@@ -34,7 +34,9 @@ env:
   STRICT_OCR_SHEET_GATE: "0"
   CHECK_WEB_PROXY: "1"
   WORKFLOW_V2_DEPLOY_CHECK: "1"
-  ALLOW_BASIC_ONLY_AUTH: "1"
+  ALLOW_BASIC_ONLY_AUTH: "0"
+  GOOGLE_OAUTH_CLIENT_ID: ${{ vars.STG_GOOGLE_OAUTH_CLIENT_ID }}
+  PROD_GOOGLE_OAUTH_CLIENT_ID: "167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com"
 
 jobs:
   source-gate:
@@ -53,6 +55,18 @@ jobs:
           test -z "$(git status --porcelain)"
           git fetch origin "+refs/heads/develop:refs/remotes/origin/develop"
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"
+          if [[ -z "${GOOGLE_OAUTH_CLIENT_ID}" ]]; then
+            echo "STG_GOOGLE_OAUTH_CLIENT_ID repository variable is required" >&2
+            exit 1
+          fi
+          if [[ "${GOOGLE_OAUTH_CLIENT_ID}" = "${PROD_GOOGLE_OAUTH_CLIENT_ID}" ]]; then
+            echo "staging must not reuse the production Google OAuth client ID" >&2
+            exit 1
+          fi
+          if [[ ! "${GOOGLE_OAUTH_CLIENT_ID}" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]; then
+            echo "STG_GOOGLE_OAUTH_CLIENT_ID is not a valid Google web client ID" >&2
+            exit 1
+          fi
       - id: changes
         name: Detect changed deploy surfaces
         run: |
@@ -192,7 +206,7 @@ jobs:
             --build-arg "API_PROXY_TARGET=${WORKER_URL}" \
             --build-arg "SHIFT_WEB_PROXY_TARGET=${SHIFT_WEB_URL}" \
             --build-arg "SCHOOL_LUNCH_WEB_PROXY_TARGET=${SCHOOL_LUNCH_WEB_URL}" \
-            --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=" \
+            --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
             --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
             -t "$image" \
@@ -227,7 +241,7 @@ jobs:
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$WORKER_SERVICE" WEB_SERVICE="$WEB_SERVICE" WEB_URL="$WEB_URL" \
           RUN_LOCAL_REGRESSION=0 STRICT_OCR_SHEET_GATE="$STRICT_OCR_SHEET_GATE" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
           CHECK_WEB_PROXY="$CHECK_WEB_PROXY" WORKFLOW_V2_DEPLOY_CHECK="$WORKFLOW_V2_DEPLOY_CHECK" ALLOW_BASIC_ONLY_AUTH="$ALLOW_BASIC_ONLY_AUTH" \
-          WORKER_EXTRA_ENV_VARS="AUTH_PROVIDER=local,ADMIN_USER=${OPERATOR_USER},ADMIN_PASSWORD=${OPERATOR_PASSWORD}" \
+          WORKER_EXTRA_ENV_VARS="AUTH_PROVIDER=local,ADMIN_USER=${OPERATOR_USER},ADMIN_PASSWORD=${OPERATOR_PASSWORD},GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
 
@@ -263,5 +277,6 @@ jobs:
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" WEB_SERVICE="$WEB_SERVICE" WORKER_SERVICE="$WORKER_SERVICE" \
           WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" IMAGE="$IMAGE" ALLOW_WEB_IMAGE_PROMOTION=1 ALLOW_UNAUTHENTICATED_WEB=1 \
           STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" WORKFLOW_V2_DEPLOY_CHECK="$WORKFLOW_V2_DEPLOY_CHECK" ALLOW_BASIC_ONLY_AUTH="$ALLOW_BASIC_ONLY_AUTH" \
+          GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
           ENSURE_GCLOUD_AUTH=true \
           TAG_PREFIX=stg-frontend ./scripts/deploy_web_with_checks.sh

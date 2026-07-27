@@ -14,12 +14,7 @@ WORKER_URL="${WORKER_URL:-}"
 OPERATOR_USER="${OPERATOR_USER:-}"
 OPERATOR_PASSWORD="${OPERATOR_PASSWORD:-}"
 ALLOW_BASIC_ONLY_AUTH="${ALLOW_BASIC_ONLY_AUTH:-0}"
-DEFAULT_GOOGLE_CLIENT_ID="167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com"
-if [[ "${ALLOW_BASIC_ONLY_AUTH}" == "1" ]]; then
-  GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
-else
-  GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-$DEFAULT_GOOGLE_CLIENT_ID}"
-fi
+GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
 WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 IMAGE_REPO="${IMAGE_REPO:-asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend}"
@@ -79,6 +74,11 @@ compare_workflow_v2_json() {
 
 if [ -z "$WEB_SERVICE" ]; then
   echo "WEB_SERVICE is required"
+  exit 1
+fi
+
+if [[ "${ALLOW_BASIC_ONLY_AUTH}" != "1" && -z "${GOOGLE_CLIENT_ID}" ]]; then
+  echo "GOOGLE_CLIENT_ID is required when Basic-only authentication is disabled" >&2
   exit 1
 fi
 
