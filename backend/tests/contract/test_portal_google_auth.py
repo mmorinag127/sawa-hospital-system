@@ -14,9 +14,20 @@ client = TestClient(app)
 
 
 def _seed_user(account: str, *, status: str = "active", systems: tuple[str, ...] = ("hospital",)) -> str:
-    portal.ensure_portal_schema()
     user_id = str(uuid.uuid4())
     with engine.begin() as connection:
+        connection.execute(
+            text(
+                """CREATE TABLE IF NOT EXISTS user_system_access (
+                user_id VARCHAR NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                system_key VARCHAR NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                PRIMARY KEY(user_id, system_key),
+                CONSTRAINT ck_user_system_access_system_key
+                  CHECK (system_key IN ('hospital', 'shift', 'school-lunch'))
+                )"""
+            )
+        )
         connection.execute(
             text("INSERT INTO users(id, account, role, status) VALUES(:id, :account, 'operator', :status)"),
             {"id": user_id, "account": account, "status": status},

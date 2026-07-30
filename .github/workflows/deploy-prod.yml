@@ -38,6 +38,8 @@ env:
   CHECK_WEB_PROXY: "1"
   WORKFLOW_V2_DEPLOY_CHECK: "1"
   GOOGLE_OAUTH_CLIENT_ID: "167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com"
+  CLOUD_SQL_PROXY_VERSION: "2.24.1"
+  CLOUD_SQL_PROXY_SHA256: "fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb"
 
 jobs:
   source-gate:
@@ -199,10 +201,93 @@ jobs:
       - name: Approved for production deploy
         run: echo "production deploy approved"
 
+  prod-db-bootstrap-gate:
+    needs:
+      - source-gate
+      - build-backend
+      - production-approval
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PORTAL_BOOTSTRAP_ADMIN_EMAIL: ${{ vars.PROD_PORTAL_BOOTSTRAP_ADMIN_EMAIL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - id: cloudsql
+        name: Resolve prod Cloud SQL instance
+        run: |
+          set -euo pipefail
+          service_json="$(gcloud run services describe "$WEB_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format=json)"
+          instance="$(printf '%s' "$service_json" | jq -r '.spec.template.metadata.annotations["run.googleapis.com/cloudsql-instances"] // empty')"
+          if [[ -z "$instance" ]]; then
+            echo "web-prod is missing the Cloud SQL instance annotation" >&2
+            exit 1
+          fi
+          echo "instance=$instance" >> "$GITHUB_OUTPUT"
+      - name: Download Cloud SQL Auth Proxy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/cloud-sql-proxy \
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+          echo "${CLOUD_SQL_PROXY_SHA256}  /tmp/cloud-sql-proxy" | sha256sum -c -
+          chmod +x /tmp/cloud-sql-proxy
+      - name: Run prod portal DB bootstrap gate
+        env:
+          INSTANCE_CONNECTION_NAME: ${{ steps.cloudsql.outputs.instance }}
+        run: |
+          set -euo pipefail
+          /tmp/cloud-sql-proxy --address 127.0.0.1 --port 5432 "$INSTANCE_CONNECTION_NAME" \
+            >/tmp/cloud-sql-proxy.log 2>&1 &
+          proxy_pid=$!
+          cleanup() {
+            status=$?
+            kill "$proxy_pid" >/dev/null 2>&1 || true
+            wait "$proxy_pid" >/dev/null 2>&1 || true
+            if [[ "$status" -ne 0 && -f /tmp/cloud-sql-proxy.log ]]; then
+              cat /tmp/cloud-sql-proxy.log >&2
+            fi
+            return "$status"
+          }
+          trap cleanup EXIT
+          ready=0
+          for _ in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != "1" ]]; then
+            echo "cloud-sql-proxy did not become ready on 127.0.0.1:5432" >&2
+            exit 1
+          fi
+          (
+            cd backend
+            uv run --extra dev python scripts/portal_prod_db_bootstrap.py \
+              --project-id "$PROJECT_ID" \
+              --region "$REGION" \
+              --service "$WEB_SERVICE" \
+              --db-host 127.0.0.1 \
+              --db-port 5432
+          )
+
   deploy-backend:
     needs:
       - source-gate
       - build-backend
+      - prod-db-bootstrap-gate
       - production-approval
     runs-on: ubuntu-latest
     permissions:

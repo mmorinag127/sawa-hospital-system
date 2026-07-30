@@ -16,6 +16,16 @@ on:
       - "**/*.md"
 
 jobs:
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Infra workflow guard tests
+        run: python -m unittest infra/terraform/tests/test_secret_manager_iam_migration.py -v
+
   backend:
     runs-on: ubuntu-latest
     env:

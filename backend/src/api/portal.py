@@ -4,25 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from src.api.auth import UserContext, get_current_user, require_portal_admin
-from src.db import engine, session_scope
+from src.db import session_scope
 from src.models.user import AuditLog
 
 router = APIRouter(prefix="/portal")
 SYSTEMS = {"hospital", "shift", "school-lunch"}
-
-
-def ensure_portal_schema() -> None:
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                """CREATE TABLE IF NOT EXISTS user_system_access (
-                user_id VARCHAR NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                system_key VARCHAR NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                PRIMARY KEY(user_id, system_key)
-                )"""
-            )
-        )
 
 
 def _systems(session, user_id: str) -> list[str]:

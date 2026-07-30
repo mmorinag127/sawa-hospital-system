@@ -18,6 +18,29 @@
 
 stgとprodのユーザーおよび権限データは共有しません。各環境で登録・確認します。
 
+## prod DB bootstrap gate
+
+prod backend deployの前に、GitHub Actions `Deploy Production` は production approval 後の `prod-db-bootstrap-gate` job を必ず通します。順序は次の固定です。
+
+1. `source-gate`
+2. `build-backend`
+3. `build-frontend`
+4. `production-approval`
+5. `prod-db-bootstrap-gate`
+6. `deploy-backend`
+7. `deploy-frontend`
+
+`prod-db-bootstrap-gate` は local実行禁止です。Cloud Run `web-prod` のenv/Cloud SQL annotationを読み、既存の Secret Manager `DB_PASSWORD` を使って Cloud SQLへ接続し、`backend/migrations/0026_user_system_access.py` の canonical schemaを未適用時に1回だけ適用します。`user_system_access` が既に存在する場合は canonical shape を検証し、不整合なら prod deploy を止めます。
+
+active admin が1人もいない場合だけ、GitHub Environment `production` の Variable `PROD_PORTAL_BOOTSTRAP_ADMIN_EMAIL` を必須とします。この email は bootstrap action の明示入力であり、job はその account を `active/admin` として作成または昇格し、`hospital` / `shift` / `school-lunch` を明示付与します。active admin が既に存在する場合、この variable は未設定でも構いません。
+
+この gate に追加の GitHub secret は不要です。使用する GitHub secret は既存の prod deploy と同じです。
+
+- `GCP_WORKLOAD_IDENTITY_PROVIDER_PROD`
+- `GCP_DEPLOY_SERVICE_ACCOUNT_PROD`
+
+gate は DB変更時に audit log を残します。失敗時は prod backend deploy に進みません。runtime startup で schema作成や auto-grant をしてはいけません。
+
 ## Googleアカウントの復旧準備
 
 - 管理者2名以上に、Googleの2段階認証を設定します。
@@ -37,6 +60,8 @@ stgとprodのユーザーおよび権限データは共有しません。各環�
 ## Secret Manager IAMの2段階移行
 
 project-wideの`roles/secretmanager.secretAccessor`を一度に削除してはいけません。stg、prodを個別に、承認付きGitHub Actionsから次の2回のTerraform applyで移行します。ローカルからapplyしません。
+
+実行手順、GitHub Environment設定、phase1記録ファイルの契約は`docs/runbooks/secret_manager_iam_two_phase_actions.md`を正本として参照します。
 
 1. 第1回applyでは`retain_legacy_project_secret_accessor=true`を維持します。これにより旧project-wide権限を残したまま、Cloud Runサービスが実際に参照するSecretだけへper-secret IAMが追加されます。
 2. apply後、各サービスのSecret参照、起動、Googleログイン、CI検証を確認します。Terraform planでper-secret grantが存在することも確認します。

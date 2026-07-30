@@ -8,6 +8,7 @@ This is the short deploy rule page for agents working in this repo.
 
 - stg deploy: GitHub Actions `Deploy Staging` from `origin/develop` only.
 - prod deploy: GitHub Actions `Deploy Production` from `release/prod-*` only.
+- prod backend deploy is blocked unless `prod-db-bootstrap-gate` succeeds after the GitHub `production` environment approval.
 - Prod release branch must contain `origin/develop`.
 - Do not deploy stg/prod directly from a local worktree during normal work.
 - Do not deploy from detached HEAD.

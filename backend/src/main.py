@@ -73,7 +73,6 @@ app.include_router(portal.router, prefix="")
 
 @app.on_event("startup")
 def _initialize_menu_schema() -> None:
-    portal.ensure_portal_schema()
     menu_service.ensure_menu_schema()
     facility_template_version_service.ensure_facility_template_version_schema()
     facility_service.sync_facility_names_from_master()
