@@ -1,4 +1,3 @@
-import base64
 import os
 import threading
 import time
@@ -31,14 +30,6 @@ AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "local").strip().lower()
 PORTAL_AUTH_ME_URL = os.getenv("PORTAL_AUTH_ME_URL", "").strip()
 
 
-def _parse_emails(env_key: str) -> set[str]:
-    raw = os.getenv(env_key, "")
-    if not raw:
-        return set()
-    return {item.strip().lower() for item in raw.split(",") if item.strip()}
-
-
-ADMIN_SERVICE_ACCOUNTS = _parse_emails("ADMIN_SERVICE_ACCOUNTS")
 _USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS", "15")), 0.0)
 _USER_ROLE_CACHE_LOCK = threading.Lock()
 _USER_ROLE_CACHE_EXPIRES_AT = 0.0
@@ -103,34 +94,6 @@ def _auth_header(request: Request) -> str:
     return request.headers.get("Authorization", "")
 
 
-def _basic_credentials(request: Request):
-    auth = _auth_header(request)
-    if not auth.startswith("Basic "):
-        return None, None
-    raw = auth.removeprefix("Basic ").strip()
-    try:
-        decoded = base64.b64decode(raw).decode("utf-8")
-    except Exception:
-        return None, None
-    if ":" not in decoded:
-        return None, None
-    return decoded.split(":", 1)
-
-
-def _matches_basic(username: str | None, password: str | None, env_user: str | None, env_pass: str | None) -> bool:
-    if not env_user or not env_pass:
-        return False
-    return username == env_user and password == env_pass
-
-
-def _raise_basic_unauthorized(realm: str = "Orders"):
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Unauthorized",
-        headers={"WWW-Authenticate": f'Basic realm="{realm}"'},
-    )
-
-
 def _raise_unauthorized():
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
@@ -142,7 +105,7 @@ def _get_bearer_token(request: Request) -> str | None:
     return auth.removeprefix("Bearer ").strip()
 
 
-def _portal_role(request: Request) -> str | None:
+def _portal_user(request: Request) -> UserContext | None:
     if AUTH_PROVIDER != "portal":
         return None
     authorization = _auth_header(request)
@@ -164,9 +127,12 @@ def _portal_role(request: Request) -> str | None:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Portal authentication unavailable") from exc
     role = str(payload.get("role") or "").lower()
+    account = str(payload.get("account") or "").strip().lower()
     if role not in {"admin", "operator"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    return role
+    if not account:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return UserContext(role=role, account=account)
 
 
 def _audience_candidates(request: Request) -> list[str]:
@@ -219,15 +185,13 @@ def _google_email_or_none(request: Request) -> str | None:
 def get_current_admin(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="admin")
-    portal_role = _portal_role(request)
-    if portal_role:
-        if portal_role != "admin":
+    portal_user = _portal_user(request)
+    if portal_user:
+        if portal_user.role != "admin":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        return UserContext(role="admin")
+        return portal_user
     google_email = _google_email_or_none(request)
     if google_email:
-        if google_email in ADMIN_SERVICE_ACCOUNTS:
-            return UserContext(role="admin", account=google_email)
         try:
             active_roles = _load_active_user_roles()
         except UserRoleLookupError:
@@ -238,31 +202,17 @@ def get_current_admin(request: Request) -> UserContext:
         if registered_role in {"operator"}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    username, password = _basic_credentials(request)
-    admin_user = os.getenv("ADMIN_USER")
-    admin_pass = os.getenv("ADMIN_PASSWORD")
-    if _matches_basic(username, password, admin_user, admin_pass):
-        return UserContext(role="admin")
-    if (
-        username
-        and password
-        and username == os.getenv("OPERATOR_USER")
-        and password == os.getenv("OPERATOR_PASSWORD")
-    ):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    _raise_basic_unauthorized("Admin")
+    _raise_unauthorized()
 
 
 def get_current_operator(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="operator")
-    portal_role = _portal_role(request)
-    if portal_role:
-        return UserContext(role="operator")
+    portal_user = _portal_user(request)
+    if portal_user:
+        return UserContext(role="operator", account=portal_user.account)
     google_email = _google_email_or_none(request)
     if google_email:
-        if google_email in ADMIN_SERVICE_ACCOUNTS:
-            return UserContext(role="operator", account=google_email)
         try:
             active_roles = _load_active_user_roles()
         except UserRoleLookupError:
@@ -271,33 +221,26 @@ def get_current_operator(request: Request) -> UserContext:
         if registered_role in {"admin", "operator"}:
             return UserContext(role="operator", account=google_email)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    username, password = _basic_credentials(request)
-    admin_user = os.getenv("ADMIN_USER")
-    admin_pass = os.getenv("ADMIN_PASSWORD")
-    if _matches_basic(username, password, admin_user, admin_pass):
-        return UserContext(role="operator")
-    if (
-        username
-        and password
-        and username == os.getenv("OPERATOR_USER")
-        and password == os.getenv("OPERATOR_PASSWORD")
-    ):
-        return UserContext(role="operator")
-    _raise_basic_unauthorized("Operator")
+    _raise_unauthorized()
 
 
 def get_current_user(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="admin")
+    portal_user = _portal_user(request)
+    if portal_user:
+        return portal_user
+    google_email = _google_email_or_none(request)
+    if not google_email:
+        _raise_unauthorized()
     try:
-        return get_current_admin(request)
-    except HTTPException as exc:
-        if exc.status_code not in {
-            status.HTTP_401_UNAUTHORIZED,
-            status.HTTP_403_FORBIDDEN,
-        }:
-            raise
-    return get_current_operator(request)
+        active_roles = _load_active_user_roles()
+    except UserRoleLookupError:
+        _raise_role_lookup_unavailable()
+    registered_role = active_roles.get(str(google_email).lower())
+    if registered_role not in {"admin", "operator"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return UserContext(role=registered_role, account=google_email)
 
 
 def require_role(required: str):

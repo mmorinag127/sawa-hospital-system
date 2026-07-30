@@ -58,10 +58,6 @@ const setStoredAuthHeader = (value: string) => {
   clearLegacyAuthStorage();
 };
 
-export const setBasicAuth = (token: string) => {
-  setStoredAuthHeader(token ? `Basic ${token}` : "");
-};
-
 export const setBearerToken = (token: string) => {
   setStoredAuthHeader(token ? `Bearer ${token}` : "");
 };

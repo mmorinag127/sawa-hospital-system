@@ -53,7 +53,7 @@ def test_auth_can_be_explicitly_disabled_in_tests(monkeypatch):
     assert me_res.json()["role"] == "admin"
 
 
-def test_auth_enables_basic_operator_when_env_present(monkeypatch):
+def test_auth_rejects_basic_operator_when_legacy_env_present(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("OPERATOR_USER", "operator")
     monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
@@ -62,14 +62,13 @@ def test_auth_enables_basic_operator_when_env_present(monkeypatch):
 
     client = TestClient(app)
     res = client.get("/orders", headers=_basic_header("operator", "secret"))
-    assert res.status_code == 200
+    assert res.status_code == 401
 
     me_res = client.get("/auth/me", headers=_basic_header("operator", "secret"))
-    assert me_res.status_code == 200
-    assert me_res.json()["role"] == "operator"
+    assert me_res.status_code == 401
 
 
-def test_auth_me_returns_admin_for_basic_admin(monkeypatch):
+def test_auth_rejects_basic_admin_when_legacy_env_present(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ADMIN_USER", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "secret")
@@ -78,11 +77,10 @@ def test_auth_me_returns_admin_for_basic_admin(monkeypatch):
 
     client = TestClient(app)
     res = client.get("/auth/me", headers=_basic_header("admin", "secret"))
-    assert res.status_code == 200
-    assert res.json()["role"] == "admin"
+    assert res.status_code == 401
 
 
-def test_shared_basic_credentials_prefer_admin_role(monkeypatch):
+def test_shared_basic_credentials_are_rejected(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("ADMIN_USER", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "secret")
@@ -93,16 +91,17 @@ def test_shared_basic_credentials_prefer_admin_role(monkeypatch):
 
     client = TestClient(app)
     res = client.get("/auth/me", headers=_basic_header("admin", "secret"))
-    assert res.status_code == 200
-    assert res.json()["role"] == "admin"
+    assert res.status_code == 401
 
 
-def test_staging_deploy_configures_basic_admin_credentials():
+def test_staging_deploy_has_no_basic_admin_credentials():
     workflow = (ROOT.parent / ".github" / "workflows" / "deploy-stg.yml").read_text(
         encoding="utf-8"
     )
-    assert "ADMIN_USER=${OPERATOR_USER}" in workflow
-    assert "ADMIN_PASSWORD=${OPERATOR_PASSWORD}" in workflow
+    assert "ADMIN_USER" not in workflow
+    assert "ADMIN_PASSWORD" not in workflow
+    assert "OPERATOR_USER" not in workflow
+    assert "OPERATOR_PASSWORD" not in workflow
 
 
 def test_portal_mode_rejects_local_basic_auth(monkeypatch):
@@ -151,9 +150,9 @@ def test_portal_user_management_rejects_operator_for_list_create_and_update(monk
         "systems": ["hospital"],
     }
 
-    assert client.get("/portal/users", headers=headers).status_code == 403
-    assert client.post("/portal/users", json=body, headers=headers).status_code == 403
-    assert client.put("/portal/users/user-id", json=body, headers=headers).status_code == 403
+    assert client.get("/portal/users", headers=headers).status_code == 401
+    assert client.post("/portal/users", json=body, headers=headers).status_code == 401
+    assert client.put("/portal/users/user-id", json=body, headers=headers).status_code == 401
 
 
 def test_portal_user_management_allows_admin_list_create_and_update(monkeypatch):

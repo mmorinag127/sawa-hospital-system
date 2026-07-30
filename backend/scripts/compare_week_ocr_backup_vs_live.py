@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 from datetime import datetime
 from pathlib import Path
@@ -31,13 +30,11 @@ class HttpApiClient:
         *,
         base_url: str,
         api_prefix: str,
-        operator_user: str,
-        operator_password: str,
+        bearer_token: str,
         timeout_seconds: float = 60.0,
     ) -> None:
         self.api_root = compose_api_root(base_url, api_prefix=api_prefix)
-        token = base64.b64encode(f"{operator_user}:{operator_password}".encode("utf-8")).decode("ascii")
-        self.authorization = f"Basic {token}"
+        self.authorization = f"Bearer {bearer_token}"
         self.timeout_seconds = max(float(timeout_seconds), 1.0)
 
     def _request_json(
@@ -97,8 +94,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backup-dir", required=True, help="Backup directory created by backup_and_rerun_week_ocr.py")
     parser.add_argument("--base-url", default="https://web-prod-avlnzjjrca-dt.a.run.app", help="Base web or worker URL.")
     parser.add_argument("--api-prefix", default="/api", help="API prefix. Use empty string for worker direct URL.")
-    parser.add_argument("--operator-user", default="", help="Operator basic-auth username. Can also be provided by OPERATOR_USER.")
-    parser.add_argument("--operator-password", default="", help="Operator basic-auth password. Can also be provided by OPERATOR_PASSWORD.")
+    parser.add_argument("--bearer-token", default="", help="Google ID token. Can also be provided by GOOGLE_ID_TOKEN.")
     parser.add_argument("--history-limit", type=int, default=200, help="History length to compare. Default: 200")
     parser.add_argument("--only-changed", action="store_true", help="Print only changed orders.")
     parser.add_argument("--summary-json", default="", help="Optional summary output path.")
@@ -109,10 +105,9 @@ def main() -> int:
     args = parse_args()
     import os
 
-    operator_user = args.operator_user or os.environ.get("OPERATOR_USER", "")
-    operator_password = args.operator_password or os.environ.get("OPERATOR_PASSWORD", "")
-    if not operator_user or not operator_password:
-        print("OPERATOR_USER / OPERATOR_PASSWORD are required", file=sys.stderr)
+    bearer_token = args.bearer_token or os.environ.get("GOOGLE_ID_TOKEN", "")
+    if not bearer_token:
+        print("GOOGLE_ID_TOKEN is required", file=sys.stderr)
         return 2
 
     backup_dir = Path(args.backup_dir)
@@ -123,8 +118,7 @@ def main() -> int:
     client = HttpApiClient(
         base_url=args.base_url,
         api_prefix=args.api_prefix,
-        operator_user=operator_user,
-        operator_password=operator_password,
+        bearer_token=bearer_token,
     )
 
     order_dirs = sorted([path for path in backup_dir.iterdir() if path.is_dir() and path.name.startswith("ORD")])

@@ -92,8 +92,7 @@ def _read_gcs_bytes(storage_client: storage.Client, file_uri: str) -> tuple[byte
 def _upload_to_stg(
     *,
     stg_base_url: str,
-    operator_user: str,
-    operator_password: str,
+    bearer_token: str,
     target_month_id: str,
     filename: str,
     sheet_name: str | None,
@@ -107,7 +106,7 @@ def _upload_to_stg(
     return requests.post(
         f"{stg_base_url.rstrip('/')}/monthly-menus",
         params=params,
-        auth=(operator_user, operator_password),
+        headers={"Authorization": f"Bearer {bearer_token}"},
         files={"file": (filename, file_bytes, media_type)},
         data=data,
         timeout=180,
@@ -120,12 +119,11 @@ def main() -> int:
     parser.add_argument("--upload-id", required=True)
     parser.add_argument("--target-month-id", required=True)
     parser.add_argument("--stg-base-url", default=os.getenv("STG_BASE_URL", DEFAULT_STG_BASE_URL))
-    parser.add_argument("--operator-user", default=os.getenv("OPERATOR_USER", ""))
-    parser.add_argument("--operator-password", default=os.getenv("OPERATOR_PASSWORD", ""))
+    parser.add_argument("--bearer-token", default=os.getenv("GOOGLE_ID_TOKEN", ""))
     args = parser.parse_args()
 
-    if not args.operator_user or not args.operator_password:
-        raise SystemExit("OPERATOR_USER and OPERATOR_PASSWORD are required")
+    if not args.bearer_token:
+        raise SystemExit("GOOGLE_ID_TOKEN is required")
 
     prod_password = _load_secret(PROD_SECRET)
     connector = Connector()
@@ -150,8 +148,7 @@ def main() -> int:
         file_bytes, media_type = _read_gcs_bytes(storage_client, file_uri)
         response = _upload_to_stg(
             stg_base_url=args.stg_base_url,
-            operator_user=args.operator_user,
-            operator_password=args.operator_password,
+            bearer_token=args.bearer_token,
             target_month_id=args.target_month_id,
             filename=filename,
             sheet_name=metadata.get("sheet_name"),

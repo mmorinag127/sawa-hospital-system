@@ -70,12 +70,13 @@ module "cloudsql" {
 }
 
 module "cloudrun" {
-  source          = "../../modules/cloudrun"
-  project_id      = var.project_id
-  region          = var.region
-  env             = local.env
-  services        = var.cloudrun_services
-  request_timeout = var.cloudrun_request_timeout
+  source                                = "../../modules/cloudrun"
+  project_id                            = var.project_id
+  region                                = var.region
+  env                                   = local.env
+  services                              = var.cloudrun_services
+  retain_legacy_project_secret_accessor = var.retain_legacy_project_secret_accessor
+  request_timeout                       = var.cloudrun_request_timeout
   service_request_timeouts = {
     "ocr-pipeline" = "3600s"
   }
@@ -94,11 +95,7 @@ module "cloudrun" {
     DB_HOST                = "/cloudsql/${module.cloudsql.connection_name}"
     DB_DRIVER              = "postgresql+psycopg2"
     AUTH_DISABLED          = var.auth_disabled ? "true" : "false"
-    OPERATOR_USER          = var.operator_user
-    OPERATOR_PASSWORD      = var.operator_password
     GOOGLE_OAUTH_CLIENT_ID = var.google_oauth_client_id
-    ALLOWED_EMAILS         = join(",", var.allowed_emails)
-    ADMIN_EMAILS           = join(",", var.admin_emails)
     GCP_PROJECT_ID         = var.project_id
     RAW_BUCKET             = "${var.project_id}-${local.env}-raw"
     TEMPLATE_BUCKET        = "${var.project_id}-${local.env}-templates"
@@ -126,7 +123,6 @@ module "cloudrun" {
       OCR_PIPELINE_MAX_INFLIGHT    = "4"
       INGEST_MAX_WORKERS           = "6"
       GOOGLE_SERVICE_ACCOUNT_EMAIL = "worker-exec-${local.env}@${var.project_id}.iam.gserviceaccount.com"
-      ADMIN_SERVICE_ACCOUNTS       = "worker-exec-${local.env}@${var.project_id}.iam.gserviceaccount.com"
     }
     "ocr-pipeline" = {
       OCR_YOMITOKU_DEVICE            = "cpu"
@@ -224,10 +220,6 @@ module "iam" {
     {
       member = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
       role   = "roles/datastore.user"
-    },
-    {
-      member = "serviceAccount:${module.cloudrun.service_accounts["ocr-pipeline"]}"
-      role   = "roles/secretmanager.secretAccessor"
     },
     {
       member = "serviceAccount:${local.deploy_service_account}"

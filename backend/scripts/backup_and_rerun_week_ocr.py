@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,13 +32,11 @@ class HttpApiClient:
         *,
         base_url: str,
         api_prefix: str,
-        operator_user: str,
-        operator_password: str,
+        bearer_token: str,
         timeout_seconds: float = 60.0,
     ) -> None:
         self.api_root = compose_api_root(base_url, api_prefix=api_prefix)
-        token = base64.b64encode(f"{operator_user}:{operator_password}".encode("utf-8")).decode("ascii")
-        self.authorization = f"Basic {token}"
+        self.authorization = f"Bearer {bearer_token}"
         self.timeout_seconds = max(float(timeout_seconds), 1.0)
 
     def _request_json(
@@ -129,14 +126,9 @@ def parse_args() -> argparse.Namespace:
         help="API prefix to append to --base-url. Use empty string for worker direct URLs.",
     )
     parser.add_argument(
-        "--operator-user",
+        "--bearer-token",
         default="",
-        help="Operator basic-auth username. Can also be provided by OPERATOR_USER.",
-    )
-    parser.add_argument(
-        "--operator-password",
-        default="",
-        help="Operator basic-auth password. Can also be provided by OPERATOR_PASSWORD.",
+        help="Google ID token. Can also be provided by GOOGLE_ID_TOKEN.",
     )
     parser.add_argument(
         "--output-dir",
@@ -208,10 +200,9 @@ def _resolve_output_dir(raw: str, start_date: date, end_date: date) -> Path:
 
 def main() -> int:
     args = parse_args()
-    operator_user = args.operator_user or __import__("os").environ.get("OPERATOR_USER", "")
-    operator_password = args.operator_password or __import__("os").environ.get("OPERATOR_PASSWORD", "")
-    if not operator_user or not operator_password:
-        print("OPERATOR_USER / OPERATOR_PASSWORD are required", file=sys.stderr)
+    bearer_token = args.bearer_token or __import__("os").environ.get("GOOGLE_ID_TOKEN", "")
+    if not bearer_token:
+        print("GOOGLE_ID_TOKEN is required", file=sys.stderr)
         return 2
 
     start_date = date.fromisoformat(args.week_start)
@@ -220,8 +211,7 @@ def main() -> int:
     client = HttpApiClient(
         base_url=args.base_url,
         api_prefix=args.api_prefix,
-        operator_user=operator_user,
-        operator_password=operator_password,
+        bearer_token=bearer_token,
     )
 
     orders, date_summaries = collect_week_orders(

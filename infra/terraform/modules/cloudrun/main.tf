@@ -60,6 +60,12 @@ variable "service_secret_env_vars" {
   default     = {}
 }
 
+variable "retain_legacy_project_secret_accessor" {
+  description = "Keep legacy project-wide Secret Manager access during phase 1. Set false only after per-secret grants are verified."
+  type        = bool
+  default     = true
+}
+
 variable "request_timeout" {
   description = "Request timeout for Cloud Run services (e.g. 900s)."
   type        = string
@@ -91,15 +97,34 @@ locals {
   }
 }
 
+resource "google_secret_manager_secret_iam_member" "secret_accessor" {
+  for_each = merge([
+    for service_name, secret_map in local.service_secret_refs : {
+      for env_name, secret_id in secret_map :
+      "${service_name}:${secret_id}" => {
+        service_name = service_name
+        secret_id    = secret_id
+      }
+    }
+  ]...)
+  project   = var.project_id
+  secret_id = each.value.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.run_exec[each.value.service_name].email}"
+}
+
+# Phase 1 keeps these legacy bindings while per-secret grants are created.
+# Phase 2 explicitly sets the migration variable false after verification.
 resource "google_project_iam_member" "secret_accessor" {
-  for_each = {
+  for_each = var.retain_legacy_project_secret_accessor ? {
     for service_name, secret_map in local.service_secret_refs :
-    service_name => service_name
-    if length(secret_map) > 0
-  }
+    service_name => service_name if length(secret_map) > 0
+  } : {}
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.run_exec[each.key].email}"
+
+  depends_on = [google_secret_manager_secret_iam_member.secret_accessor]
 }
 
 resource "google_project_iam_member" "cloudsql_client" {
@@ -115,7 +140,7 @@ resource "google_cloud_run_v2_service" "service" {
   location = var.region
   project  = var.project_id
   depends_on = [
-    google_project_iam_member.secret_accessor,
+    google_secret_manager_secret_iam_member.secret_accessor,
     google_project_iam_member.cloudsql_client,
   ]
 

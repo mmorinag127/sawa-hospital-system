@@ -26,7 +26,7 @@ const emptyUser = (): User => ({
   account: "",
   role: "operator",
   status: "active",
-  systems: ["hospital", "shift", "school-lunch"],
+  systems: [],
 });
 
 const systemLabels: Record<SystemKey, string> = {

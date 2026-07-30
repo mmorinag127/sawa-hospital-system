@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from src.api.auth import UserContext, get_current_user, require_role
 from src.db import engine, session_scope
+from src.models.user import AuditLog
 
 router = APIRouter(prefix="/portal")
 SYSTEMS = {"hospital", "shift", "school-lunch"}
@@ -22,17 +23,6 @@ def ensure_portal_schema() -> None:
                 )"""
             )
         )
-        connection.execute(
-            text(
-                """INSERT INTO user_system_access(user_id, system_key, enabled)
-                SELECT id, system_key, TRUE
-                FROM users CROSS JOIN
-                    (VALUES ('hospital'), ('shift'), ('school-lunch')) AS s(system_key)
-                WHERE status = 'active'
-                  AND NOT EXISTS (SELECT 1 FROM user_system_access)
-                ON CONFLICT(user_id, system_key) DO NOTHING"""
-            )
-        )
 
 
 def _systems(session, user_id: str) -> list[str]:
@@ -48,6 +38,10 @@ def _systems(session, user_id: str) -> list[str]:
 
 @router.get("/auth/me")
 def portal_me(system: str | None = None, user: UserContext = Depends(get_current_user)):
+    if system is not None and system not in SYSTEMS:
+        raise HTTPException(status_code=400, detail="Unknown system")
+    if not user.account:
+        raise HTTPException(status_code=403, detail="Registered account required")
     with session_scope() as session:
         row = (
             session.execute(
@@ -57,7 +51,9 @@ def portal_me(system: str | None = None, user: UserContext = Depends(get_current
             if user.account
             else None
         )
-        systems = _systems(session, row["id"]) if row else sorted(SYSTEMS)
+        if not row or str(row["status"] or "").lower() != "active":
+            raise HTTPException(status_code=403, detail="Active registered user required")
+        systems = _systems(session, row["id"])
     if system and system not in systems:
         raise HTTPException(status_code=403, detail="System access denied")
     return {"role": user.role, "account": user.account, "systems": systems}
@@ -68,7 +64,7 @@ def list_users():
         rows = session.execute(text("SELECT id,account,role,status FROM users ORDER BY lower(account)")).mappings().all()
         return {"items": [{**dict(row), "systems": _systems(session, row["id"])} for row in rows]}
 
-def _save(body: dict, user_id: str | None = None):
+def _save(body: dict, actor: UserContext, user_id: str | None = None):
     account = str(body.get("account") or "").strip().lower()
     role = str(body.get("role") or "operator")
     status = str(body.get("status") or "active")
@@ -109,12 +105,26 @@ def _save(body: dict, user_id: str | None = None):
                 ),
                 {"id": target, "key": key},
             )
+        session.add(
+            AuditLog(
+                id=str(uuid.uuid4()),
+                actor=actor.account or "unknown",
+                action="portal_user_updated" if user_id else "portal_user_created",
+                target=target,
+                metadata_json={
+                    "account": account,
+                    "role": role,
+                    "status": status,
+                    "systems": systems,
+                },
+            )
+        )
     return {"id": target, "account": account, "role": role, "status": status, "systems": systems}
 
-@router.post("/users", dependencies=[Depends(require_role("admin"))])
-def create_user(body: dict):
-    return {"user": _save(body)}
+@router.post("/users")
+def create_user(body: dict, actor: UserContext = Depends(require_role("admin"))):
+    return {"user": _save(body, actor)}
 
-@router.put("/users/{user_id}", dependencies=[Depends(require_role("admin"))])
-def update_user(user_id: str, body: dict):
-    return {"user": _save(body, user_id)}
+@router.put("/users/{user_id}")
+def update_user(user_id: str, body: dict, actor: UserContext = Depends(require_role("admin"))):
+    return {"user": _save(body, actor, user_id)}

@@ -1,7 +1,7 @@
 FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 FROM node:20-slim AS builder
 WORKDIR /app

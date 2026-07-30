@@ -7,11 +7,10 @@ WEB_SERVICE="${WEB_SERVICE:-}"
 WORKER_SERVICE="${WORKER_SERVICE:-}"
 WEB_URL="${WEB_URL:-}"
 WORKER_URL="${WORKER_URL:-}"
-OPERATOR_USER="${OPERATOR_USER:-}"
-OPERATOR_PASSWORD="${OPERATOR_PASSWORD:-}"
+AUTHORIZATION_HEADER="${AUTHORIZATION_HEADER:-}"
 CHECK_WEB_PROXY="${CHECK_WEB_PROXY:-0}"
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
-ALLOW_BASIC_ONLY_AUTH="${ALLOW_BASIC_ONLY_AUTH:-0}"
+
 
 fail=0
 
@@ -39,10 +38,10 @@ check_http_code_any() {
   local name="$1"
   local url="$2"
   local expected_csv="$3"
-  local auth="$4"
+  local authorization="${4:-}"
   local code
-  if [ -n "$auth" ]; then
-    code=$(curl -sS -u "$auth" -o /dev/null -w "%{http_code}" "$url" || true)
+  if [ -n "$authorization" ]; then
+    code=$(curl -sS -H "Authorization: ${authorization}" -o /dev/null -w "%{http_code}" "$url" || true)
   else
     code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || true)
   fi
@@ -67,8 +66,7 @@ fi
 
 require_env WEB_URL "$WEB_URL"
 require_env WORKER_URL "$WORKER_URL"
-require_env OPERATOR_USER "$OPERATOR_USER"
-require_env OPERATOR_PASSWORD "$OPERATOR_PASSWORD"
+require_env AUTHORIZATION_HEADER "$AUTHORIZATION_HEADER"
 
 if [ "$fail" -ne 0 ]; then
   exit 1
@@ -78,22 +76,28 @@ check_http_code_any "web_root" "$WEB_URL/" "200,308" ""
 check_http_code_any "web_login" "$WEB_URL/login" "200,308" ""
 
 check_http_code_any "worker_health" "$WORKER_URL/health" "200" ""
-check_http_code_any "worker_backlog" "$WORKER_URL/health/backlog" "200" "$OPERATOR_USER:$OPERATOR_PASSWORD"
+check_http_code_any "worker_backlog" "$WORKER_URL/health/backlog" "200" "$AUTHORIZATION_HEADER"
 
-check_http_code_any "worker_orders" "$WORKER_URL/orders?include_ocr=false" "200" "$OPERATOR_USER:$OPERATOR_PASSWORD"
-check_http_code_any "worker_system_status" "$WORKER_URL/system/status" "200" "$OPERATOR_USER:$OPERATOR_PASSWORD"
+check_http_code_any "worker_orders" "$WORKER_URL/orders?include_ocr=false" "200" "$AUTHORIZATION_HEADER"
+check_http_code_any "worker_system_status" "$WORKER_URL/system/status" "200" "$AUTHORIZATION_HEADER"
 
 if [ "$CHECK_WEB_PROXY" = "1" ]; then
-  check_http_code_any "web_api_orders" "$WEB_URL/api/orders?include_ocr=false" "200,308" "$OPERATOR_USER:$OPERATOR_PASSWORD"
-  check_http_code_any "web_api_system_status" "$WEB_URL/api/system/status" "200,308" "$OPERATOR_USER:$OPERATOR_PASSWORD"
+  check_http_code_any "web_api_orders" "$WEB_URL/api/orders?include_ocr=false" "200,308" "$AUTHORIZATION_HEADER"
+  check_http_code_any "web_api_system_status" "$WEB_URL/api/system/status" "200,308" "$AUTHORIZATION_HEADER"
 fi
 
-status_json=$(curl -sS -u "$OPERATOR_USER:$OPERATOR_PASSWORD" "$WORKER_URL/system/status" || true)
+
+check_http_code_any "worker_orders_unauthenticated" "$WORKER_URL/orders?include_ocr=false" "401" ""
+if [ "$CHECK_WEB_PROXY" = "1" ]; then
+  check_http_code_any "web_api_orders_unauthenticated" "$WEB_URL/api/orders?include_ocr=false" "401,308" ""
+fi
+
+status_json=$(curl -sS -u "$AUTHORIZATION_HEADER" "$WORKER_URL/system/status" || true)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 python3 "$SCRIPT_DIR/check_predeploy_system_status.py" \
   "$status_json" \
   "$STRICT_OCR_QUALITY" \
-  "$ALLOW_BASIC_ONLY_AUTH" \
+  "0" \
   || fail=1
 
 if [ "$fail" -ne 0 ]; then

@@ -159,14 +159,14 @@ def _download_pdf_bytes(storage_client: storage.Client, document_uri: str) -> tu
 def _upload_to_stg(
     *,
     base_url: str,
-    auth: tuple[str, str],
+    auth: dict[str, str],
     prod_order: ProdOrder,
     pdf_bytes: bytes,
     filename: str,
 ) -> dict:
     response = requests.post(
         f"{base_url.rstrip('/')}/ingest/upload",
-        auth=auth,
+        headers=auth,
         data={
             "facility_hint": prod_order.facility_code,
             "week_hint": prod_order.week_code,
@@ -186,11 +186,11 @@ def _upload_to_stg(
     return payload
 
 
-def _trigger_recovery(base_url: str, auth: tuple[str, str]) -> None:
+def _trigger_recovery(base_url: str, auth: dict[str, str]) -> None:
     try:
         response = requests.post(
             f"{base_url.rstrip('/')}/ingest/recover-ready",
-            auth=auth,
+            headers=auth,
             timeout=60,
         )
         response.raise_for_status()
@@ -220,14 +220,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Import canonical prod orders into stg via the normal ingest upload API.")
     parser.add_argument("--order-id", action="append", required=True, help="Prod order id to import. Repeatable.")
     parser.add_argument("--stg-base-url", default=os.getenv("STG_BASE_URL", DEFAULT_STG_BASE_URL))
-    parser.add_argument("--operator-user", default=os.getenv("OPERATOR_USER"))
-    parser.add_argument("--operator-password", default=os.getenv("OPERATOR_PASSWORD"))
+    parser.add_argument("--bearer-token", default=os.getenv("GOOGLE_ID_TOKEN"))
     parser.add_argument("--wait-seconds", type=int, default=120)
     args = parser.parse_args()
 
-    operator_user = _require_env_or_arg(args.operator_user, "OPERATOR_USER")
-    operator_password = _require_env_or_arg(args.operator_password, "OPERATOR_PASSWORD")
-    auth = (operator_user, operator_password)
+    bearer_token = _require_env_or_arg(args.bearer_token, "GOOGLE_ID_TOKEN")
+    auth = {"Authorization": f"Bearer {bearer_token}"}
 
     order_ids = [str(order_id or "").strip() for order_id in args.order_id if str(order_id or "").strip()]
     prod_orders = _fetch_prod_orders(order_ids)
@@ -249,7 +247,7 @@ def main() -> int:
         pdf_bytes, filename = _download_pdf_bytes(storage_client, prod_order.document_uri)
         payload = _upload_to_stg(
             base_url=args.stg_base_url,
-            auth=auth,
+            headers=auth,
             prod_order=prod_order,
             pdf_bytes=pdf_bytes,
             filename=filename,

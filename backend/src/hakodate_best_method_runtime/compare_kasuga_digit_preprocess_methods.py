@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
 import json
 import math
@@ -340,12 +339,16 @@ def _operator_auth_header_from_gcloud() -> str:
         for item in container.get("env", []):
             if "value" in item:
                 env[str(item.get("name"))] = str(item.get("value"))
-    user = env.get("OPERATOR_USER")
-    password = env.get("OPERATOR_PASSWORD")
-    if not user or not password:
-        raise ValueError("worker-stg OPERATOR_USER/OPERATOR_PASSWORD are not available")
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
+    audience = env.get("GOOGLE_OAUTH_CLIENT_ID")
+    if not audience:
+        raise ValueError("worker-stg GOOGLE_OAUTH_CLIENT_ID is not available")
+    token = subprocess.check_output(
+        ["gcloud", "auth", "print-identity-token", f"--audiences={audience}"],
+        text=True,
+    ).strip()
+    if not token:
+        raise ValueError("Google OIDC identity token could not be minted")
+    return f"Bearer {token}"
 
 
 def _fetch_stg_draft_sheet(out_dir: Path) -> dict[str, Any]:

@@ -33,10 +33,7 @@ cloudrun_service_resources = {
 # worker_service_name  = "worker-prod"
 
 auth_disabled = false
-operator_user = "admin"
-operator_password = "set-admin-password-here"
 google_oauth_client_id = "your-login-client-id.apps.googleusercontent.com"
-allowed_emails = ["user@example.com"]
-admin_emails = ["admin@example.com"]
+retain_legacy_project_secret_accessor = true
 
 notification_emails = ["alerts@example.com"]

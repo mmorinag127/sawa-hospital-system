@@ -43,11 +43,8 @@ cloudrun_worker_url_override = ""
 cloudrun_ocr_pipeline_url_override = "https://ocr-pipeline-stg-avlnzjjrca-dt.a.run.app"
 
 auth_disabled = false
-operator_user = "admin"
-operator_password = "set-stg-admin-password-here"
 google_oauth_client_id = "your-stg-login-client-id.apps.googleusercontent.com"
-allowed_emails = ["user@example.com"]
-admin_emails = ["admin@example.com"]
+retain_legacy_project_secret_accessor = true
 
 db_instance_name = "orders-stg"
 db_name          = "orders"

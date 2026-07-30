@@ -10,8 +10,7 @@ SERVICE="${SERVICE:-worker-prod}"
 WEB_SERVICE="${WEB_SERVICE:-web-prod}"
 IMAGE="${1:-}"
 ORDER_ID="${2:-}"
-OPERATOR_USER="${OPERATOR_USER:-}"
-OPERATOR_PASSWORD="${OPERATOR_PASSWORD:-}"
+GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
 WEB_URL="${WEB_URL:-}"
 RUN_LOCAL_REGRESSION="${RUN_LOCAL_REGRESSION:-1}"
 STRICT_OCR_SHEET_GATE="${STRICT_OCR_SHEET_GATE:-1}"
@@ -83,8 +82,8 @@ if [[ -z "${ORDER_ID}" ]]; then
   exit 1
 fi
 
-if [[ -z "${OPERATOR_USER}" || -z "${OPERATOR_PASSWORD}" ]]; then
-  echo "OPERATOR_USER / OPERATOR_PASSWORD are required"
+if [[ -z "${GOOGLE_CLIENT_ID}" ]]; then
+  echo "GOOGLE_CLIENT_ID is required for CI OIDC verification"
   exit 1
 fi
 
@@ -93,6 +92,11 @@ if [[ -z "${WEB_URL}" ]]; then
 fi
 
 "$ENSURE_GCLOUD_AUTH"
+DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token --audiences="${GOOGLE_CLIENT_ID}")"
+if [[ -z "${DEPLOY_ID_TOKEN}" ]]; then
+  echo "Failed to mint CI OIDC verification token"
+  exit 1
+fi
 
 if [[ "${CHECK_WEB_PROXY}" == "1" && -z "${WEB_URL}" ]]; then
   echo "WEB_URL or WEB_SERVICE is required when CHECK_WEB_PROXY=1"
@@ -207,11 +211,19 @@ fi
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.url)')"
 
+# Google-only authentication must also reject requests without a Bearer token.
+UNAUTH_CODE="$(curl -sS -o /dev/null -w "%{http_code}" "${SERVICE_URL}/orders?include_ocr=false")"
+if [[ "${UNAUTH_CODE}" != "401" ]]; then
+  echo "Unauthenticated worker request must be rejected: status=${UNAUTH_CODE}"
+  exit 1
+fi
+
+
 if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
   echo "[4/9] call worker workflow-v2 APIs"
   WORKER_WORKFLOW_V2_JSON="$(mktemp)"
   HTTP_CODE="$(
-    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+    curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
       -o "${WORKER_WORKFLOW_V2_JSON}" \
       -w "%{http_code}" \
       "${SERVICE_URL}/orders/${ORDER_ID}/workflow-v2"
@@ -224,7 +236,7 @@ if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
 
   WORKER_INSPECTION_V2_JSON="$(mktemp)"
   HTTP_CODE="$(
-    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+    curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
       -o "${WORKER_INSPECTION_V2_JSON}" \
       -w "%{http_code}" \
       "${SERVICE_URL}/orders/${ORDER_ID}/workflow-v2/inspection"
@@ -239,7 +251,7 @@ if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
     echo "[5/9] verify web proxy workflow-v2 parity"
     WEB_WORKFLOW_V2_JSON="$(mktemp)"
     WEB_CODE="$(
-      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+      curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
         -o "${WEB_WORKFLOW_V2_JSON}" \
         -w "%{http_code}" \
         "${WEB_URL}/api/orders/${ORDER_ID}/workflow-v2"
@@ -252,7 +264,7 @@ if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
 
     WEB_INSPECTION_V2_JSON="$(mktemp)"
     WEB_CODE="$(
-      curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+      curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
         -o "${WEB_INSPECTION_V2_JSON}" \
         -w "%{http_code}" \
         "${WEB_URL}/api/orders/${ORDER_ID}/workflow-v2/inspection"
@@ -281,8 +293,7 @@ if [[ "${WORKFLOW_V2_DEPLOY_CHECK}" == "1" ]]; then
   WORKER_SERVICE="${SERVICE}" \
   PROJECT_ID="${PROJECT_ID}" \
   REGION="${REGION}" \
-  OPERATOR_USER="${OPERATOR_USER}" \
-  OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" \
+  AUTHORIZATION_HEADER="Bearer ${DEPLOY_ID_TOKEN}" \
   STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY}" \
   CHECK_WEB_PROXY="${CHECK_WEB_PROXY}" \
   "${PREDEPLOY_SCRIPT}"
@@ -295,7 +306,7 @@ fi
 echo "[4/9] call worker current-order APIs"
 WORKER_JSON="$(mktemp)"
 HTTP_CODE="$(
-  curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+  curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
     -o "${WORKER_JSON}" \
     -w "%{http_code}" \
     "${SERVICE_URL}/orders/${ORDER_ID}/ocr-sheet"
@@ -308,7 +319,7 @@ fi
 
 WORKER_DRAFT_JSON="$(mktemp)"
 HTTP_CODE="$(
-  curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+  curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
     -o "${WORKER_DRAFT_JSON}" \
     -w "%{http_code}" \
     "${SERVICE_URL}/orders/${ORDER_ID}/draft-sheet"
@@ -321,7 +332,7 @@ fi
 
 WORKER_WORKFLOW_JSON="$(mktemp)"
 HTTP_CODE="$(
-  curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+  curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
     -o "${WORKER_WORKFLOW_JSON}" \
     -w "%{http_code}" \
     "${SERVICE_URL}/orders/${ORDER_ID}/workflow-state"
@@ -352,7 +363,7 @@ if [[ "${CHECK_WEB_PROXY}" == "1" ]]; then
   echo "[7/9] call web proxy current-order APIs"
   WEB_JSON="$(mktemp)"
   WEB_CODE="$(
-    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+    curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
       -o "${WEB_JSON}" \
       -w "%{http_code}" \
       "${WEB_URL}/api/orders/${ORDER_ID}/ocr-sheet"
@@ -365,7 +376,7 @@ if [[ "${CHECK_WEB_PROXY}" == "1" ]]; then
 
   WEB_DRAFT_JSON="$(mktemp)"
   WEB_CODE="$(
-    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+    curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
       -o "${WEB_DRAFT_JSON}" \
       -w "%{http_code}" \
       "${WEB_URL}/api/orders/${ORDER_ID}/draft-sheet"
@@ -378,7 +389,7 @@ if [[ "${CHECK_WEB_PROXY}" == "1" ]]; then
 
   WEB_WORKFLOW_JSON="$(mktemp)"
   WEB_CODE="$(
-    curl -sS -u "${OPERATOR_USER}:${OPERATOR_PASSWORD}" \
+    curl -sS -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
       -o "${WEB_WORKFLOW_JSON}" \
       -w "%{http_code}" \
       "${WEB_URL}/api/orders/${ORDER_ID}/workflow-state"
@@ -406,8 +417,7 @@ WEB_SERVICE="${WEB_SERVICE}" \
 WORKER_SERVICE="${SERVICE}" \
 PROJECT_ID="${PROJECT_ID}" \
 REGION="${REGION}" \
-OPERATOR_USER="${OPERATOR_USER}" \
-OPERATOR_PASSWORD="${OPERATOR_PASSWORD}" \
+AUTHORIZATION_HEADER="Bearer ${DEPLOY_ID_TOKEN}" \
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY}" \
 CHECK_WEB_PROXY="${CHECK_WEB_PROXY}" \
 "${PREDEPLOY_SCRIPT}"

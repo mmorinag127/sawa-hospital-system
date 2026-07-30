@@ -109,30 +109,14 @@ variable "auth_disabled" {
   default = false
 }
 
-variable "operator_user" {
-  type    = string
-  default = ""
-}
-
-variable "operator_password" {
-  type      = string
-  default   = ""
-  sensitive = true
-}
-
 variable "google_oauth_client_id" {
   type    = string
   default = ""
 }
 
-variable "allowed_emails" {
-  type    = list(string)
-  default = []
-}
-
-variable "admin_emails" {
-  type    = list(string)
-  default = []
+variable "retain_legacy_project_secret_accessor" {
+  type    = bool
+  default = true
 }
 
 variable "db_instance_name" {

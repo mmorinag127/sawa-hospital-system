@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import subprocess
@@ -117,12 +116,15 @@ def _operator_auth_header_from_gcloud() -> str:
         for item in container.get("env", []):
             if "value" in item:
                 env[str(item.get("name"))] = str(item.get("value"))
-    user = os.getenv("OPERATOR_USER") or env.get("OPERATOR_USER")
-    password = os.getenv("OPERATOR_PASSWORD") or env.get("OPERATOR_PASSWORD")
-    if not user or not password:
-        raise RuntimeError("OPERATOR_USER/OPERATOR_PASSWORD are unavailable")
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
+    audience = env.get("GOOGLE_OAUTH_CLIENT_ID")
+    if not audience:
+        raise RuntimeError("GOOGLE_OAUTH_CLIENT_ID is unavailable")
+    token = subprocess.check_output(
+        ["gcloud", "auth", "print-identity-token", f"--audiences={audience}"], text=True
+    ).strip()
+    if not token:
+        raise RuntimeError("Google OIDC token could not be minted")
+    return f"Bearer {token}"
 
 
 def _week_sheet_name_from_week_value(value: str) -> str:

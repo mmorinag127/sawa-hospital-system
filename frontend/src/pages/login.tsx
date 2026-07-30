@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import PublicNav from "../components/PublicNav";
-import { setBasicAuth, setBearerToken } from "../services/apiClient";
+import { setBearerToken } from "../services/apiClient";
 
 declare global {
   interface Window {
@@ -10,21 +10,12 @@ declare global {
   }
 }
 
-const encodeBasic = (value: string) => {
-  if (typeof window !== "undefined" && window.btoa) {
-    return window.btoa(value);
-  }
-  return Buffer.from(value, "utf-8").toString("base64");
-};
-
 export default function LoginPage() {
   const router = useRouter();
   const envClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
   const [clientId, setClientId] = useState(envClientId);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const [googleReady, setGoogleReady] = useState(false);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
   const [configMessage, setConfigMessage] = useState("");
 
@@ -106,18 +97,6 @@ export default function LoginPage() {
     return () => script.removeEventListener("load", initialize);
   }, [clientId]);
 
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!username || !password) {
-      setMessage("ユーザー名とパスワードを入力してください。");
-      return;
-    }
-    const token = encodeBasic(`${username}:${password}`);
-    setBasicAuth(token);
-    setMessage("");
-    redirectAfterLogin();
-  };
-
   return (
     <main className="page">
       <header className="hero">
@@ -125,7 +104,7 @@ export default function LoginPage() {
           <p className="eyebrow">Sign In</p>
           <h1>オペレーター認証</h1>
           <p className="subtle">
-            推奨はGoogleログインです。注文書アップロード運用でも、この認証を使います。
+            Googleアカウントでログインしてください。管理者が登録した利用者のみ利用できます。
           </p>
           <p className="subtle links">
             <Link href="/about">ホームページ</Link>
@@ -157,37 +136,7 @@ export default function LoginPage() {
         )}
       </section>
 
-      <section className="panel">
-        <header className="panel-header">
-          <h2>Basic認証 (セッションのみ)</h2>
-        </header>
-        <p className="subtle">
-          ブラウザを閉じると破棄されます。長期利用は Google ログインを使ってください。
-        </p>
-        <form className="form-grid" onSubmit={submit}>
-          <label className="field">
-            <span className="field-label">Username</span>
-            <input
-              className="input"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field-label">Password</span>
-            <input
-              className="input"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </label>
-          <button className="btn primary" type="submit">
-            セッションで進む
-          </button>
-        </form>
-        {message && <p className="message">{message}</p>}
-      </section>
+      {message && <p className="message">{message}</p>}
 
       <style jsx>{`
         :global(body) {
