@@ -11,6 +11,7 @@ WEB_SERVICE="${WEB_SERVICE:-web-prod}"
 IMAGE="${1:-}"
 ORDER_ID="${2:-}"
 GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
+GOOGLE_IDENTITY_SERVICE_ACCOUNT="${GOOGLE_IDENTITY_SERVICE_ACCOUNT:-}"
 WEB_URL="${WEB_URL:-}"
 RUN_LOCAL_REGRESSION="${RUN_LOCAL_REGRESSION:-1}"
 STRICT_OCR_SHEET_GATE="${STRICT_OCR_SHEET_GATE:-1}"
@@ -82,8 +83,8 @@ if [[ -z "${ORDER_ID}" ]]; then
   exit 1
 fi
 
-if [[ -z "${GOOGLE_CLIENT_ID}" ]]; then
-  echo "GOOGLE_CLIENT_ID is required for CI OIDC verification"
+if [[ -z "${GOOGLE_CLIENT_ID}" || -z "${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" ]]; then
+  echo "GOOGLE_CLIENT_ID and GOOGLE_IDENTITY_SERVICE_ACCOUNT are required for CI OIDC verification"
   exit 1
 fi
 
@@ -92,9 +93,25 @@ if [[ -z "${WEB_URL}" ]]; then
 fi
 
 "$ENSURE_GCLOUD_AUTH"
-DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token --audiences="${GOOGLE_CLIENT_ID}")"
+DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token \
+  --impersonate-service-account="${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" \
+  --include-email \
+  --audiences="${GOOGLE_CLIENT_ID}")"
 if [[ -z "${DEPLOY_ID_TOKEN}" ]]; then
   echo "Failed to mint CI OIDC verification token"
+  exit 1
+fi
+
+CURRENT_SERVICE_URL="$(resolve_service_url "${SERVICE}" || true)"
+if [[ -z "${CURRENT_SERVICE_URL}" ]]; then
+  echo "Current service URL is unavailable for CI identity preflight"
+  exit 1
+fi
+CI_IDENTITY_STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
+  "${CURRENT_SERVICE_URL}/portal/auth/me?system=hospital" || true)"
+if [[ "${CI_IDENTITY_STATUS}" != "200" ]]; then
+  echo "CI verification identity must be registered, active, and granted hospital access before deploy"
   exit 1
 fi
 

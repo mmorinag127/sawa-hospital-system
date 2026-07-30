@@ -238,9 +238,11 @@ jobs:
         env:
           IMAGE: ${{ needs.build-backend.outputs.image }}
           ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
         run: |
           set -euo pipefail
-          WEB_URL="$WEB_URL" GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" ENSURE_GCLOUD_AUTH=true \
+          WEB_URL="$WEB_URL" GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" ENSURE_GCLOUD_AUTH=true \
           WORKER_EXTRA_ENV_VARS="GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
 
@@ -265,10 +267,12 @@ jobs:
         env:
           IMAGE: ${{ needs.build-frontend.outputs.image }}
           ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
         run: |
           set -euo pipefail
           WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" WEB_SERVICE="$WEB_SERVICE" WORKER_SERVICE="$WORKER_SERVICE" \
           IMAGE="$IMAGE" ALLOW_WEB_IMAGE_PROMOTION=1 STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
           GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_web_with_checks.sh

@@ -8,7 +8,7 @@ import urllib.request
 from fastapi import Depends, HTTPException, status, Request
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.db import session_scope
 from src.models.user import User
@@ -88,6 +88,34 @@ def _raise_role_lookup_unavailable():
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="User role lookup unavailable",
     )
+
+
+def _has_system_access(account: str, system: str) -> bool:
+    try:
+        with session_scope() as session:
+            return bool(
+                session.execute(
+                    text(
+                        "SELECT 1 FROM users u "
+                        "JOIN user_system_access usa ON usa.user_id = u.id "
+                        "WHERE lower(u.account) = :account "
+                        "AND lower(u.status) = 'active' "
+                        "AND usa.system_key = :system AND usa.enabled = TRUE"
+                    ),
+                    {"account": account.strip().lower(), "system": system},
+                ).scalar()
+            )
+    except Exception as exc:  # noqa: BLE001
+        raise UserRoleLookupError("Failed to load system access") from exc
+
+
+def _require_system_access(account: str, system: str) -> None:
+    try:
+        allowed = _has_system_access(account, system)
+    except UserRoleLookupError:
+        _raise_role_lookup_unavailable()
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System access denied")
 
 
 def _auth_header(request: Request) -> str:
@@ -198,6 +226,7 @@ def get_current_admin(request: Request) -> UserContext:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role == "admin":
+            _require_system_access(google_email, "hospital")
             return UserContext(role="admin", account=google_email)
         if registered_role in {"operator"}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -219,6 +248,7 @@ def get_current_operator(request: Request) -> UserContext:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
         if registered_role in {"admin", "operator"}:
+            _require_system_access(google_email, "hospital")
             return UserContext(role="operator", account=google_email)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     _raise_unauthorized()
@@ -252,3 +282,9 @@ def require_role(required: str):
         return user
 
     return dependency
+
+
+def require_portal_admin(user: UserContext = Depends(get_current_user)) -> UserContext:
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return user

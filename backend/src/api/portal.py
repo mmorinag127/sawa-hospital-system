@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
-from src.api.auth import UserContext, get_current_user, require_role
+from src.api.auth import UserContext, get_current_user, require_portal_admin
 from src.db import engine, session_scope
 from src.models.user import AuditLog
 
@@ -58,7 +58,7 @@ def portal_me(system: str | None = None, user: UserContext = Depends(get_current
         raise HTTPException(status_code=403, detail="System access denied")
     return {"role": user.role, "account": user.account, "systems": systems}
 
-@router.get("/users", dependencies=[Depends(require_role("admin"))])
+@router.get("/users", dependencies=[Depends(require_portal_admin)])
 def list_users():
     with session_scope() as session:
         rows = session.execute(text("SELECT id,account,role,status FROM users ORDER BY lower(account)")).mappings().all()
@@ -122,9 +122,9 @@ def _save(body: dict, actor: UserContext, user_id: str | None = None):
     return {"id": target, "account": account, "role": role, "status": status, "systems": systems}
 
 @router.post("/users")
-def create_user(body: dict, actor: UserContext = Depends(require_role("admin"))):
+def create_user(body: dict, actor: UserContext = Depends(require_portal_admin)):
     return {"user": _save(body, actor)}
 
 @router.put("/users/{user_id}")
-def update_user(user_id: str, body: dict, actor: UserContext = Depends(require_role("admin"))):
+def update_user(user_id: str, body: dict, actor: UserContext = Depends(require_portal_admin)):
     return {"user": _save(body, actor, user_id)}

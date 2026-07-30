@@ -84,6 +84,27 @@ def test_user_without_requested_system_is_denied(monkeypatch):
         _cleanup(user_id)
 
 
+def test_direct_hospital_api_requires_hospital_grant(monkeypatch):
+    account = "shift.only.direct@example.com"
+    user_id = _seed_user(account, systems=("shift",))
+    try:
+        response = client.get("/orders", headers=_google(monkeypatch, account))
+        assert response.status_code == 403
+        assert response.json()["detail"] == "System access denied"
+    finally:
+        _cleanup(user_id)
+
+
+def test_direct_hospital_api_allows_registered_user_with_hospital_grant(monkeypatch):
+    account = "hospital.direct@example.com"
+    user_id = _seed_user(account, systems=("hospital",))
+    try:
+        response = client.get("/orders", headers=_google(monkeypatch, account))
+        assert response.status_code == 200
+    finally:
+        _cleanup(user_id)
+
+
 def test_missing_malformed_and_basic_auth_are_denied(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setattr(auth_module, "AUTH_PROVIDER", "local")

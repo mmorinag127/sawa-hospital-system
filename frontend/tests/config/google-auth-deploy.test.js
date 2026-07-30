@@ -42,13 +42,15 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   const predeploy = read("scripts/predeploy_env_checks.sh");
 
   for (const script of [workerDeploy, webDeploy]) {
-    assert.match(script, /gcloud auth print-identity-token --audiences=/);
+    assert.match(script, /gcloud auth print-identity-token[\s\S]*--impersonate-service-account=[\s\S]*--include-email[\s\S]*--audiences=/);
     assert.match(script, /Authorization: Bearer \$\{DEPLOY_ID_TOKEN\}/);
     assert.doesNotMatch(script, /curl -sS -u|OPERATOR_PASSWORD/);
   }
   assert.match(workerDeploy, /check_ocr_sheet_quality_gate\.py/);
   assert.match(workerDeploy, /check_worker_surface_parity\.py/);
   assert.match(workerDeploy, /check_worker_web_surface_consistency\.py/);
+  assert.match(workerDeploy, /portal\/auth\/me\?system=hospital/);
+  assert.match(workerDeploy, /CI verification identity must be registered, active, and granted hospital access/);
   assert.match(predeploy, /check_predeploy_system_status\.py/);
   assert.match(predeploy, /worker_orders_unauthenticated/);
 });

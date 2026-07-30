@@ -13,6 +13,7 @@ WEB_URL="${WEB_URL:-}"
 WORKER_URL="${WORKER_URL:-}"
 
 GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}"
+GOOGLE_IDENTITY_SERVICE_ACCOUNT="${GOOGLE_IDENTITY_SERVICE_ACCOUNT:-}"
 STRICT_OCR_QUALITY="${STRICT_OCR_QUALITY:-0}"
 WORKFLOW_V2_DEPLOY_CHECK="${WORKFLOW_V2_DEPLOY_CHECK:-0}"
 IMAGE_REPO="${IMAGE_REPO:-asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend}"
@@ -29,7 +30,14 @@ ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh
 "$SCRIPT_DIR/require_ci_cd_deploy.sh" "${WEB_SERVICE:-web deploy}"
 
 "$ENSURE_GCLOUD_AUTH"
-DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token --audiences="${GOOGLE_CLIENT_ID}")"
+if [[ -z "${GOOGLE_CLIENT_ID}" || -z "${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" ]]; then
+  echo "GOOGLE_CLIENT_ID and GOOGLE_IDENTITY_SERVICE_ACCOUNT are required for CI OIDC verification"
+  exit 1
+fi
+DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token \
+  --impersonate-service-account="${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" \
+  --include-email \
+  --audiences="${GOOGLE_CLIENT_ID}")"
 if [[ -z "${DEPLOY_ID_TOKEN}" ]]; then
   echo "Failed to mint CI OIDC verification token"
   exit 1
