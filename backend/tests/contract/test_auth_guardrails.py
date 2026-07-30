@@ -104,6 +104,14 @@ def test_staging_deploy_has_no_basic_admin_credentials():
     assert "OPERATOR_PASSWORD" not in workflow
 
 
+def test_predeploy_status_payload_uses_bearer_authorization_header():
+    source = (ROOT.parent / "scripts" / "predeploy_env_checks.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'status_json=$(curl -sS -H "Authorization: ${AUTHORIZATION_HEADER}"' in source
+    assert 'curl -sS -u "$AUTHORIZATION_HEADER"' not in source
+
+
 def test_portal_mode_rejects_local_basic_auth(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setenv("AUTH_PROVIDER", "portal")

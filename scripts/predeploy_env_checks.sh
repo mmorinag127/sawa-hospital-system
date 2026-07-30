@@ -92,7 +92,7 @@ if [ "$CHECK_WEB_PROXY" = "1" ]; then
   check_http_code_any "web_api_orders_unauthenticated" "$WEB_URL/api/orders?include_ocr=false" "401,308" ""
 fi
 
-status_json=$(curl -sS -u "$AUTHORIZATION_HEADER" "$WORKER_URL/system/status" || true)
+status_json=$(curl -sS -H "Authorization: ${AUTHORIZATION_HEADER}" "$WORKER_URL/system/status" || true)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 python3 "$SCRIPT_DIR/check_predeploy_system_status.py" \
   "$status_json" \
