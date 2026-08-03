@@ -18,6 +18,9 @@ def test_prod_workflow_requires_bootstrap_gate_before_backend_deploy():
     assert "sha256sum -c -" in workflow
     assert "scripts/portal_prod_db_bootstrap.py" in workflow
     assert "- prod-db-bootstrap-gate" in workflow
+    assert 'SHIFT_WEB_URL: ""' in workflow
+    assert "if: env.SHIFT_WEB_URL != ''" in workflow
+    assert "shift-api-prod must use the dedicated shift-prod Cloud SQL instance" in workflow
 
     approval_pos = workflow.index("production-approval:")
     gate_pos = workflow.index("prod-db-bootstrap-gate:")

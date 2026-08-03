@@ -60,3 +60,14 @@ test("school lunch root and descendant routes use the same configured target", a
     { source: "/school-lunch/:path*", destination: "https://school-lunch.example/school-lunch/:path*" },
   ]);
 });
+
+test("shift routes are disabled when no shift target is configured", async () => {
+  const rewrites = await loadRewrites({
+    SHIFT_WEB_PROXY_TARGET: "",
+  });
+  const shiftRoutes = rewrites.beforeFiles.filter((route) =>
+    route.source.startsWith("/shift"),
+  );
+
+  assert.deepEqual(shiftRoutes, []);
+});
