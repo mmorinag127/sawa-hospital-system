@@ -213,6 +213,7 @@ jobs:
       id-token: write
     env:
       PORTAL_BOOTSTRAP_ADMIN_EMAIL: ${{ vars.PROD_PORTAL_BOOTSTRAP_ADMIN_EMAIL }}
+      PORTAL_DEPLOY_VERIFICATION_EMAIL: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -279,6 +280,7 @@ jobs:
               --project-id "$PROJECT_ID" \
               --region "$REGION" \
               --service "$WEB_SERVICE" \
+              --deploy-verification-email "$PORTAL_DEPLOY_VERIFICATION_EMAIL" \
               --db-host 127.0.0.1 \
               --db-port 5432
           )

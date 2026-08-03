@@ -13,10 +13,12 @@ def test_prod_workflow_requires_bootstrap_gate_before_backend_deploy():
     assert "prod-db-bootstrap-gate:" in workflow
     assert "environment: production" in workflow
     assert "PORTAL_BOOTSTRAP_ADMIN_EMAIL: ${{ vars.PROD_PORTAL_BOOTSTRAP_ADMIN_EMAIL }}" in workflow
+    assert "PORTAL_DEPLOY_VERIFICATION_EMAIL: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" in workflow
     assert 'CLOUD_SQL_PROXY_VERSION: "2.24.1"' in workflow
     assert "CLOUD_SQL_PROXY_SHA256" in workflow
     assert "sha256sum -c -" in workflow
     assert "scripts/portal_prod_db_bootstrap.py" in workflow
+    assert '--deploy-verification-email "$PORTAL_DEPLOY_VERIFICATION_EMAIL"' in workflow
     assert "- prod-db-bootstrap-gate" in workflow
     assert 'SHIFT_WEB_URL: ""' in workflow
     assert "if: env.SHIFT_WEB_URL != ''" in workflow
@@ -34,4 +36,6 @@ def test_prod_bootstrap_script_is_ci_only_and_release_branch_only():
     assert 'os.getenv("GITHUB_ACTIONS") != "true"' in source
     assert 'release/prod-*' in source
     assert "PORTAL_BOOTSTRAP_ADMIN_EMAIL" in source
+    assert "PORTAL_DEPLOY_VERIFICATION_EMAIL" in source
+    assert "--deploy-verification-email" in source
     assert "run_portal_access_bootstrap_gate" in source

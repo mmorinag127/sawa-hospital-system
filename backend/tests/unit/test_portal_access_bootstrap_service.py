@@ -133,6 +133,125 @@ def test_gate_is_idempotent_after_active_admin_exists(tmp_path):
     assert access_count == 3
 
 
+def test_gate_grants_hospital_only_access_to_deploy_verification_identity(tmp_path):
+    engine = _prepare_engine(tmp_path)
+    with engine.begin() as connection:
+        result = run_portal_access_bootstrap_gate(
+            connection,
+            bootstrap_admin_email="bootstrap-admin@example.com",
+            deploy_verification_email="deploy-verifier@example.com",
+        )
+        deploy_row = connection.execute(
+            text(
+                "SELECT id, role, status FROM users "
+                "WHERE lower(account) = 'deploy-verifier@example.com'"
+            )
+        ).mappings().one()
+        deploy_access = connection.execute(
+            text(
+                "SELECT system_key FROM user_system_access "
+                "WHERE user_id = :user_id AND enabled = TRUE "
+                "ORDER BY system_key"
+            ),
+            {"user_id": deploy_row["id"]},
+        ).scalars().all()
+        actions = connection.execute(
+            text("SELECT action FROM audit_logs ORDER BY created_at, action")
+        ).scalars().all()
+
+    assert result.bootstrap_performed is True
+    assert result.deploy_verification_access_granted is True
+    assert deploy_row["role"] == "operator"
+    assert deploy_row["status"] == "active"
+    assert deploy_access == ["hospital"]
+    assert "portal_deploy_verification_user_upserted" in actions
+    assert "portal_deploy_verification_hospital_access_granted" in actions
+
+
+def test_gate_keeps_existing_deploy_admin_role_and_is_idempotent(tmp_path):
+    engine = _prepare_engine(tmp_path)
+    with engine.begin() as connection:
+        first = run_portal_access_bootstrap_gate(
+            connection,
+            bootstrap_admin_email="bootstrap-admin@example.com",
+            deploy_verification_email="deploy-verifier@example.com",
+        )
+        connection.execute(
+            text(
+                "UPDATE users SET role = 'admin' "
+                "WHERE lower(account) = 'deploy-verifier@example.com'"
+            )
+        )
+        audit_count_before = int(
+            connection.execute(text("SELECT COUNT(*) FROM audit_logs")).scalar() or 0
+        )
+        second = run_portal_access_bootstrap_gate(
+            connection,
+            bootstrap_admin_email="",
+            deploy_verification_email="deploy-verifier@example.com",
+        )
+        audit_count_after = int(
+            connection.execute(text("SELECT COUNT(*) FROM audit_logs")).scalar() or 0
+        )
+        deploy_row = connection.execute(
+            text(
+                "SELECT role, status FROM users "
+                "WHERE lower(account) = 'deploy-verifier@example.com'"
+            )
+        ).mappings().one()
+
+    assert first.deploy_verification_access_granted is True
+    assert second.bootstrap_performed is False
+    assert second.deploy_verification_access_granted is False
+    assert audit_count_before == audit_count_after
+    assert deploy_row["role"] == "admin"
+    assert deploy_row["status"] == "active"
+
+
+def test_gate_removes_non_hospital_access_from_existing_deploy_verification_identity(tmp_path):
+    engine = _prepare_engine(tmp_path)
+    with engine.begin() as connection:
+        run_portal_access_bootstrap_gate(
+            connection,
+            bootstrap_admin_email="bootstrap-admin@example.com",
+            deploy_verification_email="deploy-verifier@example.com",
+        )
+        deploy_user_id = connection.execute(
+            text(
+                "SELECT id FROM users "
+                "WHERE lower(account) = 'deploy-verifier@example.com'"
+            )
+        ).scalar_one()
+        for system_key in ("shift", "school-lunch"):
+            connection.execute(
+                text(
+                    "INSERT INTO user_system_access(user_id, system_key, enabled) "
+                    "VALUES(:user_id, :system_key, TRUE)"
+                ),
+                {"user_id": deploy_user_id, "system_key": system_key},
+            )
+
+        repaired = run_portal_access_bootstrap_gate(
+            connection,
+            bootstrap_admin_email="",
+            deploy_verification_email="deploy-verifier@example.com",
+        )
+        access_rows = connection.execute(
+            text(
+                "SELECT system_key, enabled FROM user_system_access "
+                "WHERE user_id = :user_id ORDER BY system_key"
+            ),
+            {"user_id": deploy_user_id},
+        ).all()
+
+    assert repaired.deploy_verification_access_granted is True
+    assert access_rows == [
+        ("hospital", True),
+        ("school-lunch", False),
+        ("shift", False),
+    ]
+
+
 def test_gate_blocks_when_no_active_admin_and_bootstrap_email_is_missing(tmp_path):
     engine = _prepare_engine(tmp_path)
     with engine.begin() as connection:

@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
         "--bootstrap-admin-email",
         default=os.getenv("PORTAL_BOOTSTRAP_ADMIN_EMAIL", ""),
     )
+    parser.add_argument(
+        "--deploy-verification-email",
+        default=os.getenv("PORTAL_DEPLOY_VERIFICATION_EMAIL", ""),
+    )
     parser.add_argument("--db-host", default=os.getenv("PORTAL_BOOTSTRAP_DB_HOST", "127.0.0.1"))
     parser.add_argument("--db-port", default=os.getenv("PORTAL_BOOTSTRAP_DB_PORT", "5432"))
     parser.add_argument("--actor", default=os.getenv("PORTAL_BOOTSTRAP_ACTOR", BOOTSTRAP_ACTOR))
@@ -210,6 +214,7 @@ def main() -> int:
             result = run_portal_access_bootstrap_gate(
                 connection,
                 bootstrap_admin_email=args.bootstrap_admin_email,
+                deploy_verification_email=args.deploy_verification_email,
                 actor=args.actor,
             )
     finally:
@@ -220,6 +225,9 @@ def main() -> int:
                 "service": args.service,
                 "instance_connection_name": config.instance_connection_name,
                 "bootstrap_admin_configured": bool(str(args.bootstrap_admin_email or "").strip()),
+                "deploy_verification_email_configured": bool(
+                    str(args.deploy_verification_email or "").strip()
+                ),
                 **result.to_dict(),
             },
             ensure_ascii=False,
