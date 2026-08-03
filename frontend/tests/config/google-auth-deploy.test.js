@@ -42,6 +42,8 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   const predeploy = read("scripts/predeploy_env_checks.sh");
 
   for (const script of [workerDeploy, webDeploy]) {
+    assert.match(script, /GITHUB_ACTIONS:-/);
+    assert.match(script, /GOOGLE_GHA_CREDS_PATH:-/);
     assert.match(script, /active_account="\$\(gcloud config get-value account/);
     assert.match(script, /if \[\[ "\$\{active_account\}" == "\$\{GOOGLE_IDENTITY_SERVICE_ACCOUNT\}" \]\]/);
     assert.match(script, /gcloud auth print-identity-token[\s\S]*--include-email[\s\S]*--audiences=/);

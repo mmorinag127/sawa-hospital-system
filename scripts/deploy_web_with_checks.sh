@@ -37,6 +37,12 @@ fi
 
 mint_ci_identity_token() {
   local active_account
+  if [[ "${GITHUB_ACTIONS:-}" == "true" && -n "${GOOGLE_GHA_CREDS_PATH:-}" ]]; then
+    gcloud auth print-identity-token \
+      --include-email \
+      --audiences="${GOOGLE_CLIENT_ID}"
+    return
+  fi
   active_account="$(gcloud config get-value account 2>/dev/null || true)"
   if [[ "${active_account}" == "${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" ]]; then
     gcloud auth print-identity-token \
