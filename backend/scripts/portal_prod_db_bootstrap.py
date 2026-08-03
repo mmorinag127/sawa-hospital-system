@@ -7,6 +7,8 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,10 @@ def parse_args() -> argparse.Namespace:
         "--deploy-verification-token",
         default=os.getenv("DEPLOY_ID_TOKEN", ""),
     )
+    parser.add_argument(
+        "--live-auth-url",
+        required=True,
+    )
     parser.add_argument("--db-host", default=os.getenv("PORTAL_BOOTSTRAP_DB_HOST", "127.0.0.1"))
     parser.add_argument("--db-port", default=os.getenv("PORTAL_BOOTSTRAP_DB_PORT", "5432"))
     parser.add_argument("--actor", default=os.getenv("PORTAL_BOOTSTRAP_ACTOR", BOOTSTRAP_ACTOR))
@@ -105,6 +111,33 @@ def _extract_email_from_id_token(raw_token: str) -> str:
     if payload.get("email_verified") is not True:
         raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN email claim must be verified")
     return email
+
+
+def _verify_live_portal_access(*, live_auth_url: str, deploy_token: str) -> int:
+    url = str(live_auth_url or "").strip()
+    if not url:
+        raise PortalAccessBootstrapError("live auth URL is required")
+    if not str(deploy_token or "").strip():
+        raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN is required for live deploy verification")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {deploy_token}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            status_code = int(response.status)
+    except urllib.error.HTTPError as exc:
+        status_code = int(exc.code)
+    except Exception as exc:
+        raise PortalAccessBootstrapError("live deploy verification request failed") from exc
+    if status_code != 200:
+        raise PortalAccessBootstrapError(
+            f"live deploy verification failed with HTTP {status_code}"
+        )
+    return status_code
 
 
 def _load_secret(project_id: str, secret_name: str, version: str | None = None) -> str:
@@ -246,6 +279,10 @@ def main() -> int:
                 deploy_verification_email=deploy_verification_email,
                 actor=args.actor,
             )
+        live_auth_status = _verify_live_portal_access(
+            live_auth_url=args.live_auth_url,
+            deploy_token=args.deploy_verification_token,
+        )
     finally:
         engine.dispose()
     print(
@@ -260,6 +297,7 @@ def main() -> int:
                 "deploy_verification_token_configured": bool(
                     str(args.deploy_verification_token or "").strip()
                 ),
+                "live_auth_status": live_auth_status,
                 **result.to_dict(),
             },
             ensure_ascii=False,

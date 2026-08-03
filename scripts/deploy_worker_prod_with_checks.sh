@@ -118,16 +118,15 @@ if [[ -z "${DEPLOY_ID_TOKEN}" ]]; then
   exit 1
 fi
 
-CURRENT_SERVICE_URL="$(resolve_service_url "${SERVICE}" || true)"
-if [[ -z "${CURRENT_SERVICE_URL}" ]]; then
-  echo "Current service URL is unavailable for CI identity preflight"
+if [[ -z "${WEB_URL}" ]]; then
+  echo "WEB_URL is required for CI identity preflight"
   exit 1
 fi
 CI_IDENTITY_STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
-  "${CURRENT_SERVICE_URL}/portal/auth/me?system=hospital" || true)"
+  "${WEB_URL}/api/auth/me" || true)"
 if [[ "${CI_IDENTITY_STATUS}" != "200" ]]; then
-  echo "CI verification identity must be registered, active, and granted hospital access before deploy"
+  echo "CI verification identity must be registered, active, and granted hospital access before deploy: HTTP ${CI_IDENTITY_STATUS}"
   exit 1
 fi
 
@@ -248,6 +247,14 @@ SERVICE_URL="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID
 UNAUTH_CODE="$(curl -sS -o /dev/null -w "%{http_code}" "${SERVICE_URL}/orders?include_ocr=false")"
 if [[ "${UNAUTH_CODE}" != "401" ]]; then
   echo "Unauthenticated worker request must be rejected: status=${UNAUTH_CODE}"
+  exit 1
+fi
+
+WORKER_PORTAL_STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
+  "${SERVICE_URL}/portal/auth/me?system=hospital" || true)"
+if [[ "${WORKER_PORTAL_STATUS}" != "200" ]]; then
+  echo "worker portal hospital access check failed: status=${WORKER_PORTAL_STATUS}"
   exit 1
 fi
 

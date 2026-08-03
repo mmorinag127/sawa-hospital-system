@@ -63,7 +63,9 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(workerDeploy, /check_ocr_sheet_quality_gate\.py/);
   assert.match(workerDeploy, /check_worker_surface_parity\.py/);
   assert.match(workerDeploy, /check_worker_web_surface_consistency\.py/);
-  assert.match(workerDeploy, /portal\/auth\/me\?system=hospital/);
+  assert.match(workerDeploy, /\$\{WEB_URL\}\/api\/auth\/me/);
+  assert.doesNotMatch(workerDeploy, /\$\{CURRENT_SERVICE_URL\}\/portal\/auth\/me\?system=hospital/);
+  assert.match(workerDeploy, /\$\{SERVICE_URL\}\/portal\/auth\/me\?system=hospital/);
   assert.match(workerDeploy, /CI verification identity must be registered, active, and granted hospital access/);
   assert.match(predeploy, /check_predeploy_system_status\.py/);
   assert.match(predeploy, /worker_orders_unauthenticated/);

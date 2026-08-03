@@ -287,6 +287,7 @@ jobs:
               --service "$WEB_SERVICE" \
               --deploy-verification-email "$PORTAL_DEPLOY_VERIFICATION_EMAIL" \
               --deploy-verification-token "$DEPLOY_ID_TOKEN" \
+              --live-auth-url "$WEB_URL/api/auth/me" \
               --db-host 127.0.0.1 \
               --db-port 5432
           )
