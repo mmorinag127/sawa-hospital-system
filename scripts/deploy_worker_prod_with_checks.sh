@@ -72,6 +72,21 @@ compare_workflow_v2_json() {
   rm -f "$diff_file"
 }
 
+mint_ci_identity_token() {
+  local active_account
+  active_account="$(gcloud config get-value account 2>/dev/null || true)"
+  if [[ "${active_account}" == "${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" ]]; then
+    gcloud auth print-identity-token \
+      --include-email \
+      --audiences="${GOOGLE_CLIENT_ID}"
+    return
+  fi
+  gcloud auth print-identity-token \
+    --impersonate-service-account="${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" \
+    --include-email \
+    --audiences="${GOOGLE_CLIENT_ID}"
+}
+
 if [[ -z "${IMAGE}" ]]; then
   echo "usage: $0 <image> <order_id>"
   echo "example: $0 asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:prod-backend-YYYYMMDD-HHMMSS ORDc935f9e2"
@@ -93,10 +108,7 @@ if [[ -z "${WEB_URL}" ]]; then
 fi
 
 "$ENSURE_GCLOUD_AUTH"
-DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token \
-  --impersonate-service-account="${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" \
-  --include-email \
-  --audiences="${GOOGLE_CLIENT_ID}")"
+DEPLOY_ID_TOKEN="$(mint_ci_identity_token)"
 if [[ -z "${DEPLOY_ID_TOKEN}" ]]; then
   echo "Failed to mint CI OIDC verification token"
   exit 1

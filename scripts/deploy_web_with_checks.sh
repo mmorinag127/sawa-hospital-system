@@ -34,10 +34,23 @@ if [[ -z "${GOOGLE_CLIENT_ID}" || -z "${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" ]]; th
   echo "GOOGLE_CLIENT_ID and GOOGLE_IDENTITY_SERVICE_ACCOUNT are required for CI OIDC verification"
   exit 1
 fi
-DEPLOY_ID_TOKEN="$(gcloud auth print-identity-token \
-  --impersonate-service-account="${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" \
-  --include-email \
-  --audiences="${GOOGLE_CLIENT_ID}")"
+
+mint_ci_identity_token() {
+  local active_account
+  active_account="$(gcloud config get-value account 2>/dev/null || true)"
+  if [[ "${active_account}" == "${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" ]]; then
+    gcloud auth print-identity-token \
+      --include-email \
+      --audiences="${GOOGLE_CLIENT_ID}"
+    return
+  fi
+  gcloud auth print-identity-token \
+    --impersonate-service-account="${GOOGLE_IDENTITY_SERVICE_ACCOUNT}" \
+    --include-email \
+    --audiences="${GOOGLE_CLIENT_ID}"
+}
+
+DEPLOY_ID_TOKEN="$(mint_ci_identity_token)"
 if [[ -z "${DEPLOY_ID_TOKEN}" ]]; then
   echo "Failed to mint CI OIDC verification token"
   exit 1
