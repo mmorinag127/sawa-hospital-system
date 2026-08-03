@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -53,6 +54,10 @@ def parse_args() -> argparse.Namespace:
         "--deploy-verification-email",
         default=os.getenv("PORTAL_DEPLOY_VERIFICATION_EMAIL", ""),
     )
+    parser.add_argument(
+        "--deploy-verification-token",
+        default=os.getenv("DEPLOY_ID_TOKEN", ""),
+    )
     parser.add_argument("--db-host", default=os.getenv("PORTAL_BOOTSTRAP_DB_HOST", "127.0.0.1"))
     parser.add_argument("--db-port", default=os.getenv("PORTAL_BOOTSTRAP_DB_PORT", "5432"))
     parser.add_argument("--actor", default=os.getenv("PORTAL_BOOTSTRAP_ACTOR", BOOTSTRAP_ACTOR))
@@ -79,6 +84,27 @@ def _run_gcloud_json(*args: str) -> dict[str, Any]:
         text=True,
     )
     return json.loads(completed.stdout)
+
+
+def _extract_email_from_id_token(raw_token: str) -> str:
+    token = str(raw_token or "").strip()
+    if not token:
+        raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN is required for deploy verification bootstrap")
+    parts = token.split(".")
+    if len(parts) < 2:
+        raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN must be a JWT")
+    payload_part = parts[1]
+    padding = "=" * (-len(payload_part) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(f"{payload_part}{padding}"))
+    except Exception as exc:
+        raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN payload could not be decoded") from exc
+    email = str(payload.get("email") or "").strip()
+    if not email:
+        raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN must include an email claim")
+    if payload.get("email_verified") is not True:
+        raise PortalAccessBootstrapError("DEPLOY_ID_TOKEN email claim must be verified")
+    return email
 
 
 def _load_secret(project_id: str, secret_name: str, version: str | None = None) -> str:
@@ -211,10 +237,13 @@ def main() -> int:
     )
     try:
         with engine.begin() as connection:
+            deploy_verification_email = _extract_email_from_id_token(
+                args.deploy_verification_token
+            )
             result = run_portal_access_bootstrap_gate(
                 connection,
                 bootstrap_admin_email=args.bootstrap_admin_email,
-                deploy_verification_email=args.deploy_verification_email,
+                deploy_verification_email=deploy_verification_email,
                 actor=args.actor,
             )
     finally:
@@ -226,7 +255,10 @@ def main() -> int:
                 "instance_connection_name": config.instance_connection_name,
                 "bootstrap_admin_configured": bool(str(args.bootstrap_admin_email or "").strip()),
                 "deploy_verification_email_configured": bool(
-                    str(args.deploy_verification_email or "").strip()
+                    str(deploy_verification_email or "").strip()
+                ),
+                "deploy_verification_token_configured": bool(
+                    str(args.deploy_verification_token or "").strip()
                 ),
                 **result.to_dict(),
             },

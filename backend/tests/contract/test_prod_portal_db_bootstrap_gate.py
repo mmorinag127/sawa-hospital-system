@@ -19,6 +19,8 @@ def test_prod_workflow_requires_bootstrap_gate_before_backend_deploy():
     assert "sha256sum -c -" in workflow
     assert "scripts/portal_prod_db_bootstrap.py" in workflow
     assert '--deploy-verification-email "$PORTAL_DEPLOY_VERIFICATION_EMAIL"' in workflow
+    assert '--deploy-verification-token "$DEPLOY_ID_TOKEN"' in workflow
+    assert "DEPLOY_ID_TOKEN: ${{ steps.auth-db.outputs.id_token }}" in workflow
     assert "- prod-db-bootstrap-gate" in workflow
     assert 'SHIFT_WEB_URL: ""' in workflow
     assert "if: env.SHIFT_WEB_URL != ''" in workflow
@@ -38,4 +40,7 @@ def test_prod_bootstrap_script_is_ci_only_and_release_branch_only():
     assert "PORTAL_BOOTSTRAP_ADMIN_EMAIL" in source
     assert "PORTAL_DEPLOY_VERIFICATION_EMAIL" in source
     assert "--deploy-verification-email" in source
+    assert "DEPLOY_ID_TOKEN" in source
+    assert "--deploy-verification-token" in source
+    assert "_extract_email_from_id_token" in source
     assert "run_portal_access_bootstrap_gate" in source

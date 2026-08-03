@@ -46,8 +46,11 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}/);
   assert.match(prodWorkflow, /id: auth-frontend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-frontend\.outputs\.id_token \}\}/);
-  assert.equal((prodWorkflow.match(/token_format: id_token/g) || []).length, 2);
-  assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 2);
+  assert.match(prodWorkflow, /id: auth-db[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
+  assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-db\.outputs\.id_token \}\}/);
+  assert.match(prodWorkflow, /--deploy-verification-token "\$DEPLOY_ID_TOKEN"/);
+  assert.equal((prodWorkflow.match(/token_format: id_token/g) || []).length, 3);
+  assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
   for (const script of [workerDeploy, webDeploy]) {
     assert.match(script, /if \[\[ -n "\$\{DEPLOY_ID_TOKEN:-\}" \]\]/);
     assert.match(script, /active_account="\$\(gcloud config get-value account/);
