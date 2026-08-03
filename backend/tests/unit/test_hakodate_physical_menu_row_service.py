@@ -39,6 +39,20 @@ def test_physical_row_count_increases_for_event_food_physical_rows() -> None:
     assert hakodate_physical_menu_row_service.physical_row_count_from_entries(entries) == 57
 
 
+def test_physical_row_count_for_20260921_lunch_event_food_is_fifty_seven() -> None:
+    entries = _entries({day: (2, 3, 3) for day in range(20, 27)})
+    entries.append(
+        {
+            "menu_date": date(2026, 9, 21),
+            "daypart_key": "lunch",
+            "slot_index": 3,
+            "menu_name": "行事食4品目",
+        }
+    )
+
+    assert hakodate_physical_menu_row_service.physical_row_count_from_entries(entries) == 57
+
+
 def test_sheet_physical_row_count_ignores_diet_override_rows() -> None:
     sheet = {
         "physical_menu_row_count": 56,

@@ -503,6 +503,132 @@ def test_label_meal_slots_are_assigned_by_daypart_menu_order():
     assert komatsuna["メニュー"] == "副菜②"
 
 
+def test_label_meal_slots_assign_fourth_lunch_item_as_side_three():
+    lines = [
+        {
+            "date": "2026-09-21",
+            "daypart": "昼",
+            "menu_name": "行事食主菜",
+            "menu_category": "主菜",
+            "diet_type": "regular",
+            "source_row_index": 18,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-09-21",
+            "daypart": "昼",
+            "menu_name": "行事食副菜一",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 19,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-09-21",
+            "daypart": "昼",
+            "menu_name": "行事食副菜二",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 20,
+            "quantity_original": 3,
+        },
+        {
+            "date": "2026-09-21",
+            "daypart": "昼",
+            "menu_name": "行事食副菜三",
+            "menu_category": "副菜",
+            "diet_type": "regular",
+            "source_row_index": 21,
+            "quantity_original": 3,
+        },
+    ]
+
+    enriched = output_builder._apply_label_meal_slot_categories(lines)
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            for line in enriched
+        ],
+        {},
+        None,
+    )
+
+    categories_by_name = {row["商品名１"]: row["メニュー"] for row in labels}
+    assert categories_by_name == {
+        "行事食主菜": "主菜",
+        "行事食副菜一": "副菜①",
+        "行事食副菜二": "副菜②",
+        "行事食副菜三": "副菜③",
+    }
+
+
+def test_monthly_entry_override_assigns_20260921_lunch_fourth_slot_as_side_three():
+    entries = [
+        {
+            "menu_date": "2026-09-21",
+            "daypart": "昼食",
+            "slot_index": 0,
+            "name": "行事食主菜",
+            "category": "主菜",
+            "diet_type": "regular",
+        },
+        {
+            "menu_date": "2026-09-21",
+            "daypart": "昼食",
+            "slot_index": 1,
+            "name": "行事食副菜一",
+            "category": "副菜",
+            "diet_type": "regular",
+        },
+        {
+            "menu_date": "2026-09-21",
+            "daypart": "昼食",
+            "slot_index": 2,
+            "name": "行事食副菜二",
+            "category": "副菜",
+            "diet_type": "regular",
+        },
+        {
+            "menu_date": "2026-09-21",
+            "daypart": "昼食",
+            "slot_index": 3,
+            "name": "行事食副菜三",
+            "category": "副菜",
+            "diet_type": "regular",
+        },
+    ]
+    lines = [
+        {
+            "date": "2026-09-21",
+            "daypart": "昼",
+            "menu_name": entry["name"],
+            "menu_category": "副菜" if entry["slot_index"] else "主菜",
+            "diet_type": "regular",
+            "source_row_index": entry["slot_index"],
+            "quantity_original": 3,
+        }
+        for entry in entries
+    ]
+
+    enriched = output_builder._apply_menu_entry_overrides(lines, entries)
+    labels, _fields, _label_format = output_builder._build_label_rows(
+        [
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            for line in enriched
+        ],
+        {},
+        None,
+    )
+
+    categories_by_name = {row["商品名１"]: row["メニュー"] for row in labels}
+    assert categories_by_name == {
+        "行事食主菜": "主菜",
+        "行事食副菜一": "副菜①",
+        "行事食副菜二": "副菜②",
+        "行事食副菜三": "副菜③",
+    }
+
+
 def test_label_meal_slots_skip_parent_prefixed_garnish_category():
     lines = [
         {

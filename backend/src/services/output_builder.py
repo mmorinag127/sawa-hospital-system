@@ -731,12 +731,16 @@ def _normalize_daily_label_category_text(category: str) -> str:
         return "副菜① 添え"
     if compact in {"副菜②添え", "副菜2添え", "副②添え", "副2添え"}:
         return "副菜② 添え"
+    if compact in {"副菜③添え", "副菜3添え", "副③添え", "副3添え"}:
+        return "副菜③ 添え"
     if text in {"主", "主菜", "主Ａ", "主A"}:
         return "主菜"
     if text in {"副", "副①", "副1", "副菜1", "副菜①"}:
         return "副菜①"
     if text in {"副②", "副2", "副菜2", "副菜②"}:
         return "副菜②"
+    if text in {"副③", "副3", "副菜3", "副菜③"}:
+        return "副菜③"
     return text
 
 
@@ -1186,17 +1190,19 @@ def _menu_entry_category_label(entry: dict) -> str:
         return normalized
     if daypart == "朝" and slot_index > 0:
         return {1: "副菜1", 2: "副菜2"}.get(slot_index, normalized)
-    if normalized in {"副菜1", "副菜2", "主菜"}:
+    if normalized in {"副菜1", "副菜2", "副菜3", "主菜"}:
         return normalized
-    if daypart in {"朝", "昼"}:
+    if daypart == "朝":
         return {0: "副菜1", 1: "副菜2"}.get(slot_index, normalized)
+    if daypart == "昼":
+        return {0: "主菜", 1: "副菜1", 2: "副菜2", 3: "副菜3"}.get(slot_index, normalized)
     if daypart == "夕":
-        return {0: "副菜1", 1: "副菜2", 2: "主菜"}.get(slot_index, normalized)
+        return {0: "副菜1", 1: "副菜2", 2: "主菜", 3: "副菜3"}.get(slot_index, normalized)
     return normalized
 
 
 def _is_specific_delivery_category(value: object) -> bool:
-    return _normalize_delivery_category_label(value) in {"副菜1", "副菜2", "主菜"}
+    return _normalize_delivery_category_label(value) in {"副菜1", "副菜2", "副菜3", "主菜"}
 
 
 def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> bool:
@@ -1563,7 +1569,7 @@ def _label_meal_slot_sequence(daypart: str) -> list[str]:
     if daypart == "朝":
         return ["副菜1", "副菜2"]
     if daypart in {"昼", "夕"}:
-        return ["主菜", "副菜1", "副菜2"]
+        return ["主菜", "副菜1", "副菜2", "副菜3"]
     return []
 
 
@@ -2760,10 +2766,13 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         "副菜②": 6,
         "副菜②（軟菜）": 7,
         "副菜②（ミキサー）": 8,
-        "副菜": 9,
-        "副菜（軟菜）": 10,
-        "副菜（ミキサー）": 11,
-        "ソース": 12,
+        "副菜③": 9,
+        "副菜③（軟菜）": 10,
+        "副菜③（ミキサー）": 11,
+        "副菜": 12,
+        "副菜（軟菜）": 13,
+        "副菜（ミキサー）": 14,
+        "ソース": 15,
     }
     diet_order = {
         "": 0,
@@ -2806,6 +2815,12 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
             if "軟菜" in text:
                 return "副菜②（軟菜）"
             return "副菜②"
+        if text.startswith("副菜③"):
+            if "ミキサー" in text:
+                return "副菜③（ミキサー）"
+            if "軟菜" in text:
+                return "副菜③（軟菜）"
+            return "副菜③"
         if text.startswith("副菜"):
             if "ミキサー" in text:
                 return "副菜（ミキサー）"
@@ -3575,6 +3590,8 @@ def _normalize_delivery_category_label(value: Any) -> str:
         return "副菜1"
     if compact in {"副2", "副②", "副菜2", "副菜②", "副菜二"}:
         return "副菜2"
+    if compact in {"副3", "副③", "副菜3", "副菜③", "副菜三"}:
+        return "副菜3"
     if compact in {"主", "主菜", "主菜1", "主菜①"}:
         return "主菜"
     return text
@@ -3589,17 +3606,19 @@ def _delivery_category_sort_value(daypart: Any, category: Any) -> int:
         return 1 if normalized_daypart in {"昼", "夕"} else 0
     if label == "副菜2":
         return 2 if normalized_daypart in {"昼", "夕"} else 1
+    if label == "副菜3":
+        return 3 if normalized_daypart in {"昼", "夕"} else 2
     return 90
 
 
 def _delivery_category_from_menu_default(daypart: Any, menu_name: Any, current_category: Any) -> str:
     normalized = _normalize_delivery_category_label(current_category)
-    if normalized in {"副菜1", "副菜2", "添え"}:
+    if normalized in {"副菜1", "副菜2", "副菜3", "添え"}:
         return normalized
     default_daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(menu_name)
     if default_category and _normalize_delivery_daypart(default_daypart) == _normalize_delivery_daypart(daypart):
         default_label = _normalize_delivery_category_label(default_category)
-        if default_label in {"副菜1", "副菜2", "主菜"}:
+        if default_label in {"副菜1", "副菜2", "副菜3", "主菜"}:
             return default_label
     return normalized
 
@@ -3610,19 +3629,25 @@ def _delivery_display_category_label(daypart: Any, category: Any) -> str:
         return "副①"
     if label == "副菜2":
         return "副②"
+    if label == "副菜3":
+        return "副③"
     if label == "主菜":
         return "主Ａ" if _normalize_delivery_daypart(daypart) == "昼" else "主"
     return label
 
 
-def _delivery_reference_slot_sequence(daypart: Any) -> list[str]:
+def _delivery_reference_slot_sequence(daypart: Any, row_count: int | None = None) -> list[str]:
     normalized_daypart = _normalize_delivery_daypart(daypart)
     if normalized_daypart == "朝":
         return ["副菜1", "副菜2"]
     if normalized_daypart == "昼":
-        return ["主菜", "副菜1", "副菜2"]
+        if row_count == 3:
+            return ["主菜", "副菜1", "副菜2"]
+        return ["主菜", "副菜1", "副菜2", "副菜3"]
     if normalized_daypart == "夕":
-        return ["主菜", "副菜1", "副菜2"]
+        if row_count == 3:
+            return ["主菜", "副菜1", "副菜2"]
+        return ["主菜", "副菜1", "副菜2", "副菜3"]
     return []
 
 
@@ -3637,7 +3662,9 @@ def _apply_delivery_reference_slot_categories(rows: list[dict]) -> None:
         grouped.setdefault((row.get("date"), daypart), []).append(row)
 
     for (_date_value, daypart), daypart_rows in grouped.items():
-        slot_sequence = _delivery_reference_slot_sequence(daypart)
+        if all(_is_specific_delivery_category(row.get("menu_category")) for row in daypart_rows):
+            continue
+        slot_sequence = _delivery_reference_slot_sequence(daypart, len(daypart_rows))
         if len(daypart_rows) != len(slot_sequence):
             continue
         daypart_rows.sort(

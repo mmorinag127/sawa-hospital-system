@@ -119,6 +119,56 @@ def test_build_position_menu_entries_merges_adjacent_month_payloads(monkeypatch)
     ]
 
 
+def test_build_position_menu_entries_keeps_single_event_lunch_fourth_slot(monkeypatch) -> None:
+    entries_payload = []
+    order_index = 0
+    for day in range(20, 27):
+        for daypart, count in (("朝食", 2), ("昼食", 3), ("夕食", 3)):
+            for slot_index in range(count):
+                entries_payload.append(
+                    {
+                        "name": f"{day}-{daypart}-{slot_index}",
+                        "menu_date": f"2026-09-{day:02d}",
+                        "daypart": daypart,
+                        "slot_index": slot_index,
+                        "category": "副菜" if slot_index else "主菜",
+                        "order": order_index,
+                    }
+                )
+                order_index += 1
+    entries_payload.append(
+        {
+            "name": "9月21日昼4品目",
+            "menu_date": "2026-09-21",
+            "daypart": "昼食",
+            "slot_index": 3,
+            "category": "副菜",
+            "order": order_index,
+        }
+    )
+
+    monkeypatch.setattr(order_service, "_sheet_week_month_ids", lambda _week_id: ["2026-09"])
+    monkeypatch.setattr(
+        order_service,
+        "_load_menu_payloads_for_week",
+        lambda *_args, **_kwargs: [("2026-09", {"entries": entries_payload})],
+    )
+
+    entries = order_service._build_position_menu_entries(  # noqa: SLF001
+        "2026-09@2026-09-20~2026-09-26",
+        "FAC00009",
+    )
+
+    event_lunch = [
+        entry
+        for entry in entries
+        if entry["menu_date"] == date(2026, 9, 21) and entry["daypart_key"] == "昼"
+    ]
+    assert len(entries) == 57
+    assert [entry["slot_index"] for entry in event_lunch] == [0, 1, 2, 3]
+    assert event_lunch[-1]["menu_name"] == "9月21日昼4品目"
+
+
 def test_build_sheet_menu_entries_rescues_missing_cross_month_dates_from_ocr_payload(monkeypatch) -> None:
     def _fake_get_menu_for_facility(month_id: str, _facility_id: str | None):
         if month_id == "2026-04":

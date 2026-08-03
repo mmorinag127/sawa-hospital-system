@@ -1835,6 +1835,73 @@ def test_delivery_rows_use_reference_slot_labels_and_order_for_html():
     ]
 
 
+def test_delivery_rows_use_four_lunch_reference_slots_for_event_food():
+    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+        {
+            "id": "ORD-20260921-event-lunch",
+            "facility": "FAC00009",
+            "lines": [
+                {
+                    "date": "2026-09-21",
+                    "daypart": "昼",
+                    "menu_category": "副菜",
+                    "menu_name": "行事食主菜",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": "2026-09-21",
+                    "daypart": "昼",
+                    "menu_category": "副菜",
+                    "menu_name": "行事食副菜一",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": "2026-09-21",
+                    "daypart": "昼",
+                    "menu_category": "副菜",
+                    "menu_name": "行事食副菜二",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+                {
+                    "date": "2026-09-21",
+                    "daypart": "昼",
+                    "menu_category": "副菜",
+                    "menu_name": "行事食副菜三",
+                    "diet_type": "regular",
+                    "area_id": "2F",
+                    "quantity_original": 3,
+                },
+            ],
+        },
+        {
+            "columns": [
+                {"name": "日付", "source": "date"},
+                {"name": "区分", "source": "daypart"},
+                {"name": "献立区分", "source": "menu_category"},
+                {"name": "メニュー名", "source": "menu_name"},
+                {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+            ]
+        },
+        {"zero_as_empty": True},
+        {"facility_name": "グループホームそよかぜ"},
+        {},
+        allow_ocr_menu_meta=False,
+    )
+
+    assert [(row["menu_category"], row["menu_name"]) for row in rows] == [
+        ("主Ａ", "行事食主菜"),
+        ("副①", "行事食副菜一"),
+        ("副②", "行事食副菜二"),
+        ("副③", "行事食副菜三"),
+    ]
+
+
 def test_delivery_rows_use_reference_slots_when_source_categories_are_raw():
     lines = []
     for index, (daypart, category, menu_name) in enumerate(
