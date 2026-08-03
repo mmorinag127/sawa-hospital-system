@@ -232,9 +232,20 @@ module "iam" {
     {
       member = "serviceAccount:${local.deploy_service_account}"
       role   = "roles/cloudbuild.builds.editor"
+    },
+    {
+      member = "serviceAccount:${local.deploy_service_account}"
+      role   = "roles/cloudsql.client"
     }
   ]
   depends_on = [module.apis, module.cloudrun]
+}
+
+resource "google_secret_manager_secret_iam_member" "deploy_db_password_secret_accessor" {
+  project   = var.project_id
+  secret_id = var.db_password_secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${local.deploy_service_account}"
 }
 
 resource "google_service_account_iam_member" "worker_token_creator" {
