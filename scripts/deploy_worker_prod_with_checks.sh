@@ -74,10 +74,8 @@ compare_workflow_v2_json() {
 
 mint_ci_identity_token() {
   local active_account
-  if [[ "${GITHUB_ACTIONS:-}" == "true" && -n "${GOOGLE_GHA_CREDS_PATH:-}" ]]; then
-    gcloud auth print-identity-token \
-      --include-email \
-      --audiences="${GOOGLE_CLIENT_ID}"
+  if [[ -n "${DEPLOY_ID_TOKEN:-}" ]]; then
+    printf '%s' "${DEPLOY_ID_TOKEN}"
     return
   fi
   active_account="$(gcloud config get-value account 2>/dev/null || true)"
