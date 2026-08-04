@@ -23,7 +23,7 @@ def test_prod_workflow_requires_bootstrap_gate_before_backend_deploy():
     assert '--live-auth-url "$WEB_URL/api/auth/me"' in workflow
     assert "DEPLOY_ID_TOKEN: ${{ steps.auth-db.outputs.id_token }}" in workflow
     assert "- prod-db-bootstrap-gate" in workflow
-    assert 'SHIFT_WEB_URL: ""' in workflow
+    assert "SHIFT_WEB_URL: https://shift-web-prod-avlnzjjrca-dt.a.run.app" in workflow
     assert "if: env.SHIFT_WEB_URL != ''" in workflow
     assert "shift-api-prod must use the dedicated shift-prod Cloud SQL instance" in workflow
 

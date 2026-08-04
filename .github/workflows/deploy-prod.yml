@@ -28,7 +28,7 @@ env:
   WEB_SERVICE: web-prod
   WORKER_SERVICE: worker-prod
   WEB_URL: https://web-prod-avlnzjjrca-dt.a.run.app
-  SHIFT_WEB_URL: ""
+  SHIFT_WEB_URL: https://shift-web-prod-avlnzjjrca-dt.a.run.app
   SCHOOL_LUNCH_WEB_URL: https://price-web-prod-avlnzjjrca-dt.a.run.app
   WORKER_URL: https://worker-prod-avlnzjjrca-dt.a.run.app
   BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-25dfbf2145a3-20260612-080320
