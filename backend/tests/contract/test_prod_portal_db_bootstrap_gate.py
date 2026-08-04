@@ -26,6 +26,10 @@ def test_prod_workflow_requires_bootstrap_gate_before_backend_deploy():
     assert "SHIFT_WEB_URL: https://shift-web-prod-avlnzjjrca-dt.a.run.app" in workflow
     assert "if: env.SHIFT_WEB_URL != ''" in workflow
     assert "shift-api-prod must use the dedicated shift-prod Cloud SQL instance" in workflow
+    assert "production_confirmation:" in workflow
+    assert 'test "$EVENT_NAME" = "workflow_dispatch"' in workflow
+    assert 'test "$ACTOR" = "$OWNER"' in workflow
+    assert 'test "$PRODUCTION_CONFIRMATION" = "DEPLOY_PRODUCTION"' in workflow
 
     approval_pos = workflow.index("production-approval:")
     gate_pos = workflow.index("prod-db-bootstrap-gate:")

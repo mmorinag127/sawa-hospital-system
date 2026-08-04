@@ -17,6 +17,10 @@ on:
         description: "Production smoke order id"
         required: false
         default: "ORDedee3bb3"
+      production_confirmation:
+        description: "Enter DEPLOY_PRODUCTION"
+        required: true
+        type: string
 
 concurrency:
   group: deploy-prod
@@ -55,6 +59,17 @@ jobs:
         run: |
           set -euo pipefail
           echo "order_id=${{ inputs.order_id || 'ORDc92f733e' }}" >> "$GITHUB_OUTPUT"
+      - name: Enforce manual production approval substitute
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_NAME" = "workflow_dispatch"
+          test "$ACTOR" = "$OWNER"
+          test "$PRODUCTION_CONFIRMATION" = "DEPLOY_PRODUCTION"
       - name: Assert production release source
         run: |
           set -euo pipefail
