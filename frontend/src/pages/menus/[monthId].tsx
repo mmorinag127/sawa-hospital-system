@@ -1,5 +1,5 @@
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
 import { DIET_TYPE_OPTIONS, formatDietTypeLabel } from "../../services/menuVocabulary";
@@ -133,6 +133,15 @@ type PendingMenuMasterReview = {
 type MenuMasterCheckState = {
   issues: MenuMasterReviewIssue[];
   resolutions: Record<string, MenuMasterReviewResolution>;
+};
+
+type PendingReviewIssueState = {
+  issue: MenuMasterReviewIssue;
+  index: number;
+  issueKey: string;
+  sourceName: string;
+  complete: boolean;
+  missingRequirements: string[];
 };
 
 type MenuSheetColumn = {
@@ -407,6 +416,23 @@ const buildInitialReviewResolution = (issue: MenuMasterReviewIssue, index: numbe
   };
 };
 
+const buildPendingReviewResolution = (issue: MenuMasterReviewIssue, index: number): MenuMasterReviewResolution => {
+  const suggestedPatch = issue.suggested_patch || {};
+  return {
+    issue_key: getReviewIssueKey(issue, index),
+    source_name: getReviewSourceName(issue),
+    action: "",
+    menu_master_id: "",
+    name: normalizeValue(suggestedPatch.name) || getReviewSourceName(issue),
+    unit_type: "",
+    qty_per_serving: "",
+    bag_max_qty: "",
+    bag_max_unit: "",
+    condiments: (suggestedPatch.condiments || []).join(", "),
+    category: normalizeValue(String(suggestedPatch.category ?? issue.current_master?.category ?? "")),
+  };
+};
+
 const isReviewResolutionComplete = (
   issue: MenuMasterReviewIssue,
   resolution?: MenuMasterReviewResolution | null,
@@ -471,6 +497,56 @@ const isReviewResolutionComplete = (
     return false;
   }
   return false;
+};
+
+const getPendingReviewMissingRequirements = (
+  resolution?: MenuMasterReviewResolution | null,
+): string[] => {
+  if (!resolution?.action) return ["対応方法を選択"];
+  if (resolution.action === "existing") {
+    return resolution.menu_master_id ? [] : ["候補マスターを選択"];
+  }
+  if (resolution.action === "create" || resolution.action === "update") {
+    const missing: string[] = [];
+    if (!resolution.name.trim()) missing.push("メニュー名を入力");
+    if (!normalizeUnitChoice(resolution.unit_type)) missing.push("基準単位を選択");
+    const qty = Number(resolution.qty_per_serving);
+    if (!Number.isFinite(qty) || qty <= 0) missing.push("基準量を入力");
+    return missing;
+  }
+  if (resolution.action === "category_only") {
+    return resolution.category.trim() ? [] : ["カテゴリを入力"];
+  }
+  if (resolution.action === "month_only") {
+    const missing: string[] = [];
+    if (!normalizeUnitChoice(resolution.unit_type)) missing.push("基準単位を選択");
+    const qtyRaw = String(resolution.qty_per_serving ?? "").trim();
+    if (qtyRaw && (!Number.isFinite(Number(qtyRaw)) || Number(qtyRaw) <= 0)) {
+      missing.push("基準量を正しく入力");
+    }
+    return missing;
+  }
+  return ["対応方法を選択"];
+};
+
+const buildPendingReviewIssueStates = (
+  review: PendingMenuMasterReview | null | undefined,
+): PendingReviewIssueState[] => {
+  if (!review) return [];
+  return review.issues.map((issue, index) => {
+    const issueKey = getReviewIssueKey(issue, index);
+    const resolution = review.resolutions[issueKey];
+    return {
+      issue,
+      index,
+      issueKey,
+      sourceName: getReviewSourceName(issue),
+      complete: isReviewResolutionComplete(issue, resolution, {
+        requireBaggingSettings: false,
+      }),
+      missingRequirements: getPendingReviewMissingRequirements(resolution),
+    };
+  });
 };
 
 const findMatchingItemIndex = (items: MenuItem[], entry: MenuEntry | null) => {
@@ -543,6 +619,9 @@ export default function MonthlyMenuEditorPage() {
   const [entryExceptionSaving, setEntryExceptionSaving] = useState<boolean>(false);
   const [selectedMonth, setSelectedMonth] = useState<string>("");
   const [menuOptions, setMenuOptions] = useState<MonthlyMenu[]>([]);
+  const [highlightedReviewIssueKey, setHighlightedReviewIssueKey] = useState<string | null>(null);
+  const [pendingReviewNotice, setPendingReviewNotice] = useState<string>("");
+  const reviewIssueRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
     const value = (scopeOverride || "").trim();
@@ -728,7 +807,7 @@ export default function MonthlyMenuEditorPage() {
         const issues = ((detail as { issues?: MenuMasterReviewIssue[] }).issues || []).filter(Boolean);
         const resolutions = Object.fromEntries(
           issues.map((issue, index) => {
-            const resolution = buildInitialReviewResolution(issue, index);
+            const resolution = buildPendingReviewResolution(issue, index);
             return [resolution.issue_key, resolution];
           }),
         );
@@ -737,6 +816,7 @@ export default function MonthlyMenuEditorPage() {
           issues,
           resolutions,
         });
+        setPendingReviewNotice("");
         setMessage("未登録メニューがあります。既存マスターを使うか、新規登録するか確認してください。");
       } else {
         setMessage(`アップロード失敗: ${formatErrorDetail(detail, "アップロードに失敗しました。")}`);
@@ -747,6 +827,7 @@ export default function MonthlyMenuEditorPage() {
   };
 
   const updateReviewResolution = (issueKey: string, patch: Partial<MenuMasterReviewResolution>) => {
+    setPendingReviewNotice("");
     setPendingReview((current) => {
       if (!current) return current;
       const existing = current.resolutions[issueKey];
@@ -778,13 +859,15 @@ export default function MonthlyMenuEditorPage() {
   const closePendingReview = () => {
     if (reviewSubmitting) return;
     setPendingReview(null);
+    setHighlightedReviewIssueKey(null);
+    setPendingReviewNotice("");
   };
 
   const applyPendingReviewIssues = (targetFile: File, issues: MenuMasterReviewIssue[]) => {
     const filteredIssues = issues.filter(Boolean);
     const resolutions = Object.fromEntries(
       filteredIssues.map((issue, index) => {
-        const nextResolution = buildInitialReviewResolution(issue, index);
+        const nextResolution = buildPendingReviewResolution(issue, index);
         const existingResolution = pendingReview?.resolutions[nextResolution.issue_key];
         return [nextResolution.issue_key, existingResolution || nextResolution];
       }),
@@ -794,18 +877,27 @@ export default function MonthlyMenuEditorPage() {
       issues: filteredIssues,
       resolutions,
     });
+    setPendingReviewNotice("");
+  };
+
+  const focusPendingReviewIssue = (issueKey: string) => {
+    const target = reviewIssueRefs.current[issueKey];
+    if (!target) return;
+    setHighlightedReviewIssueKey(issueKey);
+    target.scrollIntoView({ block: "center" });
+    target.focus();
   };
 
   const confirmPendingReview = async () => {
     if (!monthId || Array.isArray(monthId) || !pendingReview) return;
-    const unresolved = pendingReview.issues.find((issue, index) => {
-      const issueKey = getReviewIssueKey(issue, index);
-      return !isReviewResolutionComplete(issue, pendingReview.resolutions[issueKey], {
-        requireBaggingSettings: false,
-      });
-    });
+    const issueStates = buildPendingReviewIssueStates(pendingReview);
+    const incompleteIssues = issueStates.filter((issueState) => !issueState.complete);
+    const unresolved = incompleteIssues[0];
     if (unresolved) {
-      setMessage(`未登録メニューの確認が完了していません: ${getReviewSourceName(unresolved)}`);
+      const notice = `未登録メニューの確認が${incompleteIssues.length}件残っています。最初の未完了項目: ${unresolved.sourceName}（${unresolved.missingRequirements.join("、")}）`;
+      setMessage(notice);
+      setPendingReviewNotice(notice);
+      focusPendingReviewIssue(unresolved.issueKey);
       return;
     }
     setReviewSubmitting(true);
@@ -1124,12 +1216,10 @@ export default function MonthlyMenuEditorPage() {
   const daypartOptions = uniqueValues(items, "daypart");
   const categoryOptions = uniqueValues(items, "category");
   const { columns: sheetColumns, rows: sheetDateRows } = buildMenuSheetGrid(entries, formatScopeLabel);
+  const pendingReviewIssueStates = buildPendingReviewIssueStates(pendingReview);
+  const incompletePendingReviewIssues = pendingReviewIssueStates.filter((issueState) => !issueState.complete);
   const canSubmitPendingReview =
-    pendingReview?.issues.every((issue, index) =>
-      isReviewResolutionComplete(issue, pendingReview.resolutions[getReviewIssueKey(issue, index)], {
-        requireBaggingSettings: false,
-      }),
-    ) ?? false;
+    pendingReviewIssueStates.length > 0 && incompletePendingReviewIssues.length === 0;
   return (
     <main className="page">
       <header className="hero">
@@ -1323,17 +1413,47 @@ export default function MonthlyMenuEditorPage() {
             <p className="subtle">
               既存メニューマスターにない献立、または候補が複数ある献立があります。アップロード前に、既存マスターを使うか新規登録するかを確定してください。
             </p>
+            <div className="review-status" data-testid="menu-master-review-incomplete-summary" aria-live="polite">
+              {pendingReviewNotice && <p className="message review-validation-message" role="alert">{pendingReviewNotice}</p>}
+              {incompletePendingReviewIssues.length > 0 ? (
+                <>
+                  <p className="message">
+                    未完了 {incompletePendingReviewIssues.length}件 / {pendingReviewIssueStates.length}件
+                  </p>
+                  <div className="review-summary-list">
+                    {incompletePendingReviewIssues.map((issueState) => (
+                      <button
+                        key={`pending-review-summary-${issueState.issueKey}`}
+                        type="button"
+                        className={`review-summary-link${highlightedReviewIssueKey === issueState.issueKey ? " active" : ""}`}
+                        onClick={() => focusPendingReviewIssue(issueState.issueKey)}
+                      >
+                        {issueState.sourceName}（{issueState.missingRequirements.join("、")}）
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <p className="message">全{pendingReviewIssueStates.length}件の確認が完了しています。</p>
+              )}
+            </div>
             <div className="review-list">
               {pendingReview.issues.map((issue, index) => {
                 const issueKey = getReviewIssueKey(issue, index);
                 const resolution = pendingReview.resolutions[issueKey];
                 const candidates = issue.candidates || [];
                 const suggestedPatch = issue.suggested_patch || {};
+                const isIncomplete = incompletePendingReviewIssues.some((issueState) => issueState.issueKey === issueKey);
                 return (
                   <article
                     key={issueKey}
-                    className="review-card"
+                    className={`review-card${isIncomplete ? " incomplete" : ""}${highlightedReviewIssueKey === issueKey ? " active-target" : ""}`}
                     data-testid={`menu-master-review-card-${index}`}
+                    tabIndex={-1}
+                    ref={(node) => {
+                      reviewIssueRefs.current[issueKey] = node;
+                    }}
+                    onFocusCapture={() => setHighlightedReviewIssueKey(issueKey)}
                   >
                     <div className="review-card-head">
                       <div>
@@ -1344,7 +1464,7 @@ export default function MonthlyMenuEditorPage() {
                           {suggestedPatch.category && <span>{suggestedPatch.category}</span>}
                           {normalizeUnitChoice(suggestedPatch.unit_type) && (
                             <span>
-                              既定案: {formatUnitChoiceLabel(suggestedPatch.unit_type)} / {toResolutionQty(suggestedPatch.qty_per_serving) || "-"}
+                              月次案: {formatUnitChoiceLabel(suggestedPatch.unit_type)} / {toResolutionQty(suggestedPatch.qty_per_serving) || "-"}
                             </span>
                           )}
                         </div>
@@ -1354,6 +1474,12 @@ export default function MonthlyMenuEditorPage() {
                       </span>
                     </div>
 
+                    {isIncomplete && (
+                      <p className="review-missing-requirements">
+                        未完了: {incompletePendingReviewIssues.find((issueState) => issueState.issueKey === issueKey)?.missingRequirements.join("、")}
+                      </p>
+                    )}
+
                     <div className="review-mode-row">
                       {candidates.length > 0 && (
                         <label className="review-radio">
@@ -1361,13 +1487,7 @@ export default function MonthlyMenuEditorPage() {
                             type="radio"
                             name={`review-action-${issueKey}`}
                             checked={resolution.action === "existing"}
-                            onChange={() =>
-                              updateReviewResolution(issueKey, {
-                                action: "existing",
-                                menu_master_id:
-                                  resolution.menu_master_id || (candidates.length === 1 ? candidates[0].id : ""),
-                              })
-                            }
+                            onChange={() => updateReviewResolution(issueKey, { action: "existing" })}
                           />
                           <span>既存マスターを使う</span>
                         </label>
@@ -1393,13 +1513,7 @@ export default function MonthlyMenuEditorPage() {
                           type="radio"
                           name={`review-action-${issueKey}`}
                           checked={resolution.action === "create"}
-                          onChange={() =>
-                            updateReviewResolution(issueKey, {
-                              action: "create",
-                              unit_type: normalizeUnitChoice(resolution.unit_type || suggestedPatch.unit_type),
-                              qty_per_serving: resolution.qty_per_serving || toResolutionQty(suggestedPatch.qty_per_serving),
-                            })
-                          }
+                          onChange={() => updateReviewResolution(issueKey, { action: "create" })}
                         />
                         <span>新規登録する</span>
                       </label>
@@ -1543,9 +1657,9 @@ export default function MonthlyMenuEditorPage() {
                 className="btn primary"
                 type="button"
                 onClick={confirmPendingReview}
-                disabled={!canSubmitPendingReview || reviewSubmitting}
+                disabled={reviewSubmitting}
               >
-                {reviewSubmitting ? "確認中..." : "この内容でアップロード"}
+                {reviewSubmitting ? "確認中..." : canSubmitPendingReview ? "この内容でアップロード" : "未完了項目を確認する"}
               </button>
             </div>
           </section>
@@ -2844,6 +2958,42 @@ export default function MonthlyMenuEditorPage() {
           gap: 14px;
         }
 
+        .review-status {
+          display: grid;
+          gap: 8px;
+        }
+
+        .review-status .message {
+          margin-top: 0;
+        }
+
+        .review-validation-message {
+          border: 1px solid #d97706;
+          background: #fff3d6;
+          color: #6b3d00;
+        }
+
+        .review-summary-list {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .review-summary-link {
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 6px;
+          background: #ffffff;
+          color: #17302c;
+          padding: 6px 12px;
+          font: inherit;
+          cursor: pointer;
+        }
+
+        .review-summary-link.active {
+          border-color: #d97706;
+          background: #fff3d6;
+        }
+
         .review-card {
           border: 1px solid rgba(25, 32, 30, 0.1);
           border-radius: 18px;
@@ -2851,6 +3001,24 @@ export default function MonthlyMenuEditorPage() {
           background: #ffffff;
           display: grid;
           gap: 14px;
+          scroll-margin-block: 96px;
+          outline: none;
+        }
+
+        .review-card.incomplete {
+          border-color: #d97706;
+          background: #fffaf0;
+        }
+
+        .review-card.active-target {
+          box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.22);
+        }
+
+        .review-missing-requirements {
+          margin: 0;
+          color: #8a4b00;
+          font-size: 13px;
+          font-weight: 700;
         }
 
         .review-card-head {

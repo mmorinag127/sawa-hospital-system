@@ -548,13 +548,39 @@ test("monthly menu upload asks for menu master review when backend returns 409",
   await expect(page.getByRole("heading", { name: "未登録メニューの確認" })).toBeVisible();
   await expect(page.getByTestId("menu-master-review-card-0")).toContainText("白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ");
   await expect(page.getByTestId("menu-master-review-card-1")).toContainText("タラのムニエル");
+  await expect(page.getByTestId("menu-master-review-incomplete-summary")).toContainText("未完了 2件 / 2件");
+  await expect(page.getByTestId("menu-master-review-incomplete-summary")).toContainText("白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ");
+  await expect(page.getByTestId("menu-master-review-incomplete-summary")).toContainText("タラのムニエル");
+  await expect(page.getByTestId("menu-master-review-card-0").getByRole("radio", { name: "既存マスターを使う" })).not.toBeChecked();
+  await expect(page.getByTestId("menu-master-review-card-0").getByRole("radio", { name: "新規登録する" })).not.toBeChecked();
+  await expect(page.getByTestId("menu-master-review-card-1").getByRole("radio", { name: "新規登録する" })).not.toBeChecked();
+  await expect(page.getByTestId("menu-master-review-card-0")).toContainText("未完了: 対応方法を選択");
+  await expect(page.getByTestId("menu-master-review-card-1")).toContainText("未完了: 対応方法を選択");
+
+  await page.getByRole("button", { name: "未完了項目を確認する" }).click();
+  expect(uploadAttemptCount).toBe(1);
+  await expect(page.getByRole("alert").filter({ hasText: "未登録メニューの確認が2件残っています。最初の未完了項目: 白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ（対応方法を選択）" }))
+    .toBeVisible();
+  await expect(page.getByTestId("menu-master-review-card-0")).toBeFocused();
 
   await page.getByTestId("menu-master-review-card-0").getByRole("radio", { name: "既存マスターを使う" }).check();
+  await expect(page.getByLabel("候補マスター-1")).toHaveValue("");
+  await expect(page.getByTestId("menu-master-review-card-0")).toContainText("未完了: 候補マスターを選択");
   await page.getByLabel("候補マスター-1").selectOption("MM100");
+  await expect(page.getByTestId("menu-master-review-incomplete-summary")).toContainText("未完了 1件 / 2件");
+
+  await page.getByRole("button", { name: "未完了項目を確認する" }).click();
+  expect(uploadAttemptCount).toBe(1);
+  await expect(page.getByTestId("menu-master-review-card-1")).toBeFocused();
 
   await page.getByTestId("menu-master-review-card-1").getByRole("radio", { name: "新規登録する" }).check();
+  await expect(page.getByLabel("新規単位-2")).toHaveValue("");
+  await expect(page.getByLabel("新規量-2")).toHaveValue("");
+  await expect(page.getByTestId("menu-master-review-card-1")).toContainText("未完了: 基準単位を選択、基準量を入力");
   await page.getByLabel("新規単位-2").selectOption("cut");
   await page.getByLabel("新規量-2").fill("2");
+
+  await expect(page.getByTestId("menu-master-review-incomplete-summary")).toContainText("全2件の確認が完了しています。");
 
   await page.getByRole("button", { name: "この内容でアップロード" }).click();
 
