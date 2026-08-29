@@ -37,11 +37,18 @@ test("login and API client expose no Basic authentication path", () => {
 });
 
 test("deploy verification uses ephemeral Google OIDC and keeps positive safety gates", () => {
+  const stgWorkflow = read(".github/workflows/deploy-stg.yml");
   const prodWorkflow = read(".github/workflows/deploy-prod.yml");
   const workerDeploy = read("scripts/deploy_worker_prod_with_checks.sh");
   const webDeploy = read("scripts/deploy_web_with_checks.sh");
   const predeploy = read("scripts/predeploy_env_checks.sh");
 
+  assert.match(stgWorkflow, /id: auth-backend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
+  assert.match(stgWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}/);
+  assert.match(stgWorkflow, /id: auth-frontend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
+  assert.match(stgWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-frontend\.outputs\.id_token \}\}/);
+  assert.equal((stgWorkflow.match(/token_format: id_token/g) || []).length, 2);
+  assert.equal((stgWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 2);
   assert.match(prodWorkflow, /id: auth-backend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}/);
   assert.match(prodWorkflow, /id: auth-frontend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
