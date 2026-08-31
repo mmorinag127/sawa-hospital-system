@@ -1,6 +1,7 @@
 import { useRouter } from "next/router";
 import type { ReactNode } from "react";
 import { clearAuth } from "../services/apiClient";
+import { enterSchoolLunch } from "../services/systemNavigation";
 
 type Props = {
   children: ReactNode;
@@ -42,7 +43,7 @@ export default function UnifiedShell({ children, gitSha, deployedAt, publicPage 
               <a href="/" className={path === "/" ? "active" : ""}>統合トップに戻る</a>
               <a href="/hospital" className={path.startsWith("/hospital") ? "active" : ""}>病院注文</a>
               <a href="/shift" className={path.startsWith("/shift") ? "active" : ""}>シフト管理</a>
-              <a href="/school-lunch" className={path.startsWith("/school-lunch") ? "active" : ""}>学校給食</a>
+              <a href="/school-lunch" onClick={enterSchoolLunch} className={path.startsWith("/school-lunch") ? "active" : ""}>学校給食</a>
               <button type="button" className="unified-logout" onClick={logout}>ログアウト</button>
             </nav>
           ) : null}
