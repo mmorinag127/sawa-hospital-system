@@ -25,6 +25,28 @@ vars:
   PROD_RELEASE_OUT_DIR: "tmp/prod_release_from_stg"
 
 tasks:
+  setup:
+    desc: Install order backend and frontend development dependencies.
+    cmds:
+      - task: backend_setup_dev
+      - task: frontend_setup
+
+  test:
+    desc: Run the order backend contract suite and frontend end-to-end suite.
+    cmds:
+      - task: backend_test_us_all
+      - task: frontend_test_e2e
+
+  dev:backend:
+    desc: Run the order backend locally.
+    cmds:
+      - task: backend_run
+
+  dev:frontend:
+    desc: Run the order frontend against the local backend.
+    cmds:
+      - task: frontend_run_local
+
   backend_setup:
     desc: Create venv and install backend dependencies.
     cmds:
