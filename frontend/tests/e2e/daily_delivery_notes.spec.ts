@@ -1,5 +1,79 @@
 import { expect, test } from "@playwright/test";
 
+test("daily delivery notes shows meal counts by daypart and warns about unconfirmed orders", async ({ page }) => {
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith("/auth/me")) {
+      await route.fulfill({ status: 200, json: { role: "admin" } });
+      return;
+    }
+    if (path.endsWith("/facilities")) {
+      await route.fulfill({
+        status: 200,
+        json: { facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
+      });
+      return;
+    }
+    if (path.endsWith("/orders/daily-output-context")) {
+      await route.fulfill({
+        status: 200,
+        json: {
+          sections: {
+            orders: {
+              status: "fulfilled",
+              data: {
+                orders: [
+                  { id: "ORD-001", facility: "FAC-001", status: "確定", week: "2026-09" },
+                  { id: "ORD-002", facility: "FAC-002", status: "要確認", week: "2026-09" },
+                ],
+              },
+            },
+            daily_bags: { status: "fulfilled", data: { groups: [] } },
+            daily_bags_audit: { status: "fulfilled", data: { rule_based: { finding_count: 0 } } },
+            totals: { status: "fulfilled", data: { rows: [] } },
+            meal_counts: {
+              status: "fulfilled",
+              data: {
+                date: "2026-09-01",
+                groups: [
+                  { daypart: "朝食", counts: [{ diet_type: "regular", quantity: 12 }, { diet_type: "diabetes", quantity: 3 }] },
+                  { daypart: "昼食", counts: [{ diet_type: "soft", quantity: 7 }] },
+                  { daypart: "夕食", counts: [{ diet_type: "mixer", quantity: 5 }] },
+                ],
+                unconfirmed_orders: [{ order_id: "ORD-002", facility_id: "FAC-002", status: "要確認" }],
+              },
+            },
+          },
+        },
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.getByRole("button", { name: "取得" }).click();
+
+  const summary = page.getByRole("heading", { name: "当日食数集計" }).locator("..").locator("..");
+  await expect(summary.getByRole("heading", { name: "朝食" })).toBeVisible();
+  await expect(summary.getByText("常食")).toBeVisible();
+  await expect(summary.getByText("12食")).toBeVisible();
+  await expect(summary.getByText("糖尿")).toBeVisible();
+  await expect(summary.getByText("3食")).toBeVisible();
+  await expect(summary.getByRole("heading", { name: "昼食" })).toBeVisible();
+  await expect(summary.getByRole("heading", { name: "夕食" })).toBeVisible();
+  await expect(summary.getByRole("alert")).toContainText("未確定の注文があるため、この集計には含まれていません。");
+  await expect(summary.getByRole("alert")).toContainText("施設B (ORD-002) / 要確認");
+});
+
 test("daily delivery notes shows menu category and calculation basis in daily bag rows", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
 

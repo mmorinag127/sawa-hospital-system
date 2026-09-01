@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from src.db import session_scope
 from src.models.order import Order, OrderLine
 from src.services import config_service
+from src.services import order_service
 from src.services import output_builder
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 from src.services.order_serialization_service import serialize_order
+
+_MEAL_PERIOD_LABELS = {
+    "朝": "朝食",
+    "昼": "昼食",
+    "夕": "夕食",
+}
 
 
 def _ensure_date(value: object) -> date | None:
@@ -82,6 +90,31 @@ def _serialize_order_refs(order_refs: dict[tuple[str, str, str, str], dict[str, 
         )
     )
     return rows
+
+
+def _resolve_meal_period(value: object) -> str:
+    normalized = order_service._normalize_daypart_key(value)  # noqa: SLF001
+    if normalized in _MEAL_PERIOD_LABELS:
+        return _MEAL_PERIOD_LABELS[normalized]
+    raw = str(value or "").strip()
+    return normalized or raw
+
+
+def _line_final_quantity(line: OrderLine, zero_as_empty: bool) -> float | None:
+    quantity = line.quantity_corrected
+    if quantity is None:
+        quantity = line.quantity_original
+    if quantity is None:
+        return None
+    try:
+        quantity_value = float(quantity)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(quantity_value):
+        return None
+    if zero_as_empty and quantity_value <= 0:
+        return None
+    return quantity_value
 
 
 def build_totals(date_from: date | None, date_to: date | None, include_order_refs: bool = False) -> list[dict]:
@@ -169,3 +202,92 @@ def build_totals(date_from: date | None, date_to: date | None, include_order_ref
         if include_order_refs:
             row["order_refs"] = _serialize_order_refs(order_refs)
     return rows
+
+
+def build_daily_meal_counts(target_date: date) -> dict[str, Any]:
+    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+    zero_as_empty = quantity_rules.get("zero_as_empty", True)
+    with session_scope() as session:
+        confirmed_rows = session.execute(
+            select(OrderLine, Order.facility_code)
+            .join(Order, Order.id == OrderLine.order_id)
+            .where(
+                OrderLine.date == target_date,
+                Order.status == "確定",
+                OrderLine.confirmed_snapshot_id.is_not(None),
+            )
+        ).all()
+        unconfirmed_rows = session.execute(
+            select(Order.id, Order.facility_code, Order.status)
+            .join(OrderLine, OrderLine.order_id == Order.id)
+            .where(
+                OrderLine.date == target_date,
+                or_(Order.status.is_(None), Order.status != "確定"),
+            )
+            .group_by(Order.id, Order.facility_code, Order.status)
+        ).all()
+
+    slot_quantities: dict[tuple[str, str, str, str], set[float]] = {}
+    slot_facilities: dict[tuple[str, str, str, str], str | None] = {}
+    for line, facility_id in confirmed_rows:
+        quantity = _line_final_quantity(line, zero_as_empty)
+        if quantity is None:
+            continue
+        daypart = _resolve_meal_period(line.daypart)
+        diet_type = str(line.diet_type or "").strip()
+        slot_key = (str(line.order_id), daypart, diet_type, str(line.area_id or "").strip())
+        slot_quantities.setdefault(slot_key, set()).add(quantity)
+        slot_facilities[slot_key] = str(facility_id).strip() if facility_id is not None else None
+
+    totals: dict[tuple[str, str], float] = {}
+    inconsistent_counts: list[dict[str, Any]] = []
+    for (order_id, daypart, diet_type, area_id), quantities in slot_quantities.items():
+        if len(quantities) != 1:
+            inconsistent_counts.append(
+                {
+                    "order_id": order_id,
+                    "facility_id": slot_facilities[(order_id, daypart, diet_type, area_id)],
+                    "daypart": daypart,
+                    "diet_type": diet_type,
+                    "area_id": area_id,
+                    "quantities": sorted(quantities),
+                }
+            )
+            continue
+        totals[(daypart, diet_type)] = totals.get((daypart, diet_type), 0.0) + next(iter(quantities))
+
+    groups_by_daypart: dict[str, list[dict[str, Any]]] = {}
+    for (daypart, diet_type), quantity in totals.items():
+        groups_by_daypart.setdefault(daypart, []).append({"diet_type": diet_type, "quantity": quantity})
+    daypart_order = {"朝食": 0, "昼食": 1, "夕食": 2}
+    groups = [
+        {"daypart": daypart, "counts": sorted(counts, key=lambda row: row["diet_type"])}
+        for daypart, counts in sorted(groups_by_daypart.items(), key=lambda item: (daypart_order.get(item[0], 99), item[0]))
+    ]
+
+    unconfirmed_orders = [
+        {
+            "order_id": str(order_id or "").strip(),
+            "facility_id": str(facility_id).strip() if facility_id is not None else None,
+            "status": str(status).strip() if status is not None else None,
+        }
+        for order_id, facility_id, status in unconfirmed_rows
+        if str(order_id or "").strip()
+    ]
+    unconfirmed_orders.sort(
+        key=lambda row: (
+            row.get("facility_id") or "",
+            row.get("order_id") or "",
+            row.get("status") or "",
+        )
+    )
+
+    return {
+        "date": target_date.isoformat(),
+        "groups": groups,
+        "unconfirmed_orders": unconfirmed_orders,
+        "inconsistent_counts": sorted(
+            inconsistent_counts,
+            key=lambda row: (row["facility_id"] or "", row["order_id"], row["daypart"], row["diet_type"], row["area_id"]),
+        ),
+    }

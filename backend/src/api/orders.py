@@ -1345,6 +1345,13 @@ def get_daily_output_context(date: str, facility: str | None = None, status: str
     except Exception as exc:  # noqa: BLE001
         sections["totals"] = _daily_output_section(error=exc)
 
+    try:
+        sections["meal_counts"] = _daily_output_section(
+            total_service.build_daily_meal_counts(target_date)
+        )
+    except Exception as exc:  # noqa: BLE001
+        sections["meal_counts"] = _daily_output_section(error=exc)
+
     result["ok"] = all(
         isinstance(section, dict) and section.get("status") == "fulfilled"
         for section in sections.values()

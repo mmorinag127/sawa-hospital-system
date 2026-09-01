@@ -174,6 +174,34 @@ type TotalRow = {
   quantity?: number | null;
 };
 
+type DailyMealCount = {
+  diet_type?: string | null;
+  quantity?: number | null;
+};
+
+type DailyMealCountGroup = {
+  daypart?: string | null;
+  counts?: DailyMealCount[];
+};
+
+type DailyMealCountUnconfirmedOrder = {
+  order_id?: string | null;
+  facility_id?: string | null;
+  status?: string | null;
+};
+
+type DailyMealCountSummary = {
+  date?: string | null;
+  groups?: DailyMealCountGroup[];
+  unconfirmed_orders?: DailyMealCountUnconfirmedOrder[];
+  inconsistent_counts?: (DailyMealCountUnconfirmedOrder & {
+    daypart?: string | null;
+    diet_type?: string | null;
+    area_id?: string | null;
+    quantities?: number[];
+  })[];
+};
+
 const dietTypeLabels: Record<string, string> = {
   regular: "常食",
   regular_bag: "常食(袋分け)",
@@ -416,6 +444,8 @@ export default function DailyDeliveryNotesPage() {
   const [dailyBagAudit, setDailyBagAudit] = useState<DailyBagAuditResponse>({});
   const [auditAiLoading, setAuditAiLoading] = useState(false);
   const [totalsRows, setTotalsRows] = useState<TotalRow[]>([]);
+  const [mealCountSummary, setMealCountSummary] = useState<DailyMealCountSummary>({});
+  const [mealCountMessage, setMealCountMessage] = useState("");
   const [overrideEditor, setOverrideEditor] = useState<DailyOutputOverrideResponse | null>(null);
   const [overrideEditorLoading, setOverrideEditorLoading] = useState(false);
   const [overrideEditorMessage, setOverrideEditorMessage] = useState("");
@@ -513,6 +543,8 @@ export default function DailyDeliveryNotesPage() {
     setDailyBagSummary({});
     setDailyBagAudit({});
     setTotalsRows([]);
+    setMealCountSummary({});
+    setMealCountMessage("");
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
@@ -565,6 +597,18 @@ export default function DailyDeliveryNotesPage() {
         setTotalsRows([]);
         setTotalsMessage(sectionErrorMessage(sections.totals, "総量の取得に失敗しました。"));
       }
+
+      const mealCountsPayload = sectionData<DailyMealCountSummary>(sections.meal_counts);
+      if (mealCountsPayload) {
+        const payload = mealCountsPayload || {};
+        setMealCountSummary(payload);
+        if (!Array.isArray(payload.groups) || payload.groups.length === 0) {
+          setMealCountMessage("確定済みの食数がありません。");
+        }
+      } else {
+        setMealCountSummary({});
+        setMealCountMessage(sectionErrorMessage(sections.meal_counts, "食数集計の取得に失敗しました。"));
+      }
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       setMessage(detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。");
@@ -572,6 +616,7 @@ export default function DailyDeliveryNotesPage() {
       setDailyBagSummary({});
       setDailyBagAudit({});
       setTotalsRows([]);
+      setMealCountSummary({});
     } finally {
       setLoading(false);
     }
@@ -1029,6 +1074,38 @@ export default function DailyDeliveryNotesPage() {
     return rows;
   }, [totalsRows]);
 
+  const mealCountGroups = useMemo(() => {
+    const daypartOrder = new Map([
+      ["朝食", 0],
+      ["朝", 0],
+      ["昼食", 1],
+      ["昼", 1],
+      ["夕食", 2],
+      ["夕", 2],
+      ["夜", 2],
+    ]);
+    return [...(mealCountSummary.groups || [])]
+      .map((group) => ({
+        ...group,
+        counts: [...(group.counts || [])].sort((left, right) =>
+          formatDietType(left.diet_type).localeCompare(formatDietType(right.diet_type), "ja"),
+        ),
+      }))
+      .sort(
+        (left, right) =>
+          (daypartOrder.get(String(left.daypart || "")) ?? 99) -
+            (daypartOrder.get(String(right.daypart || "")) ?? 99) ||
+          String(left.daypart || "").localeCompare(String(right.daypart || ""), "ja"),
+      );
+  }, [mealCountSummary]);
+
+  const unconfirmedMealCountOrders = Array.isArray(mealCountSummary.unconfirmed_orders)
+    ? mealCountSummary.unconfirmed_orders
+    : [];
+  const inconsistentMealCounts = Array.isArray(mealCountSummary.inconsistent_counts)
+    ? mealCountSummary.inconsistent_counts
+    : [];
+
   const auditFindings = useMemo(
     () => (Array.isArray(dailyBagAudit.rule_based?.findings) ? dailyBagAudit.rule_based?.findings || [] : []),
     [dailyBagAudit],
@@ -1186,6 +1263,61 @@ export default function DailyDeliveryNotesPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="panel">
+        <header className="panel-header">
+          <h2>当日食数集計</h2>
+          <span className="badge">全施設合計</span>
+        </header>
+        <p className="subtle">確定済み注文を、朝食・昼食・夕食ごとに食種別で集計しています。</p>
+        {unconfirmedMealCountOrders.length > 0 ? (
+          <div className="meal-count-warning" role="alert">
+            <strong>未確定の注文があるため、この集計には含まれていません。</strong>
+            <ul>
+              {unconfirmedMealCountOrders.map((order) => (
+                <li key={order.order_id || `${order.facility_id}-${order.status}`}>
+                  {order.facility_id ? facilityNameMap[order.facility_id] || order.facility_id : "施設未確定"}
+                  {order.order_id ? ` (${order.order_id})` : ""} / {order.status || "未確定"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {inconsistentMealCounts.length > 0 ? (
+          <div className="meal-count-warning" role="alert">
+            <strong>同じ食数枠に異なる数量があるため、該当分は集計していません。</strong>
+            <ul>
+              {inconsistentMealCounts.map((count) => (
+                <li key={`${count.order_id}-${count.daypart}-${count.diet_type}-${count.area_id}`}>
+                  {count.facility_id ? facilityNameMap[count.facility_id] || count.facility_id : "施設未確定"}
+                  {count.order_id ? ` (${count.order_id})` : ""} / {count.daypart || "食区分不明"} /{" "}
+                  {formatDietType(count.diet_type)} / {count.area_id || "区画不明"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {mealCountMessage ? <p className="subtle">{mealCountMessage}</p> : null}
+        {mealCountGroups.length === 0 ? (
+          <p className="subtle">該当データなし</p>
+        ) : (
+          <div className="meal-count-grid">
+            {mealCountGroups.map((group) => (
+              <section key={group.daypart || "unknown"} className="meal-count-group">
+                <h3>{group.daypart || "食区分不明"}</h3>
+                <dl>
+                  {(group.counts || []).map((count) => (
+                    <div key={count.diet_type || "unknown"} className="meal-count-row">
+                      <dt>{formatDietType(count.diet_type)}</dt>
+                      <dd>{formatQuantity(count.quantity)}食</dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="panel">
@@ -2255,7 +2387,67 @@ export default function DailyDeliveryNotesPage() {
           margin-top: 14px;
         }
 
+        .meal-count-warning {
+          margin: 14px 0;
+          padding: 14px 16px;
+          border: 1px solid rgba(139, 90, 22, 0.28);
+          border-radius: 8px;
+          background: #fff7e7;
+          color: #6d4511;
+        }
+
+        .meal-count-warning ul {
+          margin: 8px 0 0;
+          padding-left: 20px;
+        }
+
+        .meal-count-grid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 16px;
+          margin-top: 16px;
+        }
+
+        .meal-count-group {
+          min-width: 0;
+          border: 1px solid rgba(25, 32, 30, 0.1);
+          border-radius: 8px;
+          background: #fff;
+          padding: 14px;
+        }
+
+        .meal-count-group h3 {
+          margin: 0 0 10px;
+          font-size: 16px;
+        }
+
+        .meal-count-group dl {
+          margin: 0;
+        }
+
+        .meal-count-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 8px 0;
+          border-top: 1px solid rgba(25, 32, 30, 0.08);
+        }
+
+        .meal-count-row dt,
+        .meal-count-row dd {
+          margin: 0;
+        }
+
+        .meal-count-row dd {
+          font-weight: 700;
+          white-space: nowrap;
+        }
+
         @media (max-width: 720px) {
+          .meal-count-grid {
+            grid-template-columns: 1fr;
+          }
+
           .override-modal-backdrop {
             padding: 12px;
           }
