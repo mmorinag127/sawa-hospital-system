@@ -100,10 +100,10 @@ def _resolve_meal_period(value: object) -> str:
     return normalized or raw
 
 
-def _line_final_quantity(line: OrderLine, zero_as_empty: bool) -> float | None:
-    quantity = line.quantity_corrected
+def _final_quantity(quantity_corrected: object, quantity_original: object, zero_as_empty: bool) -> float | None:
+    quantity = quantity_corrected
     if quantity is None:
-        quantity = line.quantity_original
+        quantity = quantity_original
     if quantity is None:
         return None
     try:
@@ -209,7 +209,15 @@ def build_daily_meal_counts(target_date: date) -> dict[str, Any]:
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
     with session_scope() as session:
         confirmed_rows = session.execute(
-            select(OrderLine, Order.facility_code)
+            select(
+                OrderLine.order_id,
+                Order.facility_code,
+                OrderLine.daypart,
+                OrderLine.diet_type,
+                OrderLine.area_id,
+                OrderLine.quantity_corrected,
+                OrderLine.quantity_original,
+            )
             .join(Order, Order.id == OrderLine.order_id)
             .where(
                 OrderLine.date == target_date,
@@ -229,13 +237,13 @@ def build_daily_meal_counts(target_date: date) -> dict[str, Any]:
 
     slot_quantities: dict[tuple[str, str, str, str], set[float]] = {}
     slot_facilities: dict[tuple[str, str, str, str], str | None] = {}
-    for line, facility_id in confirmed_rows:
-        quantity = _line_final_quantity(line, zero_as_empty)
+    for order_id, facility_id, daypart_value, diet_type_value, area_id_value, corrected, original in confirmed_rows:
+        quantity = _final_quantity(corrected, original, zero_as_empty)
         if quantity is None:
             continue
-        daypart = _resolve_meal_period(line.daypart)
-        diet_type = str(line.diet_type or "").strip()
-        slot_key = (str(line.order_id), daypart, diet_type, str(line.area_id or "").strip())
+        daypart = _resolve_meal_period(daypart_value)
+        diet_type = str(diet_type_value or "").strip()
+        slot_key = (str(order_id), daypart, diet_type, str(area_id_value or "").strip())
         slot_quantities.setdefault(slot_key, set()).add(quantity)
         slot_facilities[slot_key] = str(facility_id).strip() if facility_id is not None else None
 

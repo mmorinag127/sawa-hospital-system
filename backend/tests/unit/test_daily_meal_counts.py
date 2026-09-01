@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 from datetime import date
-from types import SimpleNamespace
 
 from src.services import total_service
 
@@ -28,14 +27,14 @@ class _Session:
 
 def test_daily_meal_counts_preserve_diet_types_and_separate_dayparts(monkeypatch):
     confirmed_lines = [
-        (SimpleNamespace(order_id="ORD-1", area_id="2F", daypart="朝食", diet_type="regular", quantity_corrected=None, quantity_original=10), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="2F", daypart="朝食", diet_type="regular", quantity_corrected=None, quantity_original=10), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="2F", daypart="朝食", diet_type="diabetes", quantity_corrected=3, quantity_original=2), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="2F", daypart="昼食", diet_type="regular", quantity_corrected=None, quantity_original=8), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="2F", daypart="夕食", diet_type="soft_mixer", quantity_corrected=None, quantity_original=4), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="2F", daypart="夕食", diet_type="soft", quantity_corrected=None, quantity_original=None), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="3F", daypart="夕食", diet_type="regular", quantity_corrected=None, quantity_original=4), "FAC-001"),
-        (SimpleNamespace(order_id="ORD-1", area_id="3F", daypart="夕食", diet_type="regular", quantity_corrected=None, quantity_original=5), "FAC-001"),
+        ("ORD-1", "FAC-001", "朝食", "regular", "2F", None, 10),
+        ("ORD-1", "FAC-001", "朝食", "regular", "2F", None, 10),
+        ("ORD-1", "FAC-001", "朝食", "diabetes", "2F", 3, 2),
+        ("ORD-1", "FAC-001", "昼食", "regular", "2F", None, 8),
+        ("ORD-1", "FAC-001", "夕食", "soft_mixer", "2F", None, 4),
+        ("ORD-1", "FAC-001", "夕食", "soft", "2F", None, None),
+        ("ORD-1", "FAC-001", "夕食", "regular", "3F", None, 4),
+        ("ORD-1", "FAC-001", "夕食", "regular", "3F", None, 5),
     ]
 
     session = _Session(
