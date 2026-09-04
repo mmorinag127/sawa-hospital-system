@@ -8264,14 +8264,16 @@ def get_daily_bag_audit(
     status: Optional[str] = None,
     *,
     use_ai: bool = False,
+    summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
-        summary = get_daily_bag_summary(
-            target_date,
-            facility_id=facility_id,
-            status=status,
-            allow_stale_draft_lines=True,
-        )
+        if summary is None:
+            summary = get_daily_bag_summary(
+                target_date,
+                facility_id=facility_id,
+                status=status,
+                allow_stale_draft_lines=True,
+            )
     except ValueError as exc:
         detail = str(exc)
         return {

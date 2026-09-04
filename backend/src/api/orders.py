@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 from datetime import datetime, timedelta, date as dt_date
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -1292,7 +1293,12 @@ def _daily_output_section(value: object = None, error: Exception | None = None) 
 
 
 @router.get("/daily-output-context", dependencies=[Depends(require_role("operator"))])
-def get_daily_output_context(date: str, facility: str | None = None, status: str | None = None):
+def get_daily_output_context(
+    date: str,
+    facility: str | None = None,
+    status: str | None = None,
+    section: Literal["all", "primary", "bags", "totals"] = "all",
+):
     target_date = _parse_iso_date(date)
     result: dict[str, object] = {
         "date": target_date.isoformat(),
@@ -1301,56 +1307,60 @@ def get_daily_output_context(date: str, facility: str | None = None, status: str
         "sections": {},
     }
     sections = result["sections"]
-    try:
-        orders = order_service.list_orders_by_line_date(target_date, facility_id=facility, status=status)
-        sections["orders"] = _daily_output_section(
-            {"date": target_date.isoformat(), "orders": orders}
-        )
-    except Exception as exc:  # noqa: BLE001
-        sections["orders"] = _daily_output_section(error=exc)
-        orders = []
+    orders = []
+    if section in {"all", "primary"}:
+        try:
+            orders = order_service.list_orders_by_line_date(target_date, facility_id=facility, status=status)
+            sections["orders"] = _daily_output_section(
+                {"date": target_date.isoformat(), "orders": orders}
+            )
+        except Exception as exc:  # noqa: BLE001
+            sections["orders"] = _daily_output_section(error=exc)
 
-    try:
-        sections["daily_bags"] = _daily_output_section(
-            order_service.get_daily_bag_summary(
+        try:
+            sections["meal_counts"] = _daily_output_section(
+                total_service.build_daily_meal_counts(target_date)
+            )
+        except Exception as exc:  # noqa: BLE001
+            sections["meal_counts"] = _daily_output_section(error=exc)
+
+    if section in {"all", "bags"}:
+        try:
+            summary = order_service.get_daily_bag_summary(
                 target_date,
                 facility_id=facility,
                 status=status,
                 allow_stale_draft_lines=True,
             )
-        )
-    except Exception as exc:  # noqa: BLE001
-        sections["daily_bags"] = _daily_output_section(error=exc)
+            sections["daily_bags"] = _daily_output_section(summary)
+        except Exception as exc:  # noqa: BLE001
+            sections["daily_bags"] = _daily_output_section(error=exc)
+            sections["daily_bags_audit"] = _daily_output_section(error=exc)
+        else:
+            try:
+                sections["daily_bags_audit"] = _daily_output_section(
+                    order_service.get_daily_bag_audit(
+                        target_date,
+                        facility_id=facility,
+                        status=status,
+                        use_ai=False,
+                        summary=summary,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                sections["daily_bags_audit"] = _daily_output_section(error=exc)
 
-    try:
-        sections["daily_bags_audit"] = _daily_output_section(
-            order_service.get_daily_bag_audit(
-                target_date,
-                facility_id=facility,
-                status=status,
-                use_ai=False,
+    if section in {"all", "totals"}:
+        try:
+            sections["totals"] = _daily_output_section(
+                {
+                    "rows": total_service.build_totals(target_date, target_date),
+                    "date_from": target_date.isoformat(),
+                    "date_to": target_date.isoformat(),
+                }
             )
-        )
-    except Exception as exc:  # noqa: BLE001
-        sections["daily_bags_audit"] = _daily_output_section(error=exc)
-
-    try:
-        sections["totals"] = _daily_output_section(
-            {
-                "rows": total_service.build_totals(target_date, target_date),
-                "date_from": target_date.isoformat(),
-                "date_to": target_date.isoformat(),
-            }
-        )
-    except Exception as exc:  # noqa: BLE001
-        sections["totals"] = _daily_output_section(error=exc)
-
-    try:
-        sections["meal_counts"] = _daily_output_section(
-            total_service.build_daily_meal_counts(target_date)
-        )
-    except Exception as exc:  # noqa: BLE001
-        sections["meal_counts"] = _daily_output_section(error=exc)
+        except Exception as exc:  # noqa: BLE001
+            sections["totals"] = _daily_output_section(error=exc)
 
     result["ok"] = all(
         isinstance(section, dict) and section.get("status") == "fulfilled"

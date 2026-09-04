@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -434,6 +434,8 @@ export default function DailyDeliveryNotesPage() {
   const [status, setStatus] = useState<string>("");
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const loadGeneration = useRef(0);
+  useEffect(() => () => { loadGeneration.current += 1; }, []);
   const [message, setMessage] = useState("");
   const [bagMessage, setBagMessage] = useState("");
   const [totalsMessage, setTotalsMessage] = useState("");
@@ -535,7 +537,9 @@ export default function DailyDeliveryNotesPage() {
 
   const loadOrders = async () => {
     if (!date) return;
+    const generation = ++loadGeneration.current;
     setLoading(true);
+    setOrders([]);
     setMessage("");
     setBagMessage("");
     setTotalsMessage("");
@@ -548,77 +552,94 @@ export default function DailyDeliveryNotesPage() {
     try {
       const params: Record<string, string> = { date };
       if (status) params.status = status;
-      const contextRes = await apiClient.get("/orders/daily-output-context", { params });
-      const sections = contextRes.data?.sections || {};
-      const ordersPayload = sectionData<{ orders?: OrderSummary[] }>(sections.orders);
-      const items = Array.isArray(ordersPayload?.orders) ? ordersPayload.orders : [];
-      setOrders(items);
-      if (!items.length) {
-        if (sections.orders?.status === "rejected") {
-          setMessage(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
-        } else {
-          setMessage("該当する注文がありません。");
-        }
-      }
+      await Promise.all((["primary", "bags", "totals"] as const).map(async (section) => {
+        try {
+          const contextRes = await apiClient.get("/orders/daily-output-context", { params: { ...params, section } });
+          if (generation !== loadGeneration.current) return;
+          const sections = contextRes.data?.sections || {};
+          if (section === "primary") {
+            const ordersPayload = sectionData<{ orders?: OrderSummary[] }>(sections.orders);
+            const items = Array.isArray(ordersPayload?.orders) ? ordersPayload.orders : [];
+            setOrders(items);
+            if (!items.length) {
+              if (sections.orders?.status === "rejected") {
+                setMessage(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
+              } else {
+                setMessage("該当する注文がありません。");
+              }
+            }
+          }
+          if (section === "bags") {
+            const bagPayload = sectionData<DailyBagSummaryResponse>(sections.daily_bags);
+            if (bagPayload) {
+              const payload = bagPayload || {};
+              setDailyBagSummary(payload);
+              const count = Array.isArray(payload.groups) ? payload.groups.length : 0;
+              if (!count) {
+                setBagMessage("袋分け結果がまだ生成されていません。");
+              }
+            } else {
+              setDailyBagSummary({});
+              setBagMessage(sectionErrorMessage(sections.daily_bags, "袋分け結果の取得に失敗しました。"));
+            }
 
-      const bagPayload = sectionData<DailyBagSummaryResponse>(sections.daily_bags);
-      if (bagPayload) {
-        const payload = bagPayload || {};
-        setDailyBagSummary(payload);
-        const count = Array.isArray(payload.groups) ? payload.groups.length : 0;
-        if (!count) {
-          setBagMessage("袋分け結果がまだ生成されていません。");
+            const auditPayload = sectionData<DailyBagAuditResponse>(sections.daily_bags_audit);
+            if (auditPayload) {
+              const payload = auditPayload || {};
+              setDailyBagAudit(payload);
+              if (!Number(payload?.rule_based?.finding_count || 0)) {
+                setAuditMessage("ルールベース監査で確認候補はありません。");
+              }
+            } else {
+              setDailyBagAudit({});
+              setAuditMessage(sectionErrorMessage(sections.daily_bags_audit, "数量監査の取得に失敗しました。"));
+            }
+          }
+          if (section === "totals") {
+            const totalsPayload = sectionData<{ rows?: TotalRow[] }>(sections.totals);
+            if (totalsPayload) {
+              const rows = Array.isArray(totalsPayload.rows) ? totalsPayload.rows : [];
+              setTotalsRows(rows);
+              if (!rows.length) {
+                setTotalsMessage("総量は確定注文のみ集計されるため、対象データがありません。");
+              }
+            } else {
+              setTotalsRows([]);
+              setTotalsMessage(sectionErrorMessage(sections.totals, "総量の取得に失敗しました。"));
+            }
+          }
+          if (section === "primary") {
+            const mealCountsPayload = sectionData<DailyMealCountSummary>(sections.meal_counts);
+            if (mealCountsPayload) {
+              const payload = mealCountsPayload || {};
+              setMealCountSummary(payload);
+              if (!Array.isArray(payload.groups) || payload.groups.length === 0) {
+                setMealCountMessage("確定済みの食数がありません。");
+              }
+            } else {
+              setMealCountSummary({});
+              setMealCountMessage(sectionErrorMessage(sections.meal_counts, "食数集計の取得に失敗しました。"));
+            }
+          }
+        } catch (err: any) {
+          if (generation !== loadGeneration.current) return;
+          const detail = err?.response?.data?.detail;
+          const error = detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。";
+          if (section === "primary") {
+            setMessage(error);
+            setMealCountMessage(error);
+          } else if (section === "bags") {
+            setBagMessage(error);
+            setAuditMessage(error);
+          } else {
+            setTotalsMessage(error);
+          }
         }
-      } else {
-        setDailyBagSummary({});
-        setBagMessage(sectionErrorMessage(sections.daily_bags, "袋分け結果の取得に失敗しました。"));
-      }
-
-      const auditPayload = sectionData<DailyBagAuditResponse>(sections.daily_bags_audit);
-      if (auditPayload) {
-        const payload = auditPayload || {};
-        setDailyBagAudit(payload);
-        if (!Number(payload?.rule_based?.finding_count || 0)) {
-          setAuditMessage("ルールベース監査で確認候補はありません。");
-        }
-      } else {
-        setDailyBagAudit({});
-        setAuditMessage(sectionErrorMessage(sections.daily_bags_audit, "数量監査の取得に失敗しました。"));
-      }
-
-      const totalsPayload = sectionData<{ rows?: TotalRow[] }>(sections.totals);
-      if (totalsPayload) {
-        const rows = Array.isArray(totalsPayload.rows) ? totalsPayload.rows : [];
-        setTotalsRows(rows);
-        if (!rows.length) {
-          setTotalsMessage("総量は確定注文のみ集計されるため、対象データがありません。");
-        }
-      } else {
-        setTotalsRows([]);
-        setTotalsMessage(sectionErrorMessage(sections.totals, "総量の取得に失敗しました。"));
-      }
-
-      const mealCountsPayload = sectionData<DailyMealCountSummary>(sections.meal_counts);
-      if (mealCountsPayload) {
-        const payload = mealCountsPayload || {};
-        setMealCountSummary(payload);
-        if (!Array.isArray(payload.groups) || payload.groups.length === 0) {
-          setMealCountMessage("確定済みの食数がありません。");
-        }
-      } else {
-        setMealCountSummary({});
-        setMealCountMessage(sectionErrorMessage(sections.meal_counts, "食数集計の取得に失敗しました。"));
-      }
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setMessage(detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。");
-      setOrders([]);
-      setDailyBagSummary({});
-      setDailyBagAudit({});
-      setTotalsRows([]);
-      setMealCountSummary({});
+      }));
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -1160,11 +1181,11 @@ export default function DailyDeliveryNotesPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">日付</span>
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} disabled={loading} />
           </label>
           <label className="field">
             <span className="field-label">ステータス</span>
-            <select className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <select className="input" value={status} onChange={(e) => setStatus(e.target.value)} disabled={loading}>
               <option value="">全て</option>
               <option value="未着">未着</option>
               <option value="要確認">要確認</option>

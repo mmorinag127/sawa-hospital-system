@@ -1,4 +1,92 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
+
+const contextKeys = {
+  primary: ["orders", "meal_counts"],
+  bags: ["daily_bags", "daily_bags_audit"],
+  totals: ["totals"],
+} as const;
+
+async function fulfillDailyContext(route: Route, response: { status: number; json: any }) {
+  const section = new URL(route.request().url()).searchParams.get("section");
+  expect(section).toMatch(/^(primary|bags|totals)$/);
+  const keys = contextKeys[section as keyof typeof contextKeys];
+  const sections = response.json.sections ?? {
+    [keys[0]]: { status: "fulfilled", data: response.json },
+    ...(section === "primary" ? { meal_counts: { status: "fulfilled", data: { groups: [] } } } : {}),
+    ...(section === "bags" ? { daily_bags_audit: { status: "fulfilled", data: { rule_based: { finding_count: 0 } } } } : {}),
+  };
+  await route.fulfill({
+    status: response.status,
+    json: { sections: Object.fromEntries(keys.map((key) => [key, sections[key]])) },
+  });
+}
+
+for (const bagOutcome of ["success", "failure"] as const) {
+  test(`daily delivery notes retains primary results while bags are pending and after ${bagOutcome}`, async ({ page }) => {
+    const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+    let releaseBags!: () => void;
+    const bagsPending = new Promise<void>((resolve) => { releaseBags = resolve; });
+    const requests: string[] = [];
+    await page.addInitScript(() => {
+      window.localStorage.setItem("auth_header", "Bearer e2e-token");
+      window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+    });
+    await page.route("**/api/**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/auth/me")) {
+        await route.fulfill({ status: 200, json: { role: "admin" } });
+      } else if (url.pathname.endsWith("/facilities")) {
+        await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-001", name: "施設A" }] } });
+      } else if (url.pathname.endsWith("/orders/daily-output-context")) {
+        const section = url.searchParams.get("section")!;
+        requests.push(section);
+        if (section === "bags") {
+          await bagsPending;
+          if (bagOutcome === "failure") {
+            await route.fulfill({ status: 500, json: { detail: "bags failed" } });
+            return;
+          }
+        }
+        await fulfillDailyContext(route, {
+          status: 200,
+          json: { sections: {
+            orders: { status: "fulfilled", data: { orders: [{ id: "ORD-PARTIAL-001", facility: "FAC-001", status: "確定" }] } },
+            meal_counts: { status: "fulfilled", data: { groups: [{ daypart: "朝食", counts: [{ diet_type: "regular", quantity: 12 }] }] } },
+            daily_bags: { status: "fulfilled", data: { groups: [] } },
+            daily_bags_audit: { status: "fulfilled", data: { rule_based: { finding_count: 0 } } },
+            totals: { status: "fulfilled", data: { rows: [] } },
+          } },
+        });
+      } else {
+        await route.fulfill({ status: 200, json: {} });
+      }
+    });
+    try {
+      await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
+      await page.getByRole("button", { name: "取得", exact: true }).click();
+      await expect(page.getByText("12食", { exact: true })).toBeVisible();
+      await expect(page.locator('a[href="/orders/ORD-PARTIAL-001"]')).toBeVisible();
+      await expect(page.getByRole("button", { name: "取得中...", exact: true })).toBeDisabled();
+      await expect(page.getByLabel("日付", { exact: true })).toBeDisabled();
+      await expect(page.getByLabel("ステータス", { exact: true })).toBeDisabled();
+      expect(requests.slice().sort()).toEqual(["bags", "primary", "totals"]);
+      releaseBags();
+      await expect(page.getByRole("button", { name: "取得", exact: true })).toBeEnabled();
+      await expect(page.getByLabel("日付", { exact: true })).toBeEnabled();
+      await expect(page.getByLabel("ステータス", { exact: true })).toBeEnabled();
+      await expect(page.getByText("12食", { exact: true })).toBeVisible();
+      await expect(page.locator('a[href="/orders/ORD-PARTIAL-001"]')).toBeVisible();
+      if (bagOutcome === "failure") {
+        await expect(page.getByText("取得に失敗しました: bags failed", { exact: true })).toHaveCount(2);
+      } else {
+        await expect(page.getByText("袋分け結果がまだ生成されていません。")).toBeVisible();
+      }
+      expect(requests).toHaveLength(3);
+    } finally {
+      releaseBags();
+    }
+  });
+}
 
 test("daily delivery notes shows meal counts by daypart and warns about unconfirmed orders", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
@@ -23,7 +111,7 @@ test("daily delivery notes shows meal counts by daypart and warns about unconfir
       return;
     }
     if (path.endsWith("/orders/daily-output-context")) {
-      await route.fulfill({
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           sections: {
@@ -59,7 +147,7 @@ test("daily delivery notes shows meal counts by daypart and warns about unconfir
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
   await page.getByRole("button", { name: "取得" }).click();
 
   const summary = page.getByRole("heading", { name: "当日食数集計" }).locator("..").locator("..");
@@ -102,8 +190,8 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
       return;
     }
 
-    if (path.endsWith("/orders/by-line-date") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "primary" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           orders: [
@@ -119,8 +207,8 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
       return;
     }
 
-    if (path.endsWith("/orders/daily-bags") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "bags" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           date: "2026-03-24",
@@ -168,8 +256,8 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
       return;
     }
 
-    if (path.endsWith("/totals") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "totals" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           date_from: "2026-03-24",
@@ -203,7 +291,7 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
 
   await expect(page.getByRole("heading", { name: "日別出力" })).toBeVisible();
   await page.getByRole("button", { name: "取得" }).click();
@@ -221,7 +309,8 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
   await expect(page.getByRole("button", { name: "施設別" }).first()).toBeVisible();
 });
 
-test("daily delivery notes can save facility-level portion overrides and reflect them in the list", async ({ page }) => {
+for (const mutation of ["save", "remove"] as const) {
+ test(`daily delivery notes refreshes after ${mutation} while an older request is pending`, async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
 
   await page.addInitScript(() => {
@@ -233,6 +322,15 @@ test("daily delivery notes can save facility-level portion overrides and reflect
     "FAC-001__regular": { qty: 100, unit: "g", note: "", overrideId: "" },
     "FAC-002__regular": { qty: 100, unit: "g", note: "", overrideId: "" },
   };
+
+  let releaseOldTotals!: () => void;
+  let releaseNewTotals!: () => void;
+  const oldTotalsPending = new Promise<void>((resolve) => { releaseOldTotals = resolve; });
+  const newTotalsPending = new Promise<void>((resolve) => { releaseNewTotals = resolve; });
+  const requestCounts = { primary: 0, bags: 0, totals: 0 };
+  if (mutation === "remove") {
+    overrideState["FAC-001__regular"] = { qty: 2, unit: "切", note: "", overrideId: "DPOe2e001" };
+  }
 
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -254,8 +352,9 @@ test("daily delivery notes can save facility-level portion overrides and reflect
       return;
     }
 
-    if (path.endsWith("/orders/by-line-date") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "primary" && method === "GET") {
+      requestCounts.primary += 1;
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           orders: [
@@ -271,10 +370,11 @@ test("daily delivery notes can save facility-level portion overrides and reflect
       return;
     }
 
-    if (path.endsWith("/orders/daily-bags") && method === "GET") {
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "bags" && method === "GET") {
+      requestCounts.bags += 1;
       const totalQuantity = 220 + 18;
       const totalAmount = `${overrideState["FAC-001__regular"].qty * 220}${overrideState["FAC-001__regular"].unit === "切" ? "切" : "g"}`;
-      await route.fulfill({
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           date: "2026-03-24",
@@ -309,8 +409,15 @@ test("daily delivery notes can save facility-level portion overrides and reflect
       return;
     }
 
-    if (path.endsWith("/totals") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "totals" && method === "GET") {
+      requestCounts.totals += 1;
+      if (requestCounts.totals === 1) {
+        await oldTotalsPending;
+        await route.fulfill({ status: 500, json: { detail: "stale totals failure" } });
+        return;
+      }
+      await newTotalsPending;
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           date_from: "2026-03-24",
@@ -472,23 +579,40 @@ test("daily delivery notes can save facility-level portion overrides and reflect
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/daily-delivery-notes`);
-  await page.getByRole("button", { name: "取得" }).click();
-
-  await page.getByRole("button", { name: "施設別単位設定" }).click();
-  await expect(page.getByRole("heading", { name: "施設別単位設定" })).toBeVisible();
-  await expect(page.getByRole("dialog").getByText("全施設に一括適用")).toBeVisible();
-  await page.getByLabel("施設を選ぶ").selectOption("FAC-002");
-  const facilityEditor = page.locator(".override-editor-shell .override-editor-card").nth(1);
-  await expect(facilityEditor.locator(".override-facility")).toHaveText("施設B (FAC-002)");
-  await facilityEditor.locator("input[type='number']").fill("2");
-  await facilityEditor.locator("select").last().selectOption("切");
-  await facilityEditor.locator("input[type='text']").fill("この施設のみ2切");
-  await facilityEditor.getByRole("button", { name: "保存", exact: true }).click();
-
-  await expect(page.getByText("施設別単位設定を保存しました。")).toBeVisible();
-  await expect(page.getByRole("dialog").getByText("2切/人")).toBeVisible();
-});
+  try {
+    await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
+    await page.getByRole("button", { name: "取得", exact: true }).click();
+    await page.getByRole("button", { name: "施設別単位設定" }).click();
+    await page.getByLabel("施設を選ぶ").selectOption("FAC-001");
+    const facilityEditor = page.locator(".override-editor-shell .override-editor-card").nth(1);
+    await expect(page.getByRole("button", { name: "取得中...", exact: true })).toBeDisabled();
+    if (mutation === "save") {
+      await facilityEditor.locator("input[type='number']").fill("2");
+      await facilityEditor.locator("select").last().selectOption("切");
+      await facilityEditor.getByRole("button", { name: "保存", exact: true }).click();
+    } else {
+      await facilityEditor.getByRole("button", { name: "解除", exact: true }).click();
+    }
+    await expect.poll(() => requestCounts).toEqual({ primary: 2, bags: 2, totals: 2 });
+    const basis = mutation === "save" ? "2切/人" : "100g/人";
+    await expect(page.locator(".menu-bag-table").getByRole("cell", { name: basis, exact: true })).toBeVisible();
+    const oldResponse = page.waitForResponse((response) =>
+      response.url().includes("daily-output-context") && response.status() === 500);
+    releaseOldTotals();
+    await oldResponse;
+    await expect(page.getByRole("button", { name: "取得中...", exact: true })).toBeDisabled();
+    await expect(page.getByText("取得に失敗しました: stale totals failure", { exact: true })).toHaveCount(0);
+    releaseNewTotals();
+    await expect(page.getByRole("button", { name: "取得", exact: true })).toBeEnabled();
+    await expect(page.locator(".menu-bag-table").getByRole("cell", { name: basis, exact: true })).toBeVisible();
+    await expect(page.getByText(mutation === "save" ? "施設別単位設定を保存しました。" : "施設別単位設定を解除しました。")).toBeVisible();
+    expect(requestCounts).toEqual({ primary: 2, bags: 2, totals: 2 });
+  } finally {
+    releaseOldTotals();
+    releaseNewTotals();
+  }
+ });
+}
 
 test("daily delivery notes can save bulk portion overrides for all facilities", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
@@ -518,8 +642,8 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
       return;
     }
 
-    if (path.endsWith("/orders/by-line-date") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "primary" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           orders: [
@@ -531,8 +655,8 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
       return;
     }
 
-    if (path.endsWith("/orders/daily-bags") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "bags" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           date: "2026-03-24",
@@ -567,8 +691,8 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
       return;
     }
 
-    if (path.endsWith("/totals") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "totals" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           date_from: "2026-03-24",
@@ -640,7 +764,7 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
   await page.getByRole("button", { name: "取得" }).click();
   await page.getByRole("button", { name: "施設別単位設定" }).click();
   const bulkEditor = page.locator(".override-bulk-card");
@@ -676,8 +800,8 @@ test("daily delivery notes shows blocker text when bag data truly does not exist
       return;
     }
 
-    if (path.endsWith("/orders/by-line-date") && method === "GET") {
-      await route.fulfill({
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "primary" && method === "GET") {
+      await fulfillDailyContext(route, {
         status: 200,
         json: {
           orders: [{ id: "ORD-DAILY-EMPTY-001", facility: "FAC-001", week: "2026-03", status: "確定" }],
@@ -686,20 +810,20 @@ test("daily delivery notes shows blocker text when bag data truly does not exist
       return;
     }
 
-    if (path.endsWith("/orders/daily-bags") && method === "GET") {
-      await route.fulfill({ status: 200, json: { date: "2026-03-24", order_count: 1, groups: [] } });
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "bags" && method === "GET") {
+      await fulfillDailyContext(route, { status: 200, json: { date: "2026-03-24", order_count: 1, groups: [] } });
       return;
     }
 
-    if (path.endsWith("/totals") && method === "GET") {
-      await route.fulfill({ status: 200, json: { date_from: "2026-03-24", date_to: "2026-03-24", rows: [] } });
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "totals" && method === "GET") {
+      await fulfillDailyContext(route, { status: 200, json: { date_from: "2026-03-24", date_to: "2026-03-24", rows: [] } });
       return;
     }
 
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
   await page.getByRole("button", { name: "取得" }).click();
 
   await expect(page.getByRole("heading", { name: "当日袋分け一覧" })).toBeVisible();
@@ -730,18 +854,18 @@ test("daily delivery notes bundle download survives responses longer than the ol
       return;
     }
 
-    if (path.endsWith("/orders/by-line-date") && method === "GET") {
-      await route.fulfill({ status: 200, json: { orders: [] } });
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "primary" && method === "GET") {
+      await fulfillDailyContext(route, { status: 200, json: { orders: [] } });
       return;
     }
 
-    if (path.endsWith("/orders/daily-bags") && method === "GET") {
-      await route.fulfill({ status: 200, json: { date: "2026-03-24", order_count: 0, groups: [] } });
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "bags" && method === "GET") {
+      await fulfillDailyContext(route, { status: 200, json: { date: "2026-03-24", order_count: 0, groups: [] } });
       return;
     }
 
-    if (path.endsWith("/totals") && method === "GET") {
-      await route.fulfill({ status: 200, json: { date_from: "2026-03-24", date_to: "2026-03-24", rows: [] } });
+    if (path.endsWith("/orders/daily-output-context") && url.searchParams.get("section") === "totals" && method === "GET") {
+      await fulfillDailyContext(route, { status: 200, json: { date_from: "2026-03-24", date_to: "2026-03-24", rows: [] } });
       return;
     }
 
@@ -764,7 +888,7 @@ test("daily delivery notes bundle download survives responses longer than the ol
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/daily-delivery-notes`);
+  await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
   await page.getByRole("button", { name: "取得" }).click();
   await page.getByRole("button", { name: "当日納品書Excel" }).click();
 
