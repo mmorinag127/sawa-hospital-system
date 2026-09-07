@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.portal_prod_db_bootstrap import _load_service_db_config  # noqa: E402
+from src.services.portal_access_bootstrap_service import PortalAccessBootstrapError  # noqa: E402
 from src.services.portal_automation_bootstrap_service import (  # noqa: E402
     PortalAutomationBootstrapError,
     require_automation_context,
@@ -69,7 +70,7 @@ def _run() -> int:
 def main() -> int:
     try:
         return _run()
-    except PortalAutomationBootstrapError as exc:
+    except PortalAccessBootstrapError as exc:
         # Dedicated bootstrap errors contain only developer-controlled diagnostics.
         print(f"blocked: {exc}", file=sys.stderr)
         return 1

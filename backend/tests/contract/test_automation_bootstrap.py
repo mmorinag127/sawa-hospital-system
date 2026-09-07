@@ -230,6 +230,15 @@ def test_cli_errors_never_expose_secrets(monkeypatch, capsys, failure_at):
         engine.dispose.assert_called_once()
 
 
+def test_cli_reports_shared_schema_guard(monkeypatch, capsys):
+    _context(monkeypatch, "stg")
+    monkeypatch.setattr(cli, "parse_args", lambda: _args("stg"))
+    message = "user_system_access system_key constraint must allow only hospital, shift, and school-lunch"
+    monkeypatch.setattr(cli, "_load_service_db_config", Mock(side_effect=cli.PortalAccessBootstrapError(message)))
+    assert cli.main() == 1
+    assert capsys.readouterr().err == f"blocked: {message}\n"
+
+
 @pytest.mark.parametrize("environment", ["stg", "prod"])
 @pytest.mark.parametrize("field,value,message", [
     ("project_id", "other-project", "Cloud Run project must be sawahospitalsystem"),
