@@ -109,8 +109,31 @@ def _has_system_access(account: str, system: str) -> bool:
         raise UserRoleLookupError("Failed to load system access") from exc
 
 
+def _automation_configs() -> list[tuple[str, str, str, str]]:
+    return [
+        (
+            system,
+            os.getenv(f"{prefix}_EMAIL", "").strip().lower(),
+            os.getenv(f"{prefix}_AUDIENCE", "").strip(),
+            os.getenv(f"{prefix}_SUBJECT", "").strip(),
+        )
+        for system, prefix in (
+            ("shift", "AUTOMATION_AUTH"),
+            ("school-lunch", "SCHOOL_LUNCH_AUTOMATION_AUTH"),
+        )
+    ]
+
+
+def automation_system(account: str) -> str | None:
+    matches = [system for system, email, _, _ in _automation_configs() if email and account.lower() == email]
+    if len(matches) > 1:
+        raise HTTPException(status_code=403, detail="Distinct automation identities required")
+    return matches[0] if matches else None
+
+
 def _require_system_access(account: str, system: str) -> None:
-    if account == os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower() and system != "shift":
+    machine_system = automation_system(account)
+    if machine_system is not None and system != machine_system:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System access denied")
     try:
         allowed = _has_system_access(account, system)
@@ -181,12 +204,10 @@ def _audience_candidates(request: Request) -> list[str]:
 
 def _verify_google_token(token: str, request: Request) -> str:
     candidates = _audience_candidates(request)
-    automation_audience = os.getenv("AUTOMATION_AUTH_AUDIENCE", "").strip()
-    automation_email = os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower()
-    automation_subject = os.getenv("AUTOMATION_AUTH_SUBJECT", "").strip()
-    automation_configured = all((automation_audience, automation_email, automation_subject))
-    if automation_configured and automation_audience not in candidates:
-        candidates.append(automation_audience)
+    configs = _automation_configs()
+    for _, email, audience, subject in configs:
+        if all((email, audience, subject)) and audience not in candidates:
+            candidates.append(audience)
     if not candidates:
         _raise_unauthorized()
     payload = None
@@ -206,15 +227,26 @@ def _verify_google_token(token: str, request: Request) -> str:
     if not email:
         _raise_unauthorized()
     email = str(email).lower()
-    if payload.get("aud") == automation_audience or (automation_email and email == automation_email):
+    matching_configs = [
+        config for config in configs
+        if config[1] and email == config[1]
+    ]
+    if not matching_configs and any(audience and payload.get("aud") == audience for _, _, audience, _ in configs):
+        _raise_unauthorized()
+    for machine_system, automation_email, automation_audience, automation_subject in matching_configs:
         if (
-            not automation_configured
+            not all((automation_email, automation_audience, automation_subject))
             or automation_audience in GOOGLE_OAUTH_CLIENT_IDS
             or payload.get("aud") != automation_audience
             or email != automation_email
             or payload.get("sub") != automation_subject
             or payload.get("email_verified") is not True
             or not email.endswith(".iam.gserviceaccount.com")
+        ):
+            _raise_unauthorized()
+        if any(
+            other_system != machine_system and (other_email == automation_email or other_subject == automation_subject)
+            for other_system, other_email, other_audience, other_subject in configs
         ):
             _raise_unauthorized()
         issued_at, expires_at = payload.get("iat"), payload.get("exp")
@@ -243,7 +275,7 @@ def _registered_role(account: str) -> str | None:
         role = _load_active_user_roles().get(account.lower())
     except UserRoleLookupError:
         _raise_role_lookup_unavailable()
-    if account == os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower() and role != "operator":
+    if automation_system(account) is not None and role != "operator":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Automation operator required")
     return role
 
