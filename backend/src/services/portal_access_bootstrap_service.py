@@ -87,6 +87,15 @@ def ensure_user_system_access_schema(connection: Connection) -> bool:
     if not inspector.has_table("user_system_access"):
         _apply_user_system_access_migration(connection)
         migration_applied = True
+    elif connection.dialect.name == "postgresql":
+        connection.execute(sa.text("LOCK TABLE user_system_access IN ACCESS EXCLUSIVE MODE"))
+        if not sa.inspect(connection).get_check_constraints("user_system_access"):
+            connection.execute(sa.text(
+                "ALTER TABLE user_system_access ADD CONSTRAINT "
+                "ck_user_system_access_system_key "
+                "CHECK (system_key IN ('hospital', 'shift', 'school-lunch'))"
+            ))
+            migration_applied = True
     _assert_canonical_user_system_access_schema(connection)
     return migration_applied
 
@@ -172,6 +181,31 @@ def _assert_canonical_user_system_access_schema(connection: Connection) -> None:
 
 
 def _has_canonical_system_check(connection: Connection, checks: list[dict]) -> bool:
+    if connection.dialect.name == "postgresql":
+        if len(checks) != 1 or checks[0].get("name") != CANONICAL_CHECK_NAME:
+            return False
+        reference = f"bootstrap_check_{uuid.uuid4().hex}"
+        # Let PostgreSQL normalize both expressions using the same column types.
+        connection.execute(sa.text(
+            f'CREATE TEMP TABLE "{reference}" (LIKE user_system_access) ON COMMIT DROP'
+        ))
+        try:
+            connection.execute(sa.text(
+                f'ALTER TABLE "{reference}" ADD CHECK '
+                "(system_key IN ('hospital', 'shift', 'school-lunch'))"
+            ))
+            expressions = connection.execute(sa.text(
+                "SELECT conrelid = 'user_system_access'::regclass AS actual, "
+                "pg_get_expr(conbin, conrelid) AS expression, convalidated "
+                "FROM pg_constraint WHERE contype = 'c' AND "
+                "conrelid IN ('user_system_access'::regclass, to_regclass(:reference))"
+            ), {"reference": reference}).all()
+            actual = [row for row in expressions if row.actual]
+            expected = [row for row in expressions if not row.actual]
+            return (len(actual) == len(expected) == 1 and actual[0].convalidated
+                    and actual[0].expression == expected[0].expression)
+        finally:
+            connection.execute(sa.text(f'DROP TABLE "{reference}"'))
     for check in checks:
         sqltext = str(check.get("sqltext") or "")
         name = str(check.get("name") or "")
