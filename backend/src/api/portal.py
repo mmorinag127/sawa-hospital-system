@@ -1,10 +1,9 @@
-import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
-from src.api.auth import UserContext, get_current_user, require_portal_admin
+from src.api.auth import UserContext, automation_system, get_current_user, require_portal_admin
 from src.db import session_scope
 from src.models.user import AuditLog
 
@@ -41,25 +40,27 @@ def portal_me(system: str | None = None, user: UserContext = Depends(get_current
         if not row or str(row["status"] or "").lower() != "active":
             raise HTTPException(status_code=403, detail="Active registered user required")
         systems = _systems(session, row["id"])
-    if user.account == os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower() and systems != ["shift"]:
-        raise HTTPException(status_code=403, detail="Automation shift-only access required")
+    machine_system = automation_system(user.account)
+    if machine_system is not None and systems != [machine_system]:
+        raise HTTPException(status_code=403, detail="Automation single-system access required")
     if system and system not in systems:
         raise HTTPException(status_code=403, detail="System access denied")
     return {"role": user.role, "account": user.account, "systems": systems}
 
 
 @router.post("/automation/auth")
-def automation_login(user: UserContext = Depends(get_current_user)):
-    account = os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower()
-    if not account or user.account != account or user.role != "operator":
+def automation_login(system: str = "shift", user: UserContext = Depends(get_current_user)):
+    if system not in {"shift", "school-lunch"}:
+        raise HTTPException(status_code=400, detail="Unknown automation system")
+    if not user.account or automation_system(user.account) != system or user.role != "operator":
         raise HTTPException(status_code=403, detail="Automation operator required")
-    result = portal_me(system="shift", user=user)
+    result = portal_me(system=system, user=user)
     with session_scope() as session:
         session.add(AuditLog(
             id=str(uuid.uuid4()),
             actor=user.account,
             action="automation_login",
-            target="shift",
+            target=system,
             metadata_json={"systems": result["systems"]},
         ))
     return result

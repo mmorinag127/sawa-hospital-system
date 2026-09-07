@@ -79,7 +79,9 @@ jobs:
             tests/contract/test_facility_config.py \
             tests/contract/test_auth_guardrails.py \
             tests/contract/test_automation_auth.py \
+            tests/contract/test_school_lunch_automation_auth.py \
             tests/contract/test_automation_bootstrap.py \
+            tests/contract/test_price_automation_bootstrap.py \
             tests/contract/test_automation_bootstrap_postgres.py \
             tests/contract/test_prod_portal_db_bootstrap_gate.py \
             tests/unit/test_portal_access_bootstrap_service.py \

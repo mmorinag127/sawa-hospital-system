@@ -5,6 +5,11 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${GITHUB_REF:-}" != refs/heads/develop |
   echo "Automation bootstrap requires the staging develop workflow" >&2
   exit 1
 fi
+case "${2:-shift}" in
+  shift) bootstrap_script=portal_automation_db_bootstrap.py; bootstrap_email="$AUTOMATION_AUTH_EMAIL" ;;
+  school-lunch) bootstrap_script=price_automation_db_bootstrap.py; bootstrap_email="$SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL" ;;
+  *) echo "Unknown automation system" >&2; exit 1 ;;
+esac
 instance="$(gcloud run services describe "$WEB_SERVICE" --project "$PROJECT_ID" --region "$REGION" \
   --format=json | jq -r '.spec.template.metadata.annotations["run.googleapis.com/cloudsql-instances"] // empty')"
 if [[ -z "$instance" ]]; then
@@ -28,7 +33,7 @@ for _ in $(seq 1 30); do
 done
 [[ "$ready" == 1 ]] || { echo "Cloud SQL proxy did not become ready" >&2; exit 1; }
 cd backend
-uv run --extra dev python scripts/portal_automation_db_bootstrap.py \
+uv run --extra dev python "scripts/$bootstrap_script" \
   --environment stg --project-id "$PROJECT_ID" --region "$REGION" \
-  --service "$WEB_SERVICE" --email "$AUTOMATION_AUTH_EMAIL" \
+  --service "$WEB_SERVICE" --email "$bootstrap_email" \
   --db-host 127.0.0.1 --db-port 5432
