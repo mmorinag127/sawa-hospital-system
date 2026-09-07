@@ -252,10 +252,9 @@ jobs:
           WORKER_EXTRA_ENV_VARS="AUTH_PROVIDER=local,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},AUTOMATION_AUTH_AUDIENCE=${AUTOMATION_AUTH_AUDIENCE},AUTOMATION_AUTH_EMAIL=${AUTOMATION_AUTH_EMAIL},AUTOMATION_AUTH_SUBJECT=${AUTOMATION_AUTH_SUBJECT}" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
+      - uses: astral-sh/setup-uv@v8.1.0
       - name: Register approved shift verification operator
-        env:
-          DEPLOY_ID_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
-        run: python scripts/register_automation_user.py
+        run: bash scripts/bootstrap_automation_user.sh stg
 
   deploy-frontend:
     needs:
