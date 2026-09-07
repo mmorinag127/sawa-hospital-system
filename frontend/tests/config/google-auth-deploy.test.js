@@ -48,7 +48,7 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(stgWorkflow, /id: auth-frontend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(stgWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-frontend\.outputs\.id_token \}\}/);
   assert.equal((stgWorkflow.match(/token_format: id_token/g) || []).length, 2);
-  assert.equal((stgWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
+  assert.equal((stgWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 2);
   assert.match(prodWorkflow, /id: auth-backend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}/);
   assert.match(prodWorkflow, /id: auth-frontend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
@@ -57,9 +57,11 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-db\.outputs\.id_token \}\}/);
   assert.match(prodWorkflow, /--deploy-verification-token "\$DEPLOY_ID_TOKEN"/);
   assert.equal((prodWorkflow.match(/token_format: id_token/g) || []).length, 3);
-  assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 4);
+  assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
+  assert.match(stgWorkflow, /bash scripts\/bootstrap_automation_user\.sh stg/);
+  assert.match(prodWorkflow, /python scripts\/portal_automation_db_bootstrap\.py/);
   for (const workflow of [stgWorkflow, prodWorkflow]) {
-    assert.match(workflow, /name: Register approved shift verification operator\s+env:\s+DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}\s+run: python scripts\/register_automation_user\.py/);
+    assert.doesNotMatch(workflow, /register_automation_user\.py/);
   }
   for (const script of [workerDeploy, webDeploy]) {
     assert.match(script, /if \[\[ -n "\$\{DEPLOY_ID_TOKEN:-\}" \]\]/);

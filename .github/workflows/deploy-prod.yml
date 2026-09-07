@@ -308,6 +308,10 @@ jobs:
               --live-auth-url "$WEB_URL/api/auth/me" \
               --db-host 127.0.0.1 \
               --db-port 5432
+            uv run --extra dev python scripts/portal_automation_db_bootstrap.py \
+              --environment prod --project-id "$PROJECT_ID" --region "$REGION" \
+              --service "$WEB_SERVICE" --email "$AUTOMATION_AUTH_EMAIL" \
+              --db-host 127.0.0.1 --db-port 5432
           )
 
   deploy-backend:
@@ -363,10 +367,6 @@ jobs:
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" ENSURE_GCLOUD_AUTH=true \
           WORKER_EXTRA_ENV_VARS="GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},AUTOMATION_AUTH_AUDIENCE=${AUTOMATION_AUTH_AUDIENCE},AUTOMATION_AUTH_EMAIL=${AUTOMATION_AUTH_EMAIL},AUTOMATION_AUTH_SUBJECT=${AUTOMATION_AUTH_SUBJECT}" \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
-      - name: Register approved shift verification operator
-        env:
-          DEPLOY_ID_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
-        run: python scripts/register_automation_user.py
 
   deploy-frontend:
     needs:
