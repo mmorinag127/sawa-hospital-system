@@ -95,8 +95,27 @@ jobs:
             echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build-backend:
+  automation-bootstrap:
     needs: source-gate
+    if: needs.source-gate.outputs.backend_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Register approved shift verification operator
+        run: bash scripts/bootstrap_automation_user.sh stg
+
+  build-backend:
+    needs: [source-gate, automation-bootstrap]
     if: needs.source-gate.outputs.backend_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -252,20 +271,19 @@ jobs:
           WORKER_EXTRA_ENV_VARS="AUTH_PROVIDER=local,GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},AUTOMATION_AUTH_AUDIENCE=${AUTOMATION_AUTH_AUDIENCE},AUTOMATION_AUTH_EMAIL=${AUTOMATION_AUTH_EMAIL},AUTOMATION_AUTH_SUBJECT=${AUTOMATION_AUTH_SUBJECT}" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
-      - uses: astral-sh/setup-uv@v8.1.0
-      - name: Register approved shift verification operator
-        run: bash scripts/bootstrap_automation_user.sh stg
 
   deploy-frontend:
     needs:
       - source-gate
+      - automation-bootstrap
       - build-frontend
       - deploy-backend
     if: |
       always() &&
       needs.source-gate.outputs.frontend_changed == 'true' &&
       needs.build-frontend.result == 'success' &&
-      (needs.deploy-backend.result == 'success' || needs.deploy-backend.result == 'skipped')
+      (needs.source-gate.outputs.backend_changed == 'false' ||
+       (needs.automation-bootstrap.result == 'success' && needs.deploy-backend.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: read

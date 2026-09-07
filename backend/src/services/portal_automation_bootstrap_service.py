@@ -45,7 +45,13 @@ def run_portal_automation_bootstrap(
     for table in ("users", "audit_logs", "user_system_access"):
         if not inspector.has_table(table):
             raise PortalAutomationBootstrapError(f"{table} table is required before automation bootstrap")
-    _assert_canonical_user_system_access_schema(connection)
+    try:
+        _assert_canonical_user_system_access_schema(connection)
+    except PortalAccessBootstrapError:
+        # Schema metadata only; never include user records or connection details.
+        import json
+        print(json.dumps({"user_system_access_checks": inspector.get_check_constraints("user_system_access")}))
+        raise
     # accounts have no unique constraint; serialize check/insert on PostgreSQL.
     if connection.dialect.name == "postgresql":
         connection.execute(sa.text("LOCK TABLE users, user_system_access IN SHARE ROW EXCLUSIVE MODE"))

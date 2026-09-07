@@ -59,6 +59,8 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.equal((prodWorkflow.match(/token_format: id_token/g) || []).length, 3);
   assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
   assert.match(stgWorkflow, /bash scripts\/bootstrap_automation_user\.sh stg/);
+  assert.match(stgWorkflow, /build-backend:\s+needs: \[source-gate, automation-bootstrap\]/);
+  assert.match(stgWorkflow, /needs\.source-gate\.outputs\.backend_changed == 'false' \|\|\s+\(needs\.automation-bootstrap\.result == 'success' && needs\.deploy-backend\.result == 'success'\)/);
   assert.match(prodWorkflow, /python scripts\/portal_automation_db_bootstrap\.py/);
   for (const workflow of [stgWorkflow, prodWorkflow]) {
     assert.doesNotMatch(workflow, /register_automation_user\.py/);
