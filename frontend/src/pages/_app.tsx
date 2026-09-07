@@ -6,7 +6,7 @@ import PageTemplate from "../components/PageTemplate";
 import UnifiedShell from "../components/UnifiedShell";
 import "../styles/sawa-template.css";
 
-const PUBLIC_ROUTES = new Set(["/login", "/auth/handoff", "/about", "/privacy", "/terms"]);
+const PUBLIC_ROUTES = new Set(["/login", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
 const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
 
 export default function App({ Component, pageProps }: AppProps) {

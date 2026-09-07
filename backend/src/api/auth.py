@@ -110,6 +110,8 @@ def _has_system_access(account: str, system: str) -> bool:
 
 
 def _require_system_access(account: str, system: str) -> None:
+    if account == os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower() and system != "shift":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System access denied")
     try:
         allowed = _has_system_access(account, system)
     except UserRoleLookupError:
@@ -179,6 +181,12 @@ def _audience_candidates(request: Request) -> list[str]:
 
 def _verify_google_token(token: str, request: Request) -> str:
     candidates = _audience_candidates(request)
+    automation_audience = os.getenv("AUTOMATION_AUTH_AUDIENCE", "").strip()
+    automation_email = os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower()
+    automation_subject = os.getenv("AUTOMATION_AUTH_SUBJECT", "").strip()
+    automation_configured = all((automation_audience, automation_email, automation_subject))
+    if automation_configured and automation_audience not in candidates:
+        candidates.append(automation_audience)
     if not candidates:
         _raise_unauthorized()
     payload = None
@@ -198,6 +206,26 @@ def _verify_google_token(token: str, request: Request) -> str:
     if not email:
         _raise_unauthorized()
     email = str(email).lower()
+    if payload.get("aud") == automation_audience or (automation_email and email == automation_email):
+        if (
+            not automation_configured
+            or automation_audience in GOOGLE_OAUTH_CLIENT_IDS
+            or payload.get("aud") != automation_audience
+            or email != automation_email
+            or payload.get("sub") != automation_subject
+            or payload.get("email_verified") is not True
+            or not email.endswith(".iam.gserviceaccount.com")
+        ):
+            _raise_unauthorized()
+        issued_at, expires_at = payload.get("iat"), payload.get("exp")
+        now = time.time()
+        if (
+            type(issued_at) not in (int, float)
+            or type(expires_at) not in (int, float)
+            or not now - 3600 <= issued_at <= now + 30
+            or not now < expires_at <= issued_at + 3600
+        ):
+            _raise_unauthorized()
     if payload.get("email_verified") is False:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return str(email)
@@ -210,6 +238,16 @@ def _google_email_or_none(request: Request) -> str | None:
     return _verify_google_token(token, request)
 
 
+def _registered_role(account: str) -> str | None:
+    try:
+        role = _load_active_user_roles().get(account.lower())
+    except UserRoleLookupError:
+        _raise_role_lookup_unavailable()
+    if account == os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower() and role != "operator":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Automation operator required")
+    return role
+
+
 def get_current_admin(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="admin")
@@ -220,11 +258,7 @@ def get_current_admin(request: Request) -> UserContext:
         return portal_user
     google_email = _google_email_or_none(request)
     if google_email:
-        try:
-            active_roles = _load_active_user_roles()
-        except UserRoleLookupError:
-            _raise_role_lookup_unavailable()
-        registered_role = active_roles.get(str(google_email).lower())
+        registered_role = _registered_role(google_email)
         if registered_role == "admin":
             _require_system_access(google_email, "hospital")
             return UserContext(role="admin", account=google_email)
@@ -242,11 +276,7 @@ def get_current_operator(request: Request) -> UserContext:
         return UserContext(role="operator", account=portal_user.account)
     google_email = _google_email_or_none(request)
     if google_email:
-        try:
-            active_roles = _load_active_user_roles()
-        except UserRoleLookupError:
-            _raise_role_lookup_unavailable()
-        registered_role = active_roles.get(str(google_email).lower())
+        registered_role = _registered_role(google_email)
         if registered_role in {"admin", "operator"}:
             _require_system_access(google_email, "hospital")
             return UserContext(role="operator", account=google_email)
@@ -263,11 +293,7 @@ def get_current_user(request: Request) -> UserContext:
     google_email = _google_email_or_none(request)
     if not google_email:
         _raise_unauthorized()
-    try:
-        active_roles = _load_active_user_roles()
-    except UserRoleLookupError:
-        _raise_role_lookup_unavailable()
-    registered_role = active_roles.get(str(google_email).lower())
+    registered_role = _registered_role(google_email)
     if registered_role not in {"admin", "operator"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return UserContext(role=registered_role, account=google_email)

@@ -1,3 +1,4 @@
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,9 +41,28 @@ def portal_me(system: str | None = None, user: UserContext = Depends(get_current
         if not row or str(row["status"] or "").lower() != "active":
             raise HTTPException(status_code=403, detail="Active registered user required")
         systems = _systems(session, row["id"])
+    if user.account == os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower() and systems != ["shift"]:
+        raise HTTPException(status_code=403, detail="Automation shift-only access required")
     if system and system not in systems:
         raise HTTPException(status_code=403, detail="System access denied")
     return {"role": user.role, "account": user.account, "systems": systems}
+
+
+@router.post("/automation/auth")
+def automation_login(user: UserContext = Depends(get_current_user)):
+    account = os.getenv("AUTOMATION_AUTH_EMAIL", "").strip().lower()
+    if not account or user.account != account or user.role != "operator":
+        raise HTTPException(status_code=403, detail="Automation operator required")
+    result = portal_me(system="shift", user=user)
+    with session_scope() as session:
+        session.add(AuditLog(
+            id=str(uuid.uuid4()),
+            actor=user.account,
+            action="automation_login",
+            target="shift",
+            metadata_json={"systems": result["systems"]},
+        ))
+    return result
 
 @router.get("/users", dependencies=[Depends(require_portal_admin)])
 def list_users():

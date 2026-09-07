@@ -42,6 +42,9 @@ env:
   CHECK_WEB_PROXY: "1"
   WORKFLOW_V2_DEPLOY_CHECK: "1"
   GOOGLE_OAUTH_CLIENT_ID: "167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com"
+  AUTOMATION_AUTH_AUDIENCE: ${{ vars.PROD_AUTOMATION_AUTH_AUDIENCE }}
+  AUTOMATION_AUTH_EMAIL: ${{ vars.PROD_AUTOMATION_AUTH_EMAIL }}
+  AUTOMATION_AUTH_SUBJECT: ${{ vars.PROD_AUTOMATION_AUTH_SUBJECT }}
   CLOUD_SQL_PROXY_VERSION: "2.24.1"
   CLOUD_SQL_PROXY_SHA256: "fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb"
 
@@ -358,8 +361,12 @@ jobs:
           set -euo pipefail
           WEB_URL="$WEB_URL" GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" ENSURE_GCLOUD_AUTH=true \
-          WORKER_EXTRA_ENV_VARS="GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
+          WORKER_EXTRA_ENV_VARS="GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},AUTOMATION_AUTH_AUDIENCE=${AUTOMATION_AUTH_AUDIENCE},AUTOMATION_AUTH_EMAIL=${AUTOMATION_AUTH_EMAIL},AUTOMATION_AUTH_SUBJECT=${AUTOMATION_AUTH_SUBJECT}" \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
+      - name: Register approved shift verification operator
+        env:
+          DEPLOY_ID_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+        run: python scripts/register_automation_user.py
 
   deploy-frontend:
     needs:
