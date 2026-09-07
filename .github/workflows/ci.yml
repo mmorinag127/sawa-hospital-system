@@ -28,7 +28,20 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-bootstrap-only
+          POSTGRES_DB: bootstrap_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
+      TEST_BOOTSTRAP_DB_URI: postgresql+psycopg2://postgres:ci-bootstrap-only@localhost:5432/bootstrap_test
       DB_URI: sqlite:///./test.db
       FACILITY_MASTER_PATH: src/data/facility_master.template.json
       INGEST_POLICY_PATH: src/data/ingest_policy.template.json
@@ -67,6 +80,10 @@ jobs:
             tests/contract/test_auth_guardrails.py \
             tests/contract/test_automation_auth.py \
             tests/contract/test_automation_bootstrap.py \
+            tests/contract/test_automation_bootstrap_postgres.py \
+            tests/contract/test_prod_portal_db_bootstrap_gate.py \
+            tests/unit/test_portal_access_bootstrap_service.py \
+            tests/unit/test_portal_prod_db_bootstrap_script.py \
             tests/integration/test_facility_config_apply.py \
             --junitxml=.logs/pytest-junit.xml \
             -vv 2>&1 | tee .logs/pytest.log

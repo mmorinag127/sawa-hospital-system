@@ -8,7 +8,7 @@ from sqlalchemy.engine import Connection
 
 from src.services.portal_access_bootstrap_service import (
     PortalAccessBootstrapError,
-    _assert_canonical_user_system_access_schema,
+    ensure_user_system_access_schema,
     _insert_audit_log,
 )
 
@@ -46,7 +46,7 @@ def run_portal_automation_bootstrap(
         if not inspector.has_table(table):
             raise PortalAutomationBootstrapError(f"{table} table is required before automation bootstrap")
     try:
-        _assert_canonical_user_system_access_schema(connection)
+        ensure_user_system_access_schema(connection)
     except PortalAccessBootstrapError:
         # Schema metadata only; never include user records or connection details.
         import json
