@@ -2657,6 +2657,12 @@ def build_bag_payload_for_outputs(
     )
 
 
+def _label_display_category(daypart: object, category: str) -> str:
+    if _normalize_output_daypart(daypart) == "朝":
+        return re.sub(r"^主菜(?=$|[\s（(])", "副菜①", category)
+    return category
+
+
 def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | None) -> dict:
     fixed_text = label_profile.get("fixed_text", {})
     expiry_rule = label_profile.get("expiry_rule", "meal_date")
@@ -2671,7 +2677,7 @@ def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | N
         "expiry_date": expiry_value,
         "storage_mode": label_profile.get("storage_mode"),
         "meal_slot": bag.get("daypart"),
-        "menu_category": menu_category,
+        "menu_category": _label_display_category(bag.get("daypart"), menu_category) if menu_category else menu_category,
         "product_name": bag.get("menu_name"),
         "quantity": bag.get("quantity"),
         "details": _build_label_details(bag),
@@ -2878,6 +2884,7 @@ def _merge_label_rows(rows: list[dict], fields: list[str]) -> list[dict]:
         key=sort_key
     )
     for row in merged:
+        row["メニュー"] = _label_display_category(row.get("時間"), row.get("メニュー", ""))
         for key in list(row.keys()):
             if str(key).startswith("_sort_"):
                 row.pop(key, None)
