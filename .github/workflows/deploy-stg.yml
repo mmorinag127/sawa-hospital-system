@@ -277,6 +277,22 @@ jobs:
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
 
+      - name: Verify live breakfast label display
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          gcloud run services describe "$WORKER_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
+            --format='json(status.latestReadyRevisionName,status.traffic,spec.template.spec.containers[0].image)' > verification/worker.json
+          python3 scripts/verify_live_breakfast_labels.py --target stg --order-id "$ORDER_ID" --output-dir verification
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-label-display-stg
+          path: verification/
+          retention-days: 7
+
   deploy-frontend:
     needs:
       - source-gate
