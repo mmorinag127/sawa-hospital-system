@@ -4,9 +4,10 @@ import { useRouter } from "next/router";
 import { getStoredAuthHeader } from "../services/apiClient";
 import PageTemplate from "../components/PageTemplate";
 import UnifiedShell from "../components/UnifiedShell";
+import { watchBrowserLogout } from "../services/browserSession";
 import "../styles/sawa-template.css";
 
-const PUBLIC_ROUTES = new Set(["/login", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
+const PUBLIC_ROUTES = new Set(["/login", "/logout", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
 const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
 
 export default function App({ Component, pageProps }: AppProps) {
@@ -14,6 +15,8 @@ export default function App({ Component, pageProps }: AppProps) {
   const gitSha = process.env.NEXT_PUBLIC_GIT_SHA || "unknown";
   const deployedAt = process.env.NEXT_PUBLIC_DEPLOYED_AT || "unknown";
   const publicPage = PUBLIC_ROUTES.has(router.pathname);
+
+  useEffect(() => watchBrowserLogout(() => window.location.replace("/login")), []);
 
   useEffect(() => {
     if (!router.isReady) return;

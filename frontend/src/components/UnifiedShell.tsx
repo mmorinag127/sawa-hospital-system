@@ -1,6 +1,5 @@
 import { useRouter } from "next/router";
 import type { ReactNode } from "react";
-import { clearAuth } from "../services/apiClient";
 import { enterSchoolLunch } from "../services/systemNavigation";
 
 type Props = {
@@ -23,10 +22,7 @@ export default function UnifiedShell({ children, gitSha, deployedAt, publicPage 
   const currentSystem = publicPage ? "共通ログイン" : systemForPath(path);
   const shortSha = gitSha === "unknown" ? gitSha : gitSha.slice(0, 12);
   const logout = () => {
-    clearAuth();
-    window.sessionStorage.removeItem("auth_next");
-    window.google?.accounts?.id?.disableAutoSelect?.();
-    window.location.replace("/login");
+    window.location.replace("/logout");
   };
 
   return (
