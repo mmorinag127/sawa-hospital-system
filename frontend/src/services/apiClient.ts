@@ -1,4 +1,5 @@
 import axios, { AxiosHeaders, type AxiosRequestHeaders } from "axios";
+import { markSessionCurrent, sessionWasLoggedOut } from "./browserSession";
 
 const AUTH_STORAGE_KEY = "auth_header";
 const LEGACY_AUTH_COOKIE_KEY = "auth_header";
@@ -28,6 +29,10 @@ const getSessionAuthHeader = () => {
 
 export const getStoredAuthHeader = () => {
   if (typeof window === "undefined") return "";
+  if (sessionWasLoggedOut()) {
+    clearAuth();
+    return "";
+  }
   const sessionValue = getSessionAuthHeader();
   if (sessionValue) {
     return sessionValue;
@@ -42,6 +47,7 @@ export const getStoredAuthHeader = () => {
   // Migrate old bearer sessions once, but always drop legacy persistence.
   if (legacyValue.startsWith("Bearer ")) {
     window.sessionStorage.setItem(AUTH_STORAGE_KEY, legacyValue);
+    markSessionCurrent();
   }
   clearLegacyAuthStorage();
   return legacyValue.startsWith("Bearer ") ? legacyValue : "";
@@ -55,6 +61,7 @@ const setStoredAuthHeader = (value: string) => {
     return;
   }
   window.sessionStorage.setItem(AUTH_STORAGE_KEY, value);
+  markSessionCurrent();
   clearLegacyAuthStorage();
 };
 
