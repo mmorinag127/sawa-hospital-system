@@ -1,5 +1,6 @@
 import axios, { AxiosHeaders, type AxiosRequestHeaders } from "axios";
 import { markSessionCurrent, sessionWasLoggedOut } from "./browserSession";
+import { loginUrlFor } from "./loginDestination";
 
 const AUTH_STORAGE_KEY = "auth_header";
 const LEGACY_AUTH_COOKIE_KEY = "auth_header";
@@ -115,8 +116,9 @@ apiClient.interceptors.response.use(
     if (err?.response?.status === 401 && typeof window !== "undefined") {
       clearAuth();
       if (!window.location.pathname.startsWith("/login")) {
-        window.sessionStorage.setItem("auth_next", window.location.pathname);
-        window.location.href = "/login";
+        const next = window.location.pathname + window.location.search + window.location.hash;
+        window.sessionStorage.setItem("auth_next", next);
+        window.location.href = loginUrlFor(next);
       }
     }
     return Promise.reject(err);
