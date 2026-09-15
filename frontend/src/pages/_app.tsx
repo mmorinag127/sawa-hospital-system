@@ -5,6 +5,7 @@ import { getStoredAuthHeader } from "../services/apiClient";
 import PageTemplate from "../components/PageTemplate";
 import UnifiedShell from "../components/UnifiedShell";
 import { watchBrowserLogout } from "../services/browserSession";
+import { loginUrlFor } from "../services/loginDestination";
 import "../styles/sawa-template.css";
 
 const PUBLIC_ROUTES = new Set(["/login", "/logout", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
@@ -26,7 +27,7 @@ export default function App({ Component, pageProps }: AppProps) {
     if (!header && typeof window !== "undefined") {
       const nextPath = router.asPath || "/";
       window.sessionStorage.setItem("auth_next", nextPath);
-      window.location.href = portalUrl || "/login";
+      window.location.href = portalUrl ? new URL(loginUrlFor(nextPath), portalUrl).toString() : loginUrlFor(nextPath);
     }
   }, [router.isReady, router.pathname, router.asPath]);
 

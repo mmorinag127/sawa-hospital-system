@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/router";
 import PublicNav from "../components/PublicNav";
 import { setBearerToken } from "../services/apiClient";
+import { resolveLoginDestination } from "../services/loginDestination";
+import { prepareSystemDestination } from "../services/systemNavigation";
+import { watchBrowserLogout } from "../services/browserSession";
 
 declare global {
   interface Window {
@@ -11,23 +13,54 @@ declare global {
 }
 
 export default function LoginPage() {
-  const router = useRouter();
   const envClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
   const [clientId, setClientId] = useState(envClientId);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const [googleReady, setGoogleReady] = useState(false);
   const [message, setMessage] = useState("");
   const [configMessage, setConfigMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
+  const mounted = useRef(true);
+  const attempt = useRef<AbortController | null>(null);
+
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; attempt.current?.abort(); }; }, []);
 
   useEffect(() => {
     const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
-    if (portalUrl) window.location.replace(portalUrl);
+    if (portalUrl && new URL(portalUrl).origin !== window.location.origin) {
+      try {
+        const login = new URL("/login", portalUrl);
+        login.searchParams.set("next", resolveLoginDestination(window.location.search, window.sessionStorage.getItem("auth_next")));
+        window.location.replace(login.toString());
+      } catch { setMessage("復帰先が不正です。統合トップから開き直してください。"); }
+    }
   }, []);
 
-  const redirectAfterLogin = () => {
-    const next = window.sessionStorage.getItem("auth_next") || "/";
-    window.sessionStorage.removeItem("auth_next");
-    router.push(next);
+  const redirectAfterLogin = async (credential: string) => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setMessage("");
+    const controller = new AbortController();
+    attempt.current = controller;
+    const stopWatching = watchBrowserLogout(() => controller.abort());
+    try {
+      const next = resolveLoginDestination(window.location.search, window.sessionStorage.getItem("auth_next"));
+      const destination = await prepareSystemDestination(next, `Bearer ${credential}`, controller.signal);
+      if (!mounted.current || controller.signal.aborted) return;
+      setBearerToken(credential);
+      window.sessionStorage.removeItem("auth_next");
+      // A full navigation runs the subsystem's server-side session guard.
+      window.location.replace(destination);
+    } catch (error) {
+      if (mounted.current) setMessage(error instanceof Error ? error.message : "ログインを確認できませんでした。");
+    } finally {
+      stopWatching();
+      attempt.current = null;
+      submitting.current = false;
+      if (mounted.current) setBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -65,9 +98,7 @@ export default function LoginPage() {
             setMessage("Googleログインに失敗しました。");
             return;
           }
-          setBearerToken(response.credential);
-          setMessage("");
-          redirectAfterLogin();
+          void redirectAfterLogin(response.credential);
         },
       });
       window.google.accounts.id.renderButton(googleButtonRef.current, {
@@ -136,7 +167,8 @@ export default function LoginPage() {
         )}
       </section>
 
-      {message && <p className="message">{message}</p>}
+      {busy && <p role="status">利用権限を確認して、元の画面を開いています…</p>}
+      {message && <p className="message" role="alert">{message}</p>}
 
       <style jsx>{`
         :global(body) {
