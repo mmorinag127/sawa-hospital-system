@@ -1,0 +1,93 @@
+name: Rerun Verified OCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        options: [stg, prod]
+        required: true
+      manifest:
+        type: string
+        required: true
+      manifest_sha256:
+        type: string
+        required: true
+      confirmation:
+        description: Enter RERUN_OCR
+        type: string
+        required: true
+      include_confirmed:
+        description: Explicitly approve discarding saved sheets and confirmed outputs
+        type: boolean
+        default: false
+
+concurrency:
+  group: verified-ocr-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    environment: ${{ inputs.target == 'prod' && 'production' || 'staging' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify owner approval and source
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          TARGET: ${{ inputs.target }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "$ACTOR" = "$OWNER"
+          test "$CONFIRMATION" = RERUN_OCR
+          git fetch origin develop
+          if [ "$TARGET" = prod ]; then
+            case "$GITHUB_REF_NAME" in release/prod-*) ;; *) exit 1 ;; esac
+            git merge-base --is-ancestor origin/develop HEAD
+          else
+            test "$GITHUB_REF_NAME" = develop
+            test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"
+          fi
+      - name: Test selection guards
+        run: python3 -m unittest discover -s .github/operations -p 'test_*.py'
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: sawahospitalsystem
+          workload_identity_provider: ${{ inputs.target == 'prod' && secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ inputs.target == 'prod' && secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD || secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ inputs.target == 'prod' && '167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com' || vars.STG_GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Reprocess reviewed originals
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth.outputs.id_token }}
+          TARGET: ${{ inputs.target }}
+          MANIFEST: ${{ inputs.manifest }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          INCLUDE_CONFIRMED: ${{ inputs.include_confirmed }}
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          gcloud run services describe "worker-$TARGET" --project=sawahospitalsystem --region=asia-northeast2 \
+            --format='json(status.latestReadyRevisionName,status.traffic,spec.template.spec.containers[0].image)' > verification/worker.json
+          extra=()
+          if [ "$INCLUDE_CONFIRMED" = true ]; then extra+=(--include-confirmed); fi
+          python3 .github/operations/rerun_verified_ocr.py --target "$TARGET" \
+            --manifest "$MANIFEST" --manifest-sha256 "$MANIFEST_SHA256" \
+            --output-dir verification --execute "${extra[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-ocr-${{ inputs.target }}
+          path: verification/
+          retention-days: 7
