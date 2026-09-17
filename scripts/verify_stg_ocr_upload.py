@@ -60,6 +60,8 @@ def main():
             raise RuntimeError('Duplicate FAX; no implicit rerun is permitted')
         uploaded_id = upload['uploaded_pdf_id']
         evidence = None
+        canonical_started = False
+        previous_evidence_id = None
         deadline = time.monotonic() + 1200
         while time.monotonic() < deadline:
             state = request('/ingest/uploads/' + uploaded_id)
@@ -71,12 +73,27 @@ def main():
                 except urllib.error.HTTPError as error:
                     if error.code != 404:
                         raise
-                if evidence and evidence.get('status') == 'done':
+                if evidence:
+                    (folder / 'evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
+                if state.get('status') == 'completed' and not canonical_started:
+                    previous_evidence_id = evidence.get('id') if evidence else None
+                    period = case['week_id'].split('@', 1)[1].split('~')
+                    context = request(f'/orders/{oid}/workflow-v2/context', json.dumps({
+                        'facility_id': case['facility_id'], 'week_start': period[0], 'week_end': period[1],
+                    }).encode(), 'application/json')
+                    (folder / 'context.json').write_text(json.dumps(context, ensure_ascii=False, indent=2))
+                    started = request(f'/orders/{oid}/workflow-v2/ocr-runs', b'{"mode":"hakodate"}', 'application/json')
+                    (folder / 'ocr-start.json').write_text(json.dumps(started, ensure_ascii=False, indent=2))
+                    canonical_started = True
+                    deadline = time.monotonic() + 1200
+                    evidence = None
+                    continue
+                if canonical_started and evidence and evidence.get('id') != previous_evidence_id and evidence.get('status') == 'done' and evidence.get('producer_version') == 'hakodate_best_method_pipeline':
                     break
             if state.get('status') in ('failed', 'error', 'manual_review'):
                 raise RuntimeError('Upload stopped: ' + json.dumps(state, ensure_ascii=False))
             time.sleep(15)
-        if not evidence or evidence.get('status') != 'done':
+        if not canonical_started or not evidence or evidence.get('id') == previous_evidence_id or evidence.get('status') != 'done' or evidence.get('producer_version') != 'hakodate_best_method_pipeline':
             raise TimeoutError('OCR evidence did not complete')
         (folder / 'evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
         workflow = request(f'/orders/{oid}/workflow-v2')
