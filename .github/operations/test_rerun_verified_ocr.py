@@ -1,5 +1,6 @@
 import unittest
 from copy import deepcopy
+from pathlib import Path
 from rerun_verified_ocr import validate_case
 
 
@@ -54,6 +55,21 @@ class SelectionTests(unittest.TestCase):
         self.order['is_archived'] = True
         with self.assertRaises(ValueError):
             validate_case(self.case, self.order, self.workflow, True)
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_ocr_mode_keeps_deploy_jobs_off_and_uses_existing_identity(self):
+        folder = Path(__file__).resolve().parents[1] / 'workflows'
+        prod = (folder / 'deploy-prod.yml').read_text()
+        stg = (folder / 'deploy-stg.yml').read_text()
+        for name in ['build-backend', 'build-frontend']:
+            self.assertIn(f"  {name}:\n    needs: source-gate\n    if: inputs.ocr_rerun_manifest == ''", prod)
+        self.assertIn('if [ -n "$OCR_RERUN_MANIFEST" ]; then\n            echo "backend_changed=false"', stg)
+        for target, text in [('PROD', prod), ('STG', stg)]:
+            self.assertIn(f'workload_identity_provider: ${{{{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_{target} }}}}', text)
+            self.assertIn('test "$CONFIRMATION" = RERUN_OCR', text)
+        self.assertIn('environment: production', prod.split('  source-gate:')[0])
+        self.assertFalse((folder / 'rerun-ocr.yml').exists())
 
 
 if __name__ == '__main__':

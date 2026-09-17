@@ -13,6 +13,21 @@ on:
       - ".github/workflows/deploy-prod.yml"
   workflow_dispatch:
     inputs:
+      ocr_rerun_manifest:
+        description: Optional reviewed GCS manifest; OCR-only mode, no deployment
+        type: string
+        required: false
+      ocr_rerun_manifest_sha256:
+        type: string
+        required: false
+      ocr_rerun_confirmation:
+        description: Enter RERUN_OCR for OCR-only mode
+        type: string
+        required: false
+      ocr_rerun_include_confirmed:
+        description: Explicitly approve discarding saved sheets and confirmed outputs
+        type: boolean
+        default: false
       order_id:
         description: "Production smoke order id"
         required: false
@@ -49,6 +64,62 @@ env:
   CLOUD_SQL_PROXY_SHA256: "fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb"
 
 jobs:
+
+  rerun-verified-ocr:
+    needs: source-gate
+    if: github.event_name == 'workflow_dispatch' && inputs.ocr_rerun_manifest != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require explicit OCR approval
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          CONFIRMATION: ${{ inputs.ocr_rerun_confirmation }}
+        run: |
+          set -euo pipefail
+          test "$ACTOR" = "$OWNER"
+          test "$CONFIRMATION" = RERUN_OCR
+      - name: Test selection guards
+        run: python3 -m unittest discover -s .github/operations -p 'test_*.py'
+      - id: auth-rerun
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Reprocess reviewed originals without deployment
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-rerun.outputs.id_token }}
+          MANIFEST: ${{ inputs.ocr_rerun_manifest }}
+          MANIFEST_SHA256: ${{ inputs.ocr_rerun_manifest_sha256 }}
+          INCLUDE_CONFIRMED: ${{ inputs.ocr_rerun_include_confirmed }}
+        run: |
+          set -euo pipefail
+          mkdir -p verification-ocr
+          gcloud run services describe "$WORKER_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
+            --format='json(status.latestReadyRevisionName,status.traffic,spec.template.spec.containers[0].image)' > verification-ocr/worker.json
+          extra=()
+          if [ "$INCLUDE_CONFIRMED" = true ]; then extra+=(--include-confirmed); fi
+          python3 .github/operations/rerun_verified_ocr.py --target prod \
+            --manifest "$MANIFEST" --manifest-sha256 "$MANIFEST_SHA256" \
+            --output-dir verification-ocr --execute "${extra[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-ocr-prod
+          path: verification-ocr/
+          retention-days: 7
+
   source-gate:
     runs-on: ubuntu-latest
     outputs:
@@ -92,6 +163,7 @@ jobs:
 
   build-backend:
     needs: source-gate
+    if: inputs.ocr_rerun_manifest == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -165,6 +237,7 @@ jobs:
 
   build-frontend:
     needs: source-gate
+    if: inputs.ocr_rerun_manifest == ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
