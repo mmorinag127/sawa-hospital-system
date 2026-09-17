@@ -2448,7 +2448,30 @@ def _row_intersection_correct_ys(
         corrected_xs=[float(value) for value in corrected_xs],
     )
     y_clusters = _filter_structural_y_clusters(voted_y_clusters)
-    corrected, structural_evidence = _ordered_match_y_clusters_to_template(template_ys=template_ys, y_clusters=y_clusters)
+    # Menu cardinality is not the number of printed bands. In particular,
+    # month-end sheets retain blank days below the last ordered meal.
+    body_starts = [
+        index for index, cluster in enumerate(y_clusters)
+        if index > 0
+        and 0 in cluster.get("column_votes", [])
+        and 3 in cluster.get("column_votes", [])
+        and 4 in cluster.get("column_votes", [])
+    ]
+    if not body_starts or body_starts[0] < STEP_REVIEW_HEADER_BANDS:
+        return None, {"used": False, "reason": "fax_body_header_boundary_unresolved", **detection}
+    body_start = body_starts[0]
+    selected = [*y_clusters[:STEP_REVIEW_HEADER_BANDS], *y_clusters[body_start:]]
+    corrected = [float(cluster["value"]) for cluster in selected]
+    structural_evidence = {
+        "used": True,
+        "reason": "observed_fax_boundaries_including_blank_bands",
+        "body_start_cluster_index": body_start,
+        "detected_body_band_count": len(corrected) - STEP_REVIEW_HEADER_BANDS - 1,
+        "body_day_boundary_indexes": [
+            index for index, cluster in enumerate(y_clusters[body_start:])
+            if 0 in cluster.get("column_votes", [])
+        ],
+    }
     evidence = {
         "used": False,
         "method": "full_table_intersection_structural_y_axis_correction",
@@ -2467,7 +2490,7 @@ def _row_intersection_correct_ys(
     height_evidence = _row_height_outlier_evidence(corrected)
     evidence["row_height_quality"] = height_evidence
     evidence["corrected_ys"] = [round(float(value), 3) for value in corrected]
-    evidence["y_offsets_px"] = [round(float(value) - float(template_ys[index]), 3) for index, value in enumerate(corrected)]
+    evidence["y_offsets_px"] = []
     evidence["used"] = True
     if height_evidence.get("manual_review_required"):
         evidence["reason"] = "applied_with_row_height_manual_review_required"
@@ -3171,11 +3194,12 @@ def _align_axes(
         corrected_xs=[float(value) for value in matched_xs],
         template_ys=template_ys,
     )
-    if row_corrected_ys is not None:
-        adjusted_ys = [float(value) for value in row_corrected_ys]
+    if row_corrected_ys is None:
+        raise ValueError(str(row_y_match.get("reason") or "fax_row_boundaries_unresolved"))
+    adjusted_ys = [float(value) for value in row_corrected_ys]
     manual_row_ys = normalize_row_axis_override(
         row_axis_override,
-        expected_count=len(template_ys),
+        expected_count=len(adjusted_ys),
         canvas_height=rectified_fax.shape[0],
     )
     if manual_row_ys is not None:

@@ -12,6 +12,11 @@ on:
       - "Taskfile.yml"
       - ".github/workflows/deploy-stg.yml"
   workflow_dispatch:
+    inputs:
+      ocr_verification_manifest:
+        description: "Optional staging GCS manifest of identity-verified FAX uploads"
+        required: false
+        type: string
 
 concurrency:
   group: deploy-stg
@@ -291,6 +296,19 @@ jobs:
         with:
           name: live-label-display-stg
           path: verification/
+          retention-days: 7
+
+      - name: Verify explicitly requested staging OCR uploads
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+          OCR_MANIFEST: ${{ inputs.ocr_verification_manifest }}
+        run: python3 scripts/verify_stg_ocr_upload.py --manifest "$OCR_MANIFEST" --output-dir ocr-verification
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        with:
+          name: live-ocr-stg
+          path: ocr-verification/
           retention-days: 7
 
   deploy-frontend:

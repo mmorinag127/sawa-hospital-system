@@ -881,6 +881,8 @@ def build_best_method_for_manifest_item(
             "row_axis_template_body_row_count": row_axis_evidence.get("template_body_row_count"),
             "row_axis_row_edge_count": row_axis_evidence.get("row_edge_count"),
             "row_axis": row_axis_evidence,
+            "row_mesh_dewarp": axis_evidence.get("row_mesh_dewarp"),
+            "row_structure": (axis_evidence.get("row_intersection_y_match") or {}).get("structural_match"),
             "draft_sheet_body_row_count": draft_row_edges_evidence.get("draft_body_row_count"),
             "draft_sheet_row_edges_applied": bool(draft_row_edges_evidence.get("applied")),
             "draft_sheet_row_edges_reason": draft_row_edges_evidence.get("reason"),
