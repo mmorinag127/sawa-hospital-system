@@ -2235,7 +2235,13 @@ def _detect_table_intersections_for_row_axis(
     corrected_xs: list[float],
     template_ys: list[int],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    h_mask, v_mask = _split_line_masks(rectified_bgr)
+    # FAX dithering breaks thin blank-cell rulings into short runs. Join only
+    # two-pixel horizontal gaps before extracting lines; retain observed edges.
+    gray = cv2.cvtColor(rectified_bgr, cv2.COLOR_BGR2GRAY)
+    _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    joined = cv2.morphologyEx(inv, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1)))
+    h_mask = cv2.morphologyEx(joined, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(18, inv.shape[1] // 55), 1)))
+    v_mask = cv2.morphologyEx(inv, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(18, inv.shape[0] // 75))))
     x0 = max(0, int(round(float(corrected_xs[0]))) - 14)
     x1 = min(rectified_bgr.shape[1], int(round(float(corrected_xs[-1]))) + 14)
     y0 = max(0, int(round(float(template_ys[0]))) - 18)
@@ -2449,7 +2455,7 @@ def _row_intersection_correct_ys(
     )
     y_clusters = _filter_structural_y_clusters(voted_y_clusters)
     # Menu cardinality is not the number of printed bands. In particular,
-    # month-end sheets retain blank days below the last ordered meal.
+    # split-month sheets retain blank days before or after the ordered meals.
     body_starts = [
         index for index, cluster in enumerate(y_clusters)
         if index > 0
@@ -2562,13 +2568,25 @@ def _step_review_physical_row_map(worksheet: Any, *, row_count: int) -> dict[int
     return rows
 
 
-def _step_review_draft_sheet_row_map(draft_sheet: dict[str, Any] | None, *, row_count: int) -> dict[int, dict[str, Any]]:
+def _step_review_draft_sheet_row_map(
+    draft_sheet: dict[str, Any] | None, *, row_count: int,
+    menu_body_row_indexes: list[int] | None = None,
+) -> dict[int, dict[str, Any]]:
     if not isinstance(draft_sheet, dict):
         return {}
     fields = [str(field or "").strip() for field in (draft_sheet.get("fields") or [])]
     rows = [row for row in (draft_sheet.get("rows") or []) if isinstance(row, list)]
     if not fields or not rows:
         return {}
+    if menu_body_row_indexes is None:
+        raise ValueError("fax_menu_row_mapping_unresolved")
+    if (
+        len(menu_body_row_indexes) != len(rows)
+        or any(type(value) is not int or value < 0 for value in menu_body_row_indexes)
+        or any(b <= a for a, b in zip(menu_body_row_indexes, menu_body_row_indexes[1:]))
+        or any(STEP_REVIEW_HEADER_BANDS + value >= row_count for value in menu_body_row_indexes)
+    ):
+        raise ValueError("fax_menu_row_mapping_invalid")
     field_index = {field: idx for idx, field in enumerate(fields) if field}
     date_idx = field_index.get("date_mmdd", field_index.get("date"))
     daypart_idx = field_index.get("daypart")
@@ -2578,9 +2596,7 @@ def _step_review_draft_sheet_row_map(draft_sheet: dict[str, Any] | None, *, row_
     mapped: dict[int, dict[str, Any]] = {}
     last_date = ""
     for payload_row_index, row in enumerate(rows):
-        row_index = STEP_REVIEW_HEADER_BANDS + payload_row_index
-        if row_index >= row_count:
-            break
+        row_index = STEP_REVIEW_HEADER_BANDS + menu_body_row_indexes[payload_row_index]
         worksheet_row = STEP_REVIEW_BODY_START_ROW + payload_row_index
 
         def _cell(index: int | None) -> str:
@@ -2614,6 +2630,7 @@ def _step_review_merged_or_single_cell_bbox(
     row_edges: list[float],
     column_edges: list[float],
     merged_cells: dict[tuple[int, int], dict[str, Any]],
+    worksheet_grid_rows: dict[int, int] | None = None,
 ) -> tuple[list[float], dict[str, Any] | None]:
     merged = merged_cells.get((worksheet_row, worksheet_col))
     if not merged:
@@ -2623,15 +2640,14 @@ def _step_review_merged_or_single_cell_bbox(
             row_edges=row_edges,
             column_edges=column_edges,
         ), None
-    start_row_index = _step_review_worksheet_row_to_grid_index(int(merged["min_row"]))
-    end_row_index = _step_review_worksheet_row_to_grid_index(int(merged["max_row"]))
+    if worksheet_grid_rows is not None:
+        start_row_index = worksheet_grid_rows.get(int(merged["min_row"]))
+        end_row_index = worksheet_grid_rows.get(int(merged["max_row"]))
+    else:
+        start_row_index = _step_review_worksheet_row_to_grid_index(int(merged["min_row"]))
+        end_row_index = _step_review_worksheet_row_to_grid_index(int(merged["max_row"]))
     if start_row_index is None or end_row_index is None:
-        return _single_cell_bbox(
-            row_index=row_index,
-            col_index=col_index,
-            row_edges=row_edges,
-            column_edges=column_edges,
-        ), None
+        raise ValueError("fax_merged_cell_row_mapping_unresolved")
     start_col_index = max(0, int(merged["min_col"]) - 1)
     end_col_index = max(0, int(merged["max_col"]) - 1)
     if (
@@ -2642,12 +2658,7 @@ def _step_review_merged_or_single_cell_bbox(
         or end_col_index < start_col_index
         or end_row_index < start_row_index
     ):
-        return _single_cell_bbox(
-            row_index=row_index,
-            col_index=col_index,
-            row_edges=row_edges,
-            column_edges=column_edges,
-        ), None
+        raise ValueError("fax_merged_cell_bounds_invalid")
     return [
         float(column_edges[start_col_index]),
         float(row_edges[start_row_index]),
@@ -3391,6 +3402,7 @@ def _post_menu_target_regions(
     fax_template: dict[str, Any] | None = None,
     horizontal_line_mask: np.ndarray | None = None,
     draft_sheet: dict[str, Any] | None = None,
+    menu_body_row_indexes: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     col_count = min(int(worksheet.max_column or 0), len(column_edges) - 1)
     slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
@@ -3414,10 +3426,16 @@ def _post_menu_target_regions(
     # the menu column must stay visible to OCR.  Downstream sheet/materialization
     # logic decides how totals, notes, and helper columns aggregate.
     target_cols = list(range(menu_col + 1, col_count + 1))
-    draft_row_map = _step_review_draft_sheet_row_map(draft_sheet, row_count=len(row_edges) - 1)
+    draft_row_map = _step_review_draft_sheet_row_map(
+        draft_sheet, row_count=len(row_edges) - 1, menu_body_row_indexes=menu_body_row_indexes,
+    )
     if draft_sheet is not None and not draft_row_map:
         raise ValueError("hakodate_draft_sheet_row_map_unresolved")
-    physical_row_map = draft_row_map or _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
+    physical_row_map = draft_row_map if draft_sheet is not None else _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
+    worksheet_grid_rows = (
+        {int(meta["worksheet_row"]): index for index, meta in draft_row_map.items()}
+        if draft_sheet is not None else None
+    )
     merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)  # noqa: SLF001
     by_region_id: dict[str, dict[str, Any]] = {}
     blank_menu_row_count = 0
@@ -3448,6 +3466,7 @@ def _post_menu_target_regions(
                 row_edges=row_edges,
                 column_edges=column_edges,
                 merged_cells=merged_cells,
+                worksheet_grid_rows=worksheet_grid_rows,
             )
             sheet_cell = f"{get_column_letter(worksheet_col)}{worksheet_row}"
             physical_split_from_excel_merge: dict[str, Any] | None = None

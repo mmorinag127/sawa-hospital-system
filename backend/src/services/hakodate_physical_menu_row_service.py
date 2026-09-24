@@ -1,7 +1,61 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
+
+from src.services import sheet_week_service
+
+
+def resolve_fax_menu_row_indexes(sheet: dict[str, Any], row_match: dict[str, Any]) -> list[int]:
+    """Map canonical menu rows into the observed Sunday-to-Saturday FAX grid."""
+    row_ids = sheet.get("physical_menu_row_ids")
+    count, _ = physical_row_count_from_sheet(sheet)
+    if (
+        not isinstance(row_ids, list)
+        or any(not isinstance(value, str) for value in row_ids)
+        or len(row_ids) != count
+        or len(set(row_ids)) != count
+    ):
+        raise ValueError("physical_menu_row_ids_unresolved")
+    try:
+        dates = [date.fromisoformat(value.split("__", 1)[0]) for value in row_ids]
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("physical_menu_row_dates_unresolved") from None
+    if not dates or dates != sorted(dates):
+        raise ValueError("physical_menu_row_dates_unresolved")
+    _, start, end = sheet_week_service.parse_sheet_week_value(sheet.get("week_id"))
+    if start is None or end is None:
+        raise ValueError("physical_menu_week_unresolved")
+    expected_dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    if list(dict.fromkeys(dates)) != expected_dates:
+        raise ValueError("physical_menu_days_disagree_with_order_period")
+    _, calendar_start, calendar_end = sheet_week_service.parse_sheet_week_value(
+        sheet_week_service.build_calendar_week_value(start)
+    )
+    if calendar_start is None or calendar_end is None or end > calendar_end:
+        raise ValueError("fax_calendar_week_unresolved")
+    structural = row_match.get("structural_match")
+    if not isinstance(structural, dict):
+        raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")
+    boundaries = structural.get("body_day_boundary_indexes")
+    day_count = (calendar_end - calendar_start).days + 1
+    if (
+        not isinstance(boundaries, list)
+        or len(boundaries) != day_count + 1
+        or any(type(value) is not int for value in boundaries)
+        or boundaries[0] != 0
+        or any(b <= a for a, b in zip(boundaries, boundaries[1:]))
+        or boundaries[-1] != structural.get("detected_body_band_count")
+    ):
+        raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")
+    indexes: list[int] = []
+    for menu_date in expected_dates:
+        day_index = (menu_date - calendar_start).days
+        first, last = boundaries[day_index:day_index + 2]
+        if last - first != dates.count(menu_date):
+            raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")
+        indexes.extend(range(first, last))
+    return indexes
 
 
 def physical_row_key_from_entry(entry: dict[str, Any], fallback_index: int) -> tuple[str, str, str] | None:
