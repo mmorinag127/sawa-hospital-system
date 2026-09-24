@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -15,11 +16,11 @@ BASE = 'https://web-stg-avlnzjjrca-dt.a.run.app/api'
 BUCKET = 'gs://sawahospitalsystem-stg-raw/'
 
 
-def request(path, body=None, content_type=None):
+def request(path, body=None, content_type=None, method=None):
     headers = {'Authorization': 'Bearer ' + os.environ['VERIFICATION_TOKEN']}
     if content_type:
         headers['Content-Type'] = content_type
-    req = urllib.request.Request(BASE + path, data=body, headers=headers)
+    req = urllib.request.Request(BASE + path, data=body, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=180) as response:
         return json.load(response)
 
@@ -28,6 +29,29 @@ def download(uri, path):
     if not uri.startswith(BUCKET):
         raise ValueError('Verification artifacts must belong to staging')
     subprocess.run(['gcloud', 'storage', 'cp', uri, str(path)], check=True)
+
+
+def apply_verified_quad(case, order_id):
+    if 'approved_quad' not in case:
+        return None
+    quad = case['approved_quad']
+    if (
+        not isinstance(quad, dict)
+        or case.get('identity_verified') is not True
+        or quad.get('coordinate_space') != {'mode': 'render_width', 'width': 1864}
+        or quad.get('decision') not in ('approved_estimate', 'manual_override')
+        or not isinstance(quad.get('quad_px'), list)
+        or len(quad['quad_px']) != 4
+        or any(not isinstance(point, list) or len(point) != 2 for point in quad['quad_px'])
+        or any(type(value) not in (int, float) or not math.isfinite(value)
+               for point in quad['quad_px'] for value in point)
+    ):
+        raise ValueError('Verified operator quad with render_width=1864 is required')
+    return request(
+        f'/orders/{order_id}/workflow-v2/quad-review',
+        json.dumps({'decision': quad['decision'], 'quad_px': quad['quad_px']}).encode(),
+        'application/json', method='PUT',
+    )
 
 
 def main():
@@ -82,6 +106,9 @@ def main():
                         'facility_id': case['facility_id'], 'week_start': period[0], 'week_end': period[1],
                     }).encode(), 'application/json')
                     (folder / 'context.json').write_text(json.dumps(context, ensure_ascii=False, indent=2))
+                    quad_review = apply_verified_quad(case, oid)
+                    if quad_review is not None:
+                        (folder / 'quad-review.json').write_text(json.dumps(quad_review, ensure_ascii=False, indent=2))
                     started = request(f'/orders/{oid}/workflow-v2/ocr-runs', b'{"mode":"hakodate"}', 'application/json')
                     (folder / 'ocr-start.json').write_text(json.dumps(started, ensure_ascii=False, indent=2))
                     canonical_started = True
