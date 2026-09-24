@@ -1051,18 +1051,8 @@ def _draft_sheet_body_row_count_source(draft_sheet: dict[str, Any] | None) -> st
     return source
 
 
-def _validate_menu_day_boundaries(sheet: dict[str, Any], row_match: dict[str, Any]) -> None:
-    row_ids = sheet.get("physical_menu_row_ids")
-    if not isinstance(row_ids, list) or len(row_ids) != _draft_sheet_body_row_count(sheet):
-        raise ValueError("physical_menu_row_ids_unresolved")
-    dates = [str(value).split("__", 1)[0] for value in row_ids]
-    if not dates or any(not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in dates):
-        raise ValueError("physical_menu_row_dates_unresolved")
-    expected = [0] + [index for index in range(1, len(dates)) if dates[index] != dates[index - 1]] + [len(dates)]
-    observed = (row_match.get("structural_match") or {}).get("body_day_boundary_indexes", [])
-    ordered_boundaries = [int(value) for value in observed if int(value) <= len(dates)]
-    if ordered_boundaries != expected:
-        raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")
+def _validate_menu_day_boundaries(sheet: dict[str, Any], row_match: dict[str, Any]) -> list[int]:
+    return hakodate_physical_menu_row_service.resolve_fax_menu_row_indexes(sheet, row_match)
 
 
 
@@ -1159,7 +1149,7 @@ def _build_preprocess_for_ocr(
     detected_body_count = len(row_axis_ys) - STEP_REVIEW_HEADER_BANDS - 1
     if detected_body_count < target_body_count:
         raise ValueError("fax_row_boundaries_shorter_than_menu")
-    _validate_menu_day_boundaries(draft_sheet, axis_evidence["row_intersection_y_match"])
+    menu_row_indexes = _validate_menu_day_boundaries(draft_sheet, axis_evidence["row_intersection_y_match"])
     row_axis_evidence = {
         "applied": True,
         "reason": "observed_fax_boundaries_including_blank_bands",
@@ -1168,6 +1158,7 @@ def _build_preprocess_for_ocr(
         "draft_body_row_count_source": _draft_sheet_body_row_count_source(draft_sheet),
         "detected_body_band_count": detected_body_count,
         "non_target_band_count": detected_body_count - target_body_count,
+        "menu_body_row_indexes": menu_row_indexes,
         "row_edge_count": len(row_axis_ys),
     }
     row_dewarp_evidence: dict[str, Any] = {"applied": False, "reason": "row_axis_not_available"}
@@ -1303,6 +1294,7 @@ def _build_preprocess_for_ocr(
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
         draft_sheet=draft_sheet,
+        menu_body_row_indexes=menu_row_indexes,
     )
     mark_timing("build_target_regions_seconds", step_t0)
     step_t0 = time.perf_counter()

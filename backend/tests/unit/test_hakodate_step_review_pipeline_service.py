@@ -897,6 +897,7 @@ def test_step_review_target_regions_use_draft_sheet_row_count_when_available() -
         column_edges=column_edges,
         row_edges=row_edges,
         draft_sheet=draft_sheet,
+        menu_body_row_indexes=list(range(63)),
     )
 
     assert evidence["row_source"] == "draft_sheet"
@@ -926,6 +927,41 @@ def test_step_review_target_regions_block_unresolved_draft_sheet_map() -> None:
             column_edges=column_edges,
             row_edges=row_edges,
             draft_sheet=draft_sheet,
+            menu_body_row_indexes=[0],
+        )
+
+
+@pytest.mark.parametrize("merged", [False, True])
+def test_draft_menu_cells_use_physical_rows_after_leading_blanks(merged) -> None:
+    worksheet = Workbook().active
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    if merged:
+        worksheet.merge_cells("E11:E12")
+    sheet = {"fields": ["date_mmdd", "daypart", "menu"], "rows": [["10/01", "朝", "A"], ["10/01", "朝", "B"]]}
+    regions, _ = _post_menu_target_regions(
+        worksheet=worksheet, column_edges=[float(i * 10) for i in range(6)],
+        row_edges=[float(i * 10) for i in range(59)], draft_sheet=sheet,
+        menu_body_row_indexes=[32, 33],
+    )
+    assert regions[0]["sheet_cell"] == "E11"
+    assert regions[0]["grid_row_index"] == 34
+    assert regions[0]["bbox"] == [40.0, 340.0, 50.0, 360.0 if merged else 350.0]
+    assert regions[0]["logical_targets"][0]["menu_name"] == "A"
+    assert len(regions) == (1 if merged else 2)
+
+
+@pytest.mark.parametrize("indexes", [None, [], [0, 0], [1, 0], [-1, 0], [55, 56]])
+def test_missing_or_invalid_physical_menu_mapping_blocks(indexes) -> None:
+    worksheet = Workbook().active
+    worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    sheet = {"fields": ["date_mmdd", "daypart", "menu"], "rows": [["10/01", "朝", "A"], ["10/01", "朝", "B"]]}
+    with pytest.raises(ValueError, match="fax_menu_row_mapping"):
+        _post_menu_target_regions(
+            worksheet=worksheet, column_edges=[float(i * 10) for i in range(6)],
+            row_edges=[float(i * 10) for i in range(59)], draft_sheet=sheet,
+            menu_body_row_indexes=indexes,
         )
 
 
