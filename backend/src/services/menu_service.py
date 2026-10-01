@@ -789,10 +789,6 @@ def _monthly_item_patch_from_source(meta: dict, master: MenuMaster | None) -> di
     if master is not None:
         # Rule-generated suggestions are not changes supplied by the operator.
         inherited_fields = set(meta.get("_inferred_master_fields", []))
-        inherited_fields.update(
-            field for field in ("unit_type", "qty_per_serving", "temp_type", "bag_max_qty", "bag_max_unit")
-            if field not in patch
-        )
         for field in inherited_fields:
             patch.pop(field, None)
             value = getattr(master, field, None)
@@ -2131,9 +2127,7 @@ def create_menu(
             if plan is None:
                 raise ValueError(f"menu master resolution plan not found: {name}")
             master = _materialize_upload_menu_master_plan(session, name, plan)
-            item_patch = _monthly_item_patch_from_source(
-                meta, master if plan.get("action") == "existing" else None
-            )
+            item_patch = _monthly_item_patch_from_source(meta, master)
             session.add(
                 MonthlyMenuItem(
                     id=item_id,

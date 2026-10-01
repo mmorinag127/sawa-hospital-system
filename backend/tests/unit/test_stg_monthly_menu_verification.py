@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -37,3 +39,13 @@ def test_verification_rejects_quantity_diff_but_keeps_other_warnings():
 def test_production_fixture_uri_is_not_read_by_staging_job():
     with pytest.raises(ValueError):
         verification.download("gs://sawahospitalsystem-prod-raw/file.xlsm")
+
+
+def test_only_exact_explicit_test_snapshot_can_be_replaced():
+    snapshot = payload()
+    digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    verification.verify_replace_snapshot(snapshot, digest)
+    with pytest.raises(RuntimeError):
+        verification.verify_replace_snapshot(snapshot, None)
+    with pytest.raises(RuntimeError):
+        verification.verify_replace_snapshot(payload(2), digest)
