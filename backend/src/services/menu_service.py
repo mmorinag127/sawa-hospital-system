@@ -757,6 +757,7 @@ def _apply_rule_payloads_to_items(items: list[dict], rules: list[dict]) -> list[
     enriched: list[dict] = []
     for item in items:
         updated = dict(item)
+        explicit_fields = set(_extract_master_patch(item, _MASTER_FIELDS))
         if rules:
             matches = [rule for rule in rules if _rule_applies_to_item(rule, item)]
             if matches:
@@ -776,8 +777,28 @@ def _apply_rule_payloads_to_items(items: list[dict], rules: list[dict]) -> list[
             updated["unit_type"] = _infer_unit_type(updated.get("name"))
         if not updated.get("temp_type"):
             updated["temp_type"] = _infer_temp_type(updated.get("name"))
+        updated["_inferred_master_fields"] = sorted(
+            set(_extract_master_patch(updated, _MASTER_FIELDS)) - explicit_fields
+        )
         enriched.append(updated)
     return enriched
+
+
+def _monthly_item_patch_from_source(meta: dict, master: MenuMaster | None) -> dict:
+    patch = _extract_master_patch(meta, _MASTER_FIELDS)
+    if master is not None:
+        # Rule-generated suggestions are not changes supplied by the operator.
+        inherited_fields = set(meta.get("_inferred_master_fields", []))
+        inherited_fields.update(
+            field for field in ("unit_type", "qty_per_serving", "temp_type", "bag_max_qty", "bag_max_unit")
+            if field not in patch
+        )
+        for field in inherited_fields:
+            patch.pop(field, None)
+            value = getattr(master, field, None)
+            if not _is_blank_value(value):
+                patch[field] = value
+    return patch
 
 
 def _parse_monthly_menu(
@@ -2060,6 +2081,11 @@ def create_menu(
                     "seed_fields": dict(seed_patch or {}),
                 }
             master_plans[name] = plan
+            if plan.get("action") == "existing":
+                plan["seed_fields"] = {
+                    field: value for field, value in (plan.get("seed_fields") or {}).items()
+                    if field not in meta.get("_inferred_master_fields", [])
+                }
             normalized_plan_name = _normalize_menu_name(name)
             if normalized_plan_name:
                 master_plans_by_normalized_name[normalized_plan_name] = plan
@@ -2105,7 +2131,9 @@ def create_menu(
             if plan is None:
                 raise ValueError(f"menu master resolution plan not found: {name}")
             master = _materialize_upload_menu_master_plan(session, name, plan)
-            item_patch = _extract_master_patch(meta, _MASTER_FIELDS)
+            item_patch = _monthly_item_patch_from_source(
+                meta, master if plan.get("action") == "existing" else None
+            )
             session.add(
                 MonthlyMenuItem(
                     id=item_id,
@@ -2213,8 +2241,6 @@ def _repair_monthly_menu_items_for_entries(session, month_id: str) -> int:
         }
         for rule in session.query(MenuRule).filter(MenuRule.active.is_(True)).all()
     ]
-    if not active_rules:
-        active_rules = [dict(rule) for rule in menu_rule_service.DEFAULT_GLOBAL_RULES]
     seed_items = _apply_rule_payloads_to_items(
         [
             {
@@ -2233,6 +2259,7 @@ def _repair_monthly_menu_items_for_entries(session, month_id: str) -> int:
         if not name:
             continue
         master = _find_menu_master_by_normalized(session, _normalize_menu_name(name))
+        seed = _monthly_item_patch_from_source(seed, master)
         session.add(
             MonthlyMenuItem(
                 id=f"MMI{uuid4().hex[:8]}",
@@ -2295,8 +2322,6 @@ def _missing_monthly_menu_item_payloads(
         }
         for rule in session.query(MenuRule).filter(MenuRule.active.is_(True)).all()
     ]
-    if not active_rules:
-        active_rules = [dict(rule) for rule in menu_rule_service.DEFAULT_GLOBAL_RULES]
     seed_items = _apply_rule_payloads_to_items(
         [
             {
@@ -2316,6 +2341,7 @@ def _missing_monthly_menu_item_payloads(
         if not name:
             continue
         master = _find_menu_master_by_normalized(session, _normalize_menu_name(name))
+        seed = _monthly_item_patch_from_source(seed, master)
         payloads.append(
             {
                 "id": f"{_REPAIRED_MENU_ITEM_ID_PREFIX}{entry.id}",
