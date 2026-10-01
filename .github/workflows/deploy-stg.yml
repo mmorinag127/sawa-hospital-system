@@ -17,6 +17,10 @@ on:
         description: "Optional staging GCS manifest of identity-verified FAX uploads"
         required: false
         type: string
+      menu_verification_manifest:
+        description: "Optional staging GCS manifest of verified production menu originals"
+        required: false
+        type: string
 
 concurrency:
   group: deploy-stg
@@ -296,6 +300,19 @@ jobs:
         with:
           name: live-label-display-stg
           path: verification/
+          retention-days: 7
+
+      - name: Verify explicitly requested staging monthly menus
+        if: github.event_name == 'workflow_dispatch' && inputs.menu_verification_manifest != ''
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+          MENU_MANIFEST: ${{ inputs.menu_verification_manifest }}
+        run: python3 scripts/verify_stg_monthly_menus.py --manifest "$MENU_MANIFEST" --output-dir menu-verification
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.menu_verification_manifest != ''
+        with:
+          name: live-menu-stg
+          path: menu-verification/
           retention-days: 7
 
       - name: Verify explicitly requested staging OCR uploads

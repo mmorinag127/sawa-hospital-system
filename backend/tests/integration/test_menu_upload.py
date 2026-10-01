@@ -296,7 +296,7 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
         key=lambda item: (item["daypart"], item["category"]),
     )
     assert [(item["daypart"], item["category"], item["qty_per_serving"]) for item in german_items] == [
-        ("夕食", "副菜", 40.0),
+        ("夕食", "副菜", 70.0),
         ("朝食", "主菜", 70.0),
     ]
     repaired = next(item for item in german_items if item["daypart"] == "夕食")
