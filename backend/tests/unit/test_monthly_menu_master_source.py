@@ -33,12 +33,13 @@ def database(monkeypatch):
     engine.dispose()
 
 
-def upload(monkeypatch, month, fields):
+def upload(monkeypatch, month, fields, resolutions=None):
     item = {"name": "Fish", "daypart": "夕食", "category": "主菜", **fields}
     monkeypatch.setattr(service, "_parse_monthly_menu", lambda *args: (
         date(2026, month, 1), None, [item], [],
     ))
-    return service.create_menu(f"2026-{month:02}", b"fixture", "menu.xlsx")
+    return service.create_menu(f"2026-{month:02}", b"fixture", "menu.xlsx",
+                               menu_master_resolutions=resolutions)
 
 
 @pytest.mark.parametrize("unit,quantity", [("cut", 1), ("count", 2)])
@@ -97,4 +98,21 @@ def test_master_quantity_does_not_depend_on_a_matching_default_rule():
     master = MenuMaster(unit_type="cut", qty_per_serving=1)
     source = service._apply_rule_payloads_to_items([{"name": "Fish"}], [])[0]
     patch = service._monthly_item_patch_from_source(source, master)
-    assert (patch["unit_type"], patch["qty_per_serving"]) == ("cut", 1)
+    assert patch["unit_type"] == "cut"
+    assert "qty_per_serving" not in patch
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_operator_resolution_overrides_inferred_values(database, monkeypatch, action):
+    if action == "update":
+        with database() as session:
+            session.add(MenuMaster(id="master", name="Fish", normalized_name="fish",
+                                   unit_type="g", qty_per_serving=100))
+    upload(monkeypatch, 10, {}, [{
+        "source_name": "Fish", "action": action, "unit_type": "cut", "qty_per_serving": 1,
+        "bag_max_qty": 16, "bag_max_unit": "cut",
+    }])
+    with database() as session:
+        item = session.query(MonthlyMenuItem).one()
+        assert (item.unit_type, item.qty_per_serving) == ("cut", 1)
+        assert service._build_menu_master_checks(session, [item], [])["issues"] == []

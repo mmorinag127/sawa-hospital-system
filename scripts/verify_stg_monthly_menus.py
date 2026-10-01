@@ -60,6 +60,12 @@ def validate(payload, masters, expected):
     return {"checked_existing_items": checked, "remaining_issues": len(issues)}
 
 
+def verify_replace_snapshot(payload, expected_sha256):
+    actual = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if not expected_sha256 or actual != expected_sha256:
+        raise RuntimeError("Existing month differs from the explicitly authorized test snapshot")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
@@ -83,13 +89,15 @@ def main():
                               "not_a_fixed_upload_verification": True,
                               "existing_issues": baseline["master_checks"]["count"]})
             continue
+        replacing = False
         try:
-            request("/monthly-menus/" + case["month"])
+            current = request("/monthly-menus/" + case["month"])
         except urllib.error.HTTPError as error:
             if error.code != 404:
                 raise
         else:
-            raise RuntimeError("Existing month must not be overwritten: " + case["month"])
+            verify_replace_snapshot(current, case.get("replace_test_snapshot_sha256"))
+            replacing = True
         before = {item["id"]: item for item in request("/menu-masters?limit=10000")["items"]}
         (folder / "masters-before.json").write_text(json.dumps(before, ensure_ascii=False, indent=2))
         try:
@@ -106,7 +114,7 @@ def main():
                 assert not any(item["normalized_name"] == issue["normalized_name"] for item in before.values()), issue
                 resolutions.append({**master, "source_name": issue["source_name"], "action": "create"})
             uploaded = upload(case, raw, resolutions)
-        assert uploaded["created"] and uploaded["replaced"] is False, uploaded
+        assert uploaded["created"] and uploaded["replaced"] is replacing, uploaded
         (folder / "upload.json").write_text(json.dumps(uploaded, ensure_ascii=False, indent=2))
         payload = request("/monthly-menus/" + case["month"])
         (folder / "menu.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2))
