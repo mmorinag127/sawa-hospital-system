@@ -1,6 +1,5 @@
 import importlib.util
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -43,9 +42,17 @@ def test_production_fixture_uri_is_not_read_by_staging_job():
 
 def test_only_exact_explicit_test_snapshot_can_be_replaced():
     snapshot = payload()
-    digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    digest = hashlib.sha256(verification.canonical_snapshot(snapshot).encode()).hexdigest()
     verification.verify_replace_snapshot(snapshot, digest)
     with pytest.raises(RuntimeError):
         verification.verify_replace_snapshot(snapshot, None)
     with pytest.raises(RuntimeError):
         verification.verify_replace_snapshot(payload(2), digest)
+
+
+def test_snapshot_ignores_item_order_but_preserves_all_values():
+    snapshot = {"items": [{"id": "b", "quantity": 1}, {"id": "a", "quantity": 2}]}
+    reordered = {"items": list(reversed(snapshot["items"]))}
+    assert verification.canonical_snapshot(snapshot) == verification.canonical_snapshot(reordered)
+    changed = {"items": [{"id": "a", "quantity": 2}, {"id": "b", "quantity": 3}]}
+    assert verification.canonical_snapshot(snapshot) != verification.canonical_snapshot(changed)

@@ -60,8 +60,14 @@ def validate(payload, masters, expected):
     return {"checked_existing_items": checked, "remaining_issues": len(issues)}
 
 
+def canonical_snapshot(payload):
+    normalized = dict(payload)
+    normalized["items"] = sorted(payload["items"], key=lambda item: item["id"])
+    return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+
+
 def verify_replace_snapshot(payload, expected_sha256):
-    actual = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    actual = hashlib.sha256(canonical_snapshot(payload).encode()).hexdigest()
     if not expected_sha256 or actual != expected_sha256:
         raise RuntimeError("Existing month differs from the explicitly authorized test snapshot")
 
@@ -96,6 +102,7 @@ def main():
             if error.code != 404:
                 raise
         else:
+            (folder / "before-replace.json").write_text(json.dumps(current, ensure_ascii=False, indent=2))
             verify_replace_snapshot(current, case.get("replace_test_snapshot_sha256"))
             replacing = True
         before = {item["id"]: item for item in request("/menu-masters?limit=10000")["items"]}
@@ -122,7 +129,7 @@ def main():
         after = {item["id"]: item for item in request("/menu-masters?limit=10000")["items"]}
         summary = validate(payload, after, case["expected_quantities"])
         reloaded = request("/monthly-menus/" + case["month"])
-        assert reloaded == payload, "Reload changed the menu response"
+        assert canonical_snapshot(reloaded) == canonical_snapshot(payload), "Reload changed the menu response"
         assert all(after[key] == value for key, value in before.items()), "Existing master was modified"
         summaries.append({"month": case["month"], "sha256": case["sha256"], **summary})
         (args.output_dir / "summary.json").write_text(json.dumps({
