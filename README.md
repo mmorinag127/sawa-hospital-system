@@ -18,3 +18,16 @@
 ## 開発の入口
 手元で動かす場合は `docs/quickstart.md` を参照してください。
 
+## Menu master production UI mock test
+
+`frontend/` で事前に `npm run build` を完了させた後、Playwright bundled WebKitで実行します。
+
+```sh
+cd frontend
+npx playwright install webkit
+npm run build
+E2E_PORT=31318 E2E_BASE_URL=http://127.0.0.1:31318 npx playwright test --config=playwright.menu-masters.config.js
+```
+
+このconfigは`tests/e2e/menu_masters.spec.ts`だけを対象にし、WebKit/headless、現行productionと同じ`npm run start`、`reuseExistingServer:false`を固定します。
+`E2E_PORT`は1024から65535の整数、`E2E_BASE_URL`は同一portの`http` localhost root URL（query/hash/userinfoなし）だけを受け付けます。

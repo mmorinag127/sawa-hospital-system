@@ -23,8 +23,13 @@ const asNullableNumber = (value: unknown): number | null => {
   return typeof value === "number" ? value : Number(value);
 };
 
-test("menu master page saves cut/count unit selections canonically", async ({ page }) => {
-  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+const entryPoints = [
+  { name: "root", path: "/menu-masters" },
+  { name: "hospital", path: "/hospital/menu-masters" },
+];
+
+for (const entryPoint of entryPoints) {
+  test(`menu master page saves cut/count unit selections canonically (${entryPoint.name})`, async ({ page }, testInfo) => {
 
   const state = {
     items: [
@@ -45,6 +50,7 @@ test("menu master page saves cut/count unit selections canonically", async ({ pa
 
   let createBody: Record<string, unknown> | null = null;
   let updateBody: Record<string, unknown> | null = null;
+  const unexpectedRequests: string[] = [];
 
   await page.addInitScript(() => {
     window.localStorage.setItem("auth_header", "Bearer e2e-token");
@@ -91,33 +97,104 @@ test("menu master page saves cut/count unit selections canonically", async ({ pa
       return;
     }
 
-    await route.fulfill({ status: 200, json: {} });
+    unexpectedRequests.push(`${method} ${path}`);
+    await route.fulfill({ status: 500, json: { detail: `Unexpected mocked API request: ${method} ${path}` } });
   });
 
-  await page.goto(`${baseUrl}/menu-masters`);
+  await page.goto(entryPoint.path);
 
   await expect(page.getByRole("heading", { name: "メニューマスター" })).toBeVisible();
 
   await page.getByPlaceholder("メニュー名 *").fill("タラのムニエル");
   await page.getByTestId("new-menu-master-unit-type").selectOption("cut");
   await page.getByTestId("new-menu-master-bag-max-unit").selectOption("count");
+  const createRequest = page.waitForRequest((request) =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/menu-masters",
+  );
+  const createResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && new URL(response.url()).pathname === "/api/menu-masters",
+  );
+  const createReload = page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/menu-masters",
+  );
   await page.getByRole("button", { name: "追加" }).click();
-
-  expect(createBody).toMatchObject({
+  expect((await createRequest).postDataJSON()).toMatchObject({
     name: "タラのムニエル",
     unit_type: "cut",
     bag_max_unit: "count",
   });
+  expect((await createResponse).status()).toBe(200);
+  await createReload;
+  await expect(page.getByTestId("menu-master-unit-type-MNU002")).toHaveValue("cut");
+  expect(createBody).toMatchObject({ name: "タラのムニエル" });
 
   await expect(page.getByTestId("menu-master-unit-type-MNU001")).toHaveValue("cut");
   await page.getByTestId("menu-master-unit-type-MNU001").selectOption("count");
   await page.getByTestId("menu-master-bag-max-unit-MNU001").selectOption("cut");
   await expect(page.getByTestId("menu-master-unit-type-MNU001")).toHaveValue("count");
   await expect(page.getByTestId("menu-master-bag-max-unit-MNU001")).toHaveValue("cut");
+  const updateRequest = page.waitForRequest((request) =>
+    request.method() === "PUT" && new URL(request.url()).pathname === "/api/menu-masters/MNU001",
+  );
+  const updateResponse = page.waitForResponse((response) =>
+    response.request().method() === "PUT" && new URL(response.url()).pathname === "/api/menu-masters/MNU001",
+  );
+  const updateReload = page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/menu-masters",
+  );
   await page.locator("tr").filter({ has: page.getByTestId("menu-master-unit-type-MNU001") }).getByRole("button", { name: "保存" }).click();
-
-  expect(updateBody).toMatchObject({
+  expect((await updateRequest).postDataJSON()).toMatchObject({
     unit_type: "count",
     bag_max_unit: "cut",
   });
-});
+  expect((await updateResponse).status()).toBe(200);
+  const savedListResponse = await updateReload;
+  expect(savedListResponse.status()).toBe(200);
+  expect(await savedListResponse.finished()).toBeNull();
+  const savedList = await savedListResponse.json();
+  const expectedRecord = { id: "MNU001", unit_type: "count", bag_max_unit: "cut" };
+  expect(savedList.items.find((item: MenuMasterStateItem) => item.id === "MNU001")).toMatchObject(expectedRecord);
+  expect(updateBody).toMatchObject({ unit_type: "count", bag_max_unit: "cut" });
+
+  await test.step("Reload a new document and render the saved MNU001 from GET", async () => {
+    const previousTimeOrigin = await page.evaluate(() => performance.timeOrigin);
+    const reloadGet = page.waitForResponse((response) =>
+      response.request().method() === "GET" && new URL(response.url()).pathname === "/api/menu-masters",
+    );
+    const documentResponse = await page.reload();
+    expect(documentResponse?.status()).toBe(200);
+    const reloadedListResponse = await reloadGet;
+    expect(reloadedListResponse.status()).toBe(200);
+    expect(await reloadedListResponse.finished()).toBeNull();
+    const reloadedList = await reloadedListResponse.json();
+    const reloadedRecord = reloadedList.items.find((item: MenuMasterStateItem) => item.id === "MNU001");
+    expect(reloadedRecord).toMatchObject(expectedRecord);
+
+    const navigation = await page.evaluate(() => ({
+      timeOrigin: performance.timeOrigin,
+      type: (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming).type,
+    }));
+    expect(navigation.type).toBe("reload");
+    expect(navigation.timeOrigin).toBeGreaterThan(previousTimeOrigin);
+    const unitType = page.getByTestId("menu-master-unit-type-MNU001");
+    const bagMaxUnit = page.getByTestId("menu-master-bag-max-unit-MNU001");
+    await expect(unitType).toHaveValue("count");
+    await expect(bagMaxUnit).toHaveValue("cut");
+
+    await testInfo.attach("saved-record-after-document-reload", {
+      body: JSON.stringify({
+        entryPath: entryPoint.path,
+        previousTimeOrigin,
+        navigation,
+        documentStatus: documentResponse?.status(),
+        getUrl: reloadedListResponse.url(),
+        getStatus: reloadedListResponse.status(),
+        record: reloadedRecord,
+        rendered: { id: "MNU001", unit_type: await unitType.inputValue(), bag_max_unit: await bagMaxUnit.inputValue() },
+      }, null, 2),
+      contentType: "application/json",
+    });
+  });
+  expect(unexpectedRequests).toEqual([]);
+  });
+}
