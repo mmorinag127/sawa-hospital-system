@@ -1,16 +1,14 @@
-import base64
-import importlib
 import pathlib
 import sys
 from datetime import datetime
 
 from fastapi.testclient import TestClient
 
+from auth_support import hospital_operator  # noqa: F401
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-import src.api.auth as auth_module  # noqa: E402
-import src.api.auth_config as auth_config_module  # noqa: E402
 import src.api.orders as orders_api  # noqa: E402
 import src.api.shipping as shipping_api  # noqa: E402
 from src.main import app  # noqa: E402
@@ -18,22 +16,8 @@ from src.services.shipping_service import ShippingRecord  # noqa: E402
 from src.services.sagawa_tracking_service import TrackingStatus  # noqa: E402
 
 
-def _basic_header(username: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {token}"}
-
-
-def _enable_operator_auth(monkeypatch) -> dict[str, str]:
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
-    return _basic_header("operator", "secret")
-
-
-def test_shipping_parse_auto_registers_tracking_statuses(monkeypatch, tmp_path):
-    headers = _enable_operator_auth(monkeypatch)
+def test_shipping_parse_auto_registers_tracking_statuses(monkeypatch, tmp_path, hospital_operator):
+    headers = hospital_operator.headers
     output_path = tmp_path / "shipping.xlsx"
     output_path.write_bytes(b"dummy-xlsx")
 
@@ -88,8 +72,8 @@ def test_shipping_parse_auto_registers_tracking_statuses(monkeypatch, tmp_path):
     assert captured["ship_date_by_tracking"] == {"1234-5678-9012": datetime(2026, 3, 12).date()}
 
 
-def test_shipping_enrich_auto_registers_tracking_status_metadata(monkeypatch, tmp_path):
-    headers = _enable_operator_auth(monkeypatch)
+def test_shipping_enrich_auto_registers_tracking_status_metadata(monkeypatch, tmp_path, hospital_operator):
+    headers = hospital_operator.headers
     output_path = tmp_path / "shipping_enriched.xlsx"
     output_path.write_bytes(b"dummy-xlsx")
 
@@ -145,8 +129,8 @@ def test_shipping_enrich_auto_registers_tracking_status_metadata(monkeypatch, tm
     assert captured["ship_date_by_tracking"] == {"123456789012": datetime(2026, 3, 14).date()}
 
 
-def test_refresh_pending_shipping_statuses(monkeypatch):
-    headers = _enable_operator_auth(monkeypatch)
+def test_refresh_pending_shipping_statuses(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     monkeypatch.setattr(
         shipping_api.shipping_status_store,
         "get_latest_pending_tracking_numbers",
@@ -185,8 +169,8 @@ def test_refresh_pending_shipping_statuses(monkeypatch):
     assert body["pending"] == 1
 
 
-def test_get_shipping_status_latest(monkeypatch):
-    headers = _enable_operator_auth(monkeypatch)
+def test_get_shipping_status_latest(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     monkeypatch.setattr(
         shipping_api.shipping_status_store,
         "get_latest_status_view",
@@ -240,8 +224,8 @@ def test_get_shipping_status_latest(monkeypatch):
     assert body["groups"][0]["items"][0]["tracking_number"] == "1234-5678-9012"
 
 
-def test_get_shipping_status_latest_rejects_invalid_view(monkeypatch):
-    headers = _enable_operator_auth(monkeypatch)
+def test_get_shipping_status_latest_rejects_invalid_view(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     def _raise(**_kwargs):
         raise ValueError("view must be active, all, attention, or recent")
@@ -255,8 +239,8 @@ def test_get_shipping_status_latest_rejects_invalid_view(monkeypatch):
     assert res.json()["detail"] == "view must be active, all, attention, or recent"
 
 
-def test_order_shipping_statuses_endpoint(monkeypatch):
-    headers = _enable_operator_auth(monkeypatch)
+def test_order_shipping_statuses_endpoint(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     monkeypatch.setattr(
         orders_api.order_service,
         "get_order_by_id",

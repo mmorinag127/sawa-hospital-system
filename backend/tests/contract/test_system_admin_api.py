@@ -1,9 +1,10 @@
 import pathlib
 import sys
-import base64
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
+
+from auth_support import hospital_operator  # noqa: F401
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
@@ -20,11 +21,6 @@ from src.services.ingest_job_service import create_ingest_job  # noqa: E402
 from src.services.ocr_pipeline_state_store import save_pipeline_error, save_pipeline_request  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
-
-
-def _basic_header(username: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {token}"}
 
 
 def _create_seed_order(message_id: str) -> dict:
@@ -408,16 +404,13 @@ def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch
     assert summary["blocked_attempt_exhausted_count"] == 1
 
 
-def test_health_backlog_requires_operator_when_auth_enabled(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "operator-pass")
+def test_health_backlog_requires_operator_when_auth_enabled(hospital_operator):
     client = TestClient(app)
 
     unauth_res = client.get("/health/backlog")
     assert unauth_res.status_code == 401
 
-    auth_res = client.get("/health/backlog", headers=_basic_header("operator", "operator-pass"))
+    auth_res = client.get("/health/backlog", headers=hospital_operator.headers)
     assert auth_res.status_code == 200
 
 

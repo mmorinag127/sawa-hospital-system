@@ -1,33 +1,22 @@
-import base64
-import importlib
 import pathlib
 import sys
 from datetime import date
 
 from fastapi.testclient import TestClient
 
+from auth_support import hospital_operator  # noqa: F401
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-import src.api.auth as auth_module  # noqa: E402
-import src.api.auth_config as auth_config_module  # noqa: E402
 import src.api.menus as menus_api  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.main import app  # noqa: E402
 from src.models.menu import MonthlyMenu, MonthlyMenuEntry  # noqa: E402
 
 
-def _basic_header(username: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {token}"}
-
-
-def test_monthly_menus_get_requires_operator_and_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_get_requires_operator_and_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -41,18 +30,14 @@ def test_monthly_menus_get_requires_operator_and_allows_operator(monkeypatch):
 
     authorized = client.get(
         "/monthly-menus/2026-03",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert authorized.status_code == 200
     assert authorized.json()["menu"]["id"] == "2026-03"
 
 
-def test_monthly_menus_get_uses_facility_specific_lookup_when_query_is_present(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_get_uses_facility_specific_lookup_when_query_is_present(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     captured: dict[str, str | None] = {}
 
@@ -66,18 +51,14 @@ def test_monthly_menus_get_uses_facility_specific_lookup_when_query_is_present(m
     client = TestClient(app)
     authorized = client.get(
         "/monthly-menus/2026-04?facility_id=FAC00005",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert authorized.status_code == 200
     assert captured == {"month_id": "2026-04", "facility_id": "FAC00005"}
 
 
-def test_monthly_menus_latest_requires_operator_and_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_latest_requires_operator_and_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -91,18 +72,14 @@ def test_monthly_menus_latest_requires_operator_and_allows_operator(monkeypatch)
 
     authorized = client.get(
         "/monthly-menus/latest",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert authorized.status_code == 200
     assert authorized.json()["menu"]["id"] == "2026-03"
 
 
-def test_monthly_menus_get_returns_synthetic_menu_when_parent_row_is_missing(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_get_returns_synthetic_menu_when_parent_row_is_missing(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     with session_scope() as session:
         session.query(MonthlyMenuEntry).filter(MonthlyMenuEntry.monthly_menu_id == "2099-12").delete()
@@ -121,7 +98,7 @@ def test_monthly_menus_get_returns_synthetic_menu_when_parent_row_is_missing(mon
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/2099-12",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     payload = res.json()
@@ -131,12 +108,8 @@ def test_monthly_menus_get_returns_synthetic_menu_when_parent_row_is_missing(mon
     assert payload["entries"][0]["name"] == "Synthetic Menu A"
 
 
-def test_monthly_menus_get_resolves_previous_month_when_entries_cover_requested_month(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_get_resolves_previous_month_when_entries_cover_requested_month(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     with session_scope() as session:
         session.query(MonthlyMenuEntry).filter(
@@ -164,7 +137,7 @@ def test_monthly_menus_get_resolves_previous_month_when_entries_cover_requested_
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/2099-04",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     payload = res.json()
@@ -178,12 +151,8 @@ def test_monthly_menus_get_resolves_previous_month_when_entries_cover_requested_
     assert payload["entries"][0]["name"] == "Covered Menu A"
 
 
-def test_monthly_menus_get_returns_entries_in_canonical_daypart_order(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_get_returns_entries_in_canonical_daypart_order(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     with session_scope() as session:
         session.query(MonthlyMenuEntry).filter(MonthlyMenuEntry.monthly_menu_id == "2099-06").delete()
@@ -229,7 +198,7 @@ def test_monthly_menus_get_returns_entries_in_canonical_daypart_order(monkeypatc
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/2099-06",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     payload = res.json()
@@ -241,12 +210,8 @@ def test_monthly_menus_get_returns_entries_in_canonical_daypart_order(monkeypatc
     ]
 
 
-def test_monthly_menus_upload_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_upload_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     captured: dict[str, object] = {}
 
@@ -281,7 +246,7 @@ def test_monthly_menus_upload_allows_operator(monkeypatch):
             "scope_value": "ikebukuro",
         },
         files={"file": ("menu.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["created"] is True
@@ -290,12 +255,8 @@ def test_monthly_menus_upload_allows_operator(monkeypatch):
     assert captured["require_menu_master_review"] is True
 
 
-def test_monthly_menus_upload_passes_review_resolutions(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_upload_passes_review_resolutions(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     captured: dict[str, object] = {}
 
@@ -327,7 +288,7 @@ def test_monthly_menus_upload_passes_review_resolutions(monkeypatch):
             "review_resolutions": '[{"source_name":"白身魚のフライ","action":"create","unit_type":"count","qty_per_serving":1}]'
         },
         files={"file": ("menu.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert captured["menu_master_resolutions"] == [
@@ -360,12 +321,8 @@ def test_menu_master_resolution_index_accepts_issue_key_and_normalized_name():
     assert indexed[menus_api.menu_service._normalize_menu_name("白身魚フライ 添)キャベツ")]["action"] == "create"  # noqa: SLF001
 
 
-def test_monthly_menus_upload_returns_review_required_payload(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_upload_returns_review_required_payload(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     def _create_menu(*_args, **_kwargs):
         raise menus_api.menu_service.MenuMasterResolutionRequired(
@@ -397,19 +354,15 @@ def test_monthly_menus_upload_returns_review_required_payload(monkeypatch):
         "/monthly-menus",
         params={"month_id": "2026-03"},
         files={"file": ("menu.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 409
     assert res.json()["detail"]["code"] == "menu_master_review_required"
     assert res.json()["detail"]["issues"][0]["source_name"] == "白身魚のフライ"
 
 
-def test_monthly_menus_upload_history_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_upload_history_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -427,18 +380,14 @@ def test_monthly_menus_upload_history_allows_operator(monkeypatch):
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/2026-03/uploads",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["items"][0]["id"] == "AUD1"
 
 
-def test_monthly_menus_scope_options_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_scope_options_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -452,19 +401,15 @@ def test_monthly_menus_scope_options_allows_operator(monkeypatch):
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/scope-options",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["facilities"][0]["id"] == "FAC00008"
     assert res.json()["tags"][0]["value"] == "special-group"
 
 
-def test_monthly_menus_upload_download_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_upload_download_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -480,18 +425,14 @@ def test_monthly_menus_upload_download_allows_operator(monkeypatch):
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/2026-03/uploads/AUD1/download",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.content == b"dummy"
 
 
-def test_monthly_menus_update_item_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_update_item_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(menus_api.menu_service, "update_item_status", lambda *_args, **_kwargs: "updated")
 
@@ -499,18 +440,14 @@ def test_monthly_menus_update_item_allows_operator(monkeypatch):
     res = client.put(
         "/monthly-menus/2026-03/items/item-1",
         json={"name": "Menu A"},
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["updated"] is True
 
 
-def test_monthly_menus_download_supports_non_ascii_filename(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_download_supports_non_ascii_filename(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -526,7 +463,7 @@ def test_monthly_menus_download_supports_non_ascii_filename(monkeypatch):
     client = TestClient(app)
     res = client.get(
         "/monthly-menus/2026-03/uploads/AUD-JP/download",
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.content == b"dummy"
@@ -535,12 +472,8 @@ def test_monthly_menus_download_supports_non_ascii_filename(monkeypatch):
     assert "filename*=UTF-8''%E7%8C%AE%E7%AB%8B%E8%A1%A8%28%E6%9C%88%E9%96%93%292026.4%E6%9C%88.xlsm" in disposition
 
 
-def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     captured: dict[str, object] = {}
 
@@ -567,7 +500,7 @@ def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch):
             "unit_type": "cut",
             "qty_per_serving": 1,
         },
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["updated"] is True
@@ -581,12 +514,8 @@ def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch):
     }
 
 
-def test_monthly_menus_resolve_master_check_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_resolve_master_check_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     captured: dict[str, object] = {}
 
@@ -602,7 +531,7 @@ def test_monthly_menus_resolve_master_check_allows_operator(monkeypatch):
     res = client.post(
         "/monthly-menus/2026-03/master-checks/item-1/resolve",
         json={"action": "month_only", "unit_type": "cut", "qty_per_serving": 2, "category": "主菜"},
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["resolved"] is True
@@ -611,12 +540,8 @@ def test_monthly_menus_resolve_master_check_allows_operator(monkeypatch):
     assert captured["body"] == {"action": "month_only", "unit_type": "cut", "qty_per_serving": 2, "category": "主菜"}
 
 
-def test_monthly_menus_condiments_allows_operator(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
+def test_monthly_menus_condiments_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
 
     monkeypatch.setattr(
         menus_api.menu_service,
@@ -628,7 +553,7 @@ def test_monthly_menus_condiments_allows_operator(monkeypatch):
     res = client.post(
         "/monthly-menus/condiments",
         files={"file": ("condiments.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=_basic_header("operator", "secret"),
+        headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["items"] == 5
