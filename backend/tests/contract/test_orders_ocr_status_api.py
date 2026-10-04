@@ -1942,11 +1942,12 @@ def test_download_document_returns_404_when_source_and_ocr_artifacts_missing(mon
         "urlopen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(HTTPError("https://signed.example/document.pdf", 404, "Not Found", None, None)),
     )
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_ocr_output",
-        lambda _order_id: ({"combined": {}}, None),
-    )
+    def _get_ocr_output(_order_id, *, persist_cache):
+        assert _order_id == order_id
+        assert persist_cache is False
+        return ({"combined": {}}, None)
+
+    monkeypatch.setattr(orders_api.order_service, "get_ocr_output", _get_ocr_output)
 
     res = client.get(f"/orders/{order_id}/document")
 

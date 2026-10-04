@@ -5786,10 +5786,18 @@ def test_get_ocr_sheet_preserves_authoritative_current_sheet_gate_when_blocked(m
     }
 
     monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
+    ready_templates = []
+
+    def _ready_position_fallback(_payload, *, template=None):
+        if template is not None:
+            assert template["columns"] == config_service.get_facility_config("FAC00001")["fax_template"]["columns"]
+        ready_templates.append(template)
+        return True
+
     monkeypatch.setattr(
         order_service.position_column_mapping_service,
         "payload_uses_ready_position_fallback",
-        lambda _payload: True,
+        _ready_position_fallback,
     )
     monkeypatch.setattr(
         order_service.position_column_mapping_service,
@@ -5809,6 +5817,7 @@ def test_get_ocr_sheet_preserves_authoritative_current_sheet_gate_when_blocked(m
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
 
+    assert any(template is not None for template in ready_templates)
     assert error is None
     assert isinstance(sheet, dict)
     assert sheet["source"] == "weekly_menu"

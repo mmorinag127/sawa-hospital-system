@@ -9451,11 +9451,13 @@ def test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows(monkeyp
             }
         ]
 
-    monkeypatch.setattr(
-        order_service,
-        "_load_existing_first_pass_payload_for_reparse",
-        lambda order_id: dict(first_pass_payload) if order_id == order["id"] else None,
-    )
+    def _existing_first_pass(order_id, *, template):
+        assert order_id == order["id"]
+        assert template["columns"] == config_service.get_facility_config("FAC00001")["fax_template"]["columns"]
+        assert template["main_ocr_provider"] == "gemini"
+        return dict(first_pass_payload) if order_id == order["id"] else None
+
+    monkeypatch.setattr(order_service, "_load_existing_first_pass_payload_for_reparse", _existing_first_pass)
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: b"%PDF-raw\n%EOF\n")
     monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
     monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)
@@ -9584,11 +9586,13 @@ def test_reparse_order_large_structural_projection_requires_manual_review(monkey
             }
         ]
 
-    monkeypatch.setattr(
-        order_service,
-        "_load_existing_first_pass_payload_for_reparse",
-        lambda order_id: dict(first_pass_payload) if order_id == order["id"] else None,
-    )
+    def _existing_first_pass(order_id, *, template):
+        assert order_id == order["id"]
+        assert template["columns"] == config_service.get_facility_config("FAC00001")["fax_template"]["columns"]
+        assert template["main_ocr_provider"] == "gemini"
+        return dict(first_pass_payload) if order_id == order["id"] else None
+
+    monkeypatch.setattr(order_service, "_load_existing_first_pass_payload_for_reparse", _existing_first_pass)
     monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: b"%PDF-raw\n%EOF\n")
     monkeypatch.setattr(order_service, "extract_fax_data", _fake_extract)
     monkeypatch.setattr(order_service, "parse_order_lines", _fake_parse)

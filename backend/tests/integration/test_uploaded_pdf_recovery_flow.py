@@ -437,11 +437,15 @@ def test_process_ingest_inline_prefers_payload_ocr_job_id(monkeypatch):
         "create_order_from_ingest",
         lambda *_args, **_kwargs: {"id": "ORDinlinecanonical"},
     )
-    monkeypatch.setattr(
-        ingest_worker,
-        "create_job",
-        lambda job_id, input_reference, status="running": seen.append({"job_id": job_id, "input_reference": input_reference}) or ({}, True),
-    )
+    def _create_job(job_id, input_reference, status="running", *, order_id, uploaded_pdf_id, order_document_id, input_artifact_digest):
+        assert status == "running"
+        assert order_id is None
+        assert uploaded_pdf_id is None
+        assert order_document_id is None
+        assert input_artifact_digest == "sha-inline"
+        return seen.append({"job_id": job_id, "input_reference": input_reference}) or ({}, True)
+
+    monkeypatch.setattr(ingest_worker, "create_job", _create_job)
 
     ingest_worker._process_ingest_inline(
         message_id="upload:sha256:inline-canonical",
