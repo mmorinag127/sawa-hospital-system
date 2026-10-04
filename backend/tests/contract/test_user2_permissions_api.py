@@ -1,15 +1,14 @@
-import base64
-import importlib
 import pathlib
 import sys
+from unittest.mock import create_autospec
 
 from fastapi.testclient import TestClient
+
+from auth_support import hospital_operator  # noqa: F401
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-import src.api.auth as auth_module  # noqa: E402
-import src.api.auth_config as auth_config_module  # noqa: E402
 import src.api.base_menus as base_menus_api  # noqa: E402
 import src.api.facility_master as facility_master_api  # noqa: E402
 import src.api.facilities as facilities_api  # noqa: E402
@@ -18,22 +17,8 @@ import src.api.menu_rules as menu_rules_api  # noqa: E402
 from src.main import app  # noqa: E402
 
 
-def _basic_header(username: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {token}"}
-
-
-def _set_operator_auth(monkeypatch) -> dict[str, str]:
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setenv("OPERATOR_USER", "operator")
-    monkeypatch.setenv("OPERATOR_PASSWORD", "secret")
-    importlib.reload(auth_module)
-    importlib.reload(auth_config_module)
-    return _basic_header("operator", "secret")
-
-
-def test_user2_base_menus_allows_operator(monkeypatch):
-    headers = _set_operator_auth(monkeypatch)
+def test_user2_base_menus_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     monkeypatch.setattr(base_menus_api.base_menu_service, "list_items", lambda *_args: [{"id": "item-1"}])
     monkeypatch.setattr(base_menus_api.base_menu_service, "replace_items", lambda items: {"created": len(items)})
     monkeypatch.setattr(base_menus_api.base_menu_service, "update_item", lambda *_args, **_kwargs: {"id": "item-1"})
@@ -44,20 +29,45 @@ def test_user2_base_menus_allows_operator(monkeypatch):
     assert client.put("/base-menus/item-1", json={"name": "B"}, headers=headers).status_code == 200
 
 
-def test_user2_menu_masters_allows_operator(monkeypatch):
-    headers = _set_operator_auth(monkeypatch)
-    monkeypatch.setattr(menu_masters_api.menu_service, "list_menu_masters", lambda **_kwargs: [{"id": "m1"}])
-    monkeypatch.setattr(menu_masters_api.menu_service, "create_menu_master", lambda body: {"id": "m2", **body})
-    monkeypatch.setattr(menu_masters_api.menu_service, "update_menu_master", lambda *_args, **_kwargs: {"id": "m1"})
+def test_user2_menu_masters_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
+    read_item = {"id": "m1", "revision": 1}
+    saved_item = {"id": "m1", "name": "Menu", "revision": 2}
+    list_masters = create_autospec(
+        menu_masters_api.menu_service.list_menu_masters_page,
+        return_value={"items": [read_item], "total": 1, "offset": 0, "limit": 1000},
+    )
+    create_master = create_autospec(
+        menu_masters_api.menu_service.create_menu_master,
+        side_effect=lambda body: {"id": "m2", **body},
+    )
+    save_master = create_autospec(menu_masters_api.menu_service.save_menu_master, return_value=saved_item)
+    monkeypatch.setattr(menu_masters_api.menu_service, "list_menu_masters_page", list_masters)
+    monkeypatch.setattr(menu_masters_api.menu_service, "create_menu_master", create_master)
+    monkeypatch.setattr(menu_masters_api.menu_service, "save_menu_master", save_master)
 
     client = TestClient(app)
-    assert client.get("/menu-masters", headers=headers).status_code == 200
+    read = client.get("/menu-masters", headers=headers)
+    assert read.status_code == 200
+    assert read.json() == {"items": [read_item], "total": 1, "offset": 0, "limit": 1000}
+    list_masters.assert_called_once_with(query=None, limit=1000, offset=0, sort="name", order="asc")
+    create_master.assert_not_called()
+    save_master.assert_not_called()
+
     assert client.post("/menu-masters", json={"name": "Menu"}, headers=headers).status_code == 200
-    assert client.put("/menu-masters/m1", json={"name": "Menu"}, headers=headers).status_code == 200
+    create_master.assert_called_once_with({"name": "Menu"})
+    assert client.put("/menu-masters/m1", json={"name": "Menu"}, headers=headers).status_code == 422
+    save_master.assert_not_called()
+
+    revision = read.json()["items"][0]["revision"]
+    saved = client.put("/menu-masters/m1", json={"name": "Menu", "revision": revision}, headers=headers)
+    assert saved.status_code == 200
+    save_master.assert_called_once_with("m1", {"name": "Menu"}, expected_revision=revision)
+    assert saved.json() == {"updated": True, "item": saved_item}
 
 
-def test_user2_menu_rules_allows_operator(monkeypatch):
-    headers = _set_operator_auth(monkeypatch)
+def test_user2_menu_rules_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     monkeypatch.setattr(menu_rules_api.menu_rule_service, "list_rules", lambda *_args: [{"id": "r1"}])
     monkeypatch.setattr(menu_rules_api.menu_rule_service, "create_rule", lambda body: {"id": "r2", **body})
     monkeypatch.setattr(menu_rules_api.menu_rule_service, "update_rule", lambda *_args, **_kwargs: {"id": "r1"})
@@ -70,8 +80,8 @@ def test_user2_menu_rules_allows_operator(monkeypatch):
     assert client.delete("/menu-rules/r1", headers=headers).status_code == 200
 
 
-def test_user2_facility_master_save_allows_operator(monkeypatch):
-    headers = _set_operator_auth(monkeypatch)
+def test_user2_facility_master_save_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     sample_master = {"schema_version": "1", "facilities": [{"facility_id": "FAC00001", "facility_name": "Test"}]}
     monkeypatch.setattr(facility_master_api.facility_master_service, "save_master", lambda master: master)
 
@@ -81,8 +91,8 @@ def test_user2_facility_master_save_allows_operator(monkeypatch):
     assert res.json()["updated"] is True
 
 
-def test_user2_facility_basic_update_allows_operator(monkeypatch):
-    headers = _set_operator_auth(monkeypatch)
+def test_user2_facility_basic_update_allows_operator(monkeypatch, hospital_operator):
+    headers = hospital_operator.headers
     monkeypatch.setattr(
         facilities_api.facility_service,
         "update_facility",
