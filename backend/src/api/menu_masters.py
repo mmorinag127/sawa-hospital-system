@@ -1,31 +1,62 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm.exc import StaleDataError
 
 from src.api.auth import require_role
+from src.api.menu_master_schemas import MenuMasterFields, MenuMasterUpdate
 from src.services import menu_service
 
-router = APIRouter()
 
-
-@router.get("/menu-masters", dependencies=[Depends(require_role("operator"))])
-def list_menu_masters(q: str | None = None, limit: int = 1000):
-    return {"items": menu_service.list_menu_masters(query=q, limit=limit)}
-
-
-@router.post("/menu-masters", dependencies=[Depends(require_role("operator"))])
-def create_menu_master(body: dict):
+def _require_menu_schema() -> None:
     try:
-        item = menu_service.create_menu_master(body)
+        menu_service.ensure_menu_schema()
+    except menu_service.MenuSchemaNotMigrated as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": "menu_schema_not_migrated", "message": str(exc),
+        }) from exc
+
+
+router = APIRouter(dependencies=[Depends(require_role("operator")), Depends(_require_menu_schema)])
+
+
+@router.get("/menu-masters")
+def list_menu_masters(
+    q: str | None = None, limit: int = 1000, offset: int = Query(default=0, ge=0),
+    sort: str = "name", order: str = "asc",
+):
+    try:
+        return menu_service.list_menu_masters_page(query=q, limit=limit, offset=offset, sort=sort, order=order)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/menu-masters/{item_id}")
+def get_menu_master(item_id: str):
+    item = menu_service.get_menu_master(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"item": item}
+
+
+@router.post("/menu-masters")
+def create_menu_master(body: MenuMasterFields):
+    try:
+        item = menu_service.create_menu_master(body.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"item": item}
 
 
-@router.put("/menu-masters/{item_id}", dependencies=[Depends(require_role("operator"))])
-def update_menu_master(item_id: str, body: dict):
+@router.put("/menu-masters/{item_id}")
+def update_menu_master(item_id: str, body: MenuMasterUpdate):
     try:
-        updated = menu_service.update_menu_master(item_id, body)
+        item = menu_service.save_menu_master(
+            item_id, body.model_dump(exclude_unset=True, exclude={"revision"}),
+            expected_revision=body.revision,
+        )
+    except (menu_service.MenuMasterRevisionConflict, StaleDataError) as exc:
+        raise HTTPException(status_code=409, detail="menu master revision conflict; reload before saving") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if not updated:
+    if item is None:
         raise HTTPException(status_code=404, detail="not found")
-    return {"updated": True}
+    return {"updated": True, "item": item}

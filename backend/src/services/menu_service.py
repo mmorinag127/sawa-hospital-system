@@ -10,7 +10,7 @@ from loguru import logger
 from uuid import uuid4
 import pandas as pd
 
-from sqlalchemy import delete, select, inspect, or_, text
+from sqlalchemy import delete, select, inspect, or_, text, func
 
 from src.db import session_scope, engine
 from src.models.menu import (
@@ -110,6 +110,14 @@ class MenuMasterResolutionRequired(Exception):
     def __init__(self, issues: list[dict]):
         super().__init__("menu master resolution required")
         self.issues = issues
+
+
+class MenuMasterRevisionConflict(Exception):
+    pass
+
+
+class MenuSchemaNotMigrated(RuntimeError):
+    pass
 
 
 def _menu_entry_sort_key(entry) -> tuple[str, int, int, str]:
@@ -244,7 +252,7 @@ def _menu_schema_missing_items() -> list[str]:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     required: dict[str, set[str]] = {
-        "menu_masters": {"condiments"},
+        "menu_masters": {"condiments", "revision"},
         "menu_facility_overrides": {"menu_master_id", "facility_id"},
         "monthly_menu_items": {"menu_master_id", "master_resolution_mode", "bag_max_qty", "bag_max_unit"},
         "monthly_menu_entries": {"facility_override"},
@@ -270,25 +278,10 @@ def _ensure_monthly_menu_item_identity_index() -> None:
     index_names = {str(index.get("name") or "") for index in inspector.get_indexes("monthly_menu_items")}
     if "uq_monthly_menu_items_scope_identity" in index_names:
         return
-    with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE monthly_menu_items DROP CONSTRAINT IF EXISTS uq_monthly_menu_item_scope"))
-        conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_item_scope"))
-        conn.execute(text("DROP INDEX IF EXISTS uq_monthly_menu_items_scope_name"))
-        conn.execute(
-            text(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_menu_items_scope_identity
-                ON monthly_menu_items(
-                  monthly_menu_id,
-                  name,
-                  COALESCE(daypart, ''),
-                  COALESCE(category, ''),
-                  COALESCE(diet_type, ''),
-                  COALESCE(facility_override, '')
-                )
-                """
-            )
-        )
+    raise MenuSchemaNotMigrated(
+        "menu schema is not migrated; run migration 0023 before boot: "
+        "uq_monthly_menu_items_scope_identity"
+    )
 
 
 def ensure_menu_schema() -> None:
@@ -300,7 +293,7 @@ def ensure_menu_schema() -> None:
             return
         missing = _menu_schema_missing_items()
         if missing:
-            raise RuntimeError(
+            raise MenuSchemaNotMigrated(
                 "menu schema is not migrated; run database migrations before boot: "
                 + ", ".join(missing)
             )
@@ -3023,6 +3016,7 @@ def _serialize_synthetic_menu(month_id: str, latest_upload_log: AuditLog | None 
 def serialize_menu_master(master: MenuMaster) -> dict:
     return {
         "id": master.id,
+        "revision": master.revision,
         "name": master.name,
         "normalized_name": master.normalized_name,
         "unit_type": _normalize_menu_unit_type(master.unit_type),
@@ -3037,16 +3031,55 @@ def serialize_menu_master(master: MenuMaster) -> dict:
 
 
 def list_menu_masters(query: str | None = None, limit: int = 1000) -> list[dict]:
+    return list_menu_masters_page(query=query, limit=limit)["items"]
+
+
+_MENU_MASTER_SORT_COLUMNS = {
+    "id": MenuMaster.id,
+    "name": MenuMaster.name,
+    "unit_type": MenuMaster.unit_type,
+    "qty_per_serving": MenuMaster.qty_per_serving,
+    "bag_max_qty": MenuMaster.bag_max_qty,
+    "bag_max_unit": MenuMaster.bag_max_unit,
+    "temp_type": MenuMaster.temp_type,
+    "daypart": MenuMaster.daypart,
+    "category": MenuMaster.category,
+    "revision": MenuMaster.revision,
+}
+
+
+def list_menu_masters_page(
+    query: str | None = None, limit: int = 1000, offset: int = 0,
+    sort: str = "name", order: str = "asc",
+) -> dict:
     ensure_menu_schema()
     normalized_limit = max(1, min(int(limit or 1000), 5000))
+    if offset < 0 or sort not in _MENU_MASTER_SORT_COLUMNS or order not in {"asc", "desc"}:
+        raise ValueError("invalid menu master pagination or sort")
     with session_scope() as session:
         stmt = select(MenuMaster)
+        count_stmt = select(func.count()).select_from(MenuMaster)
         if query and query.strip():
             q = f"%{query.strip()}%"
             stmt = stmt.where(MenuMaster.name.ilike(q))
-        stmt = stmt.order_by(MenuMaster.name).limit(normalized_limit)
+            count_stmt = count_stmt.where(MenuMaster.name.ilike(q))
+        column = _MENU_MASTER_SORT_COLUMNS[sort]
+        ordering = column.desc() if order == "desc" else column.asc()
+        stmt = stmt.order_by(ordering, MenuMaster.id.asc()).offset(offset).limit(normalized_limit)
         rows = session.execute(stmt).scalars().all()
-        return [serialize_menu_master(row) for row in rows]
+        return {
+            "items": [serialize_menu_master(row) for row in rows],
+            "total": session.execute(count_stmt).scalar_one(),
+            "offset": offset,
+            "limit": normalized_limit,
+        }
+
+
+def get_menu_master(master_id: str) -> dict | None:
+    ensure_menu_schema()
+    with session_scope() as session:
+        master = session.get(MenuMaster, master_id)
+        return serialize_menu_master(master) if master else None
 
 
 def create_menu_master(body: dict) -> dict:
@@ -3085,15 +3118,24 @@ def create_menu_master(body: dict) -> dict:
 
 
 def update_menu_master(master_id: str, body: dict) -> bool:
+    return save_menu_master(master_id, body) is not None
+
+
+def save_menu_master(master_id: str, body: dict, *, expected_revision: int | None = None) -> dict | None:
+    """Shared save for API revision checks and existing internal ORM callers."""
     ensure_menu_schema()
     if not master_id:
-        return False
+        return None
     with session_scope() as session:
         master = session.get(MenuMaster, master_id)
         if not master:
-            return False
+            return None
+        if expected_revision is not None and master.revision != expected_revision:
+            raise MenuMasterRevisionConflict("menu master revision conflict; reload before saving")
         _update_menu_master_in_session(session, master, body)
-        return True
+        session.flush()
+        session.refresh(master)
+        return serialize_menu_master(master)
 
 
 def serialize_item(item: MonthlyMenuItem):

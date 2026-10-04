@@ -35,6 +35,8 @@ class MenuMaster(Base):
     __tablename__ = "menu_masters"
 
     id = Column(String, primary_key=True)
+    revision = Column(Integer, nullable=False, default=1, server_default="1")
+    __mapper_args__ = {"version_id_col": revision}
     name = Column(String, nullable=False)
     normalized_name = Column(String, nullable=False, index=True, unique=True)
     unit_type = Column(String, nullable=True)
