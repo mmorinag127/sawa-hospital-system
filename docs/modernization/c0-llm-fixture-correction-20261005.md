@@ -57,6 +57,29 @@ The structural assertion is unresolved, not retired. `reparse_order` computes `l
 
 Runner SHA256: `3962513eedccb056b159fbc56320fc6eb0ba3db789e9e1123dfd0f9e4a094147` for [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/scripts/run_c0_mock_contracts_isolated.py](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/scripts/run_c0_mock_contracts_isolated.py). All owned runner processes terminated. The bounded correction and overall modernization remain incomplete.
 
+## Postcommit 27c6ffc Source-Bound Evidence
+
+Generating source: `27c6ffc89d89db2cea68fdc6046013a3fdd26457`; the tree was clean before both runs. Committed test SHA256: `051fbdbfd19d638dba3701042dd7cda2bb41f3dd5890f1a7a7421b7071ecaa2a` for `backend/tests/integration/test_ocr_pipeline.py`. Master SHA256: `18b47a19bde8159e22b23b9c9eabeba9ab6be300099bd689d8f6562ebccc0025` for `backend/src/data/facility_master.template.json`. Committed runner SHA256: `3962513eedccb056b159fbc56320fc6eb0ba3db789e9e1123dfd0f9e4a094147`.
+
+Exact6 command: `PYTHONDONTWRITEBYTECODE=1 /Users/mmorinag/Sawa/2025.12/worktrees/daily-output-label-requests-20260616/backend/.venv/bin/python -B scripts/run_c0_mock_contracts_isolated.py postcommit27c6ffc-exact-20261005 exact`.
+
+- Result: `5 passed, 1 failed`, matching the required residual count. The residual is unchanged: `test_reparse_order_large_structural_projection_requires_manual_review` receives an accepted order where its unchanged assertion expects `updated is None`.
+- XML: [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-exact-20261005/results.xml](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-exact-20261005/results.xml), SHA256 `e2903348a482ba8599de13eb5f4ba6a1e14da8726b7bc887cea60d95b014746e`.
+- Import/isolated DB proof: [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-exact-20261005/import-proof.log](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-exact-20261005/import-proof.log): current worktree root, `dont_write_bytecode: True`, and run-local `test.sqlite`.
+
+Sibling2 command: `PYTHONDONTWRITEBYTECODE=1 /Users/mmorinag/Sawa/2025.12/worktrees/daily-output-label-requests-20260616/backend/.venv/bin/python -B scripts/run_c0_mock_contracts_isolated.py postcommit27c6ffc-siblings-20261005 siblings`.
+
+- Result: `1 passed, 1 failed`, matching the required residual count. The unchanged sibling still compares expected `llm_full_table_baseline_missing` to its fake-extractor Gemini thinking-mode 400 result.
+- XML: [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-siblings-20261005/results.xml](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-siblings-20261005/results.xml), SHA256 `6e47e00930ca13d65f8039b10f307897e873453cb56a773e3a10f90bf05d16f9`.
+
+No product or test code changed during postcommit verification. All owned processes terminated. This is source-bound postcommit evidence for the committed candidate only; it is not whole-migration completion or an all-tests-pass claim.
+
+### Postcommit Import-Proof Hashes
+
+- Exact6 import proof: [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-exact-20261005/import-proof.log](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-exact-20261005/import-proof.log), SHA256 `670d4f466f25bacba2b9f1bbddf10ecf75c47ce0efc4b5e6e3e44e46f8d62db2`.
+- Sibling2 import proof: [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-siblings-20261005/import-proof.log](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/tmp/c0-direct-mocks/postcommit27c6ffc-siblings-20261005/import-proof.log), SHA256 `b4709ae09c0b7f84968ef125b9c8f92355881d3db38158de38d1594fe992c0b6`.
+- Generating runner: [/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/scripts/run_c0_mock_contracts_isolated.py](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-llm-fixtures/scripts/run_c0_mock_contracts_isolated.py), SHA256 `3962513eedccb056b159fbc56320fc6eb0ba3db789e9e1123dfd0f9e4a094147`.
+
 ## Historical FAC00001 / Invalid Raw-Base Proof - Provider-Row Follow-up
 
 The focused follow-up inspected the resolved `fax_template.main_ocr_row_fields` in the isolated exact runner. Its actual list is `date_mmdd`, `daypart`, `menu`, `qty.regular_x`, `qty.placeholder_x`, `qty.no_meat_x`, `qty.no_fish_x`, `qty.change_1_x`, `qty.change_2_x`, `remarks`; `qty.regular_2f` occurs zero times. The provider stub cannot truthfully emit a canonical full-width row containing `qty.regular_2f=2` in this requested FAC00001 mode. The mismatch is introduced by the facility-scoped override being authoritative for `columns` (`config_service._merge_template`, `backend/src/services/config_service.py:113-128`), while the original test fixture still expresses a 2F field.
