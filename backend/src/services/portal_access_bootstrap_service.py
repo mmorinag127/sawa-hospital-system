@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import importlib.util
 import uuid
 from dataclasses import asdict, dataclass
-from pathlib import Path
-
 import sqlalchemy as sa
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
 from sqlalchemy.engine import Connection
 
 
 SYSTEM_KEYS = ("hospital", "shift", "school-lunch")
-MIGRATION_ID = "0026"
-MIGRATION_PATH = Path(__file__).resolve().parents[2] / "migrations" / "0026_user_system_access.py"
-CANONICAL_CHECK_NAME = "ck_user_system_access_system_key"
 BOOTSTRAP_ACTOR = "system:prod-portal-db-bootstrap"
 
 
@@ -77,27 +69,9 @@ def run_portal_access_bootstrap_gate(
 
 
 def ensure_user_system_access_schema(connection: Connection) -> bool:
-    inspector = sa.inspect(connection)
-    if not inspector.has_table("users"):
-        raise PortalAccessBootstrapError("users table is required before portal bootstrap")
-    if not inspector.has_table("audit_logs"):
-        raise PortalAccessBootstrapError("audit_logs table is required before portal bootstrap")
+    from src.maintenance.portal_access_bootstrap_schema import ensure_user_system_access_schema as ensure_schema
 
-    migration_applied = False
-    if not inspector.has_table("user_system_access"):
-        _apply_user_system_access_migration(connection)
-        migration_applied = True
-    elif connection.dialect.name == "postgresql":
-        connection.execute(sa.text("LOCK TABLE user_system_access IN ACCESS EXCLUSIVE MODE"))
-        if not sa.inspect(connection).get_check_constraints("user_system_access"):
-            connection.execute(sa.text(
-                "ALTER TABLE user_system_access ADD CONSTRAINT "
-                "ck_user_system_access_system_key "
-                "CHECK (system_key IN ('hospital', 'shift', 'school-lunch'))"
-            ))
-            migration_applied = True
-    _assert_canonical_user_system_access_schema(connection)
-    return migration_applied
+    return ensure_schema(connection, error_type=PortalAccessBootstrapError)
 
 
 def _normalize_email(
@@ -113,114 +87,6 @@ def _normalize_email(
     return token
 
 
-def _load_user_system_access_migration():
-    spec = importlib.util.spec_from_file_location(
-        "migration_0026_user_system_access",
-        MIGRATION_PATH,
-    )
-    if spec is None or spec.loader is None:
-        raise PortalAccessBootstrapError(f"unable to load migration {MIGRATION_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _apply_user_system_access_migration(connection: Connection) -> None:
-    module = _load_user_system_access_migration()
-    context = MigrationContext.configure(connection)
-    previous_op = getattr(module, "op", None)
-    module.op = Operations(context)
-    try:
-        module.upgrade()
-    finally:
-        module.op = previous_op
-
-
-def _assert_canonical_user_system_access_schema(connection: Connection) -> None:
-    inspector = sa.inspect(connection)
-    columns = {column["name"]: column for column in inspector.get_columns("user_system_access")}
-    if set(columns) != {"user_id", "system_key", "enabled"}:
-        raise PortalAccessBootstrapError(
-            f"user_system_access columns are not canonical: {sorted(columns)}"
-        )
-    for required_column in ("user_id", "system_key", "enabled"):
-        if columns[required_column].get("nullable"):
-            raise PortalAccessBootstrapError(
-                f"user_system_access.{required_column} must be NOT NULL"
-            )
-
-    pk = inspector.get_pk_constraint("user_system_access") or {}
-    pk_columns = tuple(pk.get("constrained_columns") or ())
-    if set(pk_columns) != {"user_id", "system_key"}:
-        raise PortalAccessBootstrapError(
-            f"user_system_access primary key is not canonical: {pk_columns}"
-        )
-
-    foreign_keys = inspector.get_foreign_keys("user_system_access")
-    canonical_fk = next(
-        (
-            foreign_key
-            for foreign_key in foreign_keys
-            if tuple(foreign_key.get("constrained_columns") or ()) == ("user_id",)
-            and foreign_key.get("referred_table") == "users"
-            and tuple(foreign_key.get("referred_columns") or ()) == ("id",)
-        ),
-        None,
-    )
-    if canonical_fk is None:
-        raise PortalAccessBootstrapError("user_system_access.user_id must reference users.id")
-    ondelete = str((canonical_fk.get("options") or {}).get("ondelete") or "").upper()
-    if ondelete and ondelete != "CASCADE":
-        raise PortalAccessBootstrapError("user_system_access.user_id foreign key must use ON DELETE CASCADE")
-
-    checks = inspector.get_check_constraints("user_system_access")
-    if not _has_canonical_system_check(connection, checks):
-        raise PortalAccessBootstrapError(
-            "user_system_access system_key constraint must allow only hospital, shift, and school-lunch"
-        )
-
-
-def _has_canonical_system_check(connection: Connection, checks: list[dict]) -> bool:
-    if connection.dialect.name == "postgresql":
-        if len(checks) != 1 or checks[0].get("name") != CANONICAL_CHECK_NAME:
-            return False
-        reference = f"bootstrap_check_{uuid.uuid4().hex}"
-        # Let PostgreSQL normalize both expressions using the same column types.
-        connection.execute(sa.text(
-            f'CREATE TEMP TABLE "{reference}" (LIKE user_system_access) ON COMMIT DROP'
-        ))
-        try:
-            connection.execute(sa.text(
-                f'ALTER TABLE "{reference}" ADD CHECK '
-                "(system_key IN ('hospital', 'shift', 'school-lunch'))"
-            ))
-            expressions = connection.execute(sa.text(
-                "SELECT conrelid = 'user_system_access'::regclass AS actual, "
-                "pg_get_expr(conbin, conrelid) AS expression, convalidated "
-                "FROM pg_constraint WHERE contype = 'c' AND "
-                "conrelid IN ('user_system_access'::regclass, to_regclass(:reference))"
-            ), {"reference": reference}).all()
-            actual = [row for row in expressions if row.actual]
-            expected = [row for row in expressions if not row.actual]
-            return (len(actual) == len(expected) == 1 and actual[0].convalidated
-                    and actual[0].expression == expected[0].expression)
-        finally:
-            connection.execute(sa.text(f'DROP TABLE "{reference}"'))
-    for check in checks:
-        sqltext = str(check.get("sqltext") or "")
-        name = str(check.get("name") or "")
-        if all(key in sqltext for key in SYSTEM_KEYS):
-            if connection.dialect.name == "sqlite" or name in {"", CANONICAL_CHECK_NAME}:
-                return True
-
-    if connection.dialect.name != "sqlite":
-        return False
-
-    ddl = connection.execute(
-        sa.text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_system_access'")
-    ).scalar()
-    ddl_text = str(ddl or "")
-    return "CHECK" in ddl_text and all(key in ddl_text for key in SYSTEM_KEYS)
 
 
 def _count_active_admins(connection: Connection) -> int:

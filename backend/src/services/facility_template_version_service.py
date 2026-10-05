@@ -42,30 +42,31 @@ def ensure_facility_template_version_schema() -> None:
         return
     inspector = inspect(engine)
     if "facility_template_versions" not in set(inspector.get_table_names()):
-        _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = True
-        return
+        raise RuntimeError(
+            "facility template version schema is not migrated; run migrations through 0025: "
+            "facility_template_versions"
+        )
     columns = {
         str(column.get("name") or "")
         for column in inspector.get_columns("facility_template_versions")
     }
-    statements: list[str] = []
-    if "config_json" not in columns:
-        statements.append("ALTER TABLE facility_template_versions ADD COLUMN config_json JSON")
-    if "valid_from" not in columns:
-        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_from DATE")
-    if "valid_to" not in columns:
-        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_to DATE")
-    if engine.dialect.name == "postgresql":
-        statements.extend(
-            (
-                "CREATE INDEX IF NOT EXISTS ix_facility_template_versions_valid_from ON facility_template_versions (valid_from)",
-                "CREATE INDEX IF NOT EXISTS ix_facility_template_versions_valid_to ON facility_template_versions (valid_to)",
-            )
+    required_columns = {column.name for column in FacilityTemplateVersion.__table__.columns}
+    missing_columns = sorted(required_columns - columns)
+    if missing_columns:
+        raise RuntimeError(
+            "facility template version schema is not migrated; run migrations through 0025: "
+            + ", ".join(f"facility_template_versions.{column}" for column in missing_columns)
         )
-    if statements:
-        with engine.begin() as connection:
-            for statement in statements:
-                connection.execute(text(statement))
+    if engine.dialect.name == "postgresql":
+        indexes = {str(index.get("name") or "") for index in inspector.get_indexes("facility_template_versions")}
+        missing_indexes = sorted(
+            {"ix_facility_template_versions_valid_from", "ix_facility_template_versions_valid_to"} - indexes
+        )
+        if missing_indexes:
+            raise RuntimeError(
+                "facility template version schema is not migrated; run migrations through 0025: "
+                + ", ".join(missing_indexes)
+            )
     _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = True
 
 

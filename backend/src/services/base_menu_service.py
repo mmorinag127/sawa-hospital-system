@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, inspect, select, text
+from sqlalchemy import delete, inspect, select
 
 from src.db import engine, session_scope
 from src.models.menu import BaseMenuCycleItem
@@ -11,29 +11,25 @@ from src.services import menu_service
 from src.services.menu_vocabulary import normalize_diet_type
 
 
-def _ensure_base_menu_table() -> None:
+class BaseMenuSchemaNotMigrated(RuntimeError):
+    pass
+
+
+def _require_base_menu_schema() -> None:
     inspector = inspect(engine)
-    if "base_menu_cycle_items" in inspector.get_table_names():
-        return
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS base_menu_cycle_items (
-                    id VARCHAR PRIMARY KEY,
-                    cycle_day INTEGER NOT NULL,
-                    daypart VARCHAR NULL,
-                    category VARCHAR NULL,
-                    name VARCHAR NOT NULL,
-                    diet_type VARCHAR NULL,
-                    slot_index INTEGER NULL
-                )
-                """
-            )
+    if "base_menu_cycle_items" not in inspector.get_table_names():
+        raise BaseMenuSchemaNotMigrated(
+            "base menu schema is not migrated; run migration 0015: base_menu_cycle_items"
         )
-
-
-_ensure_base_menu_table()
+    columns = {str(column.get("name") or "") for column in inspector.get_columns("base_menu_cycle_items")}
+    required_columns = {column.name for column in BaseMenuCycleItem.__table__.columns}
+    missing_columns = sorted(required_columns - columns)
+    if not missing_columns:
+        return
+    raise BaseMenuSchemaNotMigrated(
+        "base menu schema is not migrated; run migration 0015: "
+        + ", ".join(f"base_menu_cycle_items.{column}" for column in missing_columns)
+    )
 
 
 def serialize_item(item: BaseMenuCycleItem) -> dict[str, Any]:
@@ -85,6 +81,7 @@ def _merge_master_defaults(items: list[dict]) -> list[dict]:
 
 
 def list_items(cycle_day: int | None = None) -> list[dict]:
+    _require_base_menu_schema()
     with session_scope() as session:
         query = select(BaseMenuCycleItem)
         if cycle_day is not None:
@@ -103,6 +100,7 @@ def list_items(cycle_day: int | None = None) -> list[dict]:
 
 
 def replace_items(items: list[dict]) -> dict:
+    _require_base_menu_schema()
     cleaned: list[dict] = []
     for raw in items:
         if not isinstance(raw, dict):
@@ -148,6 +146,7 @@ def replace_items(items: list[dict]) -> dict:
 def update_item(item_id: str, body: dict) -> bool:
     if not item_id:
         return False
+    _require_base_menu_schema()
     with session_scope() as session:
         item = session.get(BaseMenuCycleItem, item_id)
         if not item:
