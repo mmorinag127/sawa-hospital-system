@@ -1,6 +1,7 @@
 FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
+COPY vendor/sawa-ui-0.1.0-8004321e0364f54d1294df4bb3143dc091fc5a86.tgz ./vendor/sawa-ui-0.1.0-8004321e0364f54d1294df4bb3143dc091fc5a86.tgz
 RUN npm ci
 
 FROM node:20-slim AS builder

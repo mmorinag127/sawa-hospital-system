@@ -13,6 +13,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@sawa/ui": "file:vendor/sawa-ui-0.1.0-8004321e0364f54d1294df4bb3143dc091fc5a86.tgz",
     "axios": "^1.20.0",
     "next": "16.3.8",
     "postcss": "8.5.26",

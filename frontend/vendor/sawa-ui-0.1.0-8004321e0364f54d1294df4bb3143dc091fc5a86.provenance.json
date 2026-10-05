@@ -1,0 +1,29 @@
+{
+  "package": "@sawa/ui",
+  "version": "0.1.0",
+  "filename": "sawa-ui-0.1.0-8004321e0364f54d1294df4bb3143dc091fc5a86.tgz",
+  "sourceRepository": "https://github.com/mmorinag127/sawa-platform.git",
+  "sourceCommit": "8004321e0364f54d1294df4bb3143dc091fc5a86",
+  "sourcePackageLockSHA256": "0447ba89c825f476f994b65575a6dda70a93566f9a5997819618165df1876357",
+  "generation": {
+    "cwd": "packages/ui",
+    "command": "npm pack --json --ignore-scripts --pack-destination tmp/verify-8004321-20261005/final-pack",
+    "generatedAt": "2026-10-05T01:17:59.051Z",
+    "node": "20.17.0",
+    "npm": "10.8.2",
+    "rename": "Byte-preserving copy to source-SHA filename"
+  },
+  "sha256": "eb85dd9a368cbac702840289ff4c1e964de09707a07831b7043755130d82dfcb",
+  "integrity": "sha512-nfC57vICD7+C5BE8TZbf48sKoW9DnGeesUTBMpQ9CR+3Zw/mbFFdXAKK4mr5wGkWgVlI4zRwzUvh6AjfVVkEfw==",
+  "verificationReferences": [
+    {
+      "repositoryRelativePath": "docs/modernization/mui-verification-8004321-20261005.md",
+      "sha256": "5cf1d2c3bd64c0e1392730c4ba4c16b9dfa6f655b24b71b489bd518ad9a7f287"
+    },
+    {
+      "repositoryRelativePath": "packages/ui/tmp/artifacts/artifact-manifest-8004321e0364f54d1294df4bb3143dc091fc5a86.json",
+      "sha256": "dafd31f2394b91d3f39bc13d8047737736f0966a9b282328b26a27160fc3eae6"
+    }
+  ],
+  "verificationScope": "Shared package build/types/10 unit cases/offline WebKit and isolated Next 16.3.8 React 18.3.1 consumer; full/prod audit zero at verification time. Not hospital integration, production authentication, deployment, stg or a general security guarantee. Referenced evidence retained in platform verification worktree, not assumed published in Git."
+}

@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const yaml = require("js-yaml");
 
 const repoRoot = path.resolve(__dirname, "../../..");
 const read = (relativePath) => fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
@@ -59,8 +60,21 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.equal((prodWorkflow.match(/token_format: id_token/g) || []).length, 3);
   assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
   assert.match(stgWorkflow, /bash scripts\/bootstrap_automation_user\.sh stg/);
-  assert.match(stgWorkflow, /build-backend:\s+needs: \[source-gate, automation-bootstrap\]/);
-  assert.match(stgWorkflow, /needs\.source-gate\.outputs\.backend_changed == 'false' \|\|\s+\(needs\.automation-bootstrap\.result == 'success' && needs\.deploy-backend\.result == 'success'\)/);
+  const jobs = yaml.load(stgWorkflow).jobs;
+  const backendChanged = "needs.source-gate.outputs.backend_changed == 'true'";
+  assert.deepEqual(jobs["menu-master-migration"].needs, ["source-gate", "automation-bootstrap"]);
+  assert.equal(jobs["menu-master-migration"].if, backendChanged);
+  assert.ok(jobs["menu-master-migration"].steps.some(step =>
+    step.run === "uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py"));
+  assert.deepEqual(jobs["build-backend"].needs, ["source-gate", "automation-bootstrap", "menu-master-migration"]);
+  assert.equal(jobs["build-backend"].if, backendChanged);
+  assert.deepEqual(jobs["deploy-backend"].needs, ["source-gate", "build-backend", "menu-master-migration"]);
+  assert.equal(jobs["deploy-backend"].if, backendChanged);
+  assert.deepEqual(jobs["deploy-frontend"].needs, ["source-gate", "automation-bootstrap", "build-frontend", "deploy-backend", "menu-master-migration"]);
+  assert.equal(jobs["deploy-frontend"].if.replace(/\s+/g, " ").trim(),
+    "always() && needs.source-gate.result == 'success' && needs.source-gate.outputs.frontend_changed == 'true' && " +
+    "needs.build-frontend.result == 'success' && (needs.source-gate.outputs.backend_changed == 'false' || " +
+    "(needs.automation-bootstrap.result == 'success' && needs.menu-master-migration.result == 'success' && needs.deploy-backend.result == 'success'))");
   assert.match(prodWorkflow, /python scripts\/portal_automation_db_bootstrap\.py/);
   for (const workflow of [stgWorkflow, prodWorkflow]) {
     assert.doesNotMatch(workflow, /register_automation_user\.py/);

@@ -4,6 +4,7 @@ import { useRouter } from "next/router";
 import { getStoredAuthHeader } from "../services/apiClient";
 import PageTemplate from "../components/PageTemplate";
 import UnifiedShell from "../components/UnifiedShell";
+import { NavigationBoundary } from "../components/NavigationBoundary";
 import { watchBrowserLogout } from "../services/browserSession";
 import { loginUrlFor } from "../services/loginDestination";
 import "../styles/sawa-template.css";
@@ -32,10 +33,10 @@ export default function App({ Component, pageProps }: AppProps) {
   }, [router.isReady, router.pathname, router.asPath]);
 
   return (
-    <UnifiedShell gitSha={gitSha} deployedAt={deployedAt} publicPage={publicPage}>
+    <NavigationBoundary><UnifiedShell gitSha={gitSha} deployedAt={deployedAt} publicPage={publicPage}>
       <PageTemplate publicPage={publicPage}>
         <Component {...pageProps} />
       </PageTemplate>
-    </UnifiedShell>
+    </UnifiedShell></NavigationBoundary>
   );
 }

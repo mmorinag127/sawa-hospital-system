@@ -51,6 +51,21 @@ test("legacy unstamped tabs are invalid after logout, but existing sessions befo
   local.setItem("sawa_logout_generation", "ended");
   assert.equal(t.api.sessionWasLoggedOut(), true);
 });
+test("cache generation changes for consecutive authentication changes after logout", () => {
+  const local = storage(), t = tab(local);
+  local.setItem("sawa_logout_generation", "prior-logout");
+  t.window.sessionStorage.setItem("auth_header", "Bearer first");
+  t.api.markSessionCurrent();
+  t.api.markAuthCacheChanged();
+  const first = t.api.browserSessionKey();
+  assert.equal(t.window.sessionStorage.getItem("sawa_auth_generation"), "prior-logout");
+  t.window.sessionStorage.setItem("auth_header", "Bearer second");
+  t.api.markSessionCurrent();
+  t.api.markAuthCacheChanged();
+  const second = t.api.browserSessionKey();
+  assert.notEqual(first, second);
+  assert.equal(t.window.sessionStorage.getItem("sawa_auth_generation"), "prior-logout");
+});
 test("restored pages clear cached authenticated state and listener cleanup works", () => {
   const local = storage(), t = tab(local);
   let notified = 0;

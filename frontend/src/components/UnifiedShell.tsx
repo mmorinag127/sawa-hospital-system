@@ -1,6 +1,8 @@
-import { useRouter } from "next/router";
 import type { ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { enterSchoolLunch } from "../services/systemNavigation";
+import { broadcastLogout } from "../services/browserSession";
+import { useHydratedPath } from "../hooks/useHydratedPath";
 
 type Props = {
   children: ReactNode;
@@ -17,11 +19,11 @@ const systemForPath = (path: string) => {
 };
 
 export default function UnifiedShell({ children, gitSha, deployedAt, publicPage = false }: Props) {
-  const router = useRouter();
-  const path = router.asPath.split("?")[0] || "/";
+  const path = useHydratedPath().split("?")[0];
   const currentSystem = publicPage ? "共通ログイン" : systemForPath(path);
   const shortSha = gitSha === "unknown" ? gitSha : gitSha.slice(0, 12);
   const logout = () => {
+    flushSync(() => broadcastLogout());
     window.location.replace("/logout");
   };
 

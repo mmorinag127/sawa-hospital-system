@@ -8,7 +8,7 @@ if (!/^[1-9]\d{3,4}$/.test(port) || Number(port) < 1024 || Number(port) > 65535)
 
 let baseUrl;
 try {
-  baseUrl = new URL(process.env.E2E_BASE_URL || `http://127.0.0.1:${port}`);
+  baseUrl = new URL(process.env.E2E_BASE_URL || `http://localhost:${port}`);
 } catch {
   throw new Error("E2E_BASE_URL must be a valid localhost URL");
 }
@@ -38,7 +38,7 @@ module.exports = defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: `PORT=${port} npm run start`,
+    command: `node node_modules/next/dist/bin/next start --hostname localhost --port ${port}`,
     url: baseUrl.toString(),
     reuseExistingServer: false,
     timeout: 120 * 1000,

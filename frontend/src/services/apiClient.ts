@@ -1,5 +1,6 @@
 import axios, { AxiosHeaders, type AxiosRequestHeaders } from "axios";
-import { markSessionCurrent, sessionWasLoggedOut } from "./browserSession";
+import { flushSync } from "react-dom";
+import { browserSessionKey, markAuthCacheChanged, markSessionCurrent, sessionWasLoggedOut } from "./browserSession";
 import { loginUrlFor } from "./loginDestination";
 
 const AUTH_STORAGE_KEY = "auth_header";
@@ -28,6 +29,12 @@ const getSessionAuthHeader = () => {
   return window.sessionStorage.getItem(AUTH_STORAGE_KEY) || "";
 };
 
+/** Render-safe check: never migrates legacy storage or clears credentials. */
+export const hasActiveSessionAuthHeader = () =>
+  typeof window !== "undefined" &&
+  !sessionWasLoggedOut() &&
+  getSessionAuthHeader().startsWith("Bearer ");
+
 export const getStoredAuthHeader = () => {
   if (typeof window === "undefined") return "";
   if (sessionWasLoggedOut()) {
@@ -49,6 +56,7 @@ export const getStoredAuthHeader = () => {
   if (legacyValue.startsWith("Bearer ")) {
     window.sessionStorage.setItem(AUTH_STORAGE_KEY, legacyValue);
     markSessionCurrent();
+    markAuthCacheChanged();
   }
   clearLegacyAuthStorage();
   return legacyValue.startsWith("Bearer ") ? legacyValue : "";
@@ -57,12 +65,15 @@ export const getStoredAuthHeader = () => {
 const setStoredAuthHeader = (value: string) => {
   if (typeof window === "undefined") return;
   if (!value) {
+    const hadCredential = !!getSessionAuthHeader();
     window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
+    if (hadCredential) markAuthCacheChanged();
     clearLegacyAuthStorage();
     return;
   }
   window.sessionStorage.setItem(AUTH_STORAGE_KEY, value);
   markSessionCurrent();
+  markAuthCacheChanged();
   clearLegacyAuthStorage();
 };
 
@@ -99,9 +110,11 @@ export const apiClient = axios.create({
   baseURL: inferBaseUrl(),
   timeout: 30000,
 });
+const requestSessions = new WeakMap<object, string>();
 
 apiClient.interceptors.request.use((config) => {
   const header = getStoredAuthHeader();
+  requestSessions.set(config, browserSessionKey());
   if (header) {
     const headers = AxiosHeaders.from(config.headers || ({} as AxiosRequestHeaders));
     headers.set("Authorization", header);
@@ -113,8 +126,10 @@ apiClient.interceptors.request.use((config) => {
 apiClient.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err?.response?.status === 401 && typeof window !== "undefined") {
-      clearAuth();
+    // An old session's response cannot revoke a newer login (even for the same token).
+    if (err?.response?.status === 401 && typeof window !== "undefined" &&
+        err.config && requestSessions.get(err.config) === browserSessionKey()) {
+      flushSync(() => clearAuth());
       if (!window.location.pathname.startsWith("/login")) {
         const next = window.location.pathname + window.location.search + window.location.hash;
         window.sessionStorage.setItem("auth_next", next);

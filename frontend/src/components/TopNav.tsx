@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { useRouter } from "next/router";
 
 import { useCurrentUserRole } from "../hooks/useCurrentUserRole";
+import { useNavigationBoundary } from "./NavigationBoundary";
+import { useHydratedPath } from "../hooks/useHydratedPath";
 
 type NavItem = {
   href: string;
@@ -26,8 +27,8 @@ const normalizePath = (path: string) => {
 const hospitalHref = (href: string) => (href === "/" ? "/hospital" : `/hospital${href}`);
 
 export default function TopNav() {
-  const router = useRouter();
-  const currentPath = normalizePath(router.asPath || "/");
+  const currentPath = normalizePath(useHydratedPath());
+  const navigation = useNavigationBoundary();
   const { role } = useCurrentUserRole();
   const roleRank = role === "admin" ? 2 : 1;
 
@@ -184,6 +185,7 @@ export default function TopNav() {
           </div>
           <Link
             href="/hospital"
+            onNavigate={event => { if (!navigation.allow("/hospital")) event.preventDefault(); }}
             className={`dashboard-link${currentPath === "/" ? " active" : ""}`}
             aria-current={currentPath === "/" ? "page" : undefined}
           >
@@ -203,6 +205,7 @@ export default function TopNav() {
                   <Link
                     key={item.href}
                     href={hospitalHref(item.href)}
+                    onNavigate={event => { if (!navigation.allow(hospitalHref(item.href))) event.preventDefault(); }}
                     className={`top-link${active ? " active" : ""}`}
                     aria-current={active ? "page" : undefined}
                   >
