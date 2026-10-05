@@ -75,6 +75,7 @@ def test_best_method_overlay_does_not_draw_internal_merge_boundary(monkeypatch) 
         regions=regions,
         records=[],
         quad_points=[],
+        header_intersection_points=[],
         facility_code="FAC_TEST",
         order_id="ORD_TEST",
         details=[],
