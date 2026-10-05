@@ -1,4 +1,4 @@
-"""Registered hospital operator for contract tests; only Google is mocked."""
+"""Registered hospital users for contract tests; only Google is mocked."""
 
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,7 +15,7 @@ HUMAN_AUDIENCE = "hospital-contract.apps.googleusercontent.com"
 
 
 @dataclass(frozen=True)
-class HospitalOperator:
+class HospitalUser:
     user_id: str
     account: str
     token: str
@@ -27,7 +27,7 @@ class HospitalOperator:
 
 
 @contextmanager
-def registered_hospital_operator(monkeypatch, *, status="active", systems=("hospital",)):
+def _registered_hospital_user(monkeypatch, *, role, status="active", systems=("hospital",)):
     account = f"hospital-contract-{uuid4().hex}@example.invalid"
     token = f"hospital-contract-token-{uuid4().hex}"
     with monkeypatch.context() as patch:
@@ -45,14 +45,24 @@ def registered_hospital_operator(monkeypatch, *, status="active", systems=("hosp
         verifier = Mock(side_effect=verify)
         patch.setattr(auth_module.id_token, "verify_oauth2_token", verifier)
         # Reuse the existing canonical test grant schema and real user inserts.
-        user_id = _seed_user(account, status=status, systems=systems)
+        user_id = _seed_user(account, role=role, status=status, systems=systems)
         try:
-            yield HospitalOperator(user_id, account, token, verifier)
+            yield HospitalUser(user_id, account, token, verifier)
         finally:
             _cleanup(user_id)
+
+
+def registered_hospital_operator(monkeypatch, *, status="active", systems=("hospital",)):
+    return _registered_hospital_user(monkeypatch, role="operator", status=status, systems=systems)
 
 
 @pytest.fixture
 def hospital_operator(monkeypatch):
     with registered_hospital_operator(monkeypatch) as operator:
         yield operator
+
+
+@pytest.fixture
+def hospital_admin(monkeypatch):
+    with _registered_hospital_user(monkeypatch, role="admin") as admin:
+        yield admin

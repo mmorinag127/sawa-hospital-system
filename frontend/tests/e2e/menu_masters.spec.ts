@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Request, type TestInfo } from "@playwright/test";
 
 type RecordValue = {
   id: string; revision: number; name: string; unit_type: string | null;
@@ -47,6 +47,13 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     sessionStorage.setItem("sawa_auth_cache_generation", "menu-test-A");
   });
   const origin = new URL(String(info.project.use.baseURL)).origin;
+  const pending = new Set<Request>(), failures: string[] = [];
+  let finished = 0;
+  page.on("request", request => { if (new URL(request.url()).origin === origin) pending.add(request); });
+  page.on("requestfinished", request => { if (pending.delete(request)) finished++; });
+  page.on("requestfailed", request => {
+    if (pending.delete(request)) failures.push(`${request.url()}: ${request.failure()?.errorText}`);
+  });
   await page.route("**/*", async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.origin !== origin) { state.blocked.push(url.origin + url.pathname); return route.abort("blockedbyclient"); }
@@ -86,7 +93,13 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     state.unexpected.push(`${method} ${path}`);
     return respond(500, { detail: "Unmocked request; no live fallback" });
   });
-  return state;
+  return Object.assign(state, { settleDocument: async () => {
+    // Finish finite same-origin traffic before the test destroys this document.
+    await page.waitForLoadState("networkidle");
+    expect([...pending].map(request => request.url())).toEqual([]);
+    expect(failures).toEqual([]);
+    return finished;
+  } });
 }
 
 async function finish(page: Page, info: TestInfo, state: Awaited<ReturnType<typeof fixture>>) {
@@ -163,6 +176,10 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
     await expect(field(editForm(page), "分類")).toHaveValue("魚");
     await expect(field(editForm(page), "付属品")).toHaveValue("ソース");
     expect(s.items[0]).toMatchObject({ ...update, revision: 2 });
+    const savedRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: update.name, exact: true }) });
+    await expect(savedRow.getByRole("cell")).toHaveText([update.name, "個", "2", "—", "切れ", "温", "夕", "魚", "ソース", "編集"]);
+    const createdRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: payload.name, exact: true }) });
+    await expect(createdRow.getByRole("cell")).toHaveText([payload.name, "切れ", "0", "10", "個", "冷", "昼", "主菜", "塩、レモン", "編集"]);
     await page.getByRole("textbox", { name: "メニュー名で検索", exact: true }).fill("日本語");
     for (const width of [360, 1280]) {
       await page.setViewportSize({ width, height: 1000 });
@@ -203,6 +220,12 @@ test("g/null/zero and duplicate registration does not overwrite", async ({ page 
   await field(form, "メニュー名").fill(original.name); await field(form, "分類").fill("重複で上書き禁止"); await save(form); await saved(form);
   expect(s.items[0]).toEqual(original); expect(s.items).toHaveLength(3);
   await expect(field(editForm(page), "分類")).toHaveValue(original.category!);
+  s.items.push({ ...record("UNKNOWN", "未知コード"), unit_type: "UNIT-X", bag_max_unit: null, temp_type: "TEMP-X" });
+  await page.reload();
+  const zero = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "数量ゼロ", exact: true }) });
+  await expect(zero.getByRole("cell")).toHaveText(["数量ゼロ", "グラム (g)", "—", "0", "グラム (g)", "—", "—", "—", "—", "編集"]);
+  const unknown = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "未知コード", exact: true }) });
+  await expect(unknown.getByRole("cell")).toHaveText(["未知コード", "UNIT-X", "1", "5", "—", "TEMP-X", "夕食", "主菜", "—", "編集"]);
   await finish(page, info, s);
 });
 
@@ -275,10 +298,11 @@ test("actual table 1500/0/g remains readable and keyboard-scrollable on mobile",
       const rect = cell.getBoundingClientRect();
       return { text: cell.textContent, width: rect.width, height: rect.height, lines: new Set([...range.getClientRects()].map(r => Math.round(r.y))).size, whiteSpace: getComputedStyle(cell).whiteSpace };
     }));
-    for (const text of ["1500", "0", "g"]) {
+    for (const text of ["1500", "0", "グラム (g)", "温"]) {
       const cells = metrics.filter(c => c.text === text); expect(cells.length).toBeGreaterThan(0);
       for (const cell of cells) expect(cell.lines).toBe(1);
     }
+    expect(metrics.filter(c => c.text === "グラム (g)")).toHaveLength(2);
     const headings = await region.getByRole("columnheader").evaluateAll(cells => cells.map(cell => {
       const range = document.createRange(); range.selectNodeContents(cell);
       return { text: cell.textContent, lines: new Set([...range.getClientRects()].map(r => Math.round(r.y))).size };
@@ -479,10 +503,15 @@ test("document reload adopts existing owned token and retains earlier query hist
 
 test("invalid query stops API list without guessing a page", async ({ page }, info) => {
   const s = await fixture(page, info);
+  const documents: { query: string; finished: number }[] = [];
   for (const query of ["page=-1", "page=1.5", "pageSize=0", "pageSize=7"]) {
     s.requests.length = 0; await page.goto(`/hospital/menu-masters?${query}`);
-    await expect(page.getByRole("alert").filter({ hasText: "一覧の" })).toBeVisible(); expect(s.requests.filter(r => r.path === "/menu-masters")).toHaveLength(0);
+    await expect(page.getByRole("alert").filter({ hasText: "一覧の" })).toBeVisible();
+    const finished = await s.settleDocument();
+    expect(s.requests.filter(r => r.path === "/menu-masters")).toHaveLength(0);
+    documents.push({ query, finished });
   }
+  await info.attach("invalid-query-document-traffic", { body: JSON.stringify({ documents }), contentType: "application/json" });
   await finish(page, info, s);
 });
 
@@ -551,7 +580,9 @@ test("guest client redirect and adjacent public page have no hydration mismatch"
   const s = await fixture(page, info, { guest: true }); const documents: { url: string; status: number }[] = [];
   page.on("response", r => { if (r.request().isNavigationRequest()) documents.push({ url: r.url(), status: r.status() }); });
   await page.goto("/hospital/menu-masters"); await expect(page).toHaveURL(/\/login/); expect(documents.some(d => d.url.endsWith("/hospital/menu-masters") && d.status === 200)).toBe(true);
+  await s.settleDocument();
   await page.goto("/about"); await expect(page.locator(".unified-current")).toHaveText("共通ログイン");
+  await s.settleDocument();
   expect(s.requests.filter(r => r.path === "/menu-masters")).toHaveLength(0);
   await info.attach("guest-document-vs-client-redirect", { body: JSON.stringify(documents), contentType: "application/json" }); await finish(page, info, s);
 });

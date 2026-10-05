@@ -19,6 +19,7 @@ import {
   type TableColumn,
 } from "@sawa/ui";
 import TopNav from "../components/TopNav";
+import { menuMasterOptionLabel, menuMasterTemperatures, menuMasterUnits } from "../components/menuMasterOptions";
 import { apiClient, hasActiveSessionAuthHeader } from "../services/apiClient";
 import {
   browserSessionKey,
@@ -69,6 +70,11 @@ const condiments = (value: string) =>
     .split(",")
     .map((v) => v.trim())
     .filter(Boolean);
+const renderOptionLabel = (options: readonly { value: string; label: string }[], value: string | null) => (
+  <Box component="span" sx={{ whiteSpace: options.some(option => option.value === value) ? "nowrap" : "normal" }}>
+    {menuMasterOptionLabel(options, value)}
+  </Box>
+);
 const classify = (error: any) => ({
   kind:
     error?.response?.status === 409
@@ -90,9 +96,7 @@ function Fields() {
       />
       <FormTextField<MenuMasterDraft> name="unit_type" label="単位" select>
         <MenuItem value="">未選択</MenuItem>
-        <MenuItem value="g">グラム (g)</MenuItem>
-        <MenuItem value="cut">切れ</MenuItem>
-        <MenuItem value="count">個</MenuItem>
+        {menuMasterUnits.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
       </FormTextField>
       <FormTextField<MenuMasterDraft>
         name="qty_per_serving"
@@ -110,14 +114,11 @@ function Fields() {
       />
       <FormTextField<MenuMasterDraft> name="bag_max_unit" label="袋単位" select>
         <MenuItem value="">未選択</MenuItem>
-        <MenuItem value="g">グラム (g)</MenuItem>
-        <MenuItem value="cut">切れ</MenuItem>
-        <MenuItem value="count">個</MenuItem>
+        {menuMasterUnits.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
       </FormTextField>
       <FormTextField<MenuMasterDraft> name="temp_type" label="温冷" select>
         <MenuItem value="">未選択</MenuItem>
-        <MenuItem value="hot">温</MenuItem>
-        <MenuItem value="cold">冷</MenuItem>
+        {menuMasterTemperatures.map(option => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
       </FormTextField>
       <FormTextField<MenuMasterDraft> name="daypart" label="食事帯" />
       <FormTextField<MenuMasterDraft> name="category" label="分類" />
@@ -240,7 +241,7 @@ function Screen({ authenticated }: { authenticated: boolean }) {
   };
   const columns: readonly TableColumn<MenuMaster>[] = [
     { id: "name", label: "メニュー名", render: (r) => r.name },
-    { id: "unit", label: "単位", render: (r) => r.unit_type || "—" },
+    { id: "unit", label: "単位", render: (r) => renderOptionLabel(menuMasterUnits, r.unit_type) },
     {
       id: "qty",
       label: "1人前",
@@ -253,8 +254,8 @@ function Screen({ authenticated }: { authenticated: boolean }) {
       align: "right",
       render: (r) => r.bag_max_qty ?? "—",
     },
-    { id: "bag-unit", label: "袋単位", render: (r) => r.bag_max_unit || "—" },
-    { id: "temp", label: "温冷", render: (r) => r.temp_type || "—" },
+    { id: "bag-unit", label: "袋単位", render: (r) => renderOptionLabel(menuMasterUnits, r.bag_max_unit) },
+    { id: "temp", label: "温冷", render: (r) => renderOptionLabel(menuMasterTemperatures, r.temp_type) },
     { id: "daypart", label: "食事帯", render: (r) => r.daypart || "—" },
     { id: "category", label: "分類", render: (r) => r.category || "—" },
     {

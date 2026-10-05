@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from auth_support import hospital_operator  # noqa: F401
+from auth_support import hospital_admin, hospital_operator  # noqa: F401
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
@@ -45,12 +45,12 @@ def _create_seed_order(message_id: str) -> dict:
     return order_service.create_order_from_ingest(payload, lines=lines)
 
 
-def test_system_status_and_admin_endpoints():
+def test_system_status_and_admin_endpoints(hospital_admin):
     order_service.clear_all()
     _create_seed_order("msg-system-api-001")
     client = TestClient(app)
 
-    status_res = client.get("/system/status")
+    status_res = client.get("/system/status", headers=hospital_admin.headers)
     assert status_res.status_code == 200
     status_payload = status_res.json()
     assert isinstance(status_payload.get("db_quota"), dict)
@@ -68,27 +68,28 @@ def test_system_status_and_admin_endpoints():
     assert intake.get("manual_upload_enabled") is True
     assert isinstance((intake.get("manual_upload_storage") or {}).get("configured"), bool)
 
-    quota_res = client.get("/system/db/quota")
+    quota_res = client.get("/system/db/quota", headers=hospital_admin.headers)
     assert quota_res.status_code == 200
     assert quota_res.json().get("resource")
 
-    download_res = client.get("/system/db/download")
+    download_res = client.get("/system/db/download", headers=hospital_admin.headers)
     assert download_res.status_code == 200
     assert len(download_res.content) > 0
 
-    bad_clear_res = client.post("/system/clear-all", json={"confirm": "INVALID"})
+    bad_clear_res = client.post("/system/clear-all", json={"confirm": "INVALID"}, headers=hospital_admin.headers)
     assert bad_clear_res.status_code == 400
 
     clear_res = client.post(
         "/system/clear-all",
         json={"confirm": "CLEAR_ALL", "include_audit_logs": True},
+        headers=hospital_admin.headers,
     )
     assert clear_res.status_code == 200
     clear_payload = clear_res.json()
     assert clear_payload.get("result", {}).get("total_removed", 0) >= 1
 
 
-def test_system_process_logs_returns_recent_one_row_per_process():
+def test_system_process_logs_returns_recent_one_row_per_process(hospital_operator):
     order_service.clear_all()
     now = datetime.utcnow()
     with session_scope() as session:
@@ -153,7 +154,7 @@ def test_system_process_logs_returns_recent_one_row_per_process():
         )
 
     client = TestClient(app)
-    res = client.get("/system/process-logs?limit=3")
+    res = client.get("/system/process-logs?limit=3", headers=hospital_operator.headers)
 
     assert res.status_code == 200
     payload = res.json()
@@ -171,11 +172,11 @@ def test_system_process_logs_returns_recent_one_row_per_process():
     }
 
 
-def test_system_status_reports_manual_upload_mode(monkeypatch):
+def test_system_status_reports_manual_upload_mode(monkeypatch, hospital_operator):
     monkeypatch.setenv("INGEST_MODE", "manual_upload")
     client = TestClient(app)
 
-    res = client.get("/system/status")
+    res = client.get("/system/status", headers=hospital_operator.headers)
 
     assert res.status_code == 200
     payload = res.json()
@@ -184,7 +185,7 @@ def test_system_status_reports_manual_upload_mode(monkeypatch):
     assert intake.get("manual_upload_enabled") is True
 
 
-def test_system_status_and_health_include_uploaded_pdf_backlog():
+def test_system_status_and_health_include_uploaded_pdf_backlog(hospital_operator):
     order_service.clear_all()
     now = datetime.utcnow()
     with session_scope() as session:
@@ -227,7 +228,7 @@ def test_system_status_and_health_include_uploaded_pdf_backlog():
 
     client = TestClient(app)
 
-    status_res = client.get("/system/status")
+    status_res = client.get("/system/status", headers=hospital_operator.headers)
     assert status_res.status_code == 200
     status_payload = status_res.json()
     uploaded_pdfs = status_payload.get("uploaded_pdfs") or {}
@@ -235,14 +236,14 @@ def test_system_status_and_health_include_uploaded_pdf_backlog():
     assert uploaded_pdfs.get("stale_lease_count") == 1
     assert uploaded_pdfs.get("eligible_backlog_count") == 2
 
-    health_res = client.get("/health/backlog")
+    health_res = client.get("/health/backlog", headers=hospital_operator.headers)
     assert health_res.status_code == 200
     health_payload = health_res.json()
     assert health_payload.get("uploaded_pdf_queue_depth") == 2
     assert (health_payload.get("uploaded_pdfs") or {}).get("pending_count") == 1
 
 
-def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch):
+def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch, hospital_operator):
     order_service.clear_all()
     monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "10")
     now = datetime.utcnow()
@@ -322,7 +323,7 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch):
         recovering_running_job.updated_at = now - timedelta(minutes=30)
 
     client = TestClient(app)
-    res = client.get("/health/backlog")
+    res = client.get("/health/backlog", headers=hospital_operator.headers)
 
     assert res.status_code == 200
     payload = res.json()
@@ -414,13 +415,13 @@ def test_health_backlog_requires_operator_when_auth_enabled(hospital_operator):
     assert auth_res.status_code == 200
 
 
-def test_system_status_reflects_latest_pipeline_request_in_gcs_only_mode(monkeypatch, tmp_path):
+def test_system_status_reflects_latest_pipeline_request_in_gcs_only_mode(monkeypatch, tmp_path, hospital_operator):
     monkeypatch.setenv("OCR_PIPELINE_STATE_URI", str(tmp_path / "pipeline-state.json"))
     save_pipeline_error("MAIN-old", "OCR pipeline output not found: gs://bucket/output/old.json")
     save_pipeline_request("MAIN-new", "gs://bucket/input/new.pdf")
 
     client = TestClient(app)
-    res = client.get("/system/status")
+    res = client.get("/system/status", headers=hospital_operator.headers)
 
     assert res.status_code == 200
     pipeline = res.json().get("ocr_pipeline") or {}

@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from auth_support import hospital_operator, registered_hospital_operator  # noqa: F401
+from auth_support import hospital_admin, hospital_operator, registered_hospital_operator  # noqa: F401
 from src.api import auth as auth_module
 from src.db import engine, session_scope
 from src.main import app
@@ -79,7 +79,23 @@ def test_active_hospital_operator_reaches_real_endpoint_but_not_admin(hospital_o
     assert response.status_code == 200
     assert "ingest_queue_depth" in response.json()
     assert client.get("/system/db/download", headers=hospital_operator.headers).status_code == 403
+    assert client.post("/system/clear-all", headers=hospital_operator.headers, json={"confirm": "CLEAR_ALL"}).status_code == 403
     assert hospital_operator.verifier.called
+
+
+def test_hospital_admin_fixture_uses_registered_admin_role_and_enabled_grant(hospital_admin):
+    assert os.environ["AUTH_DISABLED"] == "false"
+    with session_scope() as session:
+        user = session.get(User, hospital_admin.user_id)
+        assert (user.account, user.role, user.status) == (hospital_admin.account, "admin", "active")
+        assert session.execute(
+            text("SELECT system_key FROM user_system_access WHERE user_id = :id AND enabled = TRUE"),
+            {"id": hospital_admin.user_id},
+        ).scalars().all() == ["hospital"]
+    response = TestClient(app).get("/system/db/download", headers=hospital_admin.headers)
+    assert response.status_code == 200
+    assert response.content
+    assert hospital_admin.verifier.called
 
 
 def test_helper_clears_cache_restores_patches_and_preserves_other_users(monkeypatch):

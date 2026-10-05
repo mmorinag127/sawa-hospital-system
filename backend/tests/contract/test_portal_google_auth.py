@@ -13,7 +13,7 @@ from src.main import app
 client = TestClient(app)
 
 
-def _seed_user(account: str, *, status: str = "active", systems: tuple[str, ...] = ("hospital",)) -> str:
+def _seed_user(account: str, *, role: str = "operator", status: str = "active", systems: tuple[str, ...] = ("hospital",)) -> str:
     user_id = str(uuid.uuid4())
     with engine.begin() as connection:
         connection.execute(
@@ -29,8 +29,8 @@ def _seed_user(account: str, *, status: str = "active", systems: tuple[str, ...]
             )
         )
         connection.execute(
-            text("INSERT INTO users(id, account, role, status) VALUES(:id, :account, 'operator', :status)"),
-            {"id": user_id, "account": account, "status": status},
+            text("INSERT INTO users(id, account, role, status) VALUES(:id, :account, :role, :status)"),
+            {"id": user_id, "account": account, "role": role, "status": status},
         )
         for system in systems:
             connection.execute(
