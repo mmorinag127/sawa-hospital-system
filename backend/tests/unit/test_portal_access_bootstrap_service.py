@@ -7,10 +7,21 @@ from sqlalchemy import create_engine, text
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
+import src.maintenance.portal_access_bootstrap_schema as portal_schema  # noqa: E402
+import src.services.portal_access_bootstrap_service as portal_service  # noqa: E402
 from src.services.portal_access_bootstrap_service import (  # noqa: E402
     PortalAccessBootstrapError,
     run_portal_access_bootstrap_gate,
 )
+
+
+def test_legacy_canonical_schema_assertion_delegates_with_portal_error_identity(monkeypatch):
+    def blocked(connection, error_type):
+        raise error_type("canonical schema blocked")
+
+    monkeypatch.setattr(portal_schema, "_assert_canonical_user_system_access_schema", blocked)
+    with pytest.raises(PortalAccessBootstrapError, match="canonical schema blocked"):
+        portal_service._assert_canonical_user_system_access_schema(object())
 
 
 def _prepare_engine(tmp_path):

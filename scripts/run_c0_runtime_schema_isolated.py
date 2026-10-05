@@ -21,12 +21,23 @@ TESTS = [
 ]
 
 
+def _resolve_pytest_target(source_root: Path, raw_target: str) -> str:
+    path_text, separator, node_id = raw_target.partition("::")
+    candidate = Path(path_text)
+    source_tests = (source_root / "backend" / "tests").resolve()
+    resolved = (candidate if candidate.is_absolute() else source_root / candidate).resolve()
+    if not resolved.is_relative_to(source_tests) or resolved.suffix != ".py" or not resolved.is_file():
+        raise ValueError(f"pytest_target_outside_source_backend_tests:{raw_target}")
+    return f"{resolved}::{node_id}" if separator else str(resolved)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_name")
     parser.add_argument("--postgres-uri")
     parser.add_argument("--postgres-socket-dir")
     parser.add_argument("--source-root", default=str(ROOT))
+    parser.add_argument("--pytest-target", action="append", default=[])
     args = parser.parse_args()
     source_root = Path(args.source_root).resolve()
     source_backend = source_root / "backend"
@@ -72,7 +83,10 @@ def main() -> int:
     )
     import pytest
 
-    targets = [str(source_root / target) if "::" not in target else f"{source_root / target.split('::', 1)[0]}::{target.split('::', 1)[1]}" for target in TESTS]
+    targets = [
+        _resolve_pytest_target(source_root, target)
+        for target in (args.pytest_target or TESTS)
+    ]
     if args.postgres_uri:
         targets.append(str(source_root / "backend/tests/contract/test_automation_bootstrap_postgres.py"))
     return pytest.main([*targets, f"--junitxml={run_dir / 'results.xml'}", "-o", "faulthandler_timeout=120"])

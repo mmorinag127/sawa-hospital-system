@@ -74,6 +74,15 @@ def ensure_user_system_access_schema(connection: Connection) -> bool:
     return ensure_schema(connection, error_type=PortalAccessBootstrapError)
 
 
+def _assert_canonical_user_system_access_schema(connection: Connection) -> None:
+    """Compatibility entry point for explicit bootstrap callers."""
+    from src.maintenance.portal_access_bootstrap_schema import (
+        _assert_canonical_user_system_access_schema as assert_schema,
+    )
+
+    assert_schema(connection, PortalAccessBootstrapError)
+
+
 def _normalize_email(
     raw_email: str | None,
     *,

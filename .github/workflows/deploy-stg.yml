@@ -152,6 +152,8 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v3
       - name: Verify prior schema and explicitly apply menu master revision
         run: uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py
+      - name: Preflight runtime schema readiness
+        run: uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py
 
   build-backend:
     needs: [source-gate, automation-bootstrap, menu-master-migration]
