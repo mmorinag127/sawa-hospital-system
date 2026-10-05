@@ -21,6 +21,11 @@ on:
         description: "Optional staging GCS manifest of verified production menu originals"
         required: false
         type: string
+      verify_menu_master_ui:
+        description: "Create, verify and strictly clean up this run's own staging menu master"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-stg
@@ -263,6 +268,7 @@ jobs:
             --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
             --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
+            --label "sawa.git_sha=${GITHUB_SHA}" \
             -t "$image" \
             "$deploy_dir"
           docker push "$image"
@@ -395,3 +401,47 @@ jobs:
           DEPLOY_ID_TOKEN="$DEPLOY_ID_TOKEN" \
           ENSURE_GCLOUD_AUTH=true \
           TAG_PREFIX=stg-frontend ./scripts/deploy_web_with_checks.sh
+
+      - name: Initialize opted-in menu master evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        run: |
+          mkdir -p tmp/menu-master-live
+          python3 -c 'import json,os,pathlib; pathlib.Path("tmp/menu-master-live/result.json").write_text(json.dumps({"status":"not-started","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in staging service-principal verification"}))'
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        with:
+          node-version: '20'
+      - uses: astral-sh/setup-uv@v8.1.0
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+      - name: Prepare opted-in menu master verification
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+          cd ..
+          uv sync --project backend --extra dev --frozen
+      - id: auth-menu-master-live
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - name: Verify opted-in actual menu master UI and clean up own record
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        env:
+          C1_LIVE_VERIFY: 'true'
+          LIVE_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          LIVE_ID_TOKEN: ${{ steps.auth-menu-master-live.outputs.id_token }}
+        run: uv run --project backend --extra dev --frozen python scripts/verify_stg_menu_master_ui.py
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        with:
+          name: live-menu-master-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/menu-master-live/
+          retention-days: 7
+          if-no-files-found: error

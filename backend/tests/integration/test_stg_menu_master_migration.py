@@ -29,6 +29,8 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 import apply_menu_master_revision_migration as migration  # noqa: E402
 from scripts import portal_prod_db_bootstrap as config_reader  # noqa: E402
+import staging_db_target as db_target  # noqa: E402
+from test_staging_db_target import install_cloud  # noqa: E402
 
 
 CONTEXT = {
@@ -248,22 +250,10 @@ def test_guard_rejections_precede_all_cloud_proxy_and_db_calls(context, monkeypa
 
 @pytest.fixture
 def cloud_transport(context, monkeypatch):
-    calls = []
-
-    def describe(*args):
-        calls.append(args)
-        return {"spec": {"template": {
-            "metadata": {"annotations": {"run.googleapis.com/cloudsql-instances": "sawahospitalsystem:asia-northeast2:orders-stg"}},
-            "spec": {"containers": [{"env": [
-                {"name": "DB_NAME", "value": "orders"}, {"name": "DB_USER", "value": "stg-user"},
-                {"name": "DB_HOST", "value": "/cloudsql/sawahospitalsystem:asia-northeast2:orders-stg"},
-                {"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "test-secret", "key": "1"}}},
-            ]}]},
-        }}}
-
-    monkeypatch.setattr(config_reader, "_run_gcloud_json", describe)
-    secret = Mock(return_value="private-password-sentinel")
-    monkeypatch.setattr(config_reader, "_load_secret", secret)
+    _, _, calls, secret = install_cloud(monkeypatch)
+    # The proxy fixture redirects only to our independently owned PG database.
+    monkeypatch.setattr(runner, 'verify_connection_target', lambda connection:
+        db_target.verify_connection_target(connection, database='c1_stg_migration', role=sa.make_url(os.environ['C1_STG_PG_URI']).username))
 
     @contextmanager
     def proxy(instance):
@@ -290,9 +280,9 @@ def test_full_runner_real_db_transaction_reader_reuse_and_secretless_url(prior, 
     assert after["users"] == before["users"] and after["user_system_access"] == before["user_system_access"]
     assert runner.main() == 0 and snapshot(prior) == after
     calls, secret = cloud_transport
-    assert [call[3] for call in calls] == ["web-stg", "worker-stg"] * 2
-    assert secret.call_count == 4
-    assert urls[0].username == "stg-user" and urls[0].password == "private-password-sentinel"
+    assert [call[3] for call in calls] == ["web-stg", "web-stg-r1", "worker-stg", "worker-stg-r1"] * 2
+    assert secret.call_count == 8
+    assert urls[0].username == "orders_app" and urls[0].password == "private-password-sentinel"
     assert (urls[0].host, urls[0].port, urls[0].database) == ("127.0.0.1", 5432, "orders")
     output = capsys.readouterr()
     assert "private-password" not in output.out + output.err
@@ -305,6 +295,16 @@ def test_runner_schema_failure_exit_one_and_no_revision(prior, cloud_transport, 
     monkeypatch.setattr(runner, "create_engine", lambda *args, **kwargs: prior)
     assert runner.main() == 1
     assert "0023" in capsys.readouterr().err and snapshot(prior) == before
+
+
+def test_real_connected_target_mismatch_stops_before_migration(prior, cloud_transport, monkeypatch, capsys):
+    before = snapshot(prior)
+    monkeypatch.setattr(runner, "create_engine", lambda *args, **kwargs: prior)
+    monkeypatch.setattr(runner, "verify_connection_target", db_target.verify_connection_target)
+    assert runner.main() == 1  # Own c1_stg_migration is deliberately not orders/orders_app.
+    assert 'connected-database-or-role-mismatch' in capsys.readouterr().err
+    assert snapshot(prior) == before
+    assert "revision" not in {col["name"] for col in sa.inspect(prior).get_columns("menu_masters")}
 
 
 def test_real_migration_lock_failure_fails_runner_and_rolls_back(prior, cloud_transport, monkeypatch, capsys):
@@ -332,7 +332,7 @@ def test_real_migration_lock_failure_fails_runner_and_rolls_back(prior, cloud_tr
 
 @pytest.mark.parametrize("mismatch", ["instance", "database", "wrong-project", "multiple-instances", "prod", "other", "other-database"])
 def test_cloud_targets_must_match_before_proxy_or_database(context, monkeypatch, mismatch):
-    first = SimpleNamespace(instance_connection_name="sawahospitalsystem:asia-northeast2:orders-stg", db_name="orders")
+    first = SimpleNamespace(instance_connection_name="sawahospitalsystem:asia-northeast2:orders-stg", db_name="orders", db_user="orders_app")
     second = SimpleNamespace(**vars(first))
     if mismatch == "instance":
         second.instance_connection_name += "-other"
@@ -360,8 +360,9 @@ def test_actual_reader_rejects_misdirected_stg_metadata_before_proxy(cloud_trans
 
     def misdirected(*args):
         data = describe(*args)
-        data["spec"]["template"]["metadata"]["annotations"]["run.googleapis.com/cloudsql-instances"] = (
-            "sawahospitalsystem:asia-northeast2:" + instance)
+        if args[1] == 'services':
+            data["spec"]["template"]["metadata"]["annotations"]["run.googleapis.com/cloudsql-instances"] = (
+                "sawahospitalsystem:asia-northeast2:" + instance)
         return data
 
     monkeypatch.setattr(config_reader, "_run_gcloud_json", misdirected)
@@ -369,7 +370,7 @@ def test_actual_reader_rejects_misdirected_stg_metadata_before_proxy(cloud_trans
     monkeypatch.setattr(runner, "cloud_sql_proxy", proxy)
     monkeypatch.setattr(runner, "create_engine", engine)
     assert runner.main() == 1
-    assert [call[3] for call in cloud_transport[0]] == ["web-stg", "worker-stg"]
+    assert [call[3] for call in cloud_transport[0]] == ["web-stg", "web-stg-r1"]
     proxy.assert_not_called()
     engine.assert_not_called()
 

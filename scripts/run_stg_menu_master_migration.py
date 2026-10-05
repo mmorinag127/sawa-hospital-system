@@ -21,7 +21,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "backend"))
 
 from apply_menu_master_revision_migration import MigrationBlocked, upgrade_staging  # noqa: E402
-from scripts.portal_prod_db_bootstrap import _load_service_db_config  # noqa: E402
+from staging_db_target import (  # noqa: E402
+    StagingConfigBlocked, load_service_db_config as _load_service_db_config, verify_connection_target,
+)
 
 
 # Same pinned binary/checksum as bootstrap_automation_user.sh; no mutable latest URL.
@@ -89,9 +91,9 @@ def run() -> None:
     require_staging_context()
     web = _load_service_db_config(os.environ["PROJECT_ID"], os.environ["REGION"], os.environ["WEB_SERVICE"])
     worker = _load_service_db_config(os.environ["PROJECT_ID"], os.environ["REGION"], os.environ["WORKER_SERVICE"])
-    if (web.instance_connection_name, web.db_name) != (worker.instance_connection_name, worker.db_name):
+    if (web.instance_connection_name, web.db_name, web.db_user) != (worker.instance_connection_name, worker.db_name, worker.db_user):
         raise MigrationBlocked("0027 blocked: staging web and worker database targets differ")
-    if web.instance_connection_name != STAGING_INSTANCE or web.db_name != STAGING_DATABASE:
+    if web.instance_connection_name != STAGING_INSTANCE or web.db_name != STAGING_DATABASE or web.db_user != "orders_app":
         raise MigrationBlocked("0027 blocked: verified orders-stg instance and orders database required")
     with cloud_sql_proxy(web.instance_connection_name):
         engine = create_engine(URL.create(
@@ -100,6 +102,7 @@ def run() -> None:
         ), hide_parameters=True, pool_pre_ping=True)
         try:
             with engine.begin() as connection:
+                verify_connection_target(connection)
                 connection.execute(text("SET LOCAL lock_timeout = '5s'"))
                 connection.execute(text("SET LOCAL statement_timeout = '60s'"))
                 upgrade_staging(connection)
@@ -110,7 +113,7 @@ def run() -> None:
 def main() -> int:
     try:
         run()
-    except MigrationBlocked as exc:
+    except (MigrationBlocked, StagingConfigBlocked) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except Exception:
