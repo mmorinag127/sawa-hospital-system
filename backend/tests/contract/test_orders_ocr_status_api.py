@@ -1886,10 +1886,10 @@ def test_download_document_falls_back_to_archived_ocr_input_when_canonical_uri_i
         raise AssertionError(f"unexpected urlopen uri: {uri}")
 
     monkeypatch.setattr(orders_api, "urlopen", _urlopen)
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_ocr_output",
-        lambda _order_id: (
+    def _get_ocr_output(_order_id, *, persist_cache):
+        assert _order_id == order_id
+        assert persist_cache is False
+        return (
             {
                 "input_reference": "gs://bucket/input/ocr-input.pdf",
                 "combined": {
@@ -1898,8 +1898,9 @@ def test_download_document_falls_back_to_archived_ocr_input_when_canonical_uri_i
                 },
             },
             None,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(orders_api.order_service, "get_ocr_output", _get_ocr_output)
 
     def _load(uri: str):
         if uri == "gs://bucket/path/document.pdf":
