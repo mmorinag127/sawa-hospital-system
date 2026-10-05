@@ -7,7 +7,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import order_service, config_service  # noqa: E402
+from src.services import config_service, facility_service, order_service, order_workflow_v2_service, sheet_week_service  # noqa: E402
 from src.services.ocr_job_service import get_job  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData  # noqa: E402
 from src.services.fax_parser import parse_order_lines  # noqa: E402
@@ -63,6 +63,108 @@ def _ensure_week_menu_entries(week_id: str) -> None:
                     slot_index=idx,
                 )
             )
+
+
+def _resolve_materialized_fac00010_order_template(order_id: str) -> dict:
+    facility_id = "FAC00010"
+    with session_scope() as session:
+        assert facility_service.ensure_facility_materialized(session, facility_id) is not None
+    template = order_service._resolve_order_fax_template(order_id)
+    assert template is not None
+    return template
+
+
+def _adopt_current_sheet_via_workflow_v2(
+    *,
+    order_id: str,
+    menu_date: str,
+    daypart: str,
+    menu_name: str,
+) -> tuple[list[str], dict]:
+    facility_id = "FAC00010"
+    canonical_week = sheet_week_service.build_calendar_week_value(date.fromisoformat(menu_date))
+    _month_id, week_start, week_end = sheet_week_service.parse_sheet_week_value(canonical_week)
+    assert week_start is not None and week_end is not None
+    assert week_start <= date.fromisoformat(menu_date) <= week_end
+    facility_config = config_service.get_facility_config(facility_id) or {}
+    workflow, workflow_error = order_workflow_v2_service.confirm_context(
+        order_id=order_id,
+        facility_id=facility_id,
+        week_start=week_start.isoformat(),
+        week_end=week_end.isoformat(),
+        template_id=str(facility_config.get("fax_template_id") or ""),
+    )
+    assert workflow_error is None
+    assert workflow is not None
+    assert workflow["week_start"] == week_start.isoformat()
+    assert workflow["week_end"] == week_end.isoformat()
+    assert workflow["template_id"] == "山城"
+    template = _resolve_materialized_fac00010_order_template(order_id)
+    regular_2f_columns = [
+        column
+        for column in (template.get("columns") or [])
+        if isinstance(column, dict)
+        and str(column.get("role") or "").strip() == "quantity"
+        and str(column.get("diet_type") or "").strip() == "regular"
+        and str(column.get("area_id") or "").strip() == "2F"
+    ]
+    assert len(regular_2f_columns) == 1
+    assert regular_2f_columns[0].get("index") == 3
+    assert regular_2f_columns[0].get("source_index") == 4
+    main_ocr_fields = [str(field).strip() for field in (template.get("main_ocr_row_fields") or []) if str(field).strip()]
+    assert main_ocr_fields.count("qty.regular_2f") == 1
+    evidence = order_service.persist_ocr_evidence_run(
+        order_id,
+        {
+            "date_strings": [menu_date],
+            "table_rows": [[datetime.fromisoformat(menu_date).strftime("%m/%d"), daypart, menu_name, "2"]],
+            "table_raw": (
+                "|日付|区分|メニュー|常食2F|\n"
+                "|---|---|---|---|\n"
+                f"|{datetime.fromisoformat(menu_date).strftime('%m/%d')}|{daypart}|{menu_name}|2|"
+            ),
+        },
+        schema_version="workflow-v2-test",
+        producer_version="integration-current-sheet-fixture",
+        status="ready",
+        source="integration-current-sheet-fixture",
+        refresh_workflow=False,
+    )
+    assert evidence is not None
+    selected, selected_error = order_workflow_v2_service.select_ocr_result(order_id, str(evidence["id"]))
+    assert selected_error is None
+    assert selected is not None
+    fields, field_index = order_service._build_sheet_fields_and_indexes(template)
+    row = [""] * len(fields)
+    row[field_index["date_mmdd"]] = datetime.fromisoformat(menu_date).strftime("%m/%d")
+    row[field_index["daypart"]] = daypart
+    row[field_index["menu"]] = menu_name
+    saved, saved_error = order_workflow_v2_service.save_sheet(
+        order_id=order_id,
+        sheet={
+            "fields": fields,
+            "header": [str(item) for item in fields],
+            "rows": [row],
+            "row_ids": ["workflow-v2-current-sheet-row"],
+            "source": "workflow_v2_manual_saved_sheet",
+        },
+        edited_by="integration-current-sheet-fixture",
+    )
+    assert saved_error is None
+    assert saved is not None
+    current_sheet, current_sheet_error = order_workflow_v2_service.get_saved_sheet(order_id)
+    assert current_sheet_error is None
+    assert current_sheet is not None
+    baseline = order_service._resolve_reparse_llm_baseline(
+        order_id=order_id,
+        template=template,
+        fallback_payload=None,
+    )
+    assert baseline is not None
+    assert baseline["baseline_source"] == "sheet"
+    assert baseline["fields"] == fields
+    assert baseline["rows"] == [row]
+    return main_ocr_fields, template
 
 
 def _make_first_pass_payload(rows: list[list[str]] | None = None, table_raw: str | None = None) -> dict:
@@ -9381,23 +9483,34 @@ def test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows(monkeyp
         message_id="msg-gemini-previous-draft-001",
         pdf_uri=str(pdf_path),
         received_at=datetime(2026, 2, 15, 9, 0, 0),
-        facility_hint="FAC00001",
+        facility_hint="FAC00010",
         week_hint="2026-02",
     )
     order = order_service.create_order_from_ingest(payload, lines=[])
     canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
     canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
 
-    facility_config = config_service.get_facility_config("FAC00001") or {}
-    template = dict(facility_config.get("fax_template") or {})
+    order_template = _resolve_materialized_fac00010_order_template(order["id"])
     order_service._save_reparse_candidate_as_draft(
         order_id=order["id"],
-        template=template,
+        template=order_template,
         rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "7"]],
         before_digest="before-digest",
         review_state="auto_apply_blocked",
         review_blockers=["sheet_llm_audit_failed"],
     )
+    main_ocr_fields, current_sheet_template = _adopt_current_sheet_via_workflow_v2(
+        order_id=order["id"],
+        menu_date=canonical_date,
+        daypart=canonical_daypart,
+        menu_name=canonical_menu,
+    )
+    assert current_sheet_template["columns"] == order_template["columns"]
+    fake_ocr_row = [""] * len(main_ocr_fields)
+    fake_ocr_row[main_ocr_fields.index("date_mmdd")] = canonical_mmdd
+    fake_ocr_row[main_ocr_fields.index("daypart")] = canonical_daypart
+    fake_ocr_row[main_ocr_fields.index("menu")] = canonical_menu
+    fake_ocr_row[main_ocr_fields.index("qty.regular_2f")] = "2"
 
     first_pass_payload = {
         "pages": [
@@ -9428,9 +9541,9 @@ def test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows(monkeyp
         if prompt:
             captured_prompt["value"] = prompt
         return FaxExtractedData(
-            facility_name="Test Facility",
+            facility_name="山城",
             date_strings=[canonical_date],
-            table_rows=[[canonical_mmdd, canonical_daypart, canonical_menu, "2"]],
+            table_rows=[fake_ocr_row],
             tokens=[],
             grid=None,
             ocr_provider="gemini",
@@ -9453,7 +9566,7 @@ def test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows(monkeyp
 
     def _existing_first_pass(order_id, *, template):
         assert order_id == order["id"]
-        assert template["columns"] == config_service.get_facility_config("FAC00001")["fax_template"]["columns"]
+        assert template["columns"] == order_template["columns"]
         assert template["main_ocr_provider"] == "gemini"
         return dict(first_pass_payload) if order_id == order["id"] else None
 
@@ -9532,12 +9645,23 @@ def test_reparse_order_large_structural_projection_requires_manual_review(monkey
         message_id="msg-gemini-structural-projection-001",
         pdf_uri=str(pdf_path),
         received_at=datetime(2026, 2, 1, 9, 0, 0),
-        facility_hint="FAC00001",
+        facility_hint="FAC00010",
         week_hint="2026-02",
     )
     order = order_service.create_order_from_ingest(payload, lines=[])
     canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
     canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    main_ocr_fields, order_template = _adopt_current_sheet_via_workflow_v2(
+        order_id=order["id"],
+        menu_date=canonical_date,
+        daypart=canonical_daypart,
+        menu_name=canonical_menu,
+    )
+    fake_ocr_row = [""] * len(main_ocr_fields)
+    fake_ocr_row[main_ocr_fields.index("date_mmdd")] = canonical_mmdd
+    fake_ocr_row[main_ocr_fields.index("daypart")] = canonical_daypart
+    fake_ocr_row[main_ocr_fields.index("menu")] = canonical_menu
+    fake_ocr_row[main_ocr_fields.index("qty.regular_2f")] = "2"
     first_pass_payload = {
         "pages": [
             {
@@ -9560,12 +9684,25 @@ def test_reparse_order_large_structural_projection_requires_manual_review(monkey
         ),
     }
     order_service._save_order_ocr_cache(order["id"], dict(first_pass_payload))
+    fixture_baseline = order_service._resolve_reparse_llm_baseline(
+        order_id=order["id"],
+        template=order_template,
+        fallback_payload=None,
+    )
+    assert fixture_baseline is not None
+    assert fixture_baseline["baseline_source"] == "sheet"
+    projection_row = list(fixture_baseline["rows"][0])
+    projection_fields = list(fixture_baseline["fields"])
+    projection_row[projection_fields.index("date_mmdd")] = canonical_mmdd
+    projection_row[projection_fields.index("daypart")] = canonical_daypart
+    projection_row[projection_fields.index("menu")] = canonical_menu
+    projection_row[projection_fields.index("qty.regular_2f")] = "2"
 
     def _fake_extract(pdf_bytes, template, facility_id=None, preferred_template_id=None):  # noqa: ARG001
         return FaxExtractedData(
-            facility_name="Test Facility",
+            facility_name="山城",
             date_strings=[canonical_date],
-            table_rows=[["", "", "", "2"]],
+            table_rows=[fake_ocr_row],
             tokens=[],
             grid=None,
             ocr_provider="gemini",
@@ -9588,7 +9725,7 @@ def test_reparse_order_large_structural_projection_requires_manual_review(monkey
 
     def _existing_first_pass(order_id, *, template):
         assert order_id == order["id"]
-        assert template["columns"] == config_service.get_facility_config("FAC00001")["fax_template"]["columns"]
+        assert template["columns"] == order_template["columns"]
         assert template["main_ocr_provider"] == "gemini"
         return dict(first_pass_payload) if order_id == order["id"] else None
 
@@ -9602,7 +9739,7 @@ def test_reparse_order_large_structural_projection_requires_manual_review(monkey
         order_service,
         "_project_quantity_only_rows_onto_structural_rows",
         lambda **kwargs: (
-            [[canonical_mmdd, canonical_daypart, canonical_menu, "2"]],
+            [projection_row],
             {
                 "projected_row_count": 30,
                 "rows_with_projected_quantity": 30,
