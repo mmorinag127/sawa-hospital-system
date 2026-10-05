@@ -9,12 +9,58 @@ base-menu and facility-template-version schemas now stop with a migration-requir
 error; neither is repaired or defaulted at runtime.  Portal user-system-access DDL
 remains available only through the explicit bootstrap gate and migration `0026`.
 
+## Current Integrated Status
+
+Current `hospital-main` and `develop` source is
+`08f1c2ad04e0ab5d5a9d16f1bd542dbe954b63cd`. Parent integrated evidence is
+`tmp/c0-runtime-schema/parent-final-integrated-20261005/results.xml`, SHA256
+`83bf890f5323e53a975b63b87bf035ca6447aa051a73eb01e9f4f15039ebbefa`:
+81 passed with zero failures, errors, and skips. Parent bootstrap/menu regression
+evidence is `tmp/c0-runtime-schema/parent-final-bootstrap-menu-regression-20261005/results.xml`,
+SHA256 `4b73e8c7e5166be96292f7caf5b3b6b88a903851122dc19afe7dbe3ad41428c0`:
+356 passed with zero failures, errors, and skips.
+
+The initially introduced `650ec9a` collection error is retained below as history;
+the compatibility correction is included in `08f`. The earlier related 24-pass
+result remains attributed to `650ec9a`, not relabeled as `08f`.
+
+Manual STG Actions run `37310451571` for exact `08f` completed successfully.
+CI run `37310394150` also completed successfully; automatic run `37310394157`
+was cancelled as the owned duplicate. Runtime schema preflight completed
+successfully. Parent PostgreSQL is stopped and its private sockets are absent.
+This record does not claim production deployment, full 391-failure clearance,
+C1 human approval, or modernization completion.
+
+The owned download `tmp/stg-08f1c2a/live-menu-master-stg-37310451571-1` has
+`result.json`, `browser-result.json`, and a manifest whose 13 artifact hashes
+match. It records all nine fields through POST, PUT, fresh reload, null/zero,
+and Japanese labels; a real stale-editor 409 retaining the draft; and an injected
+network abort that is not a real 503. Owned `MNUf951bc48` was deleted and verified
+absent by API; owned processes stopped. `owned-edit-360.png`, `owned-edit-1280.png`,
+and `owned-row-1280.png` were personally viewed, but are cropped rather than a
+full-page review and are not human approval. The serving revisions were
+`web-stg-00356-jn8` / `frontend@sha256:a2384cdc98d4052e9158dcd2d4d41f08837c745998b6771bbcdb6d3f41de9d68`
+and `worker-stg-00776-rs6` / `backend@sha256:b52f9985e0ee341cc1722195c0f6fb3b1bceb75dbc7ba6f336e3afd6a95abfcb`,
+each built from exact `08f` and serving 100% traffic.
+
+The parent current-168 run at `08f` and pristine `9d` baseline both have 168
+nodes: 7 passed, 161 failed, zero errors, and zero skips. Baseline raw XML is
+`tmp/c0-runtime-schema/parent-other168-before-9d98a47-20261005/results.xml`
+(SHA256 `f7473fc014d56b548439e52879a26d1c45d82495d5b9fef0726d4e2b9d6f62fa`);
+current raw XML is
+`tmp/c0-runtime-schema/parent-other168-current-08f1c2a-20261005/results.xml`
+(SHA256 `50c360327316694aa217b20f1fe32aa5036f803c16f1a0accb449d6f21f5229b`).
+The exact testcase status map difference is `[]`.
+
+Local test-only fixture changes recorded below postdate deployed `08f`; they are
+not deployed or part of the STG result.
+
 ## Evidence
 
 - Pristine baseline source: `hospital-main` at `9d98a473079aa5086fb21c82c3a73ebc3e213af7`.
   Import proof: `tmp/c0-runtime-schema/before-pristine-pg-final-20261005/import-proof.log`.
   Result: 37 passed, 1 expected runtime-schema-guard failure.
-- Final source: this worktree. Import proof:
+- Historical candidate source: this worktree. Import proof:
   `tmp/c0-runtime-schema/after-runtime-schema-monitor-final-20261005/import-proof.log`.
   Result: 55 passed.
 - Both PostgreSQL runs used a fresh PostgreSQL 16 cluster, fresh role/database,
@@ -202,3 +248,30 @@ The owned PostgreSQL cleanup status is retained at
 - `test_runtime_schema_runner.py`: `006b832a6d132ae8754f6d1f22ac8a8d488fe0bfded0fd8d403aa78e96380477`
 - `test_portal_access_bootstrap_service.py`: `5f65cdb9262b7ee96926174715fa3d091578ced4a077149bd77b6f7211a60ca9`
 - `deploy-stg.yml`: `2e274b871614d98f9f9eb172a04956796b43fe5481a37c745b4338af2702d0b2`
+- `test_orders_archive_api.py` (local test-only): `d20a99a75d38f0b8929bc3f64a113ad925fc85427996bfdecce0ed2a3fd6e518`
+- `test_order_workflow_v2_service.py` (local test-only): `141ebba8e798f86f10e785ce81984322c8bc3dccfc811c568e86a4ab7969646b`
+
+## Test-Only Fixture Evidence
+
+The archive fixture now supplies canonical `OcrJob.order_id` and retains an
+unlinked same-prefix job, proving one purge rather than ID-prefix deletion. The
+auto-edit fixture supplies row/column targets because real selector behavior now
+applies: a non-empty cell with OCR presence is intentionally excluded. Its payload
+case therefore uses blank-plus-presence to create a valid suspect and exercise OCR
+value exclusion; the real-selector neighbor retains both `1` and `110` populated
+first-cell cases and proves neither is selected. It records primary groups `2/2/1`
+by sorted `target_chunk_index`, two sequential persistent one-cell retries for group
+1, and two patches. Final focused evidence is
+`tmp/c0-runtime-schema/c0-test-only-fixtures-focused-final-20261005/results.xml`
+(SHA256 `d2063e5336b32beab262af62c372efe0d30ca2595a3eca7eedd132e5c424654d`):
+7 passed. Its import proof SHA256 is
+`6a7c34345ce6c91a704927ff4345ceb1b0c093e7acd1257341b411723d32706c`.
+Final whole-file evidence is
+`tmp/c0-runtime-schema/c0-test-only-fixtures-whole-files-final-20261005/results.xml`
+(SHA256 `2095e72f5e6bcdb02bf167cab1911d9662cb4d8bc24a2f6e1eb21e310ab80124`):
+76 passed, 1 failed. The retained failure is
+`test_facility_template_columns_save_on_confirmed_order_clears_snapshot_reference`
+with `legacy_facility_template_column_override_disabled`; it is outside these
+fixtures. Earlier focused attempts are retained: first and second runs were each
+5 passed / 1 failed because the newly-real selector correctly emitted an empty
+target set for the old populated payload fixture.

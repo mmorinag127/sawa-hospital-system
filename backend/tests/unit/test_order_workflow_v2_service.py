@@ -1927,7 +1927,7 @@ def test_workflow_v2_sheet_auto_edit_llm_payload_excludes_ocr_values(monkeypatch
         sheet={
             "fields": ["date", "daypart", "menu", "qty.regular"],
             "header": ["日付", "区分", "献立", "常食"],
-            "rows": [["04/26", "朝", "大豆のトマト煮", "110"]],
+            "rows": [["04/26", "朝", "大豆のトマト煮", ""]],
             "ocr_numeric_cell_items": [
                 {
                     "target_row_index": 0,
@@ -1941,6 +1941,8 @@ def test_workflow_v2_sheet_auto_edit_llm_payload_excludes_ocr_values(monkeypatch
                 {
                     "target_cell_id": "cell-r0c3",
                     "sheet_cell": "R0C3",
+                    "target_row_index": 0,
+                    "target_col_index": 3,
                     "worksheet_row": 11,
                     "worksheet_col": 4,
                     "bbox": [100, 100, 120, 120],
@@ -1976,7 +1978,9 @@ def test_workflow_v2_sheet_auto_edit_chunks_target_cells_and_reports_partial_fai
         assert "ocr_sheet_comparison" not in user_payload
         target_cells = user_payload["target_cell_map"]
         assert isinstance(target_cells, list)
-        if len(calls) == 2:
+        computed_context = user_payload["computed_context"]
+        assert isinstance(computed_context, dict)
+        if computed_context["target_chunk_index"] == 1:
             return None, {"status": "failed", "model": "fake", "error": "bad json"}
         first_cell = target_cells[0]
         assert isinstance(first_cell, dict)
@@ -2017,20 +2021,81 @@ def test_workflow_v2_sheet_auto_edit_chunks_target_cells_and_reports_partial_fai
         sheet={
             "fields": ["date", "daypart", "menu", "qty.3", "qty.4", "qty.5", "qty.6", "qty.7"],
             "header": ["日付", "区分", "献立", "数量3", "数量4", "数量5", "数量6", "数量7"],
-            "rows": [["04/26", "朝", "大豆のトマト煮", "1", "2", "3", "4", "5"]],
+            "rows": [["04/26", "朝", "大豆のトマト煮", "", "2", "3", "4", "5"]],
             "ocr_numeric_cell_items": [{"target_row_index": 0, "target_col_index": 3, "value": "999"}],
             "target_cell_map": target_cell_map,
         },
         use_llm=True,
     )
 
-    assert len(calls) == 3
+    assert len(calls) == 5
     assert calls[0]["response_schema"]["required"] == ["patches"]
+    primary_calls = sorted(
+        calls[:3],
+        key=lambda call: call["user_payload"]["computed_context"]["target_chunk_index"],
+    )
+    primary_target_ids = [
+        [target["target_cell_id"] for target in call["user_payload"]["target_cell_map"]]
+        for call in primary_calls
+    ]
+    assert primary_target_ids == [
+        ["cell-r0c3", "cell-r0c4"],
+        ["cell-r0c5", "cell-r0c6"],
+        ["cell-r0c7"],
+    ]
+    assert [
+        call["user_payload"]["computed_context"]["target_chunk_index"] for call in primary_calls
+    ] == [0, 1, 2]
+    retry_target_ids = [
+        [target["target_cell_id"] for target in call["user_payload"]["target_cell_map"]]
+        for call in calls[3:]
+    ]
+    assert retry_target_ids == [["cell-r0c5"], ["cell-r0c6"]]
+    assert [
+        call["user_payload"]["computed_context"]["target_chunk_index"] for call in calls[3:]
+    ] == [1, 1]
     assert result["llm"]["status"] == "partial_failed"
     assert result["llm"]["failed_chunks"] == 1
     assert result["llm"]["total_chunks"] == 3
     assert result["llm"]["error"] == "bad json"
     assert len(result["patches"]) == 2
+
+
+@pytest.mark.parametrize("first_value", ["1", "110"])
+def test_workflow_v2_sheet_auto_edit_selector_excludes_present_first_value_and_selects_neighbors(
+    first_value: str,
+) -> None:
+    target_cell_map = [
+        {
+            "target_cell_id": f"cell-r0c{col}",
+            "sheet_cell": f"R0C{col}",
+            "target_row_index": 0,
+            "target_col_index": col,
+            "worksheet_row": 11,
+            "worksheet_col": col + 1,
+            "bbox": [100 + col, 100, 120 + col, 120],
+            "field": f"qty.{col}",
+            "field_label": f"数量{col}",
+        }
+        for col in range(3, 8)
+    ]
+
+    selected = order_workflow_v2_service.workflow_v2_sheet_review_service._suspect_target_cells_from_presence(
+        {
+            "fields": ["date", "daypart", "menu", "qty.3", "qty.4", "qty.5", "qty.6", "qty.7"],
+            "header": ["日付", "区分", "献立", "数量3", "数量4", "数量5", "数量6", "数量7"],
+            "rows": [["04/26", "朝", "大豆のトマト煮", first_value, "2", "3", "4", "5"]],
+            "ocr_numeric_cell_items": [{"target_row_index": 0, "target_col_index": 3, "value": "999"}],
+            "target_cell_map": target_cell_map,
+        }
+    )
+
+    assert [target["target_cell_id"] for target in selected] == [
+        "cell-r0c4",
+        "cell-r0c5",
+        "cell-r0c6",
+        "cell-r0c7",
+    ]
 
 
 def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) -> None:

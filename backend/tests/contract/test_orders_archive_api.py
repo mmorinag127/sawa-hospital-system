@@ -181,8 +181,17 @@ def test_archive_week_can_purge_runtime_state_when_explicitly_requested() -> Non
         session.add(
             OcrJob(
                 id=f"OCR-{order_id}",
+                order_id=order_id,
                 status="done",
                 input_reference="file://dummy.pdf",
+                metrics={"stale": True},
+            )
+        )
+        session.add(
+            OcrJob(
+                id=f"OCR-{order_id}-unlinked",
+                status="done",
+                input_reference="file://dummy-unlinked.pdf",
                 metrics={"stale": True},
             )
         )
@@ -205,6 +214,7 @@ def test_archive_week_can_purge_runtime_state_when_explicitly_requested() -> Non
     assert payload["purge_counts"]["order_ocr_cache"] == 1
     with session_scope() as session:
         assert session.get(OcrJob, f"OCR-{order_id}") is None
+        assert session.get(OcrJob, f"OCR-{order_id}-unlinked") is not None
         assert session.get(OrderOcrCache, order_id) is None
 
 
