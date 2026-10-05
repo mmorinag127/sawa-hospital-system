@@ -1205,6 +1205,98 @@ def test_build_daily_output_bundle_empty_orders_are_not_errors(tmp_path, monkeyp
     assert [item["status"] for item in summary["items"]] == ["ok", "empty"]
 
 
+@pytest.mark.parametrize("bundle_type", ["labels", "labels_csv", "delivery", "both"])
+def test_daily_output_bundle_keeps_ok_empty_and_canonical_errors_separate(tmp_path, monkeypatch, bundle_type):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda *_args, **_kwargs: [
+            {"id": "ORD-OK", "facility": "FAC-OK"},
+            {"id": "ORD-EMPTY", "facility": "FAC-EMPTY"},
+            {"id": "ORD-BLOCKED", "facility": "FAC-BLOCKED"},
+        ],
+    )
+
+    def _context(order_id, **_kwargs):
+        if order_id == "ORD-BLOCKED":
+            raise ValueError("workflow-v2 saved sheet materialization failed")
+        context = _make_context(order_id, f"FAC-{order_id.split('-')[1]}", order_id, "献立A")
+        context["bags"] = context["bags"] if order_id == "ORD-OK" else []
+        return context
+
+    monkeypatch.setattr(output_builder, "_prepare_output_context", _context)
+    monkeypatch.setattr(
+        output_builder,
+        "_build_delivery_rows",
+        lambda order, *_args, **_kwargs: [
+            {
+                "date": TARGET_DATE,
+                "daypart": "朝",
+                "menu_category": "主菜",
+                "menu_name": "献立A",
+                "quantity": 7,
+            }
+        ] if order["id"] == "ORD-OK" else [],
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_create_daily_label_workbook_bytes",
+        lambda **_kwargs: (b"label-workbook", "labels.xlsx"),
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_create_daily_label_csv_bytes",
+        lambda **_kwargs: (b"label-csv", "labels.csv"),
+    )
+
+    def _create_labels_sheet(workbook, used_titles, *, title_seed, **_kwargs):
+        worksheet = workbook.create_sheet(title=output_builder._safe_sheet_title(title_seed, "ラベル", used_titles))
+        worksheet["A1"] = "labels"
+        return worksheet.title
+
+    written_quantities = []
+
+    def _write_delivery_note(path, rows, *_args, **_kwargs):
+        written_quantities.extend(row["quantity"] for row in rows)
+        workbook = Workbook()
+        workbook.active["A1"] = rows[0]["quantity"]
+        workbook.save(path)
+
+    monkeypatch.setattr(output_builder, "_create_daily_labels_sheet", _create_labels_sheet)
+    monkeypatch.setattr(output_builder, "_write_delivery_note", _write_delivery_note)
+
+    bundle_path, summary = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type=bundle_type)
+
+    assert bundle_path.exists()
+    assert summary["total_orders"] == 3
+    assert summary["success_orders"] == 1
+    assert summary["empty_orders"] == 1
+    assert summary["error_orders"] == 1
+    assert sorted(item["status"] for item in summary["items"]) == ["empty", "error", "ok"]
+    assert next(item for item in summary["items"] if item["status"] == "ok")["files"]
+    assert written_quantities == ([7] if bundle_type in {"delivery", "both"} else [])
+
+
+@pytest.mark.parametrize("bundle_type", ["labels", "labels_csv", "delivery", "both"])
+def test_daily_output_bundle_all_empty_keeps_existing_no_output_block(tmp_path, monkeypatch, bundle_type):
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        output_builder.order_service,
+        "list_orders_by_line_date",
+        lambda *_args, **_kwargs: [{"id": "ORD-EMPTY", "facility": "FAC-EMPTY"}],
+    )
+    monkeypatch.setattr(
+        output_builder,
+        "_prepare_output_context",
+        lambda *_args, **_kwargs: {**_make_context("ORD-EMPTY", "FAC-EMPTY", "empty", "献立A"), "bags": []},
+    )
+    monkeypatch.setattr(output_builder, "_build_delivery_rows", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(ValueError, match="対象日の出力対象がありません"):
+        output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type=bundle_type)
+
+
 def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(

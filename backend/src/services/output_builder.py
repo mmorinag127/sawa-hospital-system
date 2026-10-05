@@ -6183,6 +6183,13 @@ def _build_invoice_template_from_fax_columns(facility_config: dict | None) -> di
     }
 
 
+def _daily_bundle_status_counts(manifest_items: list[dict]) -> dict[str, int]:
+    return {
+        "empty_orders": sum(1 for item in manifest_items if item.get("status") == "empty"),
+        "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
+    }
+
+
 def build_daily_output_bundle(
     target_date: dt_date,
     *,
@@ -6328,7 +6335,7 @@ def build_daily_output_bundle(
             "bundle_type": normalized_type,
             "total_orders": len(orders),
             "success_orders": len(grouped_outputs),
-            "error_orders": sum(1 for item in manifest_items if item.get("status") == "error"),
+            **_daily_bundle_status_counts(manifest_items),
             "items": manifest_items,
         }
         return bundle_path, summary
@@ -6377,7 +6384,7 @@ def build_daily_output_bundle(
             "created_at": datetime.utcnow().isoformat(),
             "total_orders": len(manifest_items),
             "success_orders": success_count,
-            "error_orders": max(len(manifest_items) - success_count, 0),
+            **_daily_bundle_status_counts(manifest_items),
             "items": manifest_items,
             "file_format": "zip",
         }
@@ -6478,7 +6485,7 @@ def build_daily_output_bundle(
         "created_at": datetime.utcnow().isoformat(),
         "total_orders": len(manifest_items),
         "success_orders": success_count,
-        "error_orders": max(len(manifest_items) - success_count, 0),
+        **_daily_bundle_status_counts(manifest_items),
         "items": manifest_items,
         "file_format": "xlsx",
     }
