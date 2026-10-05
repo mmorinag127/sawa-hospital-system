@@ -71,3 +71,25 @@ PYTHONDONTWRITEBYTECODE=1 /Users/mmorinag/Sawa/2025.12/worktrees/daily-output-la
 The first relative `apply_patch` created `run_c0_mock_contracts_isolated.py` at `/Users/mmorinag/Sawa/2025.12/scripts/`; it was deleted with an absolute-path patch. The runner now exists only at this worktree's `scripts/run_c0_mock_contracts_isolated.py`. The first attempted execution failed before collection because that runner was absent from the assigned worktree.
 
 No staging, commit, push, deploy, or cross-thread action occurred. This bounded correction is frozen for parent and monitor review. The remaining C0 inventory and modernization are incomplete.
+
+## Postcommit Verification
+
+Source commit: `1d472726419e08ca08c706d5116fd3acd7c6ece2`. `git status --short` was empty before the runs and empty again after both runs, before this documentation-only edit. The source-bound test diff is `HEAD^..HEAD` for [`backend/tests/contract/test_orders_ocr_status_api.py:1886`](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-direct-mocks/backend/tests/contract/test_orders_ocr_status_api.py:1886): it replaces only the stale `get_ocr_output` lambda with a double that accepts keyword-only `persist_cache` and preserves the response/document assertions. Source SHA256: `7a73387ae85272a761250188fcc346b5ec06562704dd74707bfebf3f74a8cd6f`.
+
+The committed runner SHA256 is `3962513eedccb056b159fbc56320fc6eb0ba3db789e9e1123dfd0f9e4a094147`: [scripts/run_c0_mock_contracts_isolated.py](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-direct-mocks/scripts/run_c0_mock_contracts_isolated.py). Both commands were run from this worktree with the borrowed interpreter, `PYTHONDONTWRITEBYTECODE=1`, and `-B`:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 /Users/mmorinag/Sawa/2025.12/worktrees/daily-output-label-requests-20260616/backend/.venv/bin/python -B scripts/run_c0_mock_contracts_isolated.py postcommit-exact exact
+PYTHONDONTWRITEBYTECODE=1 /Users/mmorinag/Sawa/2025.12/worktrees/daily-output-label-requests-20260616/backend/.venv/bin/python -B scripts/run_c0_mock_contracts_isolated.py postcommit-siblings siblings
+```
+
+| Scope | Result | XML evidence |
+| --- | --- | --- |
+| exact6 | 4 passed, 2 failed | [postcommit-exact/results.xml](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-direct-mocks/tmp/c0-direct-mocks/postcommit-exact/results.xml), SHA256 `b1b68875815e2e72aac64af94ddcd9614d25036ae2cafab3369d21dea50165df` |
+| sibling2 | 1 passed, 1 failed | [postcommit-siblings/results.xml](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-direct-mocks/tmp/c0-direct-mocks/postcommit-siblings/results.xml), SHA256 `e653b7e45f14670005980e4a0210c7550e037143cb86a1444c44fc9de744d7ee` |
+
+The exact6 failures remain `llm_full_table_baseline_missing` in `test_reparse_order_llm_prompt_includes_previous_saved_candidate_rows` and the mismatch between expected `sheet_structural_projection_requires_review` and actual `llm_full_table_baseline_missing` in `test_reparse_order_large_structural_projection_requires_manual_review`. The sibling failure remains the expected `llm_full_table_baseline_missing` versus actual `main_ocr_failed:gemini:...thinking mode.` No failure was skipped, weakened, or reclassified as passing.
+
+Import/source/isolated-DB evidence: [postcommit-exact/import-proof.log](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-direct-mocks/tmp/c0-direct-mocks/postcommit-exact/import-proof.log), SHA256 `a27593a7a1ef90127db3f894be8a99183aabb8039ec8d54d04e3854548334e13`; [postcommit-siblings/import-proof.log](/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c0-direct-mocks/tmp/c0-direct-mocks/postcommit-siblings/import-proof.log), SHA256 `a707491a3626abe007e7cf1bcfd666a7dd2b12770efd19e5842e1e3c4baef2e8`. They record this worktree's `backend/src` imports, `dont_write_bytecode: True`, and separate SQLite DBs under `tmp/c0-direct-mocks/postcommit-exact/test.sqlite` and `tmp/c0-direct-mocks/postcommit-siblings/test.sqlite`.
+
+This section is a separate uncommitted documentation edit. It records evidence for the source commit above; it does not mean this documentation change modified the verified source.
