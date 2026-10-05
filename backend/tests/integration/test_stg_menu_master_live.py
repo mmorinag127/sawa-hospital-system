@@ -123,7 +123,13 @@ def pg():
             if name in safety.ID_TABLES:
                 # monthly_menu_items deliberately has no FK, matching migration 0015.
                 cols.append(sa.Column('menu_master_id', sa.String, *([sa.ForeignKey('menu_masters.id')] if name == 'menu_facility_overrides' else [])))
+            if name == 'menu_facility_overrides':
+                # Both definitions coexist in migration 0015 and carry index attributes.
+                cols.extend([sa.Column('facility_id', sa.String, nullable=False),
+                    sa.UniqueConstraint('menu_master_id', 'facility_id', name='uq_menu_facility_override_scope')])
             sa.Table(name, metadata, *cols)
+    overrides = metadata.tables['menu_facility_overrides']
+    sa.Index('uq_menu_facility_overrides_master_facility', overrides.c.menu_master_id, overrides.c.facility_id, unique=True)
     sa.Table('users', metadata, sa.Column('id', sa.String, primary_key=True), sa.Column('account', sa.String), sa.Column('role', sa.String), sa.Column('status', sa.String))
     sa.Table('user_system_access', metadata, sa.Column('user_id', sa.String), sa.Column('system_key', sa.String), sa.Column('enabled', sa.Boolean))
     metadata.create_all(engine)
@@ -166,6 +172,28 @@ def test_own_matching_record_cleanup_after_secondary_ui_failure(pg):
     assert count(pg) == 0
 
 
+@pytest.mark.parametrize('ordinary_index', [False, True], ids=['migration-0015-indexes', 'ordinary-index-sibling'])
+def test_index_attributes_are_not_independent_references(pg, ordinary_index):
+    expected = {'uq_menu_facility_override_scope', 'uq_menu_facility_overrides_master_facility'}
+    with pg.begin() as c:
+        if ordinary_index:
+            c.execute(sa.text('CREATE INDEX c1_monthly_reference ON monthly_menu_items(menu_master_id)'))
+            expected.add('c1_monthly_reference')
+        rows = c.execute(sa.text("""
+            SELECT c.relname,c.relkind,a.attname,pg_get_indexdef(c.oid) AS definition
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            JOIN pg_attribute a ON a.attrelid=c.oid
+            WHERE n.nspname='public' AND c.relname=ANY(:names) AND a.attname='menu_master_id'
+            ORDER BY c.relname
+        """), {'names': sorted(expected)}).mappings().all()
+    assert {r['relname'] for r in rows} == expected
+    assert all(r['relkind'] == 'i' for r in rows)
+    print('isolated catalog index metadata:', [dict(r) for r in rows])
+    initial, ledger, checked = owned(pg)
+    assert safety.cleanup_owned(pg, initial, ledger, checked)['deleted'] == ['MNU0123abcd']
+    assert count(pg) == 0
+
+
 @pytest.mark.parametrize('case', ['existing', 'foreign-ledger', 'foreign-name', 'mutated', 'mutated-fields-only', 'unknown-id', 'pending', 'post-timeout', 'payload-mismatch'])
 def test_ambiguous_foreign_existing_mutated_records_are_not_deleted(pg, case):
     initial, ledger, checked = owned(pg)
@@ -201,7 +229,9 @@ def test_ambiguous_foreign_existing_mutated_records_are_not_deleted(pg, case):
 def test_fk_nonfk_and_normalized_name_references_block_cleanup(pg, table):
     initial, ledger, checked = owned(pg)
     with pg.begin() as c:
-        if table in safety.ID_TABLES:
+        if table == 'menu_facility_overrides':
+            c.execute(sa.text("INSERT INTO menu_facility_overrides(id,name,menu_master_id,facility_id) VALUES('r','other','MNU0123abcd','f')"))
+        elif table in safety.ID_TABLES:
             c.execute(sa.text(f"INSERT INTO {table}(id,name,menu_master_id) VALUES('r','other','MNU0123abcd')"))
         else:
             c.execute(sa.text(f"INSERT INTO {table}(id,name) VALUES('r',:name)"), {'name': ' ' + NAME.upper() + ' '})
@@ -293,8 +323,8 @@ def test_lock_contention_stops_cleanup_without_deletion(pg):
     assert count(pg) == 1
 
 
-@pytest.mark.parametrize('outcome', ['pass', 'display-failure', 'post-timeout'])
-def test_runner_finally_real_sql_cleanup_or_explicit_unresolved(pg, monkeypatch, tmp_path, outcome):
+@pytest.fixture
+def local_runner(pg, monkeypatch, tmp_path):
     for k, v in CONTEXT.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setenv('LIVE_ID_TOKEN', 'private-test-sentinel')
@@ -309,6 +339,46 @@ def test_runner_finally_real_sql_cleanup_or_explicit_unresolved(pg, monkeypatch,
     monkeypatch.setattr(runner, 'uuid4', lambda: SimpleNamespace(hex='a' * 32))
     monkeypatch.setattr(runner, 'preflight', lambda engine, name: safety.preflight(engine, name, database='c1_live', role=pg.url.username))
 
+
+@pytest.mark.parametrize('column', ['menu_master_id', 'menu_master_name'])
+@pytest.mark.parametrize('kind', ['r', 'p', 'f', 'm', 'v', 'c'])
+def test_unknown_reference_relation_blocks_runner_before_post(pg, local_runner, monkeypatch, tmp_path, kind, column):
+    ddl = {
+        'r': f'CREATE TABLE unexpected({column} TEXT); CREATE INDEX c1_unknown_ref ON unexpected({column})',
+        'p': f'CREATE TABLE unexpected({column} TEXT) PARTITION BY HASH({column}); CREATE INDEX c1_unknown_ref ON unexpected({column})',
+        'f': f'CREATE FOREIGN TABLE unexpected({column} TEXT) SERVER c1_catalog_only',
+        'm': f'CREATE MATERIALIZED VIEW unexpected AS SELECT NULL::TEXT AS {column}',
+        'v': f'CREATE VIEW unexpected AS SELECT NULL::TEXT AS {column}',
+        'c': f'CREATE TYPE unexpected AS ({column} TEXT)',
+    }
+    with pg.begin() as c:
+        if kind == 'f':
+            # No handler, user mapping or network target: catalog metadata only.
+            c.execute(sa.text('CREATE FOREIGN DATA WRAPPER c1_catalog_only'))
+            c.execute(sa.text('CREATE SERVER c1_catalog_only FOREIGN DATA WRAPPER c1_catalog_only'))
+        c.execute(sa.text(ddl[kind]))
+        assert c.execute(sa.text("SELECT relkind FROM pg_class WHERE oid='public.unexpected'::regclass")).scalar_one() == kind
+    api, browser = Mock(), Mock()
+    monkeypatch.setattr(runner, 'api', api)
+    monkeypatch.setattr(runner, 'browser', browser)
+    result = {}
+    try:
+        with pytest.raises(safety.Blocked, match='^unknown-non-FK-reference-column$'):
+            runner.run(result)
+        assert result['phase'] == 'read-only-database-preflight'
+        api.assert_not_called()
+        browser.assert_not_called()
+        assert not (tmp_path / 'ledger.json').exists()
+        assert count(pg) == 0
+    finally:
+        if kind == 'f':
+            with pg.begin() as c:
+                c.execute(sa.text('DROP SERVER c1_catalog_only CASCADE'))
+                c.execute(sa.text('DROP FOREIGN DATA WRAPPER c1_catalog_only'))
+
+
+@pytest.mark.parametrize('outcome', ['pass', 'display-failure', 'post-timeout'])
+def test_runner_finally_real_sql_cleanup_or_explicit_unresolved(pg, local_runner, monkeypatch, tmp_path, outcome):
     def api(path, token, expected=200):
         if '/portal/auth/me' in path:
             return dict(account=safety.SA_EMAIL, role='operator', systems=['hospital'])

@@ -92,10 +92,12 @@ def schema_gate(connection):
         require("name" in {c["name"] for c in inspector.get_columns(table, schema="public")}, "reference-name-column-missing")
     for table in ID_TABLES:
         require("menu_master_id" in {c["name"] for c in inspector.get_columns(table, schema="public")}, "reference-id-column-missing")
+    # Index attributes describe the indexed relation, not independent referencing data.
     named_references = connection.execute(sa.text("""
         SELECT n.nspname,c.relname,a.attname FROM pg_attribute a
         JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE a.attnum>0 AND NOT a.attisdropped AND a.attname IN ('menu_master_id','menu_master_name')
+          AND c.relkind NOT IN ('i', 'I')
           AND n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
     """)).all()
     require(all(n == 'public' and t in ID_TABLES and col == 'menu_master_id' for n, t, col in named_references),
