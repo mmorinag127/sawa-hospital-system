@@ -25,4 +25,10 @@ The isolated Python was `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20
   Result: 78 collected, 71 passed, 7 failed. XML: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-output-empty-accounting/tmp/empty-accounting-whole.sCS9AF/results.xml`; SHA256 `0af2074a0a3fd420fd8524b21e0e6c54765187efa056d952b35bff8618d72c50`.
 - The seven retained failures are `test_write_delivery_note_blocks_when_template_uri_missing`, `test_build_outputs_download_path_does_not_write_canonical_rows`, `test_weekly_weight_collect_rows_counts_diabetes_as_regular_and_excludes_forbidden`, and four inactive reference-daily-delivery workbook nodes. The former empty-accounting node passed; no test was removed.
 
-This worker candidate is not integrated, staged, deployed, or a claim of whole-program completion.
+## Integrated And Staging Evidence
+
+- Source `290caac4247b85f6ef62678c9fc30075a78fea8a` integrated the empty-accounting correction. Parent result: 87 tests, 80 passed, 7 existing failures. XML: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main/tmp/c0-runtime-schema/parent-empty-integrated-290caac/results.xml`; SHA256 `2bbcf7950d06378480cd27719f133cfe5e93ede063fd6016a3d634918661986c`.
+- STG run `37338269442` succeeded for that source. Browser primary/bags/totals completed, six permitted API GETs returned HTTP 200, and parent reviewed full, bags, and totals PNGs. The saved-sheet target eight-menu total `206` equals daily bags `206` and totals `order_refs` `206`; all manifest hashes passed. Artifact: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-output-source/tmp/stg-290caac-output-37338269442`; `result.json` SHA256 `f5347fd536c9b257a74703eaa2df869724000b33baa084e31d33cdab76dc04c8`.
+- The verifier does not call the daily-bundle endpoint. Consequently, the live `empty_orders` response header is not proven by this STG run; only the local 13-pass regression set covers empty accounting across four formats and headers. The STG evidence proves root source/day-table quantities only.
+
+This worker candidate is integrated and STG-verified as stated above; this is not a claim of production deployment, human approval, or whole-program completion.

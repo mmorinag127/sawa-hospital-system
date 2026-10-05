@@ -21,6 +21,19 @@ Parent committed this worktree candidate, fast-forward integrated it, and pushed
 
 This is not a claim of staging success, quantity equality, full-system completion, or production approval.
 
+## Current Correction At 290caac
+
+The preceding integrated-state and eight-residual-node sections are historical records of the `bf00` candidate and its then-current classifications; they are retained unchanged. Current state is source `290caac4247b85f6ef62678c9fc30075a78fea8a`.
+
+- Valid-empty accounting was integrated at `290caac`: parent result is 87 tests, 80 passed, 7 existing failures; the empty-accounting regression set has 13 passed. The former empty aggregate node is therefore no longer a current residual failure.
+- Template URI remains an unresolved contract question, not a confirmed output bug: the active public output path builds delivery columns from the facility JSON/FAX columns. Whether the separately configured template URI must instead be required for public output has been asked of the user and has no recorded answer.
+- Diabetes inclusion in weekly-weight regular totals remains an unresolved business rule, not a confirmed global aggregation bug. Facility/month-specific material exists, but no approved all-facility rule has been recorded. The question has been asked of the user and has no recorded answer.
+- The completed STG evidence is source `9497db8f17345b71bfe68bc8eafb0929929dd356`, GitHub Actions run `37335360666`. Browser `primary`, `bags`, and `totals` responses were complete; parent personally reviewed the full-page, bags, and totals PNGs. The saved-sheet eight-menu quantity total `206` equals daily bags `206` and totals `order_refs` `206`; all manifest hashes matched.
+- Artifact directory: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-output-source/tmp/stg-9497db8-output-37335360666`. Its `result.json` SHA256 is `be44611f3ba73c99d843f0cf53d06a81260fb041661e4e41a1afe30ea7e723df`; web `web-stg-00360-pvf` and worker `worker-stg-00780-zbc` image digests are recorded in that `result.json`.
+- The `f3` run `37332139985` early-browser-completion history remains valid: it reported success while the captured PNG still showed `取得中...` with bags/totals not rendered. It is not reclassified as UI verification.
+- STG run `37338269442` succeeded for `290caac4247b85f6ef62678c9fc30075a78fea8a`. Browser `primary`, `bags`, and `totals` responses completed; its six permitted API GETs returned HTTP 200. Parent personally reviewed all three PNGs and confirmed the target eight-menu quantity total `206` in saved sheet, daily bags, and totals `order_refs`; all manifest hashes passed. Artifact directory: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-output-source/tmp/stg-290caac-output-37338269442`; `result.json` SHA256 `f5347fd536c9b257a74703eaa2df869724000b33baa084e31d33cdab76dc04c8`. Serving revisions `web-stg-00361-4c2` and `worker-stg-00781-9ql` with their image digests are recorded in that `result.json`.
+- This verifier did not call the daily-bundle endpoint. It does not prove the live `empty_orders` header; the 13 local empty-accounting regressions cover the four formats and header behavior. The STG evidence is limited to root source/day-table quantities. No production deployment, human approval, human GIS verification, or claim that all fallback paths are absent is made.
+
 ## Invariant
 
 When a persisted workflow has a saved draft, that draft is the only source for daily bags, totals, and output materialization. A rebuild error, draft/order mismatch, bagging lineage mismatch, empty draft result, lookup failure, missing required draft, missing template version, or template-version mismatch stops the output path. It does not use `OrderLine`, a prior bagging materialization candidate, metadata/cache substitution, or auxiliary bootstrap quantities. Workflow and draft template version IDs must both be present and equal.
