@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import argparse
 import hashlib
 import json
 import os
@@ -16,18 +17,26 @@ import time
 from urllib.parse import parse_qs, quote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+for entry in (ROOT / "backend", ROOT):
+    if str(entry) not in sys.path:
+        sys.path.insert(0, str(entry))
 
-from staging_db_target import read_http  # noqa: E402
-from verify_stg_menu_master_ui import WEB, WORKER, deployed_sources, private_command  # noqa: E402
+from scripts.staging_db_target import read_http  # noqa: E402
+from scripts.verify_stg_menu_master_ui import WEB, WORKER, deployed_sources, private_command  # noqa: E402
 
-OUTPUT = ROOT / "tmp/output-source-live"
+DEFAULT_OUTPUT = ROOT / "tmp/output-source-live"
 SA_EMAIL = "sawa-github-deploy-stg@sawahospitalsystem.iam.gserviceaccount.com"
 ORDER_PATTERN = re.compile(r"ORD[0-9A-Za-z_-]+$")
 
 
 class Blocked(RuntimeError):
     pass
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="GET-only staging output-source verification")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    return parser.parse_args()
 
 
 def require(ok: object, code: str) -> None:
@@ -243,8 +252,9 @@ def run_browser(token: str, order_id: str, target_date: str, output: Path) -> No
                 process.wait()
 
 
-def main() -> int:
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+def main(output: Path | None = None) -> int:
+    output = (output if output is not None else parse_args().output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
     result: dict[str, object] = {"scope": "GET-only stg output-source verification with service-principal auth; not human GIS login", "status": "not-verified"}
     try:
         head = private_command(["git", "rev-parse", "HEAD"])
@@ -284,7 +294,7 @@ def main() -> int:
         if result["case"].get("kind") != "captured":
             result["code"] = result["case"].get("reason")
         else:
-            run_browser(token, order_id, target_date, OUTPUT)
+            run_browser(token, order_id, target_date, output)
             result["status"] = "captured"
     except Blocked as error:
         result["code"] = str(error)
@@ -292,9 +302,9 @@ def main() -> int:
         result["code"] = "verification-transport-or-schema-error-details-withheld"
     finally:
         result["ownedBrowserAndProcessesStopped"] = True
-        write_json(OUTPUT / "result.json", result)
-        files = [path for path in OUTPUT.iterdir() if path.is_file() and path.name != "manifest.json"]
-        write_json(OUTPUT / "manifest.json", {"sourceSHA": result.get("sourceSHA"), "status": result["status"],
+        write_json(output / "result.json", result)
+        files = [path for path in output.iterdir() if path.is_file() and path.name != "manifest.json"]
+        write_json(output / "manifest.json", {"sourceSHA": result.get("sourceSHA"), "status": result["status"],
                                                 "files": [{"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in sorted(files)]})
     return 0 if result["status"] == "captured" else 1
 

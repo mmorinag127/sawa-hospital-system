@@ -7,6 +7,20 @@
 - Parent source: `919b802c1b341b8361fb45224c90d2e5e83a646a`
 - Failure class: `OUTPUT_CANONICAL_SOURCE_BYPASS`
 
+## Current Integrated State
+
+Parent committed this worktree candidate, fast-forward integrated it, and pushed `develop` at `bf00faf79d4b844dcc4e908c9fc66944cb15b0d6`.
+
+- Parent integrated result: 95 tests, 87 passed, 8 failed. Against the 13-failure baseline, 5 failures were resolved; new failures: 0; deleted test nodes: 0.
+- XML: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-output-source/tmp/parent-output-integrated-bf00faf/results.xml`; SHA256 `3146887b6e5ade8fd58c6a6fb0e7aac2c0060d011e8cf7ca89b93b5954d4e956`.
+- Node configuration/origin tests: 4 passed, 0 failed.
+- Manual staging run `37326602539` completed with failure for this exact source SHA. `deploy-backend` and `deploy-frontend` both succeeded; the failing step was `Verify opted-in existing output source is read-only and canonical`, which stopped before API reads with `ModuleNotFoundError: scripts`.
+- Parent read-only Cloud Run evidence records `worker-stg-00777-4zn` and `web-stg-00357-gp6` at 100% traffic. Immutable image metadata/source verification remains incomplete, and there is no saved-sheet lineage, quantity equality, or full-page PNG evidence.
+- The entrypoint import repair is an uncommitted candidate, not a statement about `bf00faf79d4b844dcc4e908c9fc66944cb15b0d6`. It explicitly adds its repository root and backend dependency root, then imports through `scripts.*`; its external-cwd, unset-`PYTHONPATH` regression uses an explicit `--output` temporary directory, requires the invalid-context stop before authentication or cloud access, and validates the sanitized result and manifest without touching existing proof artifacts. The default Actions output remains `tmp/output-source-live`.
+- Historical 9/13 label evidence and `/Users/mmorinag/Sawa/2025.12/tmp/verify_daily_output_sections.report.json` support the candidate order/date (`ORD37344b72`, `2026-09-13`) only. They do not establish the required saved-sheet lineage (workflow saved-sheet ID, wrapper order ID/template version, and saved-sheet target date).
+
+This is not a claim of staging success, quantity equality, full-system completion, or production approval.
+
 ## Invariant
 
 When a persisted workflow has a saved draft, that draft is the only source for daily bags, totals, and output materialization. A rebuild error, draft/order mismatch, bagging lineage mismatch, empty draft result, lookup failure, missing required draft, missing template version, or template-version mismatch stops the output path. It does not use `OrderLine`, a prior bagging materialization candidate, metadata/cache substitution, or auxiliary bootstrap quantities. Workflow and draft template version IDs must both be present and equal.
@@ -60,9 +74,24 @@ Parent artifacts compare the same two target files:
 
 The first attempted isolated run, `output-source-focused-20261005-a`, exited before collection because the system Python lacked `celery`. No source behavior result is inferred from that dependency failure.
 
-## Not Complete
+## Historical Candidate Status Before Parent Integration
 
-This is a worker candidate only. It is not merged, staged, pushed, deployed, or verified in staging. Parent integration and staging verification remain required.
+The following status was accurate before the parent commit, fast-forward integration, and `develop` push recorded above. It is retained as historical evidence, not the current integration state: this was a worker candidate only and had not been merged, staged, pushed, deployed, or verified in staging.
+
+## Integrated Residual Failures
+
+The parent integrated XML retains eight failed nodes. None is deleted or ignored.
+
+1. `test_write_delivery_note_blocks_when_template_uri_missing` -- implementation required. `backend/src/services/output_builder.py` `_write_delivery_note` falls back to a generated `.xlsx` when the delivery template URI is absent or cannot be read. The invariant requires an explicit blocker instead of surrogate output.
+2. `test_build_daily_output_bundle_empty_orders_are_not_errors` -- implementation required. `build_daily_output_bundle` records an item with `status="empty"`, but its manifest does not expose an `empty_orders` aggregate. The aggregate contract is incomplete.
+3. `test_weekly_weight_collect_rows_counts_diabetes_as_regular_and_excludes_forbidden` -- implementation required. `_normalize_diet_key` produces `diabetes`, while `_WEEKLY_WEIGHT_REGULAR_DIETS` omits it, so the regular weekly-weight total drops that quantity.
+4. `test_build_outputs_download_path_does_not_write_canonical_rows` -- fixture/contract mismatch. The test calls `build_outputs`, whose active contract writes `Bag`, `LabelRow`, and `DeliveryNote` materializations. The intended non-writing public download path must be identified; this is not evidence to restore a fallback or weaken the test.
+5. `test_reference_daily_delivery_materializes_static_formula_labels` -- fixture/source mismatch. It asserts static labels from the retired reference daily-delivery workbook route; active bundle assembly has `use_reference_daily_delivery = False`.
+6. `test_reference_daily_delivery_rewrites_static_menu_cells_for_target_date` -- fixture/source mismatch for the same inactive reference-workbook route.
+7. `test_reference_daily_delivery_writes_excel_readable_workbook` -- fixture/source mismatch for the same inactive reference-workbook route.
+8. `test_reference_daily_delivery_removes_static_artifacts` -- fixture/source mismatch for the same inactive reference-workbook route.
+
+The four reference-workbook nodes require an authoritative fixture/contract decision. They do not justify re-enabling the retired route or modifying the locked master workbook.
 
 ## Staging Read-Only Verifier
 
@@ -76,4 +105,4 @@ The browser verifier accepts only the exact configured staging origin `https://w
 
 Monitor-correction evidence: `output-source-origin-pair-final-2-20261005` ran 28 Python tests with 28 passed and 0 failed; `results.xml` SHA256 `5491a011faaa87e69f38e33d787c5d4c2dbc8a2ef0b1c1d5773a30164c40e5f4`. `frontend/tests/config/menu-master-live.test.js` plus `frontend/tests/config/output-source-live-origin.test.mjs` ran 4 Node tests with 4 passed and 0 failed. The latter accepts only the exact staging origin and rejects empty, trailing-slash, evil, production, and localhost origins.
 
-No local cloud call was made: existing user credentials cannot mint the required verification service-principal token (`parent token_mint_exit1`). The verifier remains a candidate, not merged, not deployed, and not run against staging. Parent integration and an opted-in GitHub Actions staging run with an explicit order ID and ISO date remain required; production is not approved.
+No local cloud call was made: existing user credentials cannot mint the required verification service-principal token (`parent token_mint_exit1`). The opt-in verifier workflow at `bf00faf79d4b844dcc4e908c9fc66944cb15b0d6` has not produced staging evidence: run `37326602539` failed at its pre-API import boundary. The entrypoint import repair is not committed. An opted-in GitHub Actions verification with an explicit order ID and ISO date, immutable metadata/source confirmation, saved-sheet lineage, quantity comparison, and PNG review remain required. Production is not approved.

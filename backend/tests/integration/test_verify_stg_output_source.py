@@ -1,6 +1,9 @@
 """Pure safety tests for the Actions-only, GET-only output-source verifier."""
 
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -93,3 +96,25 @@ def test_verifier_uses_current_read_routes_and_get_only_browser_guard():
     assert "route.abort('blockedbyclient')" in browser
     assert browser.index("assert.equal(isAllowedOutputSourceOrigin(origin), true)") < browser.index("webkit.launch")
     assert "if (location.origin !== sessionOrigin) return;" in browser
+
+
+def test_entrypoint_resolves_repo_packages_without_cwd_or_pythonpath_and_stops_before_auth(tmp_path):
+    output = tmp_path / "output-source-live"
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env.pop("GITHUB_ACTIONS", None)
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_stg_output_source.py"), "--output", str(output)],
+        cwd=Path("/private/tmp"),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    result = json.loads((output / "result.json").read_text())
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert result["status"] == "not-verified"
+    assert result["code"] == "context-invalid-GITHUB_ACTIONS"
+    assert "sourceSHA" not in result
+    assert manifest["status"] == "not-verified"
+    assert [item["name"] for item in manifest["files"]] == ["result.json"]
