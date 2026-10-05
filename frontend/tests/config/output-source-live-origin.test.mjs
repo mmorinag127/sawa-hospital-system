@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { STG_OUTPUT_SOURCE_ORIGIN, isAllowedOutputSourceOrigin } from '../../scripts/output-source-live-origin.mjs';
-import { OPERATOR_DAILY_DELIVERY_PATH, recordAllowedResponse, sanitizedFailureCode, sameOriginPathname } from '../../scripts/verify-output-source-live.mjs';
+import { DAILY_OUTPUT_SECTIONS, OPERATOR_DAILY_DELIVERY_PATH, OUTPUT_SECTION_PNGS, hasCompleteDailyOutputReceipt, recordAllowedResponse, sanitizedFailureCode, sameOriginPathname, settleDailyOutputReceipts } from '../../scripts/verify-output-source-live.mjs';
 
 test('output-source browser verifier only accepts the exact staging origin', () => {
   assert.equal(OPERATOR_DAILY_DELIVERY_PATH, '/hospital/daily-delivery-notes');
+  assert.deepEqual(OUTPUT_SECTION_PNGS, [['当日袋分け一覧', 'daily-bags-section.png'], ['当日総量', 'daily-totals-section.png']]);
   assert.equal(isAllowedOutputSourceOrigin(STG_OUTPUT_SOURCE_ORIGIN), true);
   for (const origin of ['', 'https://web-stg-avlnzjjrca-dt.a.run.app/', 'https://web.example.invalid', 'https://web-prod-avlnzjjrca-dt.a.run.app', 'http://localhost:3000']) {
     assert.equal(isAllowedOutputSourceOrigin(origin), false);
@@ -35,4 +36,29 @@ test('browser failure fixture retains only the phase-derived code and rejects of
     origin: STG_OUTPUT_SOURCE_ORIGIN, url: `${STG_OUTPUT_SOURCE_ORIGIN}/api/orders`, method: 'POST', status: 200,
   }), false);
   assert.deepEqual(result.http, []);
+});
+
+test('browser receipt fixture requires all three completed output sections before rendered completion', () => {
+  const fulfilled = {
+    orders: { status: 'fulfilled', data: { orders: [{ id: 'ORD1' }] } },
+    meal_counts: { status: 'fulfilled', data: { groups: [{ daypart: '昼' }] } },
+    daily_bags: { status: 'fulfilled', data: { groups: [{ menu_name: 'A' }] } },
+    daily_bags_audit: { status: 'fulfilled', data: {} },
+    totals: { status: 'fulfilled', data: { rows: [{ quantity: 1 }] } },
+  };
+  assert.deepEqual(Object.keys(DAILY_OUTPUT_SECTIONS), ['primary', 'bags', 'totals']);
+  assert.equal(hasCompleteDailyOutputReceipt('primary', { sections: fulfilled }), true);
+  assert.equal(hasCompleteDailyOutputReceipt('bags', { sections: fulfilled }), true);
+  assert.equal(hasCompleteDailyOutputReceipt('totals', { sections: fulfilled }), true);
+  assert.equal(hasCompleteDailyOutputReceipt('bags', { sections: { ...fulfilled, daily_bags: { status: 'fulfilled', data: { groups: [] } } } }), false);
+  assert.equal(hasCompleteDailyOutputReceipt('totals', { sections: { ...fulfilled, totals: { status: 'rejected', error: {} } } }), false);
+  assert.equal(hasCompleteDailyOutputReceipt('primary', { sections: { orders: fulfilled.orders, meal_counts: fulfilled.meal_counts } }), true);
+  assert.equal(hasCompleteDailyOutputReceipt('primary', { sections: { orders: fulfilled.orders } }), false);
+});
+
+test('browser receipt aggregation handles all waiter rejections before click completion', async () => {
+  const rejected = await settleDailyOutputReceipts([Promise.resolve('primary'), Promise.reject(new Error('secret transport detail')), Promise.resolve('totals')]);
+  assert.deepEqual(rejected, { ok: false, receipts: [] });
+  const fulfilled = await settleDailyOutputReceipts([Promise.resolve('primary'), Promise.resolve('bags'), Promise.resolve('totals')]);
+  assert.deepEqual(fulfilled, { ok: true, receipts: ['primary', 'bags', 'totals'] });
 });

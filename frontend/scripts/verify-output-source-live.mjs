@@ -5,10 +5,20 @@ import { isAllowedOutputSourceOrigin } from './output-source-live-origin.mjs';
 
 const allowedMethods = new Set(['GET', 'HEAD']);
 export const OPERATOR_DAILY_DELIVERY_PATH = '/hospital/daily-delivery-notes';
+export const DAILY_OUTPUT_SECTIONS = Object.freeze({
+  primary: ['orders', 'meal_counts'],
+  bags: ['daily_bags', 'daily_bags_audit'],
+  totals: ['totals'],
+});
+export const OUTPUT_SECTION_PNGS = Object.freeze([
+  ['当日袋分け一覧', 'daily-bags-section.png'],
+  ['当日総量', 'daily-totals-section.png'],
+]);
 const phases = new Set([
   'validate-input', 'launch-browser', 'configure-private-context', 'open-daily-delivery-notes',
   'verify-deploy-version', 'verify-controls', 'set-target-date', 'await-daily-output-context',
-  'verify-output-context', 'capture-full-page', 'validate-readonly', 'finished',
+  'verify-primary-receipt', 'verify-bags-receipt', 'verify-totals-receipt',
+  'verify-rendered-output', 'capture-full-page', 'capture-section-pngs', 'validate-readonly', 'finished',
 ]);
 
 function writeJson(path, data) {
@@ -36,10 +46,32 @@ export function sanitizedFailureCode(phase) {
   return 'browser-readonly-check-failed-at-' + (phases.has(phase) ? phase : 'unknown-phase');
 }
 
+export function hasCompleteDailyOutputReceipt(section, payload) {
+  const sections = payload && typeof payload === 'object' && payload.sections && typeof payload.sections === 'object'
+    ? payload.sections : null;
+  const required = DAILY_OUTPUT_SECTIONS[section];
+  if (!sections || !required || !required.every(key => sections[key]?.status === 'fulfilled')) return false;
+  if (section === 'primary') {
+    return Array.isArray(sections.orders.data?.orders) && sections.orders.data.orders.length > 0
+      && Array.isArray(sections.meal_counts.data?.groups) && sections.meal_counts.data.groups.length > 0;
+  }
+  if (section === 'bags') {
+    return Array.isArray(sections.daily_bags.data?.groups) && sections.daily_bags.data.groups.length > 0;
+  }
+  return Array.isArray(sections.totals.data?.rows) && sections.totals.data.rows.length > 0;
+}
+
+export function settleDailyOutputReceipts(waiters) {
+  return Promise.all(waiters).then(
+    receipts => ({ ok: true, receipts }),
+    () => ({ ok: false, receipts: [] }),
+  );
+}
+
 export async function verifyOutputSourceBrowser({ origin, token, orderId, targetDate, source, output }) {
   const result = { status: 'failed', scope: 'GET-only daily-delivery-notes evidence; service-principal auth, not human GIS login',
     phase: 'validate-input', unexpectedWriteCount: 0, pageErrorCount: 0, sourceSHA: source,
-    http: [], ui: { dateInputPresent: false, fetchButtonPresent: false, dateInputValue: null }, finalPathname: null };
+    http: [], dailyOutputSections: {}, ui: { dateInputPresent: false, fetchButtonPresent: false, dateInputValue: null, loadingFinished: false }, finalPathname: null };
   let browser;
   let context;
   let page;
@@ -88,20 +120,46 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
     result.phase = 'set-target-date';
     await dateInput.fill(targetDate);
     result.phase = 'await-daily-output-context';
-    const dailyOutputContext = page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === '/api/orders/daily-output-context' && url.searchParams.get('date') === targetDate;
-    });
+    const sectionWaiters = Object.fromEntries(Object.keys(DAILY_OUTPUT_SECTIONS).map(section => [section,
+      page.waitForResponse(response => {
+        const url = new URL(response.url());
+        return response.request().method() === 'GET' && url.origin === origin
+          && url.pathname === '/api/orders/daily-output-context'
+          && url.searchParams.get('date') === targetDate && url.searchParams.get('section') === section;
+      }),
+    ]));
+    const receiptsReady = settleDailyOutputReceipts(Object.keys(DAILY_OUTPUT_SECTIONS).map(async section => {
+      const response = await sectionWaiters[section];
+      return { section, response, receipt: await response.json() };
+    }));
     await fetchButton.click();
-    const contextResponse = await dailyOutputContext;
-    result.phase = 'verify-output-context';
-    assert.equal(contextResponse.status(), 200);
-    await page.waitForLoadState('networkidle');
+    const receiptResult = await receiptsReady;
+    assert.equal(receiptResult.ok, true);
+    for (const { section, response, receipt } of receiptResult.receipts) {
+      result.phase = `verify-${section}-receipt`;
+      assert.equal(response.status(), 200);
+      const complete = hasCompleteDailyOutputReceipt(section, receipt);
+      result.dailyOutputSections[section] = { status: response.status(), complete };
+      assert.equal(complete, true);
+    }
+    result.phase = 'verify-rendered-output';
     await expect(dateInput).toHaveValue(targetDate);
+    await expect(fetchButton).toBeEnabled();
+    await expect(page.getByRole('button', { name: '取得中...', exact: true })).toHaveCount(0);
+    await expect(dateInput).toBeEnabled();
     result.ui.dateInputValue = await dateInput.inputValue();
+    result.ui.loadingFinished = true;
     result.phase = 'capture-full-page';
     await page.screenshot({ path: resolve(output, 'daily-delivery-notes-full.png'), fullPage: true });
+    result.phase = 'capture-section-pngs';
+    result.sectionPngs = [];
+    for (const [heading, filename] of OUTPUT_SECTION_PNGS) {
+      const section = page.getByRole('heading', { name: heading, exact: true })
+        .locator('xpath=ancestor::section[contains(@class, "panel")][1]');
+      await expect(section).toBeVisible();
+      await section.screenshot({ path: resolve(output, filename) });
+      result.sectionPngs.push(filename);
+    }
     result.finalPathname = sameOriginPathname(origin, page.url());
     result.phase = 'validate-readonly';
     assert.equal(result.unexpectedWriteCount, 0);
