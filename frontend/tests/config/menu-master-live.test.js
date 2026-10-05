@@ -16,7 +16,7 @@ test('data-writing C1 verification is dispatch opt-in after successful web deplo
   const job = workflow.jobs['deploy-frontend'];
   assert.deepEqual(job.permissions, { contents: 'read', 'id-token': 'write' });
   const steps = job.steps, deploy = steps.findIndex(s => s.name === 'Deploy web-stg');
-  const extra = steps.slice(deploy + 1);
+  const extra = steps.slice(deploy + 1, deploy + 8);
   assert.equal(extra.length, 7);
   for (const step of extra.slice(0, -1)) assert.equal(step.if, optIn);
   assert.match(extra[3].run, /playwright install --with-deps webkit/);
@@ -37,6 +37,42 @@ test('data-writing C1 verification is dispatch opt-in after successful web deplo
   assert.equal(extra[6].if, 'always() && ' + optIn);
   assert.equal(extra[6].with.path, 'tmp/menu-master-live/');
   assert.equal(extra[6].with['if-no-files-found'], 'error');
+});
+
+test('read-only output-source verification is explicit-order dispatch opt-in after the unchanged menu UI steps', () => {
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.verify_output_source_order_id, {
+    description: "Optional existing staging order ID for read-only canonical output-source verification",
+    required: false, type: 'string', default: '',
+  });
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.verify_output_source_date, {
+    description: "Required ISO date within the selected order's saved-sheet workflow week",
+    required: false, type: 'string', default: '',
+  });
+  const steps = workflow.jobs['deploy-frontend'].steps;
+  const pairGate = steps.find(step => step.name === 'Validate output-source verification input pair');
+  assert.equal(pairGate.if, "github.event_name == 'workflow_dispatch'");
+  assert.deepEqual(pairGate.env, {
+    OUTPUT_SOURCE_VERIFY_ORDER_ID: '${{ inputs.verify_output_source_order_id }}',
+    OUTPUT_SOURCE_VERIFY_DATE: '${{ inputs.verify_output_source_date }}',
+  });
+  assert.match(pairGate.run, /bool\(order\) != bool\(date\)/);
+  assert.doesNotMatch(pairGate.run, /inputs\.verify_output_source/);
+  const start = steps.findIndex(s => s.name === 'Initialize opted-in output-source evidence');
+  const extra = steps.slice(start, start + 7);
+  const optIn = "github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''";
+  assert.equal(extra.length, 7);
+  for (const step of extra.slice(0, -1)) assert.equal(step.if, optIn);
+  assert.match(extra[3].run, /playwright install --with-deps webkit/);
+  assert.equal(extra[4].id, 'auth-output-source-live');
+  assert.deepEqual(extra[4].with, {
+    project_id: '${{ env.PROJECT_ID }}',
+    workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}',
+    service_account: '${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}',
+    token_format: 'id_token', id_token_audience: '${{ env.GOOGLE_OAUTH_CLIENT_ID }}', id_token_include_email: true,
+  });
+  assert.equal(extra[5].run, 'uv run --project backend --extra dev --frozen python scripts/verify_stg_output_source.py');
+  assert.equal(extra[5].env.OUTPUT_SOURCE_VERIFY_DATE, '${{ inputs.verify_output_source_date }}');
+  assert.equal(extra[6].if, 'always() && ' + optIn);
 });
 
 test('both staging image builds bind metadata to the full source SHA, not a tag guess', () => {

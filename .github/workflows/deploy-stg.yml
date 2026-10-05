@@ -26,6 +26,16 @@ on:
         required: false
         type: boolean
         default: false
+      verify_output_source_order_id:
+        description: "Optional existing staging order ID for read-only canonical output-source verification"
+        required: false
+        type: string
+        default: ""
+      verify_output_source_date:
+        description: "Required ISO date within the selected order's saved-sheet workflow week"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: deploy-stg
@@ -445,5 +455,56 @@ jobs:
         with:
           name: live-menu-master-stg-${{ github.run_id }}-${{ github.run_attempt }}
           path: tmp/menu-master-live/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Validate output-source verification input pair
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OUTPUT_SOURCE_VERIFY_ORDER_ID: ${{ inputs.verify_output_source_order_id }}
+          OUTPUT_SOURCE_VERIFY_DATE: ${{ inputs.verify_output_source_date }}
+        run: python3 -c 'import os,sys; order=os.environ["OUTPUT_SOURCE_VERIFY_ORDER_ID"].strip(); date=os.environ["OUTPUT_SOURCE_VERIFY_DATE"].strip(); sys.exit("verify_output_source_order_id and verify_output_source_date must be specified together" if bool(order) != bool(date) else 0)'
+      - name: Initialize opted-in output-source evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        run: |
+          mkdir -p tmp/output-source-live
+          python3 -c 'import json,os,pathlib; pathlib.Path("tmp/output-source-live/result.json").write_text(json.dumps({"status":"not-verified","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in GET-only staging output-source verification"}))'
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        with:
+          node-version: '20'
+      - uses: astral-sh/setup-uv@v8.1.0
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+      - name: Prepare opted-in output-source verification
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+          cd ..
+          uv sync --project backend --extra dev --frozen
+      - id: auth-output-source-live
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - name: Verify opted-in existing output source is read-only and canonical
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        env:
+          LIVE_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          LIVE_ID_TOKEN: ${{ steps.auth-output-source-live.outputs.id_token }}
+          OUTPUT_SOURCE_VERIFY_ORDER_ID: ${{ inputs.verify_output_source_order_id }}
+          OUTPUT_SOURCE_VERIFY_DATE: ${{ inputs.verify_output_source_date }}
+        run: uv run --project backend --extra dev --frozen python scripts/verify_stg_output_source.py
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        with:
+          name: live-output-source-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/output-source-live/
           retention-days: 7
           if-no-files-found: error

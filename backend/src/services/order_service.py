@@ -7819,7 +7819,7 @@ def get_daily_bag_summary(
     facility_id: Optional[str] = None,
     status: Optional[str] = None,
     *,
-    allow_stale_draft_lines: bool = False,
+    include_expanded_copy: bool = True,
 ) -> dict[str, Any]:
     orders = list_orders_by_line_date(target_date, facility_id=facility_id, status=status)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -7835,8 +7835,7 @@ def get_daily_bag_summary(
             continue
         order_lines = build_order_lines_for_outputs(
             order_payload,
-            include_expanded_copy=not allow_stale_draft_lines,
-            allow_stale_draft_lines=allow_stale_draft_lines,
+            include_expanded_copy=include_expanded_copy,
         )
         amount_stats = _build_daily_bag_amount_stats(order_lines)
         bag_rows = build_bag_payload_for_outputs(order_payload, order_lines=order_lines)
@@ -8272,7 +8271,7 @@ def get_daily_bag_audit(
                 target_date,
                 facility_id=facility_id,
                 status=status,
-                allow_stale_draft_lines=True,
+                include_expanded_copy=False,
             )
     except ValueError as exc:
         detail = str(exc)

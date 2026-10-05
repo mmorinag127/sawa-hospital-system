@@ -1260,7 +1260,7 @@ def get_daily_bags(date: str, facility: str | None = None, status: str | None = 
         target_date,
         facility_id=facility,
         status=status,
-        allow_stale_draft_lines=True,
+        include_expanded_copy=False,
     )
 
 
@@ -1330,7 +1330,7 @@ def get_daily_output_context(
                 target_date,
                 facility_id=facility,
                 status=status,
-                allow_stale_draft_lines=True,
+                include_expanded_copy=False,
             )
             sections["daily_bags"] = _daily_output_section(summary)
         except Exception as exc:  # noqa: BLE001

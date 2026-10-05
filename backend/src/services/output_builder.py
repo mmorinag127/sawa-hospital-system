@@ -1957,7 +1957,6 @@ def build_order_lines_for_outputs(
     order: dict,
     *,
     include_expanded_copy: bool = True,
-    allow_stale_draft_lines: bool = False,
     timings: dict[str, float] | None = None,
 ) -> list[dict]:
     total_started = time.perf_counter()
@@ -1995,29 +1994,22 @@ def build_order_lines_for_outputs(
         or "draft_newer_than_lines" in workflow_warnings
         or "draft_newer_than_lines" in workflow_blockers
     )
-    use_existing_lines_for_stale_draft = (
-        allow_stale_draft_lines
-        and draft_newer_than_lines
-        and isinstance(raw_lines, list)
-        and bool(raw_lines)
+    workflow_started = time.perf_counter()
+    workflow_v2_lines = _workflow_v2_lines_for_outputs(
+        order,
+        raw_lines,
+        require_saved_sheet=(
+            draft_newer_than_lines
+            or _workflow_v2_output_state_requires_saved_sheet(workflow_state.get("state"))
+        ),
     )
-    if use_existing_lines_for_stale_draft:
-        logger.warning(
-            "Daily output read used existing order lines without workflow draft materialization",
-            order_id=order_id,
-            facility_id=facility_id,
-            workflow_state=workflow_state.get("state"),
+    if timings is not None:
+        timings["build_order_lines_workflow_v2_ms"] = round(
+            (time.perf_counter() - workflow_started) * 1000,
+            1,
         )
-    else:
-        workflow_started = time.perf_counter()
-        workflow_v2_lines = _workflow_v2_lines_for_outputs(order, raw_lines)
-        if timings is not None:
-            timings["build_order_lines_workflow_v2_ms"] = round(
-                (time.perf_counter() - workflow_started) * 1000,
-                1,
-            )
-        if workflow_v2_lines is not None:
-            raw_lines = workflow_v2_lines
+    if workflow_v2_lines is not None:
+        raw_lines = workflow_v2_lines
     week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
     facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
     expanded_copy_enabled = False
@@ -2115,41 +2107,50 @@ def build_order_lines_for_outputs(
     return order_lines
 
 
-def _workflow_v2_lines_for_outputs(order: dict, raw_lines: object) -> list[dict] | None:
+def _workflow_v2_lines_for_outputs(
+    order: dict,
+    raw_lines: object,
+    *,
+    require_saved_sheet: bool = False,
+) -> list[dict] | None:
     order_id = str(order.get("id") or "").strip()
     if not order_id:
+        if require_saved_sheet:
+            raise ValueError("latest saved sheet cannot be resolved without an order id")
         return None
     try:
         with session_scope() as session:
             workflow = session.get(OrderWorkflowState, order_id)
-            if workflow is None or not workflow.draft_id:
+            if workflow is None:
+                if require_saved_sheet:
+                    raise ValueError("latest saved sheet is missing")
                 return None
+            if not workflow.draft_id:
+                raise ValueError("workflow-v2 saved sheet is missing")
+            # A persisted draft is the canonical source even in legacy workflow states.
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is None or draft.order_id != order_id:
-                if _workflow_v2_output_state_requires_saved_sheet(workflow.state):
-                    raise ValueError("workflow-v2 saved sheet is missing")
-                return None
+                raise ValueError("workflow-v2 saved sheet is missing")
+            workflow_template_version_id = str(getattr(workflow, "template_version_id", "") or "").strip()
+            draft_template_version_id = str(getattr(draft, "template_version_id", "") or "").strip()
+            if not workflow_template_version_id or not draft_template_version_id:
+                raise ValueError("workflow-v2 saved sheet template version is required")
+            if workflow_template_version_id != draft_template_version_id:
+                raise ValueError("workflow-v2 saved sheet template does not match workflow")
             candidate = _workflow_v2_materialization_candidate(session, order, workflow, draft)
             if not isinstance(candidate, dict):
-                if _workflow_v2_output_state_requires_saved_sheet(workflow.state):
-                    raise ValueError("workflow-v2 saved sheet materialization is missing")
-                return None
+                raise ValueError("workflow-v2 saved sheet materialization is missing")
             error = str(candidate.get("error") or "").strip()
             if error:
-                if _workflow_v2_output_state_requires_saved_sheet(workflow.state) or not raw_lines:
-                    raise ValueError(f"workflow-v2 saved sheet materialization failed: {error}")
-                return None
+                raise ValueError(f"workflow-v2 saved sheet materialization failed: {error}")
             lines = candidate.get("lines")
             if isinstance(lines, list) and lines:
                 return [dict(line) for line in lines if isinstance(line, dict)]
-            if _workflow_v2_output_state_requires_saved_sheet(workflow.state) or not raw_lines:
-                raise ValueError("workflow-v2 saved sheet produced no output lines")
+            raise ValueError("workflow-v2 saved sheet produced no output lines")
     except ValueError:
         raise
     except Exception as exc:  # noqa: BLE001
-        if not raw_lines:
-            raise ValueError(f"workflow-v2 output state lookup failed: {exc}") from exc
-        logger.warning("Workflow-v2 output state lookup skipped", order_id=order_id, error=str(exc))
+        raise ValueError(f"workflow-v2 output state lookup failed: {exc}") from exc
     return None
 
 
@@ -2201,29 +2202,6 @@ def _workflow_v2_materialization_candidate(
             raise ValueError("workflow-v2 bagging result source does not match saved sheet")
         if template_version_id and draft_template_version_id and template_version_id != draft_template_version_id:
             raise ValueError("workflow-v2 bagging result template does not match saved sheet")
-        candidate = bagging_result.get("materialization_candidate")
-        if isinstance(candidate, dict):
-            try:
-                rebuilt_candidate = rebuild_from_saved_sheet()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Workflow-v2 saved sheet rebuild skipped while validating bagging materialization candidate",
-                    order_id=order.get("id"),
-                    error=str(exc),
-                )
-                rebuilt_candidate = None
-            if isinstance(rebuilt_candidate, dict) and not rebuilt_candidate.get("error"):
-                candidate_lines = candidate.get("lines") if not candidate.get("error") else None
-                rebuilt_lines = rebuilt_candidate.get("lines")
-                logger.info(
-                    "Workflow-v2 output materialization rebuilt from saved sheet",
-                    order_id=order.get("id"),
-                    candidate_lines=len(candidate_lines) if isinstance(candidate_lines, list) else None,
-                    rebuilt_lines=len(rebuilt_lines) if isinstance(rebuilt_lines, list) else None,
-                    saved_sheet_id=draft.id,
-                )
-                return rebuilt_candidate
-            return candidate
     return rebuild_from_saved_sheet()
 
 

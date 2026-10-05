@@ -139,6 +139,7 @@ def test_bags_section_reuses_exact_summary_for_audit(monkeypatch):
     calls = []
 
     def build_summary(*args, **kwargs):
+        assert kwargs["include_expanded_copy"] is False
         calls.append("summary")
         return summary
 
@@ -154,6 +155,22 @@ def test_bags_section_reuses_exact_summary_for_audit(monkeypatch):
     assert response.json()["ok"] is True
     assert set(response.json()["sections"]) == {"daily_bags", "daily_bags_audit"}
     assert calls == ["summary", "audit"]
+
+
+def test_daily_bags_api_keeps_legacy_nonexpanded_transform(monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    calls = []
+
+    def build_summary(*_args, **kwargs):
+        calls.append(kwargs["include_expanded_copy"])
+        return {"date": "2026-09-13", "groups": []}
+
+    monkeypatch.setattr(orders_api.order_service, "get_daily_bag_summary", build_summary)
+
+    response = TestClient(app).get("/orders/daily-bags?date=2026-09-13")
+
+    assert response.status_code == 200
+    assert calls == [False]
 
 
 def test_failed_bag_source_blocks_audit_without_retry(monkeypatch):
