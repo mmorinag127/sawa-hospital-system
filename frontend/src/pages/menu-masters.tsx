@@ -275,7 +275,7 @@ function Screen({ authenticated }: { authenticated: boolean }) {
   ];
   if (!authenticated) return <Box sx={{ p: 3 }}>ログインを確認しています。</Box>;
   return (
-    <Box sx={{ maxWidth: 1440, mx: "auto", px: { xs: 2, md: 3 }, py: 3 }}>
+    <Box sx={{ maxWidth: 1440, mx: "auto", px: { xs: 2, md: 3 }, py: 3, overflowWrap: "anywhere" }}>
       <Stack spacing={3}>
         <Box component="header">
           <Typography component="h1" variant="h5">

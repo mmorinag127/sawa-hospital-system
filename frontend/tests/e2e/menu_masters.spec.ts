@@ -211,6 +211,41 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
   });
 }
 
+for (const [kind, name] of [
+  ["stg-long-name", "c1-live-37266102226-1-aabd0ce687864d539b5b6f9ea984dcdd"],
+  ["unbroken-ascii", "X".repeat(96)],
+  ["japanese-control", "白身魚のフライ"],
+]) test(`long content remains visible within the page: ${kind}`, async ({ page }, info) => {
+  const s = await fixture(page, info);
+  s.items = [record("MNU001", name)];
+  expect((await page.goto("/hospital/menu-masters"))?.status()).toBe(200);
+  await select(page, name);
+  const heading = page.getByRole("heading", { name: `編集: ${name}`, exact: true });
+  for (const width of [360, 1280]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect(heading).toHaveText(`編集: ${name}`);
+    await expect(field(editForm(page), "メニュー名")).toHaveValue(name);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    const metrics = await heading.evaluate(node => {
+      const box = node.getBoundingClientRect(), range = document.createRange();
+      range.selectNodeContents(node);
+      const text = range.getBoundingClientRect(), style = getComputedStyle(node);
+      return { right: box.right, width: box.width, bottom: box.bottom, textRight: text.right,
+        textWidth: text.width, overflowX: style.overflowX, textOverflow: style.textOverflow };
+    });
+    expect(metrics.textRight).toBeLessThanOrEqual(metrics.right + 1);
+    expect(metrics.textWidth).toBeLessThanOrEqual(metrics.width + 1);
+    expect(metrics.overflowX).toBe("visible");
+    expect(metrics.textOverflow).not.toBe("ellipsis");
+    const firstLabel = await editForm(page).locator("label").first().boundingBox();
+    expect(firstLabel!.y).toBeGreaterThan(metrics.bottom);
+    await info.attach(`long-content-metrics-${width}`, { body: JSON.stringify(metrics), contentType: "application/json" });
+    await info.attach(`long-content-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+  }
+  await s.settleDocument();
+  await finish(page, info, s);
+});
+
 test("g/null/zero and duplicate registration does not overwrite", async ({ page }, info) => {
   const s = await fixture(page, info); await open(page); const form = createForm(page);
   await field(form, "メニュー名").fill("数量ゼロ"); await option(page, form, "単位", "グラム (g)"); await option(page, form, "袋単位", "グラム (g)");
