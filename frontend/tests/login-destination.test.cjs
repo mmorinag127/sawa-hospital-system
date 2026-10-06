@@ -12,9 +12,9 @@ test('invalid explicit return never falls back to old stored destination',()=>{
  assert.throws(()=>resolve('?next=https://evil.invalid','/shift'),/復帰先/);assert.throws(()=>resolve('?next=/shift&next=/hospital',null),/復帰先/);
 });
 for(const target of ['/school-lunch/work-schedules?facility_id=8&service_date=2026-07-01','/shift/planning?week=2026-09-21','/hospital','/orders/ORD123?tab=review','/admin/users','/'])test(`internal work path retained ${target}`,()=>assert.equal(valid(target),target));
-function scenario(status=200,identity={role:'operator'},authorization='Bearer synthetic-test'){
+function scenario(status=200,identity={role:'operator',session_generation:'school-test-generation'},authorization='Bearer synthetic-test'){
  const calls=[],navigation=[],alerts=[],stored=new Map();
- const api=load('systemNavigation',{authorization,fetch:async(url,options)=>{calls.push({url,options});if(status==='network')throw Error('internal secret');return {ok:status===200,status,json:async()=>identity};},window:{sessionStorage:{setItem:(k,v)=>stored.set(k,v)},location:{assign:value=>navigation.push(value)},alert:value=>alerts.push(value)}});
+ const api=load('systemNavigation',{authorization,fetch:async(url,options)=>{calls.push({url,options});if(status==='network')throw Error('internal secret');return {ok:status===200,status,json:async()=>identity};},window:{sessionStorage:{setItem:(k,v)=>stored.set(k,v)},localStorage:{setItem:(k,v)=>stored.set(k,v)},location:{assign:value=>navigation.push(value)},alert:value=>alerts.push(value)}});
  return {api,calls,navigation,alerts,stored};
 }
 test('school session handshake is the sole target before original URL return',async()=>{

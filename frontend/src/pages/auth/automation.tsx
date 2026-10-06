@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { clearAuth, setBearerToken } from "../../services/apiClient";
+import { publishSchoolLunchSessionGeneration } from "../../services/browserSession";
 
 export default function AutomationLoginPage() {
   const [token, setToken] = useState("");
@@ -34,6 +35,8 @@ export default function AutomationLoginPage() {
           redirect: "error",
         });
         if (!session.ok) throw new Error("School lunch session rejected");
+        const issued = await session.json() as { session_generation?: unknown };
+        publishSchoolLunchSessionGeneration(issued.session_generation);
       }
       setBearerToken(token.trim());
       setToken("");
