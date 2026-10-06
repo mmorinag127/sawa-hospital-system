@@ -23,6 +23,8 @@ from src.workers import ingest_worker  # noqa: E402
 app = FastAPI()
 app.include_router(orders_api.router, prefix="/orders")
 
+pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
+
 
 def _seed_order(message_id: str) -> dict:
     payload = IngestEmailPayload(

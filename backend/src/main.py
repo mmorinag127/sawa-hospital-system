@@ -26,6 +26,8 @@ from src.api import (
 from src.services import facility_service, facility_template_version_service, menu_service
 from src.services.read_only_request_guard_service import read_only_request_guard
 from src.workers.ingest_worker import start_uploaded_pdf_recovery_loop
+from src import db
+from src.maintenance.formal_migration_schema import require_formal_head
 
 app = FastAPI(title="Hospital Order System API")
 
@@ -73,6 +75,8 @@ app.include_router(portal.router, prefix="")
 
 @app.on_event("startup")
 def _initialize_menu_schema() -> None:
+    with db.engine.connect() as connection:
+        require_formal_head(connection)
     menu_service.ensure_menu_schema()
     facility_template_version_service.ensure_facility_template_version_schema()
     facility_service.sync_facility_names_from_master()

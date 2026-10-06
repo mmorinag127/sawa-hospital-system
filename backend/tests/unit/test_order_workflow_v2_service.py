@@ -170,6 +170,8 @@ def _install_active_template_version(
     template_id: str = "template-fac00001",
     *,
     columns: list[dict] | None = None,
+    valid_from=None,
+    valid_to=None,
 ) -> str:
     normalized_columns = order_workflow_v2_service.facility_template_version_service.normalize_template_columns(
         columns if columns is not None else _template_columns()
@@ -182,14 +184,25 @@ def _install_active_template_version(
     with session_scope() as session:
         if session.get(Facility, facility_id) is None:
             session.add(Facility(id=facility_id, name=f"Template Facility {facility_id}"))
-        for active in (
+        active_versions = (
             session.query(FacilityTemplateVersion)
             .filter(
                 FacilityTemplateVersion.facility_id == facility_id,
                 FacilityTemplateVersion.status == "active",
             )
             .all()
-        ):
+        )
+        if len(active_versions) == 1:
+            active = active_versions[0]
+            if (
+                active.template_id == template_id
+                and active.columns_json == normalized_columns
+                and active.template_digest == digest
+                and active.valid_from == valid_from
+                and active.valid_to == valid_to
+            ):
+                return active.id
+        for active in active_versions:
             active.status = "archived"
             active.archived_at = datetime.utcnow()
         session.add(
@@ -203,12 +216,61 @@ def _install_active_template_version(
                 columns_json=normalized_columns,
                 cells_json=[],
                 template_digest=digest,
+                valid_from=valid_from,
+                valid_to=valid_to,
                 validation_json={"errors": [], "warnings": []},
                 created_at=datetime.utcnow(),
                 activated_at=datetime.utcnow(),
             )
         )
     return version_id
+
+
+def _fixture_template_history(facility_id):
+    with session_scope() as session:
+        return [
+            tuple(getattr(row, column.name) for column in FacilityTemplateVersion.__table__.columns)
+            for row in session.query(FacilityTemplateVersion)
+            .filter_by(facility_id=facility_id).order_by(FacilityTemplateVersion.id).all()
+        ]
+
+
+def test_install_same_active_configuration_is_idempotent():
+    first = _install_active_template_version()
+    before = _fixture_template_history("FAC00001")
+    assert _install_active_template_version() == first
+    assert _fixture_template_history("FAC00001") == before
+    assert len(before) == 1
+
+
+def test_install_different_configuration_preserves_history():
+    first = _install_active_template_version()
+    second = _install_active_template_version(template_id="explicit-other-template")
+    assert second != first
+    with session_scope() as session:
+        assert session.get(FacilityTemplateVersion, first).status == "archived"
+        assert session.get(FacilityTemplateVersion, second).status == "active"
+        assert session.query(FacilityTemplateVersion).filter_by(facility_id="FAC00001").count() == 2
+
+
+def test_install_archived_configuration_does_not_reuse_history():
+    import sqlalchemy as sa
+    first = _install_active_template_version()
+    with session_scope() as session:
+        session.get(FacilityTemplateVersion, first).status = "archived"
+    before = _fixture_template_history("FAC00001")
+    with pytest.raises(sa.exc.IntegrityError):
+        _install_active_template_version()
+    assert _fixture_template_history("FAC00001") == before
+
+
+def test_install_different_effective_range_does_not_ignore_range():
+    import sqlalchemy as sa
+    from datetime import date
+    before = _fixture_template_history("FAC00001")
+    with pytest.raises(sa.exc.IntegrityError):
+        _install_active_template_version(valid_from=date(2026, 7, 1))
+    assert _fixture_template_history("FAC00001") == before
 
 
 def _add_ocr_job(order_id: str, job_id: str = "OCR-job", *, job_order_id: str | None = None) -> str:
@@ -229,7 +291,7 @@ def _add_ocr_job(order_id: str, job_id: str = "OCR-job", *, job_order_id: str | 
 
 
 @pytest.fixture(autouse=True)
-def _standard_active_template_for_workflow_tests() -> None:
+def _standard_active_template_for_workflow_tests(isolated_formal_schema) -> None:
     _install_active_template_version("FAC00001", "template-fac00001")
 
 

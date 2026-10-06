@@ -4,6 +4,7 @@ FROM ${BASE_IMAGE}
 WORKDIR /app
 
 COPY src ./src
+COPY alembic/catalog_contracts.json ./alembic/catalog_contracts.json
 COPY migrations ./migrations
 COPY ocr_pipeline ./ocr_pipeline
 COPY tmp ./tmp

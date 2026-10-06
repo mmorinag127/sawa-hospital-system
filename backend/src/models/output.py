@@ -33,7 +33,7 @@ class LabelRow(Base):
     source_saved_sheet_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True, index=True)
     template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     payload_json = Column(JSON, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class DeliveryNote(Base):
@@ -49,7 +49,7 @@ class DeliveryNote(Base):
     date = Column(Date, nullable=True)
     file_uri = Column(String, nullable=True)
     payload_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class ManufacturingAggregateRow(Base):
@@ -66,7 +66,7 @@ class ManufacturingAggregateRow(Base):
     area_id = Column(String, nullable=True)
     bag_type = Column(String, nullable=True)
     quantity = Column(Float, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class DailyOutputPortionOverride(Base):

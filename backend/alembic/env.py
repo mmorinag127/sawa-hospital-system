@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
-
 from alembic import context
 from alembic.script import ScriptDirectory
 from sqlalchemy import engine_from_config, inspect, pool, text
 from sqlalchemy.engine import make_url
-from src.maintenance.formal_migration_schema import require_revision_catalog
+from src.maintenance.formal_migration_schema import read_catalog, require_revision_catalog
+from src.maintenance.database_target import explicit_database_uri
 
 config = context.config
 # Stable, database-local namespace shared by every formal migration revision.
@@ -16,10 +15,7 @@ MIGRATION_LOCK = (0x53415741, 0x4D494752)
 
 
 def _database_url() -> str:
-    database_url = os.environ.get("ALEMBIC_DB_URI")
-    if not database_url:
-        raise RuntimeError("ALEMBIC_DB_URI is required; automatic database adoption is disabled")
-    return database_url
+    return explicit_database_uri(migration=True)
 
 
 def run_migrations_offline() -> None:
@@ -32,9 +28,31 @@ def run_migrations_online() -> None:
     section = config.get_section(config.config_ini_section) or {}
     section["sqlalchemy.url"] = _database_url()
     connect_args = {"timeout": 0} if make_url(section["sqlalchemy.url"]).get_backend_name() == "sqlite" else {}
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        if supplied.engine.url != make_url(section["sqlalchemy.url"]):
+            raise RuntimeError("supplied migration connection disagrees with explicit database target")
+        apply_on_connection(supplied)
+        return
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool, connect_args=connect_args)
     try:
-        with connectable.connect() as connection, connection.begin():
+        with connectable.connect() as connection:
+            apply_on_connection(connection)
+    finally:
+        connectable.dispose()
+
+
+def apply_on_connection(connection):
+    if connection.in_transaction():
+        raise RuntimeError("migration requires its own exclusive transaction")
+    cursor = None
+    previous_busy_timeout = None
+    try:
+        if connection.dialect.name == "sqlite":
+            cursor = connection.connection.driver_connection.cursor()
+            previous_busy_timeout = cursor.execute("PRAGMA busy_timeout").fetchone()[0]
+            cursor.execute("PRAGMA busy_timeout=0")
+        with connection.begin():
             if connection.dialect.name == "sqlite":
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             elif connection.dialect.name == "postgresql":
@@ -42,11 +60,22 @@ def run_migrations_online() -> None:
                     {"namespace": MIGRATION_LOCK[0], "key": MIGRATION_LOCK[1]}).scalar_one()
                 if not acquired:
                     raise RuntimeError("formal migration blocked: migration lock is already held")
+            else:
+                raise RuntimeError("formal migration blocked: unsupported dialect")
             _require_safe_database_state(connection)
             context.configure(connection=connection, transactional_ddl=True)
             context.run_migrations()
+            revisions = list(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
+            if len(revisions) != 1:
+                raise RuntimeError("alembic_version must contain exactly one revision after migration")
+            require_revision_catalog(connection, revisions[0])
     finally:
-        connectable.dispose()
+        if cursor is not None:
+            try:
+                if previous_busy_timeout is not None:
+                    cursor.execute(f"PRAGMA busy_timeout={previous_busy_timeout}")
+            finally:
+                cursor.close()
 
 
 def _require_safe_database_state(connection) -> None:
@@ -62,6 +91,7 @@ def _require_safe_database_state(connection) -> None:
             raise RuntimeError(
                 "database has tables or views but no alembic_version; automatic adoption and upgrade are disabled"
             )
+        read_catalog(connection)  # Also reject unsupported native objects in table-less schemas.
         return
 
     revisions = list(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import sqlalchemy as sa
 
-from src.models.monthly_menu_identity import (
+from src.monthly_menu_identity import (
     IDENTITY_INDEX,
     LEGACY_INDEX,
     RAW_COLUMNS,

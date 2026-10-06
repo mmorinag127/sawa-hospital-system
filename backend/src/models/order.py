@@ -16,7 +16,7 @@ class Order(Base):
     superseded_document_ids = Column(JSON, nullable=True)
     document_uri = Column(String, nullable=False)
     message_id = Column(String, nullable=False, index=True)
-    received_at = Column(DateTime, default=datetime.utcnow, index=True)
+    received_at = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
     lines_updated_at = Column(DateTime, nullable=True)
     archived_at = Column(DateTime, nullable=True)
     archived_by = Column(String, nullable=True)

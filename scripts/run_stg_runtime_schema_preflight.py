@@ -6,6 +6,7 @@ import sys
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
+from src.maintenance.formal_migration_schema import require_formal_head
 
 from run_stg_menu_master_migration import (
     MigrationBlocked,
@@ -21,58 +22,16 @@ from staging_db_target import (
 )
 
 
-BASE_TABLE = "base_menu_cycle_items"
-BASE_COLUMNS = (
-    "id", "cycle_day", "daypart", "category", "name", "diet_type", "slot_index",
-)
-FACILITY_TABLE = "facility_template_versions"
-FACILITY_COLUMNS = (
-    "id", "facility_id", "version", "status", "template_id", "source", "config_json",
-    "columns_json", "cells_json", "template_digest", "validation_json", "valid_from",
-    "valid_to", "created_by", "created_at", "activated_at", "archived_at",
-)
-FACILITY_INDEXES = (
-    "ix_facility_template_versions_valid_from",
-    "ix_facility_template_versions_valid_to",
-)
-
-
-def _columns(connection, table: str) -> set[str]:
-    return set(connection.execute(text(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = :table_name"
-    ), {"table_name": table}).scalars().all())
-
-
-def _require_columns(connection, table: str, required: tuple[str, ...]) -> None:
-    actual = _columns(connection, table)
-    if not actual:
-        raise MigrationBlocked(f"runtime schema preflight blocked: missing table {table}")
-    missing = sorted(set(required) - actual)
-    if missing:
-        raise MigrationBlocked(
-            f"runtime schema preflight blocked: missing columns in {table}: {', '.join(missing)}"
-        )
-
-
 def validate_catalog(connection) -> None:
     """Reject incomplete migrated schemas without changing them."""
     connection.execute(text("SET TRANSACTION READ ONLY"))
     connection.execute(text("SET LOCAL lock_timeout = '5s'"))
     connection.execute(text("SET LOCAL statement_timeout = '15s'"))
     verify_connection_target(connection)
-    _require_columns(connection, BASE_TABLE, BASE_COLUMNS)
-    _require_columns(connection, FACILITY_TABLE, FACILITY_COLUMNS)
-    indexes = set(connection.execute(text(
-        "SELECT indexname FROM pg_indexes "
-        "WHERE schemaname = current_schema() AND tablename = :table_name"
-    ), {"table_name": FACILITY_TABLE}).scalars().all())
-    missing = sorted(set(FACILITY_INDEXES) - indexes)
-    if missing:
-        raise MigrationBlocked(
-            "runtime schema preflight blocked: missing indexes in "
-            f"{FACILITY_TABLE}: {', '.join(missing)}"
-        )
+    try:
+        require_formal_head(connection)
+    except RuntimeError as exc:
+        raise MigrationBlocked(f"runtime schema preflight blocked: {exc}") from exc
 
 
 def run() -> None:

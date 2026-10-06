@@ -4,7 +4,7 @@ from sqlalchemy import Column, String, Float, ForeignKey, Date, DateTime, Intege
 from sqlalchemy.orm import relationship
 
 from src.db import Base
-from src.models.monthly_menu_identity import canonical_identity_index
+from src.monthly_menu_identity import canonical_identity_index
 
 
 class WeeklyMenu(Base):

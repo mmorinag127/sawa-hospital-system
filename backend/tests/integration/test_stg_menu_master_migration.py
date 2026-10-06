@@ -18,6 +18,7 @@ from alembic.operations import Operations
 import pytest
 import sqlalchemy as sa
 import yaml
+from c1_pg_ownership import additional_profile, require_server
 
 from src.models.menu import MenuMaster, MenuFacilityOverride, MonthlyMenu, MonthlyMenuItem, MonthlyMenuEntry
 from src.models.user import User, AuditLog
@@ -62,16 +63,25 @@ def pg():
     if not raw:
         pytest.skip("C1_STG_PG_URI required; no PostgreSQL proof without a dedicated cluster")
     url = sa.make_url(raw)
-    assert url.drivername == "postgresql+psycopg2" and url.host is None
-    assert url.database == "c1_stg_migration" and url.query["port"] == "55447"
-    socket = Path(url.query["host"]).resolve()
-    assert socket.parent == Path("/private/tmp") and socket.name.startswith("sawa-c1stg-pg.")
-    assert (socket / "OWNER").read_text().strip() == str(ROOT)
-    assert not url.query.get("options")
+    profile = additional_profile(url, "migration")
+    if profile is None:
+        assert url.drivername == "postgresql+psycopg2" and url.host is None
+        assert url.database == "c1_stg_migration" and url.query["port"] == "55447"
+        socket = Path(url.query["host"]).resolve()
+        assert socket.parent == Path("/private/tmp") and socket.name.startswith("sawa-c1stg-pg.")
+        assert (socket / "OWNER").read_text().strip() == str(ROOT)
+        assert not url.query.get("options")
     owner = sa.create_engine(url)
-    with owner.connect() as connection:
-        assert Path(connection.execute(sa.text("SHOW data_directory")).scalar_one()).resolve() == ROOT / "tmp/stg-migration/pgdata"
-        assert connection.execute(sa.text("SHOW listen_addresses")).scalar_one() == ""
+    try:
+        with owner.connect() as connection:
+            if profile is not None:
+                require_server(connection, profile)
+            else:
+                assert Path(connection.execute(sa.text("SHOW data_directory")).scalar_one()).resolve() == ROOT / "tmp/stg-migration/pgdata"
+                assert connection.execute(sa.text("SHOW listen_addresses")).scalar_one() == ""
+    except BaseException:
+        owner.dispose()
+        raise
     schema = "stgtest_" + uuid4().hex
     with owner.begin() as connection:
         connection.execute(sa.schema.CreateSchema(schema))
@@ -253,7 +263,7 @@ def cloud_transport(context, monkeypatch):
     _, _, calls, secret = install_cloud(monkeypatch)
     # The proxy fixture redirects only to our independently owned PG database.
     monkeypatch.setattr(runner, 'verify_connection_target', lambda connection:
-        db_target.verify_connection_target(connection, database='c1_stg_migration', role=sa.make_url(os.environ['C1_STG_PG_URI']).username))
+        db_target.verify_connection_target(connection, database=sa.make_url(os.environ['C1_STG_PG_URI']).database, role=sa.make_url(os.environ['C1_STG_PG_URI']).username))
 
     @contextmanager
     def proxy(instance):

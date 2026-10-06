@@ -25,6 +25,7 @@ from src.api import auth, menu_masters, portal
 from src.models.menu import MenuMaster, MenuFacilityOverride, MonthlyMenu, MonthlyMenuItem, MonthlyMenuEntry
 from src.models.user import User, AuditLog
 from src.services import menu_service as service
+from c1_pg_ownership import additional_profile, require_server
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -52,12 +53,21 @@ def database(request, tmp_path):
     if not raw_uri:
         pytest.skip("C1_POSTGRES_URI required for dedicated local PostgreSQL proof")
     url = sa.make_url(raw_uri)
-    assert url.drivername == "postgresql+psycopg2"
-    assert url.database == "c1_menu_master" and url.host is None
-    assert Path(url.query["host"]).resolve() == ROOT / "tmp/pgs"
-    assert url.query["port"] == "55437"
-    assert not url.query.get("options"), "test owns its schema/search_path"
+    profile = additional_profile(url, "menu")
+    if profile is None:
+        assert url.drivername == "postgresql+psycopg2"
+        assert url.database == "c1_menu_master" and url.host is None
+        assert Path(url.query["host"]).resolve() == ROOT / "tmp/pgs"
+        assert url.query["port"] == "55437"
+        assert not url.query.get("options"), "test owns its schema/search_path"
     owner = sa.create_engine(url)
+    if profile is not None:
+        try:
+            with owner.connect() as connection:
+                require_server(connection, profile)
+        except BaseException:
+            owner.dispose()
+            raise
     schema = "c1_" + uuid4().hex
     with owner.begin() as connection:
         connection.execute(sa.schema.CreateSchema(schema))

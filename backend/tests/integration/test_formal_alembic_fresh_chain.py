@@ -13,25 +13,33 @@ from alembic.operations import Operations
 import pytest
 import sqlalchemy as sa
 from src.services.monthly_menu_identity_schema import require_canonical_identity_schema
-from src.models.monthly_menu_identity import (
+from src.monthly_menu_identity import (
     identity_index_ddl, legacy_index_ddl, LEGACY_INDEX, RAW_CONSTRAINT, RAW_COLUMNS,
 )
 from src.maintenance.formal_migration_schema import (
     read_catalog, require_revision_catalog, table_shapes, _without_identity,
-    _sqlite_table_definition,
+    _sqlite_table_definition, require_formal_head,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def explicit_formal_target_environment(monkeypatch):
+    # The suite's runtime database is not the independently owned migration target.
+    for name in ("DB_URI", "DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _owned_postgres(uri):
     owner = sa.engine.make_url(uri)
     assert owner.drivername == "postgresql+psycopg2" and owner.host is None and owner.port is None
     assert owner.database == "postgres"
+    assert set(owner.query) == {"host", "port"}, "only owned Unix socket target parameters are permitted"
     targets = {
-        "55464": (Path("/private/tmp/sawa-c2-formal-alembic-20261006"), 16),
-        "55465": (Path("/private/tmp/sawa-c2-formal-pg15-20261006"), 15),
+        "55470": (Path("/private/tmp/sawa-c2-hospital-catalog-20261006/pg16"), 16),
+        "55469": (Path("/private/tmp/sawa-c2-hospital-catalog-20261006/pg15"), 15),
     }
     port = owner.query["port"]
     assert port in targets, "only explicitly owned PG15/PG16 ports are permitted"
@@ -44,7 +52,7 @@ def _owned_postgres(uri):
 def _verify_postgres_owner(connection, root, port, major):
     assert Path(connection.exec_driver_sql("SHOW data_directory").scalar_one()).resolve() == (root / "pgdata").resolve()
     assert connection.exec_driver_sql("SHOW port").scalar_one() == port
-    assert connection.exec_driver_sql("SHOW listen_addresses").scalar_one() == "127.0.0.1"
+    assert connection.exec_driver_sql("SHOW listen_addresses").scalar_one() == ""
     assert connection.exec_driver_sql("SHOW unix_socket_directories").scalar_one() == str(root / "socket")
     assert int(connection.exec_driver_sql("SHOW server_version_num").scalar_one()) // 10000 == major
 
@@ -87,6 +95,8 @@ def formal_database(request, tmp_path, monkeypatch):
                 created = True
             url = owner.set(database=database)
         engine = sa.create_engine(url)
+        monkeypatch.delenv("DB_URI", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.setenv("ALEMBIC_DB_URI", url.render_as_string(hide_password=False))
         yield engine, Config(str(ROOT / "alembic.ini"))
     finally:
@@ -114,6 +124,398 @@ def test_each_observed_revision_resumes_to_head(formal_database, revision):
         assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0028"
         require_revision_catalog(connection, "0028")
         require_canonical_identity_schema(connection)
+
+
+@pytest.mark.parametrize("mutation", ("extra-column", "wrong-type", "missing-pk"))
+def test_version_table_schema_is_not_adopted(formal_database, mutation):
+    engine, config = formal_database
+    command.upgrade(config, "0001")
+    with engine.begin() as connection:
+        operations = Operations(MigrationContext.configure(connection))
+        if mutation == "extra-column":
+            operations.add_column("alembic_version", sa.Column("unknown", sa.Text()))
+        else:
+            with operations.batch_alter_table("alembic_version") as batch:
+                if mutation == "wrong-type":
+                    batch.alter_column("version_num", type_=sa.Text(), existing_type=sa.String(32))
+                else:
+                    batch.drop_constraint("alembic_version_pkc", type_="primary")
+    before = _catalog_and_rows(engine)
+    with pytest.raises(RuntimeError, match="catalog"):
+        command.upgrade(config, "head")
+    assert _catalog_and_rows(engine) == before
+
+
+def test_column_order_and_sql_literal_are_preserved_by_catalog_comparison():
+    definition = _sqlite_table_definition("CREATE TABLE example (a TEXT DEFAULT 'A B', b TEXT, PRIMARY KEY (a,b))")
+    reordered = _sqlite_table_definition("CREATE TABLE example (b TEXT, a TEXT DEFAULT 'A B', PRIMARY KEY (a,b))")
+    literal_changed = _sqlite_table_definition("CREATE TABLE example (a TEXT DEFAULT 'AB', b TEXT, PRIMARY KEY (a,b))")
+    key_changed = _sqlite_table_definition("CREATE TABLE example (a TEXT DEFAULT 'A B', b TEXT, PRIMARY KEY (b,a))")
+    assert definition != reordered
+    assert definition != literal_changed
+    assert definition != key_changed
+    snapshot = {"tables": {"example": {"columns": [{"name": "a"}, {"name": "b"}], "pk": {"constrained_columns": ["a", "b"]}}}, "native": []}
+    shape = table_shapes(snapshot, "sqlite")
+    snapshot["tables"]["example"]["columns"].reverse()
+    assert table_shapes(snapshot, "sqlite") != shape
+
+
+@pytest.mark.parametrize("invalid", ("missing", "blank", "disagree", "partial-components"))
+def test_standard_alembic_cli_rejects_ambiguous_target_before_connect(tmp_path, invalid):
+    import subprocess
+    import sys
+    environment = os.environ.copy()
+    for name in ("ALEMBIC_DB_URI", "DB_URI", "DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
+        environment.pop(name, None)
+    candidate = tmp_path / "must-not-create.sqlite3"
+    other = tmp_path / "also-must-not-create.sqlite3"
+    if invalid != "missing":
+        environment["ALEMBIC_DB_URI"] = " " if invalid == "blank" else f"sqlite:///{candidate}"
+    if invalid == "disagree":
+        environment["DB_URI"] = f"sqlite:///{other}"
+    if invalid == "partial-components":
+        environment["DB_HOST"] = "/cloudsql/explicit:region:instance"
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", str(ROOT / "alembic.ini"), "upgrade", "head"],
+        env=environment, cwd=ROOT.parent, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert any(word in result.stderr for word in ("required", "nonblank", "disagree", "components"))
+    assert not candidate.exists()
+    assert not other.exists()
+
+
+@pytest.mark.parametrize("state", ("head", "old", "missing-column", "missing-index"))
+def test_owned_postgres_predeploy_and_startup_share_readonly_catalog(formal_database, monkeypatch, state):
+    import sys
+    engine, config = formal_database
+    if engine.dialect.name != "postgresql":
+        pytest.skip("actual PostgreSQL READ ONLY predeploy boundary")
+    sys.path.insert(0, str(ROOT.parent / "scripts"))
+    import run_stg_runtime_schema_preflight as runner
+
+    command.upgrade(config, "0001" if state == "old" else "head")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("INSERT INTO facilities(id,name) VALUES ('preflight-preserve','値保持')")
+        if state == "missing-column":
+            connection.exec_driver_sql("ALTER TABLE facility_template_versions RENAME COLUMN template_digest TO unknown_digest")
+        elif state == "missing-index":
+            connection.exec_driver_sql("DROP INDEX ix_facility_template_versions_valid_to")
+    owner, root, port, major = _owned_postgres(os.environ["C2_FORMAL_PG_URI"])
+    monkeypatch.setattr(runner, "verify_connection_target", lambda connection: _verify_postgres_owner(connection, root, port, major))
+    before = _catalog_and_rows(engine)
+    statements = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as connection, connection.begin():
+            if state == "head":
+                runner.validate_catalog(connection)
+                require_formal_head(connection)
+            else:
+                with pytest.raises(runner.MigrationBlocked, match="formal migration head|missing columns|missing indexes"):
+                    runner.validate_catalog(connection)
+                with pytest.raises(RuntimeError, match="formal migration head|missing columns|missing indexes"):
+                    require_formal_head(connection)
+            assert connection.exec_driver_sql("SHOW transaction_read_only").scalar_one() == "on"
+            assert connection.exec_driver_sql("SHOW lock_timeout").scalar_one() == "5s"
+            assert connection.exec_driver_sql("SHOW statement_timeout").scalar_one() == "15s"
+            with pytest.raises(sa.exc.DBAPIError, match="read-only"):
+                connection.exec_driver_sql("UPDATE facilities SET name='must-not-save'")
+            connection.rollback()
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", capture)
+    # The sole attempted UPDATE is the explicit negative assertion above.
+    assert not any(statement.lstrip().upper().startswith(("CREATE", "ALTER", "DROP", "INSERT", "DELETE", "TRUNCATE")) for statement in statements)
+    assert _catalog_and_rows(engine) == before
+
+
+@pytest.mark.parametrize("mutation", ("collation", "unvalidated-fk"))
+def test_postgres_native_attributes_stop_before_ddl(formal_database, mutation):
+    engine, config = formal_database
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL native column and constraint attributes")
+    command.upgrade(config, "0014")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("INSERT INTO facilities(id,name) VALUES ('native-preserve','値保持')")
+        if mutation == "collation":
+            connection.exec_driver_sql('ALTER TABLE facilities ALTER COLUMN name TYPE VARCHAR COLLATE "C"')
+        else:
+            connection.exec_driver_sql("ALTER TABLE orders DROP CONSTRAINT fk_orders_template_version_id")
+            connection.exec_driver_sql("ALTER TABLE orders ADD CONSTRAINT fk_orders_template_version_id FOREIGN KEY (template_version_id) REFERENCES facility_template_versions(id) NOT VALID")
+    before = _catalog_and_rows(engine)
+    with pytest.raises(RuntimeError, match="catalog"):
+        command.upgrade(config, "head")
+    assert _catalog_and_rows(engine) == before
+
+
+@pytest.mark.parametrize("state", ("head", "versionless", "old", "unknown-column"))
+def test_startup_uses_readonly_formal_head_before_any_business_initialization(formal_database, monkeypatch, state):
+    import src.main as main
+    engine, config = formal_database
+    if state != "versionless":
+        command.upgrade(config, "0001" if state == "old" else "head")
+    if state == "unknown-column":
+        with engine.begin() as connection:
+            connection.exec_driver_sql("ALTER TABLE facilities ADD COLUMN unknown_startup INTEGER")
+    monkeypatch.setattr(main.db, "engine", engine)
+    calls = []
+    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: calls.append("menu"))
+    monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda: calls.append("facility"))
+    monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: calls.append("sync"))
+    monkeypatch.setattr(main, "start_uploaded_pdf_recovery_loop", lambda: calls.append("recovery"))
+    before = _catalog_and_rows(engine)
+    ddl = []
+
+    def record(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE")):
+            ddl.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", record)
+    try:
+        if state == "head":
+            main._initialize_menu_schema()
+            assert calls == ["menu", "facility", "sync", "recovery"]
+        else:
+            with pytest.raises(RuntimeError, match="runtime blocked|catalog"):
+                main._initialize_menu_schema()
+            assert calls == []
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record)
+    assert ddl == []
+    assert _catalog_and_rows(engine) == before
+
+
+def test_postflight_rejects_normal_return_after_corrupting_real_ddl(formal_database, monkeypatch):
+    engine, config = formal_database
+    command.upgrade(config, "0001")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("INSERT INTO facilities(id,name) VALUES ('postflight','値保持')")
+    before = _catalog_and_rows(engine)
+    original = Operations.create_table
+    observed = []
+
+    def corrupt(operations, name, *args, **kwargs):
+        result = original(operations, name, *args, **kwargs)
+        if name == "ocr_jobs":
+            operations.add_column(name, sa.Column("unknown_postflight", sa.Integer()))
+            observed.append(name)
+        return result
+
+    monkeypatch.setattr(Operations, "create_table", corrupt)
+    with pytest.raises(RuntimeError, match="catalog.*ocr_jobs"):
+        command.upgrade(config, "head")
+    assert observed == ["ocr_jobs"]
+    assert _catalog_and_rows(engine) == before
+
+
+def test_0028_postflight_rolls_back_real_ddl_and_preserves_json_quantity(formal_database, monkeypatch):
+    engine, config = formal_database
+    command.upgrade(config, "0027")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("INSERT INTO order_ocr_revisions (id,order_id,row_count,changed,sheet_save_only,fields,created_at) VALUES ('postflight-json','owned-order',3,false,false,'{\"quantity\":3.25}',CURRENT_TIMESTAMP)")
+    before = _catalog_and_rows(engine)
+    original = Operations.add_column
+    observed = []
+
+    def corrupt(operations, table_name, column, *args, **kwargs):
+        result = original(operations, table_name, column, *args, **kwargs)
+        if table_name == "order_ocr_revisions" and column.name == "metadata_json":
+            original(operations, table_name, sa.Column("unknown_postflight", sa.Integer()))
+            observed.append(column.name)
+        return result
+
+    monkeypatch.setattr(Operations, "add_column", corrupt)
+    with pytest.raises(RuntimeError, match="catalog.*order_ocr_revisions"):
+        command.upgrade(config, "head")
+    assert observed == ["metadata_json"]
+    assert _catalog_and_rows(engine) == before
+
+
+@pytest.mark.parametrize("outcome", ("success", "ddl-error", "lock-conflict"))
+def test_sqlite_supplied_pool_busy_timeout_is_restored(tmp_path, monkeypatch, outcome):
+    import time
+    url = f"sqlite:///{tmp_path / 'pool.sqlite3'}"
+    monkeypatch.setenv("ALEMBIC_DB_URI", url)
+    engine = sa.create_engine(url, connect_args={"timeout": 30}, poolclass=sa.pool.QueuePool)
+    config = Config(str(ROOT / "alembic.ini"))
+    observed = []
+    owner = None
+
+    def fail_after_ddl(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().startswith("CREATE TABLE facilities"):
+            observed.append(statement)
+            raise RuntimeError("owned post-DDL fault")
+
+    try:
+        with engine.connect() as connection:
+            before = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+            connection.rollback()
+            config.attributes["connection"] = connection
+            if outcome == "lock-conflict":
+                owner = engine.connect()
+                owner.exec_driver_sql("BEGIN IMMEDIATE")
+            if outcome == "ddl-error":
+                sa.event.listen(engine, "after_cursor_execute", fail_after_ddl)
+            started = time.monotonic()
+            if outcome == "success":
+                command.upgrade(config, "head")
+            else:
+                with pytest.raises((RuntimeError, sa.exc.OperationalError), match="post-DDL fault|database is locked"):
+                    command.upgrade(config, "head")
+            if outcome == "lock-conflict":
+                assert time.monotonic() - started < 5
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == before == 30000
+            connection.rollback()
+        if owner is not None:
+            owner.close()
+            owner = None
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == before
+        if outcome == "ddl-error":
+            assert observed
+    finally:
+        if outcome == "ddl-error":
+            sa.event.remove(engine, "after_cursor_execute", fail_after_ddl)
+        if owner is not None:
+            owner.close()
+        engine.dispose()
+
+
+def _pg_unsupported_snapshot(engine):
+    with engine.connect() as connection:
+        inspector = sa.inspect(connection)
+        tables = {}
+        for name in inspector.get_table_names():
+            quoted = connection.dialect.identifier_preparer.quote(name)
+            tables[name] = {
+                "columns": repr(inspector.get_columns(name)),
+                "constraints": repr((inspector.get_pk_constraint(name), inspector.get_foreign_keys(name), inspector.get_check_constraints(name))),
+                "indexes": repr(inspector.get_indexes(name)),
+                "rows": sorted(repr(tuple(row)) for row in connection.exec_driver_sql(f"SELECT * FROM {quoted}")),
+            }
+        semantics = connection.exec_driver_sql("""
+            SELECT c.relname,c.relkind,c.relispartition,c.relrowsecurity,c.relforcerowsecurity,
+              (SELECT array_agg(pg_get_triggerdef(t.oid) ORDER BY t.tgname) FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal),
+              (SELECT array_agg(p.polname || ':' || coalesce(pg_get_expr(p.polqual,p.polrelid),'') ORDER BY p.polname) FROM pg_policy p WHERE p.polrelid=c.oid),
+              (SELECT array_agg(i.inhparent::regclass::text ORDER BY i.inhparent) FROM pg_inherits i WHERE i.inhrelid=c.oid)
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname=current_schema() ORDER BY c.relname
+        """).all()
+        return tables, semantics
+
+
+@pytest.mark.parametrize("mutation", ("trigger", "rls", "policy", "partition", "inheritance"))
+def test_postgres_unsupported_semantics_stop_migration_and_runtime(formal_database, mutation):
+    engine, config = formal_database
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL native schema semantics")
+    command.upgrade(config, "head")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("INSERT INTO facilities(id,name) VALUES ('owned-preserve','値保持')")
+        if mutation == "trigger":
+            connection.exec_driver_sql("CREATE FUNCTION owned_trigger() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'")
+            connection.exec_driver_sql("CREATE TRIGGER owned_trigger BEFORE INSERT ON facilities FOR EACH ROW EXECUTE FUNCTION owned_trigger()")
+        elif mutation == "rls":
+            connection.exec_driver_sql("ALTER TABLE facilities ENABLE ROW LEVEL SECURITY")
+        elif mutation == "policy":
+            connection.exec_driver_sql("CREATE POLICY owned_policy ON facilities USING (true)")
+        elif mutation == "partition":
+            connection.exec_driver_sql("CREATE TABLE owned_partition(id integer) PARTITION BY RANGE(id)")
+        else:
+            connection.exec_driver_sql("CREATE TABLE owned_child() INHERITS (facilities)")
+    before = _pg_unsupported_snapshot(engine)
+    with pytest.raises(RuntimeError, match="unsupported"):
+        command.upgrade(config, "head")
+    with engine.connect() as connection, pytest.raises(RuntimeError, match="unsupported"):
+        require_formal_head(connection)
+    assert _pg_unsupported_snapshot(engine) == before
+
+
+@pytest.mark.parametrize("revision", (None, "0001"))
+def test_postgres_routine_only_or_known_revision_stops_before_ddl(formal_database, revision):
+    engine, config = formal_database
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL standalone routines")
+    if revision is not None:
+        command.upgrade(config, revision)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE FUNCTION owned_value() RETURNS integer LANGUAGE sql AS 'SELECT 7'")
+
+    def snapshot():
+        with engine.connect() as connection:
+            return (
+                _pg_unsupported_snapshot(engine),
+                connection.exec_driver_sql("SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() ORDER BY p.proname").all(),
+                connection.exec_driver_sql("SELECT owned_value()").scalar_one(),
+            )
+
+    before = snapshot()
+    with pytest.raises(RuntimeError, match="unsupported routine"):
+        command.upgrade(config, "head")
+    assert snapshot() == before
+
+
+@pytest.mark.parametrize("formal_database", ("postgresql",), indirect=True)
+@pytest.mark.parametrize("revision", (None, "0028"))
+@pytest.mark.parametrize("kind", ("shell", "range", "multirange", "base", "domain", "enum", "composite"))
+def test_postgres_standalone_types_stop_independently_before_ddl(formal_database, revision, kind):
+    engine, config = formal_database
+    if revision is not None:
+        command.upgrade(config, revision)
+    name = "unknown_" + kind
+    with engine.begin() as connection:
+        if revision is not None:
+            connection.exec_driver_sql("INSERT INTO facilities(id,name) VALUES ('type-preserve','Preserved Facility')")
+        if kind == "shell":
+            connection.exec_driver_sql("CREATE TYPE unknown_shell")
+        elif kind in {"range", "multirange"}:
+            connection.exec_driver_sql("CREATE TYPE unknown_range AS RANGE (SUBTYPE=integer, MULTIRANGE_TYPE_NAME=unknown_multirange)")
+        elif kind == "base":
+            connection.exec_driver_sql("CREATE TYPE unknown_base")
+            connection.exec_driver_sql("CREATE FUNCTION unknown_base_in(cstring) RETURNS unknown_base AS 'int4in' LANGUAGE internal IMMUTABLE STRICT")
+            connection.exec_driver_sql("CREATE FUNCTION unknown_base_out(unknown_base) RETURNS cstring AS 'int4out' LANGUAGE internal IMMUTABLE STRICT")
+            connection.exec_driver_sql("CREATE TYPE unknown_base (INPUT=unknown_base_in, OUTPUT=unknown_base_out, INTERNALLENGTH=4, PASSEDBYVALUE, ALIGNMENT=int4)")
+        elif kind == "domain":
+            connection.exec_driver_sql("CREATE DOMAIN unknown_domain AS integer")
+        elif kind == "enum":
+            connection.exec_driver_sql("CREATE TYPE unknown_enum AS ENUM ('explicit')")
+        else:
+            connection.exec_driver_sql("CREATE TYPE unknown_composite AS (explicit integer)")
+    def snapshot():
+        with engine.connect() as connection:
+            return (
+                _pg_unsupported_snapshot(engine),
+                connection.exec_driver_sql("SELECT to_jsonb(t) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=current_schema() ORDER BY t.typname").all(),
+                connection.exec_driver_sql("SELECT to_jsonb(r) FROM pg_range r JOIN pg_type t ON t.oid=r.rngtypid JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=current_schema() ORDER BY t.typname").all(),
+                connection.exec_driver_sql("SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() ORDER BY p.oid").all(),
+            )
+    before = snapshot()
+    if kind == "shell":
+        assert before[3] == []  # Shell rejection must not rely on routine detection.
+    message = rf"unsupported standalone type:.*{name} \({kind}\)"
+    with engine.connect() as connection, pytest.raises(RuntimeError, match=message):
+        read_catalog(connection)
+    with pytest.raises(RuntimeError, match=message):
+        command.upgrade(config, "head")
+    with engine.connect() as connection, pytest.raises(RuntimeError, match=message if revision else "formal migration head is required"):
+        require_formal_head(connection)
+    assert snapshot() == before
+
+
+@pytest.mark.parametrize("formal_database", ("postgresql",), indirect=True)
+def test_postgres_automatic_table_and_array_types_remain_supported(formal_database):
+    engine, config = formal_database
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        types = connection.exec_driver_sql("SELECT t.typtype,t.typelem,c.relkind FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace LEFT JOIN pg_class c ON c.oid=t.typrelid WHERE n.nspname=current_schema()").all()
+        assert any(kind == "c" and relation == "r" for kind, element, relation in types)
+        assert any(kind == "b" and element != 0 for kind, element, relation in types)
+        read_catalog(connection)
+        require_formal_head(connection)
 
 
 def _catalog_and_rows(engine):
@@ -441,6 +843,8 @@ def test_constraint_index_catalog_mismatch_stops_before_ddl(formal_database, mut
 
 
 def test_owned_postgres_fresh_all_28_revisions(monkeypatch):
+    monkeypatch.delenv("DB_URI", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     uri = os.environ.get("C2_FORMAL_PG_URI")
     if not uri:
         pytest.skip("C2_FORMAL_PG_URI not supplied; owned PostgreSQL requires explicit opt-in")

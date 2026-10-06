@@ -13,6 +13,26 @@ from sqlalchemy.engine import make_url
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture
+def formal_startup_boundary(tmp_path, monkeypatch):
+    from alembic import command
+    from alembic.config import Config
+    import src.main as main
+
+    uri = f"sqlite:///{tmp_path / 'formal-startup.sqlite3'}"
+    engine = create_engine(uri)
+    try:
+        with monkeypatch.context() as target:
+            for name in ("DB_URI", "DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
+                target.delenv(name, raising=False)
+            target.setenv("ALEMBIC_DB_URI", uri)
+            command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
+        monkeypatch.setattr(main.db, "engine", engine)
+        yield engine
+    finally:
+        engine.dispose()
+
+
 def _sqlite_schema_snapshot(engine) -> dict[str, tuple[str, ...]]:
     inspector = inspect(engine)
     return {
@@ -247,7 +267,7 @@ def test_runtime_import_and_base_menu_read_emit_no_ddl() -> None:
     assert len(statements) >= 2
 
 
-def test_startup_calls_facility_schema_validator_without_ddl(monkeypatch) -> None:
+def test_startup_calls_facility_schema_validator_without_ddl(monkeypatch, formal_startup_boundary) -> None:
     import src.main as main
 
     calls: list[str] = []
@@ -260,7 +280,7 @@ def test_startup_calls_facility_schema_validator_without_ddl(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize("partial", [False, True])
-def test_startup_blocks_missing_or_partial_facility_schema_without_ddl(monkeypatch, partial) -> None:
+def test_startup_blocks_missing_or_partial_facility_schema_without_ddl(monkeypatch, partial, formal_startup_boundary) -> None:
     import src.main as main
     from src.services import facility_template_version_service
 
@@ -285,7 +305,7 @@ def test_startup_blocks_missing_or_partial_facility_schema_without_ddl(monkeypat
     assert _ddl(statements) == []
 
 
-def test_startup_accepts_migrated_facility_schema_without_ddl(monkeypatch) -> None:
+def test_startup_accepts_migrated_facility_schema_without_ddl(monkeypatch, formal_startup_boundary) -> None:
     import src.main as main
     from src.services import facility_template_version_service
 

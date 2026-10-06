@@ -79,7 +79,7 @@ def seed_user():
                 )"""
             ))
             connection.execute(
-                text("INSERT INTO users(id, account, role, status) VALUES(:id, :account, :role, :status)"),
+                text("INSERT INTO users(id, account, role, status, created_at) VALUES(:id, :account, :role, :status, CURRENT_TIMESTAMP)"),
                 {"id": user_id, "account": account, "role": role, "status": status},
             )
             for system in systems:

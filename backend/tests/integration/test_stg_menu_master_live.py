@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
+from c1_pg_ownership import additional_profile, require_server
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -104,14 +105,23 @@ def test_image_proof_checks_manifest_blob_and_full_source_sha(monkeypatch, failu
 def pg():
     raw = os.environ['C1_LIVE_PG_URI']  # Missing real PG is an error, never a passing skip.
     url = sa.make_url(raw)
-    assert url.drivername == 'postgresql+psycopg2' and url.host is None and url.database == 'c1_live'
-    socket = Path(url.query['host']).resolve()
-    assert socket.parent == Path('/private/tmp') and socket.name.startswith('sawa-c1stg-pg.')
-    assert (socket / 'OWNER').read_text().strip() == str(ROOT)
+    profile = additional_profile(url, 'live')
+    if profile is None:
+        assert url.drivername == 'postgresql+psycopg2' and url.host is None and url.database == 'c1_live'
+        socket = Path(url.query['host']).resolve()
+        assert socket.parent == Path('/private/tmp') and socket.name.startswith('sawa-c1stg-pg.')
+        assert (socket / 'OWNER').read_text().strip() == str(ROOT)
     engine = sa.create_engine(url)
-    with engine.connect() as c:
-        assert Path(c.execute(sa.text('SHOW data_directory')).scalar_one()).resolve() == ROOT / 'tmp/stg-migration/pgdata'
-        assert c.execute(sa.text('SHOW listen_addresses')).scalar_one() == ''
+    try:
+        with engine.connect() as c:
+            if profile is not None:
+                require_server(c, profile)
+            else:
+                assert Path(c.execute(sa.text('SHOW data_directory')).scalar_one()).resolve() == ROOT / 'tmp/stg-migration/pgdata'
+                assert c.execute(sa.text('SHOW listen_addresses')).scalar_one() == ''
+    except BaseException:
+        engine.dispose()
+        raise
     with engine.begin() as c:
         c.execute(sa.text('DROP SCHEMA public CASCADE'))
         c.execute(sa.text('CREATE SCHEMA public'))
@@ -144,7 +154,7 @@ def pg():
 
 
 def proof(pg):
-    return safety.preflight(pg, NAME, database='c1_live', role=pg.url.username)
+    return safety.preflight(pg, NAME, database=pg.url.database, role=pg.url.username)
 
 
 def owned(pg):
@@ -337,7 +347,7 @@ def local_runner(pg, monkeypatch, tmp_path):
     monkeypatch.setattr(runner, 'cloud_sql_proxy', lambda *args: nullcontext())
     monkeypatch.setattr(runner, 'create_engine', lambda *args, **kwargs: pg)
     monkeypatch.setattr(runner, 'uuid4', lambda: SimpleNamespace(hex='a' * 32))
-    monkeypatch.setattr(runner, 'preflight', lambda engine, name: safety.preflight(engine, name, database='c1_live', role=pg.url.username))
+    monkeypatch.setattr(runner, 'preflight', lambda engine, name: safety.preflight(engine, name, database=pg.url.database, role=pg.url.username))
 
 
 @pytest.mark.parametrize('column', ['menu_master_id', 'menu_master_name'])

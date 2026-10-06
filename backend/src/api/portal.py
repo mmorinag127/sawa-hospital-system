@@ -100,7 +100,7 @@ def _save(body: dict, actor: UserContext, user_id: str | None = None):
             )
         else:
             session.execute(
-                text("INSERT INTO users(id, account, role, status) VALUES(:id, :account, :role, :status)"),
+                text("INSERT INTO users(id, account, role, status, created_at) VALUES(:id, :account, :role, :status, CURRENT_TIMESTAMP)"),
                 values,
             )
         session.execute(text("DELETE FROM user_system_access WHERE user_id=:id"), {"id":target})

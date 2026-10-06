@@ -7,6 +7,9 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -25,40 +28,41 @@ CONTEXT = {
 }
 
 
-class Result:
-    def __init__(self, values):
-        self.values = values
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self.values
-
-
-class CatalogConnection:
-    def __init__(self, columns, indexes):
-        self.columns = columns
-        self.indexes = indexes
-        self.statements = []
-
-    def execute(self, statement, params=None):
-        sql = str(statement)
-        self.statements.append(sql)
-        if "information_schema.columns" in sql:
-            return Result(self.columns[params["table_name"]])
-        if "pg_indexes" in sql:
-            return Result(self.indexes)
-        return Result([])
-
-
 @pytest.fixture
-def catalog(monkeypatch):
+def catalog(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "verify_connection_target", lambda connection: None)
-    return CatalogConnection(
-        {runner.BASE_TABLE: list(runner.BASE_COLUMNS), runner.FACILITY_TABLE: list(runner.FACILITY_COLUMNS)},
-        list(runner.FACILITY_INDEXES),
-    )
+    uri = f"sqlite:///{tmp_path / 'preflight.sqlite3'}"
+    with monkeypatch.context() as target:
+        for name in ("DB_URI", "DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
+            target.delenv(name, raising=False)
+        target.setenv("ALEMBIC_DB_URI", uri)
+        command.upgrade(Config(str(ROOT / "backend/alembic.ini")), "head")
+    engine = sa.create_engine(uri)
+    try:
+        with engine.connect() as connection:
+            connection.statements = []
+            original = connection.execute
+
+            def execute(statement, *args, **kwargs):
+                sql = str(statement)
+                if sql.startswith("SET "):
+                    # Offline SQLite exercises the real common catalog checker;
+                    # PostgreSQL transaction settings are asserted separately on owned PG.
+                    connection.statements.append(sql)
+                    return None
+                return original(statement, *args, **kwargs)
+
+            def capture(connection, cursor, statement, parameters, context, executemany):
+                connection.statements.append(statement)
+
+            monkeypatch.setattr(connection, "execute", execute)
+            sa.event.listen(engine, "before_cursor_execute", capture)
+            try:
+                yield connection
+            finally:
+                sa.event.remove(engine, "before_cursor_execute", capture)
+    finally:
+        engine.dispose()
 
 
 def assert_catalog_only(statements):
@@ -67,21 +71,24 @@ def assert_catalog_only(statements):
 
 
 def test_missing_table_blocks_without_mutating_sql(catalog):
-    catalog.columns[runner.BASE_TABLE] = []
+    catalog.exec_driver_sql("DROP TABLE base_menu_cycle_items")
+    catalog.statements.clear()
     with pytest.raises(runner.MigrationBlocked, match="missing table base_menu_cycle_items"):
         runner.validate_catalog(catalog)
     assert_catalog_only(catalog.statements)
 
 
 def test_missing_column_blocks_without_mutating_sql(catalog):
-    catalog.columns[runner.FACILITY_TABLE].remove("template_digest")
+    catalog.exec_driver_sql("ALTER TABLE facility_template_versions RENAME COLUMN template_digest TO unknown_digest")
+    catalog.statements.clear()
     with pytest.raises(runner.MigrationBlocked, match="missing columns in facility_template_versions: template_digest"):
         runner.validate_catalog(catalog)
     assert_catalog_only(catalog.statements)
 
 
 def test_missing_index_blocks_without_mutating_sql(catalog):
-    catalog.indexes.remove("ix_facility_template_versions_valid_to")
+    catalog.exec_driver_sql("DROP INDEX ix_facility_template_versions_valid_to")
+    catalog.statements.clear()
     with pytest.raises(runner.MigrationBlocked, match="missing indexes in facility_template_versions"):
         runner.validate_catalog(catalog)
     assert_catalog_only(catalog.statements)
