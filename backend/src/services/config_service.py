@@ -7,16 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import select
-
-from src.db import session_scope
-from src.models.facility import Facility
+from src.services import canonical_facility_store
 from src.services.template_field_schema_service import derive_row_fields_from_columns
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-FACILITY_MASTER_PATH = Path(
-    os.getenv("FACILITY_MASTER_PATH", DATA_DIR / "facility_master.template.json")
-)
 INGEST_POLICY_PATH = Path(os.getenv("INGEST_POLICY_PATH", DATA_DIR / "ingest_policy.template.json"))
 
 _NAME_TRANSLATION = str.maketrans(
@@ -41,40 +35,6 @@ _CORP_TOKENS = [
 ]
 _PHONE_PATTERN = re.compile(r"(?:\+?81[-\s]?)?(?:0?\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4})")
 
-_DEFAULT_ORDER_FORM_PATTERNS: list[dict[str, Any]] = [
-    {
-        "pattern_id": "PATTERN_A",
-        "label": "標準A",
-        "description": "Placeholder pattern A (TBD)",
-        "marker_cells": ["A1", "L1", "A40", "L40"],
-    },
-    {
-        "pattern_id": "PATTERN_B",
-        "label": "標準B",
-        "description": "Placeholder pattern B (TBD)",
-        "marker_cells": ["A1", "M1", "A42", "M42"],
-    },
-    {
-        "pattern_id": "PATTERN_C",
-        "label": "標準C",
-        "description": "Placeholder pattern C (TBD)",
-        "marker_cells": ["A1", "K1", "A38", "K38"],
-    },
-    {
-        "pattern_id": "PATTERN_D",
-        "label": "標準D",
-        "description": "Placeholder pattern D (TBD)",
-        "marker_cells": ["A1", "N1", "A44", "N44"],
-    },
-    {
-        "pattern_id": "PATTERN_E",
-        "label": "標準E",
-        "description": "Placeholder pattern E (TBD)",
-        "marker_cells": ["A1", "J1", "A36", "J36"],
-    },
-]
-
-
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -94,9 +54,8 @@ def _normalize_fax_template_ids(value: Any) -> list[str]:
     return normalized
 
 
-@lru_cache(maxsize=1)
 def load_facility_master() -> dict:
-    return _load_json(FACILITY_MASTER_PATH)
+    return canonical_facility_store.read_snapshot().master
 
 
 @lru_cache(maxsize=1)
@@ -105,7 +64,6 @@ def load_ingest_policy() -> dict:
 
 
 def reload_configs() -> None:
-    load_facility_master.cache_clear()
     load_ingest_policy.cache_clear()
 
 
@@ -666,42 +624,7 @@ def sanitize_facility_config_for_storage(
     current_config: dict[str, Any] | None = None,
     allow_authoritative_column_changes: bool = False,
 ) -> dict[str, Any]:
-    sanitized = _strip_facility_template_storage_keys(config)
-    master_override = None
-    master_template_id = None
-    master_template_ids: list[str] = []
-    master = load_facility_master()
-    for fac_master in master.get("facilities", []):
-        if fac_master.get("facility_id") == facility_id:
-            master_override = fac_master.get("fax_template_override")
-            master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
-            break
-
-    current_override = None
-    if master_template_id:
-        sanitized["fax_template_id"] = master_template_id
-        sanitized["fax_template_ids"] = master_template_ids or [master_template_id]
-    fax_override = _preserve_authoritative_fax_override(
-        current_override,
-        sanitized.get("fax_template_override"),
-        master_override,
-        allow_authoritative_column_changes=allow_authoritative_column_changes,
-    )
-    if fax_override is None:
-        sanitized.pop("fax_template_override", None)
-        return sanitized
-
-    reconciled = _reconcile_fax_template_override(
-        fax_override,
-        master_override,
-        drop_redundant=True,
-        prefer_master=bool(master_override),
-    )
-    if reconciled is None:
-        sanitized.pop("fax_template_override", None)
-    else:
-        sanitized["fax_template_override"] = reconciled
-    return sanitized
+    raise canonical_facility_store.CanonicalStoreError("legacy_facility_config_sanitizer_disabled", status_code=410)
 
 
 def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
@@ -883,10 +806,7 @@ def _normalize_order_form_patterns(raw: Any) -> list[dict[str, Any]]:
 
 def get_order_form_patterns() -> list[dict[str, Any]]:
     master = load_facility_master()
-    patterns = _normalize_order_form_patterns(master.get("order_form_patterns"))
-    if patterns:
-        return patterns
-    return [dict(item) for item in _DEFAULT_ORDER_FORM_PATTERNS]
+    return _normalize_order_form_patterns(master.get("order_form_patterns"))
 
 
 def get_order_form_pattern(pattern_id: str | None) -> Optional[dict[str, Any]]:
@@ -970,14 +890,6 @@ def _collect_facilities_for_match() -> list[dict]:
         if not facility_id:
             continue
         merged[facility_id] = {"facility_id": facility_id, **fac}
-    with session_scope() as session:
-        for fac in session.execute(select(Facility)).scalars().all():
-            entry = merged.get(fac.id, {"facility_id": fac.id})
-            if not entry.get("facility_name"):
-                entry["facility_name"] = fac.name
-            if fac.config and fac.config.config_json:
-                entry.update(fac.config.config_json)
-            merged[fac.id] = entry
     return list(merged.values())
 
 
@@ -1097,65 +1009,17 @@ def match_facility_candidates(
 
 def resolve_facility_id(facility_name: str) -> Optional[str]:
     target = facility_name.strip()
-    with session_scope() as session:
-        fac = session.execute(select(Facility).where(Facility.name == target)).scalars().first()
-        if fac:
-            return fac.id
     master = load_facility_master()
-    for fac in master.get("facilities", []):
-        if fac.get("facility_name") == target:
-            return fac.get("facility_id")
-        if target in (fac.get("aliases") or []):
-            return fac.get("facility_id")
-    return None
+    matches = [fac["facility_id"] for fac in master["facilities"]
+               if fac.get("facility_name") == target or target in (fac.get("aliases") or [])]
+    return matches[0] if len(matches) == 1 else None
 
 
-def get_facility_by_id(facility_id: str) -> Optional[dict]:
-    with session_scope() as session:
-        fac = session.get(Facility, facility_id)
-        if fac:
-            config = fac.config.config_json if fac.config else {}
-            facility = {
-                "facility_id": fac.id,
-                "facility_name": fac.name,
-                "areas": [
-                    {"area_id": area.id, "name": area.name} for area in (fac.areas or [])
-                ],
-            }
-            if config:
-                facility.update(_strip_facility_template_storage_keys(config))
-            master = load_facility_master()
-            for fac_master in master.get("facilities", []):
-                if fac_master.get("facility_id") == facility_id:
-                    master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
-                    if master_template_id:
-                        facility["fax_template_id"] = master_template_id
-                        facility["fax_template_ids"] = master_template_ids or [master_template_id]
-                    for key in ("fax_template_override",):
-                        value = fac_master.get(key)
-                        if value not in (None, [], {}):
-                            facility[key] = deepcopy(value)
-                    master_override = fac_master.get("fax_template_override")
-                    current_override = facility.get("fax_template_override")
-                    reconciled_override = _reconcile_fax_template_override(
-                        current_override,
-                        master_override,
-                        drop_redundant=False,
-                        prefer_master=bool(master_override),
-                    )
-                    if reconciled_override is None:
-                        facility.pop("fax_template_override", None)
-                    else:
-                        facility["fax_template_override"] = reconciled_override
-                    for key, value in fac_master.items():
-                        if key not in facility or facility[key] in (None, [], {}):
-                            facility[key] = value
-                    break
-            return facility
-    master = load_facility_master()
-    for fac in master.get("facilities", []):
+def get_facility_by_id(facility_id: str, *, master: dict | None = None) -> Optional[dict]:
+    master = load_facility_master() if master is None else master
+    for fac in master["facilities"]:
         if fac.get("facility_id") == facility_id:
-            return fac
+            return deepcopy(fac)
     return None
 
 
@@ -1164,8 +1028,9 @@ def _build_facility_config(
     facility_id: str,
     facility: dict[str, Any],
     selected_template_id: str | None = None,
+    master: dict | None = None,
 ) -> dict[str, Any]:
-    master = load_facility_master()
+    master = load_facility_master() if master is None else master
     fax_template_override = facility.get("fax_template_override")
     fax_template = None
     template_ids = _normalize_fax_template_ids(facility.get("fax_template_ids"))
@@ -1245,17 +1110,6 @@ def _build_facility_config(
     bagging_exceptions = facility.get("bagging_exceptions") or []
 
     merged = {**facility}
-    facility_template_id = str(
-        merged.get("facility_template_id")
-        or merged.get("facility_template_name")
-        or merged.get("facility_name")
-        or merged.get("name")
-        or facility_id
-        or ""
-    ).strip()
-    if facility_template_id:
-        merged["facility_template_id"] = facility_template_id
-        merged["facility_template_name"] = facility_template_id
     if template_id:
         merged["fax_template_id"] = template_id
     if template_ids:
@@ -1269,19 +1123,22 @@ def _build_facility_config(
     if isinstance(pattern_id, str) and pattern_id.strip():
         resolved_pattern_id = pattern_id.strip()
         merged["order_form_pattern_id"] = resolved_pattern_id
-        pattern = get_order_form_pattern(resolved_pattern_id)
+        pattern = next((item for item in _normalize_order_form_patterns(master.get("order_form_patterns"))
+                        if item["pattern_id"] == resolved_pattern_id), None)
         if pattern:
             merged["order_form_pattern"] = pattern
     return merged
 
 
-def get_facility_config(facility_id: str) -> Optional[dict[str, Any]]:
-    facility = get_facility_by_id(facility_id)
+def get_facility_config(facility_id: str, *, master: dict | None = None) -> Optional[dict[str, Any]]:
+    master = load_facility_master() if master is None else master
+    facility = get_facility_by_id(facility_id, master=master)
     if not facility:
         return None
     return _build_facility_config(
         facility_id=facility_id,
         facility=facility,
+        master=master,
     )
 
 
@@ -1289,13 +1146,15 @@ def get_facility_config_for_template(
     facility_id: str,
     template_id: str | None,
 ) -> Optional[dict[str, Any]]:
-    facility = get_facility_by_id(facility_id)
+    master = load_facility_master()
+    facility = get_facility_by_id(facility_id, master=master)
     if not facility:
         return None
     return _build_facility_config(
         facility_id=facility_id,
         facility=facility,
         selected_template_id=template_id,
+        master=master,
     )
 
 

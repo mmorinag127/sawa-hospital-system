@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
+import { useFormContext } from "react-hook-form";
 import TopNav from "../components/TopNav";
+import { canonicalErrorText, canonicalSaveNotice, requireCanonicalRevision } from "../services/facilityData";
 import { apiClient, hasActiveSessionAuthHeader } from "../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
 import { useH1LeaveGuard } from "../hooks/useH1LeaveGuard";
@@ -24,18 +26,33 @@ type FacilityDraft = {
   valid_to: string;
 };
 
+function FacilityDraftBridge({ onValuesChange }: { onValuesChange: (values: FacilityDraft) => void }) {
+  const { watch, getValues } = useFormContext<FacilityDraft>();
+  useEffect(() => {
+    onValuesChange(getValues());
+    const subscription = watch((values) => onValuesChange(values as FacilityDraft));
+    return () => subscription.unsubscribe();
+  }, [watch, getValues, onValuesChange]);
+  return null;
+}
+
 type FacilityMaster = {
+  [key: string]: unknown;
   schema_version?: string;
   updated_at?: string;
   facilities?: FacilityEntry[];
 };
 
 type AreaEntry = {
+  sourceIndex: number;
   id: string;
   name: string;
+  raw?: Record<string, unknown>;
 };
 
 type FaxColumn = {
+  sourcePosition?: number;
+  raw?: Record<string, unknown>;
   index: string;
   sourceIndex: string;
   role: string;
@@ -141,9 +158,11 @@ const facilityDraft = (facility: FacilityEntry): FacilityDraft => ({
   valid_to: readString(facility.valid_to),
 });
 
-const mergeFacilityDraft = (facility: FacilityEntry, draft: FacilityDraft): FacilityEntry => {
+const mergeFacilityDraft = (facility: FacilityEntry, draft: FacilityDraft, baseline: FacilityEntry = facility): FacilityEntry => {
   const next = { ...facility };
+  const original = facilityDraft(baseline);
   (Object.keys(draft) as Array<keyof FacilityDraft>).forEach((key) => {
+    if (draft[key] === original[key]) return;
     // An absent field remains absent until an operator supplies a value.
     if (draft[key] !== "" || Object.prototype.hasOwnProperty.call(facility, key)) {
       next[key] = draft[key];
@@ -186,12 +205,12 @@ const readAreas = (value: unknown) => {
     .map((area) => {
       if (typeof area === "string") {
         const name = area.trim();
-        return name ? { id: name, name } : null;
+        return name ? { id: "", name } : null;
       }
       if (area && typeof area === "object") {
         const record = area as Record<string, unknown>;
         const name = readString(record.name || record.label);
-        const id = readString(record.area_id || record.id) || name;
+        const id = readString("area_id" in record ? record.area_id : record.id);
         if (!name) return null;
         return { id, name };
       }
@@ -203,15 +222,17 @@ const readAreas = (value: unknown) => {
 const readEditableAreas = (value: unknown) => {
   if (!Array.isArray(value)) return [];
   return value
-    .map((area) => {
+    .map<AreaEntry | null>((area, sourceIndex) => {
       if (typeof area === "string") {
-        return { id: area, name: area };
+        return { sourceIndex, id: "", name: area };
       }
       if (area && typeof area === "object") {
         const record = area as Record<string, unknown>;
         return {
-          id: readString(record.area_id || record.id),
-          name: readString(record.name || record.label),
+          sourceIndex,
+          raw: record,
+          id: readString("area_id" in record ? record.area_id : record.id),
+          name: readString("name" in record ? record.name : record.label),
         };
       }
       return null;
@@ -226,13 +247,13 @@ const toStringValue = (value: unknown) => {
   return "";
 };
 
-const compactStringList = (items: string[]) => items.map((item) => item.trim()).filter((item) => item);
-
-const normalizeArea = (area: AreaEntry) => {
-  const id = area.id.trim();
-  const name = area.name.trim();
-  if (!id && !name) return null;
-  return { area_id: id || name, name: name || id };
+export const patchArea = (original: unknown, patch: Partial<Pick<AreaEntry, "id" | "name">>): unknown => {
+  if (typeof original === "string" && !("id" in patch)) return patch.name ?? original;
+  const next: Record<string, unknown> = original && typeof original === "object" && !Array.isArray(original)
+    ? { ...original as Record<string, unknown> } : { name: original };
+  if ("name" in patch) next["label" in next && !("name" in next) ? "label" : "name"] = patch.name;
+  if ("id" in patch) next["id" in next && !("area_id" in next) ? "id" : "area_id"] = patch.id;
+  return next;
 };
 
 const readFaxOverride = (facility?: FacilityEntry) => {
@@ -243,10 +264,12 @@ const readFaxOverride = (facility?: FacilityEntry) => {
   const columns = Array.isArray(overrideRecord.columns) ? overrideRecord.columns : [];
   return {
     columns: columns
-      .map((column) => {
+      .map<FaxColumn | null>((column, sourcePosition) => {
         if (!column || typeof column !== "object") return null;
         const col = column as Record<string, unknown>;
         return {
+          sourcePosition,
+          raw: col,
           index: toStringValue(col.index),
           sourceIndex: toStringValue(col.source_index),
           role: readString(col.role),
@@ -289,7 +312,8 @@ const readFaxOverride = (facility?: FacilityEntry) => {
 };
 
 const normalizeFaxColumn = (column: FaxColumn) => {
-  const next: Record<string, unknown> = {};
+  const editableKeys = new Set(["index", "source_index", "role", "header_super_group", "header", "header_group", "name", "format", "diet_type", "area_id", "bag_type", "delivery_header", "delivery_name", "delivery_source", "delivery_enabled"]);
+  const next: Record<string, unknown> = Object.fromEntries(Object.entries(column.raw || {}).filter(([key]) => !editableKeys.has(key)));
   if (column.index.trim()) {
     const parsed = Number(column.index);
     next.index = Number.isFinite(parsed) ? parsed : column.index.trim();
@@ -311,6 +335,21 @@ const normalizeFaxColumn = (column: FaxColumn) => {
   if (column.deliveryName.trim()) next.delivery_name = column.deliveryName.trim();
   if (column.deliverySource.trim()) next.delivery_source = column.deliverySource.trim();
   if (column.deliveryEnabled !== null) next.delivery_enabled = column.deliveryEnabled;
+  if (column.raw) {
+    const original = readFaxOverride({ fax_template_override: { columns: [column.raw] } }).columns[0];
+    const fields: [keyof FaxColumn, string][] = [
+      ["index", "index"], ["sourceIndex", "source_index"], ["role", "role"],
+      ["headerSuperGroup", "header_super_group"], ["header", "header"], ["headerGroup", "header_group"],
+      ["name", "name"], ["format", "format"], ["dietType", "diet_type"], ["areaId", "area_id"],
+      ["bagType", "bag_type"], ["deliveryHeader", "delivery_header"], ["deliveryName", "delivery_name"],
+      ["deliverySource", "delivery_source"], ["deliveryEnabled", "delivery_enabled"],
+    ];
+    if (original) fields.forEach(([field, key]) => {
+      if (column[field] !== original[field]) return;
+      if (Object.prototype.hasOwnProperty.call(column.raw, key)) next[key] = column.raw![key];
+      else delete next[key];
+    });
+  }
   return next;
 };
 
@@ -373,34 +412,8 @@ const deriveFaxRowFields = (columns: FaxColumn[]) => {
 };
 
 const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
-  const facilities = Array.isArray(master.facilities)
-    ? master.facilities.map((facility) => {
-        const record = { ...facility };
-        if (Array.isArray(record.aliases)) {
-          record.aliases = compactStringList(readEditableStringList(record.aliases));
-        }
-        if (Array.isArray(record.fax_template_ids)) {
-          record.fax_template_ids = compactStringList(readEditableStringList(record.fax_template_ids));
-        }
-        if (Array.isArray(record.areas)) {
-          record.areas = readEditableAreas(record.areas).map(normalizeArea).filter(Boolean);
-        }
-        if (record.fax_template_override && typeof record.fax_template_override === "object") {
-          const override = record.fax_template_override as Record<string, unknown>;
-          const columns = readFaxOverride(record).columns;
-          const normalizedColumns = columns
-            .map(normalizeFaxColumn)
-            .filter((column) => Object.keys(column).length > 0);
-          record.fax_template_override = {
-            ...override,
-            columns: normalizedColumns,
-            main_ocr_row_fields: deriveFaxRowFields(columns),
-          };
-        }
-        return record;
-      })
-    : master.facilities;
-  return { ...master, facilities };
+  // Only explicit editor patches change JSON; saving must not rewrite sibling schemas.
+  return master;
 };
 
 
@@ -416,6 +429,10 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   const [saving, setSaving] = useState(false);
   const loadGeneration = useRef(0);
   const editGeneration = useRef(0);
+  const inputGeneration = useRef(0);
+  const commandGeneration = useRef(0);
+  const activeSave = useRef<number | null>(null);
+  const baseRevision = useRef<string | null>(null);
   const dirtyRef = useRef(false);
   const [formDirty, setFormDirty] = useState(false);
   const [facilityDraftValues, setFacilityDraftValues] = useState<FacilityDraft | null>(null);
@@ -428,11 +445,22 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   const periodGeneration = useRef(0);
   const hasUnsavedChanges = formDirty || specialDirty;
   const syncFacilityDraft = useCallback((values: FacilityDraft) => {
+    if (JSON.stringify(facilityDraftRef.current) !== JSON.stringify(values)) inputGeneration.current += 1;
     facilityDraftRef.current = values;
     setFacilityDraftValues(values);
   }, []);
   dirtyRef.current = hasUnsavedChanges;
   useH1LeaveGuard(hasUnsavedChanges, ["/facility-master", "/hospital/facility-master"]);
+
+  const markSpecialDirty = () => {
+    inputGeneration.current += 1;
+    setSpecialDirty(true);
+  };
+
+  const requireEditingRevision = () => {
+    if (!baseRevision.current) throw new Error("JSON 正本の編集 revision がありません。再読込してください。");
+    return baseRevision.current;
+  };
 
   const facilities = useMemo(() => {
     if (!master?.facilities || !Array.isArray(master.facilities)) return [];
@@ -462,14 +490,17 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   const loadMaster = async () => {
     const generation = loadGeneration.current + 1;
     loadGeneration.current = generation;
+    const input = inputGeneration.current;
+    const command = commandGeneration.current;
     try {
       const res = await apiClient.get("/facility-master");
-      if (generation !== loadGeneration.current || dirtyRef.current) return;
+      if (generation !== loadGeneration.current || input !== inputGeneration.current || command !== commandGeneration.current || dirtyRef.current) return;
       const data = res.data;
       const nextMaster = data.facility_master as FacilityMaster;
       if (!nextMaster || typeof nextMaster !== "object" || !Array.isArray(nextMaster.facilities)) {
         throw new Error("Facility master の応答に facilities 配列がありません。");
       }
+      baseRevision.current = requireCanonicalRevision(data);
       setMaster(nextMaster);
       setMasterText(prettyJson(nextMaster));
       setValidation(data.validation || null);
@@ -487,7 +518,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
       setSpecialDirty(false);
       setMessage("");
     } catch (err) {
-      if (generation !== loadGeneration.current) return;
+      if (generation !== loadGeneration.current || input !== inputGeneration.current || command !== commandGeneration.current) return;
       setMessage("Facility master の取得に失敗しました。");
     }
   };
@@ -528,7 +559,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
     const nextFacility = { ...(selectedFacility as FacilityEntry), ...patch };
     updateFacilityState(nextFacility);
-    setSpecialDirty(true);
+    markSpecialDirty();
   };
 
   const beginEdit = () => {
@@ -582,7 +613,8 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
 
   const updateStringListItem = (field: string, index: number, value: string) => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const current = readEditableStringList((selectedFacility as Record<string, unknown>)[field]);
+    const raw = (selectedFacility as Record<string, unknown>)[field];
+    const current = Array.isArray(raw) ? raw : [];
     const next = [...current];
     next[index] = value;
     updateSelectedField(field, next);
@@ -590,13 +622,15 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
 
   const addStringListItem = (field: string) => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const current = readEditableStringList((selectedFacility as Record<string, unknown>)[field]);
+    const raw = (selectedFacility as Record<string, unknown>)[field];
+    const current = Array.isArray(raw) ? raw : [];
     updateSelectedField(field, [...current, ""]);
   };
 
   const removeStringListItem = (field: string, index: number) => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const current = readEditableStringList((selectedFacility as Record<string, unknown>)[field]);
+    const raw = (selectedFacility as Record<string, unknown>)[field];
+    const current = Array.isArray(raw) ? raw : [];
     updateSelectedField(
       field,
       current.filter((_, itemIndex) => itemIndex !== index)
@@ -604,25 +638,23 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   };
 
   const updateArea = (index: number, patch: Partial<AreaEntry>) => {
-    const current = readEditableAreas((selectedFacility as Record<string, unknown> | null)?.areas);
-    const next = current.map((area, itemIndex) => (itemIndex === index ? { ...area, ...patch } : area));
-    updateSelectedField("areas", next.map(normalizeArea).filter(Boolean));
+    const raw = (selectedFacility as Record<string, unknown> | null)?.areas;
+    if (!Array.isArray(raw)) return;
+    const selected = readEditableAreas(raw)[index];
+    if (!selected) return;
+    updateSelectedField("areas", raw.map((area, sourceIndex) => sourceIndex === selected.sourceIndex ? patchArea(area, patch) : area));
   };
 
   const addArea = () => {
-    const current = readEditableAreas((selectedFacility as Record<string, unknown> | null)?.areas);
-    updateSelectedField("areas", [...current.map(normalizeArea).filter(Boolean), { area_id: "", name: "" }]);
+    const raw = (selectedFacility as Record<string, unknown> | null)?.areas;
+    updateSelectedField("areas", [...(Array.isArray(raw) ? raw : []), { name: "" }]);
   };
 
   const removeArea = (index: number) => {
-    const current = readEditableAreas((selectedFacility as Record<string, unknown> | null)?.areas);
-    updateSelectedField(
-      "areas",
-      current
-        .filter((_, itemIndex) => itemIndex !== index)
-        .map(normalizeArea)
-        .filter(Boolean)
-    );
+    const raw = (selectedFacility as Record<string, unknown> | null)?.areas;
+    if (!Array.isArray(raw)) return;
+    const selected = readEditableAreas(raw)[index];
+    if (selected) updateSelectedField("areas", raw.filter((_, sourceIndex) => sourceIndex !== selected.sourceIndex));
   };
 
   const updateFaxOverride = (patch: Record<string, unknown>) => {
@@ -640,15 +672,20 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     const nextColumns = columns.map((column, itemIndex) =>
       itemIndex === index ? { ...column, ...patch } : column
     );
+    const selected = columns[index];
+    if (!selected || selected.sourcePosition === undefined) return;
+    const raw = (selectedFacility.fax_template_override as Record<string, unknown>).columns;
+    if (!Array.isArray(raw)) return;
     updateFaxOverride({
-      columns: nextColumns.map(normalizeFaxColumn),
-      main_ocr_row_fields: deriveFaxRowFields(nextColumns),
+      columns: raw.map((column, sourcePosition) => sourcePosition === selected.sourcePosition ? normalizeFaxColumn(nextColumns[index]) : column),
+      ...(["role", "name", "dietType", "areaId"].some((key) => key in patch) ? { main_ocr_row_fields: deriveFaxRowFields(nextColumns) } : {}),
     });
   };
 
   const addFaxColumn = () => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
     const columns = readFaxOverride(selectedFacility).columns;
+    const raw = (selectedFacility.fax_template_override as Record<string, unknown> | undefined)?.columns;
     const nextColumns = [
       ...columns,
       {
@@ -670,16 +707,20 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
       },
     ];
     updateFaxOverride({
-      columns: nextColumns.map(normalizeFaxColumn),
+      columns: [...(Array.isArray(raw) ? raw : []), normalizeFaxColumn(nextColumns[nextColumns.length - 1])],
       main_ocr_row_fields: deriveFaxRowFields(nextColumns),
     });
   };
 
   const removeFaxColumn = (index: number) => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
-    const nextColumns = readFaxOverride(selectedFacility).columns.filter((_, itemIndex) => itemIndex !== index);
+    const columns = readFaxOverride(selectedFacility).columns;
+    const selected = columns[index];
+    const raw = (selectedFacility.fax_template_override as Record<string, unknown> | undefined)?.columns;
+    if (!selected || !Array.isArray(raw)) return;
+    const nextColumns = columns.filter((_, itemIndex) => itemIndex !== index);
     updateFaxOverride({
-      columns: nextColumns.map(normalizeFaxColumn),
+      columns: raw.filter((_, sourcePosition) => sourcePosition !== selected.sourcePosition),
       main_ocr_row_fields: deriveFaxRowFields(nextColumns),
     });
   };
@@ -706,7 +747,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     setFacilityDraftValues(facilityDraft(nextFacility));
     facilityDraftRef.current = facilityDraft(nextFacility);
     setFormDirty(false);
-    setSpecialDirty(true);
+    markSpecialDirty();
     setSelectedFaxColumnIndex(-1);
     setMasterText(prettyJson(nextMaster));
     setMessage("新規施設を追加しました。編集内容を保存してください。");
@@ -733,7 +774,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     setFacilityDraftValues(facilityDraft(nextFacility));
     facilityDraftRef.current = facilityDraft(nextFacility);
     setFormDirty(false);
-    setSpecialDirty(true);
+    markSpecialDirty();
     setSearchText("");
     setSelectedFaxColumnIndex(-1);
     setMessage("選択中の施設を複製しました。施設名と表示名を確認して保存してください。");
@@ -765,35 +806,42 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     setEditBaseline(null);
     editGeneration.current += 1;
     setFormDirty(false);
-    setSpecialDirty(true);
+    markSpecialDirty();
     setMessage("Master JSON を反映しました。");
   };
 
   const saveMaster = async () => {
     if (!master || saving) return;
     const owner = editGeneration.current;
+    const input = inputGeneration.current;
+    const command = ++commandGeneration.current;
+    const currentCommand = () => owner === editGeneration.current && input === inputGeneration.current && command === commandGeneration.current;
     const current = selectedFacility && selectedIndex >= 0 ? selectedFacility as FacilityEntry : null;
     const mergedCurrent = current && facilityDraftRef.current && isEditing
-      ? mergeFacilityDraft(current, facilityDraftRef.current)
+      ? mergeFacilityDraft(current, facilityDraftRef.current, editBaseline || current)
       : current;
     const nextFacilities = mergedCurrent && selectedIndex >= 0
       ? facilities.map((item, index) => index === selectedIndex ? mergedCurrent : item)
       : facilities;
     const payload = sanitizeMasterForSave({ ...master, facilities: nextFacilities });
     const expectedFacilityId = mergedCurrent ? readString(mergedCurrent.facility_id) : "";
+    activeSave.current = command;
     setSaving(true);
     setMessage("保存中です...");
     try {
-      const res = await apiClient.put("/facility-master", payload);
+      const res = await apiClient.put("/facility-master", { facility_master: payload, expected_revision: requireEditingRevision() });
       if (res.data?.updated !== true || !res.data?.facility_master || typeof res.data.facility_master !== "object") {
         throw new Error("保存 API の正常応答を確認できませんでした。");
       }
-      if (owner !== editGeneration.current) return;
+      if (!currentCommand()) return;
+      const notice = canonicalSaveNotice(res.data);
       const updatedMaster = res.data.facility_master as FacilityMaster;
       if (!Array.isArray(updatedMaster.facilities)) throw new Error("保存後の施設正本を確認できませんでした。");
       if (expectedFacilityId && !updatedMaster.facilities.some((item) => readString(item.facility_id) === expectedFacilityId)) {
         throw new Error("保存後の施設を正本で確認できませんでした。");
       }
+      baseRevision.current = requireCanonicalRevision(res.data);
+      loadGeneration.current += 1;
       setMaster(updatedMaster);
       setMasterText(prettyJson(updatedMaster));
       setValidation(res.data.validation || null);
@@ -804,8 +852,9 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
       facilityDraftRef.current = null;
       setFormDirty(false);
       setSpecialDirty(false);
-      setMessage("保存しました。反映先の環境で表示を確認してください。");
+      setMessage(`保存しました。反映先の環境で表示を確認してください。${notice}`);
     } catch (err: any) {
+      if (!currentCommand()) return;
       const detail = err?.response?.data?.detail;
       if (detail?.errors) {
         setValidation({ errors: detail.errors, warnings: [] });
@@ -813,9 +862,12 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
         return;
       }
       const status = err?.response?.status;
-      setMessage(status ? `保存に失敗しました。HTTP ${status}` : "保存に失敗しました。通信状態を確認してください。");
+      setMessage(canonicalErrorText(err, status ? `保存結果を確認できませんでした。HTTP ${status}` : "保存結果を確認できませんでした。通信状態を確認してください。"));
     } finally {
-      setSaving(false);
+      if (activeSave.current === command) {
+        activeSave.current = null;
+        setSaving(false);
+      }
     }
   };
 
@@ -826,25 +878,32 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     const owner = editGeneration.current;
     setFacilityDraftValues(values);
     facilityDraftRef.current = values;
+    const input = inputGeneration.current;
+    const command = ++commandGeneration.current;
+    const currentCommand = () => owner === editGeneration.current && input === inputGeneration.current && command === commandGeneration.current;
     const original = selectedFacility as FacilityEntry;
-    const nextFacility = mergeFacilityDraft(original, values);
+    const nextFacility = mergeFacilityDraft(original, values, editBaseline || original);
     const nextFacilities = [...facilities];
     nextFacilities[selectedIndex] = nextFacility;
     const payload = sanitizeMasterForSave({ ...master, facilities: nextFacilities });
+    activeSave.current = command;
     setSaving(true);
     setMessage("保存中です...");
     try {
-      const res = await apiClient.put("/facility-master", payload);
+      const res = await apiClient.put("/facility-master", { facility_master: payload, expected_revision: requireEditingRevision() });
       if (res.data?.updated !== true || !res.data?.facility_master || typeof res.data.facility_master !== "object") {
         throw new Error("保存 API の正常応答を確認できませんでした。");
       }
-      if (owner !== editGeneration.current) {
+      if (!currentCommand()) {
         throw new Error("選択が変わったため、保存応答を適用しませんでした。");
       }
+      const notice = canonicalSaveNotice(res.data);
       const savedMaster = res.data.facility_master as FacilityMaster;
       const savedFacilities = Array.isArray(savedMaster.facilities) ? savedMaster.facilities : [];
       const saved = savedFacilities.find((item) => readString(item.facility_id) === values.facility_id);
       if (!saved) throw new Error("保存後の施設を再読込結果で確認できませんでした。");
+      baseRevision.current = requireCanonicalRevision(res.data);
+      loadGeneration.current += 1;
       setMaster(savedMaster);
       setMasterText(prettyJson(savedMaster));
       setValidation(res.data.validation || null);
@@ -854,26 +913,39 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
       facilityDraftRef.current = facilityDraft(saved);
       setFormDirty(false);
       setSpecialDirty(false);
-      setMessage("保存しました。");
+      setMessage(`保存しました。${notice}`);
       return facilityDraft(saved);
     } catch (err: any) {
+      if (!currentCommand()) throw err;
       const detail = err?.response?.data?.detail;
       if (detail?.errors) setValidation({ errors: detail.errors, warnings: [] });
-      setMessage(detail?.errors ? "Facility master の検証に失敗しました。" : err?.message || "保存に失敗しました。");
+      setMessage(detail?.errors ? "Facility master の検証に失敗しました。" : canonicalErrorText(err, err?.message || "保存に失敗しました。"));
       throw err;
     } finally {
-      if (owner === editGeneration.current) setSaving(false);
+      if (activeSave.current === command) {
+        activeSave.current = null;
+        setSaving(false);
+      }
     }
   };
 
-  const reloadFacilityDraft = async (facilityId: string) => {
+  const reloadFacilityDraft = async (facilityId: string, discardApproved: boolean) => {
+    if (hasUnsavedChanges && !discardApproved) throw new Error("未保存変更の破棄が承認されていないため再読込を中止しました。");
     const owner = editGeneration.current;
+    const input = inputGeneration.current;
+    const command = ++commandGeneration.current;
     const res = await apiClient.get("/facility-master");
-    if (owner !== editGeneration.current) throw new Error("選択が変わったため、再読込結果を適用しませんでした。");
+    if (owner !== editGeneration.current || input !== inputGeneration.current || command !== commandGeneration.current) throw new Error("選択が変わったため、再読込結果を適用しませんでした。");
     const reloaded = res.data?.facility_master as FacilityMaster | undefined;
     if (!reloaded || !Array.isArray(reloaded.facilities)) throw new Error("再読込した施設正本を確認できませんでした。");
     const saved = reloaded.facilities.find((item) => readString(item.facility_id) === facilityId);
     if (!saved) throw new Error("再読込した正本に対象施設がありません。");
+    baseRevision.current = requireCanonicalRevision(res.data);
+    loadGeneration.current += 1;
+    const index = reloaded.facilities.findIndex((item) => readString(item.facility_id) === facilityId);
+    setSelectedIndex(index);
+    setEditingIndex(index);
+    editGeneration.current += 1;
     setMaster(reloaded);
     setMasterText(prettyJson(reloaded));
     setValidation(res.data?.validation || null);
@@ -910,8 +982,13 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
       .get(`/facilities/${encodeURIComponent(facilityId)}`)
       .then((res) => {
         if (generation !== periodGeneration.current) return;
-        const version = res.data?.resolved_config?.facility_template_version;
+        const version = res.data?.template_version_reference;
         if (version && typeof version === "object") setPeriodVersion(version as Record<string, unknown>);
+        if (res.data?.version_resolution?.status === "date_version_integration_required") {
+          setPeriodVersionError(res.data?.template_version_reference_status === "unavailable"
+            ? "日付版解決は未接続で、DB版参照も取得できません。JSON正本の適用版は未確認です。"
+            : "日付版解決は未接続です。表示されたDB版参照はJSON正本の適用版として採用しません。");
+        }
       })
       .catch((err: any) => {
         if (generation !== periodGeneration.current) return;
@@ -1130,19 +1207,19 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                     label="通常施設項目"
                     defaultValues={facilityDraft(selectedFacility)}
                     onDirtyChange={setFormDirty}
-                    onValuesChange={syncFacilityDraft}
                     classifyError={(error) => ({
                       kind: (error as any)?.response?.status === 409 ? "conflict" : "error",
-                      message: error instanceof Error ? error.message : "保存に失敗しました。",
+                      message: canonicalErrorText(error, error instanceof Error ? error.message : "保存に失敗しました。"),
                     })}
                     onSave={saveFacilityDraft}
                     onReload={async () => {
                       if (hasUnsavedChanges && !window.confirm("未保存の変更を破棄して再読込しますか？")) {
                         throw new Error("再読込を中止しました。");
                       }
-                      return reloadFacilityDraft(readString(selectedFacility.facility_id));
+                      return reloadFacilityDraft(readString(selectedFacility.facility_id), true);
                     }}
                   >
+                    <FacilityDraftBridge onValuesChange={syncFacilityDraft} />
                     <FormTextField<FacilityDraft> name="facility_id" label="内部施設ID" rules={{ required: "内部施設IDは必須です。" }} />
                     <FormTextField<FacilityDraft> name="facility_name" label="施設名" rules={{ required: "施設名は必須です。" }} />
                     <FormTextField<FacilityDraft> name="address" label="住所" />
@@ -1758,7 +1835,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
             disabled={!isEditing}
             onChange={(e) => {
               setMasterText(e.target.value);
-              setSpecialDirty(true);
+              markSpecialDirty();
             }}
             rows={16}
             wrap="soft"

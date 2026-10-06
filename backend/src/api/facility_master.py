@@ -1,41 +1,42 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from contextlib import contextmanager
+
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.api.auth import require_role
-from src.services import facility_master_service
+from src.services import canonical_facility_store, facility_master_service
 from src.services.config_validator import validate_facility_master
 
 router = APIRouter()
 
 
+@contextmanager
+def canonical_errors():
+    try:
+        yield
+    except canonical_facility_store.CanonicalStoreError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
 @router.get("/facility-master", dependencies=[Depends(require_role("operator"))])
 def get_facility_master():
-    master = facility_master_service.get_master()
-    validation = validate_facility_master(master)
+    with canonical_errors():
+        snapshot = facility_master_service.get_snapshot()
     return {
-        "facility_master": master,
-        "validation": validation,
-        "path": str(facility_master_service.get_master_path()),
-        "source": "db" if master.get("facilities") else "json_backup",
+        "facility_master": snapshot.master,
+        "revision": snapshot.revision,
+        "validation": validate_facility_master(snapshot.master),
+        "path": snapshot.source,
+        "source": "canonical_json",
     }
 
 
 @router.put("/facility-master", dependencies=[Depends(require_role("operator"))])
 def update_facility_master(body: dict):
     master = body.get("facility_master") if isinstance(body, dict) else None
-    if master is None:
-        master = body
     if not isinstance(master, dict):
         raise HTTPException(status_code=400, detail="facility_master must be an object")
     validation = validate_facility_master(master)
     if validation["errors"]:
         raise HTTPException(status_code=400, detail={"errors": validation["errors"]})
-    facility_master_service.save_master(master)
-    saved_master = facility_master_service.get_master()
-    saved_validation = validate_facility_master(saved_master)
-    return {
-        "facility_master": saved_master,
-        "validation": saved_validation,
-        "path": str(facility_master_service.get_master_path()),
-        "source": "db",
-        "updated": True,
-    }
+    with canonical_errors():
+        return facility_master_service.save_master(master, expected_revision=body.get("expected_revision"))

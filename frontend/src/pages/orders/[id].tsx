@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
+import { canonicalErrorText, canonicalSaveNotice, requireFacilitySnapshot, type CanonicalFacilityResponse } from "../../services/facilityData";
 import {
   buildMarkdownTable,
   buildPreviewBlocks,
@@ -3039,6 +3040,39 @@ export default function OrderDetailPage() {
   const [gridRowEdges, setGridRowEdges] = useState<number[] | null>(null);
   const [gridRowEdgesDraft, setGridRowEdgesDraft] = useState<number[] | null>(null);
   const [rowEdgesText, setRowEdgesText] = useState<string>("");
+  const facilityEditingSnapshotRef = useRef<CanonicalFacilityResponse | null>(null);
+  const facilityConfigCommandRef = useRef(0);
+  const facilityConfigBusyOwnerRef = useRef({ geometry: 0, copy: 0, detect: 0 });
+  const facilityConfigInputRef = useRef({ key: "", generation: 0 });
+  const facilityConfigTargetRef = useRef("");
+  const facilityConfigTarget = JSON.stringify([id, facility]);
+  const facilityConfigInput = JSON.stringify([facilityConfigTarget, tableBoxDraft, gridParamsDraft,
+    gridColumnEdgesDraft, gridRowEdgesDraft, tableBoxUnitsOverride, expandedCellCopyMode, columnEdgesText, rowEdgesText]);
+  if (facilityConfigTargetRef.current !== facilityConfigTarget) {
+    facilityConfigTargetRef.current = facilityConfigTarget;
+    facilityEditingSnapshotRef.current = null;
+    facilityConfigCommandRef.current += 1;
+  }
+  if (facilityConfigInputRef.current.key !== facilityConfigInput) {
+    facilityConfigInputRef.current = { key: facilityConfigInput, generation: facilityConfigInputRef.current.generation + 1 };
+  }
+  const facilityGeometryDirtyRef = useRef(false);
+  const facilityGeometryEditorRef = useRef(false);
+  const protectFacilityGeometry = () => facilityGeometryDirtyRef.current || facilityGeometryEditorRef.current;
+  useEffect(() => {
+    facilityGeometryDirtyRef.current = false;
+    facilityGeometryEditorRef.current = false;
+    setShowTableBoxEditor(false);
+    setTableBoxDraft(null);
+    setGridColumnEdgesDraft(null);
+    setGridRowEdgesDraft(null);
+    setTableBoxUnitsOverride(null);
+  }, [facilityConfigTarget]);
+  const markFacilityGeometryEdited = () => {
+    facilityGeometryDirtyRef.current = true;
+    facilityConfigInputRef.current.generation += 1;
+    facilityConfigCommandRef.current += 1;
+  };
   const [reparsePending, setReparsePending] = useState<boolean>(false);
   const [llmReparseProvider, setLlmReparseProvider] = useState<string>(DEFAULT_LLM_REPARSE_PROVIDER);
   const [llmReparseModelMode, setLlmReparseModelMode] = useState<"flash" | "pro" | "other">(
@@ -3285,12 +3319,18 @@ export default function OrderDetailPage() {
       return;
     }
     let active = true;
+    const target = facilityConfigTarget;
+    const command = facilityConfigCommandRef.current;
+    const current = () => active && facilityConfigTargetRef.current === target &&
+      command === facilityConfigCommandRef.current && !facilityGeometryDirtyRef.current;
     apiClient
       .get(`/facilities/${facility}`)
       .then((res) => {
-        if (!active) return;
-        setFacilityConfig(res.data?.config || null);
-        setFacilityResolvedConfig(res.data?.resolved_config || null);
+        if (!current() || facilityEditingSnapshotRef.current) return;
+        requireFacilitySnapshot(res.data, facility);
+        facilityEditingSnapshotRef.current = res.data;
+        setFacilityConfig(res.data.config);
+        setFacilityResolvedConfig(res.data.resolved_config);
         setExpandedCellCopyMode(
           res.data?.resolved_config?.[EXPANDED_CELL_COPY_FACILITY_KEY] ? "persisted" : "disabled",
         );
@@ -3303,8 +3343,9 @@ export default function OrderDetailPage() {
         setFacilityTemplateSwapRight("");
         setFacilityTemplateMessage("");
       })
-      .catch(() => {
-        if (!active) return;
+      .catch((error) => {
+        if (!current() || facilityEditingSnapshotRef.current) return;
+        setTableBoxMessage(canonicalErrorText(error, "施設の編集 snapshot を取得できません。明示的に再読込してください。"));
         setFacilityConfig(null);
         setFacilityResolvedConfig(null);
         setExpandedCellCopyMode("disabled");
@@ -3316,7 +3357,7 @@ export default function OrderDetailPage() {
     return () => {
       active = false;
     };
-  }, [facility]);
+  }, [facility, id, facilityConfigTarget]);
 
   useEffect(() => {
     latestSavedSheetRevisionRef.current = null;
@@ -3407,12 +3448,12 @@ export default function OrderDetailPage() {
   }, [activeOcrPageIndex, ocrPages]);
 
   useEffect(() => {
-    if (showTableBoxEditor) return;
+    if (showTableBoxEditor || protectFacilityGeometry()) return;
     setTableBoxDraft(ocrTableBox ? [...ocrTableBox] : null);
   }, [ocrTableBox, showTableBoxEditor]);
 
   useEffect(() => {
-    if (showTableBoxEditor) return;
+    if (showTableBoxEditor || protectFacilityGeometry()) return;
     setGridColumnEdgesDraft(gridColumnEdges ? [...gridColumnEdges] : null);
   }, [gridColumnEdges, showTableBoxEditor]);
 
@@ -3422,7 +3463,7 @@ export default function OrderDetailPage() {
   }, [gridColumnEdgesDraft, showTableBoxEditor]);
 
   useEffect(() => {
-    if (showTableBoxEditor) return;
+    if (showTableBoxEditor || protectFacilityGeometry()) return;
     setGridRowEdgesDraft(gridRowEdges ? [...gridRowEdges] : null);
   }, [gridRowEdges, showTableBoxEditor]);
 
@@ -3432,7 +3473,7 @@ export default function OrderDetailPage() {
   }, [gridRowEdgesDraft, showTableBoxEditor]);
 
   useEffect(() => {
-    if (showTableBoxEditor) return;
+    if (showTableBoxEditor || protectFacilityGeometry()) return;
     setGridParamsDraft({ ...gridParams });
   }, [gridParams, showTableBoxEditor]);
 
@@ -5093,14 +5134,16 @@ export default function OrderDetailPage() {
         setHakodateJobStatus(null);
         setOcrTableBox(null);
         setOcrTableUnits(null);
-        setTableBoxUnitsOverride(null);
-        setTableBoxDraft(null);
+        if (!protectFacilityGeometry()) {
+          setTableBoxUnitsOverride(null);
+          setTableBoxDraft(null);
+          setGridParamsDraft(defaultGridParams);
+          setGridColumnEdgesDraft(null);
+          setGridRowEdgesDraft(null);
+        }
         setGridParams(defaultGridParams);
-        setGridParamsDraft(defaultGridParams);
         setGridColumnEdges(null);
-        setGridColumnEdgesDraft(null);
         setGridRowEdges(null);
-        setGridRowEdgesDraft(null);
         setOcrTableHeader([]);
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
@@ -5133,14 +5176,16 @@ export default function OrderDetailPage() {
       const metaGridParams = buildGridParams(res.data?.grid_params);
       setOcrTableBox(metaTableBox);
       setOcrTableUnits(metaTableUnits);
-      setTableBoxUnitsOverride(null);
-      setTableBoxDraft(metaTableBox ? [...metaTableBox] : null);
+      if (!protectFacilityGeometry()) {
+        setTableBoxUnitsOverride(null);
+        setTableBoxDraft(metaTableBox ? [...metaTableBox] : null);
+        setGridParamsDraft(metaGridParams);
+        setGridColumnEdgesDraft(metaColumnEdges ? [...metaColumnEdges] : null);
+        setGridRowEdgesDraft(metaRowEdges ? [...metaRowEdges] : null);
+      }
       setGridParams(metaGridParams);
-      setGridParamsDraft(metaGridParams);
       setGridColumnEdges(metaColumnEdges ? [...metaColumnEdges] : null);
-      setGridColumnEdgesDraft(metaColumnEdges ? [...metaColumnEdges] : null);
       setGridRowEdges(metaRowEdges ? [...metaRowEdges] : null);
-      setGridRowEdgesDraft(metaRowEdges ? [...metaRowEdges] : null);
       ocrPreviewRefreshKeyRef.current = [
         orderId,
         String(currentOrder?.current_sheet_revision_id || ""),
@@ -5178,7 +5223,7 @@ export default function OrderDetailPage() {
         setHakodateJobStatus(null);
         setOcrTableBox(metaTableBox);
         setOcrTableUnits(metaTableUnits);
-        setTableBoxUnitsOverride(null);
+        if (!protectFacilityGeometry()) setTableBoxUnitsOverride(null);
         setOcrTableHeader([]);
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
@@ -5201,12 +5246,14 @@ export default function OrderDetailPage() {
         setHakodateJobStatus(null);
         setOcrTableBox(null);
         setOcrTableUnits(null);
-        setTableBoxUnitsOverride(null);
-        setTableBoxDraft(null);
+        if (!protectFacilityGeometry()) {
+          setTableBoxUnitsOverride(null);
+          setTableBoxDraft(null);
+          setGridColumnEdgesDraft(null);
+          setGridRowEdgesDraft(null);
+        }
         setGridColumnEdges(null);
-        setGridColumnEdgesDraft(null);
         setGridRowEdges(null);
-        setGridRowEdgesDraft(null);
         setOcrTableHeader([]);
         setOcrTableRows([]);
         setOcrTablePageIndex(null);
@@ -6333,6 +6380,7 @@ export default function OrderDetailPage() {
   };
 
   const updateGridParam = (key: keyof GridParams, rawValue: string) => {
+    markFacilityGeometryEdited();
     if (!rawValue.trim()) return;
     const parsed = Number(rawValue);
     if (Number.isNaN(parsed)) return;
@@ -6340,6 +6388,7 @@ export default function OrderDetailPage() {
   };
 
   const setRowCount = (count: number) => {
+    markFacilityGeometryEdited();
     if (!Number.isFinite(count) || count <= 1) {
       setGridRowEdgesDraft(null);
       return;
@@ -6353,6 +6402,7 @@ export default function OrderDetailPage() {
   };
 
   const setColumnCount = (count: number) => {
+    markFacilityGeometryEdited();
     if (!Number.isFinite(count) || count <= 1) {
       setGridColumnEdgesDraft(null);
       return;
@@ -6366,6 +6416,7 @@ export default function OrderDetailPage() {
   };
 
   const updateRowEdgesText = (raw: string) => {
+    markFacilityGeometryEdited();
     if (!raw.trim()) {
       setGridRowEdgesDraft(null);
       return;
@@ -6382,6 +6433,7 @@ export default function OrderDetailPage() {
   };
 
   const updateColumnEdgesText = (raw: string) => {
+    markFacilityGeometryEdited();
     if (!raw.trim()) {
       setGridColumnEdgesDraft(null);
       return;
@@ -6414,10 +6466,12 @@ export default function OrderDetailPage() {
   };
 
   const updateTableBoxDraft = (next: number[]) => {
+    markFacilityGeometryEdited();
     setTableBoxDraft(normalizeTableBox(next));
   };
 
   const updateTableBoxIndex = (index: number, rawValue: string) => {
+    markFacilityGeometryEdited();
     if (!tableBoxDraft) return;
     if (!rawValue.trim()) return;
     const parsed = Number(rawValue);
@@ -6439,7 +6493,28 @@ export default function OrderDetailPage() {
     updateTableBoxDraft([x0 - delta, y0 - delta, x1 + delta, y1 + delta]);
   };
 
-  const toggleTableBoxEditor = () => {
+  const toggleTableBoxEditor = async () => {
+    if (!showTableBoxEditor && !facilityGeometryDirtyRef.current) {
+      const target = facilityConfigTarget;
+      const generation = facilityConfigInputRef.current.generation;
+      const command = ++facilityConfigCommandRef.current;
+      const current = () => target === facilityConfigTargetRef.current &&
+        generation === facilityConfigInputRef.current.generation && command === facilityConfigCommandRef.current;
+      try {
+        const res = await apiClient.get<CanonicalFacilityResponse>(`/facilities/${facility}`);
+        if (!current()) return;
+        requireFacilitySnapshot(res.data, facility);
+        facilityEditingSnapshotRef.current = res.data;
+        setFacilityConfig(res.data.config);
+        setFacilityResolvedConfig(res.data.resolved_config);
+      } catch (error) {
+        if (current()) setTableBoxMessage(canonicalErrorText(error, "編集 snapshot の取得に失敗しました。"));
+        return;
+      }
+    }
+    if (!showTableBoxEditor) setTableBoxUnitsOverride(tableBoxUnitsOverride ?? ocrTableUnits);
+    facilityGeometryEditorRef.current = !showTableBoxEditor;
+    facilityConfigInputRef.current.generation += 1;
     setShowTableBoxEditor((prev) => {
       const next = !prev;
       if (next && !tableBoxDraft) {
@@ -6462,6 +6537,12 @@ export default function OrderDetailPage() {
 
   const detectGridEdges = async () => {
     if (!order) return;
+    const target = facilityConfigTarget;
+    const generation = facilityConfigInputRef.current.generation;
+    const command = ++facilityConfigCommandRef.current;
+    const current = () => target === facilityConfigTargetRef.current &&
+      generation === facilityConfigInputRef.current.generation && command === facilityConfigCommandRef.current;
+    facilityConfigBusyOwnerRef.current.detect = command;
     setGridDetecting(true);
     setGridDetectMessage("自動で合わせています...");
     try {
@@ -6482,6 +6563,8 @@ export default function OrderDetailPage() {
       };
       payload.grid_params = gridParamsPayload;
       const res = await apiClient.post(`/orders/${order.id}/grid-detect`, payload);
+      if (!current()) return;
+      markFacilityGeometryEdited();
       const detectedBox = Array.isArray(res.data?.table_box) ? res.data.table_box : null;
       const detectedColumns = Array.isArray(res.data?.grid_column_edges)
         ? res.data.grid_column_edges
@@ -6519,6 +6602,7 @@ export default function OrderDetailPage() {
         `自動検出しました${fallback ? " (低信頼)" : ""}${confidence ? ` (信頼度 ${confidence})` : ""}。必要なら微調整して保存してください。`,
       );
     } catch (err: any) {
+      if (!current()) return;
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail;
       if (status === 404) {
@@ -6535,7 +6619,7 @@ export default function OrderDetailPage() {
         setGridDetectMessage("自動検出に失敗しました。");
       }
     } finally {
-      setGridDetecting(false);
+      if (facilityConfigBusyOwnerRef.current.detect === command) setGridDetecting(false);
     }
   };
 
@@ -6548,16 +6632,22 @@ export default function OrderDetailPage() {
       setTableBoxMessage("table_boxがありません。");
       return;
     }
+    const snapshot = facilityEditingSnapshotRef.current;
+    if (!snapshot) {
+      setTableBoxMessage("施設の固定編集 snapshot がありません。明示的に再読込してください。");
+      return;
+    }
+    const target = facilityConfigTarget;
+    const generation = facilityConfigInputRef.current.generation;
+    const command = ++facilityConfigCommandRef.current;
+    const current = () => target === facilityConfigTargetRef.current &&
+      generation === facilityConfigInputRef.current.generation && command === facilityConfigCommandRef.current;
+    facilityConfigBusyOwnerRef.current.geometry = command;
     setTableBoxSaving(true);
     setTableBoxMessage("保存中...");
     try {
-      let config = facilityConfig;
-      if (!config) {
-        const res = await apiClient.get(`/facilities/${facility}`);
-        config = res.data?.config || {};
-        setFacilityConfig(config);
-      }
-      const nextConfig = { ...(config || {}) };
+      const expectedRevision = requireFacilitySnapshot(snapshot, facility);
+      const nextConfig = { ...snapshot.config };
       const override = { ...(nextConfig.fax_template_override || {}) };
       override.table_box = tableBoxDraft;
       override.grid_table_box = tableBoxDraft;
@@ -6574,25 +6664,73 @@ export default function OrderDetailPage() {
           }
         });
       }
-      if (tableBoxUnitsOverride || ocrTableUnits) {
-        override.units = tableBoxUnitsOverride || ocrTableUnits;
+      if (tableBoxUnitsOverride) {
+        override.units = tableBoxUnitsOverride;
       }
       nextConfig.fax_template_override = override;
-      await apiClient.put(`/facilities/${facility}/config`, { config: nextConfig });
-      setTableBoxMessage("保存しました。再解析で反映されます。");
-      setOcrTableBox([...tableBoxDraft]);
-      setGridParams({ ...gridParamsDraft });
-      setGridColumnEdges(gridColumnEdgesDraft ? [...gridColumnEdgesDraft] : null);
-      setGridRowEdges(gridRowEdgesDraft ? [...gridRowEdgesDraft] : null);
+      const res = await apiClient.put<CanonicalFacilityResponse>(`/facilities/${facility}/config`, {
+        config: nextConfig, expected_revision: expectedRevision,
+      });
+      if (!current()) return;
+      requireFacilitySnapshot(res.data, facility);
+      const notice = canonicalSaveNotice(res.data);
+      const savedOverride = res.data.config.fax_template_override as Record<string, any> | undefined;
+      if (!savedOverride || !Array.isArray(savedOverride.table_box)) {
+        throw new Error("JSON は保存済みですが、保存した table_box を確認できません。入力を保持し明示的に再読込してください。");
+      }
+      const savedGridParams = { ...gridParamsDraft };
+      for (const key of Object.keys(savedGridParams) as (keyof GridParams)[]) {
+        if (typeof savedOverride[key] !== "number" || !Number.isFinite(savedOverride[key])) {
+          throw new Error("JSON は保存済みですが、保存した grid 設定を確認できません。明示的に再読込してください。");
+        }
+        savedGridParams[key] = savedOverride[key];
+      }
+      facilityEditingSnapshotRef.current = res.data;
+      setFacilityConfig(res.data.config);
+      setFacilityResolvedConfig(res.data.resolved_config);
+      facilityGeometryDirtyRef.current = false;
+      setTableBoxMessage(`保存しました。再解析で反映されます。${notice}`);
+      setOcrTableBox([...savedOverride.table_box]);
+      setTableBoxDraft([...savedOverride.table_box]);
+      setGridParams(savedGridParams);
+      setGridParamsDraft(savedGridParams);
+      const savedColumns = Array.isArray(savedOverride.grid_column_edges) ? [...savedOverride.grid_column_edges] : null;
+      const savedRows = Array.isArray(savedOverride.grid_row_edges) ? [...savedOverride.grid_row_edges] : null;
+      setGridColumnEdges(savedColumns);
+      setGridColumnEdgesDraft(savedColumns);
+      setGridRowEdges(savedRows);
+      setGridRowEdgesDraft(savedRows);
+      setTableBoxUnitsOverride(typeof savedOverride.units === "string" ? savedOverride.units : null);
     } catch (err: any) {
+      if (!current()) return;
+      facilityEditingSnapshotRef.current = null;
       const status = err?.response?.status;
-      setTableBoxMessage(status === 403 ? "権限がありません。" : "保存に失敗しました。");
+      setTableBoxMessage(status === 403 ? "権限がありません。" : canonicalErrorText(err, "保存に失敗しました。"));
     } finally {
-      setTableBoxSaving(false);
+      if (facilityConfigBusyOwnerRef.current.geometry === command) setTableBoxSaving(false);
     }
   };
 
-  const resetTableBoxDraft = () => {
+  const resetTableBoxDraft = async () => {
+    if (facilityGeometryDirtyRef.current && !window.confirm("未保存のテンプレート入力を破棄し、施設設定を再読込しますか？")) return;
+    const target = facilityConfigTarget;
+    const generation = facilityConfigInputRef.current.generation;
+    const command = ++facilityConfigCommandRef.current;
+    const current = () => target === facilityConfigTargetRef.current &&
+      generation === facilityConfigInputRef.current.generation && command === facilityConfigCommandRef.current;
+    try {
+      const res = await apiClient.get<CanonicalFacilityResponse>(`/facilities/${facility}`);
+      if (!current()) return;
+      requireFacilitySnapshot(res.data, facility);
+      facilityEditingSnapshotRef.current = res.data;
+      setFacilityConfig(res.data.config);
+      setFacilityResolvedConfig(res.data.resolved_config);
+      facilityGeometryDirtyRef.current = false;
+      facilityConfigInputRef.current.generation += 1;
+    } catch (error) {
+      if (current()) setTableBoxMessage(canonicalErrorText(error, "施設設定の再読込に失敗しました。入力は保持しています。"));
+      return;
+    }
     if (!ocrTableBox) {
       setTableBoxDraft(null);
       return;
@@ -7002,36 +7140,51 @@ export default function OrderDetailPage() {
       setOcrSheetMessage("手修正済みのシートがあるため、切替前に保存するか再読み込みしてください。");
       return;
     }
+    facilityConfigInputRef.current.generation += 1;
+    facilityConfigCommandRef.current += 1;
     if (nextMode === "persisted") {
       if (!facility.trim()) {
         setOcrSheetMessage("施設を選択してください。");
         return;
       }
+      const snapshot = facilityEditingSnapshotRef.current;
+      if (!snapshot || facilityGeometryDirtyRef.current) {
+        setOcrSheetMessage("施設の固定編集 snapshot がないか、テンプレートに未保存入力があります。保存または明示的に再読込してください。");
+        return;
+      }
+      const target = facilityConfigTarget;
+      const generation = facilityConfigInputRef.current.generation;
+      const command = ++facilityConfigCommandRef.current;
+      const current = () => target === facilityConfigTargetRef.current &&
+        generation === facilityConfigInputRef.current.generation && command === facilityConfigCommandRef.current;
+      facilityConfigBusyOwnerRef.current.copy = command;
       setExpandedCellCopySaving(true);
       setOcrSheetMessage("拡大セル設定を保存中...");
       try {
-        let config = facilityConfig;
-        if (!config) {
-          const res = await apiClient.get(`/facilities/${facility}`);
-          config = res.data?.config || {};
-          setFacilityConfig(config);
-          setFacilityResolvedConfig(res.data?.resolved_config || null);
-        }
+        const expectedRevision = requireFacilitySnapshot(snapshot, facility);
         const nextConfig = {
-          ...(config || {}),
+          ...snapshot.config,
           [EXPANDED_CELL_COPY_FACILITY_KEY]: true,
         };
-        const res = await apiClient.put(`/facilities/${facility}/config`, { config: nextConfig });
-        setFacilityConfig(nextConfig);
-        setFacilityResolvedConfig(res.data?.resolved_config || nextConfig);
-        setExpandedCellCopyMode("persisted");
-        await loadOcrSheet({ silent: true });
-        setOcrSheetMessage("この施設で拡大セルコピーを有効化しました。");
+        const res = await apiClient.put<CanonicalFacilityResponse>(`/facilities/${facility}/config`, {
+          config: nextConfig, expected_revision: expectedRevision,
+        });
+        if (!current()) return;
+        requireFacilitySnapshot(res.data, facility);
+        const notice = canonicalSaveNotice(res.data);
+        facilityEditingSnapshotRef.current = res.data;
+        setFacilityConfig(res.data.config);
+        setFacilityResolvedConfig(res.data.resolved_config);
+        setExpandedCellCopyMode(res.data.resolved_config[EXPANDED_CELL_COPY_FACILITY_KEY] ? "persisted" : "disabled");
+        // The mode effect derives the sheet from its existing read baseline, not another GET.
+        setOcrSheetMessage(`この施設で拡大セルコピーを有効化しました。${notice}`);
       } catch (err: any) {
+        if (!current()) return;
+        facilityEditingSnapshotRef.current = null;
         const status = err?.response?.status;
-        setOcrSheetMessage(status === 403 ? "権限がありません。" : "拡大セル設定の保存に失敗しました。");
+        setOcrSheetMessage(status === 403 ? "権限がありません。" : canonicalErrorText(err, "拡大セル設定の保存に失敗しました。"));
       } finally {
-        setExpandedCellCopySaving(false);
+        if (facilityConfigBusyOwnerRef.current.copy === command) setExpandedCellCopySaving(false);
       }
       return;
     }

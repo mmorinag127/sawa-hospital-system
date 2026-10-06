@@ -1,15 +1,16 @@
 import json
+from copy import deepcopy
 from uuid import uuid4
 from loguru import logger
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete
 
 from src.db import session_scope
 from src.models.facility import Facility, FacilityArea, FacilityConfig
-from src.models.order import Order
-from src.services import config_service
+from src.services import canonical_facility_store, config_service
 from src.services.notification_service import record_event
 
 _TEMPLATE_DEFINITION_KEYS = ("fax_template_id", "fax_template_ids", "fax_template_override")
+_TEMPLATE_COLUMN_KEYS = ("columns", "main_ocr_row_fields", "columns_authoritative")
 
 
 def _stable_json(value: object) -> str:
@@ -20,196 +21,211 @@ def _contains_template_definition_change(current_config: dict, next_config: dict
     for key in _TEMPLATE_DEFINITION_KEYS:
         if key not in next_config:
             continue
-        if _stable_json(next_config.get(key)) != _stable_json(current_config.get(key)):
+        current_value, next_value = current_config.get(key), next_config.get(key)
+        if key == "fax_template_override" and isinstance(next_value, dict):
+            if current_value is not None and not isinstance(current_value, dict):
+                return True
+            current_override = current_value if isinstance(current_value, dict) else {}
+            # Geometry/recognizer settings stay editable; authored column identity is not inferred or rewritten.
+            for column_key in _TEMPLATE_COLUMN_KEYS:
+                if (column_key in current_override) != (column_key in next_value) or \
+                        _stable_json(current_override.get(column_key)) != _stable_json(next_value.get(column_key)):
+                    return True
+            continue
+        if _stable_json(next_value) != _stable_json(current_value):
             return True
     return False
 
 
-def _normalize_area_payload(areas: list | None) -> list[dict]:
-    normalized: list[dict] = []
-    for area in areas or []:
+_UNSET = object()
+
+
+def _new_area_payload(areas: list | None) -> list | None:
+    if areas is None:
+        return None
+    if not isinstance(areas, list):
+        raise canonical_facility_store.CanonicalStoreError("facility_areas_invalid", status_code=400)
+    created = deepcopy(areas)
+    for index, area in enumerate(created):
         if isinstance(area, str):
-            name = area.strip()
-            if not name:
-                continue
-            normalized.append({"id": f"ARE{uuid4().hex[:6]}", "name": name})
-            continue
-        if isinstance(area, dict):
-            name = (area.get("name") or area.get("label") or "").strip()
-            if not name:
-                continue
-            area_id = (area.get("id") or area.get("area_id") or "").strip()
-            if not area_id:
-                area_id = f"ARE{uuid4().hex[:6]}"
-            normalized.append({"id": area_id, "name": name})
-    return normalized
+            created[index] = {"id": f"ARE{uuid4().hex[:6]}", "name": area}
+        elif isinstance(area, dict) and "id" not in area and "area_id" not in area:
+            area["id"] = f"ARE{uuid4().hex[:6]}"
+    return created
+
+
+def _projection_areas(areas: list | None) -> list[dict]:
+    if areas is None:
+        return []
+    if not isinstance(areas, list):
+        raise canonical_facility_store.CanonicalStoreError("facility_area_projection_invalid")
+    projected = []
+    seen = set()
+    for area in areas:
+        if not isinstance(area, dict):
+            raise canonical_facility_store.CanonicalStoreError("facility_area_projection_identity_missing")
+        if "id" in area and "area_id" in area and area["id"] != area["area_id"]:
+            raise canonical_facility_store.CanonicalStoreError("facility_area_projection_identity_ambiguous")
+        area_id = area.get("area_id") if "area_id" in area else area.get("id")
+        name = area.get("name") if "name" in area else area.get("label")
+        if not isinstance(area_id, str) or not area_id.strip() or not isinstance(name, str) or not name.strip():
+            raise canonical_facility_store.CanonicalStoreError("facility_area_projection_identity_missing")
+        if area_id in seen:
+            raise canonical_facility_store.CanonicalStoreError("facility_area_projection_identity_duplicate")
+        seen.add(area_id)
+        projected.append({"id": area_id, "name": name})
+    return projected
 
 
 def _sync_facilities_from_master(session) -> None:
     master = config_service.load_facility_master()
-    facilities = master.get("facilities")
-    if not isinstance(facilities, list) or not facilities:
-        return
-    existing = {fac.id: fac for fac in session.execute(select(Facility)).scalars().all()}
-    existing_by_name = {fac.name: fac for fac in existing.values()}
-    for entry in facilities:
-        if not isinstance(entry, dict):
-            continue
-        facility_id = str(entry.get("facility_id") or "").strip()
-        name = str(entry.get("facility_name") or "").strip()
-        if not facility_id or not name:
-            continue
-        if facility_id in existing:
-            fac = existing[facility_id]
-            if fac.name != name:
-                fac.name = name
-            continue
-        name_match = existing_by_name.get(name)
-        if name_match and name_match.id != facility_id:
-            old_id = name_match.id
-            session.execute(update(Facility).where(Facility.id == old_id).values(id=facility_id))
-            session.execute(
-                update(FacilityArea).where(FacilityArea.facility_id == old_id).values(facility_id=facility_id)
-            )
-            session.execute(
-                update(FacilityConfig).where(FacilityConfig.facility_id == old_id).values(facility_id=facility_id)
-            )
-            session.execute(
-                update(Order).where(Order.facility_code == old_id).values(facility_code=facility_id)
-            )
-            logger.info("Facility ID remapped", old_id=old_id, new_id=facility_id)
-            continue
-        fac = Facility(id=facility_id, name=name)
-        session.add(fac)
-        seen_area_ids: set[str] = set()
-        for area in _normalize_area_payload(entry.get("areas")):
-            if area["id"] in seen_area_ids:
-                continue
-            seen_area_ids.add(area["id"])
-            session.add(FacilityArea(id=area["id"], facility_id=facility_id, name=area["name"]))
-        logger.info("Facility created from master", fac=facility_id)
+    upsert_facility_rows_from_master(session, master)
 
 
-def create_facility(name: str, areas: list | None):
+def _entry(master: dict, facility_id: str) -> dict | None:
+    return config_service.get_facility_by_id(facility_id, master=master)
+
+
+def _catalog_entry(entry: dict) -> dict:
+    name = entry.get("facility_name")
+    if not isinstance(name, str) or not name.strip():
+        raise canonical_facility_store.CanonicalStoreError("facility_name_unconfigured")
+    areas = deepcopy(entry.get("areas", []))
+    return {"id": entry["facility_id"], "name": name, "areas": areas}
+
+
+def facility_response(master: dict, facility_id: str, revision: str) -> dict:
+    entry = _entry(master, facility_id)
+    if entry is None:
+        raise canonical_facility_store.CanonicalStoreError("facility_not_found", status_code=404)
+    return {
+        "facility": _catalog_entry(entry),
+        "config": _facility_config_from_master_entry(entry),
+        "resolved_config": config_service.get_facility_config(facility_id, master=master),
+        "revision": revision,
+        "source": "canonical_json",
+        "order_form_patterns": deepcopy(master.get("order_form_patterns", [])),
+    }
+
+
+def _command_response(saved: dict, facility_id: str) -> dict:
+    from src.services.config_validator import validate_facility_config
+
+    response = facility_response(saved["facility_master"], facility_id, saved["revision"])
+    return {**response, "updated": True, "projection": saved["projection"],
+            "validation": validate_facility_config(response["config"])}
+
+
+def _record_command_event(response: dict, event: str, facility_id: str, **metadata) -> dict:
+    try:
+        record_event(event, actor="system", target=facility_id, fac=facility_id, metadata=metadata)
+        response["event"] = {"status": "recorded"}
+    except Exception:
+        logger.exception("Facility JSON saved; notification event recording failed")
+        response["event"] = {"status": "record_failed"}
+    return response
+
+
+def create_facility(name: str, areas: list | None, *, expected_revision: str):
+    from src.services import facility_master_service
+
     fac_id = f"FAC{uuid4().hex[:6]}"
-    serialized: dict | None = None
-    with session_scope() as session:
-        fac = Facility(id=fac_id, name=name)
-        session.add(fac)
-        for area in _normalize_area_payload(areas):
-            session.add(FacilityArea(id=area["id"], facility_id=fac_id, name=area["name"]))
-        session.flush()
-        session.refresh(fac)
-        logger.info("Facility created", fac=fac_id)
-        serialized = serialize_facility(fac)
-    record_event("facility_create", actor="system", target=fac_id, fac=fac_id)
-    return serialized
+    def transform(master: dict) -> dict:
+        master["facilities"].append({"facility_id": fac_id, "facility_name": name,
+                                     "areas": _new_area_payload(areas)})
+        facility_response(master, fac_id, expected_revision)
+        return master
+    saved = facility_master_service.mutate_master(expected_revision, transform)
+    return _record_command_event(_command_response(saved, fac_id), "facility_create", fac_id)
 
 
-def update_facility(facility_id: str, name: str | None, areas: list | None) -> dict | None:
-    serialized: dict | None = None
-    event_metadata: dict[str, object] | None = None
-    with session_scope() as session:
-        fac = session.get(Facility, facility_id)
-        if not fac:
-            return None
+def update_facility(facility_id: str, name: str | None, areas=_UNSET, *, expected_revision: str) -> dict:
+    from src.services import facility_master_service
+
+    def transform(master: dict) -> dict:
+        entry = next((item for item in master["facilities"] if item["facility_id"] == facility_id), None)
+        if entry is None:
+            raise canonical_facility_store.CanonicalStoreError("facility_not_found", status_code=404)
         if name:
-            fac.name = name
-        if areas is not None:
-            session.execute(delete(FacilityArea).where(FacilityArea.facility_id == facility_id))
-            for area in _normalize_area_payload(areas):
-                session.add(FacilityArea(id=area["id"], facility_id=facility_id, name=area["name"]))
-        session.flush()
-        session.refresh(fac)
-        logger.info("Facility updated", fac=facility_id)
-        serialized = serialize_facility(fac)
-        event_metadata = {"name": fac.name, "areas": len(fac.areas or [])}
-    record_event(
-        "facility_update",
-        actor="system",
-        target=facility_id,
-        fac=facility_id,
-        metadata=event_metadata,
-    )
-    return serialized
+            entry["facility_name"] = name
+        if areas is not _UNSET:
+            entry["areas"] = deepcopy(areas)
+        facility_response(master, facility_id, expected_revision)
+        return master
+    saved = facility_master_service.mutate_master(expected_revision, transform)
+    response = _command_response(saved, facility_id)
+    return _record_command_event(response, "facility_update", facility_id,
+                                 name=response["facility"]["name"], areas=len(response["facility"]["areas"]) if isinstance(response["facility"]["areas"], list) else None)
 
 
 def update_config(
     facility_id: str,
     config: dict,
     *,
+    expected_revision: str,
     allow_authoritative_column_changes: bool = False,
-) -> bool:
-    updated = False
-    with session_scope() as session:
-        fac = ensure_facility_materialized(session, facility_id)
-        if not fac:
-            return False
-        current_config = fac.config.config_json if fac.config and isinstance(fac.config.config_json, dict) else {}
-        sanitized_config = config_service.sanitize_facility_config_for_storage(
-            facility_id,
-            config,
-            current_config=current_config,
-            allow_authoritative_column_changes=allow_authoritative_column_changes,
-        )
-        # replace config
-        session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == facility_id))
-        session.add(FacilityConfig(facility_id=facility_id, config_json=sanitized_config))
-        logger.info("Facility config updated", fac=facility_id)
-        updated = True
-    if updated:
-        record_event(
-            "facility_config_update",
-            actor="system",
-            target=facility_id,
-            fac=facility_id,
-            metadata={"keys": list(sanitized_config.keys())},
-        )
-    return updated
+) -> dict:
+    from src.services import facility_master_service
+    from src.services.config_validator import validate_facility_config
+
+    def transform(master: dict) -> dict:
+        current = _entry(master, facility_id)
+        if current is None:
+            raise canonical_facility_store.CanonicalStoreError("facility_not_found", status_code=404)
+        current_config = _facility_config_from_master_entry(current)
+        if not allow_authoritative_column_changes and _contains_template_definition_change(current_config, config):
+            raise canonical_facility_store.CanonicalStoreError(
+                "facility_template_definition_update_requires_versioned_template_endpoint", status_code=400,
+            )
+        next_config = deepcopy(config)
+        # Omitted template keys are not authority to erase the canonical template.
+        for key in _TEMPLATE_DEFINITION_KEYS:
+            if key not in next_config and key in current_config:
+                next_config[key] = deepcopy(current_config[key])
+        validation = validate_facility_config(next_config)
+        if validation["errors"]:
+            raise canonical_facility_store.CanonicalStoreError(
+                "facility_config_validation_failed", status_code=400, errors=validation["errors"],
+            )
+        identity = {key: deepcopy(value) for key, value in current.items()
+                    if key in {"facility_id", "facility_name", "name", "areas"}}
+        replacement = {**next_config, **identity}
+        master["facilities"] = [replacement if item["facility_id"] == facility_id else item
+                                for item in master["facilities"]]
+        facility_response(master, facility_id, expected_revision)
+        return master
+    saved = facility_master_service.mutate_master(expected_revision, transform)
+    return _record_command_event(_command_response(saved, facility_id), "facility_config_update", facility_id,
+                                 keys=list(config.keys()))
 
 
-def list_facilities() -> list[dict]:
-    master = config_service.load_facility_master()
-    merged: dict[str, dict] = {}
-    for entry in master.get("facilities", []):
-        if not isinstance(entry, dict):
-            continue
-        facility_id = str(entry.get("facility_id") or "").strip()
-        name = str(entry.get("facility_name") or entry.get("name") or "").strip()
-        if not facility_id or not name:
-            continue
-        merged[facility_id] = {
-            "id": facility_id,
-            "name": name,
-            "areas": _normalize_area_payload(entry.get("areas")),
-        }
-    with session_scope() as session:
-        facilities = session.execute(select(Facility)).scalars().all()
-        for fac in facilities:
-            merged[fac.id] = serialize_facility(fac)
-    return list(merged.values())
+def list_facilities(*, master: dict | None = None) -> list[dict]:
+    master = config_service.load_facility_master() if master is None else master
+    return [_catalog_entry(entry) for entry in master["facilities"]]
 
 
 def ensure_facility_materialized(session, facility_id: str) -> Facility | None:
     normalized_facility_id = str(facility_id or "").strip()
     if not normalized_facility_id:
         return None
+    master = config_service.load_facility_master()
+    if _entry(master, normalized_facility_id) is None:
+        return None
     existing = session.get(Facility, normalized_facility_id)
     if existing is not None:
         return existing
-    master = config_service.load_facility_master()
     for entry in master.get("facilities", []):
         if not isinstance(entry, dict):
             continue
         if str(entry.get("facility_id") or "").strip() != normalized_facility_id:
             continue
-        name = str(entry.get("facility_name") or entry.get("name") or "").strip()
-        if not name:
-            return None
+        name = entry.get("facility_name")
+        if not isinstance(name, str) or not name.strip():
+            raise canonical_facility_store.CanonicalStoreError("facility_name_unconfigured")
         fac = Facility(id=normalized_facility_id, name=name)
         session.add(fac)
         seen_area_ids: set[str] = set()
-        for area in _normalize_area_payload(entry.get("areas")):
+        for area in _projection_areas(entry.get("areas")):
             if area["id"] in seen_area_ids:
                 continue
             seen_area_ids.add(area["id"])
@@ -227,10 +243,10 @@ def upsert_facility_rows_from_master(session, master: dict) -> None:
     for entry in facilities:
         if not isinstance(entry, dict):
             continue
-        facility_id = str(entry.get("facility_id") or "").strip()
-        name = str(entry.get("facility_name") or entry.get("name") or "").strip()
-        if not facility_id or not name:
-            continue
+        facility_id = entry.get("facility_id")
+        name = entry.get("facility_name")
+        if not isinstance(facility_id, str) or not facility_id.strip() or not isinstance(name, str) or not name.strip():
+            raise canonical_facility_store.CanonicalStoreError("facility_projection_identity_missing")
         fac = session.get(Facility, facility_id)
         if fac is None:
             fac = Facility(id=facility_id, name=name)
@@ -240,7 +256,7 @@ def upsert_facility_rows_from_master(session, master: dict) -> None:
             fac.name = name
         session.execute(delete(FacilityArea).where(FacilityArea.facility_id == facility_id))
         seen_area_ids: set[str] = set()
-        for area in _normalize_area_payload(entry.get("areas")):
+        for area in _projection_areas(entry.get("areas")):
             if area["id"] in seen_area_ids:
                 continue
             seen_area_ids.add(area["id"])
@@ -257,10 +273,10 @@ def sync_facility_names_from_master() -> int:
         for entry in facilities:
             if not isinstance(entry, dict):
                 continue
-            facility_id = str(entry.get("facility_id") or "").strip()
-            name = str(entry.get("facility_name") or entry.get("name") or "").strip()
-            if not facility_id or not name:
-                continue
+            facility_id = entry.get("facility_id")
+            name = entry.get("facility_name")
+            if not isinstance(facility_id, str) or not facility_id.strip() or not isinstance(name, str) or not name.strip():
+                raise canonical_facility_store.CanonicalStoreError("facility_projection_identity_missing")
             fac = session.get(Facility, facility_id)
             if fac is None:
                 session.add(Facility(id=facility_id, name=name))
@@ -287,9 +303,9 @@ def upsert_facilities_and_configs_from_master(session, master: dict) -> None:
     for entry in facilities:
         if not isinstance(entry, dict):
             continue
-        facility_id = str(entry.get("facility_id") or "").strip()
-        if not facility_id:
-            continue
+        facility_id = entry.get("facility_id")
+        if not isinstance(facility_id, str) or not facility_id.strip():
+            raise canonical_facility_store.CanonicalStoreError("facility_projection_identity_missing")
         config = _facility_config_from_master_entry(entry)
         session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == facility_id))
         if config:
@@ -297,53 +313,17 @@ def upsert_facilities_and_configs_from_master(session, master: dict) -> None:
 
 
 def build_facility_master_from_db(base_master: dict) -> dict:
-    master = dict(base_master or {})
-    facilities: list[dict] = []
-    with session_scope() as session:
-        rows = session.execute(select(Facility).order_by(Facility.id.asc())).scalars().all()
-        for fac in rows:
-            entry = {
-                "facility_id": fac.id,
-                "facility_name": fac.name,
-                "areas": [{"id": area.id, "name": area.name} for area in (fac.areas or [])],
-            }
-            if fac.config and isinstance(fac.config.config_json, dict):
-                config = dict(fac.config.config_json)
-                config.pop("facility_template_source", None)
-                entry.update(config)
-            facilities.append(entry)
-    master["facilities"] = facilities
-    return master
+    raise canonical_facility_store.CanonicalStoreError("facility_master_db_authority_disabled")
 
 
 def get_facility(facility_id: str) -> dict | None:
-    with session_scope() as session:
-        fac = session.get(Facility, facility_id)
-        if not fac:
-            master = config_service.load_facility_master()
-            for entry in master.get("facilities", []):
-                if not isinstance(entry, dict):
-                    continue
-                if str(entry.get("facility_id") or "").strip() != facility_id:
-                    continue
-                name = str(entry.get("facility_name") or entry.get("name") or "").strip()
-                if not name:
-                    return None
-                return {
-                    "id": facility_id,
-                    "name": name,
-                    "areas": _normalize_area_payload(entry.get("areas")),
-                }
-            return None
-        return serialize_facility(fac)
+    entry = config_service.get_facility_by_id(facility_id)
+    return _catalog_entry(entry) if entry is not None else None
 
 
 def get_facility_config(facility_id: str) -> dict | None:
-    with session_scope() as session:
-        fac = session.get(Facility, facility_id)
-        if not fac or not fac.config:
-            return None
-        return fac.config.config_json or {}
+    entry = config_service.get_facility_by_id(facility_id)
+    return _facility_config_from_master_entry(entry) if entry is not None else None
 
 
 def serialize_facility(fac: Facility):
