@@ -452,9 +452,13 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
     auth_step = next(step for step in gate["steps"] if step.get("uses") == "google-github-actions/auth@v3")
     assert auth_step["with"]["workload_identity_provider"] == "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}"
     assert auth_step["with"]["service_account"] == "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}"
-    assert gate["steps"][-1]["run"] == "uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py"
+    migration_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py"
+    preflight_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py"
+    gate_commands = [step["run"] for step in gate["steps"] if "run" in step]
+    assert gate_commands == [migration_command, preflight_command]
     for name in ("build-backend", "deploy-backend", "deploy-frontend"):
         assert "menu-master-migration" in jobs[name]["needs"]
+        assert "continue-on-error" not in jobs[name]
     for name in ("build-backend", "deploy-backend"):
         assert jobs[name]["if"] == "needs.source-gate.outputs.backend_changed == 'true'"
         assert "continue-on-error" not in jobs[name]

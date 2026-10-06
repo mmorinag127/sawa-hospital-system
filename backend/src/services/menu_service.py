@@ -25,6 +25,10 @@ from src.models.facility import Facility, FacilityConfig
 from src.models.user import AuditLog
 from src.services.notification_service import record_event
 from src.services import menu_rule_service
+from src.services.monthly_menu_identity_schema import (
+    MonthlyMenuIdentitySchemaError,
+    require_canonical_identity_schema,
+)
 from src.services.menu_vocabulary import normalize_diet_type
 from src.services.storage_service import load_bytes_from_uri
 
@@ -269,19 +273,14 @@ def _menu_schema_missing_items() -> list[str]:
 
 
 def _ensure_monthly_menu_item_identity_index() -> None:
-    if engine.dialect.name != "postgresql":
-        return
     inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "monthly_menu_items" not in tables:
+    if "monthly_menu_items" not in set(inspector.get_table_names()):
         return
-    index_names = {str(index.get("name") or "") for index in inspector.get_indexes("monthly_menu_items")}
-    if "uq_monthly_menu_items_scope_identity" in index_names:
-        return
-    raise MenuSchemaNotMigrated(
-        "menu schema is not migrated; run migration 0023 before boot: "
-        "uq_monthly_menu_items_scope_identity"
-    )
+    try:
+        with engine.connect() as connection:
+            require_canonical_identity_schema(connection)
+    except MonthlyMenuIdentitySchemaError as exc:
+        raise MenuSchemaNotMigrated(str(exc)) from None
 
 
 def ensure_menu_schema() -> None:

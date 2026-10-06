@@ -11,6 +11,11 @@ from alembic.operations import Operations
 from sqlalchemy import create_engine
 import sqlalchemy as sa
 
+from src.services.monthly_menu_identity_schema import (
+    MonthlyMenuIdentitySchemaError,
+    require_canonical_identity_schema,
+)
+
 
 def upgrade_staging(connection) -> None:
     """Read-only prerequisite checks, followed by the canonical 0027 upgrade."""
@@ -64,37 +69,12 @@ def upgrade_staging(connection) -> None:
         raise MigrationBlocked("0027 blocked: menu master condiments must be JSON")
     if not isinstance(columns["menu_masters"]["updated_at"]["type"], sa.DateTime):
         raise MigrationBlocked("0027 blocked: menu master updated_at must be timestamp")
-    _require_identity_index(connection)
+    try:
+        require_canonical_identity_schema(connection)
+    except MonthlyMenuIdentitySchemaError as exc:
+        raise MigrationBlocked(str(exc)) from None
     _require_access_schema(inspector, columns["user_system_access"])
     upgrade(connection)
-
-
-def _require_identity_index(connection) -> None:
-    index = connection.execute(sa.text("""
-        SELECT i.indisunique, i.indisvalid, i.indisready,
-               i.indpred IS NULL AS nonpartial, i.indnkeyatts, i.indnatts, am.amname,
-               i.indoption::smallint[] AS key_options,
-               ARRAY(SELECT pg_get_indexdef(i.indexrelid, n, false)
-                     FROM generate_series(1, i.indnkeyatts) AS n ORDER BY n) AS keys
-        FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-        JOIN pg_am am ON am.oid = c.relam
-        WHERE i.indrelid = to_regclass('monthly_menu_items')
-          AND c.relname = 'uq_monthly_menu_items_scope_identity'
-    """)).mappings().one_or_none()
-    # PostgreSQL's deparser, not a substring/name check, supplies each complete key.
-    expected = ["monthly_menu_id", "name"] + [
-        f"COALESCE({name}, ''::character varying)"
-        for name in ("daypart", "category", "diet_type", "facility_override")
-    ]
-    if not index or not (
-        index["indisunique"] and index["indisvalid"] and index["indisready"] and index["nonpartial"]
-        and index["indnkeyatts"] == index["indnatts"] == 6 and index["amname"] == "btree"
-        and list(index["key_options"]) == [0] * 6
-        and list(index["keys"]) == expected
-    ):
-        raise MigrationBlocked(
-            "0027 blocked: prior 0023 unique nonpartial six-key NULL-coalescing identity index required; C2 remediation needed"
-        )
 
 
 def _require_access_schema(inspector, columns) -> None:
