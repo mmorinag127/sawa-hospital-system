@@ -7,6 +7,24 @@ const yaml = require("js-yaml");
 const repoRoot = path.resolve(__dirname, "../../..");
 const read = (relativePath) => fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 
+function oidcSteps(workflow) {
+  return Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
+    (job.steps || []).filter(step => step.uses === "google-github-actions/auth@v3" && step.with?.token_format === "id_token")
+      .map(step => ({ jobName, ...step })));
+}
+
+function assertOidcContract(workflow, expected) {
+  const actual = oidcSteps(yaml.load(workflow));
+  assert.deepEqual(actual.map(step => `${step.jobName}:${step.id}`).sort(), expected.map(step => `${step.jobName}:${step.id}`).sort());
+  for (const step of actual) {
+    assert.equal(step.with.token_format, "id_token");
+    assert.equal(step.with.id_token_audience, "${{ env.GOOGLE_OAUTH_CLIENT_ID }}");
+    assert.equal(step.with.id_token_include_email, true);
+    assert.equal(step.with.workload_identity_provider, expected.find(item => item.id === step.id).provider);
+    assert.equal(step.with.service_account, expected.find(item => item.id === step.id).serviceAccount);
+  }
+}
+
 test("staging deploy requires a dedicated Google OAuth client", () => {
   const workflow = read(".github/workflows/deploy-stg.yml");
 
@@ -48,7 +66,6 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(stgWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}/);
   assert.match(stgWorkflow, /id: auth-frontend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(stgWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-frontend\.outputs\.id_token \}\}/);
-  assert.equal((stgWorkflow.match(/token_format: id_token/g) || []).length, 3);
   assert.equal((stgWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 2);
   assert.match(prodWorkflow, /id: auth-backend[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-backend\.outputs\.id_token \}\}/);
@@ -57,8 +74,21 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(prodWorkflow, /id: auth-db[\s\S]*token_format: id_token[\s\S]*id_token_audience: \$\{\{ env\.GOOGLE_OAUTH_CLIENT_ID \}\}[\s\S]*id_token_include_email: true/);
   assert.match(prodWorkflow, /DEPLOY_ID_TOKEN: \$\{\{ steps\.auth-db\.outputs\.id_token \}\}/);
   assert.match(prodWorkflow, /--deploy-verification-token "\$DEPLOY_ID_TOKEN"/);
-  assert.equal((prodWorkflow.match(/token_format: id_token/g) || []).length, 3);
   assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
+  assertOidcContract(stgWorkflow, [
+    { jobName: "deploy-backend", id: "auth-backend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
+    { jobName: "deploy-frontend", id: "auth-frontend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
+    { jobName: "deploy-frontend", id: "auth-menu-master-live", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
+    { jobName: "deploy-frontend", id: "auth-output-source-live", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
+  ]);
+  assertOidcContract(prodWorkflow, [
+    { jobName: "prod-db-bootstrap-gate", id: "auth-db", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
+    { jobName: "deploy-backend", id: "auth-backend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
+    { jobName: "deploy-frontend", id: "auth-frontend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
+  ]);
+  assert.match(prodWorkflow, /test "\$EVENT_NAME" = "workflow_dispatch"/);
+  assert.match(prodWorkflow, /test "\$ACTOR" = "\$OWNER"/);
+  assert.match(prodWorkflow, /test "\$PRODUCTION_CONFIRMATION" = "DEPLOY_PRODUCTION"/);
   assert.match(stgWorkflow, /bash scripts\/bootstrap_automation_user\.sh stg/);
   const jobs = yaml.load(stgWorkflow).jobs;
   const backendChanged = "needs.source-gate.outputs.backend_changed == 'true'";
