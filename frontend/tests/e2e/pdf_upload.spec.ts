@@ -93,3 +93,40 @@ test("pdf upload page shows uploaded PDF rows and allows retry for incomplete ro
   await expect(page.locator(".history-card").filter({ hasText: "pending.pdf" }).getByText("未処理")).toBeVisible();
   expect(requests).toEqual([{ method: "POST", path: "/api/ingest/uploads/UPL-pending/retry" }]);
 });
+
+test("pdf upload form sends the explicitly selected MUI facility and week", async ({ page }) => {
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+  let multipartPayload = "";
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const method = route.request().method().toUpperCase();
+    if (url.pathname.endsWith("/auth/me")) {
+      await route.fulfill({ status: 200, json: { role: "operator" } });
+      return;
+    }
+    if (url.pathname.endsWith("/facilities")) {
+      await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-E2E", name: "E2E施設" }] } });
+      return;
+    }
+    if (url.pathname.endsWith("/ingest/upload") && method === "POST") {
+      multipartPayload = route.request().postData() || "";
+      await route.fulfill({ status: 200, json: { accepted: true, filename: "selected.pdf" } });
+      return;
+    }
+    await route.fulfill({ status: 200, json: { items: [] } });
+  });
+  await page.goto(`${baseUrl}/pdf-upload`);
+  await page.getByLabel("施設", { exact: true }).click();
+  await page.getByRole("option", { name: "E2E施設 (FAC-E2E)" }).click();
+  await page.getByLabel("対象月", { exact: true }).fill("2026-05");
+  await page.getByLabel("対象週", { exact: true }).click();
+  await page.getByRole("option").filter({ hasText: "2026-05" }).first().click();
+  await page.locator('input[type="file"]').setInputFiles({ name: "selected.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
+  await page.getByRole("button", { name: "PDFを登録" }).click();
+  expect(multipartPayload).toContain("FAC-E2E");
+  expect(multipartPayload).toContain("2026-05@");
+});

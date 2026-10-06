@@ -25,6 +25,8 @@ const orderIdFromWorkflowPath = (asPath: string): string => {
 
 type WorkflowV2 = {
   order_id: string;
+  revision?: number | null;
+  source?: string | null;
   state: string;
   headline?: string | null;
   primary_action?: string | null;
@@ -296,6 +298,7 @@ type SheetAutoEditResult = {
     updated_at?: string | null;
     finished_at?: string | null;
     error?: string | null;
+    workflow_result_revision?: number | null;
   } | null;
 };
 
@@ -370,13 +373,9 @@ type FacilityOption = {
   name: string;
 };
 
-type FaxTemplateOption = {
-  template_id: string;
-  label?: string | null;
-  description?: string | null;
-  template_family?: string | null;
-  template_version?: number | string | null;
-  quantity_headers?: string[];
+type CanonicalFacilityResolution = {
+  status: "ready" | "pending" | "error" | "missing" | "unregistered" | "ambiguous";
+  option: FacilityOption | null;
 };
 
 type FacilityTemplateStatus = {
@@ -415,6 +414,39 @@ const emptyContext = {
   week_end: "",
 };
 
+const resolveCanonicalFacility = (
+  facilityId: string,
+  facilityOptions: FacilityOption[],
+  loading: boolean,
+  error: string,
+): CanonicalFacilityResolution => {
+  if (loading) return { status: "pending", option: null };
+  if (error) return { status: "error", option: null };
+  const normalizedFacilityId = facilityId.trim();
+  if (!normalizedFacilityId) return { status: "missing", option: null };
+  const matches = facilityOptions.filter((option) => option.id === normalizedFacilityId);
+  if (matches.length === 1) return { status: "ready", option: matches[0] };
+  if (matches.length > 1) return { status: "ambiguous", option: null };
+  return { status: "unregistered", option: null };
+};
+
+const canonicalFacilityResolutionMessage = (resolution: CanonicalFacilityResolution) => {
+  switch (resolution.status) {
+    case "pending":
+      return "正本の施設一覧を取得中です。取得完了まで施設の反映・保存・OCR実行はできません。";
+    case "error":
+      return "正本の施設一覧を取得できません。施設の反映・保存・OCR実行はできません。";
+    case "missing":
+      return "正本の施設を選択してください。";
+    case "unregistered":
+      return "この施設IDは正本の施設一覧に未登録です。内容を確認するまで保存・OCR実行はできません。";
+    case "ambiguous":
+      return "この施設IDは正本の施設一覧で一意に照合できません。内容を確認するまで保存・OCR実行はできません。";
+    default:
+      return "";
+  }
+};
+
 const defaultSheet = {
   rows: [
     {
@@ -427,10 +459,39 @@ const defaultSheet = {
 
 const formatJson = (value: unknown) => JSON.stringify(value ?? null, null, 2);
 
+const isPositiveWorkflowRevision = (value: unknown): value is number => (
+  typeof value === "number" && Number.isInteger(value) && value > 0
+);
+
+type WorkflowRevisionToken = {
+  revision: number;
+  bootstrap: boolean;
+};
+
+const workflowRevisionTokenFromRead = (workflow: WorkflowV2): WorkflowRevisionToken | null => {
+  if (isPositiveWorkflowRevision(workflow.revision)) {
+    return { revision: workflow.revision, bootstrap: false };
+  }
+  if (
+    workflow.revision === 0
+    && workflow.state === "not_initialized"
+    && workflow.source === "workflow_v2_projection"
+  ) {
+    return { revision: 0, bootstrap: true };
+  }
+  return null;
+};
+
 const formatApiError = (err: any, fallback: string) => {
+  if (err?.response?.status === 428) {
+    return "workflow revision を取得できません。再読込してから操作してください。";
+  }
+  if (err?.response?.status === 409) {
+    return "他の更新と競合しました。編集中の値は保持しています。最新状態を確認してから、もう一度保存してください。";
+  }
   const detail = err?.response?.data?.detail;
   if (detail === "facility_template_unresolved") {
-    return "施設テンプレートが未登録です。下の「施設テンプレート登録」で帳票レイアウトを登録してから、Step1を保存してください。";
+    return "施設設定の JSON 正本に帳票テンプレートがありません。施設設定を完了してから、Step1を保存してください。";
   }
   if (detail === "selected_ocr_required" || detail === "selected_ocr_missing") {
     return "正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。";
@@ -472,12 +533,6 @@ const formatApiError = (err: any, fallback: string) => {
     return JSON.stringify(detail);
   }
   return String(err?.message || fallback);
-};
-
-const formatFaxTemplateOptionLabel = (option: FaxTemplateOption | null | undefined) => {
-  if (!option) return "";
-  const main = option.description || option.label || option.template_family || option.template_id;
-  return main === option.template_id ? option.template_id : `${main} (${option.template_id})`;
 };
 
 const normalizeExpandedCellCopyMode = (value?: unknown): ExpandedCellCopyMode => {
@@ -1188,6 +1243,8 @@ export default function OrderWorkflowV2Page() {
     }
     return orderIdFromWorkflowPath(router.asPath || "");
   }, [router.asPath, router.query.id]);
+  const activeOrderIdRef = useRef(orderId);
+  activeOrderIdRef.current = orderId;
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
@@ -1200,9 +1257,6 @@ export default function OrderWorkflowV2Page() {
   const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
   const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
   const [facilityOptionsError, setFacilityOptionsError] = useState("");
-  const [faxTemplateOptions, setFaxTemplateOptions] = useState<FaxTemplateOption[]>([]);
-  const [faxTemplateOptionsLoading, setFaxTemplateOptionsLoading] = useState(false);
-  const [faxTemplateOptionsError, setFaxTemplateOptionsError] = useState("");
   const [facilityTemplateStatus, setFacilityTemplateStatus] = useState<FacilityTemplateStatus>({
     facilityId: "",
     templateId: "",
@@ -1219,7 +1273,6 @@ export default function OrderWorkflowV2Page() {
   const [showFacilityTemplateEditor, setShowFacilityTemplateEditor] = useState(false);
   const [facilityTemplateSwapLeft, setFacilityTemplateSwapLeft] = useState("");
   const [facilityTemplateSwapRight, setFacilityTemplateSwapRight] = useState("");
-  const [selectedFacilityTemplateId, setSelectedFacilityTemplateId] = useState("");
   const [expandedCellCopyMode, setExpandedCellCopyMode] = useState<ExpandedCellCopyMode>("auto");
   const [expandedCellCopySaving, setExpandedCellCopySaving] = useState(false);
   const [showExceptionRange, setShowExceptionRange] = useState(false);
@@ -1264,6 +1317,12 @@ export default function OrderWorkflowV2Page() {
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const sheetPayloadRef = useRef<SheetPayload | null>(null);
   const pendingSheetCellEditsRef = useRef<Map<string, { rowIndex: number; colIndex: number; value: string }>>(new Map());
+  const sheetDirtyRef = useRef(false);
+  const sheetEditGenerationRef = useRef(0);
+  const refreshGenerationRef = useRef(0);
+  const workflowRevisionRef = useRef<WorkflowRevisionToken | null>(null);
+  const workflowEditorVersionsRef = useRef<Record<string, { dirty: boolean; generation: number; baseRevision: number | null; baseIsBootstrap: boolean }>>({});
+  const [sheetDirty, setSheetDirty] = useState(false);
   const [ocrConfidenceDisplayMode, setOcrConfidenceDisplayMode] = useState<ConfidenceDisplayMode>("strict");
   const [sheetAutoEditResult, setSheetAutoEditResult] = useState<SheetAutoEditResult | null>(null);
   const [localAnomalyReview, setLocalAnomalyReview] = useState<Record<string, unknown> | null>(null);
@@ -1286,6 +1345,13 @@ export default function OrderWorkflowV2Page() {
   const [overlayImageSize, setOverlayImageSize] = useState({ naturalWidth: 0, naturalHeight: 0, width: 0, height: 0 });
   const overlayImageRef = useRef<HTMLImageElement | null>(null);
   const sheetAutoEditPollRef = useRef<number | null>(null);
+  const sheetAutoEditJobInputRef = useRef<{
+    jobId: string;
+    orderId: string;
+    sheetGeneration: number;
+    editorGeneration: number;
+    baseRevision: number;
+  } | null>(null);
   const selectedOcr = useMemo(
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
     [ocrResults, workflow?.selected_ocr_result_id],
@@ -1309,8 +1375,146 @@ export default function OrderWorkflowV2Page() {
     setPreSaveChecks({});
     setPreSaveStatus({});
   };
+  const markSheetDirty = () => {
+    sheetEditGenerationRef.current += 1;
+    beginWorkflowEditorEdit("sheet");
+    sheetDirtyRef.current = true;
+    setSheetDirty(true);
+  };
   const markSheetJsonStale = () => {
+    markSheetDirty();
     setSheetJsonStale(true);
+  };
+  const markSheetClean = () => {
+    finishWorkflowEditorEdit("sheet");
+    sheetDirtyRef.current = false;
+    setSheetDirty(false);
+  };
+  const editorVersion = (editor: string) => {
+    if (!workflowEditorVersionsRef.current[editor]) {
+      workflowEditorVersionsRef.current[editor] = { dirty: false, generation: 0, baseRevision: null, baseIsBootstrap: false };
+    }
+    return workflowEditorVersionsRef.current[editor];
+  };
+  const hasDirtyWorkflowEditor = () => Object.values(workflowEditorVersionsRef.current).some((entry) => entry.dirty);
+  const beginWorkflowEditorEdit = (editor: string) => {
+    const current = editorVersion(editor);
+    if (!current.dirty) {
+      current.baseRevision = workflowRevisionRef.current?.revision ?? null;
+      current.baseIsBootstrap = Boolean(workflowRevisionRef.current?.bootstrap);
+    }
+    current.dirty = true;
+    current.generation += 1;
+  };
+  const finishWorkflowEditorEdit = (editor: string) => {
+    const current = editorVersion(editor);
+    current.dirty = false;
+    current.baseRevision = null;
+    current.baseIsBootstrap = false;
+  };
+  const adoptReadWorkflow = (next: WorkflowV2 | null | undefined) => {
+    if (!next) return;
+    setWorkflow(next);
+    const token = workflowRevisionTokenFromRead(next);
+    if (token) {
+      workflowRevisionRef.current = token;
+      return;
+    }
+    workflowRevisionRef.current = null;
+    setError("workflow revision が不正です。再読込してから操作してください。");
+  };
+  const canAdoptReadEditorInput = (editor: string) => !editorVersion(editor).dirty;
+  const captureWorkflowInputVersion = (editor: string) => {
+    const current = editorVersion(editor);
+    return {
+      editor,
+      orderId: activeOrderIdRef.current,
+      editGeneration: sheetEditGenerationRef.current,
+      editorGeneration: current.generation,
+      revision: current.baseRevision,
+      bootstrap: current.baseIsBootstrap,
+    };
+  };
+  const workflowMutationConfig = (
+    captured: ReturnType<typeof captureWorkflowInputVersion>,
+    config: any = {},
+  ) => {
+    const revision = captured.revision;
+    if (
+      workflowRevisionRef.current === null
+      || (!isPositiveWorkflowRevision(revision) && !(revision === 0 && captured.bootstrap))
+    ) {
+      throw new Error("workflow revision を取得できません。再読込してから操作してください。");
+    }
+    const headers = (config.headers && typeof config.headers === "object") ? config.headers as Record<string, string> : {};
+    return { ...config, headers: { ...headers, "If-Match": `"${revision}"` } };
+  };
+  const workflowFromMutationResponse = (data: unknown): WorkflowV2 | null => {
+    if (!data || typeof data !== "object") return null;
+    const candidate = (data as { workflow?: unknown }).workflow || data;
+    return candidate && typeof candidate === "object" ? candidate as WorkflowV2 : null;
+  };
+  const adoptOwnWorkflowCommandResponse = (
+    response: unknown,
+    captured: ReturnType<typeof captureWorkflowInputVersion>,
+  ) => {
+    const current = editorVersion(captured.editor);
+    if (
+      (isPositiveWorkflowRevision(captured.revision) || (captured.revision === 0 && captured.bootstrap))
+      && captured.orderId === activeOrderIdRef.current
+      && captured.editGeneration === sheetEditGenerationRef.current
+      && captured.editorGeneration === current.generation
+      && captured.revision === current.baseRevision
+      && captured.bootstrap === current.baseIsBootstrap
+    ) {
+      const nextWorkflow = workflowFromMutationResponse(response);
+      const nextRevision = nextWorkflow?.revision;
+      if (!isPositiveWorkflowRevision(nextRevision)) {
+        throw new Error("workflow command の応答 revision を取得できません。再読込してから操作してください。");
+      }
+      adoptReadWorkflow(nextWorkflow);
+      current.baseRevision = nextRevision;
+      current.baseIsBootstrap = false;
+      return true;
+    }
+    return false;
+  };
+  const executeWorkflowMutation = async <T extends { data: unknown }>(
+    editor: string,
+    request: (config: ReturnType<typeof workflowMutationConfig>) => Promise<T>,
+  ) => {
+    beginWorkflowEditorEdit(editor);
+    const captured = captureWorkflowInputVersion(editor);
+    const response = await request(workflowMutationConfig(captured));
+    if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
+      throw new Error("workflow command の処理中に注文または入力が変更されました。再読込してから操作してください。");
+    }
+    finishWorkflowEditorEdit(editor);
+    return response;
+  };
+  const executeSheetValidation = async <T extends { data: unknown }>(
+    request: (config: ReturnType<typeof workflowMutationConfig>) => Promise<T>,
+    onSuccess?: (captured: ReturnType<typeof captureWorkflowInputVersion>, response: T) => void,
+  ) => {
+    const wasDirty = sheetDirtyRef.current;
+    if (!wasDirty) beginWorkflowEditorEdit("sheet");
+    const captured = captureWorkflowInputVersion("sheet");
+    const response = await request(workflowMutationConfig(captured));
+    if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
+      throw new Error("シート確認中に注文または入力が変更されました。再読込してから操作してください。");
+    }
+    onSuccess?.(captured, response);
+    if (!wasDirty) finishWorkflowEditorEdit("sheet");
+    return response;
+  };
+  const discardSheetDraft = () => {
+    sheetEditGenerationRef.current += 1;
+    pendingSheetCellEditsRef.current.clear();
+    sheetPayloadRef.current = null;
+    markSheetClean();
+    setSheetPayload(null);
+    setSheetJson(formatJson(defaultSheet));
+    setSheetJsonStale(false);
   };
   const applyPreSaveState = (
     checks: PreSaveChecks | null | undefined,
@@ -1365,7 +1569,18 @@ export default function OrderWorkflowV2Page() {
   const selectedWeekRange = useMemo(() => weekRangeFromValue(selectedWeekValue), [selectedWeekValue]);
   const effectiveWeekStart = contextForm.week_start || selectedWeekRange.week_start;
   const effectiveWeekEnd = contextForm.week_end || selectedWeekRange.week_end;
-  const contextReady = Boolean(contextForm.facility_id.trim() && effectiveWeekStart && effectiveWeekEnd);
+  const contextFacilityResolution = useMemo(
+    () => resolveCanonicalFacility(
+      contextForm.facility_id,
+      facilityOptions,
+      facilityOptionsLoading,
+      facilityOptionsError,
+    ),
+    [contextForm.facility_id, facilityOptions, facilityOptionsError, facilityOptionsLoading],
+  );
+  const contextReady = Boolean(
+    contextFacilityResolution.status === "ready" && effectiveWeekStart && effectiveWeekEnd,
+  );
   const workflowContextConfirmed = Boolean(
     workflow?.facility_id
       && workflow?.week_start
@@ -1413,10 +1628,7 @@ export default function OrderWorkflowV2Page() {
       "week_unresolved",
     ].includes(item),
   );
-  const selectedFacility = useMemo(
-    () => facilityOptions.find((option) => option.id === contextForm.facility_id) || null,
-    [contextForm.facility_id, facilityOptions],
-  );
+  const selectedFacility = contextFacilityResolution.option;
   const workflowFacilityOption = useMemo(
     () => facilityOptions.find((option) => option.id === workflow?.facility_id) || null,
     [facilityOptions, workflow?.facility_id],
@@ -1427,14 +1639,6 @@ export default function OrderWorkflowV2Page() {
   const contextFacilityLabel = contextForm.facility_id
     ? (selectedFacility ? formatFacilityLabel(selectedFacility) : contextForm.facility_id)
     : "未設定";
-  const selectedFacilityTemplateOption = useMemo(
-    () => faxTemplateOptions.find((option) => option.template_id === selectedFacilityTemplateId) || null,
-    [faxTemplateOptions, selectedFacilityTemplateId],
-  );
-  const selectedFacilityRegisteredTemplateOption = useMemo(
-    () => faxTemplateOptions.find((option) => option.template_id === facilityTemplateStatus.templateId) || null,
-    [facilityTemplateStatus.templateId, faxTemplateOptions],
-  );
   const facilityTemplateMissing = Boolean(
     contextForm.facility_id
       && !facilityTemplateStatus.loading
@@ -1724,6 +1928,7 @@ export default function OrderWorkflowV2Page() {
     : "";
 
   const applyWeekValue = (value: string) => {
+    beginWorkflowEditorEdit("context");
     const range = weekRangeFromValue(value);
     setWeekDraft(value);
     setContextForm((current) => ({
@@ -1733,13 +1938,33 @@ export default function OrderWorkflowV2Page() {
     }));
   };
 
+  const applyCanonicalFacilityContext = (facilityId: string) => {
+    const resolution = resolveCanonicalFacility(
+      facilityId,
+      facilityOptions,
+      facilityOptionsLoading,
+      facilityOptionsError,
+    );
+    const canonicalFacility = resolution.option;
+    if (resolution.status !== "ready" || !canonicalFacility) {
+      setError(canonicalFacilityResolutionMessage(resolution));
+      setMessage("");
+      return false;
+    }
+    beginWorkflowEditorEdit("context");
+    setContextForm((current) => ({ ...current, facility_id: canonicalFacility.id }));
+    return true;
+  };
+
   const applyContextSuggestion = () => {
     if (!contextSuggestion) return;
+    const suggestedFacilityId = String(contextSuggestion.facility_id || "").trim();
+    if (!applyCanonicalFacilityContext(suggestedFacilityId)) return;
+    beginWorkflowEditorEdit("context");
     const weekValue = contextSuggestionWeekValue(contextSuggestion);
     const range = weekRangeFromValue(weekValue);
     setContextForm((current) => ({
       ...current,
-      facility_id: String(contextSuggestion.facility_id || current.facility_id || ""),
       week_start: String(contextSuggestion.week_start || range.week_start || current.week_start || ""),
       week_end: String(contextSuggestion.week_end || range.week_end || current.week_end || ""),
     }));
@@ -1752,59 +1977,76 @@ export default function OrderWorkflowV2Page() {
 
   const refreshAll = async () => {
     if (!orderId) return;
+    const requestedOrderId = orderId;
+    const refreshGeneration = refreshGenerationRef.current + 1;
+    refreshGenerationRef.current = refreshGeneration;
     const [workflowRes, ocrRes, inspectionRes, orderRes] = await Promise.all([
       apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`),
       apiClient.get<{ results: OcrResult[] }>(`/orders/${orderId}/workflow-v2/ocr-results`),
       apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
       apiClient.get<OrderDetail>(`/orders/${orderId}`),
     ]);
-    setWorkflow(workflowRes.data);
+    if (
+      refreshGeneration !== refreshGenerationRef.current
+      || requestedOrderId !== activeOrderIdRef.current
+    ) return;
+    adoptReadWorkflow(workflowRes.data);
     setOrderDetail(orderRes.data);
     applyPreSaveState(
       inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {},
       inspectionRes.data.pre_save_status || null,
     );
-    setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
+    if (canAdoptReadEditorInput("expandedCellCopy")) {
+      setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
+    }
     setOcrResults(Array.isArray(ocrRes.data.results) ? ocrRes.data.results : []);
     setInspection(inspectionRes.data);
     const savedSheet = inspectionRes.data.saved_sheet?.sheet;
-    if (savedSheet) {
+    const canReplaceSheet = !sheetDirtyRef.current && pendingSheetCellEditsRef.current.size === 0;
+    if (savedSheet && canReplaceSheet) {
       const normalizedSavedSheet = normalizeSheetPayload(savedSheet);
       setSheetPayload(normalizedSavedSheet);
-      markSheetJsonStale();
-    } else {
-      setSheetPayload(null);
-      setSheetJson(formatJson(defaultSheet));
-      setSheetJsonStale(false);
+      setSheetJsonStale(true);
+    } else if (!savedSheet && canReplaceSheet) {
+      discardSheetDraft();
     }
-    const suggestion = workflowRes.data.context_suggestion || null;
-    const suggestedWeekValue = contextSuggestionWeekValue(suggestion);
-    const suggestedRange = weekRangeFromValue(suggestedWeekValue);
-    const suggestedContext = {
-      facility_id: String(suggestion?.facility_id || ""),
-      week_start: String(suggestion?.week_start || suggestedRange.week_start || ""),
-      week_end: String(suggestion?.week_end || suggestedRange.week_end || ""),
-    };
     const confirmedContext = {
       facility_id: workflowRes.data.facility_id || "",
       week_start: workflowRes.data.week_start || "",
       week_end: workflowRes.data.week_end || "",
     };
-    setContextForm((current) => {
-      if (confirmedContext.facility_id || confirmedContext.week_start || confirmedContext.week_end) {
-        return confirmedContext;
-      }
-      if (current.facility_id || current.week_start || current.week_end) {
-        return current;
-      }
-      if (suggestedContext.facility_id || suggestedContext.week_start || suggestedContext.week_end) {
-        return suggestedContext;
-      }
-      return emptyContext;
-    });
-    const workflowWeekValue = weekValueFromRange(workflowRes.data.week_start, workflowRes.data.week_end);
-    setWeekDraft((current) => workflowWeekValue || current || suggestedWeekValue || "");
+    if (canAdoptReadEditorInput("context")) {
+      setContextForm((current) => {
+        if (confirmedContext.facility_id || confirmedContext.week_start || confirmedContext.week_end) {
+          return confirmedContext;
+        }
+        if (current.facility_id || current.week_start || current.week_end) {
+          return current;
+        }
+        return emptyContext;
+      });
+      const workflowWeekValue = weekValueFromRange(workflowRes.data.week_start, workflowRes.data.week_end);
+      setWeekDraft((current) => workflowWeekValue || current || "");
+    }
   };
+
+  useEffect(() => {
+    refreshGenerationRef.current += 1;
+    sheetEditGenerationRef.current += 1;
+    sheetDirtyRef.current = false;
+    workflowEditorVersionsRef.current = {};
+    sheetAutoEditJobInputRef.current = null;
+    pendingSheetCellEditsRef.current.clear();
+    sheetPayloadRef.current = null;
+    setSheetDirty(false);
+    setSheetPayload(null);
+    setSheetJson(formatJson(defaultSheet));
+    setSheetJsonStale(false);
+    setLocalAnomalyReview(null);
+    setSheetAutoEditResult(null);
+    setSelectedAnomalyIndex(null);
+    setSelectedAutoEditIndex(null);
+  }, [orderId]);
 
   useEffect(() => {
     if (!orderId) return;
@@ -1883,11 +2125,12 @@ export default function OrderWorkflowV2Page() {
       });
       setFacilityResolvedConfig(null);
       setFacilityTemplateColumns([]);
-      setFacilityTemplateColumnDraft([]);
+      if (canAdoptReadEditorInput("templateColumns")) {
+        setFacilityTemplateColumnDraft([]);
+      }
       setFacilityTemplateMessage("");
       setFacilityTemplateSwapLeft("");
       setFacilityTemplateSwapRight("");
-      setSelectedFacilityTemplateId("");
       return;
     }
     setFacilityTemplateStatus((current) => ({
@@ -1907,10 +2150,12 @@ export default function OrderWorkflowV2Page() {
       const facilityTemplateId = String(resolved?.facility_template_id || resolved?.facility_template_name || "").trim();
       setFacilityResolvedConfig(resolved);
       setFacilityTemplateColumns(resolvedColumns);
-      setFacilityTemplateColumnDraft(resolvedColumns);
-      setFacilityTemplateSwapLeft("");
-      setFacilityTemplateSwapRight("");
-      setFacilityTemplateMessage("");
+      if (canAdoptReadEditorInput("templateColumns")) {
+        setFacilityTemplateColumnDraft(resolvedColumns);
+        setFacilityTemplateSwapLeft("");
+        setFacilityTemplateSwapRight("");
+        setFacilityTemplateMessage("");
+      }
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
         templateId,
@@ -1919,7 +2164,6 @@ export default function OrderWorkflowV2Page() {
         loading: false,
         error: "",
       });
-      setSelectedFacilityTemplateId(templateId || "");
     } catch (err: any) {
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
@@ -1931,9 +2175,11 @@ export default function OrderWorkflowV2Page() {
       });
       setFacilityResolvedConfig(null);
       setFacilityTemplateColumns([]);
-      setFacilityTemplateColumnDraft([]);
-      setFacilityTemplateSwapLeft("");
-      setFacilityTemplateSwapRight("");
+      if (canAdoptReadEditorInput("templateColumns")) {
+        setFacilityTemplateColumnDraft([]);
+        setFacilityTemplateSwapLeft("");
+        setFacilityTemplateSwapRight("");
+      }
     }
   };
 
@@ -1965,42 +2211,6 @@ export default function OrderWorkflowV2Page() {
       }
     };
     loadFacilities();
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const loadFaxTemplateOptions = async () => {
-      setFaxTemplateOptionsLoading(true);
-      setFaxTemplateOptionsError("");
-      try {
-        const res = await apiClient.get("/facilities/fax-template-options");
-        if (!active) return;
-        const raw = Array.isArray(res.data?.templates) ? res.data.templates : [];
-        const normalized = raw
-          .map((item: any) => ({
-            template_id: String(item?.template_id || ""),
-            label: typeof item?.label === "string" ? item.label : null,
-            description: typeof item?.description === "string" ? item.description : null,
-            template_family: typeof item?.template_family === "string" ? item.template_family : null,
-            template_version: item?.template_version ?? null,
-            quantity_headers: Array.isArray(item?.quantity_headers)
-              ? item.quantity_headers.map((value: unknown) => String(value || "")).filter(Boolean)
-              : [],
-          }))
-          .filter((item: FaxTemplateOption) => item.template_id);
-        setFaxTemplateOptions(normalized);
-      } catch {
-        if (!active) return;
-        setFaxTemplateOptions([]);
-        setFaxTemplateOptionsError("帳票レイアウト候補を取得できませんでした。");
-      } finally {
-        if (active) setFaxTemplateOptionsLoading(false);
-      }
-    };
-    loadFaxTemplateOptions();
     return () => {
       active = false;
     };
@@ -2041,6 +2251,7 @@ export default function OrderWorkflowV2Page() {
               .filter((item: WeekOption) => item.week_id)
           : [];
         setWeekOptions(options);
+        if (!canAdoptReadEditorInput("context")) return;
         setWeekDraft((current) => {
           const currentNormalized = normalizeWeekValue(current);
           if (currentNormalized) return currentNormalized;
@@ -2153,64 +2364,29 @@ export default function OrderWorkflowV2Page() {
 
   const confirmContext = () =>
     runAction("Step1 context confirm", async () => {
+      if (contextFacilityResolution.status !== "ready") {
+        throw new Error(canonicalFacilityResolutionMessage(contextFacilityResolution));
+      }
       const fallbackRange = weekRangeFromValue(selectedWeekValue);
-      await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
+      beginWorkflowEditorEdit("context");
+      const contextInputVersion = captureWorkflowInputVersion("context");
+      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
         facility_id: contextForm.facility_id,
         week_start: contextForm.week_start || fallbackRange.week_start,
         week_end: contextForm.week_end || fallbackRange.week_end,
-      });
+      }, workflowMutationConfig(contextInputVersion));
+      if (!adoptOwnWorkflowCommandResponse(response.data, contextInputVersion)) {
+        throw new Error("Step1設定の保存中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      finishWorkflowEditorEdit("context");
     });
-
-  const registerFacilityTemplate = () =>
-    runAction(
-      "施設テンプレート登録",
-      async () => {
-        const facilityId = contextForm.facility_id.trim();
-        const templateId = selectedFacilityTemplateId.trim();
-        if (!facilityId) {
-          throw new Error("施設を選択してください");
-        }
-        if (!templateId) {
-          throw new Error("帳票レイアウトを選択してください");
-        }
-        const res = await apiClient.put(`/facilities/${facilityId}/fax-template`, {
-          fax_template_id: templateId,
-          fax_template_ids: [templateId],
-        });
-        const resolved = res.data?.resolved_config || {};
-        setFacilityTemplateStatus({
-          facilityId,
-          templateId: String(resolved?.fax_template_id || templateId),
-          templateIds: Array.isArray(resolved?.fax_template_ids)
-            ? resolved.fax_template_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean)
-            : [templateId],
-          facilityTemplateId: String(resolved?.facility_template_id || resolved?.facility_template_name || contextFacilityLabel || facilityId),
-          loading: false,
-          error: "",
-        });
-        if (contextReady) {
-          await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
-            facility_id: contextForm.facility_id,
-            week_start: contextForm.week_start,
-            week_end: contextForm.week_end,
-          });
-        } else {
-          await loadFacilityTemplateStatus(facilityId);
-        }
-      },
-      {
-        successMessage: contextReady
-          ? "施設テンプレートを登録し、Step1設定を保存しました"
-          : "施設テンプレートを登録しました。施設と週を確認してStep1を保存してください。",
-        refreshAfter: contextReady,
-      },
-    );
 
   const updateFacilityTemplateColumn = (
     rowIndex: number,
     key: keyof FacilityTemplateColumn,
     value: string,
   ) => {
+    beginWorkflowEditorEdit("templateColumns");
     setFacilityTemplateColumnDraft((prev) =>
       prev.map((column, idx) => {
         if (idx !== rowIndex) return column;
@@ -2233,6 +2409,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const applyFacilityTemplateColumnSwap = (leftIndex: number, rightIndex: number) => {
+    beginWorkflowEditorEdit("templateColumns");
     setShowFacilityTemplateEditor(true);
     setFacilityTemplateColumnDraft((prev) => swapFacilityTemplateColumns(prev, leftIndex, rightIndex));
     setFacilityTemplateSwapLeft("");
@@ -2251,18 +2428,24 @@ export default function OrderWorkflowV2Page() {
   };
 
   const appendFacilityTemplateColumn = () => {
+    beginWorkflowEditorEdit("templateColumns");
     setShowFacilityTemplateEditor(true);
     setFacilityTemplateColumnDraft((prev) => reindexFacilityTemplateColumns([...prev, createEmptyFacilityTemplateColumn(prev.length)]));
     setFacilityTemplateMessage("施設区分列を追加しました。保存するとこの施設のテンプレートに反映されます。");
   };
 
   const deleteFacilityTemplateColumn = (rowIndex: number) => {
+    beginWorkflowEditorEdit("templateColumns");
     setShowFacilityTemplateEditor(true);
     setFacilityTemplateColumnDraft((prev) => removeFacilityTemplateColumn(prev, rowIndex));
     setFacilityTemplateMessage("施設区分列を削除しました。保存するとこの施設のテンプレートに反映されます。");
   };
 
   const saveFacilityTemplateColumns = async () => {
+    if (contextFacilityResolution.status !== "ready") {
+      setFacilityTemplateMessage(canonicalFacilityResolutionMessage(contextFacilityResolution));
+      return;
+    }
     const facilityId = contextForm.facility_id.trim();
     if (!facilityId || !orderId) {
       setFacilityTemplateMessage("施設を選択してください。");
@@ -2277,15 +2460,13 @@ export default function OrderWorkflowV2Page() {
     setError("");
     try {
       const columns = buildFacilityTemplateColumnsPayload(facilityTemplateColumnDraft);
-      const response = await apiClient.put(`/orders/${orderId}/workflow-v2/facility-template-columns`, { columns });
+      const response = await executeWorkflowMutation("templateColumns", (config) => apiClient.put(`/orders/${orderId}/workflow-v2/facility-template-columns`, { columns }, config));
       const resolved = response.data?.resolved_config || null;
       const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns ?? columns);
       setFacilityResolvedConfig(resolved);
       setFacilityTemplateColumns(resolvedColumns);
       setFacilityTemplateColumnDraft(resolvedColumns);
-      setSheetPayload(null);
-      setSheetJson(formatJson(defaultSheet));
-      setSheetJsonStale(false);
+      discardSheetDraft();
       setFacilityTemplateMessage(
         `施設区分列を保存しました。OCR結果を${Number(response.data?.ocr_results_cleared || 0)}件破棄したため、Step1からOCRを再実行してください。`,
       );
@@ -2305,12 +2486,9 @@ export default function OrderWorkflowV2Page() {
     setError("");
     setMessage("");
     try {
-      const response = await apiClient.put(`/orders/${orderId}/workflow-v2/expanded-cell-copy-mode`, { mode: nextMode });
-      setWorkflow(response.data);
+      const response = await executeWorkflowMutation("expandedCellCopy", (config) => apiClient.put(`/orders/${orderId}/workflow-v2/expanded-cell-copy-mode`, { mode: nextMode }, config));
       setExpandedCellCopyMode(normalizeExpandedCellCopyMode(response.data?.expanded_cell_copy_mode));
-      setSheetPayload(null);
-      setSheetJson(formatJson(defaultSheet));
-      setSheetJsonStale(false);
+      discardSheetDraft();
       await refreshAll();
       if (response.data?.selected_ocr_result_id) {
         setVisibleStep(3);
@@ -2345,7 +2523,7 @@ export default function OrderWorkflowV2Page() {
       const response = await apiClient.get<QuadReviewPayload>(`/orders/${orderId}/workflow-v2/quad-review`);
       setQuadReview(response.data);
       const savedQuad = response.data?.saved_override?.quad_px;
-      if (Array.isArray(savedQuad) && savedQuad.length === 4) {
+      if (canAdoptReadEditorInput("quad") && Array.isArray(savedQuad) && savedQuad.length === 4) {
         setManualQuadPoints(savedQuad);
       }
     } catch (err: any) {
@@ -2364,23 +2542,27 @@ export default function OrderWorkflowV2Page() {
     setError("");
     setQuadReviewMessage("");
     try {
-      await apiClient.put(`/orders/${orderId}/workflow-v2/quad-review`, {
+      beginWorkflowEditorEdit("quad");
+      const quadInputVersion = captureWorkflowInputVersion("quad");
+      const quadResponse = await apiClient.put(`/orders/${orderId}/workflow-v2/quad-review`, {
         decision,
         quad_px: quadPx,
-      });
+      }, workflowMutationConfig(quadInputVersion));
+      if (!adoptOwnWorkflowCommandResponse(quadResponse.data, quadInputVersion)) {
+        throw new Error("4点補正の保存中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      const rerunInputVersion = captureWorkflowInputVersion("quad");
       const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
         document_id: effectiveSelectedDocumentId || undefined,
-      });
-      const nextWorkflow = response.data?.workflow || response.data || null;
-      if (nextWorkflow) {
-        setWorkflow(nextWorkflow);
+      }, workflowMutationConfig(rerunInputVersion));
+      if (!adoptOwnWorkflowCommandResponse(response.data, rerunInputVersion)) {
+        throw new Error("OCR再実行中に注文または入力が変更されました。再読込してから操作してください。");
       }
-      setSheetPayload(null);
-      setSheetJson(formatJson(defaultSheet));
-      setSheetJsonStale(false);
+      finishWorkflowEditorEdit("quad");
+      discardSheetDraft();
       invalidateSheetPreSaveChecks();
       setMessage("4点補正を保存し、OCRを再実行中です。完了後に正解OCRを選択してください。");
       setVisibleStep(2);
@@ -2405,9 +2587,11 @@ export default function OrderWorkflowV2Page() {
       const savedXs = response.data?.saved_override?.corrected_xs;
       const detectedXs = response.data?.x_positions;
       const nextXs = Array.isArray(savedXs) && savedXs.length >= 2 ? savedXs : detectedXs;
-      setHeaderAxisXs((Array.isArray(nextXs) ? nextXs : []).map((value) => Number(value)).filter(Number.isFinite));
-      setSelectedHeaderAxisIndex(null);
-      setHeaderAxisAddMode(false);
+      if (canAdoptReadEditorInput("header")) {
+        setHeaderAxisXs((Array.isArray(nextXs) ? nextXs : []).map((value) => Number(value)).filter(Number.isFinite));
+        setSelectedHeaderAxisIndex(null);
+        setHeaderAxisAddMode(false);
+      }
     } catch (err: any) {
       setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
     } finally {
@@ -2439,24 +2623,31 @@ export default function OrderWorkflowV2Page() {
       ) {
         return;
       }
-      await apiClient.put(
+      beginWorkflowEditorEdit("header");
+      const headerInputVersion = captureWorkflowInputVersion("header");
+      const headerResponse = await apiClient.put(
         `/orders/${orderId}/workflow-v2/header-axis-review`,
         {
           corrected_xs: headerAxisXs,
           coordinate_space: coordinateSpace,
         },
-        { timeout: timeoutMs },
+        workflowMutationConfig(headerInputVersion, { timeout: timeoutMs }),
       );
-      await refreshAll();
-      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+      if (!adoptOwnWorkflowCommandResponse(headerResponse.data, headerInputVersion)) {
+        throw new Error("ヘッダー補正の保存中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      const rerunInputVersion = captureWorkflowInputVersion("header");
+      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
         document_id: effectiveSelectedDocumentId || undefined,
-      }, { timeout: timeoutMs });
-      setSheetPayload(null);
-      setSheetJson(formatJson(defaultSheet));
-      setSheetJsonStale(false);
+      }, workflowMutationConfig(rerunInputVersion, { timeout: timeoutMs }));
+      if (!adoptOwnWorkflowCommandResponse(response.data, rerunInputVersion)) {
+        throw new Error("OCR再実行中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      finishWorkflowEditorEdit("header");
+      discardSheetDraft();
       setSheetAutoEditResult(null);
       setLocalAnomalyReview(null);
       setSelectedAnomalyIndex(null);
@@ -2484,9 +2675,11 @@ export default function OrderWorkflowV2Page() {
       const savedYs = response.data?.saved_override?.corrected_ys;
       const detectedYs = response.data?.y_positions;
       const nextYs = Array.isArray(savedYs) && savedYs.length >= 2 ? savedYs : detectedYs;
-      setRowAxisYs((Array.isArray(nextYs) ? nextYs : []).map((value) => Number(value)).filter(Number.isFinite));
-      setSelectedRowAxisIndex(null);
-      setRowAxisAddMode(false);
+      if (canAdoptReadEditorInput("row")) {
+        setRowAxisYs((Array.isArray(nextYs) ? nextYs : []).map((value) => Number(value)).filter(Number.isFinite));
+        setSelectedRowAxisIndex(null);
+        setRowAxisAddMode(false);
+      }
     } catch (err: any) {
       setRowAxisMessage(formatApiError(err, "行推定確認データの取得に失敗しました"));
     } finally {
@@ -2508,25 +2701,32 @@ export default function OrderWorkflowV2Page() {
     setError("");
     setRowAxisMessage("");
     try {
+      beginWorkflowEditorEdit("row");
+      const rowInputVersion = captureWorkflowInputVersion("row");
       const timeoutMs = getHeaderAxisTimeoutMs();
-      await apiClient.put(
+      const rowResponse = await apiClient.put(
         `/orders/${orderId}/workflow-v2/row-axis-review`,
         {
           corrected_ys: rowAxisYs,
           coordinate_space: coordinateSpace,
         },
-        { timeout: timeoutMs },
+        workflowMutationConfig(rowInputVersion, { timeout: timeoutMs }),
       );
-      await refreshAll();
-      await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+      if (!adoptOwnWorkflowCommandResponse(rowResponse.data, rowInputVersion)) {
+        throw new Error("行境界補正の保存中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      const rerunInputVersion = captureWorkflowInputVersion("row");
+      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
         document_id: effectiveSelectedDocumentId || undefined,
-      }, { timeout: timeoutMs });
-      setSheetPayload(null);
-      setSheetJson(formatJson(defaultSheet));
-      setSheetJsonStale(false);
+      }, workflowMutationConfig(rerunInputVersion, { timeout: timeoutMs }));
+      if (!adoptOwnWorkflowCommandResponse(response.data, rerunInputVersion)) {
+        throw new Error("OCR再実行中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      finishWorkflowEditorEdit("row");
+      discardSheetDraft();
       setSheetAutoEditResult(null);
       setLocalAnomalyReview(null);
       setSelectedAnomalyIndex(null);
@@ -2548,6 +2748,7 @@ export default function OrderWorkflowV2Page() {
     const naturalHeight = image.naturalHeight || rect.height;
     const x = ((event.clientX - rect.left) / rect.width) * naturalWidth;
     const y = ((event.clientY - rect.top) / rect.height) * naturalHeight;
+    beginWorkflowEditorEdit("quad");
     setManualQuadPoints((current) => [...current, [Number(x.toFixed(2)), Number(y.toFixed(2))]].slice(0, 4));
   };
 
@@ -2562,6 +2763,7 @@ export default function OrderWorkflowV2Page() {
 
   const moveHeaderAxis = (index: number, nextX: number) => {
     const canvasWidth = Number(headerAxisReview?.canvas_size?.[0] || headerAxisReview?.coordinate_space?.width || 0);
+    beginWorkflowEditorEdit("header");
     setHeaderAxisXs((current) => {
       if (index < 0 || index >= current.length) return current;
       const minX = index > 0 ? current[index - 1] + 1 : 0;
@@ -2588,6 +2790,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const addHeaderAxisAt = (nextX: number) => {
+    beginWorkflowEditorEdit("header");
     setHeaderAxisXs((current) => {
       const next = normalizeHeaderAxisXs([...current, nextX]);
       const insertedIndex = next.findIndex((value) => Math.abs(value - Number(nextX)) < 1);
@@ -2601,6 +2804,7 @@ export default function OrderWorkflowV2Page() {
       setHeaderAxisMessage("削除するヘッダー縦軸を選択してください。");
       return;
     }
+    beginWorkflowEditorEdit("header");
     setHeaderAxisXs((current) => current.filter((_, idx) => idx !== selectedHeaderAxisIndex));
     setSelectedHeaderAxisIndex(null);
     setHeaderAxisMessage("");
@@ -2610,6 +2814,7 @@ export default function OrderWorkflowV2Page() {
     const detectedXs = (Array.isArray(headerAxisReview?.x_positions) ? headerAxisReview?.x_positions : [])
       .map((value) => Number(value))
       .filter(Number.isFinite);
+    beginWorkflowEditorEdit("header");
     setHeaderAxisXs(normalizeHeaderAxisXs(detectedXs));
     setSelectedHeaderAxisIndex(null);
     setHeaderAxisAddMode(false);
@@ -2652,6 +2857,7 @@ export default function OrderWorkflowV2Page() {
 
   const moveRowAxis = (index: number, nextY: number) => {
     const canvasHeight = Number(rowAxisReview?.canvas_size?.[1] || rowAxisReview?.coordinate_space?.height || 0);
+    beginWorkflowEditorEdit("row");
     setRowAxisYs((current) => {
       if (index < 0 || index >= current.length) return current;
       const minY = index > 0 ? current[index - 1] + 1 : 0;
@@ -2662,6 +2868,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const addRowAxisAt = (nextY: number) => {
+    beginWorkflowEditorEdit("row");
     setRowAxisYs((current) => {
       const next = normalizeRowAxisYs([...current, nextY]);
       const insertedIndex = next.findIndex((value) => Math.abs(value - Number(nextY)) < 1);
@@ -2675,6 +2882,7 @@ export default function OrderWorkflowV2Page() {
       setRowAxisMessage("削除する行境界を選択してください。");
       return;
     }
+    beginWorkflowEditorEdit("row");
     setRowAxisYs((current) => current.filter((_, idx) => idx !== selectedRowAxisIndex));
     setSelectedRowAxisIndex(null);
     setRowAxisMessage("");
@@ -2684,6 +2892,7 @@ export default function OrderWorkflowV2Page() {
     const detectedYs = (Array.isArray(rowAxisReview?.y_positions) ? rowAxisReview?.y_positions : [])
       .map((value) => Number(value))
       .filter(Number.isFinite);
+    beginWorkflowEditorEdit("row");
     setRowAxisYs(normalizeRowAxisYs(detectedYs));
     setSelectedRowAxisIndex(null);
     setRowAxisAddMode(false);
@@ -2705,6 +2914,9 @@ export default function OrderWorkflowV2Page() {
     runAction(
       "Step1 OCR run",
       async () => {
+        if (contextFacilityResolution.status !== "ready") {
+          throw new Error(canonicalFacilityResolutionMessage(contextFacilityResolution));
+        }
         const payload: Record<string, unknown> = {
           stale_action: "retry",
           mode: ocrRunMode,
@@ -2721,9 +2933,9 @@ export default function OrderWorkflowV2Page() {
             payload.ocr_prompt = ocrPrompt.trim();
           }
         }
-        await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
+        await executeWorkflowMutation("ocrRun", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
           ...payload,
-        });
+        }, config));
       },
       {
         successMessage: ocrRunMode === "llm" ? "Step1 AI OCR run が開始しました" : "Step1 OCR run が開始しました",
@@ -2735,7 +2947,7 @@ export default function OrderWorkflowV2Page() {
     runAction(
       "Step2 OCR select",
       async () => {
-        await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}/select`);
+        await executeWorkflowMutation("ocrSelection", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}/select`, undefined, config));
       },
       {
         successMessage: "正解OCRを選択しました",
@@ -2745,7 +2957,7 @@ export default function OrderWorkflowV2Page() {
 
   const deleteOcr = (ocrResultId: string) =>
     runAction("OCR result delete", async () => {
-      await apiClient.delete(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}`);
+      await executeWorkflowMutation("ocrDelete", (config) => apiClient.delete(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}`, config));
     });
 
   const generateSheetFromSelectedOcr = () =>
@@ -2910,6 +3122,8 @@ export default function OrderWorkflowV2Page() {
 
   const pollSheetAutoEditJob = (jobId: string, attempt = 0) => {
     if (!orderId || !jobId) return;
+    const expected = sheetAutoEditJobInputRef.current;
+    if (!expected || expected.jobId !== jobId || expected.orderId !== orderId) return;
     if (sheetAutoEditPollRef.current !== null) {
       window.clearTimeout(sheetAutoEditPollRef.current);
       sheetAutoEditPollRef.current = null;
@@ -2921,10 +3135,46 @@ export default function OrderWorkflowV2Page() {
           result?: SheetAutoEditResult | null;
         }>(`/orders/${orderId}/workflow-v2/sheet/auto-edit/${jobId}`);
         const job = response.data.job || null;
-        if (job?.status === "done" && response.data.result) {
-          setSheetAutoEditResult({ ...response.data.result, job });
-          setSelectedAutoEditIndex(null);
-          setMessage("AI自動編集の候補を作成しました");
+        const sheetEditor = editorVersion("sheet");
+        const sameInput = sheetAutoEditJobInputRef.current === expected
+          && expected.orderId === activeOrderIdRef.current
+          && expected.sheetGeneration === sheetEditGenerationRef.current
+          && expected.editorGeneration === sheetEditor.generation
+          && expected.baseRevision === sheetEditor.baseRevision;
+        if (!sameInput) return;
+        const terminal = job?.status === "done" || job?.status === "failed" || job?.status === "stopped";
+        if (terminal) {
+          if (sheetAutoEditPollRef.current !== null) {
+            window.clearTimeout(sheetAutoEditPollRef.current);
+            sheetAutoEditPollRef.current = null;
+          }
+          sheetAutoEditJobInputRef.current = null;
+          if (job?.status === "stopped") {
+            setSheetAutoEditResult({
+              status: "stopped",
+              patches: [],
+              llm: { status: "stopped", error: job.error || "AI自動編集は停止しました" },
+              job,
+            });
+            setError(job.error || "AI自動編集は停止しました。入力は保持されています。");
+            return;
+          }
+          const completionRevision = Number(job?.workflow_result_revision);
+          if (!isPositiveWorkflowRevision(completionRevision)) {
+            setError("AI自動編集の完了 revision を取得できません。再読込してから確認してください。");
+            return;
+          }
+          sheetEditor.baseRevision = completionRevision;
+          workflowRevisionRef.current = { revision: completionRevision, bootstrap: false };
+        }
+        if (job?.status === "done") {
+          if (response.data.result) {
+            setSheetAutoEditResult({ ...response.data.result, job });
+            setSelectedAutoEditIndex(null);
+            setMessage("AI自動編集の候補を作成しました");
+          } else {
+            setError("AI自動編集の候補結果を取得できません。入力は保持されています。");
+          }
           return;
         }
         if (job?.status === "failed") {
@@ -2968,15 +3218,30 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("AI自動編集に渡せるシートがありません");
       }
-      const response = await apiClient.post<{
+      const response = await executeSheetValidation((config) => apiClient.post<{
         job?: SheetAutoEditResult["job"];
+        workflow?: WorkflowV2;
       }>(
         `/orders/${orderId}/workflow-v2/sheet/auto-edit`,
         {
           sheet: parsed,
           use_llm: true,
+        },
+        config,
+      ), (captured, started) => {
+        const jobId = String(started.data.job?.job_id || "").trim();
+        const sheetEditor = editorVersion("sheet");
+        if (!jobId || captured.orderId !== activeOrderIdRef.current || captured.editorGeneration !== sheetEditor.generation || sheetEditor.baseRevision === null) {
+          throw new Error("AI自動編集 job の基準版を確定できません。再読込してから操作してください。");
         }
-      );
+        sheetAutoEditJobInputRef.current = {
+          jobId,
+          orderId: captured.orderId,
+          sheetGeneration: captured.editGeneration,
+          editorGeneration: sheetEditor.generation,
+          baseRevision: sheetEditor.baseRevision,
+        };
+      });
       const job = response.data.job || null;
       setSheetAutoEditResult({
         status: "running",
@@ -3118,10 +3383,11 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("異常候補の却下に使えるシートがありません");
       }
-      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
+      const response = await executeSheetValidation((config) => apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
         `/orders/${orderId}/workflow-v2/sheet/anomaly-review/dismiss`,
         { sheet: parsed, warning },
-      );
+        config,
+      ));
       const nextAnomalyReview = anomalyReviewWithoutWarning(response.data.anomaly_review || anomalyReview, warning);
       setLocalAnomalyReview(nextAnomalyReview);
       setInspection((current) => current ? { ...current, anomaly_review: nextAnomalyReview } : current);
@@ -3135,7 +3401,7 @@ export default function OrderWorkflowV2Page() {
   const saveSheet = () =>
     runAction("Step3 sheet save", async () => {
       const latestWorkflow = await apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`);
-      setWorkflow(latestWorkflow.data);
+      adoptReadWorkflow(latestWorkflow.data);
       if (!latestWorkflow.data?.selected_ocr_result_id) {
         setVisibleStep(2);
         throw new Error("正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。");
@@ -3144,13 +3410,21 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("保存できるシートがありません");
       }
+      const sheetEditGeneration = sheetEditGenerationRef.current;
       if (!effectiveAnomalyReviewConfirmed || !effectiveSheetReviewConfirmed) {
         throw new Error("シート保存前に、異常チェックとシート確認を完了してください。");
       }
-      await apiClient.put(`/orders/${orderId}/workflow-v2/sheet`, {
+      beginWorkflowEditorEdit("sheet");
+      const sheetInputVersion = captureWorkflowInputVersion("sheet");
+      const saveResponse = await apiClient.put<{ workflow?: WorkflowV2 }>(`/orders/${orderId}/workflow-v2/sheet`, {
         sheet: parsed,
         edited_by: "operator",
-      });
+      }, workflowMutationConfig(sheetInputVersion));
+      if (sheetEditGeneration === sheetEditGenerationRef.current && adoptOwnWorkflowCommandResponse(saveResponse.data, sheetInputVersion)) {
+        markSheetClean();
+      } else {
+        throw new Error("シート保存中に注文または入力が変更されました。再読込してから操作してください。");
+      }
       setSelectedAnomalyIndex(null);
       setSelectedAutoEditIndex(null);
     }, {
@@ -3161,7 +3435,7 @@ export default function OrderWorkflowV2Page() {
   const runBagging = () =>
     runAction("Step4 bagging", async () => {
       if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker("menu_amount_unresolved"));
-      await apiClient.post(`/orders/${orderId}/workflow-v2/bagging`);
+      await executeWorkflowMutation("bagging", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/bagging`, undefined, config));
     }, {
       successMessage: "出力確認を作成しました",
     });
@@ -3172,11 +3446,11 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("数量異常チェックに渡せるシートがありません");
       }
-      const response = await apiClient.post<{ anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
+      const response = await executeSheetValidation((config) => apiClient.post<{ workflow?: WorkflowV2; anomaly_review?: Record<string, unknown>; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
         `/orders/${orderId}/workflow-v2/sheet/anomaly-review`,
         { sheet: parsed, use_llm: true },
-        { timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
-      );
+        { ...config, timeout: AI_REVIEW_REQUEST_TIMEOUT_MS },
+      ));
       setLocalAnomalyReview(response.data.anomaly_review || null);
       applyPreSaveState(response.data.pre_save_checks || {}, response.data.pre_save_status || null);
       setSelectedAnomalyIndex(null);
@@ -3192,10 +3466,11 @@ export default function OrderWorkflowV2Page() {
       if (!parsed) {
         throw new Error("シート確認に使えるシートがありません");
       }
-      const response = await apiClient.post<{ pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
+      const response = await executeSheetValidation((config) => apiClient.post<{ workflow?: WorkflowV2; pre_save_checks?: PreSaveChecks; pre_save_status?: PreSaveStatus }>(
         `/orders/${orderId}/workflow-v2/sheet/review-confirm`,
         { sheet: parsed },
-      );
+        config,
+      ));
       applyPreSaveState(response.data.pre_save_checks || {}, response.data.pre_save_status || null);
       setOcrPreviewMode("sheet");
     }, {
@@ -3208,9 +3483,9 @@ export default function OrderWorkflowV2Page() {
       "Step4 final confirm",
       async () => {
         if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker("menu_amount_unresolved"));
-        await apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
-          confirmed_by: "operator",
-        });
+      await executeWorkflowMutation("finalConfirm", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
+        confirmed_by: "operator",
+        }, config));
         await router.push("/orders");
       },
       {
@@ -3426,6 +3701,12 @@ export default function OrderWorkflowV2Page() {
         <TopNav />
       </header>
 
+      {sheetDirty ? (
+        <p className="workflow-warning">
+          シートに未保存の編集があります。再読込やOCR進捗更新では編集中の値を置き換えません。
+        </p>
+      ) : null}
+
       <section className="panel state-panel">
         <div className="state-panel-main">
           <p className="eyebrow">注文情報 / 現在状態</p>
@@ -3629,14 +3910,19 @@ export default function OrderWorkflowV2Page() {
                   <span className="field-label">施設 (Step1 必須)</span>
                   <select
                     className="input"
-                    value={contextForm.facility_id}
-                    onChange={(event) => setContextForm((current) => ({ ...current, facility_id: event.target.value }))}
+                    value={contextFacilityResolution.status === "ready" ? contextForm.facility_id : ""}
+                    onChange={(event) => {
+                      const facilityId = event.target.value;
+                      if (!facilityId) {
+                        beginWorkflowEditorEdit("context");
+                        setContextForm((current) => ({ ...current, facility_id: "" }));
+                        return;
+                      }
+                      applyCanonicalFacilityContext(facilityId);
+                    }}
                     disabled={facilityOptionsLoading || Boolean(busy)}
                   >
                     <option value="">施設を選択</option>
-                    {contextForm.facility_id && !facilityOptions.some((option) => option.id === contextForm.facility_id) ? (
-                      <option value={contextForm.facility_id}>{contextForm.facility_id} (未登録)</option>
-                    ) : null}
                     {facilityOptions.map((option) => (
                       <option key={option.id} value={option.id}>
                         {formatFacilityLabel(option)}
@@ -3647,6 +3933,9 @@ export default function OrderWorkflowV2Page() {
                     <span className="subtle">{facilityOptionsError}</span>
                   ) : facilityOptionsLoading ? (
                     <span className="subtle">施設一覧を取得中...</span>
+                  ) : null}
+                  {contextFacilityResolution.status !== "ready" && contextForm.facility_id ? (
+                    <span className="workflow-warning">{canonicalFacilityResolutionMessage(contextFacilityResolution)}</span>
                   ) : null}
                 </label>
               </div>
@@ -3740,6 +4029,7 @@ export default function OrderWorkflowV2Page() {
                 disabled={Boolean(
                   busy
                   || !workflowContextConfirmed
+                  || contextFacilityResolution.status !== "ready"
                   || !facilityTemplateReadyForOcr
                   || ocrPrerequisiteBlockers.length > 0
                   || (ocrRunMode === "llm" && llmProvider === "gemini" && llmModelMode === "other" && !llmCustomModel.trim())
@@ -3758,6 +4048,9 @@ export default function OrderWorkflowV2Page() {
                       ? "施設区分列に未保存の変更があります。保存してからOCRを実行してください。"
                       : "施設テンプレートを確認してからOCRを実行してください。"}
               </p>
+            ) : null}
+            {contextFacilityResolution.status !== "ready" ? (
+              <p className="workflow-warning">{canonicalFacilityResolutionMessage(contextFacilityResolution)}</p>
             ) : null}
             {ocrRunMode === "llm" ? (
               <div className="ocr-run-options compact">
@@ -3821,7 +4114,7 @@ export default function OrderWorkflowV2Page() {
                   </p>
                   {facilityTemplateStatus.templateId ? (
                     <p className="subtle">
-                      帳票レイアウト: {formatFaxTemplateOptionLabel(selectedFacilityRegisteredTemplateOption) || facilityTemplateStatus.templateId}
+                      帳票レイアウト: {facilityTemplateStatus.templateId}
                     </p>
                   ) : null}
                   {selectedFacility ? (
@@ -3834,33 +4127,10 @@ export default function OrderWorkflowV2Page() {
                 </div>
                 {facilityTemplateMissing ? (
                   <div className="facility-template-register">
-                    <label className="toolbar-field">
-                      <span>帳票レイアウト</span>
-                      <select
-                        value={selectedFacilityTemplateId}
-                        onChange={(event) => setSelectedFacilityTemplateId(event.target.value)}
-                        disabled={Boolean(busy || faxTemplateOptionsLoading)}
-                      >
-                        <option value="">レイアウトを選択</option>
-                        {faxTemplateOptions.map((option) => (
-                          <option key={option.template_id} value={option.template_id}>
-                            {formatFaxTemplateOptionLabel(option)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    {selectedFacilityTemplateOption?.quantity_headers?.length ? (
-                      <p className="subtle">数量列: {selectedFacilityTemplateOption.quantity_headers.join(" / ")}</p>
-                    ) : null}
-                    {faxTemplateOptionsError ? <p className="subtle">{faxTemplateOptionsError}</p> : null}
-                    <button
-                      className="btn primary"
-                      type="button"
-                      onClick={registerFacilityTemplate}
-                      disabled={Boolean(busy || faxTemplateOptionsLoading || !selectedFacilityTemplateId)}
-                    >
-                      施設テンプレートに登録してStep1を保存
-                    </button>
+                    <p className="workflow-warning">施設設定の JSON 正本に帳票テンプレートがありません。候補からの補完は行わず、設定を完了するまで OCR は実行できません。</p>
+                    <Link className="btn primary" href={`/facilities/${encodeURIComponent(contextForm.facility_id)}`}>
+                      施設設定を開く
+                    </Link>
                   </div>
                 ) : null}
               </div>
@@ -4071,6 +4341,7 @@ export default function OrderWorkflowV2Page() {
               className="btn ghost"
               type="button"
               onClick={() => {
+                beginWorkflowEditorEdit("quad");
                 setManualQuadMode(true);
                 setManualQuadPoints([]);
               }}
@@ -4080,7 +4351,10 @@ export default function OrderWorkflowV2Page() {
             </button>
             {manualQuadMode ? (
               <>
-                <button className="btn ghost" type="button" onClick={() => setManualQuadPoints([])} disabled={Boolean(busy)}>
+                <button className="btn ghost" type="button" onClick={() => {
+                  beginWorkflowEditorEdit("quad");
+                  setManualQuadPoints([]);
+                }} disabled={Boolean(busy)}>
                   手動点をクリア
                 </button>
                 <button
@@ -5031,6 +5305,7 @@ export default function OrderWorkflowV2Page() {
               onChange={(event) => {
                 const nextJson = event.target.value;
                 setSheetJson(nextJson);
+                markSheetDirty();
                 setSheetJsonStale(false);
                 try {
                   setSheetPayload(normalizeSheetPayload(JSON.parse(nextJson)));

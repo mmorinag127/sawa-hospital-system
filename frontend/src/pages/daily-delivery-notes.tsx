@@ -1,7 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import { Button, MenuItem, Stack } from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
+import { FormTextField, SawaProvider } from "@sawa/ui";
+import { FormProvider, useForm } from "react-hook-form";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
 import {
   fetchFacilityNameMap,
   fetchOrderFacilityCandidates,
@@ -17,6 +22,11 @@ type OrderSummary = {
   status?: string | null;
   received_at?: string | null;
   line_count?: number | null;
+};
+
+type DailyConditions = {
+  date: string;
+  status: string;
 };
 
 type DailyBagBreakdown = {
@@ -429,9 +439,10 @@ const sectionErrorMessage = (section: any, fallback: string) => {
   return fallback;
 };
 
-export default function DailyDeliveryNotesPage() {
-  const [date, setDate] = useState<string>("");
+function DailyDeliveryNotesScreen() {
+  const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [status, setStatus] = useState<string>("");
+  const conditionForm = useForm<DailyConditions>({ defaultValues: { date, status } });
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const loadGeneration = useRef(0);
@@ -462,26 +473,15 @@ export default function DailyDeliveryNotesPage() {
   const [overrideEditorSelectedFacilityId, setOverrideEditorSelectedFacilityId] = useState("");
   const [overrideEditorSelectedDietType, setOverrideEditorSelectedDietType] = useState("");
 
-  useEffect(() => {
-    if (!date) {
-      const today = new Date();
-      setDate(today.toISOString().slice(0, 10));
-    }
-  }, [date]);
+  const facilityNamesQuery = useQuery({
+    queryKey: ["daily-delivery-notes", "facilities"],
+    queryFn: fetchFacilityNameMap,
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    fetchFacilityNameMap()
-      .then((map) => {
-        if (!cancelled) setFacilityNameMap(map);
-      })
-      .catch(() => {
-        if (!cancelled) setFacilityNameMap({});
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (facilityNamesQuery.data) setFacilityNameMap(facilityNamesQuery.data);
+    if (facilityNamesQuery.isError) setFacilityNameMap({});
+  }, [facilityNamesQuery.data, facilityNamesQuery.isError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -535,23 +535,13 @@ export default function DailyDeliveryNotesPage() {
     return "未確定";
   };
 
-  const loadOrders = async () => {
-    if (!date) return;
+  const loadOrders = async (conditions: DailyConditions = { date, status }) => {
+    if (!conditions.date) return;
     const generation = ++loadGeneration.current;
     setLoading(true);
-    setOrders([]);
-    setMessage("");
-    setBagMessage("");
-    setTotalsMessage("");
-    setAuditMessage("");
-    setDailyBagSummary({});
-    setDailyBagAudit({});
-    setTotalsRows([]);
-    setMealCountSummary({});
-    setMealCountMessage("");
     try {
-      const params: Record<string, string> = { date };
-      if (status) params.status = status;
+      const params: Record<string, string> = { date: conditions.date };
+      if (conditions.status) params.status = conditions.status;
       await Promise.all((["primary", "bags", "totals"] as const).map(async (section) => {
         try {
           const contextRes = await apiClient.get("/orders/daily-output-context", { params: { ...params, section } });
@@ -559,7 +549,12 @@ export default function DailyDeliveryNotesPage() {
           const sections = contextRes.data?.sections || {};
           if (section === "primary") {
             const ordersPayload = sectionData<{ orders?: OrderSummary[] }>(sections.orders);
+            if (!ordersPayload) {
+              throw new Error(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
+            }
             const items = Array.isArray(ordersPayload?.orders) ? ordersPayload.orders : [];
+            setDate(conditions.date);
+            setStatus(conditions.status);
             setOrders(items);
             if (!items.length) {
               if (sections.orders?.status === "rejected") {
@@ -628,6 +623,7 @@ export default function DailyDeliveryNotesPage() {
           if (section === "primary") {
             setMessage(error);
             setMealCountMessage(error);
+            throw err;
           } else if (section === "bags") {
             setBagMessage(error);
             setAuditMessage(error);
@@ -636,6 +632,10 @@ export default function DailyDeliveryNotesPage() {
           }
         }
       }));
+    } catch (err) {
+      if (generation === loadGeneration.current) {
+        throw err;
+      }
     } finally {
       if (generation === loadGeneration.current) {
         setLoading(false);
@@ -1178,24 +1178,39 @@ export default function DailyDeliveryNotesPage() {
           <h2>フィルタ</h2>
           <span className="badge">合計 {orders.length} 件</span>
         </header>
+        <FormProvider {...conditionForm}>
+          <Stack
+            component="form"
+            direction={{ xs: "column", sm: "row" }}
+            spacing={2}
+            onSubmit={conditionForm.handleSubmit(async (values) => {
+              conditionForm.clearErrors("root");
+              try {
+                await loadOrders(values);
+              } catch (error) {
+                conditionForm.setError("root", {
+                  message: error instanceof Error ? error.message : "集計の取得に失敗しました。",
+                });
+              }
+            })}
+          >
+            <FormTextField<DailyConditions> name="date" label="日付" type="date" rules={{ required: "日付を指定してください。" }} />
+            <FormTextField<DailyConditions> name="status" label="ステータス" select>
+              <MenuItem value="">全て</MenuItem>
+              <MenuItem value="未着">未着</MenuItem>
+              <MenuItem value="要確認">要確認</MenuItem>
+              <MenuItem value="確定">確定</MenuItem>
+              <MenuItem value="エラー">エラー</MenuItem>
+            </FormTextField>
+            <Button type="submit" variant="contained" disabled={loading}>
+              {loading ? "集計中..." : "表示・集計"}
+            </Button>
+          </Stack>
+          {conditionForm.formState.errors.root?.message ? (
+            <p className="message message-error">{conditionForm.formState.errors.root.message}</p>
+          ) : null}
+        </FormProvider>
         <div className="filters">
-          <label className="field">
-            <span className="field-label">日付</span>
-            <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} disabled={loading} />
-          </label>
-          <label className="field">
-            <span className="field-label">ステータス</span>
-            <select className="input" value={status} onChange={(e) => setStatus(e.target.value)} disabled={loading}>
-              <option value="">全て</option>
-              <option value="未着">未着</option>
-              <option value="要確認">要確認</option>
-              <option value="確定">確定</option>
-              <option value="エラー">エラー</option>
-            </select>
-          </label>
-          <button className="btn primary" onClick={loadOrders} disabled={loading}>
-            {loading ? "取得中..." : "取得"}
-          </button>
           <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels_csv")} disabled={loading}>
             当日ラベルCSV
           </button>
@@ -2498,5 +2513,18 @@ export default function DailyDeliveryNotesPage() {
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
     </main>
+  );
+}
+
+export default function DailyDeliveryNotesPage() {
+  const sessionKey = useSyncExternalStore(
+    subscribeBrowserSession,
+    browserSessionKey,
+    () => "server",
+  );
+  return (
+    <SawaProvider sessionKey={`hospital-daily-delivery-notes:${sessionKey}`}>
+      <DailyDeliveryNotesScreen />
+    </SawaProvider>
   );
 }

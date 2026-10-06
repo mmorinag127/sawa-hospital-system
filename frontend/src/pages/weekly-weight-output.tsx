@@ -1,8 +1,13 @@
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import { Button, MenuItem, Stack } from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
+import { FormTextField, SawaProvider } from "@sawa/ui";
+import { FormProvider, useForm } from "react-hook-form";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
 
 const isoDate = (date: Date) => date.toISOString().slice(0, 10);
 
@@ -88,6 +93,11 @@ type WeekHistoryItem = {
   latestReceivedAt: string;
 };
 
+type WeeklyWeightConditions = {
+  week: string;
+  status: string;
+};
+
 const formatTimestamp = (value?: string | null) => {
   if (!value) return "-";
   const parsed = new Date(value);
@@ -112,24 +122,26 @@ const weekHistoryFromOrder = (order: OrderSummary) => {
   };
 };
 
-export default function WeeklyWeightOutputPage() {
+function WeeklyWeightOutputScreen() {
   const router = useRouter();
   const [week, setWeek] = useState(todayWeek());
   const [status, setStatus] = useState("");
+  const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: todayWeek(), status: "" } });
   const [message, setMessage] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [weekHistory, setWeekHistory] = useState<WeekHistoryItem[]>([]);
+  const loadGeneration = useRef(0);
 
   useEffect(() => {
     if (!router.isReady) return;
     const queryDate = queryValue(router.query.date);
     const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
-    if (queryWeek) setWeek(queryWeek);
-    else if (queryDate) setWeek(dateToWeekValue(queryDate));
-    if (queryStatus) setStatus(queryStatus);
+    const nextWeek = queryWeek || (queryDate ? dateToWeekValue(queryDate) : "") || week;
+    const nextStatus = queryStatus || "";
+    conditionForm.reset({ week: nextWeek, status: nextStatus });
   }, [router.isReady, router.query.date, router.query.status, router.query.week]);
 
   const date = useMemo(() => weekValueToMonday(week), [week]);
@@ -150,8 +162,9 @@ export default function WeeklyWeightOutputPage() {
     return `${weekDates[0]} から ${weekDates[6]}`;
   }, [weekDates]);
 
-  const loadWeekHistory = async () => {
-    try {
+  const weekHistoryQuery = useQuery({
+    queryKey: ["weekly-weight-output", "history"],
+    queryFn: async () => {
       const response = await apiClient.get("/orders", { params: { include_ocr: false, limit: 500 } });
       const grouped = new Map<string, WeekHistoryItem>();
       (response.data?.orders || []).forEach((order: OrderSummary) => {
@@ -169,29 +182,33 @@ export default function WeeklyWeightOutputPage() {
           latestReceivedAt,
         });
       });
-      setWeekHistory(
-        Array.from(grouped.values()).sort((left, right) => {
+      return Array.from(grouped.values()).sort((left, right) => {
           const leftMonday = weekValueToMonday(left.week);
           const rightMonday = weekValueToMonday(right.week);
           return rightMonday.localeCompare(leftMonday);
-        }),
-      );
-    } catch {
-      setWeekHistory([]);
-    }
-  };
+      });
+    },
+  });
 
-  const loadWeeklyOrders = async () => {
-    if (weekDates.length === 0) {
-      setOrders([]);
-      return;
-    }
+  useEffect(() => {
+    if (weekHistoryQuery.data) setWeekHistory(weekHistoryQuery.data);
+  }, [weekHistoryQuery.data]);
+
+  const loadWeeklyOrders = async (conditions: WeeklyWeightConditions) => {
+    const targetDate = weekValueToMonday(conditions.week);
+    if (!targetDate) throw new Error("週を指定してください。");
+    const targetDates = Array.from({ length: 7 }, (_, index) => {
+      const item = new Date(`${targetDate}T00:00:00`);
+      item.setDate(item.getDate() + index);
+      return isoDate(item);
+    });
+    const generation = ++loadGeneration.current;
     setLoading(true);
     try {
       const responses = await Promise.all(
-        weekDates.map((targetDate) =>
+        targetDates.map((dateValue) =>
           apiClient.get("/orders/by-line-date", {
-            params: { date: targetDate, status: status || undefined },
+            params: { date: dateValue, status: conditions.status || undefined },
           }),
         ),
       );
@@ -201,26 +218,28 @@ export default function WeeklyWeightOutputPage() {
           if (order?.id) byId.set(order.id, order);
         });
       });
+      if (generation !== loadGeneration.current) return;
+      setWeek(conditions.week);
+      setStatus(conditions.status);
       setOrders(Array.from(byId.values()));
-    } catch {
-      setOrders([]);
-      setMessage("対象週の注文一覧を取得できませんでした。");
+    } catch (error) {
+      if (generation === loadGeneration.current) {
+        setMessage("対象週の注文一覧を取得できませんでした。");
+      }
+      throw error;
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadWeeklyOrders();
+    void loadWeeklyOrders({ week, status }).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weekLabel, status]);
-
-  useEffect(() => {
-    loadWeekHistory();
   }, []);
 
-  const downloadWeeklyWeight = async () => {
-    if (!date) {
+  const downloadWeeklyWeight = async (conditions: WeeklyWeightConditions) => {
+    const targetDate = weekValueToMonday(conditions.week);
+    if (!targetDate) {
       setMessage("週を指定してください。");
       return;
     }
@@ -228,12 +247,12 @@ export default function WeeklyWeightOutputPage() {
     setMessage("週別重量表Excelを作成中です。");
     try {
       const res = await apiClient.get("/outputs/weekly-weight", {
-        params: { date, status: status || undefined },
+        params: { date: targetDate, status: conditions.status || undefined },
         responseType: "blob",
         timeout: 0,
       });
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
-      const filename = extractFilename(contentDisposition) || `weekly_weight_${date}.xlsx`;
+      const filename = extractFilename(contentDisposition) || `weekly_weight_${targetDate}.xlsx`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -268,30 +287,23 @@ export default function WeeklyWeightOutputPage() {
           <h2>フィルタ</h2>
           <span className="badge">対象 {orders.length} 件</span>
         </header>
+        <FormProvider {...conditionForm}>
+          <Stack component="form" direction={{ xs: "column", sm: "row" }} spacing={2} onSubmit={conditionForm.handleSubmit((values) => void loadWeeklyOrders(values).catch(() => undefined))}>
+            <FormTextField<WeeklyWeightConditions> name="week" label="週" type="week" rules={{ required: "週を指定してください。" }} />
+            <FormTextField<WeeklyWeightConditions> name="status" label="ステータス" select>
+              <MenuItem value="">全て</MenuItem><MenuItem value="未着">未着</MenuItem><MenuItem value="要確認">要確認</MenuItem><MenuItem value="確定">確定</MenuItem><MenuItem value="エラー">エラー</MenuItem>
+            </FormTextField>
+            <Button type="submit" variant="contained" disabled={loading}>{loading ? "集計中..." : "表示・集計"}</Button>
+            <Button type="button" variant="outlined" disabled={downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
+          </Stack>
+        </FormProvider>
         <div className="filters">
-          <label className="field">
-            <span className="field-label">週</span>
-            <input className="input" type="week" value={week} onChange={(e) => setWeek(e.target.value)} />
-          </label>
-          <label className="field">
-            <span className="field-label">ステータス</span>
-            <select className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
-              <option value="">全て</option>
-              <option value="未着">未着</option>
-              <option value="要確認">要確認</option>
-              <option value="確定">確定</option>
-              <option value="エラー">エラー</option>
-            </select>
-          </label>
-          <button className="btn primary" type="button" onClick={downloadWeeklyWeight} disabled={downloading}>
-            {downloading ? "出力中..." : "Excel出力"}
-          </button>
           <Link href="/daily-delivery-notes" className="btn ghost">
             日別出力へ
           </Link>
         </div>
         <p className="subtle helper-text">
-          対象週: {weekLabel || "-"}。注文一覧は週・ステータスの変更に合わせて自動更新されます。
+          適用済み対象週: {weekLabel || "-"}。入力条件は「表示・集計」を実行するまで現在の結果を置き換えません。
         </p>
       </section>
 
@@ -309,7 +321,7 @@ export default function WeeklyWeightOutputPage() {
                 className={`week-chip${item.week === week ? " active" : ""}`}
                 key={item.week}
                 type="button"
-                onClick={() => setWeek(item.week)}
+                onClick={() => conditionForm.setValue("week", item.week, { shouldDirty: true })}
               >
                 <span>{item.label}</span>
                 <small>{item.orderCount}件</small>
@@ -578,4 +590,9 @@ export default function WeeklyWeightOutputPage() {
       `}</style>
     </main>
   );
+}
+
+export default function WeeklyWeightOutputPage() {
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  return <SawaProvider sessionKey={`hospital-weekly-weight-output:${sessionKey}`}><WeeklyWeightOutputScreen /></SawaProvider>;
 }

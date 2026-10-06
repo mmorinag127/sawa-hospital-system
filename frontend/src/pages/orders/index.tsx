@@ -7,8 +7,7 @@ import { apiClient } from "../../services/apiClient";
 import {
   fetchFacilityNameMap,
   fetchOrderFacilityCandidates,
-  pickBestFacilityCandidate,
-  type FacilityHint,
+  type FacilityCandidate,
   type FacilityNameMap,
 } from "../../services/facilityData";
 
@@ -201,7 +200,7 @@ const weekMenuId = (order: Order) => {
   return rawValue.slice(0, 7);
 };
 
-const inlineFacilityHint = (order: Order): FacilityHint | null => {
+const inlineFacilityHint = (order: Order) => {
   const facility = order.candidate_resolution?.resolutions?.facility;
   const resolvedValue = String(facility?.resolved_value || "").trim();
   const resolvedLabel = String(facility?.resolved_label || "").trim();
@@ -215,19 +214,6 @@ const inlineFacilityHint = (order: Order): FacilityHint | null => {
       auto: null,
     };
   }
-  const firstCandidate = Array.isArray(facility?.candidates) ? facility?.candidates?.[0] : null;
-  const candidateValue = String(firstCandidate?.value || "").trim();
-  const candidateLabel = String(firstCandidate?.label || "").trim();
-  if (candidateValue && candidateLabel) {
-    return {
-      order_id: String(order.id || ""),
-      facility_id: candidateValue,
-      facility_name: candidateLabel,
-      score: typeof firstCandidate?.score === "number" ? firstCandidate.score : null,
-      reason: "orders_list_candidate_resolution",
-      auto: null,
-    };
-  }
   return null;
 };
 
@@ -237,7 +223,8 @@ export default function OrdersPage() {
   const router = useRouter();
   const [orders, setOrders] = useState<Order[]>([]);
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
-  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
+  const [facilityCandidates, setFacilityCandidates] = useState<Record<string, FacilityCandidate[]>>({});
+  const [facilityCandidateErrors, setFacilityCandidateErrors] = useState<Record<string, string>>({});
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [unresolvedOnly, setUnresolvedOnly] = useState<boolean>(false);
@@ -422,43 +409,31 @@ export default function OrdersPage() {
   useEffect(() => {
     let cancelled = false;
     if (!unresolvedOnly) return;
-    const unresolved = orders
-      .filter((order) => !order.facility && order.id && !inlineFacilityHint(order))
+    const orderIds = orders
+      .filter((order) => !hasRegisteredFacility(order) && order.id && !inlineFacilityHint(order))
       .sort(compareOrdersByReceivedAt)
       .slice(0, 20)
       .map((order) => String(order.id || ""))
-      .filter((orderId) => orderId && !facilityHints[orderId]);
+      .filter((orderId) => orderId && facilityCandidates[orderId] === undefined && facilityCandidateErrors[orderId] === undefined);
+    if (!orderIds.length) return;
 
-    if (unresolved.length === 0) return;
-
-    const queue = [...unresolved];
-    const concurrency = 4;
-    const results: Record<string, FacilityHint> = {};
-
-    const workers = Array.from({ length: concurrency }, async () => {
-      while (queue.length > 0) {
-        const orderId = queue.shift();
-        if (!orderId) continue;
-        try {
-          const candidates = await fetchOrderFacilityCandidates(orderId);
-          const best = pickBestFacilityCandidate(candidates);
-          if (best) results[orderId] = { ...best, order_id: orderId };
-        } catch {
-          // ignore per-order failures
+    void Promise.all(orderIds.map(async (orderId) => {
+      try {
+        const candidates = await fetchOrderFacilityCandidates(orderId);
+        if (!cancelled) {
+          setFacilityCandidates((current) => ({ ...current, [orderId]: candidates }));
+        }
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail || err?.response?.data?.message || err?.message || "候補を取得できませんでした。";
+        if (!cancelled) {
+          setFacilityCandidateErrors((current) => ({ ...current, [orderId]: String(detail) }));
         }
       }
-    });
-
-    Promise.all(workers).then(() => {
-      if (cancelled) return;
-      if (Object.keys(results).length === 0) return;
-      setFacilityHints((prev) => ({ ...prev, ...results }));
-    });
-
+    }));
     return () => {
       cancelled = true;
     };
-  }, [facilityHints, orders, unresolvedOnly]);
+  }, [facilityCandidateErrors, facilityCandidates, orders, unresolvedOnly]);
 
   const facilityLabel = (order: Order) => {
     const facilityId = order.facility || "";
@@ -469,14 +444,14 @@ export default function OrdersPage() {
     const inlineHint = inlineFacilityHint(order);
     if (inlineHint?.facility_name) {
       const score = inlineHint.score != null ? ` / score=${inlineHint.score}` : "";
-      return `推定: ${inlineHint.facility_name} (${inlineHint.facility_id}${score})`;
+      return `未確定候補: ${inlineHint.facility_name} (${inlineHint.facility_id}${score})`;
     }
-    const orderId = order.id || "";
-    const hint = orderId ? facilityHints[orderId] : null;
-    if (hint?.facility_name) {
-      const score = hint.score != null ? ` / score=${hint.score}` : "";
-      return `推定: ${hint.facility_name} (${hint.facility_id}${score})`;
+    const orderId = String(order.id || "");
+    const candidates = facilityCandidates[orderId] || [];
+    if (candidates.length) {
+      return `未確定候補: ${candidates.map((candidate) => candidate.facility_name || candidate.facility_id).join(" / ")}`;
     }
+    if (facilityCandidateErrors[orderId]) return `候補取得失敗: ${facilityCandidateErrors[orderId]}`;
     return "未確定";
   };
 
@@ -490,35 +465,29 @@ export default function OrdersPage() {
       const facilityName = facilityId ? facilityNameMap[facilityId] || "" : "";
       const inlineHint = inlineFacilityHint(order);
       const inlineHintName = inlineHint?.facility_name ? String(inlineHint.facility_name) : "";
-      const hint = order.id ? facilityHints[order.id] : null;
-      const hintName = hint?.facility_name ? String(hint.facility_name) : "";
+      const candidateNames = (facilityCandidates[String(order.id || "")] || [])
+        .map((candidate) => `${candidate.facility_id} ${candidate.facility_name || ""}`)
+        .join(" ");
       return (
         (order.id || "").toLowerCase().includes(token) ||
         (order.message_id || "").toLowerCase().includes(token) ||
         facilityId.toLowerCase().includes(token) ||
         facilityName.toLowerCase().includes(token) ||
         inlineHintName.toLowerCase().includes(token) ||
-        hintName.toLowerCase().includes(token) ||
+        candidateNames.toLowerCase().includes(token) ||
         (order.week || "").toLowerCase().includes(token) ||
         normalizedWeek.key.toLowerCase().includes(token) ||
         normalizedWeek.label.toLowerCase().includes(token) ||
         (order.document || "").toLowerCase().includes(token)
       );
     });
-  }, [facilityHints, facilityNameMap, orders, search, unresolvedOnly]);
+  }, [facilityCandidates, facilityNameMap, orders, search, unresolvedOnly]);
 
   const sortedOrders = useMemo(() => [...filteredOrders].sort(compareOrdersByReceivedAt), [filteredOrders]);
 
   const resolvedFacilityIdForOrder = (order: Order) => {
     const confirmed = String(order.facility || "").trim();
-    if (confirmed) return confirmed;
-    const inlineHint = inlineFacilityHint(order);
-    const inlineValue = String(inlineHint?.facility_id || "").trim();
-    if (inlineValue) return inlineValue;
-    const hinted = order.id ? facilityHints[order.id] : null;
-    const hintedValue = String(hinted?.facility_id || "").trim();
-    if (hintedValue) return hintedValue;
-    return "";
+    return confirmed;
   };
 
   const displayFacilityGroupForId = (facilityId: string): FacilityDisplayGroup => {
@@ -543,7 +512,7 @@ export default function OrdersPage() {
       if (!groups.has(group.key)) groups.set(group.key, group);
     });
     return Array.from(groups.values()).sort((left, right) => left.label.localeCompare(right.label, "ja"));
-  }, [facilityHints, facilityNameMap, sortedOrders]);
+  }, [facilityNameMap, sortedOrders]);
 
   const statusClass = (status?: string | null) => {
     switch (status) {
@@ -723,7 +692,7 @@ export default function OrdersPage() {
       if (right.sortKey !== left.sortKey) return right.sortKey - left.sortKey;
       return left.label.localeCompare(right.label, "ja");
     });
-  }, [allFacilityDisplayGroups, facilityHints, facilityNameMap, sortedOrders]);
+  }, [allFacilityDisplayGroups, facilityNameMap, sortedOrders]);
 
   const archivedCountForWeekGroup = (group: WeekGroup) =>
     group.orders.filter((order) => Boolean(order.is_archived)).length;
