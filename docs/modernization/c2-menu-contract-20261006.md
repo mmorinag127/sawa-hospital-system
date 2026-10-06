@@ -65,3 +65,69 @@ Current log: `/private/tmp/hospital-c2-menu-contract-logs/current-test-config.lo
 
 Not run: frontend E2E and live/browser/cloud verification. They are outside this
 offline contract assignment and were not used as completion evidence.
+
+## Post-Integration Verification: `ef21a14ca1d7123f63b492903b7aa25914ee1c2e`
+
+Both `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract`
+and `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main`
+resolved to this commit before the following runs. Generated source artifacts are from
+this committed tree: `/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/frontend/src/generated/menu-master-openapi.json`
+has SHA256 `95fb719cbe277f970cb0f652b0aa81d385bed9ba827a1f23b65ce058c8e70096`, and
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/frontend/src/generated/menu-master-api.ts`
+has SHA256 `96889e99a9d1c481e6fdda175781534771ddaa7dd78f4f83180fce6413d384de`.
+
+| Check | Result | Log and SHA256 |
+| --- | --- | --- |
+| Backend focused suite with the same isolated HOME/TMP/PYTHONPYCACHEPREFIX and read-only backend venv recorded above | exit 0; `148 passed, 127 skipped`; all skips remain `C1_POSTGRES_URI required for dedicated local PostgreSQL proof`. | `/private/tmp/hospital-c2-menu-contract-logs/ef21a14-backend-focused.log`; `db6cddedaf34e8632f77853e5e18626f8b93c2cb34c7f93b78bf79544cb7e287` |
+| Frontend menu-master unit | exit 0; `33 pass, 0 fail`. | `/private/tmp/hospital-c2-menu-contract-logs/ef21a14-frontend-menu-master-unit.log`; `1522d6205fe70fa655d8873b6a171217b42b174e90586a606ff64410ed9c86eb` |
+| `npm run check:menu-master-api` with isolated HOME/TMP/cache and backend venv on PATH | exit 0. | `/private/tmp/hospital-c2-menu-contract-logs/ef21a14-schema-check.log`; `06e4ddad60282331ed4b5e14f199df81bef1b6eeb469b1b39bcd148568ccb5f7` |
+| `openapi-typescript src/generated/menu-master-openapi.json -o /private/tmp/hospital-c2-menu-contract-ef21a14-menu-master-api.ts` | exit 0; regenerated TS SHA256 exactly matches tracked TS SHA256 above. | `/private/tmp/hospital-c2-menu-contract-logs/ef21a14-types-regenerate.log`; `20278dc075ebc6a30fdff84c99788ee84d1c0803944594055f078a3304f2ac41` |
+| `npm run build` with isolated HOME/TMP | exit 0. `next-env.d.ts` received a Next-generated line and that line alone was removed afterward. | `/private/tmp/hospital-c2-menu-contract-logs/ef21a14-frontend-build.log`; `5b9af8d7bfd2a3cbdaf11daf36ac71cddd7f299dea14587efb1b78aac94ad327` |
+
+### PostgreSQL Proof Status
+
+This WT used only `tmp/c1-pgdata`, `tmp/pgs`, `tmp/c1/cache`, and
+`tmp/c1/logs`, with port 55437 confirmed unused before initialization. Initial
+`initdb` in the sandbox failed with `shmget(...): Operation not permitted`; a
+permitted retry initialized the dedicated cluster. PostgreSQL then rejected the
+required fixture socket path
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/tmp/pgs/.s.PGSQL.55437`
+because it exceeds its 103-byte Unix-socket maximum. The fixture requires exactly
+`ROOT/tmp/pgs`, so a shorter socket path would not test the required contract and was
+not substituted. No server started (`pg_ctl status` exit 3), no database was created,
+and the 127 PostgreSQL cases were not run or treated as passing. PostgreSQL log:
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/tmp/c1/logs/postgresql.log`;
+SHA256 `2b75fc036633e6b11a5d8b42445da65834fbbf6578c33b59c09208afde5ffadb`.
+
+### PostgreSQL Proof Completion: Short Socket Alias
+
+The fixed fixture invariant is `Path(url.query["host"]).resolve() == ROOT / "tmp/pgs"`.
+To avoid the PostgreSQL 103-byte Unix-socket path limit without weakening that assertion,
+the dedicated alias `/private/tmp/hospital-c2-pgs` was created as a symlink to this WT's
+`tmp/pgs`. PostgreSQL `unix_socket_directories` and `C1_POSTGRES_URI` both used the
+short alias. The preflight confirmed that the URI resolves to
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/tmp/pgs`,
+uses local role `c1test`, database `c1_menu_master`, and port `55437`.
+
+The command used `C1_POSTGRES_URI=postgresql+psycopg2://c1test@/c1_menu_master?host=/private/tmp/hospital-c2-pgs&port=55437`
+with the existing isolated HOME/TMP/cache environment and ran
+`backend/tests/integration/test_menu_master_revision.py`. It exited 0 with `255 passed`
+in 11.43 seconds; the PostgreSQL parameterized cases were executed rather than skipped.
+No assertion, production implementation, or existing test was changed. Test log:
+`/private/tmp/hospital-c2-menu-contract-logs/ef21a14-menu-master-postgres.log`; SHA256
+`d642ed2f5a161a15181ff7296d3c42b73d396e8f84d4ed767e0de4e976558304`.
+JUnit artifact:
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/tmp/c1/logs/pytest-ef21a14-pg.xml`;
+SHA256 `e817686f989a7072ae0c019729ca269536367e57c1b79f8a4e42759a81e32787`.
+
+URI preflight log:
+`/private/tmp/hospital-c2-menu-contract-logs/ef21a14-pg-uri-preflight.log`; SHA256
+`340bcd05b724bcdce88c204a6c8787cfbf15f780e0a067413d676cdfe5bbd9cd`.
+The lifecycle log records the symlink target, `c1_menu_master|c1test|t`, server stop
+exit 0, and post-stop `pg_ctl status` exit 3:
+`/private/tmp/hospital-c2-menu-contract-logs/ef21a14-pg-lifecycle.log`; SHA256
+`95d17bb9bb99098cf9ba496a0c89ee5d4f0d93d45291e7e1ad94811e8d3c6fd2`.
+Server log:
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-c2-menu-contract/tmp/c1/logs/postgresql-short-socket.log`;
+SHA256 `e4cc70dfdeceb9afe675e55e097bc568fb4620d6a5f754b446149f3858850ef4`.
+The earlier long-path failure record remains above as historical evidence.
