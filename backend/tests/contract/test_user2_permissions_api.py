@@ -19,14 +19,15 @@ from src.main import app  # noqa: E402
 
 def test_user2_base_menus_allows_operator(monkeypatch, hospital_operator):
     headers = hospital_operator.headers
-    monkeypatch.setattr(base_menus_api.base_menu_service, "list_items", lambda *_args: [{"id": "item-1"}])
-    monkeypatch.setattr(base_menus_api.base_menu_service, "replace_items", lambda items: {"created": len(items)})
+    revision = "base-read-revision"
+    monkeypatch.setattr(base_menus_api.base_menu_service, "list_items", lambda *_args: {"items": [{"id": "item-1"}], "revision": revision})
+    monkeypatch.setattr(base_menus_api.base_menu_service, "replace_items", lambda items, expected_revision: {"created": len(items), "items": [], "revision": expected_revision})
     monkeypatch.setattr(base_menus_api.base_menu_service, "update_item", lambda *_args, **_kwargs: {"id": "item-1"})
 
     client = TestClient(app)
     assert client.get("/base-menus", headers=headers).status_code == 200
-    assert client.post("/base-menus", json={"items": [{"name": "A", "cycle_day": 1}]}, headers=headers).status_code == 200
-    assert client.put("/base-menus/item-1", json={"name": "B"}, headers=headers).status_code == 200
+    assert client.post("/base-menus", json={"items": [{"name": "A", "cycle_day": 1}]}, headers={**headers, "If-Match": revision}).status_code == 200
+    assert client.put("/base-menus/item-1", json={"name": "B"}, headers={**headers, "If-Match": revision}).status_code == 200
 
 
 def test_user2_menu_masters_allows_operator(monkeypatch, hospital_operator):
@@ -68,16 +69,17 @@ def test_user2_menu_masters_allows_operator(monkeypatch, hospital_operator):
 
 def test_user2_menu_rules_allows_operator(monkeypatch, hospital_operator):
     headers = hospital_operator.headers
-    monkeypatch.setattr(menu_rules_api.menu_rule_service, "list_rules", lambda *_args: [{"id": "r1"}])
-    monkeypatch.setattr(menu_rules_api.menu_rule_service, "create_rule", lambda body: {"id": "r2", **body})
+    revision = "rule-read-revision"
+    monkeypatch.setattr(menu_rules_api.menu_rule_service, "list_rules", lambda *_args: {"rules": [{"id": "r1"}], "revision": revision})
+    monkeypatch.setattr(menu_rules_api.menu_rule_service, "create_rule", lambda body, expected_revision: {"id": "r2", **body})
     monkeypatch.setattr(menu_rules_api.menu_rule_service, "update_rule", lambda *_args, **_kwargs: {"id": "r1"})
     monkeypatch.setattr(menu_rules_api.menu_rule_service, "delete_rule", lambda *_args, **_kwargs: True)
 
     client = TestClient(app)
     assert client.get("/menu-rules", headers=headers).status_code == 200
-    assert client.post("/menu-rules", json={"rule_type": "global"}, headers=headers).status_code == 200
-    assert client.put("/menu-rules/r1", json={"rule_type": "global"}, headers=headers).status_code == 200
-    assert client.delete("/menu-rules/r1", headers=headers).status_code == 200
+    assert client.post("/menu-rules", json={"rule_type": "global"}, headers={**headers, "If-Match": revision}).status_code == 200
+    assert client.put("/menu-rules/r1", json={"rule_type": "global"}, headers={**headers, "If-Match": revision}).status_code == 200
+    assert client.delete("/menu-rules/r1", headers={**headers, "If-Match": revision}).status_code == 200
 
 
 def test_user2_facility_master_save_allows_operator(monkeypatch, hospital_operator):

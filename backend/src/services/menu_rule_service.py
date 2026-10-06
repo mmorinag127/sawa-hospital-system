@@ -5,6 +5,7 @@ from loguru import logger
 
 from src.db import session_scope
 from src.models.menu import MenuRule
+from src.services import menu_edit_revision_service
 from src.services.menu_vocabulary import normalize_diet_type
 
 
@@ -24,6 +25,7 @@ DEFAULT_GLOBAL_RULES = [
 def _serialize_rule(rule: MenuRule) -> dict:
     return {
         "id": rule.id,
+        "revision": rule.revision,
         "rule_type": rule.rule_type,
         "match_type": rule.match_type,
         "menu_pattern": rule.menu_pattern,
@@ -38,20 +40,26 @@ def _serialize_rule(rule: MenuRule) -> dict:
     }
 
 
-def list_rules(rule_type: str | None = None) -> list[dict]:
+def list_rules(rule_type: str | None = None) -> dict:
     try:
         with session_scope() as session:
+            revision = None
+            if rule_type:
+                revision = menu_edit_revision_service.encode(
+                    menu_edit_revision_service.rule_scope(rule_type),
+                    menu_edit_revision_service.read_locked_current(session, menu_edit_revision_service.rule_scope(rule_type)),
+                )
             stmt = select(MenuRule)
             if rule_type:
                 stmt = stmt.where(MenuRule.rule_type == rule_type)
             rules = session.execute(stmt).scalars().all()
-            return [_serialize_rule(rule) for rule in rules]
+            return {"rules": [_serialize_rule(rule) for rule in rules], "revision": revision}
     except Exception as exc:  # noqa: BLE001
         logger.warning("Menu rule query failed", error=str(exc))
-        return []
+        raise
 
 
-def create_rule(payload: dict) -> dict:
+def create_rule(payload: dict, expected_revision: str | None) -> dict:
     rule_type = str(payload.get("rule_type") or "").strip()
     if rule_type not in ALLOWED_RULE_TYPES:
         raise ValueError("invalid rule_type")
@@ -91,17 +99,37 @@ def create_rule(payload: dict) -> dict:
         active=bool(payload.get("active", True)),
     )
     with session_scope() as session:
+        expected_scope, _ = menu_edit_revision_service.decode(
+            expected_revision, menu_edit_revision_service.rule_scope(rule_type)
+        )
+        menu_edit_revision_service.compare_and_advance(
+            session, menu_edit_revision_service.rule_scope(rule_type), expected_scope
+        )
         session.add(rule)
         session.flush()
         session.refresh(rule)
-        return _serialize_rule(rule)
+        return {"rule": _serialize_rule(rule), "revision": menu_edit_revision_service.encode(menu_edit_revision_service.rule_scope(rule_type), menu_edit_revision_service.current(session, menu_edit_revision_service.rule_scope(rule_type)))}
 
 
-def update_rule(rule_id: str, payload: dict) -> bool:
+def update_rule(rule_id: str, payload: dict, expected_revision: str | None) -> dict | None:
     with session_scope() as session:
         rule = session.get(MenuRule, rule_id)
         if not rule:
-            return False
+            return None
+        expected_scope, _ = menu_edit_revision_service.decode(
+            expected_revision, menu_edit_revision_service.rule_scope(rule.rule_type)
+        )
+        menu_edit_revision_service.compare_and_advance(
+            session, menu_edit_revision_service.rule_scope(rule.rule_type), expected_scope
+        )
+        requested_type = payload.get("rule_type")
+        if requested_type is not None and requested_type not in ALLOWED_RULE_TYPES:
+            raise ValueError("invalid rule_type")
+        if requested_type and requested_type != rule.rule_type:
+            target_scope = menu_edit_revision_service.rule_scope(requested_type)
+            menu_edit_revision_service.compare_and_advance(
+                session, target_scope, menu_edit_revision_service.current(session, target_scope)
+            )
         if "qty_per_serving" in payload:
             qty_value = payload.get("qty_per_serving")
             if qty_value is not None and qty_value != "":
@@ -138,13 +166,25 @@ def update_rule(rule_id: str, payload: dict) -> bool:
                 if field == "diet_type":
                     value = normalize_diet_type(value)
                 setattr(rule, field, value)
-        return True
+        session.flush()
+        session.refresh(rule)
+        return {"rule": _serialize_rule(rule), "revision": menu_edit_revision_service.encode(menu_edit_revision_service.rule_scope(rule.rule_type), menu_edit_revision_service.current(session, menu_edit_revision_service.rule_scope(rule.rule_type)))}
 
 
-def delete_rule(rule_id: str) -> bool:
+def delete_rule(rule_id: str, expected_revision: str | None) -> dict | None:
     with session_scope() as session:
-        result = session.execute(delete(MenuRule).where(MenuRule.id == rule_id))
-        return result.rowcount > 0
+        rule = session.get(MenuRule, rule_id)
+        if rule is None:
+            return None
+        expected_scope, _ = menu_edit_revision_service.decode(
+            expected_revision, menu_edit_revision_service.rule_scope(rule.rule_type)
+        )
+        menu_edit_revision_service.compare_and_advance(
+            session, menu_edit_revision_service.rule_scope(rule.rule_type), expected_scope
+        )
+        session.delete(rule)
+        session.flush()
+        return {"deleted": True, "revision": menu_edit_revision_service.encode(menu_edit_revision_service.rule_scope(rule.rule_type), menu_edit_revision_service.current(session, menu_edit_revision_service.rule_scope(rule.rule_type)))}
 
 
 def list_active_rules() -> list[dict]:

@@ -150,11 +150,11 @@ def test_base_menu_owned_sqlite_partial_schema_is_unchanged_without_ddl(monkeypa
     assert _ddl(statements) == []
 
 
-def test_base_menu_invalid_update_keeps_pre_schema_false_result(monkeypatch) -> None:
+def test_base_menu_invalid_update_keeps_pre_schema_not_found_result(monkeypatch) -> None:
     from src.services import base_menu_service
 
     monkeypatch.setattr(base_menu_service, "_require_base_menu_schema", lambda: (_ for _ in ()).throw(AssertionError()))
-    assert base_menu_service.update_item("", {}) is False
+    assert base_menu_service.update_item("", {}, None) is None
 
 
 def test_facility_template_version_partial_schema_blocks_without_runtime_repair(monkeypatch) -> None:

@@ -1,10 +1,13 @@
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { Box } from "@mui/material";
+import { SawaProvider } from "@sawa/ui";
 
 import TopNav from "../../components/TopNav";
-import { apiClient } from "../../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
 
-export default function MonthlyMenuIndexPage() {
+function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
   const router = useRouter();
   const [message, setMessage] = useState("最新の月次メニューを確認中です。");
 
@@ -39,6 +42,8 @@ export default function MonthlyMenuIndexPage() {
       cancelled = true;
     };
   }, [router]);
+
+  if (!authenticated) return <Box sx={{ p: 3 }}>ログインを確認しています。</Box>;
 
   return (
     <main className="page">
@@ -113,4 +118,10 @@ export default function MonthlyMenuIndexPage() {
       `}</style>
     </main>
   );
+}
+
+export default function MonthlyMenuIndexPage() {
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false);
+  return <SawaProvider sessionKey={`hospital-monthly-menu-index:${sessionKey}`}><MonthlyMenuIndexScreen authenticated={authenticated} /></SawaProvider>;
 }

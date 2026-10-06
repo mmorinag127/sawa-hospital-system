@@ -7,7 +7,7 @@ from sqlalchemy import delete, inspect, select
 
 from src.db import engine, session_scope
 from src.models.menu import BaseMenuCycleItem
-from src.services import menu_service
+from src.services import menu_edit_revision_service, menu_service
 from src.services.menu_vocabulary import normalize_diet_type
 
 
@@ -35,6 +35,7 @@ def _require_base_menu_schema() -> None:
 def serialize_item(item: BaseMenuCycleItem) -> dict[str, Any]:
     return {
         "id": item.id,
+        "revision": item.revision,
         "cycle_day": item.cycle_day,
         "daypart": item.daypart,
         "category": item.category,
@@ -58,11 +59,7 @@ def _is_blank_value(value: object) -> bool:
     return False
 
 
-def _merge_master_defaults(items: list[dict]) -> list[dict]:
-    names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
-    if not names:
-        return items
-    defaults = menu_service.resolve_menu_defaults(names, None)
+def _merge_master_defaults(items: list[dict], defaults: dict[str, dict]) -> list[dict]:
     if not defaults:
         return items
     merged: list[dict] = []
@@ -80,9 +77,36 @@ def _merge_master_defaults(items: list[dict]) -> list[dict]:
     return merged
 
 
-def list_items(cycle_day: int | None = None) -> list[dict]:
+def _defaults_and_sources(session, items: list[BaseMenuCycleItem], *, lock_sources: bool) -> tuple[dict[str, dict], list[tuple[str, int]]]:
+    names = [str(item.name or "").strip() for item in items if str(item.name or "").strip()]
+    return menu_service.resolve_menu_defaults_in_session(session, names, None, lock_sources=lock_sources)
+
+
+def _snapshot(
+    session,
+    items: list[BaseMenuCycleItem],
+    scope_revision: int,
+    *,
+    cycle_day: int | None,
+) -> dict:
+    payload = [serialize_item(item) for item in items]
+    defaults, sources = _defaults_and_sources(session, items, lock_sources=True)
+    return {
+        "items": _merge_master_defaults(payload, defaults),
+        "revision": menu_edit_revision_service.encode(
+            menu_edit_revision_service.BASE_MENU_SCOPE,
+            scope_revision,
+            sources,
+            query={"cycle_day": cycle_day},
+            coverage="full" if cycle_day is None else "partial",
+        ),
+    }
+
+
+def list_items(cycle_day: int | None = None) -> dict:
     _require_base_menu_schema()
     with session_scope() as session:
+        scope_revision = menu_edit_revision_service.read_locked_current(session, menu_edit_revision_service.BASE_MENU_SCOPE)
         query = select(BaseMenuCycleItem)
         if cycle_day is not None:
             query = query.where(BaseMenuCycleItem.cycle_day == cycle_day)
@@ -95,11 +119,10 @@ def list_items(cycle_day: int | None = None) -> list[dict]:
                 item.name,
             )
         )
-        payload = [serialize_item(item) for item in items]
-        return _merge_master_defaults(payload)
+        return _snapshot(session, items, scope_revision, cycle_day=cycle_day)
 
 
-def replace_items(items: list[dict]) -> dict:
+def replace_items(items: list[dict], expected_revision: str | None) -> dict:
     _require_base_menu_schema()
     cleaned: list[dict] = []
     for raw in items:
@@ -127,6 +150,14 @@ def replace_items(items: list[dict]) -> dict:
         )
 
     with session_scope() as session:
+        expected = menu_edit_revision_service.decode_full_base_menu_snapshot(expected_revision)
+        menu_edit_revision_service.compare_and_advance(
+            session, menu_edit_revision_service.BASE_MENU_SCOPE, expected.revision
+        )
+        current_items = session.execute(select(BaseMenuCycleItem)).scalars().all()
+        _, current_sources = _defaults_and_sources(session, current_items, lock_sources=True)
+        if list(expected.sources) != current_sources:
+            raise menu_edit_revision_service.RevisionConflict("menu master revision conflict; reload before saving")
         session.execute(delete(BaseMenuCycleItem))
         for entry in cleaned:
             session.add(
@@ -140,17 +171,35 @@ def replace_items(items: list[dict]) -> dict:
                     slot_index=entry.get("slot_index"),
                 )
             )
-    return {"created": len(cleaned)}
+        session.flush()
+        saved = session.execute(select(BaseMenuCycleItem)).scalars().all()
+        snapshot = _snapshot(
+            session,
+            saved,
+            menu_edit_revision_service.current(session, menu_edit_revision_service.BASE_MENU_SCOPE),
+            cycle_day=None,
+        )
+    return {"created": len(cleaned), **snapshot}
 
 
-def update_item(item_id: str, body: dict) -> bool:
+def update_item(item_id: str, body: dict, expected_revision: str | None) -> dict | None:
     if not item_id:
-        return False
+        return None
     _require_base_menu_schema()
     with session_scope() as session:
         item = session.get(BaseMenuCycleItem, item_id)
         if not item:
-            return False
+            return None
+        expected_scope, expected_sources = menu_edit_revision_service.decode(
+            expected_revision, menu_edit_revision_service.BASE_MENU_SCOPE
+        )
+        menu_edit_revision_service.compare_and_advance(
+            session, menu_edit_revision_service.BASE_MENU_SCOPE, expected_scope
+        )
+        current_items = session.execute(select(BaseMenuCycleItem)).scalars().all()
+        _, current_sources = _defaults_and_sources(session, current_items, lock_sources=True)
+        if expected_sources != current_sources:
+            raise menu_edit_revision_service.RevisionConflict("menu master revision conflict; reload before saving")
         if "cycle_day" in body:
             try:
                 cycle_day_val = int(body.get("cycle_day"))
@@ -169,4 +218,13 @@ def update_item(item_id: str, body: dict) -> bool:
                     setattr(item, key, str(value).strip())
         if "slot_index" in body:
             item.slot_index = body.get("slot_index")
-        return True
+        session.flush()
+        session.refresh(item)
+        saved = serialize_item(item)
+        snapshot = _snapshot(
+            session,
+            session.execute(select(BaseMenuCycleItem)).scalars().all(),
+            menu_edit_revision_service.current(session, menu_edit_revision_service.BASE_MENU_SCOPE),
+            cycle_day=None,
+        )
+        return {"item": saved, **snapshot}

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, String, Float, ForeignKey, Date, DateTime, Integer, Boolean, JSON, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.db import Base
@@ -133,6 +133,8 @@ class MenuRule(Base):
     __tablename__ = "menu_rules"
 
     id = Column(String, primary_key=True)
+    revision = Column(Integer, nullable=False, default=1, server_default="1")
+    __mapper_args__ = {"version_id_col": revision}
     rule_type = Column(String, nullable=False)
     match_type = Column(String, nullable=True)
     menu_pattern = Column(String, nullable=True)
@@ -152,9 +154,36 @@ class BaseMenuCycleItem(Base):
     __tablename__ = "base_menu_cycle_items"
 
     id = Column(String, primary_key=True)
+    revision = Column(Integer, nullable=False, default=1, server_default="1")
+    __mapper_args__ = {"version_id_col": revision}
     cycle_day = Column(Integer, nullable=False)
     daypart = Column(String, nullable=True)
     category = Column(String, nullable=True)
     name = Column(String, nullable=False)
     diet_type = Column(String, nullable=True)
     slot_index = Column(Integer, nullable=True)
+
+
+class MenuEditRevision(Base):
+    """Explicit, narrow CAS authority for editor list generations."""
+
+    __tablename__ = "menu_edit_revisions"
+
+    scope = Column(String, primary_key=True)
+    revision = Column(Integer, nullable=False, default=1, server_default="1")
+
+
+class MenuEditorRevisionColumnOwnership(Base):
+    """Formal 0030 ownership record for revision columns."""
+
+    __tablename__ = "menu_editor_revision_column_ownership"
+    __table_args__ = (
+        CheckConstraint(
+            "ownership IN ('0030', 'preexisting')",
+            name="ck_menu_editor_revision_column_ownership_value",
+        ),
+    )
+
+    table_name = Column(String, primary_key=True)
+    column_name = Column(String, primary_key=True)
+    ownership = Column(String, nullable=False)

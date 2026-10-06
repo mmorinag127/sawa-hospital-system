@@ -1,473 +1,56 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Box, Button, Divider, MenuItem, Stack, TextField, Typography } from "@mui/material";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { DataTable, EditForm, FormTextField, RequestState, SawaProvider, type TableColumn } from "@sawa/ui";
 import TopNav from "../components/TopNav";
-import { apiClient } from "../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
+import { apiClient, hasActiveSessionAuthHeader } from "../services/apiClient";
 import { DIET_TYPE_OPTIONS } from "../services/menuVocabulary";
+import { useH1LeaveGuard } from "../hooks/useH1LeaveGuard";
 
-type BaseMenuItem = {
-  id?: string;
-  cycle_day?: number | string;
-  daypart?: string | null;
-  category?: string | null;
-  name?: string | null;
-  diet_type?: string | null;
-  slot_index?: number | string | null;
-  unit_type?: string | null;
-  qty_per_serving?: number | null;
-  temp_type?: string | null;
-  bag_max_qty?: number | null;
-  bag_max_unit?: string | null;
-  condiments?: string[] | null;
+type BaseMenuItem = { id?: string; clientKey: string; cycle_day?: number | string; daypart?: string | null; category?: string | null; name?: string | null; diet_type?: string | null; slot_index?: number | string | null; unit_type?: string | null; qty_per_serving?: number | null; temp_type?: string | null; bag_max_qty?: number | null; bag_max_unit?: string | null; condiments?: string[] | null };
+type BaseMenuDraft = Required<Pick<BaseMenuItem, "cycle_day" | "daypart" | "category" | "name" | "diet_type" | "slot_index">>;
+type BaseMenuSnapshot = { items: BaseMenuItem[]; revision: string };
+type SelectedBaseMenu = { item: BaseMenuItem; baseline: BaseMenuSnapshot };
+const baseMenuPaths = ["/base-menus", "/hospital/base-menus"];
+const keyFor = (item: Partial<BaseMenuItem>, index = 0) => item.id || `draft-${index}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const toItems = (items: unknown) => {
+  if (!Array.isArray(items)) throw new Error("基準メニュー一覧の応答に items 配列がありません。");
+  return items.map((item, index) => ({ ...(item as Omit<BaseMenuItem, "clientKey">), clientKey: keyFor(item as Partial<BaseMenuItem>, index) }));
 };
-
-const normalizeNumber = (value: string) => {
-  if (!value) return null;
-  const num = Number(value);
-  return Number.isNaN(num) ? null : num;
+const toSnapshot = (value: { items?: unknown; revision?: unknown }): BaseMenuSnapshot => {
+  if (typeof value.revision !== "string" || !value.revision) throw new Error("基準メニュー一覧の読取版がありません。");
+  return { items: toItems(value.items), revision: value.revision };
 };
-
-const formatTempType = (value?: string | null) => {
-  const raw = String(value || "").trim().toLowerCase();
-  if (!raw) return "-";
-  if (raw === "hot") return "温";
-  if (raw === "cold") return "冷";
-  return value || "-";
+const numberOrNull = (value: string | number | null | undefined) => value === "" || value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+const draft = (item: BaseMenuItem): BaseMenuDraft => ({ cycle_day: item.cycle_day ?? 1, daypart: item.daypart || "", category: item.category || "", name: item.name || "", diet_type: item.diet_type || "", slot_index: item.slot_index ?? "" });
+const blank = (cycleDay = ""): BaseMenuItem => ({ clientKey: keyFor({}), cycle_day: cycleDay ? Number(cycleDay) : 1, daypart: "", category: "", name: "", diet_type: "", slot_index: "" });
+const serialize = (item: BaseMenuItem) => ({ cycle_day: Number(item.cycle_day), daypart: item.daypart || null, category: item.category || null, name: item.name || "", diet_type: item.diet_type || null, slot_index: numberOrNull(item.slot_index) });
+const identity = (item: BaseMenuItem) => JSON.stringify(serialize(item));
+const verifyReplacement = (requested: BaseMenuItem[], received: BaseMenuItem[]) => {
+  const expected = new Map<string, number>(); const actual = new Map<string, number>();
+  requested.forEach((item) => expected.set(identity(item), (expected.get(identity(item)) || 0) + 1));
+  received.forEach((item) => actual.set(identity(item), (actual.get(identity(item)) || 0) + 1));
+  if (expected.size !== actual.size || [...expected].some(([key, count]) => actual.get(key) !== count)) throw new Error("全件置換後の再読込結果が保存要求と一致しません。操作を停止しました。");
 };
+const messageFor = (error: any) => error?.response?.status === 409 ? "他の編集が保存されています。入力値は保持されています。再読込して内容を確認してください。" : typeof error?.response?.data?.detail === "string" ? error.response.data.detail : error instanceof Error && error.message ? error.message : "保存に失敗しました。入力値を確認して再試行してください。";
+const validate = (item: BaseMenuItem) => { const cycleDay = numberOrNull(item.cycle_day); if (!String(item.name || "").trim()) throw new Error("メニュー名は必須です。"); if (cycleDay == null || cycleDay < 1 || cycleDay > 45) throw new Error("サイクル日は1から45で入力してください。"); if (item.slot_index !== "" && item.slot_index != null && numberOrNull(item.slot_index) == null) throw new Error("順番は数値で入力してください。"); };
+function Fields() { return <><FormTextField<BaseMenuDraft> name="cycle_day" label="サイクル日" type="number" rules={{ required: "サイクル日は必須です。", min: { value: 1, message: "1以上を入力してください。" }, max: { value: 45, message: "45以下を入力してください。" } }} parseValue={numberOrNull} /><FormTextField<BaseMenuDraft> name="daypart" label="食事帯" /><FormTextField<BaseMenuDraft> name="category" label="献立区分" /><FormTextField<BaseMenuDraft> name="name" label="メニュー名" rules={{ required: "メニュー名は必須です。" }} /><FormTextField<BaseMenuDraft> name="diet_type" label="食種" select><MenuItem value="">未選択</MenuItem>{DIET_TYPE_OPTIONS.map((option) => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}</FormTextField><FormTextField<BaseMenuDraft> name="slot_index" label="順番" type="number" parseValue={numberOrNull} /></>; }
 
-export default function BaseMenusPage() {
-  const [items, setItems] = useState<BaseMenuItem[]>([]);
-  const [cycleDay, setCycleDay] = useState<string>("");
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-
-  const loadItems = async (day?: string) => {
-    setLoading(true);
-    setMessage("");
-    try {
-      const res = await apiClient.get("/base-menus", {
-        params: day ? { cycle_day: day } : undefined,
-      });
-      setItems(res.data?.items || []);
-      if (!res.data?.items?.length) {
-        setMessage("該当データがありません。");
-      }
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setMessage(detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。");
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadItems();
-  }, []);
-
-  const addRow = () => {
-    setItems((prev) => [
-      ...prev,
-      {
-        id: undefined,
-        cycle_day: cycleDay ? Number(cycleDay) : 1,
-        daypart: "",
-        category: "",
-        name: "",
-        diet_type: "",
-        slot_index: "",
-      },
-    ]);
-  };
-
-  const updateField = (idx: number, field: keyof BaseMenuItem, value: string) => {
-    setItems((prev) => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], [field]: value };
-      return next;
-    });
-  };
-
-  const deleteRow = (idx: number) => {
-    setItems((prev) => prev.filter((_, index) => index !== idx));
-  };
-
-  const saveAll = async () => {
-    setSaving(true);
-    setMessage("");
-    const payload = items
-      .map((item) => ({
-        cycle_day: Number(item.cycle_day),
-        daypart: item.daypart || null,
-        category: item.category || null,
-        name: item.name || "",
-        diet_type: item.diet_type || null,
-        slot_index: normalizeNumber(String(item.slot_index || "")),
-      }))
-      .filter((item) => item.name && item.cycle_day >= 1 && item.cycle_day <= 45);
-    try {
-      const res = await apiClient.post("/base-menus", { items: payload });
-      setMessage(`保存しました（${res.data?.created ?? payload.length}件）。`);
-      await loadItems(cycleDay || undefined);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setMessage(detail ? `保存に失敗しました: ${detail}` : "保存に失敗しました。");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const sortedItems = useMemo(() => {
-    return [...items].sort((a, b) => {
-      const dayA = Number(a.cycle_day || 0);
-      const dayB = Number(b.cycle_day || 0);
-      if (dayA !== dayB) return dayA - dayB;
-      const partA = a.daypart || "";
-      const partB = b.daypart || "";
-      if (partA !== partB) return partA.localeCompare(partB);
-      return (a.slot_index || 0) > (b.slot_index || 0) ? 1 : -1;
-    });
-  }, [items]);
-
-  return (
-    <main className="page">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">Base Menus</p>
-          <h1>基準メニュー</h1>
-          <p className="subtle">45日サイクルの基準メニューを管理します。</p>
-        </div>
-        <TopNav />
-      </header>
-
-      <section className="panel">
-        <header className="panel-header">
-          <h2>操作</h2>
-          <span className="badge">合計 {sortedItems.length} 件</span>
-        </header>
-        <div className="filters">
-          <label className="field">
-            <span className="field-label">サイクル日 (1-45)</span>
-            <input
-              className="input"
-              type="number"
-              min={1}
-              max={45}
-              value={cycleDay}
-              onChange={(e) => setCycleDay(e.target.value)}
-            />
-          </label>
-          <button className="btn primary" onClick={() => loadItems(cycleDay || undefined)} disabled={loading}>
-            {loading ? "読込中..." : "読み込み"}
-          </button>
-          <button className="btn" onClick={() => loadItems()} disabled={loading}>
-            全件
-          </button>
-          <button className="btn" onClick={addRow}>
-            追加
-          </button>
-          <button className="btn primary" onClick={saveAll} disabled={saving}>
-            {saving ? "保存中..." : "保存"}
-          </button>
-        </div>
-        {message ? <p className="message">{message}</p> : null}
-      </section>
-
-      <section className="panel">
-        <header className="panel-header">
-          <h2>一覧</h2>
-        </header>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>日</th>
-                <th>区分</th>
-                <th>献立区分</th>
-                <th>メニュー名</th>
-                <th>食種</th>
-                <th>順番</th>
-                <th>単位(参照)</th>
-                <th>1人前(参照)</th>
-                <th>温冷(参照)</th>
-                <th>袋上限(参照)</th>
-                <th>付属品(参照)</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedItems.map((item, idx) => (
-                <tr key={`${item.id || "new"}-${idx}`}>
-                  <td>
-                    <input
-                      className="input"
-                      type="number"
-                      min={1}
-                      max={45}
-                      value={item.cycle_day ?? ""}
-                      onChange={(e) => updateField(idx, "cycle_day", e.target.value)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="input"
-                      value={item.daypart ?? ""}
-                      onChange={(e) => updateField(idx, "daypart", e.target.value)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="input"
-                      value={item.category ?? ""}
-                      onChange={(e) => updateField(idx, "category", e.target.value)}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="input"
-                      value={item.name ?? ""}
-                      onChange={(e) => updateField(idx, "name", e.target.value)}
-                    />
-                  </td>
-                  <td>
-                    <select
-                      className="input"
-                      value={item.diet_type ?? ""}
-                      onChange={(e) => updateField(idx, "diet_type", e.target.value)}
-                    >
-                      {DIET_TYPE_OPTIONS.map((choice) => (
-                        <option key={choice.value} value={choice.value}>
-                          {choice.label}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <input
-                      className="input"
-                      type="number"
-                      value={item.slot_index ?? ""}
-                      onChange={(e) => updateField(idx, "slot_index", e.target.value)}
-                    />
-                  </td>
-                  <td className="readonly">{item.unit_type || "-"}</td>
-                  <td className="readonly">
-                    {item.qty_per_serving == null || Number.isNaN(Number(item.qty_per_serving))
-                      ? "-"
-                      : Number(item.qty_per_serving)}
-                  </td>
-                  <td className="readonly">{formatTempType(item.temp_type)}</td>
-                  <td className="readonly">
-                    {item.bag_max_qty == null || Number.isNaN(Number(item.bag_max_qty))
-                      ? "-"
-                      : `${Number(item.bag_max_qty)}${item.bag_max_unit || ""}`}
-                  </td>
-                  <td className="readonly">
-                    {Array.isArray(item.condiments) && item.condiments.length ? item.condiments.join(", ") : "-"}
-                  </td>
-                  <td>
-                    <button className="btn danger" onClick={() => deleteRow(idx)}>
-                      削除
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!sortedItems.length && (
-                <tr>
-                  <td colSpan={12} className="empty">
-                    データがありません。
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <p className="hint">保存は全件置換です。必要な項目を確認してから保存してください。</p>
-      </section>
-
-      <style jsx>{`
-        :global(body) {
-          background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
-          color: #1f2a2a;
-          font-family: "Manrope", "Noto Sans JP", sans-serif;
-        }
-
-        :global(*) {
-          box-sizing: border-box;
-        }
-
-        :global(a) {
-          color: inherit;
-          text-decoration: none;
-        }
-
-        .page {
-          min-height: 100vh;
-          padding: 48px 6vw 80px;
-        }
-
-        .hero {
-          display: flex;
-          flex-wrap: wrap;
-          justify-content: space-between;
-          gap: 24px;
-          align-items: center;
-          margin-bottom: 32px;
-        }
-
-        .eyebrow {
-          letter-spacing: 0.12em;
-          text-transform: uppercase;
-          font-size: 12px;
-          color: #5f7b74;
-          margin-bottom: 8px;
-        }
-
-        h1 {
-          font-size: clamp(26px, 4vw, 36px);
-          margin: 0 0 12px;
-        }
-
-        .subtle {
-          color: #51615c;
-          margin: 0;
-        }
-
-        .panel {
-          background: #ffffff;
-          border-radius: 18px;
-          padding: 20px;
-          border: 1px solid rgba(25, 32, 30, 0.08);
-          box-shadow: 0 12px 26px rgba(27, 35, 33, 0.06);
-          margin-bottom: 20px;
-        }
-
-        .panel-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 16px;
-        }
-
-        h2 {
-          font-size: 18px;
-          margin: 0;
-        }
-
-        .badge {
-          background: #1f2a2a;
-          color: #f7f2e7;
-          padding: 4px 10px;
-          border-radius: 999px;
-          font-size: 12px;
-        }
-
-        .filters {
-          display: grid;
-          gap: 16px;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          align-items: end;
-        }
-
-        .field {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-          font-size: 13px;
-        }
-
-        .field-label {
-          color: #5f7b74;
-          font-size: 12px;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-        }
-
-        .input {
-          border: 1px solid rgba(25, 32, 30, 0.14);
-          border-radius: 10px;
-          padding: 8px 10px;
-          background: #fbfbf9;
-          width: 100%;
-        }
-
-        .btn {
-          border: none;
-          border-radius: 999px;
-          padding: 8px 14px;
-          background: #e6ebe9;
-          color: #1f2a2a;
-          font-weight: 600;
-          cursor: pointer;
-          justify-self: start;
-        }
-
-        .btn.primary {
-          background: #1f2a2a;
-          color: #f7f2e7;
-        }
-
-        .btn.danger {
-          background: #c95858;
-          color: #fff;
-        }
-
-        .btn:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-
-        .message {
-          margin-top: 12px;
-          padding: 8px 12px;
-          border-radius: 10px;
-          background: #f0f4f2;
-          font-size: 13px;
-        }
-
-        .table-wrap {
-          overflow-x: auto;
-        }
-
-        table {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 14px;
-        }
-
-        th,
-        td {
-          padding: 10px;
-          text-align: left;
-        }
-
-        thead {
-          background: #f4f1ea;
-        }
-
-        tbody tr:nth-child(even) {
-          background: #faf9f5;
-        }
-
-        .empty {
-          text-align: center;
-          padding: 14px 0;
-        }
-
-        .readonly {
-          color: #40524d;
-          font-size: 13px;
-          white-space: nowrap;
-        }
-
-        .hint {
-          margin-top: 10px;
-          font-size: 12px;
-          color: #6b7a7a;
-        }
-      `}</style>
-      <style jsx global>{`
-        @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
-      `}</style>
-    </main>
-  );
+function Screen({ authenticated }: { authenticated: boolean }) {
+  const client = useQueryClient(); const [filter, setFilter] = useState(""); const [page, setPage] = useState(0); const [rowsPerPage, setRowsPerPage] = useState(25); const [selected, setSelected] = useState<SelectedBaseMenu | null>(null); const [dirty, setDirty] = useState(false); const [notice, setNotice] = useState(""); const generation = useRef(0); const mounted = useRef(false);
+  useH1LeaveGuard(dirty, baseMenuPaths);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const all = useQuery({ queryKey: ["base-menus", "all"], enabled: authenticated, queryFn: async ({ signal }) => { const response = await apiClient.get<{ items?: unknown; revision?: unknown }>("/base-menus", { signal }); return toSnapshot(response.data || {}); } });
+  const update = useMutation({ mutationFn: async ({ item, revision }: { item: BaseMenuItem; revision: string }) => { validate(item); if (!item.id) throw new Error("新規項目は全件一括保存で登録してください。"); const response = await apiClient.put(`/base-menus/${item.id}`, serialize(item), { headers: { "If-Match": revision } }); if (response.data?.updated !== true) throw new Error("保存結果を確認できませんでした。"); return toSnapshot(response.data); } });
+  const replace = useMutation({ mutationFn: async ({ items, revision }: { items: BaseMenuItem[]; revision: string }) => { items.forEach(validate); const response = await apiClient.post("/base-menus", { items: items.map(serialize) }, { headers: { "If-Match": revision } }); if (typeof response.data?.created !== "number") throw new Error("一括保存結果を確認できませんでした。"); return { created: response.data.created as number, snapshot: toSnapshot(response.data) }; } });
+  const rows = useMemo(() => (all.data?.items || []).filter((item) => !filter || String(item.cycle_day) === filter).sort((a, b) => Number(a.cycle_day || 0) - Number(b.cycle_day || 0) || String(a.daypart || "").localeCompare(String(b.daypart || "")) || Number(a.slot_index || 0) - Number(b.slot_index || 0)), [all.data, filter]);
+  const visibleRows = rows.slice(page * rowsPerPage, (page + 1) * rowsPerPage); const choose = (item: BaseMenuItem | null, baseline = all.data) => { if (dirty && !window.confirm("未保存の変更を破棄して別の項目を開きますか？")) return; if (item && !baseline) { setNotice("全件正本を読み込めていないため、編集できません。"); return; } generation.current += 1; setDirty(false); setSelected(item && baseline ? { item, baseline } : null); };
+  const reload = async () => { const result = await all.refetch(); if (result.error) throw result.error; if (!result.data) throw new Error("基準メニュー一覧の再読込結果がありません。"); return result.data; };
+  const bulkSave = async (baseline: BaseMenuSnapshot, next: BaseMenuItem[], newItem?: BaseMenuItem) => { const owner = generation.current; const result = await replace.mutateAsync({ items: next, revision: baseline.revision }); verifyReplacement(next, result.snapshot.items); const saved = newItem ? result.snapshot.items.filter((item) => identity(item) === identity(newItem)) : []; if (newItem && saved.length !== 1) throw new Error("追加した項目を再読込結果から一意に確認できませんでした。操作を停止しました。"); if (!mounted.current || owner !== generation.current) throw new Error("選択が変わったため保存結果を適用しませんでした。"); client.setQueryData(["base-menus", "all"], result.snapshot); setSelected(newItem && saved[0] ? { item: saved[0], baseline: result.snapshot } : null); setDirty(false); setNotice(`全件一括保存を完了しました（${result.created}件）。`); return newItem ? saved[0] : null; };
+  const deleteItem = (item: BaseMenuItem) => { const editingTarget = selected?.item.clientKey === item.clientKey; if (editingTarget && dirty && !window.confirm("未保存の変更を破棄して削除しますか？")) return; const baseline = editingTarget ? selected.baseline : all.data; if (!baseline) { setNotice("全件正本を読み込めていないため、削除できません。"); return; } if (!window.confirm(`全件一括保存で「${item.name || "この項目"}」を削除しますか？`)) return; void bulkSave(baseline, baseline.items.filter((candidate) => candidate.clientKey !== item.clientKey)).catch((error) => setNotice(messageFor(error))); };
+  const columns: readonly TableColumn<BaseMenuItem>[] = [{ id: "cycle", label: "日", render: (item) => item.cycle_day ?? "-" }, { id: "daypart", label: "区分", render: (item) => item.daypart || "-" }, { id: "category", label: "献立区分", render: (item) => item.category || "-" }, { id: "name", label: "メニュー名", render: (item) => item.name || "-" }, { id: "diet", label: "食種", render: (item) => DIET_TYPE_OPTIONS.find((option) => option.value === item.diet_type)?.label || item.diet_type || "-" }, { id: "slot", label: "順番", render: (item) => item.slot_index ?? "-" }, { id: "unit", label: "単位", render: (item) => item.unit_type || "-" }, { id: "qty", label: "1人前", align: "right", render: (item) => item.qty_per_serving ?? "-" }, { id: "temp", label: "温冷", render: (item) => item.temp_type === "hot" ? "温" : item.temp_type === "cold" ? "冷" : item.temp_type || "-" }, { id: "bag", label: "袋上限", render: (item) => item.bag_max_qty == null ? "-" : `${item.bag_max_qty}${item.bag_max_unit || ""}` }, { id: "condiments", label: "付属品", render: (item) => item.condiments?.join("、") || "-" }, { id: "actions", label: "", render: (item) => <Stack direction="row"><Button size="small" onClick={() => choose(item)}>編集</Button><Button size="small" color="error" disabled={all.isError || !all.data} onClick={() => deleteItem(item)}>削除</Button></Stack> }];
+  if (!authenticated) return <Box sx={{ p: 3 }}>ログインを確認しています。</Box>;
+  return <Box sx={{ maxWidth: 1440, mx: "auto", px: { xs: 2, md: 3 }, py: 3 }}><Stack spacing={3}><Box component="header"><Typography component="h1" variant="h5">基準メニュー</Typography><Typography color="text.secondary">既存項目は個別保存、新規追加と削除は全件一括保存です。</Typography></Box><TopNav /><Stack direction={{ xs: "column", sm: "row" }} spacing={1}><TextField label="サイクル日で絞込" value={filter} type="number" inputProps={{ min: 1, max: 45 }} onChange={(event) => { if (dirty && !window.confirm("未保存の変更を破棄して絞込条件を変えますか？")) return; setFilter(event.target.value); setPage(0); }} /><Button onClick={() => choose(blank(filter))} disabled={!all.data || all.isError || all.isFetching}>新規追加</Button><Button onClick={() => void reload().catch((error) => setNotice(messageFor(error)))}>全件再読込</Button></Stack>{notice && <Typography color="error">{notice}</Typography>}{all.data ? <DataTable label="基準メニュー一覧" rows={visibleRows} columns={columns} rowKey={(item) => item.clientKey} total={rows.length} page={page} rowsPerPage={rowsPerPage} onPageChange={setPage} onRowsPerPageChange={(next) => { setRowsPerPage(next); setPage(0); }} pending={all.isFetching} error={all.isError ? messageFor(all.error) : undefined} onRetry={() => void reload().catch((error) => setNotice(messageFor(error)))} /> : <RequestState pending={all.isFetching} error={all.isError ? messageFor(all.error) : undefined} onRetry={() => void reload().catch((error) => setNotice(messageFor(error)))} />}{selected && <><Divider /><EditForm<BaseMenuDraft> key={`${selected.item.clientKey}-${generation.current}`} label={selected.item.id ? "基準メニューを編集" : "基準メニューを追加"} defaultValues={draft(selected.item)} onDirtyChange={setDirty} classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: messageFor(error) })} onSave={async (values) => { const next = { ...selected.item, ...values }; if (next.id) { const owner = generation.current; const snapshot = await update.mutateAsync({ item: next, revision: selected.baseline.revision }); const saved = snapshot.items.find((item) => item.id === next.id); if (!saved || !mounted.current || owner !== generation.current) throw new Error("選択が変わったため保存結果を適用しませんでした。"); client.setQueryData(["base-menus", "all"], snapshot); setSelected({ item: saved, baseline: snapshot }); setDirty(false); return draft(saved); } const saved = await bulkSave(selected.baseline, [...selected.baseline.items, next], next); if (!saved) throw new Error("追加した項目を確認できませんでした。"); return draft(saved); }} onReload={async () => { if (dirty && !window.confirm("未保存の変更を破棄して再読込しますか？")) throw new Error("再読込を取り消しました。"); const owner = generation.current; const target = selected.item.id; const refreshed = await reload(); const current = target ? refreshed.items.find((item) => item.id === target) : null; if ((target && !current) || owner !== generation.current) throw new Error("選択が変わったため再読込結果を適用しませんでした。"); generation.current += 1; setDirty(false); setSelected(current ? { item: current, baseline: refreshed } : null); return draft(current || selected.item); }}><Fields /></EditForm></>}</Stack></Box>;
 }
+export default function BaseMenusPage() { const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server"); const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false); return <SawaProvider sessionKey={`hospital-base-menus:${sessionKey}`}><Screen authenticated={authenticated} /></SawaProvider>; }

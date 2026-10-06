@@ -1,8 +1,12 @@
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { MenuItem as MuiMenuItem } from "@mui/material";
+import { DataTable, EditForm, FormTextField, SawaProvider, type TableColumn } from "@sawa/ui";
 import TopNav from "../../components/TopNav";
-import { apiClient } from "../../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
 import { DIET_TYPE_OPTIONS, formatDietTypeLabel } from "../../services/menuVocabulary";
+import { useH1LeaveGuard } from "../../hooks/useH1LeaveGuard";
 
 type MenuItem = {
   id: string;
@@ -171,6 +175,20 @@ type MenuEntryExceptionDraft = {
   category: string;
   diet_type: string;
 };
+
+type MenuItemDraft = {
+  name: string; unit_type: string; qty_per_serving: string; temp_type: string;
+  daypart: string; category: string; diet_type: string; facility_override: string;
+  bag_max_qty: string; bag_max_unit: string;
+};
+
+const itemDraft = (item: MenuItem): MenuItemDraft => ({
+  name: item.name || "", unit_type: item.unit_type || "", qty_per_serving: item.qty_per_serving == null ? "" : String(item.qty_per_serving),
+  temp_type: item.temp_type || "", daypart: item.daypart || "", category: item.category || "", diet_type: item.diet_type || "",
+  facility_override: item.facility_override || "", bag_max_qty: item.bag_max_qty == null ? "" : String(item.bag_max_qty), bag_max_unit: item.bag_max_unit || "",
+});
+const numberOrNull = (value: string) => value.trim() === "" ? null : Number(value);
+const mergeItemDraft = (item: MenuItem, values: MenuItemDraft): MenuItem => ({ ...item, ...values, qty_per_serving: numberOrNull(values.qty_per_serving), bag_max_qty: numberOrNull(values.bag_max_qty) });
 
 const unitChoices = [
   { value: "g", label: "グラム(g)" },
@@ -557,37 +575,19 @@ const findMatchingItemIndex = (items: MenuItem[], entry: MenuEntry | null) => {
   const entryDaypart = normalizeValue(entry.daypart);
   const entryCategory = normalizeValue(entry.category);
 
-  const exactMatch = items.findIndex(
-    (item) =>
+  const exactMatches = items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) =>
       normalizeValue(item.name) === entryName &&
       normalizeValue(item.facility_override) === entryScope &&
       normalizeValue(item.daypart) === entryDaypart &&
       normalizeValue(item.category) === entryCategory &&
       normalizeValue(item.diet_type) === entryDietType,
-  );
-  if (exactMatch >= 0) return exactMatch;
-
-  const daypartMatch = items.findIndex(
-    (item) =>
-      normalizeValue(item.name) === entryName &&
-      normalizeValue(item.facility_override) === entryScope &&
-      normalizeValue(item.daypart) === entryDaypart &&
-      normalizeValue(item.diet_type) === entryDietType,
-  );
-  if (daypartMatch >= 0) return daypartMatch;
-
-  const scopeMatch = items.findIndex(
-    (item) =>
-      normalizeValue(item.name) === entryName &&
-      normalizeValue(item.facility_override) === entryScope &&
-      !normalizeValue(item.daypart),
-  );
-  if (scopeMatch >= 0) return scopeMatch;
-
-  return items.findIndex((item) => normalizeValue(item.name) === entryName && !normalizeValue(item.daypart));
+    );
+  return exactMatches.length === 1 ? exactMatches[0].index : -1;
 };
 
-export default function MonthlyMenuEditorPage() {
+function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) {
   const router = useRouter();
   const { monthId } = router.query;
   const [menu, setMenu] = useState<MonthlyMenu | null>(null);
@@ -600,7 +600,8 @@ export default function MonthlyMenuEditorPage() {
   const [message, setMessage] = useState<string>("");
   const [lastUpload, setLastUpload] = useState<string>("");
   const [uploadHistory, setUploadHistory] = useState<MenuUploadEntry[]>([]);
-  const [savingId, setSavingId] = useState<string | null>(null);
+  const [uploadHistoryPage, setUploadHistoryPage] = useState(0);
+  const [uploadHistoryRowsPerPage, setUploadHistoryRowsPerPage] = useState(25);
   const [uploading, setUploading] = useState<boolean>(false);
   const [downloadingUploadId, setDownloadingUploadId] = useState<string | null>(null);
   const [facilities, setFacilities] = useState<FacilityOption[]>([]);
@@ -621,7 +622,17 @@ export default function MonthlyMenuEditorPage() {
   const [menuOptions, setMenuOptions] = useState<MonthlyMenu[]>([]);
   const [highlightedReviewIssueKey, setHighlightedReviewIssueKey] = useState<string | null>(null);
   const [pendingReviewNotice, setPendingReviewNotice] = useState<string>("");
+  const [itemFormDirty, setItemFormDirty] = useState(false);
+  const [itemEditGeneration, setItemEditGeneration] = useState(0);
+  const [selectedMasterCheckKey, setSelectedMasterCheckKey] = useState<string | null>(null);
+  const [masterCheckPage, setMasterCheckPage] = useState(0);
+  const [masterCheckRowsPerPage, setMasterCheckRowsPerPage] = useState(25);
   const reviewIssueRefs = useRef<Record<string, HTMLElement | null>>({});
+  const menuLoadGeneration = useRef(0);
+  const itemSaveGeneration = useRef(0);
+  const selectedEntryRef = useRef<string | null>(null);
+  const hasUnsavedChanges = itemFormDirty || entryExceptionSaving;
+  useH1LeaveGuard(hasUnsavedChanges, ["/menus", "/hospital/menus"]);
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
     const value = (scopeOverride || "").trim();
@@ -643,17 +654,35 @@ export default function MonthlyMenuEditorPage() {
   const selectedEntry = entries.find((entry) => entry.id === selectedEntryId) || null;
   const selectedItemIndex = findMatchingItemIndex(items, selectedEntry);
   const selectedItem = selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
+  selectedEntryRef.current = selectedEntryId;
+  const selectEntry = (entryId: string | null) => {
+    if (entryId === selectedEntryRef.current) return;
+    if (itemFormDirty && !window.confirm("未保存の変更を破棄して献立を切り替えますか？")) return;
+    itemSaveGeneration.current += 1;
+    setItemFormDirty(false);
+    setItemEditGeneration((current) => current + 1);
+    setSelectedEntryId(entryId);
+  };
+  const itemColumns: readonly TableColumn<MenuItem>[] = [
+    { id: "name", label: "献立名", render: (item) => item.name }, { id: "scope", label: "適用先", render: (item) => formatScopeLabel(item.facility_override) },
+    { id: "daypart", label: "朝昼夕", render: (item) => item.daypart || "-" }, { id: "category", label: "区分", render: (item) => item.category || "-" },
+    { id: "diet", label: "食種", render: (item) => formatDietTypeLabel(item.diet_type || "") || "-" }, { id: "qty", label: "量 / 単位", render: (item) => item.qty_per_serving == null ? "-" : `${item.qty_per_serving}${item.unit_type || ""}` },
+    { id: "bag", label: "袋上限", render: (item) => item.bag_max_qty == null ? "-" : `${item.bag_max_qty}${item.bag_max_unit || ""}` },
+    { id: "edit", label: "", render: (item) => <button className="btn compact" onClick={() => selectEntry(entries.find((entry) => findMatchingItemIndex(items, entry) >= 0 && items[findMatchingItemIndex(items, entry)]?.id === item.id)?.id || null)}>編集</button> },
+  ];
   const selectedGarnish = splitGarnishMenuName(selectedEntry?.name);
   const selectedGarnishItem = selectedGarnish
     ? items.find((item) => normalizeValue(item.name) === selectedGarnish.garnishName)
     : null;
 
-  const loadUploadHistory = async () => {
+  const loadUploadHistory = async (expectedGeneration?: number) => {
     if (!monthId || Array.isArray(monthId)) return;
     try {
       const res = await apiClient.get(`/monthly-menus/${monthId}/uploads`);
+      if (expectedGeneration != null && expectedGeneration !== menuLoadGeneration.current) return;
       setUploadHistory(res.data?.items || []);
     } catch {
+      if (expectedGeneration != null && expectedGeneration !== menuLoadGeneration.current) return;
       setUploadHistory([]);
     }
   };
@@ -680,12 +709,19 @@ export default function MonthlyMenuEditorPage() {
 
   const loadMenu = async () => {
     if (!monthId || Array.isArray(monthId)) return;
+    const generation = menuLoadGeneration.current + 1;
+    menuLoadGeneration.current = generation;
     try {
       const res = await apiClient.get(`/monthly-menus/${monthId}`);
+      if (generation !== menuLoadGeneration.current) return;
+      if (!res.data?.menu || !Array.isArray(res.data.items) || !Array.isArray(res.data.entries)) {
+        throw new Error("月次メニュー正本の応答形式を確認できませんでした。");
+      }
       setMenu(res.data.menu);
-      setItems(res.data.items || []);
-      setEntries(res.data.entries || []);
-      const issues = res.data?.master_checks?.issues || [];
+      setItems(res.data.items);
+      setEntries(res.data.entries);
+      const issues = res.data?.master_checks?.issues;
+      if (!Array.isArray(issues)) throw new Error("メニューマスター差分の応答形式を確認できませんでした。");
       setMasterCheckState({
         issues,
         resolutions: Object.fromEntries(
@@ -695,12 +731,11 @@ export default function MonthlyMenuEditorPage() {
           }),
         ),
       });
+      setSelectedMasterCheckKey((current) => current && issues.some((issue: MenuMasterReviewIssue, index: number) => getReviewIssueKey(issue, index) === current) ? current : (issues[0] ? getReviewIssueKey(issues[0], 0) : null));
+      setMasterCheckPage(0);
       setMessage("");
     } catch (err: any) {
-      setMenu(null);
-      setItems([]);
-      setEntries([]);
-      setMasterCheckState({ issues: [], resolutions: {} });
+      if (generation !== menuLoadGeneration.current) return;
       const status = err?.response?.status;
       if (status === 403) {
         setMessage("権限がありません。月次メニューの操作にはユーザー2以上の権限が必要です。");
@@ -710,7 +745,7 @@ export default function MonthlyMenuEditorPage() {
         setMessage("月次メニューの読込に失敗しました。");
       }
     }
-    await loadUploadHistory();
+    await loadUploadHistory(generation);
   };
 
   useEffect(() => {
@@ -1095,23 +1130,21 @@ export default function MonthlyMenuEditorPage() {
     }
   };
 
-  const updateItemField = (idx: number, field: keyof MenuItem, value: string) => {
-    const next = [...items];
-    next[idx] = { ...next[idx], [field]: value };
-    setItems(next);
-  };
-
-  const saveItem = async (item: MenuItem) => {
-    if (!monthId || Array.isArray(monthId)) return;
+  const saveItem = async (item: MenuItem): Promise<MenuItem> => {
+    if (!monthId || Array.isArray(monthId)) throw new Error("対象月が確定していません。");
+    const generation = itemSaveGeneration.current + 1;
+    itemSaveGeneration.current = generation;
+    const selectedAtSaveStart = selectedEntryRef.current;
+    const menuAtSaveStart = menuLoadGeneration.current;
+    const monthAtSaveStart = monthId;
     const qtyValue =
       item.qty_per_serving == null || item.qty_per_serving === ""
         ? null
         : Number(item.qty_per_serving);
     const bagMaxValue =
       item.bag_max_qty == null || item.bag_max_qty === "" ? null : Number(item.bag_max_qty);
-    setSavingId(item.id);
     try {
-      await apiClient.put(`/monthly-menus/${monthId}/items/${item.id}`, {
+      const result = await apiClient.put(`/monthly-menus/${monthId}/items/${item.id}`, {
         name: item.name,
         unit_type: item.unit_type,
         qty_per_serving: qtyValue,
@@ -1123,9 +1156,23 @@ export default function MonthlyMenuEditorPage() {
         bag_max_qty: bagMaxValue,
         bag_max_unit: item.bag_max_unit,
       });
+      if (result.data?.updated !== true) throw new Error("メニュー保存の応答を確認できませんでした。");
+      if (generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
+        throw new Error("選択変更後の保存応答を適用しませんでした。");
+      }
+      const fresh = await apiClient.get(`/monthly-menus/${monthId}`);
+      if (!Array.isArray(fresh.data?.items)) throw new Error("保存後の月次メニュー正本を確認できませんでした。");
+      const saved = fresh.data.items.find((current: MenuItem) => current.id === item.id);
+      if (!saved || generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
+        throw new Error("保存後の項目を正本から確認できませんでした。");
+      }
+      setItems(fresh.data.items);
       setMessage(`保存しました: ${item.name}`);
-      await loadMenu();
+      return saved;
     } catch (err: any) {
+      if (generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
+        throw new Error("選択変更後の保存応答を適用しませんでした。");
+      }
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
       if (status === 403) {
@@ -1133,8 +1180,7 @@ export default function MonthlyMenuEditorPage() {
       } else {
         setMessage(detail ? `保存に失敗しました: ${detail}` : "保存に失敗しました。");
       }
-    } finally {
-      setSavingId(null);
+      throw err;
     }
   };
 
@@ -1220,6 +1266,24 @@ export default function MonthlyMenuEditorPage() {
   const incompletePendingReviewIssues = pendingReviewIssueStates.filter((issueState) => !issueState.complete);
   const canSubmitPendingReview =
     pendingReviewIssueStates.length > 0 && incompletePendingReviewIssues.length === 0;
+  const uploadHistoryColumns: readonly TableColumn<MenuUploadEntry>[] = [
+    { id: "uploaded", label: "登録日時", render: (upload) => upload.uploaded_at ? new Date(upload.uploaded_at).toLocaleString("ja-JP") : "-" },
+    { id: "filename", label: "ファイル名", render: (upload) => upload.filename || "-" },
+    { id: "sheet", label: "シート名", render: (upload) => upload.sheet_name || "-" },
+    { id: "scope", label: "適用先", render: (upload) => formatScopeLabel(upload.scope_override) },
+    { id: "count", label: "件数", align: "right", render: (upload) => upload.item_count ?? "-" },
+    { id: "kind", label: "更新種別", render: (upload) => upload.replaced ? "置換" : "新規" },
+    { id: "download", label: "", render: (upload) => upload.download_available ? <button className="btn" type="button" onClick={() => handleDownloadUpload(upload)} disabled={downloadingUploadId === upload.id}>{downloadingUploadId === upload.id ? "取得中..." : "ダウンロード"}</button> : <span className="history-note">{upload.archive_error ? "保存失敗" : "履歴のみ"}</span> },
+  ];
+  const masterCheckColumns: readonly TableColumn<MenuMasterReviewIssue>[] = [
+    { id: "name", label: "献立名", render: (issue) => getReviewSourceName(issue) },
+    { id: "kind", label: "種別", render: (issue) => issue.issue_type === "diff" ? "差分あり" : "新規登録候補" },
+    { id: "scope", label: "適用先", render: (issue) => getMasterCheckScopeLabel(issue) },
+    { id: "detail", label: "差分", render: (issue) => `${(issue.field_diffs || []).length + (issue.condiment_issues || []).length}件` },
+    { id: "edit", label: "", render: (issue) => <button className="btn compact" type="button" onClick={() => setSelectedMasterCheckKey(getReviewIssueKey(issue, masterCheckState.issues.indexOf(issue)))}>設定</button> },
+  ];
+  if (!authenticated) return <main className="page">ログインを確認しています。</main>;
+
   return (
     <main className="page">
       <header className="hero">
@@ -1341,55 +1405,17 @@ export default function MonthlyMenuEditorPage() {
             <h3>これまでのアップロード</h3>
             <p className="subtle">新しい履歴はダウンロードできます。過去分はファイル未保存のため一覧のみです。</p>
           </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>登録日時</th>
-                  <th>ファイル名</th>
-                  <th>シート名</th>
-                  <th>適用先</th>
-                  <th>件数</th>
-                  <th>更新種別</th>
-                  <th>ダウンロード</th>
-                </tr>
-              </thead>
-              <tbody>
-                {uploadHistory.length === 0 ? (
-                  <tr>
-                    <td colSpan={7}>履歴はまだありません。</td>
-                  </tr>
-                ) : (
-                  uploadHistory.map((upload) => (
-                    <tr key={upload.id}>
-                      <td>{upload.uploaded_at ? new Date(upload.uploaded_at).toLocaleString("ja-JP") : "-"}</td>
-                      <td>{upload.filename || "-"}</td>
-                      <td>{upload.sheet_name || "-"}</td>
-                      <td>{formatScopeLabel(upload.scope_override)}</td>
-                      <td>{upload.item_count ?? "-"}</td>
-                      <td>{upload.replaced ? "置換" : "新規"}</td>
-                      <td>
-                        {upload.download_available ? (
-                          <button
-                            className="btn"
-                            type="button"
-                            onClick={() => handleDownloadUpload(upload)}
-                            disabled={downloadingUploadId === upload.id}
-                          >
-                            {downloadingUploadId === upload.id ? "取得中..." : "ダウンロード"}
-                          </button>
-                        ) : (
-                          <span className="history-note">
-                            {upload.archive_error ? "保存失敗" : "履歴のみ"}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            label="取込履歴"
+            rows={uploadHistory.slice(uploadHistoryPage * uploadHistoryRowsPerPage, (uploadHistoryPage + 1) * uploadHistoryRowsPerPage)}
+            columns={uploadHistoryColumns}
+            rowKey={(upload) => upload.id}
+            total={uploadHistory.length}
+            page={uploadHistoryPage}
+            rowsPerPage={uploadHistoryRowsPerPage}
+            onPageChange={setUploadHistoryPage}
+            onRowsPerPageChange={(next) => { setUploadHistoryRowsPerPage(next); setUploadHistoryPage(0); }}
+          />
         </div>
       </section>
 
@@ -1681,9 +1707,22 @@ export default function MonthlyMenuEditorPage() {
           {masterCheckState.issues.length === 0 ? (
             <p className="subtle">差分はありません。</p>
           ) : (
+            <>
+            <DataTable
+              label="メニューマスター差分一覧"
+              rows={masterCheckState.issues.slice(masterCheckPage * masterCheckRowsPerPage, (masterCheckPage + 1) * masterCheckRowsPerPage)}
+              columns={masterCheckColumns}
+              rowKey={(issue) => getReviewIssueKey(issue, masterCheckState.issues.indexOf(issue))}
+              total={masterCheckState.issues.length}
+              page={masterCheckPage}
+              rowsPerPage={masterCheckRowsPerPage}
+              onPageChange={setMasterCheckPage}
+              onRowsPerPageChange={(next) => { setMasterCheckRowsPerPage(next); setMasterCheckPage(0); }}
+            />
             <div className="review-list">
             {masterCheckState.issues.map((issue, index) => {
               const issueKey = getReviewIssueKey(issue, index);
+              if (selectedMasterCheckKey !== issueKey) return null;
               const resolution = masterCheckState.resolutions[issueKey];
               const candidates = issue.candidates || [];
               const suggestedPatch = issue.suggested_patch || {};
@@ -2125,8 +2164,9 @@ export default function MonthlyMenuEditorPage() {
                   </div>
                 </article>
               );
-            })}
+              })}
             </div>
+            </>
           )}
         </section>
 
@@ -2215,7 +2255,7 @@ export default function MonthlyMenuEditorPage() {
                                     key={entry.id}
                                     type="button"
                                     className={`sheet-chip${selectedEntryId === entry.id ? " active" : ""}`}
-                                    onClick={() => setSelectedEntryId(entry.id)}
+                                    onClick={() => selectEntry(entry.id)}
                                   >
                                     {entry.name}
                                   </button>
@@ -2270,110 +2310,14 @@ export default function MonthlyMenuEditorPage() {
                   </div>
                 )}
                 {selectedItem ? (
-                  <div className="inspector-form">
-                    <label>
-                      <span>単位</span>
-                      <select
-                        className="input"
-                        value={selectedItem.unit_type || ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "unit_type", e.target.value)}
-                      >
-                        <option value="">未選択</option>
-                        {unitChoices.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>量</span>
-                      <input
-                        className="input"
-                        type="number"
-                        value={selectedItem.qty_per_serving ?? ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "qty_per_serving", e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>袋最大量</span>
-                      <input
-                        className="input"
-                        type="number"
-                        value={selectedItem.bag_max_qty ?? ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "bag_max_qty", e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>袋単位</span>
-                      <select
-                        className="input"
-                        value={selectedItem.bag_max_unit || ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "bag_max_unit", e.target.value)}
-                      >
-                        <option value="">未選択</option>
-                        {unitChoices.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>温冷</span>
-                      <select
-                        className="input"
-                        value={selectedItem.temp_type || ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "temp_type", e.target.value)}
-                      >
-                        {tempTypeChoices.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>時間帯</span>
-                      <select
-                        className="input"
-                        value={selectedItem.daypart || ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "daypart", e.target.value)}
-                      >
-                        {daypartChoices.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>区分</span>
-                      <input
-                        className="input"
-                        value={selectedItem.category || ""}
-                        list="category-options"
-                        onChange={(e) => updateItemField(selectedItemIndex, "category", e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>食種</span>
-                      <select
-                        className="input"
-                        value={selectedItem.diet_type || ""}
-                        onChange={(e) => updateItemField(selectedItemIndex, "diet_type", e.target.value)}
-                      >
-                        {DIET_TYPE_OPTIONS.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button className="btn primary" onClick={() => saveItem(selectedItem)} disabled={savingId === selectedItem.id}>
-                      {savingId === selectedItem.id ? "保存中..." : "この設定を保存"}
-                    </button>
-                  </div>
+                  <EditForm<MenuItemDraft> key={`${selectedItem.id}-${itemEditGeneration}`} label="献立を編集" defaultValues={itemDraft(selectedItem)} onDirtyChange={setItemFormDirty} classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: error instanceof Error ? error.message : "保存に失敗しました。" })} onSave={async (values) => { const saved = await saveItem(mergeItemDraft(selectedItem, values)); setItemFormDirty(false); return itemDraft(saved); }} onReload={async () => { if (!monthId || Array.isArray(monthId)) throw new Error("対象月が確定していません。"); if (itemFormDirty && !window.confirm("未保存の変更を破棄して再読込しますか？")) throw new Error("再読込を取り消しました。"); const reloadMonth = monthId; const reloadItemId = selectedItem.id; const reloadEntry = selectedEntryRef.current; const reloadMenuGeneration = menuLoadGeneration.current; const reloadSaveGeneration = itemSaveGeneration.current; const reloadEditGeneration = itemEditGeneration; const fresh = await apiClient.get(`/monthly-menus/${reloadMonth}`); if (!Array.isArray(fresh.data?.items)) throw new Error("月次メニュー正本の応答形式を確認できませんでした。"); const refreshed = fresh.data.items.find((item: MenuItem) => item.id === reloadItemId); if (!refreshed) throw new Error("対象の献立を再読込結果から確認できませんでした。"); if (reloadMonth !== monthId || reloadEntry !== selectedEntryRef.current || reloadMenuGeneration !== menuLoadGeneration.current || reloadSaveGeneration !== itemSaveGeneration.current || reloadEditGeneration !== itemEditGeneration) throw new Error("選択または読込世代が変わったため再読込結果を適用しませんでした。"); setItems(fresh.data.items); setItemFormDirty(false); return itemDraft(refreshed); }}>
+                    <FormTextField<MenuItemDraft> name="name" label="献立名" rules={{ required: "献立名は必須です。" }} />
+                    <FormTextField<MenuItemDraft> name="unit_type" label="単位" select><MuiMenuItem value="">未選択</MuiMenuItem>{unitChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField>
+                    <FormTextField<MenuItemDraft> name="qty_per_serving" label="1人前の量" type="number" /><FormTextField<MenuItemDraft> name="bag_max_qty" label="袋最大量" type="number" />
+                    <FormTextField<MenuItemDraft> name="bag_max_unit" label="袋単位" select><MuiMenuItem value="">未選択</MuiMenuItem>{unitChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField>
+                    <FormTextField<MenuItemDraft> name="temp_type" label="温冷" select>{tempTypeChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField>
+                    <FormTextField<MenuItemDraft> name="daypart" label="朝昼夕" select>{daypartChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField><FormTextField<MenuItemDraft> name="category" label="メニュー区分" /><FormTextField<MenuItemDraft> name="diet_type" label="食種" select>{DIET_TYPE_OPTIONS.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField><FormTextField<MenuItemDraft> name="facility_override" label="適用scope" />
+                  </EditForm>
                 ) : (
                   <p className="subtle">対応するメニュー設定がまだありません。必要なら下の補助一覧を開いて確認してください。</p>
                 )}
@@ -2520,150 +2464,8 @@ export default function MonthlyMenuEditorPage() {
 
       <section className="panel">
         <details className="menu-list-details">
-          <summary>メニュー一覧（補助）</summary>
-          <p className="subtle details-note">補助の全件一覧です。通常は上の月次シートから選択して確認します。</p>
-          <div className="table-wrap" data-testid="monthly-menu-item-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>メニュー名</th>
-                  <th>単位</th>
-                  <th>量</th>
-                  <th>袋最大量</th>
-                  <th>袋単位</th>
-                  <th>温冷</th>
-                  <th>時間帯</th>
-                  <th>区分</th>
-                  <th>食種</th>
-                  <th>適用先</th>
-                  <th>保存</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.length === 0 ? (
-                  <tr>
-                    <td colSpan={11}>メニューがありません。</td>
-                  </tr>
-                ) : (
-                  items.map((item, idx) => (
-                    <tr key={item.id}>
-                      <td>
-                        <input
-                          className="input"
-                          value={item.name}
-                          onChange={(e) => updateItemField(idx, "name", e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <select
-                          className="input"
-                          value={item.unit_type || ""}
-                          onChange={(e) => updateItemField(idx, "unit_type", e.target.value)}
-                        >
-                          <option value="">未選択</option>
-                          {unitChoices.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.label}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <input
-                          className="input"
-                          type="number"
-                          value={item.qty_per_serving ?? ""}
-                          onChange={(e) => updateItemField(idx, "qty_per_serving", e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          className="input"
-                          type="number"
-                          value={item.bag_max_qty ?? ""}
-                          onChange={(e) => updateItemField(idx, "bag_max_qty", e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <select
-                          className="input"
-                          value={item.bag_max_unit || ""}
-                          onChange={(e) => updateItemField(idx, "bag_max_unit", e.target.value)}
-                        >
-                          <option value="">未選択</option>
-                          {unitChoices.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.label}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <select
-                          className="input"
-                          value={item.temp_type || ""}
-                          onChange={(e) => updateItemField(idx, "temp_type", e.target.value)}
-                        >
-                          {tempTypeChoices.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.label}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <select
-                          className="input"
-                          value={item.daypart || ""}
-                          onChange={(e) => updateItemField(idx, "daypart", e.target.value)}
-                        >
-                          {daypartChoices.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.label}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <input
-                          className="input"
-                          value={item.category || ""}
-                          list="category-options"
-                          onChange={(e) => updateItemField(idx, "category", e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <select
-                          className="input"
-                          value={item.diet_type || ""}
-                          onChange={(e) => updateItemField(idx, "diet_type", e.target.value)}
-                        >
-                          {DIET_TYPE_OPTIONS.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.label}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <input
-                          className="input"
-                          value={item.facility_override || ""}
-                          onChange={(e) => updateItemField(idx, "facility_override", e.target.value)}
-                          placeholder="共通(base) / FACxxxx / TAG:xxx"
-                        />
-                      </td>
-                      <td>
-                        <button className="btn" onClick={() => saveItem(item)} disabled={savingId === item.id}>
-                          {savingId === item.id ? "保存中..." : "保存"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <summary>メニュー一覧</summary>
+          <DataTable label="月次メニュー一覧" rows={items} columns={itemColumns} rowKey={(item) => item.id} />
         </details>
         <datalist id="daypart-options">
           {daypartOptions.map((value) => (
@@ -3487,4 +3289,10 @@ export default function MonthlyMenuEditorPage() {
       `}</style>
     </main>
   );
+}
+
+export default function MonthlyMenuEditorPage() {
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false);
+  return <SawaProvider sessionKey={`hospital-monthly-menu:${sessionKey}`}><MonthlyMenuEditorScreen authenticated={authenticated} /></SawaProvider>;
 }
