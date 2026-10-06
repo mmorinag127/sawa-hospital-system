@@ -1,6 +1,7 @@
 import type { MouseEvent } from "react";
 
 import { getStoredAuthHeader } from "./apiClient";
+import { publishSchoolLunchSessionGeneration } from "./browserSession";
 import { loginUrlFor, validateLoginDestination } from "./loginDestination";
 
 const SCHOOL_LUNCH_HOME = "/school-lunch/implementation-price-tables";
@@ -29,9 +30,10 @@ export async function prepareSystemDestination(destination: string, authorizatio
     response.status === 401 ? "ログインの有効期限が切れています。Googleでログインし直してください。" :
     response.status === 403 ? "このシステムの利用権限がありません。統合管理者に確認してください。" :
     "認証サービスを確認できません。時間をおいてもう一度お試しください。");
-  let identity: {role?: string; auth_disabled?: boolean};
+  let identity: {role?: string; auth_disabled?: boolean; session_generation?: unknown};
   try { identity = await response.json(); } catch { throw new LoginNavigationError(503, "認証サービスの応答を確認できませんでした。"); }
   if (!identity || identity.auth_disabled || !["admin", "operator"].includes(identity.role || "")) throw new LoginNavigationError(403, "利用者の権限を確認できませんでした。");
+  if (lunch) publishSchoolLunchSessionGeneration(identity.session_generation);
   return target;
 }
 

@@ -3,6 +3,14 @@ const LOGOUT_KEY = "sawa_logout_generation";
 const SESSION_KEY = "sawa_auth_generation";
 const CACHE_KEY = "sawa_auth_cache_generation";
 const SESSION_EVENT = "sawa:auth-generation";
+const SCHOOL_GENERATION_KEY = "sawa_school_lunch_session_generation";
+const SCHOOL_PUBLISHED_GENERATION_KEY = "sawa_school_lunch_published_generation";
+
+export const publishSchoolLunchSessionGeneration = (value: unknown) => {
+  if (typeof value !== "string" || !value) throw new Error("School lunch session generation is required");
+  window.sessionStorage.setItem(SCHOOL_GENERATION_KEY, value);
+  window.localStorage.setItem(SCHOOL_PUBLISHED_GENERATION_KEY, value);
+};
 
 const notifySessionChange = () => {
   if (typeof window.dispatchEvent === "function") {

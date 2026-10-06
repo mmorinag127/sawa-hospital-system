@@ -31,13 +31,14 @@ function page({ system = "shift", role = "operator", systems = [system], authOk 
         clearAuth() { calls.push(["clear"]); },
         setBearerToken(token) { calls.push(["store", token]); },
       };
+      if (name.endsWith("browserSession")) return { publishSchoolLunchSessionGeneration(value) { calls.push(["publish", value]); } };
       throw new Error(name);
     },
     async fetch(url, options) {
       calls.push([url, options]);
       if (url.startsWith("/api/portal/")) return { ok: authOk, json: async () => ({ role, systems }) };
       assert.equal(url, "/school-lunch/api/backend/shared-auth/me");
-      return { ok: sessionOk };
+      return { ok: sessionOk, json: async () => ({ session_generation: "school-test-generation" }) };
     },
     window: { location: { replace(url) { calls.push(["navigate", url]); } } },
   });
@@ -74,6 +75,7 @@ for (const system of ["shift", "school-lunch"]) {
       assert.equal(calls[2][1].headers.Authorization, "Bearer signed-token");
       assert.equal(calls[2][1].cache, "no-store");
       assert.equal(calls[2][1].redirect, "error");
+      assert.deepEqual(calls[3], ["publish", "school-test-generation"]);
     } else {
       assert.equal(calls.length, 4);
     }
