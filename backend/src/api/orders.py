@@ -1502,7 +1502,7 @@ def unarchive_orders_for_week(payload: WeekArchiveBody):
 
 @router.get("/{order_id}", dependencies=[Depends(require_role("operator"))])
 def get_order(order_id: str):
-    order = order_service.get_order_by_id(order_id)
+    order = order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
     job_id = order.get("ocr_job_id")

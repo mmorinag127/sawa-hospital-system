@@ -40,6 +40,7 @@ type WorkflowV2 = {
   context_suggestion?: ContextSuggestion | null;
   bagging_result_id?: string | null;
   output_bundle_id?: string | null;
+  menu_amount_resolution?: OrderDetail["menu_amount_resolution"];
   pre_save_checks?: PreSaveChecks | null;
   blockers?: string[] | null;
   warnings?: string[] | null;
@@ -86,6 +87,20 @@ type OrderVersion = {
 
 type OrderDetail = {
   id?: string | null;
+  menu_amount_resolution?: {
+    status: "resolved" | "unresolved";
+    blocker?: string | null;
+    message?: string | null;
+    affected_lines: Array<{
+      line_id?: string | null;
+      date?: string | null;
+      daypart?: string | null;
+      menu_name: string;
+      diet_type?: string | null;
+      area_id?: string | null;
+      unresolved_fields: string[];
+    }>;
+  };
   version_count?: number | null;
   current_version?: OrderVersion | null;
   versions?: OrderVersion[] | null;
@@ -421,7 +436,7 @@ const formatApiError = (err: any, fallback: string) => {
     return "正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。";
   }
   if (detail === "fax_template_id_required") return "帳票レイアウトを選択してください。";
-  if (typeof detail === "string") return detail;
+  if (typeof detail === "string") return describeWorkflowBlocker(detail);
   if (detail && typeof detail === "object") {
     const error = (detail as { error?: unknown }).error;
     if (error === "validation_error") {
@@ -744,6 +759,7 @@ const stateLabel = (state?: string | null) => {
 const describeWorkflowBlocker = (code: string) => {
   const normalized = String(code || "").trim();
   const labels: Record<string, string> = {
+    menu_amount_unresolved: "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。",
     menu_entries_missing: "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_object_missing: "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_lookup_failed: "対象週の月次メニューを解決できません。メニュー登録を確認してください。",
@@ -753,6 +769,13 @@ const describeWorkflowBlocker = (code: string) => {
     quad_estimation_failed: "FAXの表外枠4点を自動推定できませんでした。4点補正を確認してからOCRを再実行してください。",
     template_resolution_failed: "施設テンプレートを解決できませんでした。施設テンプレートと施設区分列を確認してください。",
     hakodate_live_rerun_failed: "箱館方式のOCR処理中に失敗しました。詳細を確認してから再実行してください。",
+    bagging_output_enrichment_failed: "出力用の袋分けデータを作成できませんでした。保存済みシートと月次メニューを確認してから、出力確認をやり直してください。",
+    bagging_output_empty: "袋分け結果が0件です。保存済みシートの全数量が0であることを確認してから、出力確認を続けてください。",
+    bagging_output_invalid: "袋分け結果の形式が不正です。出力確認を停止しました。保存済みシートを確認してからやり直してください。",
+    saved_sheet_required: "保存済みシートがありません。Step3でシートを保存してから出力確認を実行してください。",
+    saved_sheet_missing: "保存済みシートを取得できません。出力確認を停止しました。Step3でシートを確認して保存し直してください。",
+    saved_sheet_template_mismatch: "保存済みシートと施設テンプレートの版が一致しません。出力確認を停止しました。Step3で現在のテンプレートに合わせて保存し直してください。",
+    saved_sheet_materialization_failed: "保存済みシートから出力対象を確定できません。出力確認を停止しました。Step3でシート内容を確認してください。",
   };
   return labels[normalized] || normalized;
 };
@@ -1352,6 +1375,15 @@ export default function OrderWorkflowV2Page() {
   const workflowBlockers = Array.isArray(workflow?.blockers)
     ? workflow.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
+  const menuAmountResolution = workflow?.saved_sheet_id
+    ? workflow.menu_amount_resolution
+    : orderDetail?.menu_amount_resolution;
+  const menuAmountUnresolved = Boolean(workflow?.saved_sheet_id && !menuAmountResolution)
+    || menuAmountResolution?.status === "unresolved"
+    || workflowBlockers.includes("menu_amount_unresolved");
+  if (menuAmountUnresolved && !workflowBlockers.includes("menu_amount_unresolved")) {
+    workflowBlockers.push("menu_amount_unresolved");
+  }
   const ocrJobErrorMessage = String(
     workflow?.ocr_job?.error_user_message
       || workflow?.ocr_job?.error_detail
@@ -3128,6 +3160,7 @@ export default function OrderWorkflowV2Page() {
 
   const runBagging = () =>
     runAction("Step4 bagging", async () => {
+      if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker("menu_amount_unresolved"));
       await apiClient.post(`/orders/${orderId}/workflow-v2/bagging`);
     }, {
       successMessage: "出力確認を作成しました",
@@ -3174,6 +3207,7 @@ export default function OrderWorkflowV2Page() {
     runAction(
       "Step4 final confirm",
       async () => {
+        if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker("menu_amount_unresolved"));
         await apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
           confirmed_by: "operator",
         });
@@ -3478,6 +3512,12 @@ export default function OrderWorkflowV2Page() {
       {workflowBlockers.length ? (
         <div className="notice error">
           {workflowBlockers.map(describeWorkflowBlocker).join(" / ")}
+          {menuAmountResolution?.affected_lines.map((line, index) => (
+            <div key={`${line.line_id || "line"}-${index}`}>
+              {[line.date, line.daypart, line.menu_name, line.diet_type, line.area_id].filter(Boolean).join(" / ")}
+              {` (${line.unresolved_fields.join(", ")})`}
+            </div>
+          ))}
         </div>
       ) : null}
 
@@ -5013,10 +5053,10 @@ export default function OrderWorkflowV2Page() {
               <p className="subtle">袋分け、ラベル、納品書、総量をまとめて確認して、問題なければ注文を確定します。</p>
             </div>
             <div className="row-actions">
-              <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || !workflow?.saved_sheet_id)}>
+              <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
                 出力確認を作成
               </button>
-              <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || !workflow?.output_bundle_id)}>
+              <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.output_bundle_id)}>
                 確定して一覧にもどる
               </button>
             </div>
