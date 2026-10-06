@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm.exc import StaleDataError
 
 from src.api.auth import require_role
-from src.api.menu_master_schemas import MenuMasterFields, MenuMasterUpdate
+from src.api.menu_master_schemas import (
+    MenuMasterFields,
+    MenuMasterItemResponse,
+    MenuMasterListResponse,
+    MenuMasterUpdate,
+    MenuMasterUpdateResponse,
+)
 from src.services import menu_service
 
 
@@ -18,7 +24,11 @@ def _require_menu_schema() -> None:
 router = APIRouter(dependencies=[Depends(require_role("operator")), Depends(_require_menu_schema)])
 
 
-@router.get("/menu-masters")
+@router.get(
+    "/menu-masters",
+    response_model=None,
+    responses={200: {"model": MenuMasterListResponse}},
+)
 def list_menu_masters(
     q: str | None = None, limit: int = 1000, offset: int = Query(default=0, ge=0),
     sort: str = "name", order: str = "asc",
@@ -29,7 +39,11 @@ def list_menu_masters(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/menu-masters/{item_id}")
+@router.get(
+    "/menu-masters/{item_id}",
+    response_model=None,
+    responses={200: {"model": MenuMasterItemResponse}},
+)
 def get_menu_master(item_id: str):
     item = menu_service.get_menu_master(item_id)
     if item is None:
@@ -37,7 +51,11 @@ def get_menu_master(item_id: str):
     return {"item": item}
 
 
-@router.post("/menu-masters")
+@router.post(
+    "/menu-masters",
+    response_model=None,
+    responses={200: {"model": MenuMasterItemResponse}},
+)
 def create_menu_master(body: MenuMasterFields):
     try:
         item = menu_service.create_menu_master(body.model_dump(exclude_unset=True))
@@ -46,7 +64,11 @@ def create_menu_master(body: MenuMasterFields):
     return {"item": item}
 
 
-@router.put("/menu-masters/{item_id}")
+@router.put(
+    "/menu-masters/{item_id}",
+    response_model=None,
+    responses={200: {"model": MenuMasterUpdateResponse}},
+)
 def update_menu_master(item_id: str, body: MenuMasterUpdate):
     try:
         item = menu_service.save_menu_master(

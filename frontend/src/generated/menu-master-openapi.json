@@ -1,0 +1,535 @@
+{
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "MenuMasterFields": {
+        "properties": {
+          "bag_max_qty": {
+            "title": "Bag Max Qty"
+          },
+          "bag_max_unit": {
+            "title": "Bag Max Unit"
+          },
+          "category": {
+            "title": "Category"
+          },
+          "condiments": {
+            "title": "Condiments"
+          },
+          "daypart": {
+            "title": "Daypart"
+          },
+          "name": {
+            "title": "Name"
+          },
+          "qty_per_serving": {
+            "title": "Qty Per Serving"
+          },
+          "temp_type": {
+            "title": "Temp Type"
+          },
+          "unit_type": {
+            "title": "Unit Type"
+          }
+        },
+        "title": "MenuMasterFields",
+        "type": "object"
+      },
+      "MenuMasterItemResponse": {
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/MenuMasterResponse"
+          }
+        },
+        "required": [
+          "item"
+        ],
+        "title": "MenuMasterItemResponse",
+        "type": "object"
+      },
+      "MenuMasterListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MenuMasterResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "title": "MenuMasterListResponse",
+        "type": "object"
+      },
+      "MenuMasterResponse": {
+        "description": "Exact public shape of ``menu_service.serialize_menu_master``.",
+        "properties": {
+          "bag_max_qty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bag Max Qty"
+          },
+          "bag_max_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bag Max Unit"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "condiments": {
+            "items": {},
+            "title": "Condiments",
+            "type": "array"
+          },
+          "daypart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daypart"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "normalized_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Name"
+          },
+          "qty_per_serving": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qty Per Serving"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "temp_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temp Type"
+          },
+          "unit_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Type"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "name",
+          "normalized_name",
+          "unit_type",
+          "qty_per_serving",
+          "bag_max_qty",
+          "bag_max_unit",
+          "temp_type",
+          "daypart",
+          "category",
+          "condiments"
+        ],
+        "title": "MenuMasterResponse",
+        "type": "object"
+      },
+      "MenuMasterUpdate": {
+        "properties": {
+          "bag_max_qty": {
+            "title": "Bag Max Qty"
+          },
+          "bag_max_unit": {
+            "title": "Bag Max Unit"
+          },
+          "category": {
+            "title": "Category"
+          },
+          "condiments": {
+            "title": "Condiments"
+          },
+          "daypart": {
+            "title": "Daypart"
+          },
+          "name": {
+            "title": "Name"
+          },
+          "qty_per_serving": {
+            "title": "Qty Per Serving"
+          },
+          "revision": {
+            "exclusiveMinimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "temp_type": {
+            "title": "Temp Type"
+          },
+          "unit_type": {
+            "title": "Unit Type"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "MenuMasterUpdate",
+        "type": "object"
+      },
+      "MenuMasterUpdateResponse": {
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/MenuMasterResponse"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "item",
+          "updated"
+        ],
+        "title": "MenuMasterUpdateResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Menu Master API Contract",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/menu-masters": {
+      "get": {
+        "operationId": "list_menu_masters_menu_masters_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "name",
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "asc",
+              "title": "Order",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuMasterListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Menu Masters"
+      },
+      "post": {
+        "operationId": "create_menu_master_menu_masters_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MenuMasterFields"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuMasterItemResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Menu Master"
+      }
+    },
+    "/menu-masters/{item_id}": {
+      "get": {
+        "operationId": "get_menu_master_menu_masters__item_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuMasterItemResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Menu Master"
+      },
+      "put": {
+        "operationId": "update_menu_master_menu_masters__item_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MenuMasterUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuMasterUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Menu Master"
+      }
+    }
+  }
+}

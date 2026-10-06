@@ -1,8 +1,14 @@
-export type MenuMaster = {
-  id: string;
-  revision: number;
+import type { components } from "../generated/menu-master-api";
+
+export type MenuMasterResponse = components["schemas"]["MenuMasterResponse"];
+export type MenuMaster = Omit<MenuMasterResponse, "condiments"> & {
+  // The API faithfully returns legacy arbitrary JSON lists. This is narrowed only
+  // after parseMenuMaster validates the screen's string-list requirement.
+  condiments: string[];
+};
+
+export type MenuMasterDraft = {
   name: string;
-  normalized_name?: string | null;
   unit_type: string | null;
   qty_per_serving: number | null;
   bag_max_qty: number | null;
@@ -13,16 +19,9 @@ export type MenuMaster = {
   condiments: string[];
 };
 
-export type MenuMasterDraft = Omit<
-  MenuMaster,
-  "id" | "revision" | "normalized_name"
->;
-
-export type MenuMasterList = {
+export type MenuMasterListResponse = components["schemas"]["MenuMasterListResponse"];
+export type MenuMasterList = Omit<MenuMasterListResponse, "items"> & {
   items: MenuMaster[];
-  total: number;
-  offset: number;
-  limit: number;
 };
 
 export const MENU_MASTER_PAGE_SIZE = 50;
