@@ -100,7 +100,7 @@
 - [x] T040 [US4] Implement config editor endpoints for templates/packaging/label/invoice in backend/src/api/facilities.py.
 - [x] T041 [US4] Implement facility config UI in frontend/src/pages/facilities/[id].tsx with upload/preview.
 - [x] T042 [US4] Add template/mapping linters and preview in backend/src/services/config_validator.py.
-- [x] T043 [US4] Seed/migration scripts for initial facilities/configs in backend/migrations/seed_facilities.py.
+- [x] T043 [US4] Explicit seed script for initial facilities/configs in backend/scripts/seed_facilities.py (outside migration discovery).
 
 **Checkpoint**: US4 independently testable (config-only new facility).
 

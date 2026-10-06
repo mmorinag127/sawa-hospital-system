@@ -11,6 +11,22 @@ depends_on = None
 
 def upgrade() -> None:
     op.create_table(
+        "shipping_tracking_logs",
+        sa.Column("id", sa.String(), primary_key=True),
+        sa.Column("tracking_key", sa.String(), nullable=False),
+        sa.Column("tracking_number", sa.String(), nullable=False),
+        sa.Column("facility_name", sa.String(), nullable=True),
+        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("delivered", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("arrival_text", sa.String(), nullable=True),
+        sa.Column("error", sa.String(), nullable=True),
+        sa.Column("source", sa.String(), nullable=False, server_default="manual"),
+        sa.Column("looked_up_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+    )
+    op.create_index("ix_shipping_tracking_logs_tracking_key", "shipping_tracking_logs", ["tracking_key"])
+    op.create_index("ix_shipping_tracking_logs_looked_up_at", "shipping_tracking_logs", ["looked_up_at"])
+    op.create_table(
         "order_ocr_evidence_runs",
         sa.Column("id", sa.String(), primary_key=True),
         sa.Column("order_id", sa.String(), sa.ForeignKey("orders.id"), nullable=False),
@@ -136,6 +152,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_shipping_tracking_logs_looked_up_at", table_name="shipping_tracking_logs")
+    op.drop_index("ix_shipping_tracking_logs_tracking_key", table_name="shipping_tracking_logs")
+    op.drop_table("shipping_tracking_logs")
     op.drop_index("ix_order_critical_decisions_decision_type", table_name="order_critical_decisions")
     op.drop_index("ix_order_critical_decisions_order_id", table_name="order_critical_decisions")
     op.drop_table("order_critical_decisions")

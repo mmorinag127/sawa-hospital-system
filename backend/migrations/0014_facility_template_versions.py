@@ -32,14 +32,24 @@ def upgrade() -> None:
     op.create_index("ix_facility_template_versions_status", "facility_template_versions", ["status"])
     op.create_index("ix_facility_template_versions_template_digest", "facility_template_versions", ["template_digest"])
 
-    op.add_column("orders", sa.Column("template_version_id", sa.String(), nullable=True))
-    op.create_foreign_key(
-        "fk_orders_template_version_id",
-        "orders",
-        "facility_template_versions",
-        ["template_version_id"],
-        ["id"],
-    )
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("orders", recreate="always") as batch:
+            batch.add_column(sa.Column("template_version_id", sa.String(), nullable=True))
+            batch.create_foreign_key(
+                "fk_orders_template_version_id",
+                "facility_template_versions",
+                ["template_version_id"],
+                ["id"],
+            )
+    else:
+        op.add_column("orders", sa.Column("template_version_id", sa.String(), nullable=True))
+        op.create_foreign_key(
+            "fk_orders_template_version_id",
+            "orders",
+            "facility_template_versions",
+            ["template_version_id"],
+            ["id"],
+        )
     op.create_index("ix_orders_template_version_id", "orders", ["template_version_id"])
 
     for table_name, column_name in (
@@ -50,14 +60,24 @@ def upgrade() -> None:
         ("order_workflow_states", "template_version_id"),
         ("order_current_states", "template_version_id"),
     ):
-        op.add_column(table_name, sa.Column(column_name, sa.String(), nullable=True))
-        op.create_foreign_key(
-            f"fk_{table_name}_{column_name}",
-            table_name,
-            "facility_template_versions",
-            [column_name],
-            ["id"],
-        )
+        if op.get_bind().dialect.name == "sqlite":
+            with op.batch_alter_table(table_name, recreate="always") as batch:
+                batch.add_column(sa.Column(column_name, sa.String(), nullable=True))
+                batch.create_foreign_key(
+                    f"fk_{table_name}_{column_name}",
+                    "facility_template_versions",
+                    [column_name],
+                    ["id"],
+                )
+        else:
+            op.add_column(table_name, sa.Column(column_name, sa.String(), nullable=True))
+            op.create_foreign_key(
+                f"fk_{table_name}_{column_name}",
+                table_name,
+                "facility_template_versions",
+                [column_name],
+                ["id"],
+            )
         op.create_index(f"ix_{table_name}_{column_name}", table_name, [column_name])
 
 
@@ -72,13 +92,25 @@ def downgrade() -> None:
             ("order_current_states", "template_version_id"),
         )
     ):
-        op.drop_index(f"ix_{table_name}_{column_name}", table_name=table_name)
-        op.drop_constraint(f"fk_{table_name}_{column_name}", table_name, type_="foreignkey")
-        op.drop_column(table_name, column_name)
+        if op.get_bind().dialect.name == "sqlite":
+            with op.batch_alter_table(table_name, recreate="always") as batch:
+                batch.drop_index(f"ix_{table_name}_{column_name}")
+                batch.drop_constraint(f"fk_{table_name}_{column_name}", type_="foreignkey")
+                batch.drop_column(column_name)
+        else:
+            op.drop_index(f"ix_{table_name}_{column_name}", table_name=table_name)
+            op.drop_constraint(f"fk_{table_name}_{column_name}", table_name, type_="foreignkey")
+            op.drop_column(table_name, column_name)
 
-    op.drop_index("ix_orders_template_version_id", table_name="orders")
-    op.drop_constraint("fk_orders_template_version_id", "orders", type_="foreignkey")
-    op.drop_column("orders", "template_version_id")
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("orders", recreate="always") as batch:
+            batch.drop_index("ix_orders_template_version_id")
+            batch.drop_constraint("fk_orders_template_version_id", type_="foreignkey")
+            batch.drop_column("template_version_id")
+    else:
+        op.drop_index("ix_orders_template_version_id", table_name="orders")
+        op.drop_constraint("fk_orders_template_version_id", "orders", type_="foreignkey")
+        op.drop_column("orders", "template_version_id")
 
     op.drop_index("ix_facility_template_versions_template_digest", table_name="facility_template_versions")
     op.drop_index("ix_facility_template_versions_status", table_name="facility_template_versions")
