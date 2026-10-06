@@ -25,6 +25,8 @@ from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregat
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, sheet_week_service, workflow_v2_sheet_review_service
 from src.services import order_output_artifact_service
+from src.services.order_serialization_service import menu_amount_resolution, candidate_menu_amount_resolution, MENU_AMOUNT_UNRESOLVED
+from src.services.menu_service import MenuReadUnresolved
 from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.storage_service import load_bytes_from_uri
 
@@ -1360,6 +1362,30 @@ def _require_existing_workflow_template_version(
     return template_version_id, None
 
 
+def _workflow_menu_amount_resolution(session, order, workflow):
+    if workflow is None or not workflow.draft_id:
+        return menu_amount_resolution(order)
+    draft = session.get(OrderSheetDraft, workflow.draft_id)
+    error = None
+    if draft is None or draft.order_id != order.id:
+        error = "saved_sheet_missing"
+    else:
+        version = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        if version and _normalize_id(draft.template_version_id) != version:
+            error = "saved_sheet_template_mismatch"
+    if error is None:
+        candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        if not isinstance(candidate, dict):
+            error = "saved_sheet_materialization_failed"
+        else:
+            error = _normalize_id(candidate.get("error"))
+            if not error and not candidate.get("lines"):
+                error = "draft_lines_empty"
+            if not error:
+                return candidate_menu_amount_resolution(order, candidate)
+    return {"status": "unresolved", "blocker": error, "message": error, "affected_lines": []}
+
+
 def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -1367,11 +1393,20 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             return None, error
         row = _get_workflow(session, order.id)
         if row is None:
-            return _serialize_uninitialized_workflow(order), None
+            serialized = _serialize_uninitialized_workflow(order)
+            resolution = _workflow_menu_amount_resolution(session, order, row)
+            serialized["menu_amount_resolution"] = resolution
+            if resolution["status"] == "unresolved":
+                serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
+            return serialized, None
         meta = _workflow_meta(row)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
         serialized = _serialize_workflow_checked(session, order=order, workflow=row, ocr_job=ocr_job)
+        resolution = _workflow_menu_amount_resolution(session, order, row)
+        serialized["menu_amount_resolution"] = resolution
+        if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
+            serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
         if not serialized.get("context_suggestion"):
             serialized["context_suggestion"] = _order_context_suggestion(order)
         return serialized, None
@@ -2919,39 +2954,8 @@ def _build_order_payload_for_outputs(*, order: Order, lines: list[dict[str, Any]
     }
 
 
-def _build_basic_bag_rows_for_candidate(*, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for line in lines:
-        if _is_excluded_aggregation_diet(line.get("diet_type")):
-            continue
-        numeric = _numeric_value(line.get("quantity_corrected"))
-        if numeric is None:
-            numeric = _numeric_value(line.get("quantity_original"))
-        if numeric is None:
-            continue
-        rows.append(
-            {
-                "date": line.get("date"),
-                "daypart": line.get("daypart"),
-                "menu_name": line.get("menu_name") or "",
-                "menu_category": line.get("menu_category"),
-                "diet_type": line.get("diet_type"),
-                "area_id": line.get("area_id"),
-                "bag_type": line.get("bag_type") or "standard",
-                "quantity": numeric,
-            }
-        )
-    rows.sort(
-        key=lambda row: (
-            str(row.get("date") or ""),
-            str(row.get("daypart") or ""),
-            str(row.get("menu_name") or ""),
-            str(row.get("diet_type") or ""),
-            str(row.get("area_id") or ""),
-            str(row.get("bag_type") or ""),
-        )
-    )
-    return rows
+class BaggingOutputUnresolved(ValueError):
+    pass
 
 
 def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2960,11 +2964,15 @@ def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]]) 
         from src.services import output_builder  # noqa: PLC0415
 
         enriched_lines = output_builder.build_order_lines_for_outputs(order_payload)
-        return output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines)
-    except Exception:
-        # Bagging preview must not block when optional menu/portion enrichment is unavailable.
-        # The raw candidate still gives the operator a visible bagging result.
-        return _build_basic_bag_rows_for_candidate(lines=lines)
+        bag_rows = output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines)
+        if not isinstance(bag_rows, list):
+            raise BaggingOutputUnresolved("bagging_output_invalid")
+        return bag_rows
+    except Exception as exc:
+        if isinstance(exc, BaggingOutputUnresolved):
+            raise
+        code = MENU_AMOUNT_UNRESOLVED if isinstance(exc, MenuReadUnresolved) else "bagging_output_enrichment_failed"
+        raise BaggingOutputUnresolved(code) from exc
 
 
 def _build_bagging_result_payload(
@@ -3290,8 +3298,8 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
-        if not workflow.draft_id:
+        workflow = _get_workflow(session, order.id)
+        if workflow is None or not workflow.draft_id:
             return None, "saved_sheet_required"
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
@@ -3306,11 +3314,18 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         materialization_error = _normalize_id(materialization_candidate.get("error"))
         if materialization_error:
             return None, materialization_error
-        bagging_result = _build_bagging_result_payload(
-            order=order,
-            saved_sheet=draft,
-            materialization_candidate=materialization_candidate,
-        )
+        if not materialization_candidate.get("lines"):
+            return None, "draft_lines_empty"
+        if candidate_menu_amount_resolution(order, materialization_candidate)["status"] == "unresolved":
+            return None, MENU_AMOUNT_UNRESOLVED
+        try:
+            bagging_result = _build_bagging_result_payload(
+                order=order,
+                saved_sheet=draft,
+                materialization_candidate=materialization_candidate,
+            )
+        except BaggingOutputUnresolved as exc:
+            return None, str(exc)
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         order_output_artifact_service.save_bagging_result_artifact(session, payload=bagging_result)
         order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
@@ -3533,7 +3548,9 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "output_review_required"
         meta = _workflow_meta_with_step4_artifacts(session, workflow)
         output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
         bagging_result = meta.get("bagging_result") if isinstance(meta.get("bagging_result"), dict) else None
@@ -3577,6 +3594,10 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         materialization_error = _normalize_id(materialization_candidate.get("error"))
         if materialization_error:
             return None, materialization_error
+        if not materialization_candidate.get("lines"):
+            return None, "draft_lines_empty"
+        if candidate_menu_amount_resolution(order, materialization_candidate)["status"] == "unresolved":
+            return None, MENU_AMOUNT_UNRESOLVED
         order_service_module = _get_order_service_module()
         try:
             order_service_module._materialize_confirmed_lines_from_candidate(  # noqa: SLF001

@@ -229,7 +229,7 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
     assert refreshed[lunch["id"]]["qty_per_serving"] == 40
 
 
-def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
+def test_get_menu_displays_unresolved_entries_without_writing_or_name_linking():
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).delete()
@@ -288,7 +288,9 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
             ]
         )
 
-    payload = menu_service.get_menu("2099-06")
+    with pytest.raises(menu_service.MenuReadUnresolved):
+        menu_service.get_menu("2099-06")
+    payload = menu_service.get_menu("2099-06", allow_unresolved=True)
 
     assert payload is not None
     german_items = sorted(
@@ -296,15 +298,17 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
         key=lambda item: (item["daypart"], item["category"]),
     )
     assert [(item["daypart"], item["category"], item["qty_per_serving"]) for item in german_items] == [
-        ("夕食", "副菜", 70.0),
+        ("夕食", "副菜", None),
         ("朝食", "主菜", 70.0),
     ]
     repaired = next(item for item in german_items if item["daypart"] == "夕食")
     assert repaired["master_resolution_mode"] == "month_only"
+    assert repaired["menu_master_id"] is None
+    assert repaired["confirmation_required"] is True
 
     with session_scope() as session:
         rows = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == "2099-06").all()
-        assert len(rows) == 2
+        assert len(rows) == 1
         morning_rows = [
             row
             for row in rows
@@ -313,7 +317,7 @@ def test_get_menu_repairs_legacy_entries_without_matching_same_name_items():
         assert len(morning_rows) == 1
 
 
-def test_get_menu_repairs_entry_even_when_legacy_generic_same_name_item_exists():
+def test_get_menu_does_not_infer_entry_quantity_from_generic_same_name_item():
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).delete()
@@ -355,7 +359,9 @@ def test_get_menu_repairs_entry_even_when_legacy_generic_same_name_item_exists()
             ]
         )
 
-    payload = menu_service.get_menu("2099-08")
+    with pytest.raises(menu_service.MenuReadUnresolved):
+        menu_service.get_menu("2099-08")
+    payload = menu_service.get_menu("2099-08", allow_unresolved=True)
 
     assert payload is not None
     german_items = [
@@ -364,7 +370,8 @@ def test_get_menu_repairs_entry_even_when_legacy_generic_same_name_item_exists()
         if item["name"] == "ジャーマンポテト" and item.get("daypart") == "夕食" and item.get("category") == "副菜"
     ]
     assert len(german_items) == 1
-    assert german_items[0]["qty_per_serving"] == 40.0
+    assert german_items[0]["qty_per_serving"] is None
+    assert german_items[0]["confirmation_required"] is True
     assert german_items[0]["master_resolution_mode"] == "month_only"
 
     with session_scope() as session:
@@ -376,12 +383,11 @@ def test_get_menu_repairs_entry_even_when_legacy_generic_same_name_item_exists()
         )
         assert sorted((row.daypart or "", row.category or "") for row in rows) == [
             ("", ""),
-            ("夕食", "副菜"),
             ("朝食", "主菜"),
         ]
 
 
-def test_get_menu_exposes_repair_stub_when_legacy_repair_does_not_persist(monkeypatch):
+def test_get_menu_exposes_unresolved_stub_for_explicit_operator_save():
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).delete()
@@ -415,15 +421,15 @@ def test_get_menu_exposes_repair_stub_when_legacy_repair_does_not_persist(monkey
             )
         )
 
-    monkeypatch.setattr(menu_service, "_repair_monthly_menu_items_for_entries", lambda *_args, **_kwargs: 0)
-
-    payload = menu_service.get_menu("2099-07")
+    payload = menu_service.get_menu("2099-07", allow_unresolved=True)
 
     assert payload is not None
     repaired = next(item for item in payload["items"] if item["id"] == "MMI_REPAIR_MME_LEGACY_DINNER_STUB")
     assert repaired["daypart"] == "夕食"
     assert repaired["category"] == "副菜"
-    assert repaired["qty_per_serving"] == 40.0
+    assert repaired["qty_per_serving"] is None
+    assert repaired["unit_type"] is None
+    assert repaired["confirmation_required"] is True
 
     assert menu_service.update_item_status(
         "2099-07",
@@ -759,7 +765,7 @@ def test_get_menu_for_facility_resolves_tag_and_entry_scope():
             ]
         )
 
-    payload = menu_service.get_menu_for_facility("2026-03", "FACTAG01")
+    payload = menu_service.get_menu_for_facility("2026-03", "FACTAG01", allow_unresolved=True)
     assert payload is not None
     names = [entry["name"] for entry in payload["entries"]]
     assert names == ["タグ主菜", "共通副菜"]
@@ -875,7 +881,7 @@ def test_get_menu_for_facility_preserves_multiple_base_entries_in_same_slot():
             ]
         )
 
-    payload = menu_service.get_menu_for_facility("2099-05", "FAC00008")
+    payload = menu_service.get_menu_for_facility("2099-05", "FAC00008", allow_unresolved=True)
 
     assert payload is not None
     names = [
@@ -932,7 +938,7 @@ def test_get_menu_for_facility_returns_entries_in_canonical_daypart_order():
             ]
         )
 
-    payload = menu_service.get_menu_for_facility("2026-04", None)
+    payload = menu_service.get_menu_for_facility("2026-04", None, allow_unresolved=True)
     assert payload is not None
     rows = [(entry["daypart"], entry["name"]) for entry in payload["entries"]]
     assert rows == [
@@ -943,7 +949,7 @@ def test_get_menu_for_facility_returns_entries_in_canonical_daypart_order():
     ]
 
 
-def test_get_menu_canonicalizes_requested_month_when_resolved_from_previous_month():
+def test_get_menu_does_not_substitute_previous_month():
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuEntry).filter(MonthlyMenuEntry.monthly_menu_id.in_(["2099-03", "2099-04"])).delete()
@@ -964,14 +970,11 @@ def test_get_menu_canonicalizes_requested_month_when_resolved_from_previous_mont
         )
 
     payload = menu_service.get_menu("2099-04")
-    assert payload is not None
-    assert payload["menu"]["id"] == "2099-04"
-    assert payload["menu"]["requested_month_id"] == "2099-04"
-    assert payload["menu"]["source_month_id"] == "2099-03"
-    assert payload["entries"][0]["month_id"] == "2099-04"
-    assert payload["entries"][0]["requested_month_id"] == "2099-04"
-    assert payload["entries"][0]["source_month_id"] == "2099-03"
-    assert payload["entries"][0]["menu_date"] == "2099-04-05"
+    assert payload is None
+    source = menu_service.get_menu("2099-03", allow_unresolved=True)
+    assert source["menu"]["id"] == "2099-03"
+    assert source["entries"][0]["month_id"] == "2099-03"
+    assert source["entries"][0]["menu_date"] == "2099-04-05"
 
 
 def test_create_menu_dedupes_duplicate_names_within_single_upload(monkeypatch):
@@ -1953,7 +1956,7 @@ def test_upsert_entry_exceptions_keeps_diet_scoped_entries_independent():
     assert soft_payload is not None
     assert soft_payload["entries"][0]["diet_type"] == "soft"
 
-    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001")
+    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001", allow_unresolved=True)
     assert scoped_payload is not None
     scoped_entries = {
         (entry["menu_date"], entry["daypart"], entry["slot_index"], entry["diet_type"] or "regular"): entry
@@ -1973,7 +1976,7 @@ def test_upsert_entry_exceptions_keeps_diet_scoped_entries_independent():
         },
     )
     assert regular_payload is not None
-    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001")
+    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001", allow_unresolved=True)
     assert scoped_payload is not None
     scoped_entries = {
         (entry["menu_date"], entry["daypart"], entry["slot_index"], entry["diet_type"] or "regular"): entry
@@ -1993,7 +1996,7 @@ def test_upsert_entry_exceptions_keeps_diet_scoped_entries_independent():
         },
     )
     assert soft_mixer_payload is not None
-    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001")
+    scoped_payload = menu_service.get_menu_for_facility("2026-07", "FACDIET001", allow_unresolved=True)
     assert scoped_payload is not None
     scoped_entries = {
         (entry["menu_date"], entry["daypart"], entry["slot_index"], entry["diet_type"] or "regular"): entry

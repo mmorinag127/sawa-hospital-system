@@ -76,7 +76,7 @@ def _menu_backed_week_ranges_for_month(month_id: str, facility_id: str | None) -
     normalized_month = _normalize_month_id(month_id)
     if not normalized_month:
         return []
-    payload = menu_service.get_menu_for_facility(normalized_month, facility_id) or {}
+    payload = menu_service.get_menu_for_facility(normalized_month, facility_id, allow_unresolved=True) or {}
     entries = payload.get("entries") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
         return []
@@ -122,14 +122,6 @@ def build_week_option_entries(month_id: str, facility_id: str | None) -> list[di
     ]
 
 
-def _normalize_anchor_date(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return None
-
-
 def resolve_current_week_selection(
     week_value: object,
     *,
@@ -144,25 +136,7 @@ def resolve_current_week_selection(
         if isinstance(resolved_week_value, str) and "@" in resolved_week_value
         else None
     )
-    anchor_date = _normalize_anchor_date(received_at)
-    if not selected_week_value and month_id and isinstance(anchor_date, date):
-        option_entries = list(build_week_option_entries(month_id, facility_id))
-        option_entries.sort(key=lambda item: str(item.get("date_from") or "").strip())
-        for item in option_entries:
-            week_id = str(item.get("week_id") or "").strip()
-            raw_start = str(item.get("date_from") or "").strip()
-            raw_end = str(item.get("date_to") or "").strip()
-            if not week_id or not raw_start or not raw_end:
-                continue
-            try:
-                start_date = date.fromisoformat(raw_start)
-                end_date = date.fromisoformat(raw_end)
-            except Exception:
-                continue
-            if start_date <= anchor_date <= end_date:
-                selected_week_value = week_id
-                break
-    resolved_week_value = selected_week_value or resolved_week_value
+    resolved_week_value = selected_week_value
     resolved_week_label = (
         sheet_week_service.format_sheet_week_label(resolved_week_value)
         if resolved_week_value
@@ -174,4 +148,5 @@ def resolve_current_week_selection(
         "month_id": month_id,
         "resolved_week_value": resolved_week_value,
         "resolved_week_label": resolved_week_label,
+        "blocker_code": None if resolved_week_value else "week_choice_required",
     }

@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import pytest
 from datetime import datetime
 from sqlalchemy import delete
 
@@ -77,7 +78,7 @@ def test_build_facility_resolution_keeps_current_order_value() -> None:
 
 
 def test_build_week_resolution_requires_choice_when_multiple_weeks_match(monkeypatch) -> None:
-    def _fake_get_menu_for_facility(_month_id: str, _facility_id: str | None):
+    def _fake_get_menu_for_facility(_month_id: str, _facility_id: str | None, **_kwargs):
         return {
             "entries": [
                 {"menu_date": "2026-03-01"},
@@ -143,7 +144,7 @@ def test_build_week_resolution_uses_sunday_saturday_calendar_fallback(monkeypatc
     monkeypatch.setattr(
         candidate_resolution_service.week_candidate_service.menu_service,
         "get_menu_for_facility",
-        lambda _month_id, _facility_id: {"entries": []},
+        lambda _month_id, _facility_id, **_kwargs: {"entries": []},
     )
 
     resolution = candidate_resolution_service.build_week_resolution(
@@ -283,7 +284,7 @@ def test_resolve_order_list_candidates_promotes_month_week_to_ocr_range(monkeypa
     monkeypatch.setattr(
         candidate_resolution_service.week_candidate_service.menu_service,
         "get_menu_for_facility",
-        lambda _month_id, _facility_id: {
+        lambda _month_id, _facility_id, **_kwargs: {
             "entries": [
                 {"menu_date": "2026-03-22"},
                 {"menu_date": "2026-03-23"},
@@ -371,7 +372,7 @@ def test_resolve_order_candidates_does_not_force_week_choice_from_month_only_cal
     assert week["blocked_reasons"] == []
 
 
-def test_resolve_current_week_selection_keeps_full_calendar_options_when_menu_entries_are_sparse(monkeypatch) -> None:
+def test_resolve_current_week_selection_does_not_promote_month_from_received_date(monkeypatch) -> None:
     monkeypatch.setattr(
         candidate_resolution_service.week_candidate_service.menu_service,
         "get_menu_for_facility",
@@ -387,7 +388,18 @@ def test_resolve_current_week_selection_keeps_full_calendar_options_when_menu_en
         received_at=datetime(2026, 2, 15, 9, 0, 0),
         facility_id="FAC00001",
     )
-    assert selection["resolved_week_value"] == "2026-02@2026-02-15~2026-02-21"
+    assert selection["stored_week_value"] == "2026-02"
+    assert selection["resolved_week_value"] is None
+    assert selection["blocker_code"] == "week_choice_required"
+
+
+def test_resolve_current_week_selection_keeps_explicit_crossmonth_range(monkeypatch) -> None:
+    service = candidate_resolution_service.week_candidate_service
+    monkeypatch.setattr(service, "build_week_option_entries", lambda *_args: pytest.fail("explicit range must not be guessed"))
+    value = "2026-02@2026-02-22~2026-03-01"
+    selection = service.resolve_current_week_selection(value, received_at=datetime(2026, 2, 15))
+    assert selection["stored_week_value"] == selection["resolved_week_value"] == value
+    assert selection["blocker_code"] is None
 
 
 def test_resolve_order_candidates_uses_position_fallback_when_cells_cover_quantity_columns(monkeypatch) -> None:

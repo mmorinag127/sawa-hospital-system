@@ -915,7 +915,7 @@ def _apply_menu_matching(
     facility_id: Optional[str],
     min_ratio: float,
 ) -> list[dict]:
-    items = _collect_menu_items_for_week(week_id, facility_id)
+    items = _collect_menu_items_for_week(week_id, facility_id, allow_unresolved=True)
     if not items:
         return lines
     candidates = [item.get("name") for item in items if item.get("name")]
@@ -1028,6 +1028,7 @@ def _normalize_entry_date(value: object) -> date | None:
 def _load_menu_payloads_for_week(
     week_id: str | None,
     facility_id: str | None = None,
+    *, allow_unresolved: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
     payloads: list[tuple[str, dict[str, Any]]] = []
     seen_months: set[str] = set()
@@ -1036,9 +1037,9 @@ def _load_menu_payloads_for_week(
             continue
         seen_months.add(month_id)
         payload = (
-            menu_service.get_menu_for_facility(month_id, facility_id)
+            menu_service.get_menu_for_facility(month_id, facility_id, allow_unresolved=allow_unresolved)
             if facility_id
-            else menu_service.get_menu(month_id)
+            else menu_service.get_menu(month_id, allow_unresolved=allow_unresolved)
         )
         if isinstance(payload, dict):
             payloads.append((month_id, payload))
@@ -1048,10 +1049,11 @@ def _load_menu_payloads_for_week(
 def _collect_menu_items_for_week(
     week_id: str | None,
     facility_id: str | None = None,
+    *, allow_unresolved: bool = False,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
-    for _month_id, payload in _load_menu_payloads_for_week(week_id, facility_id):
+    for _month_id, payload in _load_menu_payloads_for_week(week_id, facility_id, allow_unresolved=allow_unresolved):
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
             continue
@@ -1115,8 +1117,8 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
         return []
     selected_by_physical_slot: dict[tuple[str, str, int], tuple[int, int, dict]] = {}
     order_index = 0
-    for _month_id, menu in _load_menu_payloads_for_week(week_id, facility_id):
-        raw_entries = menu.get("entries")
+    for month_id in month_ids:
+        raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id)
         if not isinstance(raw_entries, list):
             continue
         for idx, raw in enumerate(raw_entries):
@@ -4618,7 +4620,7 @@ def create_order_from_ingest(
                         _ensure_legacy_current_order_version(session, existing_order)
                         if existing_document.id == current_document_id:
                             _record_current_order_version(session, existing_order, existing_document)
-                        return serialize_order(existing_order)
+                        return serialize_order(existing_order, allow_unresolved_menu_amount=True)
         doc_id = _make_document_id()
         document = OrderDocument(
             id=doc_id,
@@ -4699,7 +4701,7 @@ def create_order_from_ingest(
         session.flush()
         _record_current_order_version(session, order, document)
         session.refresh(order)
-        serialized = serialize_order(order)
+        serialized = serialize_order(order, allow_unresolved_menu_amount=True)
     _invalidate_orders_cache()
     _invalidate_current_sheet_state_after_order_lines_write(serialized["id"])
     try:
@@ -6634,7 +6636,7 @@ def apply_latest_draft(
         session.refresh(order)
         facility_code = order.facility_code
         week_code = order.week_code
-        serialized_order = serialize_order(order)
+        serialized_order = serialize_order(order, allow_unresolved_menu_amount=True)
 
     record_event(
         "order_reparse",
@@ -6833,29 +6835,15 @@ def _resolve_order_current_week_selection(order: Order | dict[str, Any] | None) 
 
 def _resolve_order_current_sheet_week_value(order: Order | dict[str, Any] | None) -> str | None:
     selection = _resolve_order_current_week_selection(order)
-    resolved_week_value = (
-        str(selection.get("resolved_week_value") or "").strip()
-        or str(selection.get("stored_week_value") or "").strip()
-    )
-    if resolved_week_value:
-        return resolved_week_value
-    if isinstance(order, dict):
-        raw_week_value = (
-            str(order.get("persisted_week_value") or "").strip()
-            or str(order.get("week_value") or "").strip()
-            or str(order.get("week") or "").strip()
-        )
-    else:
-        raw_week_value = str(getattr(order, "week_code", None) or "").strip()
-    return raw_week_value or None
+    return str(selection.get("resolved_week_value") or "").strip() or None
 
 
-def get_order_by_id(order_id: str):
+def get_order_by_id(order_id: str, *, allow_unresolved_menu_amount: bool = False):
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
             return None
-        payload = serialize_order(order)
+        payload = serialize_order(order, allow_unresolved_menu_amount=allow_unresolved_menu_amount)
         selection = _resolve_order_current_week_selection(order)
         stored_week_value = str(selection.get("stored_week_value") or "").strip() or None
         resolved_week_value = str(selection.get("resolved_week_value") or "").strip() or None
@@ -6873,7 +6861,6 @@ def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, 
         order = session.get(Order, order_id)
         if not order:
             return None, "order_not_found"
-        received_at = order.received_at or datetime.utcnow()
         facility_id = (order.facility_code or "").strip() or None
         current_week_selection = _resolve_order_current_week_selection(order)
         current_week_value = current_week_selection.get("stored_week_value")
@@ -6889,7 +6876,9 @@ def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, 
         if month_id and month_id not in candidate_months:
             candidate_months.append(month_id)
 
-    anchor_month = _to_sheet_month_id(selected_week_value) or current_week_id or received_at.strftime("%Y-%m")
+    anchor_month = _to_sheet_month_id(selected_week_value) or current_week_id
+    if not anchor_month:
+        return [], None
 
     for delta in (-2, -1, 0, 1, 2):
         _append(_shift_sheet_month_id(anchor_month, delta))
@@ -6911,8 +6900,6 @@ def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, 
             except Exception:
                 continue
             selected = week_value == selected_week_value
-            if not selected and not selected_week_value and start_date <= received_at.date() <= end_date:
-                selected = True
             options.append(
                 {
                     "week_id": week_value,
@@ -11400,7 +11387,7 @@ def _build_canonical_bootstrap_sheet(
     augment_candidate_resolution: bool = True,
     prefer_ocr_payload_quantities: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    order_payload = get_order_by_id(order_id)
+    order_payload = get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     if not isinstance(order_payload, dict):
         return None, "order_not_found"
     facility_id = str(order_payload.get("facility") or "").strip() or None
@@ -11674,7 +11661,7 @@ def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
         )
         if recover_error is None and isinstance(recovered_payload, dict):
             return recovered_payload
-    order_payload = get_order_by_id(order_id)
+    order_payload = get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     facility_id = str((order_payload or {}).get("facility") or "").strip() or None
     resolved_week_id = (
         str((order_payload or {}).get("persisted_week_value") or "").strip()
@@ -12785,7 +12772,7 @@ def _build_current_sheet_context_uncached(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
-    order_payload = get_order_by_id(normalized_order_id)
+    order_payload = get_order_by_id(normalized_order_id, allow_unresolved_menu_amount=True)
     latest_draft = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
     if not _draft_record_is_authoritative_current_sheet(latest_draft):
         latest_draft = None
@@ -13741,7 +13728,7 @@ def rerun_ocr_evidence_only(
         )
         if selected_document_metadata.get("error"):
             return None, str(selected_document_metadata["error"])
-        order = serialize_order(order_row)
+        order = serialize_order(order_row, allow_unresolved_menu_amount=True)
     if not isinstance(order, dict):
         return None, "order_not_found"
     facility_id = str(order.get("facility") or "").strip() or None
@@ -14342,7 +14329,7 @@ def get_order_candidate_resolution(order_id: str) -> Optional[dict]:
         resolution = state.get("candidate_resolution")
         if isinstance(resolution, dict):
             return resolution
-    order = get_order_by_id(order_id)
+    order = get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
     payload = evidence.get("payload_json") if isinstance(evidence, dict) else None
     return candidate_resolution_service.resolve_order_candidates(
@@ -14608,7 +14595,7 @@ def flatten_current_sheet_payload(
     order_payload = (
         current_sheet_context.get("order_payload")
         if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("order_payload"), dict)
-        else get_order_by_id(order_id)
+        else get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     )
     base_payload: dict[str, Any] = dict(draft_json)
     base_payload.update(
@@ -19746,7 +19733,7 @@ def review_ocr_table_with_llm(
             facility_id = str(order.facility_code or "").strip() or None
             document_uri = str(order.document_uri or "").strip() or None
     if not facility_id or not document_uri:
-        order_payload = get_order_by_id(order_id)
+        order_payload = get_order_by_id(order_id, allow_unresolved_menu_amount=True)
         if isinstance(order_payload, dict):
             if not facility_id:
                 facility_id = str(order_payload.get("facility") or "").strip() or None
@@ -28862,7 +28849,7 @@ def get_ocr_edit_history(order_id: str):
                     raw_output = evidence_payload
     if not revisions and not isinstance(raw_output, dict) and not isinstance(payload, dict):
         latest_evidence = latest_evidence or get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
-        if not isinstance(latest_evidence, dict) and not isinstance(get_order_by_id(order_id), dict):
+        if not isinstance(latest_evidence, dict) and not isinstance(get_order_by_id(order_id, allow_unresolved_menu_amount=True), dict):
             return None, "order_not_found"
     latest = revisions[-1] if revisions else None
     reparse_job = get_latest_order_job(order_id)
@@ -30033,7 +30020,7 @@ def clone_order_for_hakodate_audit(
             )
         session.flush()
         session.refresh(clone)
-        created_order = serialize_order(clone)
+        created_order = serialize_order(clone, allow_unresolved_menu_amount=True)
     _invalidate_orders_cache()
     try:
         workflow = workflow_state_service.refresh_workflow_state(clone_id)
@@ -35605,7 +35592,7 @@ def reparse_order(
             "week_code": order.week_code,
             "line_count": len(lines),
         }
-        serialized = serialize_order(order)
+        serialized = serialize_order(order, allow_unresolved_menu_amount=True)
     if log_payload:
         record_event(
             "order_reparse",

@@ -21,7 +21,7 @@ def test_monthly_menus_get_requires_operator_and_allows_operator(monkeypatch, ho
     monkeypatch.setattr(
         menus_api.menu_service,
         "get_menu",
-        lambda month_id: {"menu": {"id": month_id}, "items": [], "entries": []},
+        lambda month_id, *, allow_unresolved: {"menu": {"id": month_id}, "items": [], "entries": []} if allow_unresolved else None,
     )
 
     client = TestClient(app)
@@ -41,7 +41,8 @@ def test_monthly_menus_get_uses_facility_specific_lookup_when_query_is_present(m
 
     captured: dict[str, str | None] = {}
 
-    def _get_menu_for_facility(month_id: str, facility_id: str | None):
+    def _get_menu_for_facility(month_id: str, facility_id: str | None, *, allow_unresolved):
+        assert allow_unresolved is True
         captured["month_id"] = month_id
         captured["facility_id"] = facility_id
         return {"menu": {"id": "2026-03"}, "items": [], "entries": []}
@@ -63,7 +64,7 @@ def test_monthly_menus_latest_requires_operator_and_allows_operator(monkeypatch,
     monkeypatch.setattr(
         menus_api.menu_service,
         "get_latest_menu",
-        lambda: {"menu": {"id": "2026-03"}, "items": [], "entries": []},
+        lambda *, allow_unresolved: {"menu": {"id": "2026-03"}, "items": [], "entries": []} if allow_unresolved else None,
     )
 
     client = TestClient(app)
@@ -108,7 +109,7 @@ def test_monthly_menus_get_returns_synthetic_menu_when_parent_row_is_missing(mon
     assert payload["entries"][0]["name"] == "Synthetic Menu A"
 
 
-def test_monthly_menus_get_resolves_previous_month_when_entries_cover_requested_month(monkeypatch, hospital_operator):
+def test_monthly_menus_get_does_not_substitute_previous_month(monkeypatch, hospital_operator):
     headers = hospital_operator.headers
 
     with session_scope() as session:
@@ -139,14 +140,13 @@ def test_monthly_menus_get_resolves_previous_month_when_entries_cover_requested_
         "/monthly-menus/2099-04",
         headers=headers,
     )
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload["menu"]["id"] == "2099-04"
-    assert payload["menu"]["requested_month_id"] == "2099-04"
-    assert payload["menu"]["source_month_id"] == "2099-03"
-    assert payload["entries"][0]["month_id"] == "2099-04"
-    assert payload["entries"][0]["requested_month_id"] == "2099-04"
-    assert payload["entries"][0]["source_month_id"] == "2099-03"
+    assert res.status_code == 404
+    assert res.json()["detail"] == "not found"
+    source = client.get("/monthly-menus/2099-03", headers=headers)
+    assert source.status_code == 200
+    payload = source.json()
+    assert payload["menu"]["id"] == "2099-03"
+    assert payload["entries"][0]["month_id"] == "2099-03"
     assert payload["entries"][0]["menu_date"] == "2099-04-05"
     assert payload["entries"][0]["name"] == "Covered Menu A"
 
