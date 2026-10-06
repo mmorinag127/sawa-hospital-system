@@ -81,14 +81,24 @@ def database(request, tmp_path):
 
 
 def create_orm_schema(engine, *, strip_constraint=False, extra_unique=False):
+    """Build the explicit pre-0023 raw schema, not current ORM metadata."""
     metadata = sa.MetaData()
     for model in (MenuMaster, MonthlyMenu, MonthlyMenuItem):
         model.__table__.to_metadata(metadata)
     monthly = metadata.tables["monthly_menu_items"]
-    if strip_constraint:
-        monthly.constraints.difference_update({item for item in monthly.constraints if item.name == RAW_CONSTRAINT})
+    monthly.indexes.difference_update({item for item in monthly.indexes if item.name == IDENTITY_INDEX})
+    if not strip_constraint:
+        monthly.append_constraint(sa.UniqueConstraint(*RAW_COLUMNS, name=RAW_CONSTRAINT))
     if extra_unique:
         monthly.append_constraint(sa.UniqueConstraint("unit_type", name="uq_monthly_menu_items_unknown_unit_type"))
+    metadata.create_all(engine)
+
+
+def create_canonical_orm_schema(engine):
+    """Build current ORM metadata exactly as a fresh bootstrap does."""
+    metadata = sa.MetaData()
+    for model in (MenuMaster, MonthlyMenu, MonthlyMenuItem):
+        model.__table__.to_metadata(metadata)
     metadata.create_all(engine)
 
 
@@ -173,6 +183,64 @@ def test_recognized_orm_constraint_replaces_to_single_canonical_identity(databas
     assert named_index_exists(database, IDENTITY_INDEX)
     assert not named_index_exists(database, LEGACY_INDEX)
     assert foreign_keys(database) == EXPECTED_FOREIGN_KEYS
+
+
+def test_fresh_orm_schema_matches_canonical_identity_and_distinguishes_all_scope_keys(database):
+    create_canonical_orm_schema(database)
+    with database.connect() as connection:
+        require_canonical_identity_schema(connection)
+    insert_rows(database, [
+        {"id": "base", "daypart": "lunch", "category": "main", "diet_type": "regular", "facility_override": "A"},
+        {"id": "daypart", "daypart": "dinner", "category": "main", "diet_type": "regular", "facility_override": "A"},
+        {"id": "category", "daypart": "lunch", "category": "side", "diet_type": "regular", "facility_override": "A"},
+        {"id": "diet", "daypart": "lunch", "category": "main", "diet_type": "soft", "facility_override": "A"},
+        {"id": "facility", "daypart": "lunch", "category": "main", "diet_type": "regular", "facility_override": "B"},
+    ])
+    assert [row.id for row in rows(database)] == ["base", "category", "daypart", "diet", "facility"]
+    with pytest.raises(sa.exc.IntegrityError):
+        with database.begin() as connection:
+            connection.execute(sa.text(
+                "INSERT INTO monthly_menu_items(id, monthly_menu_id, name, daypart, category, diet_type, facility_override) "
+                "VALUES ('duplicate', 'month', 'fish', 'lunch', 'main', 'regular', 'A')"
+            ))
+
+
+@pytest.mark.parametrize("null_column", ("daypart", "category", "diet_type", "facility_override"))
+def test_fresh_orm_schema_rejects_null_empty_identity_collision_and_preserves_row_values(database, null_column):
+    create_canonical_orm_schema(database)
+    identity = {
+        "daypart": "lunch",
+        "category": "main",
+        "diet_type": "regular",
+        "facility_override": "A",
+    }
+    identity[null_column] = None
+    insert_rows(database, [{
+        "id": "one",
+        "menu_master_id": "master",
+        "unit_type": "tray",
+        "qty_per_serving": 12.5,
+        "temp_type": "cold",
+        "master_resolution_mode": "exact",
+        "bag_max_qty": 24.0,
+        "bag_max_unit": "bag",
+        **identity,
+    }])
+    before = rows(database)
+    with pytest.raises(sa.exc.IntegrityError):
+        with database.begin() as connection:
+            connection.execute(sa.text(
+                "INSERT INTO monthly_menu_items("
+                "id, monthly_menu_id, menu_master_id, name, unit_type, qty_per_serving, "
+                "daypart, category, diet_type, facility_override, bag_max_qty, bag_max_unit) "
+                "VALUES ('duplicate', 'month', 'master', 'fish', 'tray', 99, "
+                ":daypart, :category, :diet_type, :facility_override, 99, 'changed')"
+            ), {name: "" if name == null_column else value for name, value in identity.items()})
+    assert rows(database) == before
+    preserved = before[0]
+    assert (preserved.menu_master_id, preserved.qty_per_serving, preserved.bag_max_qty, preserved.bag_max_unit) == (
+        "master", 12.5, 24.0, "bag"
+    )
 
 
 def create_recognized_index(connection, name):

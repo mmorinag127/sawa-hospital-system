@@ -4,6 +4,7 @@ from sqlalchemy import Column, String, Float, ForeignKey, Date, DateTime, Intege
 from sqlalchemy.orm import relationship
 
 from src.db import Base
+from src.models.monthly_menu_identity import canonical_identity_index
 
 
 class WeeklyMenu(Base):
@@ -91,15 +92,7 @@ class MonthlyMenu(Base):
 class MonthlyMenuItem(Base):
     __tablename__ = "monthly_menu_items"
     __table_args__ = (
-        UniqueConstraint(
-            "monthly_menu_id",
-            "name",
-            "daypart",
-            "category",
-            "diet_type",
-            "facility_override",
-            name="uq_monthly_menu_item_scope",
-        ),
+        canonical_identity_index(),
     )
 
     id = Column(String, primary_key=True)

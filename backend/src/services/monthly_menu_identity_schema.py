@@ -6,13 +6,15 @@ from dataclasses import dataclass
 
 import sqlalchemy as sa
 
-
-TABLE = "monthly_menu_items"
-RAW_CONSTRAINT = "uq_monthly_menu_item_scope"
-LEGACY_INDEX = "uq_monthly_menu_items_scope_name"
-IDENTITY_INDEX = "uq_monthly_menu_items_scope_identity"
-RAW_COLUMNS = ("monthly_menu_id", "name", "daypart", "category", "diet_type", "facility_override")
-
+from src.models.monthly_menu_identity import (
+    IDENTITY_INDEX,
+    LEGACY_INDEX,
+    RAW_COLUMNS,
+    RAW_CONSTRAINT,
+    TABLE,
+    identity_index_ddl,
+    legacy_index_ddl,
+)
 
 class MonthlyMenuIdentitySchemaError(RuntimeError):
     pass
@@ -71,21 +73,6 @@ def _sqlite_ddl_tokens(sql: str | None) -> tuple[tuple[str, str], ...] | None:
 def _sqlite_ddl_matches(sql: str | None, expected: str) -> bool:
     actual_tokens = _sqlite_ddl_tokens(sql)
     return actual_tokens is not None and actual_tokens == _sqlite_ddl_tokens(expected)
-
-
-def identity_index_ddl() -> str:
-    return (
-        f"CREATE UNIQUE INDEX {IDENTITY_INDEX} ON {TABLE}("
-        "monthly_menu_id,name,COALESCE(daypart,''),COALESCE(category,''),"
-        "COALESCE(diet_type,''),COALESCE(facility_override,''))"
-    )
-
-
-def legacy_index_ddl() -> str:
-    return (
-        f"CREATE UNIQUE INDEX {LEGACY_INDEX} ON {TABLE}("
-        "monthly_menu_id,name,COALESCE(facility_override,''))"
-    )
 
 
 def _duplicate_identity_row(connection) -> object | None:
