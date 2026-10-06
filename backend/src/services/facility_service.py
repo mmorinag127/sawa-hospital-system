@@ -116,6 +116,42 @@ def _command_response(saved: dict, facility_id: str) -> dict:
             "validation": validate_facility_config(response["config"])}
 
 
+def versions_response(master: dict, facility_id: str, revision: str) -> dict:
+    versions = canonical_facility_store.facility_versions(master, facility_id)
+    reference = _entry(master, facility_id)
+    return {"facility_id": facility_id, "versions": versions, "revision": revision, "source": "canonical_json",
+            "reference": deepcopy({key: value for key, value in reference.items() if key != "versions"}),
+            "reference_status": "unversioned_reference_only"}
+
+
+def save_facility_version(facility_id: str, version_id: str, version: dict, *, expected_revision: str, create: bool) -> dict:
+    from src.services import facility_master_service
+
+    if not isinstance(version, dict) or version.get("version_id") != version_id:
+        raise canonical_facility_store.CanonicalStoreError("facility_version_target_mismatch", status_code=422)
+    def transform(master: dict) -> dict:
+        entry = next((item for item in master["facilities"] if item["facility_id"] == facility_id), None)
+        if entry is None:
+            raise canonical_facility_store.CanonicalStoreError("facility_not_found", status_code=404)
+        existing = entry.get("versions", [])
+        if not isinstance(existing, list) or any(not isinstance(item, dict) for item in existing):
+            raise canonical_facility_store.CanonicalStoreError("facility_versions_invalid", status_code=422)
+        targets = [index for index, item in enumerate(existing) if item.get("version_id") == version_id]
+        if (create and targets) or (not create and len(targets) != 1):
+            raise canonical_facility_store.CanonicalStoreError("facility_version_create_conflict" if create else "facility_version_edit_target_missing", status_code=409)
+        next_versions = deepcopy(existing)
+        if create:
+            next_versions.append(deepcopy(version))
+        else:
+            next_versions[targets[0]] = deepcopy(version)
+        entry["versions"] = next_versions
+        return master
+    saved = facility_master_service.mutate_master(expected_revision, transform)
+    response = versions_response(saved["facility_master"], facility_id, saved["revision"])
+    own_version = next(item for item in response["versions"] if item["version_id"] == version_id)
+    return {**response, "version": own_version, "updated": True, "projection": {**saved["projection"], "scope": "unversioned_reference_only"}}
+
+
 def _record_command_event(response: dict, event: str, facility_id: str, **metadata) -> dict:
     try:
         record_event(event, actor="system", target=facility_id, fac=facility_id, metadata=metadata)

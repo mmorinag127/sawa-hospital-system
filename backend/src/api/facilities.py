@@ -9,6 +9,7 @@ from src.db import session_scope
 from src.services import (
     facility_master_service,
     facility_service,
+    config_service,
     facility_template_version_service,
     master_order_form_template_service,
     order_form_service,
@@ -20,6 +21,34 @@ from src.services.storage_service import get_default_output_bucket
 from src.services.canonical_facility_store import check_revision
 
 router = APIRouter()
+
+
+@router.get("/{facility_id}/resolved", dependencies=[Depends(require_role("operator"))])
+def resolve_dated_facility(facility_id: str, effective_date: str | None = None):
+    with canonical_errors():
+        return config_service.get_facility_config_for_date(facility_id, effective_date)
+
+
+@router.get("/{facility_id}/versions", dependencies=[Depends(require_role("operator"))])
+def get_facility_versions(facility_id: str):
+    with canonical_errors():
+        snapshot = facility_master_service.get_snapshot()
+        return facility_service.versions_response(snapshot.master, facility_id, snapshot.revision)
+
+
+@router.post("/{facility_id}/versions", dependencies=[Depends(require_role("operator"))])
+def create_facility_version(facility_id: str, body: dict):
+    with canonical_errors():
+        version = body.get("version")
+        return facility_service.save_facility_version(facility_id, version.get("version_id") if isinstance(version, dict) else None,
+                                                     version, expected_revision=body.get("expected_revision"), create=True)
+
+
+@router.put("/{facility_id}/versions/{version_id}", dependencies=[Depends(require_role("operator"))])
+def update_facility_version(facility_id: str, version_id: str, body: dict):
+    with canonical_errors():
+        return facility_service.save_facility_version(facility_id, version_id, body.get("version"),
+                                                     expected_revision=body.get("expected_revision"), create=False)
 
 
 class FacilityFaxTemplateUpdateBody(BaseModel):
@@ -48,7 +77,7 @@ def get_facility(facility_id: str):
         response = facility_service.facility_response(snapshot.master, facility_id, snapshot.revision)
     response["validation"] = validate_facility_config(response["config"])
     # A legacy DB version is a reference, not provenance for this JSON snapshot.
-    response["version_resolution"] = {"status": "date_version_integration_required"}
+    response["version_resolution"] = {"status": "unversioned_reference_only", "dated_endpoint": f"/facilities/{facility_id}/resolved"}
     try:
         with session_scope() as session:
             active_version = facility_template_version_service.get_active_template_version(session, facility_id)

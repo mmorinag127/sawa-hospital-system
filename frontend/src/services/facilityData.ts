@@ -2,6 +2,64 @@ import { apiClient } from "./apiClient";
 
 export type FacilityNameMap = Record<string, string>;
 
+export type CanonicalFacilityVersion = {
+  [key: string]: unknown;
+  version_id: string;
+  valid_from: string;
+  valid_to: string | null;
+  facility: Record<string, unknown>;
+};
+
+export type CanonicalFacilityVersions = {
+  facility_id: string;
+  versions: CanonicalFacilityVersion[];
+  reference: Record<string, unknown>;
+  reference_status: "unversioned_reference_only";
+  revision: string;
+  source: "canonical_json";
+  version?: CanonicalFacilityVersion;
+  updated?: boolean;
+  projection?: { status: "synced" | "reconcile_required"; revision: string };
+};
+
+export type CanonicalDatedFacility = {
+  facility_id: string;
+  effective_date: string;
+  version: CanonicalFacilityVersion;
+  facility: Record<string, unknown>;
+  config: Record<string, unknown>;
+  revision: string;
+  source: "canonical_json";
+};
+
+export const requireDatedFacility = (data: CanonicalDatedFacility, target: string, effectiveDate: string): string => {
+  const revision = requireCanonicalRevision(data);
+  if (data.facility_id !== target || data.effective_date !== effectiveDate || !data.version?.version_id ||
+      !data.facility || data.facility.facility_id !== target ||
+      JSON.stringify(data.version.facility) !== JSON.stringify(data.facility) || JSON.stringify(data.config) !== JSON.stringify(data.facility)) {
+    throw new Error("指定日の完全施設版と正本 revision が一致しません。");
+  }
+  return revision;
+};
+
+export const requireFacilityVersions = (data: CanonicalFacilityVersions, target: string): string => {
+  const revision = requireCanonicalRevision(data);
+  if (data.facility_id !== target || !Array.isArray(data.versions) || !data.reference || data.reference.facility_id !== target ||
+      data.reference_status !== "unversioned_reference_only" ||
+      data.versions.some((version) => !version || typeof version.version_id !== "string" || !version.version_id ||
+        typeof version.valid_from !== "string" || !("valid_to" in version) ||
+        (version.valid_to !== null && typeof version.valid_to !== "string") ||
+        !version.facility || version.facility.facility_id !== target) ||
+      new Set(data.versions.map((version) => version.version_id)).size !== data.versions.length) {
+    throw new Error("施設版と正本 revision の組を確認できません。明示的に再読込してください。");
+  }
+  if (data.version && (data.versions.filter((version) => version.version_id === data.version!.version_id).length !== 1 ||
+      JSON.stringify(data.versions.find((version) => version.version_id === data.version!.version_id)) !== JSON.stringify(data.version))) {
+    throw new Error("own 保存版と同一 revision の版一覧が一致しません。自動再保存せず明示的に再読込してください。");
+  }
+  return revision;
+};
+
 export type CanonicalFacility = {
   id: string;
   name: string;

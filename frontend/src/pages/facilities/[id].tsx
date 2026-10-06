@@ -9,6 +9,7 @@ import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient"
 import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
 import { useH1LeaveGuard } from "../../hooks/useH1LeaveGuard";
 import { canonicalErrorText, canonicalSaveNotice, requireFacilitySnapshot, type CanonicalFacility, type CanonicalFacilityResponse } from "../../services/facilityData";
+import { requireFacilityVersions, requireDatedFacility, type CanonicalDatedFacility, type CanonicalFacilityVersions, type CanonicalFacilityVersion } from "../../services/facilityData";
 
 type Facility = CanonicalFacility;
 
@@ -200,6 +201,36 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
   const facilityDraftRef = useRef<FacilityDraft | null>(null);
   const [configRecord, setConfigRecord] = useState<Record<string, unknown>>({});
   const configDraftRef = useRef<ConfigDraft | null>(null);
+  const [versionSnapshot, setVersionSnapshot] = useState<CanonicalFacilityVersions | null>(null);
+  const versionSnapshotRef = useRef<CanonicalFacilityVersions | null>(null);
+  const [versionId, setVersionId] = useState("");
+  const [versionFrom, setVersionFrom] = useState("");
+  const [versionTo, setVersionTo] = useState("");
+  const [versionOpenEnd, setVersionOpenEnd] = useState(false);
+  const [versionText, setVersionText] = useState("");
+  const [versionExisting, setVersionExisting] = useState(false);
+  const versionOriginal = useRef<CanonicalFacilityVersion | null>(null);
+  const [versionDirty, setVersionDirty] = useState(false);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [versionBlocked, setVersionBlocked] = useState(false);
+  const versionGeneration = useRef(0);
+  const previewGeneration = useRef(0);
+  const versionBusyOwner = useRef(0);
+  const [versionMessage, setVersionMessage] = useState("");
+  const [effectiveDate, setEffectiveDate] = useState("");
+  const [datedResult, setDatedResult] = useState("");
+  const clearVersionEditor = () => {
+    versionGeneration.current += 1;
+    previewGeneration.current += 1;
+    versionSnapshotRef.current = null;
+    setVersionSnapshot(null);
+    versionOriginal.current = null;
+    setVersionExisting(false);
+    setVersionId(""); setVersionFrom(""); setVersionTo(""); setVersionText("");
+    setVersionOpenEnd(false);
+    setVersionDirty(false); setVersionMessage(""); setDatedResult("");
+    setVersionBlocked(false); setVersionBusy(false); versionBusyOwner.current = 0;
+  };
   const syncFacilityDraft = useCallback((values: FacilityDraft) => {
     if (JSON.stringify(facilityDraftRef.current) !== JSON.stringify(values)) inputGeneration.current += 1;
     facilityDraftRef.current = values;
@@ -208,7 +239,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
     if (JSON.stringify(configDraftRef.current) !== JSON.stringify(values)) inputGeneration.current += 1;
     configDraftRef.current = values;
   }, []);
-  const hasUnsavedChanges = facilityFormDirty || configFormDirty || specialDirty;
+  const hasUnsavedChanges = facilityFormDirty || configFormDirty || specialDirty || versionDirty;
   dirtyRef.current = hasUnsavedChanges;
   const facilityPath = !Array.isArray(id) && id ? `/facilities/${id}` : "/facilities";
   useH1LeaveGuard(hasUnsavedChanges, [facilityPath]);
@@ -235,6 +266,129 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
     const isCurrent = () => generation === commandGeneration.current && target === targetRef.current &&
       owner === saveGeneration.current && input === inputGeneration.current;
     return { generation, expectedRevision, isCurrent };
+  };
+
+  const editVersion = (setter: (value: string) => void, value: string) => {
+    versionGeneration.current += 1;
+    inputGeneration.current += 1;
+    setVersionDirty(true);
+    setter(value);
+  };
+  const captureVersionOwnership = () => {
+    const target = targetRef.current;
+    const generation = versionGeneration.current;
+    const input = inputGeneration.current;
+    const command = commandGeneration.current;
+    const owner = saveGeneration.current;
+    const session = browserSessionKey();
+    return () => target === targetRef.current && generation === versionGeneration.current &&
+      input === inputGeneration.current && command === commandGeneration.current &&
+      owner === saveGeneration.current && session === browserSessionKey() && hasActiveSessionAuthHeader();
+  };
+  const loadVersions = async () => {
+    if (!facility || versionBusyOwner.current !== 0 || versionBusy || facility.id !== targetRef.current || (versionDirty && !window.confirm("未保存の施設版入力を破棄し、版一覧を再読込しますか？"))) return;
+    const target = facility.id;
+    const generation = ++versionGeneration.current;
+    const owns = captureVersionOwnership();
+    const current = () => owns() && generation === versionGeneration.current && versionBusyOwner.current === 0;
+    try {
+      if (!current()) return;
+      const res = await apiClient.get<CanonicalFacilityVersions>(`/facilities/${target}/versions`);
+      if (!current()) return;
+      requireFacilityVersions(res.data, target);
+      clearVersionEditor();
+      versionSnapshotRef.current = res.data;
+      setVersionSnapshot(res.data);
+    } catch (error) {
+      if (current()) setVersionMessage(errorDetailText(error, "施設版を読み込めません。"));
+    }
+  };
+  const selectVersion = (selected: string) => {
+    if (versionDirty && !window.confirm("未保存の施設版入力を破棄し、選択を変更しますか？")) return;
+    const versions = versionSnapshotRef.current;
+    if (!versions || versions.facility_id !== targetRef.current) return;
+    const matches = versions.versions.filter((version) => version.version_id === selected);
+    if (selected && matches.length !== 1) { setVersionMessage("施設版の選択を一意に確認できません。"); return; }
+    versionGeneration.current += 1;
+    inputGeneration.current += 1;
+    const version = selected ? matches[0] : null;
+    versionOriginal.current = version;
+    setVersionExisting(Boolean(version));
+    setVersionId(version?.version_id ?? "");
+    setVersionFrom(version?.valid_from ?? "");
+    setVersionTo(version?.valid_to ?? "");
+    setVersionOpenEnd(Boolean(version && version.valid_to === null));
+    setVersionText(version ? prettyJson(version.facility) : "");
+    setVersionDirty(false);
+    setVersionMessage("");
+  };
+  const saveVersion = async () => {
+    if (!facility || facility.id !== targetRef.current || versionBusyOwner.current !== 0 || versionBusy || versionBlocked) return;
+    const target = facility.id;
+    const snapshot = versionSnapshotRef.current;
+    if (!snapshot) { setVersionMessage("編集開始時の施設版 snapshot がありません。明示的に再読込してください。"); return; }
+    const generation = versionGeneration.current;
+    const command = ++commandGeneration.current;
+    previewGeneration.current += 1;
+    const owns = captureVersionOwnership();
+    const current = () => owns() && generation === versionGeneration.current && command === commandGeneration.current &&
+      versionBusyOwner.current === command;
+    versionBusyOwner.current = command;
+    setVersionBusy(true);
+    let dispatched = false;
+    try {
+      const expectedRevision = requireFacilityVersions(snapshot, target);
+      const parsed = parseJson(versionText);
+      if (parsed.error || !parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) throw new Error("完全施設版をJSONオブジェクトで入力してください。");
+      const version = { ...versionOriginal.current, version_id: versionId, valid_from: versionFrom,
+        valid_to: versionOpenEnd ? null : versionTo, facility: parsed.value };
+      const url = `/facilities/${target}/versions`;
+      if (!current()) return;
+      dispatched = true;
+      const res = versionExisting
+        ? await apiClient.put<CanonicalFacilityVersions>(`${url}/${encodeURIComponent(versionId)}`, { version, expected_revision: expectedRevision })
+        : await apiClient.post<CanonicalFacilityVersions>(url, { version, expected_revision: expectedRevision });
+      if (!current()) return;
+      requireFacilityVersions(res.data, target);
+      const notice = canonicalSaveNotice(res.data);
+      const own = res.data.version;
+      if (!own || own.version_id !== versionId) throw new Error("保存済み施設版を確認できません。入力を保持して明示的に再読込してください。");
+      versionSnapshotRef.current = res.data;
+      setVersionSnapshot(res.data);
+      versionOriginal.current = own;
+      setVersionExisting(true);
+      setVersionFrom(own.valid_from); setVersionTo(own.valid_to ?? ""); setVersionText(prettyJson(own.facility));
+      setVersionOpenEnd(own.valid_to === null);
+      setVersionDirty(false);
+      setVersionMessage(`施設版を保存しました。${notice}`);
+    } catch (error) {
+      if (current()) {
+        const status = (error as any)?.response?.status;
+        if (dispatched && (status === 409 || status === 428 || !status || status >= 500)) setVersionBlocked(true);
+        setVersionMessage(errorDetailText(error, "施設版を保存できません。入力は保持しています。"));
+      }
+    } finally {
+      if (versionBusyOwner.current === command) {
+        versionBusyOwner.current = 0;
+        setVersionBusy(false);
+      }
+    }
+  };
+  const resolveVersionDate = async () => {
+    if (!facility || versionBusyOwner.current !== 0 || versionBusy) return;
+    const target = facility.id;
+    const generation = ++previewGeneration.current;
+    const owns = captureVersionOwnership();
+    const current = () => owns() && generation === previewGeneration.current && versionBusyOwner.current === 0;
+    try {
+      if (!current()) return;
+      const res = await apiClient.get<CanonicalDatedFacility>(`/facilities/${target}/resolved`, { params: { effective_date: effectiveDate } });
+      if (!current()) return;
+      requireDatedFacility(res.data, target, effectiveDate);
+      setDatedResult(prettyJson(res.data));
+    } catch (error) {
+      if (current()) { setDatedResult(""); setVersionMessage(errorDetailText(error, "指定日の施設版を解決できません。")); }
+    }
   };
 
   const ownResponse = (data: FacilityResponse, target: string) => {
@@ -272,6 +426,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
     workbookDirty.current = false;
     setSpecialDirty(false);
     setEditorEpoch((epoch) => epoch + 1);
+    clearVersionEditor();
     setMessage(kind === "facility" ? "施設情報と設定を再読込しました。" : "設定と施設情報を再読込しました。");
     return res.data;
   };
@@ -342,6 +497,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
 
   useEffect(() => {
     saveGeneration.current += 1;
+    clearVersionEditor();
     commandGeneration.current += 1;
     uploadGeneration.current += 1;
     setSourceWorkbookUploading(false);
@@ -526,6 +682,21 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
       ) : (
         <>
           <section className="panel">
+            <header className="panel-header"><h2>施設情報の有効期間</h2><button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void loadVersions()}>版一覧を再読込</button></header>
+            <div className="form-grid">
+              <label className="field"><span className="field-label">編集対象</span><select className="input" value={versionExisting ? versionId : ""} onChange={(e) => selectVersion(e.target.value)} disabled={versionBusy || !versionSnapshot}><option value="">新規版</option>{versionSnapshot?.versions.map((version) => <option key={version.version_id} value={version.version_id}>{version.version_id} ({version.valid_from} - {version.valid_to ?? "終了日なし"})</option>)}</select></label>
+              <label className="field"><span className="field-label">版ID</span><input className="input" value={versionId} onChange={(e) => editVersion(setVersionId, e.target.value)} disabled={versionBusy || versionExisting} /></label>
+              <label className="field"><span className="field-label">開始日（含む）</span><input className="input" type="date" value={versionFrom} onChange={(e) => editVersion(setVersionFrom, e.target.value)} disabled={versionBusy} /></label>
+              <label className="field"><span className="field-label">終了日（含む）</span><input className="input" type="date" value={versionTo} onChange={(e) => editVersion(setVersionTo, e.target.value)} disabled={versionBusy || versionOpenEnd} /><span><input type="checkbox" checked={versionOpenEnd} disabled={versionBusy} onChange={(e) => { versionGeneration.current += 1; inputGeneration.current += 1; setVersionDirty(true); setVersionOpenEnd(e.target.checked); }} />終了日なし</span></label>
+              <label className="field"><span className="field-label">完全施設版（名称・区域・設定・テンプレート）</span><textarea className="textarea json-textarea" rows={12} value={versionText} onChange={(e) => editVersion(setVersionText, e.target.value)} disabled={versionBusy} /></label>
+            </div>
+            <button className="btn" type="button" onClick={() => void saveVersion()} disabled={versionBusy || versionBlocked || !versionSnapshot}>施設版を保存</button>
+            <div className="form-grid"><label className="field"><span className="field-label">参照日</span><input className="input" type="date" disabled={versionBusy} value={effectiveDate} onChange={(e) => { previewGeneration.current += 1; setEffectiveDate(e.target.value); setDatedResult(""); }} /></label></div>
+            <button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void resolveVersionDate()}>指定日の版を取得</button>
+            {versionMessage ? <p className="message">{versionMessage}</p> : null}
+            {datedResult ? <pre className="json-view">{datedResult}</pre> : null}
+          </section>
+          <section className="panel">
             <header className="panel-header">
               <h2>施設情報</h2>
               <span className="badge">{facility.id}</span>
@@ -650,10 +821,10 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
 
           <section className="panel">
             <header className="panel-header">
-              <h2>Resolved Preview</h2>
+              <h2>日付未指定の参照資料</h2>
             </header>
             <details className="json-panel">
-              <summary>Resolved JSON (上級)</summary>
+              <summary>参照設定 JSON（適用版ではありません）</summary>
               <pre className="code-block">{resolvedText}</pre>
             </details>
           </section>

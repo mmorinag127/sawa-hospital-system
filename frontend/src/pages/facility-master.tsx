@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
 import { useFormContext } from "react-hook-form";
 import TopNav from "../components/TopNav";
@@ -758,8 +759,11 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
     const existing = new Set(facilities.map((facility) => String(facility.facility_id || "")));
     const facilityId = generateFacilityId(existing);
     const sourceName = readString((selectedFacility as Record<string, unknown>).facility_name);
+    const referenceCopy = cloneFacility(selectedFacility) || {};
+    // A new facility identity does not inherit another facility's recorded dated history.
+    delete referenceCopy.versions;
     const nextFacility = {
-      ...(cloneFacility(selectedFacility) || {}),
+      ...referenceCopy,
       facility_id: facilityId,
       facility_name: sourceName ? `${sourceName} コピー` : "",
     };
@@ -984,10 +988,10 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
         if (generation !== periodGeneration.current) return;
         const version = res.data?.template_version_reference;
         if (version && typeof version === "object") setPeriodVersion(version as Record<string, unknown>);
-        if (res.data?.version_resolution?.status === "date_version_integration_required") {
+        if (["date_version_integration_required", "unversioned_reference_only"].includes(res.data?.version_resolution?.status)) {
           setPeriodVersionError(res.data?.template_version_reference_status === "unavailable"
-            ? "日付版解決は未接続で、DB版参照も取得できません。JSON正本の適用版は未確認です。"
-            : "日付版解決は未接続です。表示されたDB版参照はJSON正本の適用版として採用しません。");
+            ? "日付未指定の参照資料です。DB参考情報は取得できません。JSON適用版は日時管理で指定日を選んで確認してください。"
+            : "日付未指定の参照資料です。DB参考情報はJSON適用版として採用しません。日時管理で指定日を選んで確認してください。");
         }
       })
       .catch((err: any) => {
@@ -1103,6 +1107,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
             <p className="panel-subtitle">施設を選んで確認し、必要な時だけ編集を開始します。</p>
           </div>
           <div className="actions">
+            {selectedFacility && readString(selectedFacility.facility_id) ? <Link className="btn ghost" href={`/facilities/${encodeURIComponent(readString(selectedFacility.facility_id))}`}>施設版の日時管理</Link> : null}
             <button className="btn ghost" onClick={duplicateSelectedFacility} disabled={!master || !selectedFacility || isEditing}>
               選択施設を複製
             </button>
@@ -1244,12 +1249,13 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                   </div>
                 )}
                 <div className="period-version-status">
-                  <p className="detail-label">現在解決されている期間版</p>
+                  <p className="detail-label">旧DB版（参考・JSON適用版ではありません）</p>
                   {periodVersion ? (
                     <p className="detail-meta">{readString(periodVersion.id) || "ID未設定"} / {readString(periodVersion.valid_from) || "開始日未設定"} - {readString(periodVersion.valid_to) || "終了日未設定"}</p>
                   ) : (
                     <p className="subtle">{periodVersionError || "期間版は未設定です。"}</p>
                   )}
+                  {periodVersion && periodVersionError ? <p className="subtle">{periodVersionError}</p> : null}
                 </div>
               </div>
 

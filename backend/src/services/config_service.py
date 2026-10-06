@@ -1130,6 +1130,15 @@ def _build_facility_config(
     return merged
 
 
+def get_facility_config_for_date(facility_id: str, effective_date: object) -> dict:
+    from src.services import facility_master_service
+
+    resolved = facility_master_service.resolve_facility_for_date(facility_id, effective_date)
+    # A version is complete. No root template merge, normalization, DB or current-config substitution.
+    config = deepcopy(resolved["facility"])
+    return {**resolved, "config": config}
+
+
 def get_facility_config(facility_id: str, *, master: dict | None = None) -> Optional[dict[str, Any]]:
     master = load_facility_master() if master is None else master
     facility = get_facility_by_id(facility_id, master=master)

@@ -16,11 +16,16 @@ def get_master() -> dict:
     return get_snapshot().master
 
 
+def resolve_facility_for_date(facility_id: str, effective_date: object) -> dict:
+    return canonical_facility_store.resolve_facility_version(get_snapshot(), facility_id, effective_date)
+
+
 def get_master_path() -> str:
     return canonical_facility_store.source_location()
 
 
 def _validated(master: dict) -> dict:
+    canonical_facility_store.validate_facility_versions(master)
     validation = validate_facility_master(master)
     if validation["errors"]:
         raise canonical_facility_store.CanonicalStoreError(
