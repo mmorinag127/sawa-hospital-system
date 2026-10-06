@@ -55,6 +55,8 @@ test("monthly menu index redirects to the latest registered month", async ({ pag
             filename: "menu.xlsx",
             display_name: "2026年3月 献立",
           },
+          revision: "index-target-read-1",
+          master_checks: { count: 0, issues: [] },
           items: [],
           entries: [],
         },
@@ -116,6 +118,8 @@ test("monthly menu page renders entries in a sheet-style grid", async ({ page })
             display_name: "2026年3月 献立",
             uploaded_at: "2026-03-01T09:00:00",
           },
+          revision: "sheet-read-1",
+          master_checks: { count: 0, issues: [] },
           items: [
             {
               id: "MMI001",
@@ -194,6 +198,7 @@ test("monthly menu page renders entries in a sheet-style grid", async ({ page })
   await expect(sheet.getByRole("button", { name: "豆腐の煮物" })).toBeVisible();
   await expect(sheet.getByText("筑前煮")).toBeVisible();
 
+  await page.locator(".sheet-chip").filter({ hasText: "ホイコーロー" }).click();
   await expect(page.getByTestId("selected-entry-name")).toHaveText("ホイコーロー");
   await sheet.getByRole("button", { name: "豆腐の煮物" }).click();
   await expect(page.getByTestId("selected-entry-name")).toHaveText("豆腐の煮物");

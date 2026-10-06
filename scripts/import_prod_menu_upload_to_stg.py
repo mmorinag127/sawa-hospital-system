@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+from pathlib import Path
+import re
 import subprocess
 from contextlib import closing
 from urllib.parse import urlparse
@@ -10,6 +13,7 @@ from urllib.parse import urlparse
 import requests
 from google.cloud import storage
 from google.cloud.sql.connector import Connector
+from verify_stg_monthly_menus import apply_saved_import, authored_selection, review_material, validate_receipt
 
 
 PROJECT_ID = "sawahospitalsystem"
@@ -98,19 +102,42 @@ def _upload_to_stg(
     sheet_name: str | None,
     file_bytes: bytes,
     media_type: str,
+    scope_override: str | None,
+    diet_types: list[str] | None,
 ) -> requests.Response:
+    authored_selection({"scope_override": scope_override, "diet_types": diet_types})
     params = {"month_id": target_month_id}
-    data: dict[str, str] = {}
+    if diet_types is not None:
+        params["diet_types"] = json.dumps(diet_types, ensure_ascii=False)
     if sheet_name:
-        data["sheet_name"] = sheet_name
+        params["sheet_name"] = sheet_name
+    if scope_override is not None:
+        if not isinstance(scope_override, str) or not scope_override:
+            raise ValueError("recorded source scope is unresolved")
+        params.update({"scope_type": "tag" if scope_override.startswith("TAG:") else "facility",
+                       "scope_value": scope_override[4:] if scope_override.startswith("TAG:") else scope_override})
     return requests.post(
         f"{stg_base_url.rstrip('/')}/monthly-menus",
         params=params,
         headers={"Authorization": f"Bearer {bearer_token}"},
         files={"file": (filename, file_bytes, media_type)},
-        data=data,
         timeout=180,
     )
+
+
+def _verified_original_digest(file_bytes, metadata, explicit_digest):
+    digest = hashlib.sha256(file_bytes).hexdigest()
+    recorded_digest = metadata.get("content_sha256")
+    if recorded_digest is not None:
+        if (not isinstance(recorded_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", recorded_digest)
+            or digest != recorded_digest):
+            raise ValueError("prod original differs from recorded archive digest")
+    elif explicit_digest != digest:
+        raise ValueError("unrecorded original digest requires explicit verified --source-sha256")
+    if explicit_digest is not None and explicit_digest != digest:
+        raise ValueError("original differs from explicit verified --source-sha256")
+    return digest
 
 
 def main() -> int:
@@ -120,6 +147,9 @@ def main() -> int:
     parser.add_argument("--target-month-id", required=True)
     parser.add_argument("--stg-base-url", default=os.getenv("STG_BASE_URL", DEFAULT_STG_BASE_URL))
     parser.add_argument("--bearer-token", default=os.getenv("GOOGLE_ID_TOKEN", ""))
+    parser.add_argument("--saved-import-id", help="Exact previously saved staging receipt to explicitly review")
+    parser.add_argument("--review-file", type=Path, help="Operator reviewed exact receipt/input plus explicit resolutions JSON")
+    parser.add_argument("--source-sha256", help="Explicit verified original digest if the historical log has no digest")
     args = parser.parse_args()
 
     if not args.bearer_token:
@@ -144,29 +174,56 @@ def main() -> int:
         filename = str(metadata.get("filename") or "").strip()
         if not file_uri or not filename:
             raise SystemExit("prod upload log does not contain file_uri/filename")
+        scope, diets = authored_selection(metadata)
 
         file_bytes, media_type = _read_gcs_bytes(storage_client, file_uri)
-        response = _upload_to_stg(
-            stg_base_url=args.stg_base_url,
-            bearer_token=args.bearer_token,
-            target_month_id=args.target_month_id,
-            filename=filename,
-            sheet_name=metadata.get("sheet_name"),
-            file_bytes=file_bytes,
-            media_type=media_type,
-        )
+        digest = _verified_original_digest(file_bytes, metadata, args.source_sha256)
+        auth = {"Authorization": f"Bearer {args.bearer_token}"}
+        if args.saved_import_id:
+            response = requests.get(f"{args.stg_base_url.rstrip('/')}/monthly-menus/{args.target_month_id}/imports/{args.saved_import_id}",
+                                    headers=auth, timeout=180)
+        else:
+            response = _upload_to_stg(
+                stg_base_url=args.stg_base_url, bearer_token=args.bearer_token,
+                target_month_id=args.target_month_id, filename=filename,
+                sheet_name=metadata.get("sheet_name"), file_bytes=file_bytes,
+                media_type=media_type, scope_override=scope, diet_types=diets,
+            )
         summary = {
             "source_month_id": args.source_month_id,
             "upload_id": args.upload_id,
             "target_month_id": args.target_month_id,
             "filename": filename,
             "source_file_uri": file_uri,
+            "applied": False,
             "status_code": response.status_code,
             "response": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         if response.status_code >= 400:
             raise SystemExit(1)
+        receipt = response.json()
+        validate_receipt(receipt, month=args.target_month_id, filename=filename, digest=digest,
+                         scope=scope, diet_types=diets, sheet_name=metadata.get("sheet_name"), import_id=args.saved_import_id)
+        print(json.dumps({"saved_import_id": receipt["id"], "applied": False,
+                          "review_material": review_material(receipt)}, ensure_ascii=False, indent=2))
+        if args.review_file is None:
+            raise SystemExit("Original saved, not applied: explicit --review-file and exact --saved-import-id are required to continue")
+        if not args.saved_import_id:
+            raise SystemExit("Review/apply requires explicitly resuming the saved receipt; no automatic approval of a new upload")
+        approval = json.loads(args.review_file.read_text())
+        def command(path, body=None, content_type=None, *, revision=None):
+            headers = {**auth, "If-Match": revision}
+            if content_type:
+                headers["Content-Type"] = content_type
+            own_response = requests.post(args.stg_base_url.rstrip('/') + path, data=body, headers=headers, timeout=180)
+            own_response.raise_for_status()
+            own = own_response.json()
+            print(json.dumps({"stage": "review_response" if path.endswith("/review") else "apply_response",
+                              "response": own}, ensure_ascii=False, indent=2))
+            return own
+        applied = apply_saved_import(receipt, approval, command)
+        print(json.dumps({**summary, "status_code": 200, "applied": True, "response": applied}, ensure_ascii=False, indent=2))
     finally:
         connector.close()
     return 0

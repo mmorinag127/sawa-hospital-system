@@ -1,31 +1,37 @@
 import { useRouter } from "next/router";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { Box } from "@mui/material";
+import { Box, Button, TextField } from "@mui/material";
 import { SawaProvider } from "@sawa/ui";
 
 import TopNav from "../../components/TopNav";
 import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
+import { useMenuInputOwner } from "../../hooks/useMenuInputOwner";
 
 function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
   const router = useRouter();
+  const owner = useMenuInputOwner(router.asPath);
   const [message, setMessage] = useState("最新の月次メニューを確認中です。");
+  const [month, setMonth] = useState("");
 
   useEffect(() => {
     let cancelled = false;
 
     const loadLatest = async () => {
+      if (!authenticated) return;
+      const auth = browserSessionKey();
+      const current = owner.capture("latest");
       try {
         const res = await apiClient.get("/monthly-menus/latest");
         const monthId = String(res.data?.menu?.id || "").trim();
         if (!monthId) {
           throw new Error("missing_month_id");
         }
-        if (!cancelled) {
+        if (!cancelled && current() && auth === browserSessionKey() && hasActiveSessionAuthHeader()) {
           router.replace(`/menus/${monthId}`);
         }
       } catch (err: any) {
-        if (cancelled) return;
+        if (cancelled || !current() || auth !== browserSessionKey() || !hasActiveSessionAuthHeader()) return;
         const status = err?.response?.status;
         if (status === 403) {
           setMessage("権限がありません。月次メニューの操作にはユーザー2以上の権限が必要です。");
@@ -41,7 +47,7 @@ function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [router, authenticated]);
 
   if (!authenticated) return <Box sx={{ p: 3 }}>ログインを確認しています。</Box>;
 
@@ -58,6 +64,8 @@ function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
 
       <section className="panel">
         <p className="subtle">{message}</p>
+        <TextField type="month" label="対象月" value={month} onChange={(event) => { owner.changed(); setMonth(event.target.value); }} InputLabelProps={{ shrink: true }} />
+        <Button disabled={!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)} onClick={() => void router.push(`/menus/${month}`)}>対象月を開く</Button>
       </section>
 
       <style jsx>{`
@@ -123,5 +131,5 @@ function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
 export default function MonthlyMenuIndexPage() {
   const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
   const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false);
-  return <SawaProvider sessionKey={`hospital-monthly-menu-index:${sessionKey}`}><MonthlyMenuIndexScreen authenticated={authenticated} /></SawaProvider>;
+  return <SawaProvider sessionKey={`hospital-monthly-menu-index:${sessionKey}`}><MonthlyMenuIndexScreen key={`${sessionKey}:${authenticated}`} authenticated={authenticated} /></SawaProvider>;
 }

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import inspect, select, update
 from sqlalchemy.orm import Session
 
 from src.models.menu import MenuEditRevision
@@ -133,12 +134,12 @@ def decode_full_base_menu_snapshot(value: str | None) -> RevisionToken:
 
 
 def current(session: Session, scope: str) -> int:
-    row = session.get(MenuEditRevision, scope)
-    if row is None:
+    revision = session.execute(select(MenuEditRevision.revision).where(MenuEditRevision.scope == scope)).scalar_one_or_none()
+    if revision is None:
         raise RevisionSchemaNotMigrated(f"menu editor revision scope is missing: {scope}")
-    if not _is_positive_int(row.revision):
+    if not _is_positive_int(revision):
         raise RevisionConflict(f"invalid stored editor revision for scope: {scope}")
-    return row.revision
+    return revision
 
 
 def read_locked_current(session: Session, scope: str) -> int:
@@ -148,14 +149,67 @@ def read_locked_current(session: Session, scope: str) -> int:
         connection = session.connection()
         if not connection.connection.driver_connection.in_transaction:
             connection.exec_driver_sql("BEGIN")
-    row = session.execute(
-        select(MenuEditRevision).where(MenuEditRevision.scope == scope).with_for_update(read=True)
+    revision = session.execute(
+        select(MenuEditRevision.revision).where(MenuEditRevision.scope == scope).with_for_update(read=True)
     ).scalar_one_or_none()
-    if row is None:
+    if revision is None:
         raise RevisionSchemaNotMigrated(f"menu editor revision scope is missing: {scope}")
-    if not _is_positive_int(row.revision):
+    if not _is_positive_int(revision):
         raise RevisionConflict(f"invalid stored editor revision for scope: {scope}")
-    return row.revision
+    return revision
+
+
+def begin_monthly_snapshot(session: Session, *, write: bool):
+    if session.new or session.dirty or session.deleted or session.in_transaction():
+        raise RevisionConflict("monthly snapshot requires a clean owned transaction; pending edits retained")
+    session.expire_all()
+    dialect = session.get_bind().dialect.name
+    if dialect == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
+    elif dialect == "postgresql":
+        session.connection(execution_options={"isolation_level": "SERIALIZABLE" if write else "REPEATABLE READ"})
+    else:
+        raise RevisionConflict("unsupported monthly snapshot driver")
+    inspector = inspect(session.connection())
+    if not inspector.has_table("monthly_menu_imports") or not inspector.has_table("menu_edit_revisions"):
+        raise RevisionSchemaNotMigrated("monthly import requires formal 0030/0031 migrations")
+
+
+def monthly_scope(month_id: str):
+    return f"monthly-menu:{month_id}"
+
+
+def monthly_token(scope: str, revision: int, digest: str) -> str:
+    if not _is_positive_int(revision) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise RevisionConflict("stored monthly source revision or digest is unresolved")
+    return base64.urlsafe_b64encode(json.dumps({"scope": scope, "revision": revision, "input_digest": digest},
+        sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def require_monthly_token(expected: str | None, actual: str):
+    if expected is None or (isinstance(expected, str) and not expected.strip()):
+        raise RevisionPreconditionRequired("If-Match is required")
+    if not isinstance(expected, str) or expected != actual:
+        raise RevisionConflict("monthly input changed; saved import and working input retained")
+
+
+def monthly_command_source(expected: str | None) -> str:
+    if expected is None or (isinstance(expected, str) and not expected.strip()):
+        raise RevisionPreconditionRequired("If-Match is required")
+    if not isinstance(expected, str):
+        raise RevisionConflict("invalid monthly source token")
+    try:
+        raw = json.loads(base64.urlsafe_b64decode(expected + "=" * (-len(expected) % 4)))
+        if not isinstance(raw, dict):
+            raise ValueError("invalid monthly source payload")
+        scope = raw["scope"]
+        if (not isinstance(scope, str) or not re.fullmatch(r"monthly-menu:\d{4}-(0[1-9]|1[0-2])", scope)
+            or not _is_positive_int(raw.get("revision")) or not isinstance(raw.get("input_digest"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", raw["input_digest"])):
+            raise ValueError("wrong monthly source scope")
+        return scope[len("monthly-menu:"):]
+    except (ValueError, TypeError, KeyError) as exc:
+        raise RevisionConflict("invalid monthly source token") from exc
 
 
 def compare_and_advance(session: Session, scope: str, expected_revision: int) -> int:

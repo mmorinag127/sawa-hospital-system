@@ -7,6 +7,7 @@ import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient"
 import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
 import { DIET_TYPE_OPTIONS, formatDietTypeLabel } from "../../services/menuVocabulary";
 import { useH1LeaveGuard } from "../../hooks/useH1LeaveGuard";
+import { useMenuInputOwner } from "../../hooks/useMenuInputOwner";
 
 type MenuItem = {
   id: string;
@@ -129,10 +130,47 @@ type MenuMasterReviewResolution = {
 };
 
 type PendingMenuMasterReview = {
-  file: File;
+  receipt: SavedMenuImport;
+  saved: boolean;
+  ownsInput: () => boolean;
   issues: MenuMasterReviewIssue[];
   resolutions: Record<string, MenuMasterReviewResolution>;
 };
+
+type SavedMenuImport = {
+  id: string;
+  month_id: string;
+  state: string;
+  revision: string;
+  input_revision: string;
+  current_input_revision: string;
+  source: { filename: string; file_uri: string; content_sha256: string; sheet_name: string; media_type: string; scope_override: string | null; diet_types: string[] | null };
+  review: { issues: MenuMasterReviewIssue[]; resolutions: MenuMasterReviewResolution[]; item_count: number; master_diffs: MenuMasterReviewIssue[];
+    plans: Record<string, object>; items: object[]; entries: object[]; scope_override: string | null; input_snapshot: { revision: number; digest: string } };
+  current_review: SavedMenuImport["review"];
+};
+
+function hasSavedImportSource(source: SavedMenuImport["source"]) {
+  return !!source && ["filename", "file_uri", "content_sha256", "sheet_name", "media_type", "scope_override", "diet_types"]
+    .every((key) => Object.prototype.hasOwnProperty.call(source, key))
+    && [source.filename, source.file_uri, source.sheet_name, source.media_type].every((value) => typeof value === "string" && !!value.trim())
+    && typeof source.content_sha256 === "string" && /^[0-9a-f]{64}$/.test(source.content_sha256)
+    && (source.scope_override === null || (typeof source.scope_override === "string" && !!source.scope_override.trim()))
+    && (source.diet_types === null || (Array.isArray(source.diet_types) && source.diet_types.length > 0
+      && source.diet_types.every((value) => typeof value === "string" && !!value.trim())));
+}
+
+function hasSavedImportReview(review: SavedMenuImport["review"], source: SavedMenuImport["source"]) {
+  const isObject = (value: unknown) => !!value && typeof value === "object" && !Array.isArray(value);
+  return isObject(review) && ["issues", "resolutions", "master_diffs", "item_count", "plans", "items", "entries", "scope_override", "input_snapshot"]
+    .every((key) => Object.prototype.hasOwnProperty.call(review, key))
+    && [review.issues, review.resolutions, review.master_diffs, review.items, review.entries]
+      .every((values) => Array.isArray(values) && values.every(isObject))
+    && isObject(review.plans) && Object.values(review.plans).every(isObject)
+    && Number.isInteger(review.item_count) && review.item_count >= 0 && review.scope_override === source.scope_override
+    && isObject(review.input_snapshot) && Number.isInteger(review.input_snapshot.revision) && review.input_snapshot.revision > 0
+    && typeof review.input_snapshot.digest === "string" && /^[0-9a-f]{64}$/.test(review.input_snapshot.digest);
+}
 
 type MenuMasterCheckState = {
   issues: MenuMasterReviewIssue[];
@@ -590,6 +628,9 @@ const findMatchingItemIndex = (items: MenuItem[], entry: MenuEntry | null) => {
 function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) {
   const router = useRouter();
   const { monthId } = router.query;
+  const owner = useMenuInputOwner(router.asPath);
+  const [revision, setRevision] = useState<string | null>(null);
+  const [savedImports, setSavedImports] = useState<SavedMenuImport[]>([]);
   const [menu, setMenu] = useState<MonthlyMenu | null>(null);
   const [items, setItems] = useState<MenuItem[]>([]);
   const [entries, setEntries] = useState<MenuEntry[]>([]);
@@ -597,6 +638,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const [sheetName, setSheetName] = useState<string>("");
   const [scopeType, setScopeType] = useState<string>("base");
   const [scopeValue, setScopeValue] = useState<string>("");
+  const [importDiets, setImportDiets] = useState<string[]>([]);
   const [message, setMessage] = useState<string>("");
   const [lastUpload, setLastUpload] = useState<string>("");
   const [uploadHistory, setUploadHistory] = useState<MenuUploadEntry[]>([]);
@@ -610,6 +652,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const [condimentUploading, setCondimentUploading] = useState<boolean>(false);
   const [condimentMessage, setCondimentMessage] = useState<string>("");
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const [editorSelection, setEditorSelection] = useState<{ month_id: string; entry: MenuEntry; item: MenuItem | null } | null>(null);
   const [uploadInputKey, setUploadInputKey] = useState<number>(0);
   const [pendingReview, setPendingReview] = useState<PendingMenuMasterReview | null>(null);
   const [reviewSubmitting, setReviewSubmitting] = useState<boolean>(false);
@@ -618,11 +661,17 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const [masterCheckNotice, setMasterCheckNotice] = useState<string>("");
   const [entryExceptionDraft, setEntryExceptionDraft] = useState<MenuEntryExceptionDraft | null>(null);
   const [entryExceptionSaving, setEntryExceptionSaving] = useState<boolean>(false);
+  const [exceptionReceipt, setExceptionReceipt] = useState<{ month_id: string; entry_id: string; entries: MenuEntry[] } | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<string>("");
   const [menuOptions, setMenuOptions] = useState<MonthlyMenu[]>([]);
   const [highlightedReviewIssueKey, setHighlightedReviewIssueKey] = useState<string | null>(null);
   const [pendingReviewNotice, setPendingReviewNotice] = useState<string>("");
   const [itemFormDirty, setItemFormDirty] = useState(false);
+  const [exceptionDirty, setExceptionDirty] = useState(false);
+  const itemRevision = useRef<string | null>(null);
+  const exceptionRevision = useRef<string | null>(null);
+  const masterRevisions = useRef<Record<string, string | null>>({});
+  const masterItems = useRef<Record<string, MenuItem | null>>({});
   const [itemEditGeneration, setItemEditGeneration] = useState(0);
   const [selectedMasterCheckKey, setSelectedMasterCheckKey] = useState<string | null>(null);
   const [masterCheckPage, setMasterCheckPage] = useState(0);
@@ -631,7 +680,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const menuLoadGeneration = useRef(0);
   const itemSaveGeneration = useRef(0);
   const selectedEntryRef = useRef<string | null>(null);
-  const hasUnsavedChanges = itemFormDirty || entryExceptionSaving;
+  const hasUnsavedChanges = itemFormDirty || exceptionDirty || entryExceptionSaving || Boolean(file)
+    || Object.keys(masterRevisions.current).length > 0 || Boolean(pendingReview && !pendingReview.saved);
   useH1LeaveGuard(hasUnsavedChanges, ["/menus", "/hospital/menus"]);
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
@@ -647,20 +697,34 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const getMasterCheckScopeLabel = (issue?: MenuMasterReviewIssue | null) => {
     const itemId = normalizeValue(issue?.item_id);
     if (!itemId) return "共通(base)";
-    const item = items.find((row) => normalizeValue(row.id) === itemId);
+    const item = masterRevisions.current[itemId] !== undefined
+      ? masterItems.current[itemId] : items.find((row) => normalizeValue(row.id) === itemId);
+    if (!item) return "適用先を確認できません";
     return formatScopeLabel(item?.facility_override);
   };
 
-  const selectedEntry = entries.find((entry) => entry.id === selectedEntryId) || null;
+  const selectedEntry = (itemFormDirty || exceptionDirty) && editorSelection?.month_id === monthId && editorSelection?.entry.id === selectedEntryId
+    ? editorSelection.entry : entries.find((entry) => entry.id === selectedEntryId) || null;
   const selectedItemIndex = findMatchingItemIndex(items, selectedEntry);
-  const selectedItem = selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
+  const selectedItem = itemFormDirty && editorSelection?.month_id === monthId && editorSelection?.entry.id === selectedEntryId
+    ? editorSelection.item : selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
   selectedEntryRef.current = selectedEntryId;
   const selectEntry = (entryId: string | null) => {
+    if (typeof monthId !== "string") return;
+    if (entryId !== null && !entries.some((entry) => entry.id === entryId)) return;
     if (entryId === selectedEntryRef.current) return;
-    if (itemFormDirty && !window.confirm("未保存の変更を破棄して献立を切り替えますか？")) return;
+    if ((itemFormDirty || exceptionDirty) && !window.confirm("未保存の変更を破棄して献立を切り替えますか？")) return;
+    owner.changed();
+    itemRevision.current = revision;
+    exceptionRevision.current = revision;
+    setExceptionDirty(false);
+    setExceptionReceipt(null);
     itemSaveGeneration.current += 1;
     setItemFormDirty(false);
     setItemEditGeneration((current) => current + 1);
+    const entry = entries.find((candidate) => candidate.id === entryId);
+    const itemIndex = findMatchingItemIndex(items, entry || null);
+    setEditorSelection(entry ? { month_id: monthId, entry, item: itemIndex >= 0 ? items[itemIndex] : null } : null);
     setSelectedEntryId(entryId);
   };
   const itemColumns: readonly TableColumn<MenuItem>[] = [
@@ -668,7 +732,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     { id: "daypart", label: "朝昼夕", render: (item) => item.daypart || "-" }, { id: "category", label: "区分", render: (item) => item.category || "-" },
     { id: "diet", label: "食種", render: (item) => formatDietTypeLabel(item.diet_type || "") || "-" }, { id: "qty", label: "量 / 単位", render: (item) => item.qty_per_serving == null ? "-" : `${item.qty_per_serving}${item.unit_type || ""}` },
     { id: "bag", label: "袋上限", render: (item) => item.bag_max_qty == null ? "-" : `${item.bag_max_qty}${item.bag_max_unit || ""}` },
-    { id: "edit", label: "", render: (item) => <button className="btn compact" onClick={() => selectEntry(entries.find((entry) => findMatchingItemIndex(items, entry) >= 0 && items[findMatchingItemIndex(items, entry)]?.id === item.id)?.id || null)}>編集</button> },
+    { id: "edit", label: "", render: (item) => <button className="btn compact" onClick={() => {
+      const targets = entries.filter((entry) => findMatchingItemIndex(items, entry) >= 0 && items[findMatchingItemIndex(items, entry)]?.id === item.id);
+      if (targets.length !== 1) { setMessage("シートで編集する位置を選択してください。"); return; }
+      selectEntry(targets[0].id);
+    }}>編集</button> },
   ];
   const selectedGarnish = splitGarnishMenuName(selectedEntry?.name);
   const selectedGarnishItem = selectedGarnish
@@ -677,65 +745,126 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
 
   const loadUploadHistory = async (expectedGeneration?: number) => {
     if (!monthId || Array.isArray(monthId)) return;
+    const current = owner.capture("history", false);
     try {
       const res = await apiClient.get(`/monthly-menus/${monthId}/uploads`);
+      if (!current()) return;
       if (expectedGeneration != null && expectedGeneration !== menuLoadGeneration.current) return;
       setUploadHistory(res.data?.items || []);
     } catch {
+      if (!current()) return;
       if (expectedGeneration != null && expectedGeneration !== menuLoadGeneration.current) return;
       setUploadHistory([]);
     }
   };
 
   const loadScopeOptions = async () => {
+    const current = owner.capture("scope-options", false);
     try {
       const res = await apiClient.get("/monthly-menus/scope-options");
+      if (!current()) return;
       setFacilities(res.data?.facilities || []);
       setTagOptions(res.data?.tags || []);
     } catch {
+      if (!current()) return;
       setFacilities([]);
       setTagOptions([]);
     }
   };
 
   const loadRecentMenus = async () => {
+    const current = owner.capture("recent", false);
     try {
       const res = await apiClient.get("/monthly-menus", { params: { limit: 12 } });
+      if (!current()) return;
       setMenuOptions(res.data?.items || []);
     } catch {
+      if (!current()) return;
       setMenuOptions([]);
     }
   };
 
-  const loadMenu = async () => {
+  const adoptSnapshot = (data: any, command?: "item" | "exceptions" | "master") => {
+    if (!data || !Array.isArray(data.items) || !Array.isArray(data.entries)
+      || !Array.isArray(data.master_checks?.issues) || typeof data.revision !== "string") {
+      throw new Error("月次メニューと入力版の応答を確認できませんでした。");
+    }
+    setMenu(data.menu);
+    setItems(data.items);
+    setEntries(data.entries);
+    setRevision(data.revision);
+    if (command === "item" || (!itemFormDirty && !command)) itemRevision.current = data.revision;
+    if (command === "exceptions" || (!exceptionDirty && !command)) exceptionRevision.current = data.revision;
+    const issues: MenuMasterReviewIssue[] = data.master_checks.issues;
+    setMasterCheckState((previous) => {
+      const working = previous.issues.flatMap((issue, index) => {
+        const key = getReviewIssueKey(issue, index);
+        return masterRevisions.current[key] !== undefined ? [{ ...issue, issue_key: key }] : [];
+      });
+      const workingKeys = new Set(working.map((issue, index) => getReviewIssueKey(issue, index)));
+      const nextIssues = [...working, ...issues.filter((issue: MenuMasterReviewIssue, index: number) =>
+        !workingKeys.has(getReviewIssueKey(issue, index)))];
+      return { issues: nextIssues, resolutions: Object.fromEntries(nextIssues.map((issue, index) => {
+        const resolution = buildInitialReviewResolution(issue, index);
+        return [resolution.issue_key, workingKeys.has(resolution.issue_key)
+          ? previous.resolutions[resolution.issue_key] : resolution];
+      })) };
+    });
+    owner.changed();
+  };
+
+  const loadSavedImports = async () => {
+    if (!monthId || Array.isArray(monthId)) return;
+    const current = owner.capture("imports", false);
+    try {
+      const res = await apiClient.get(`/monthly-menus/${monthId}/imports`);
+      if (!current()) return;
+      if (!Array.isArray(res.data?.items)) throw new Error("保存importの応答を確認できませんでした。");
+      if (res.data.items.some((receipt: SavedMenuImport) => receipt.month_id !== monthId || !hasSavedImportSource(receipt.source)
+        || !hasSavedImportReview(receipt.review, receipt.source) || !hasSavedImportReview(receipt.current_review, receipt.source))) {
+        throw new Error("保存原本のscope・食種を確認できませんでした。");
+      }
+      setSavedImports(res.data.items);
+    } catch (error: any) {
+      if (current()) setMessage(formatErrorDetail(error?.response?.data?.detail, "保存importの読込に失敗しました。"));
+    }
+  };
+
+  const loadMenu = async (replaceWorking = false) => {
     if (!monthId || Array.isArray(monthId)) return;
     const generation = menuLoadGeneration.current + 1;
     menuLoadGeneration.current = generation;
+    const current = owner.capture("menu-read");
     try {
-      const res = await apiClient.get(`/monthly-menus/${monthId}`);
-      if (generation !== menuLoadGeneration.current) return;
-      if (!res.data?.menu || !Array.isArray(res.data.items) || !Array.isArray(res.data.entries)) {
+      const res = await apiClient.get(`/monthly-menus/${monthId}`, { params: { editor: true } });
+      if (!current() || generation !== menuLoadGeneration.current) return;
+      if (!Array.isArray(res.data.items) || !Array.isArray(res.data.entries)
+        || !Array.isArray(res.data.master_checks?.issues) || typeof res.data.revision !== "string") {
         throw new Error("月次メニュー正本の応答形式を確認できませんでした。");
       }
-      setMenu(res.data.menu);
-      setItems(res.data.items);
-      setEntries(res.data.entries);
+      if (replaceWorking) {
+        masterRevisions.current = {};
+        masterItems.current = {};
+        itemRevision.current = res.data.revision;
+        exceptionRevision.current = res.data.revision;
+        setItemFormDirty(false);
+        setExceptionDirty(false);
+        setItemEditGeneration((value) => value + 1);
+        const entry = res.data.entries.find((value: MenuEntry) => value.id === selectedEntryRef.current) || null;
+        const index = findMatchingItemIndex(res.data.items, entry);
+        setEntryExceptionDraft(buildEntryExceptionDraft(entry, index >= 0 ? res.data.items[index] : null));
+      }
+      adoptSnapshot(res.data);
       const issues = res.data?.master_checks?.issues;
       if (!Array.isArray(issues)) throw new Error("メニューマスター差分の応答形式を確認できませんでした。");
-      setMasterCheckState({
-        issues,
-        resolutions: Object.fromEntries(
-          issues.map((issue: MenuMasterReviewIssue, index: number) => {
-            const resolution = buildInitialReviewResolution(issue, index);
-            return [resolution.issue_key, resolution];
-          }),
-        ),
-      });
-      setSelectedMasterCheckKey((current) => current && issues.some((issue: MenuMasterReviewIssue, index: number) => getReviewIssueKey(issue, index) === current) ? current : (issues[0] ? getReviewIssueKey(issues[0], 0) : null));
+      setSelectedMasterCheckKey((current) => current && (
+        masterRevisions.current[current] !== undefined
+        || issues.some((issue: MenuMasterReviewIssue, index: number) => getReviewIssueKey(issue, index) === current)
+      ) ? current : null);
       setMasterCheckPage(0);
       setMessage("");
     } catch (err: any) {
-      if (generation !== menuLoadGeneration.current) return;
+      if (!current() || generation !== menuLoadGeneration.current) return;
       const status = err?.response?.status;
       if (status === 403) {
         setMessage("権限がありません。月次メニューの操作にはユーザー2以上の権限が必要です。");
@@ -748,10 +877,17 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     await loadUploadHistory(generation);
   };
 
+  const reloadMonthlyEditor = () => {
+    if (hasUnsavedChanges && !window.confirm("未保存の変更を破棄して月次メニューを再読込しますか？")) return;
+    owner.changed();
+    void loadMenu(true);
+  };
+
   useEffect(() => {
     loadMenu();
     loadScopeOptions();
     loadRecentMenus();
+    loadSavedImports();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monthId]);
 
@@ -763,6 +899,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   }, [monthId]);
 
   const handleMonthChange = (nextMonth: string) => {
+    owner.changed();
     setSelectedMonth(nextMonth);
     if (/^\d{4}-\d{2}$/.test(nextMonth)) {
       router.push(`/menus/${nextMonth}`);
@@ -770,14 +907,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   useEffect(() => {
-    if (!entries.length) {
-      setSelectedEntryId(null);
-      return;
+    if (selectedEntryId && !entries.some((entry) => entry.id === selectedEntryId) && !itemFormDirty && !exceptionDirty) {
+      selectEntry(null);
     }
-    if (!selectedEntryId || !entries.some((entry) => entry.id === selectedEntryId)) {
-      setSelectedEntryId(entries[0].id);
-    }
-  }, [entries, selectedEntryId]);
+  }, [entries, selectedEntryId, itemFormDirty, exceptionDirty]);
 
   useEffect(() => {
     setEntryExceptionDraft(buildEntryExceptionDraft(selectedEntry, selectedItem));
@@ -793,75 +926,100 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       setMessage(scopeType === "facility" ? "施設差分を登録する施設を選択してください。" : "タグ差分のタグを選択してください。");
       return;
     }
+    if ((itemFormDirty || exceptionDirty) && !window.confirm("未保存の編集を破棄してimportを開始しますか？")) return;
+    const current = owner.capture("upload");
+    const targetFile = file;
     setUploading(true);
-    setPendingReview(null);
-    const submitUpload = async (targetFile: File, reviewResolutions?: MenuMasterReviewResolution[]) => {
-      const formData = new FormData();
-      formData.append("file", targetFile);
-      if (reviewResolutions && reviewResolutions.length > 0) {
-        formData.append("review_resolutions", JSON.stringify(reviewResolutions));
-      }
-      return apiClient.post("/monthly-menus", formData, {
+    const formData = new FormData();
+    formData.append("file", targetFile);
+    try {
+      const res = await apiClient.post("/monthly-menus", formData, {
         params: {
           month_id: monthId,
           sheet_name: sheetName || undefined,
           scope_type: scopeType,
           scope_value: scopeType === "base" ? undefined : scopeValue || undefined,
+          diet_types: importDiets.length ? JSON.stringify(importDiets) : undefined,
         },
         headers: { "Content-Type": "multipart/form-data" },
       });
-    };
-    const finalizeUploadSuccess = async (targetFile: File, res: any) => {
-      setFile(null);
-      setPendingReview(null);
-      setUploadInputKey((prev) => prev + 1);
-      await loadMenu();
-      const itemCount = res.data?.item_count ?? 0;
-      const replaced = res.data?.replaced ? "置換" : "新規";
-      const scopeLabel = formatScopeLabel(res.data?.scope_override || (scopeType === "base" ? null : scopeValue));
-      const uploadMessage = `${targetFile.name} を${replaced}で反映（${itemCount}件 / ${scopeLabel}）`;
-      setLastUpload(uploadMessage);
-      setMessage("アップロードしました。");
-      await loadUploadHistory();
-    };
-    try {
-      const res = await submitUpload(file);
-      await finalizeUploadSuccess(file, res);
+      if (!current()) return;
+      adoptImport(res.data);
+      setSavedImports((rows) => [res.data, ...rows.filter((row) => row.id !== res.data.id)]);
+      setMessage(`${targetFile.name} の原本を保存しました。差分を確認して明示反映してください。`);
     } catch (err: any) {
+      if (!current()) return;
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
       if (status === 403) {
         setMessage("アップロード失敗: 権限がありません。");
-      } else if (
-        status === 409 &&
-        detail &&
-        typeof detail === "object" &&
-        (detail as { code?: string }).code === "menu_master_review_required" &&
-        Array.isArray((detail as { issues?: unknown[] }).issues)
-      ) {
-        const issues = ((detail as { issues?: MenuMasterReviewIssue[] }).issues || []).filter(Boolean);
-        const resolutions = Object.fromEntries(
-          issues.map((issue, index) => {
-            const resolution = buildPendingReviewResolution(issue, index);
-            return [resolution.issue_key, resolution];
-          }),
-        );
-        setPendingReview({
-          file,
-          issues,
-          resolutions,
-        });
-        setPendingReviewNotice("");
-        setMessage("未登録メニューがあります。既存マスターを使うか、新規登録するか確認してください。");
       } else {
         setMessage(`アップロード失敗: ${formatErrorDetail(detail, "アップロードに失敗しました。")}`);
       }
     } finally {
-      setUploading(false);
+      if (current.active()) setUploading(false);
+    }
+  };
+
+  const adoptImport = (receipt: SavedMenuImport) => {
+    if (receipt.month_id !== monthId || !receipt.id || !receipt.revision || !hasSavedImportSource(receipt.source)
+      || !hasSavedImportReview(receipt.review, receipt.source) || !hasSavedImportReview(receipt.current_review, receipt.source)
+      || !receipt.current_input_revision || !receipt.input_revision
+      || !["review", "applied"].includes(receipt.state)) {
+      throw new Error("保存原本と差分の対応を確認できませんでした。");
+    }
+    const saved = Object.fromEntries(receipt.current_review.resolutions.map((resolution) => [resolution.issue_key, resolution]));
+    const resolutions = Object.fromEntries(receipt.current_review.issues.map((issue, index) => {
+      const resolution = buildPendingReviewResolution(issue, index);
+      return [resolution.issue_key, saved[resolution.issue_key] || resolution];
+    }));
+    owner.changed();
+    setPendingReview({ receipt, saved: receipt.current_input_revision === receipt.input_revision,
+      ownsInput: owner.checkpoint(), issues: receipt.current_review.issues, resolutions });
+    setPendingReviewNotice("");
+  };
+
+  const resumeImport = async (receiptId: string) => {
+    if (!monthId || Array.isArray(monthId)) return;
+    if (hasUnsavedChanges && !window.confirm("未保存の変更を破棄して保存importを開きますか？")) return;
+    owner.changed();
+    const current = owner.capture("resume");
+    try {
+      const res = await apiClient.get(`/monthly-menus/${monthId}/imports/${receiptId}`);
+      if (!current()) return;
+      adoptImport(res.data);
+    } catch (error: any) {
+      if (current()) setMessage(formatErrorDetail(error?.response?.data?.detail, "保存importを確認できませんでした。"));
+    }
+  };
+
+  const downloadImport = async (receipt: SavedMenuImport) => {
+    if (!hasSavedImportSource(receipt.source) || receipt.month_id !== monthId) {
+      setMessage("保存原本の対象を確認できませんでした。");
+      return;
+    }
+    if (receipt.month_id !== monthId) return;
+    const current = owner.capture("import-download");
+    try {
+      const res = await apiClient.get(`/monthly-menus/${receipt.month_id}/imports/${receipt.id}/download`, { responseType: "blob" });
+      if (!current()) return;
+      const url = URL.createObjectURL(res.data);
+      try {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = receipt.source.filename;
+        link.click();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (error: any) {
+      if (current()) setMessage(formatErrorDetail(error?.response?.data?.detail, "保存原本を取得できませんでした。"));
     }
   };
 
   const updateReviewResolution = (issueKey: string, patch: Partial<MenuMasterReviewResolution>) => {
+    owner.changed();
+    const ownsInput = owner.checkpoint();
     setPendingReviewNotice("");
     setPendingReview((current) => {
       if (!current) return current;
@@ -869,6 +1027,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       if (!existing) return current;
       return {
         ...current,
+        saved: false,
+        ownsInput,
         resolutions: {
           ...current.resolutions,
           [issueKey]: { ...existing, ...patch },
@@ -878,6 +1038,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   const updateMasterCheckResolution = (issueKey: string, patch: Partial<MenuMasterReviewResolution>) => {
+    owner.changed();
+    if (masterRevisions.current[issueKey] === undefined) {
+      masterRevisions.current[issueKey] = revision;
+      const item = items.find((row) => row.id === issueKey);
+      masterItems.current[issueKey] = item ? { ...item } : null;
+    }
     setMasterCheckState((current) => {
       const existing = current.resolutions[issueKey];
       if (!existing) return current;
@@ -893,12 +1059,13 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
 
   const closePendingReview = () => {
     if (reviewSubmitting) return;
+    owner.changed();
     setPendingReview(null);
     setHighlightedReviewIssueKey(null);
     setPendingReviewNotice("");
   };
 
-  const applyPendingReviewIssues = (targetFile: File, issues: MenuMasterReviewIssue[]) => {
+  const applyPendingReviewIssues = (receipt: SavedMenuImport, issues: MenuMasterReviewIssue[]) => {
     const filteredIssues = issues.filter(Boolean);
     const resolutions = Object.fromEntries(
       filteredIssues.map((issue, index) => {
@@ -908,7 +1075,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       }),
     );
     setPendingReview({
-      file: targetFile,
+      receipt,
+      saved: false,
+      ownsInput: owner.checkpoint(),
       issues: filteredIssues,
       resolutions,
     });
@@ -923,8 +1092,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     target.focus();
   };
 
-  const confirmPendingReview = async () => {
+  const confirmPendingReview = async (apply = false) => {
     if (!monthId || Array.isArray(monthId) || !pendingReview) return;
+    if (!pendingReview.ownsInput()) {
+      setPendingReviewNotice("対象または別の編集中入力が変わりました。保存importを明示的に開き直してください。編集中の値は保持しています。");
+      return;
+    }
     const issueStates = buildPendingReviewIssueStates(pendingReview);
     const incompleteIssues = issueStates.filter((issueState) => !issueState.complete);
     const unresolved = incompleteIssues[0];
@@ -936,31 +1109,32 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       return;
     }
     setReviewSubmitting(true);
-    const formData = new FormData();
-    formData.append("file", pendingReview.file);
-    formData.append("review_resolutions", JSON.stringify(Object.values(pendingReview.resolutions)));
+    const current = owner.capture("review");
+    const receipt = pendingReview.receipt;
+    if (apply && !pendingReview.saved) {
+      setReviewSubmitting(false);
+      setMessage("この差分設定を保存してから反映してください。");
+      return;
+    }
     try {
-      const res = await apiClient.post("/monthly-menus", formData, {
-        params: {
-          month_id: monthId,
-          sheet_name: sheetName || undefined,
-          scope_type: scopeType,
-          scope_value: scopeType === "base" ? undefined : scopeValue || undefined,
-        },
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      setFile(null);
-      setPendingReview(null);
-      setUploadInputKey((prev) => prev + 1);
-      await loadMenu();
-      const itemCount = res.data?.item_count ?? 0;
-      const replaced = res.data?.replaced ? "置換" : "新規";
-      const scopeLabel = formatScopeLabel(res.data?.scope_override || (scopeType === "base" ? null : scopeValue));
-      const uploadMessage = `${pendingReview.file.name} を${replaced}で反映（${itemCount}件 / ${scopeLabel}）`;
-      setLastUpload(uploadMessage);
-      setMessage("アップロードしました。");
-      await loadUploadHistory();
+      const res = await apiClient.post(`/monthly-menus/${monthId}/imports/${receipt.id}/${apply ? "apply" : "review"}`,
+        apply ? undefined : { resolutions: Object.values(pendingReview.resolutions), input_revision: receipt.current_input_revision },
+        { headers: { "If-Match": receipt.revision } });
+      if (!current()) return;
+      if (!apply) {
+        adoptImport(res.data);
+        setMessage("差分設定を保存しました。対象と件数を確認して反映してください。");
+      } else {
+        adoptSnapshot(res.data.snapshot);
+        setFile(null);
+        setPendingReview(null);
+        setUploadInputKey((prev) => prev + 1);
+        setLastUpload(`${receipt.source.filename} を反映（${res.data.item_count}件 / ${formatScopeLabel(receipt.source.scope_override)}）`);
+        setMessage("保存済みimportを反映しました。");
+        void loadUploadHistory();
+      }
     } catch (err: any) {
+      if (!current()) return;
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
       if (status === 403) {
@@ -973,25 +1147,34 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         Array.isArray((detail as { issues?: unknown[] }).issues)
       ) {
         const issues = ((detail as { issues?: MenuMasterReviewIssue[] }).issues || []).filter(Boolean);
-        applyPendingReviewIssues(pendingReview.file, issues);
+        applyPendingReviewIssues(receipt, issues);
         setMessage("未登録メニューの確認がまだ残っています。表示された項目を確認してください。");
       } else {
         setMessage(`アップロード失敗: ${formatErrorDetail(detail, "アップロードに失敗しました。")}`);
       }
     } finally {
-      setReviewSubmitting(false);
+      if (current.active()) setReviewSubmitting(false);
     }
   };
 
   const applyMasterCheck = async (issue: MenuMasterReviewIssue, index: number) => {
     if (!monthId || Array.isArray(monthId) || !issue.item_id) return;
     const issueKey = getReviewIssueKey(issue, index);
+    if (masterRevisions.current[issueKey] !== undefined && !masterItems.current[issueKey]) {
+      setMessage("差分の捕捉済み適用先を確認できません。編集中の入力は保持しています。");
+      return;
+    }
+    if (masterRevisions.current[issueKey] !== undefined && masterRevisions.current[issueKey] !== revision) {
+      setMessage("月次メニューの入力版が変わりました。差分の編集中入力は保持しています。正本を明示的に読込し直して確認してください。");
+      return;
+    }
     const resolution = masterCheckState.resolutions[issueKey];
     if (!isReviewResolutionComplete(issue, resolution)) {
       setMessage(`差分チェックの入力が不足しています: ${getReviewSourceName(issue)}`);
       return;
     }
     setMasterCheckSavingId(issue.item_id);
+    const current = owner.capture("master");
     try {
       const previousCount = masterCheckState.issues.length;
       const body: Record<string, unknown> = {
@@ -1032,7 +1215,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           body.menu_master_id = issue.current_master.id;
         }
       }
-      await apiClient.post(`/monthly-menus/${monthId}/master-checks/${issue.item_id}/resolve`, body);
+      const res = await apiClient.post(`/monthly-menus/${monthId}/master-checks/${issue.item_id}/resolve`, body,
+        { headers: { "If-Match": masterRevisions.current[issueKey] === undefined ? revision : masterRevisions.current[issueKey] } });
+      if (!current()) return;
+      delete masterRevisions.current[issueKey];
+      delete masterItems.current[issueKey];
+      adoptSnapshot(res.data.snapshot, "master");
       const sourceName = getReviewSourceName(issue);
       const successMessage =
         resolution.action === "month_only"
@@ -1061,8 +1249,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       });
       setMasterCheckNotice(`${successMessage}（${previousCount}件 → ${Math.max(previousCount - 1, 0)}件）`);
       setMessage(successMessage);
-      await loadMenu();
     } catch (err: any) {
+      if (!current()) return;
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
       if (status === 403) {
@@ -1071,17 +1259,19 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         setMessage(`差分反映に失敗しました: ${formatErrorDetail(detail, "差分反映に失敗しました。")}`);
       }
     } finally {
-      setMasterCheckSavingId(null);
+      if (current.active()) setMasterCheckSavingId(null);
     }
   };
 
   const handleDownloadUpload = async (upload: MenuUploadEntry) => {
     if (!monthId || Array.isArray(monthId)) return;
     setDownloadingUploadId(upload.id);
+    const current = owner.capture("download");
     try {
       const res = await apiClient.get(`/monthly-menus/${monthId}/uploads/${upload.id}/download`, {
         responseType: "blob",
       });
+      if (!current()) return;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const disposition = String(res.headers?.["content-disposition"] || "");
       const matched = disposition.match(/filename=\"?([^\";]+)\"?/i);
@@ -1093,10 +1283,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (err: any) {
+      if (!current()) return;
       const detail = err?.response?.data?.detail;
       setMessage(detail ? `ダウンロードに失敗しました: ${detail}` : "ダウンロードに失敗しました。");
     } finally {
-      setDownloadingUploadId(null);
+      if (current.active()) setDownloadingUploadId(null);
     }
   };
 
@@ -1106,6 +1297,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       return;
     }
     setCondimentUploading(true);
+    const current = owner.capture("condiment");
     setCondimentMessage("アップロード中...");
     const formData = new FormData();
     formData.append("file", condimentFile);
@@ -1114,10 +1306,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         params: { sheet_name: "主菜" },
         headers: { "Content-Type": "multipart/form-data" },
       });
+      if (!current()) return;
       const itemsCount = res.data?.items ?? 0;
       setCondimentMessage(`付属品フラグを反映しました（${itemsCount}件）。`);
       setCondimentFile(null);
     } catch (err: any) {
+      if (!current()) return;
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
       if (status === 403) {
@@ -1126,7 +1320,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         setCondimentMessage(detail ? `反映に失敗しました: ${detail}` : "反映に失敗しました。");
       }
     } finally {
-      setCondimentUploading(false);
+      if (current.active()) setCondimentUploading(false);
     }
   };
 
@@ -1137,6 +1331,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     const selectedAtSaveStart = selectedEntryRef.current;
     const menuAtSaveStart = menuLoadGeneration.current;
     const monthAtSaveStart = monthId;
+    const current = owner.capture("item");
     const qtyValue =
       item.qty_per_serving == null || item.qty_per_serving === ""
         ? null
@@ -1155,22 +1350,22 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         facility_override: item.facility_override,
         bag_max_qty: bagMaxValue,
         bag_max_unit: item.bag_max_unit,
-      });
+      }, { headers: { "If-Match": itemRevision.current } });
       if (result.data?.updated !== true) throw new Error("メニュー保存の応答を確認できませんでした。");
-      if (generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
+      if (!current() || generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
         throw new Error("選択変更後の保存応答を適用しませんでした。");
       }
-      const fresh = await apiClient.get(`/monthly-menus/${monthId}`);
+      const fresh = { data: result.data.snapshot };
       if (!Array.isArray(fresh.data?.items)) throw new Error("保存後の月次メニュー正本を確認できませんでした。");
       const saved = fresh.data.items.find((current: MenuItem) => current.id === item.id);
       if (!saved || generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
         throw new Error("保存後の項目を正本から確認できませんでした。");
       }
-      setItems(fresh.data.items);
+      adoptSnapshot(fresh.data, "item");
       setMessage(`保存しました: ${item.name}`);
       return saved;
     } catch (err: any) {
-      if (generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
+      if (!current() || generation !== itemSaveGeneration.current || selectedAtSaveStart !== selectedEntryRef.current || menuAtSaveStart !== menuLoadGeneration.current || monthAtSaveStart !== monthId) {
         throw new Error("選択変更後の保存応答を適用しませんでした。");
       }
       const detail = err?.response?.data?.detail;
@@ -1185,6 +1380,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   const updateEntryExceptionField = (field: keyof Omit<MenuEntryExceptionDraft, "facilityIds">, value: string) => {
+    owner.changed();
+    setExceptionDirty(true);
     setEntryExceptionDraft((current) => {
       if (!current) return current;
       return { ...current, [field]: value };
@@ -1192,6 +1389,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   const toggleEntryExceptionFacility = (facilityId: string) => {
+    owner.changed();
+    setExceptionDirty(true);
     setEntryExceptionDraft((current) => {
       if (!current) return current;
       const exists = current.facilityIds.includes(facilityId);
@@ -1215,6 +1414,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       return;
     }
     setEntryExceptionSaving(true);
+    const current = owner.capture("exceptions");
     try {
       const res = await apiClient.post(
         `/monthly-menus/${monthId}/entries/${selectedEntry.id}/exceptions`,
@@ -1235,14 +1435,23 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           category: entryExceptionDraft.category.trim() || null,
           diet_type: entryExceptionDraft.diet_type || null,
         },
+        { headers: { "If-Match": exceptionRevision.current } },
       );
-      const updatedEntries = Array.isArray(res.data?.entries) ? res.data.entries : [];
-      await loadMenu();
-      if (updatedEntries.length === 1 && updatedEntries[0]?.id) {
-        setSelectedEntryId(String(updatedEntries[0].id));
+      if (!current()) return;
+      const updatedEntries = Array.isArray(res.data?.result?.entries) ? res.data.result.entries : [];
+      if (res.data?.result?.entry_id !== selectedEntry.id || updatedEntries.length !== entryExceptionDraft.facilityIds.length
+        || updatedEntries.some((entry: MenuEntry) => typeof entry.id !== "string" || !entry.id
+          || typeof entry.name !== "string" || !entry.name || !entry.facility_override
+          || !entryExceptionDraft.facilityIds.includes(entry.facility_override))
+        || new Set(updatedEntries.map((entry: MenuEntry) => entry.facility_override)).size !== updatedEntries.length) {
+        throw new Error("例外保存の対象を確認できませんでした。");
       }
+      adoptSnapshot(res.data.snapshot, "exceptions");
+      setExceptionDirty(false);
+      setExceptionReceipt({ month_id: monthId, entry_id: selectedEntry.id, entries: updatedEntries });
       setMessage(`例外メニューを保存しました: ${entryExceptionDraft.name.trim()}`);
     } catch (err: any) {
+      if (!current()) return;
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
       if (status === 403) {
@@ -1255,7 +1464,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         );
       }
     } finally {
-      setEntryExceptionSaving(false);
+      if (current.active()) setEntryExceptionSaving(false);
     }
   };
 
@@ -1265,7 +1474,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const pendingReviewIssueStates = buildPendingReviewIssueStates(pendingReview);
   const incompletePendingReviewIssues = pendingReviewIssueStates.filter((issueState) => !issueState.complete);
   const canSubmitPendingReview =
-    pendingReviewIssueStates.length > 0 && incompletePendingReviewIssues.length === 0;
+    Boolean(pendingReview) && incompletePendingReviewIssues.length === 0;
   const uploadHistoryColumns: readonly TableColumn<MenuUploadEntry>[] = [
     { id: "uploaded", label: "登録日時", render: (upload) => upload.uploaded_at ? new Date(upload.uploaded_at).toLocaleString("ja-JP") : "-" },
     { id: "filename", label: "ファイル名", render: (upload) => upload.filename || "-" },
@@ -1280,12 +1489,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     { id: "kind", label: "種別", render: (issue) => issue.issue_type === "diff" ? "差分あり" : "新規登録候補" },
     { id: "scope", label: "適用先", render: (issue) => getMasterCheckScopeLabel(issue) },
     { id: "detail", label: "差分", render: (issue) => `${(issue.field_diffs || []).length + (issue.condiment_issues || []).length}件` },
-    { id: "edit", label: "", render: (issue) => <button className="btn compact" type="button" onClick={() => setSelectedMasterCheckKey(getReviewIssueKey(issue, masterCheckState.issues.indexOf(issue)))}>設定</button> },
+    { id: "edit", label: "", render: (issue) => <button className="btn compact" type="button" onClick={() => { owner.changed(); setSelectedMasterCheckKey(getReviewIssueKey(issue, masterCheckState.issues.indexOf(issue))); }}>設定</button> },
   ];
   if (!authenticated) return <main className="page">ログインを確認しています。</main>;
 
   return (
-    <main className="page">
+    <main className="page" onChangeCapture={owner.changed} onInputCapture={owner.changed}>
       <header className="hero">
         <div>
           <p className="eyebrow">Monthly Menu</p>
@@ -1361,6 +1570,16 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
             {uploading ? "アップロード中..." : "アップロード"}
           </button>
         </div>
+        <fieldset>
+          <legend>対象食種（未選択は原本に含まれる食種）</legend>
+          {DIET_TYPE_OPTIONS.filter((choice) => choice.value).map((choice) => <label key={choice.value}>
+            <input type="checkbox" checked={importDiets.includes(choice.value)} onChange={(event) => {
+              const checked = event.target.checked;
+              setImportDiets((current) => checked ? [...current, choice.value] : current.filter((value) => value !== choice.value));
+            }} />
+            {choice.label}
+          </label>)}
+        </fieldset>
         <div className="month-selector">
           <label className="field compact-field">
             <span className="field-label">登録済み月次</span>
@@ -1400,6 +1619,16 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           <p className="subtle scope-note">タグがまだありません。施設設定でタグを登録してから選択してください。</p>
         )}
         {message && <p className="message">{message}</p>}
+        <h3>保存済みimport</h3>
+        <button className="btn" type="button" onClick={() => void loadSavedImports()}>一覧を再読込</button>
+        <ul>
+          {savedImports.map((receipt) => <li key={receipt.id}>
+            <button className="btn" type="button" onClick={() => void resumeImport(receipt.id)}>
+              {receipt.source.filename} / {formatScopeLabel(receipt.source.scope_override)} / {receipt.state === "applied" ? "反映済み" : receipt.state === "review" ? "差分確認" : "状態未解決"}
+            </button>
+            <button className="btn" type="button" onClick={() => void downloadImport(receipt)}>原本</button>
+          </li>)}
+        </ul>
         <div className="upload-history">
           <div className="history-header">
             <h3>これまでのアップロード</h3>
@@ -1676,16 +1905,27 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
               })}
             </div>
             <div className="review-footer">
+              <div>
+                <p>{pendingReview.receipt.source.filename} / {pendingReview.receipt.month_id} / {formatScopeLabel(pendingReview.receipt.source.scope_override)} / {pendingReview.receipt.current_review.item_count}件</p>
+                <button className="btn" type="button" onClick={() => void downloadImport(pendingReview.receipt)}>原本をダウンロード</button>
+                <ul>{pendingReview.receipt.current_review.master_diffs.map((diff, index) => <li key={index}>
+                  {diff.source_name}: {diff.field_diffs?.map((field) => `${field.label}: ${field.master_value ?? "未登録"} → ${field.monthly_value ?? "未登録"}`).join("、")}
+                </li>)}</ul>
+              </div>
               <button className="btn" type="button" onClick={closePendingReview} disabled={reviewSubmitting}>
                 キャンセル
               </button>
               <button
                 className="btn primary"
                 type="button"
-                onClick={confirmPendingReview}
-                disabled={reviewSubmitting}
+                onClick={() => void confirmPendingReview(false)}
+                disabled={reviewSubmitting || pendingReview.receipt.state !== "review"}
               >
-                {reviewSubmitting ? "確認中..." : canSubmitPendingReview ? "この内容でアップロード" : "未完了項目を確認する"}
+                {reviewSubmitting ? "確認中..." : canSubmitPendingReview ? "差分設定を保存" : "未完了項目を確認する"}
+              </button>
+              <button className="btn primary" type="button" onClick={() => void confirmPendingReview(true)}
+                disabled={reviewSubmitting || !pendingReview.saved || !canSubmitPendingReview || pendingReview.receipt.state !== "review"}>
+                保存済み差分を反映
               </button>
             </div>
           </section>
@@ -1697,6 +1937,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           <header className="panel-header">
             <div>
               <h2>メニューマスター差分チェック</h2>
+              <button className="btn" type="button" onClick={reloadMonthlyEditor}>差分を再読込</button>
               <p className="subtle">
                 月次メニューとメニューマスターを突き合わせ、新規登録が必要なものと、マスター更新が必要な差分を確認します。
               </p>
@@ -1749,6 +1990,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                     <span className="review-card-reason">{isDiff ? "差分あり" : "未登録"}</span>
                   </div>
 
+                  {masterRevisions.current[issueKey] !== undefined && masterRevisions.current[issueKey] !== revision && (
+                    <p role="alert">月次メニューの入力版が変わりました。差分の編集中入力は保持しています。正本を明示的に読込し直して確認してください。</p>
+                  )}
                   {isDiff ? (
                     <>
                       <div className="review-mode-row">
@@ -2310,7 +2554,33 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                   </div>
                 )}
                 {selectedItem ? (
-                  <EditForm<MenuItemDraft> key={`${selectedItem.id}-${itemEditGeneration}`} label="献立を編集" defaultValues={itemDraft(selectedItem)} onDirtyChange={setItemFormDirty} classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: error instanceof Error ? error.message : "保存に失敗しました。" })} onSave={async (values) => { const saved = await saveItem(mergeItemDraft(selectedItem, values)); setItemFormDirty(false); return itemDraft(saved); }} onReload={async () => { if (!monthId || Array.isArray(monthId)) throw new Error("対象月が確定していません。"); if (itemFormDirty && !window.confirm("未保存の変更を破棄して再読込しますか？")) throw new Error("再読込を取り消しました。"); const reloadMonth = monthId; const reloadItemId = selectedItem.id; const reloadEntry = selectedEntryRef.current; const reloadMenuGeneration = menuLoadGeneration.current; const reloadSaveGeneration = itemSaveGeneration.current; const reloadEditGeneration = itemEditGeneration; const fresh = await apiClient.get(`/monthly-menus/${reloadMonth}`); if (!Array.isArray(fresh.data?.items)) throw new Error("月次メニュー正本の応答形式を確認できませんでした。"); const refreshed = fresh.data.items.find((item: MenuItem) => item.id === reloadItemId); if (!refreshed) throw new Error("対象の献立を再読込結果から確認できませんでした。"); if (reloadMonth !== monthId || reloadEntry !== selectedEntryRef.current || reloadMenuGeneration !== menuLoadGeneration.current || reloadSaveGeneration !== itemSaveGeneration.current || reloadEditGeneration !== itemEditGeneration) throw new Error("選択または読込世代が変わったため再読込結果を適用しませんでした。"); setItems(fresh.data.items); setItemFormDirty(false); return itemDraft(refreshed); }}>
+                  <EditForm<MenuItemDraft>
+                    key={`${selectedItem.id}-${itemEditGeneration}`} label="献立を編集"
+                    defaultValues={itemDraft(selectedItem)} onDirtyChange={(dirty) => {
+                      if (dirty && !itemFormDirty && selectedEntry && typeof monthId === "string") setEditorSelection({ month_id: monthId, entry: selectedEntry, item: selectedItem });
+                      setItemFormDirty(dirty);
+                    }}
+                    classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: error instanceof Error ? error.message : "保存に失敗しました。" })}
+                    onSave={async (values) => {
+                      const saved = await saveItem(mergeItemDraft(selectedItem, values));
+                      setItemFormDirty(false);
+                      return itemDraft(saved);
+                    }}
+                    onReload={async () => {
+                      if (!monthId || Array.isArray(monthId)) throw new Error("対象月が確定していません。");
+                      if (itemFormDirty && !window.confirm("未保存の変更を破棄して再読込しますか？")) throw new Error("再読込を取り消しました。");
+                      const current = owner.capture("item-reload");
+                      const entry = selectedEntryRef.current;
+                      const itemId = selectedItem.id;
+                      const fresh = await apiClient.get(`/monthly-menus/${monthId}`, { params: { editor: true } });
+                      if (!current() || entry !== selectedEntryRef.current) throw new Error("対象または入力が変わったため再読込結果を適用しませんでした。");
+                      if (!Array.isArray(fresh.data?.items)) throw new Error("正本の応答を確認できませんでした。");
+                      const refreshed = fresh.data.items.find((item: MenuItem) => item.id === itemId);
+                      if (!refreshed) throw new Error("対象の献立を確認できませんでした。");
+                      adoptSnapshot(fresh.data, "item");
+                      setItemFormDirty(false);
+                      return itemDraft(refreshed);
+                    }}>
                     <FormTextField<MenuItemDraft> name="name" label="献立名" rules={{ required: "献立名は必須です。" }} />
                     <FormTextField<MenuItemDraft> name="unit_type" label="単位" select><MuiMenuItem value="">未選択</MuiMenuItem>{unitChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField>
                     <FormTextField<MenuItemDraft> name="qty_per_serving" label="1人前の量" type="number" /><FormTextField<MenuItemDraft> name="bag_max_qty" label="袋最大量" type="number" />
@@ -2322,6 +2592,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                   <p className="subtle">対応するメニュー設定がまだありません。必要なら下の補助一覧を開いて確認してください。</p>
                 )}
                 <div className="exception-form" data-testid="entry-exception-form">
+                  {exceptionReceipt && exceptionReceipt.month_id === monthId && exceptionReceipt.entry_id === selectedEntryId && <p role="status">保存済み例外: {exceptionReceipt.entries.map((entry) => `${formatScopeLabel(entry.facility_override)} / ${entry.name}`).join("、")}</p>}
                   <div className="exception-form__header">
                     <p className="field-label">例外メニュー</p>
                     <p className="subtle">この位置だけ、選択した施設へ別メニューを割り当てます。</p>
@@ -3292,7 +3563,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
 }
 
 export default function MonthlyMenuEditorPage() {
+  const router = useRouter();
   const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
   const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false);
-  return <SawaProvider sessionKey={`hospital-monthly-menu:${sessionKey}`}><MonthlyMenuEditorScreen authenticated={authenticated} /></SawaProvider>;
+  return <SawaProvider sessionKey={`hospital-monthly-menu:${sessionKey}`}><MonthlyMenuEditorScreen key={`${sessionKey}:${router.asPath}:${authenticated}`} authenticated={authenticated} /></SawaProvider>;
 }
