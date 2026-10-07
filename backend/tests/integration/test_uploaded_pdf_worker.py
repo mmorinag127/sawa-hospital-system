@@ -712,15 +712,24 @@ def test_backfill_uploaded_pdfs_from_ingest_jobs_creates_recoverable_rows():
             )
         )
 
-    created = backfill_uploaded_pdfs_from_ingest_jobs(limit=20)
-    assert created >= 1
+    with session_scope() as session:
+        original_count = session.query(UploadedPdf).count()
+        job = session.get(IngestJob, "upload:sha256:legacy-processing")
+        original_payload = dict(job.payload)
+        original_started_at = job.started_at
+        original_updated_at = job.updated_at
 
-    rows = [get_uploaded_pdf(uploaded_pdf_id) for uploaded_pdf_id in list_ready_uploaded_pdf_ids(limit=20)]
-    matched = next(row for row in rows if row and row["message_id"] == "upload:sha256:legacy-processing")
-    assert matched is not None
-    assert matched["status"] == "processing"
-    assert matched["current_stage"] == "ingest_running"
-    assert matched["attempt_count"] == 1
+    with pytest.raises(ValueError, match="^original_uploaded_pdf_receipt_required$"):
+        backfill_uploaded_pdfs_from_ingest_jobs(limit=20)
+
+    with session_scope() as session:
+        assert session.query(UploadedPdf).count() == original_count
+        job = session.get(IngestJob, "upload:sha256:legacy-processing")
+        assert job.payload == original_payload
+        assert job.status == "processing"
+        assert job.attempts == 1
+        assert job.started_at == original_started_at
+        assert job.updated_at == original_updated_at
 
 
 def test_run_uploaded_pdf_recovery_once_processes_ready_rows(monkeypatch):

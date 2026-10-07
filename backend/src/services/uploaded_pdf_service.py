@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
-import re
 from contextlib import nullcontext
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -73,104 +71,6 @@ def _alert_after_attempts() -> int:
         return max(int(raw), 1)
     except ValueError:
         return 2
-
-
-def _backfill_scan_limit() -> int:
-    raw = str(os.getenv("UPLOADED_PDF_BACKFILL_SCAN_LIMIT", "500") or "").strip()
-    try:
-        return max(int(raw), 1)
-    except ValueError:
-        return 500
-
-
-def _parse_datetime(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text)
-    except ValueError:
-        return None
-
-
-def _looks_like_manual_upload_job(job: IngestJob) -> bool:
-    payload = job.payload or {}
-    source_kind = str(payload.get("source_kind") or "").strip().lower()
-    pdf_uri = str(payload.get("pdf_uri") or "").strip()
-    message_id = str(payload.get("message_id") or job.id or "").strip()
-    if source_kind == "manual_upload":
-        return True
-    if "/manual-uploads/" in pdf_uri:
-        return True
-    return message_id.startswith("upload:sha256:")
-
-
-def _guess_content_sha256(message_id: str, payload: dict[str, Any]) -> str:
-    raw = str(payload.get("content_sha256") or "").strip()
-    if raw:
-        return raw
-    token = str(message_id or "").strip()
-    prefix = "upload:sha256:"
-    if token.startswith(prefix):
-        return token[len(prefix):] or token
-    return token or f"legacy-backfill-{uuid4().hex[:12]}"
-
-
-def _map_ingest_job_state(job: IngestJob, *, linked: bool, now: datetime) -> dict[str, Any]:
-    raw_status = str(job.status or "").strip().lower()
-    base_started_at = job.started_at or job.updated_at or job.created_at or now
-    lease_expires_at = base_started_at + timedelta(seconds=_lease_seconds())
-    if raw_status == "done":
-        if linked:
-            return {
-                "status": "completed",
-                "current_stage": "completed",
-                "lease_owner": None,
-                "lease_expires_at": None,
-                "next_retry_at": None,
-                "last_error_code": None,
-                "last_error_message": None,
-            }
-        return {
-            "status": "retry_wait",
-            "current_stage": "retry_wait",
-            "lease_owner": None,
-            "lease_expires_at": None,
-            "next_retry_at": now,
-            "last_error_code": "order_attach_missing",
-            "last_error_message": "backfilled ingest job completed without linked order/document",
-        }
-    if raw_status == "processing":
-        return {
-            "status": "processing",
-            "current_stage": "ingest_running",
-            "lease_owner": f"legacy-backfill:{job.id}",
-            "lease_expires_at": lease_expires_at,
-            "next_retry_at": None,
-            "last_error_code": None,
-            "last_error_message": None,
-        }
-    if raw_status == "error":
-        return {
-            "status": "retry_wait",
-            "current_stage": "retry_wait",
-            "lease_owner": None,
-            "lease_expires_at": None,
-            "next_retry_at": now,
-            "last_error_code": "ingest_error",
-            "last_error_message": str(job.last_error or "backfilled ingest error").strip(),
-        }
-    return {
-        "status": "pending",
-        "current_stage": "uploaded",
-        "lease_owner": None,
-        "lease_expires_at": None,
-        "next_retry_at": None,
-        "last_error_code": None,
-        "last_error_message": None,
-    }
 
 
 def _serialize_uploaded_pdf(row: UploadedPdf) -> dict[str, Any]:
@@ -267,68 +167,7 @@ def _serialize_uploaded_pdf_with_context(session, row: UploadedPdf) -> dict[str,
 
 
 def backfill_uploaded_pdfs_from_ingest_jobs(*, limit: int | None = None) -> int:
-    scan_limit = limit or _backfill_scan_limit()
-    now = _now()
-    created = 0
-    with session_scope() as session:
-        jobs = (
-            session.execute(
-                select(IngestJob).order_by(IngestJob.created_at.desc(), IngestJob.id.desc()).limit(scan_limit)
-            )
-            .scalars()
-            .all()
-        )
-        existing_message_ids = set(
-            session.execute(select(UploadedPdf.message_id)).scalars().all()
-        )
-        for job in jobs:
-            if not _looks_like_manual_upload_job(job):
-                continue
-            payload = dict(job.payload or {})
-            message_id = str(payload.get("message_id") or job.id or "").strip()
-            storage_uri = str(payload.get("pdf_uri") or "").strip()
-            if not message_id or not storage_uri or message_id in existing_message_ids:
-                continue
-            row = UploadedPdf(
-                id=_make_uploaded_pdf_id(),
-                message_id=message_id,
-                content_sha256=_guess_content_sha256(message_id, payload),
-                source_kind=str(payload.get("source_kind") or "manual_upload"),
-                original_filename=str(payload.get("original_filename") or Path(storage_uri).name or message_id),
-                storage_uri=storage_uri,
-                received_at=_parse_datetime(payload.get("received_at")) or job.created_at or now,
-                page_count=None,
-                facility_hint=str(payload.get("facility_hint") or "").strip() or None,
-                week_hint=str(payload.get("week_hint") or "").strip() or None,
-                facility_name=str(payload.get("facility_name") or "").strip() or None,
-                skip_ocr=bool(payload.get("skip_ocr")),
-                status="pending",
-                current_stage="uploaded",
-                attempt_count=max(int(job.attempts or 0), 0),
-                max_attempts=_max_attempts(),
-                created_at=job.created_at or now,
-                updated_at=job.updated_at or now,
-            )
-            session.add(row)
-            session.flush()
-            _link_current_entities(session, row)
-            mapped_state = _map_ingest_job_state(
-                job,
-                linked=bool(row.current_order_id or row.current_document_id),
-                now=now,
-            )
-            row.status = str(mapped_state["status"])
-            row.current_stage = str(mapped_state["current_stage"])
-            row.lease_owner = mapped_state["lease_owner"]
-            row.lease_expires_at = mapped_state["lease_expires_at"]
-            row.next_retry_at = mapped_state["next_retry_at"]
-            row.last_error_code = mapped_state["last_error_code"]
-            row.last_error_message = mapped_state["last_error_message"]
-            row.updated_at = now
-            existing_message_ids.add(message_id)
-            created += 1
-        session.flush()
-    return created
+    raise ValueError("original_uploaded_pdf_receipt_required")
 
 
 def create_uploaded_pdf_from_upload(
@@ -604,47 +443,6 @@ def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str, write_sess
         )
         session.flush()
         return _serialize_uploaded_pdf(row)
-
-
-def _link_current_entities(session, row: UploadedPdf) -> None:
-    document = (
-        session.execute(
-            select(OrderDocument)
-            .where(OrderDocument.source_email_id == row.message_id)
-            .order_by(OrderDocument.received_at.desc(), OrderDocument.id.desc())
-        )
-        .scalars()
-        .first()
-    )
-    order = None
-    if document is not None:
-        order = (
-            session.execute(
-                select(Order)
-                .where(Order.current_document_id == document.id)
-                .where(Order.archived_at.is_(None))
-                .order_by(Order.received_at.desc(), Order.id.desc())
-            )
-            .scalars()
-            .first()
-        )
-    if order is None:
-        order = (
-            session.execute(
-                select(Order)
-                .where(Order.message_id == row.message_id)
-                .where(Order.archived_at.is_(None))
-                .order_by(Order.received_at.desc(), Order.id.desc())
-            )
-            .scalars()
-            .first()
-        )
-    if order is not None and str(order.current_document_id or "").strip():
-        current_document = session.get(OrderDocument, order.current_document_id)
-        if current_document is not None:
-            document = current_document
-    row.current_document_id = document.id if document is not None else None
-    row.current_order_id = order.id if order is not None else None
 
 
 def _is_linked_order_ready(session, row: UploadedPdf, *, lock=False) -> bool:
