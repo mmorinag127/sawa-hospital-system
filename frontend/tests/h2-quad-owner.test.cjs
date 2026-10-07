@@ -7,7 +7,8 @@ function actual(name,context){
   function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(ast)===name)expression=node.initializer?.getText(ast);ts.forEachChild(node,visit);}
   visit(ast);assert.ok(expression,name);
   const code=ts.transpileModule(`exports.fn=${expression}`,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText;
-  const exports={};vm.runInNewContext(code,{...context,exports});return exports.fn;
+  const exports={},bindings={process:undefined,fetch:undefined,require:undefined,global:undefined,module:undefined,Buffer:undefined,globalThis:undefined,...context,exports};
+  vm.compileFunction(code,Object.keys(bindings))(...Object.values(bindings));return exports.fn;
 }
 const plain=value=>JSON.parse(JSON.stringify(value));
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
