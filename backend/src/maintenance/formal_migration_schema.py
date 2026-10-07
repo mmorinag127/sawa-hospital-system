@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 import sqlalchemy as sa
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from src.monthly_menu_identity import RAW_COLUMNS
 
 from src.services.monthly_menu_identity_schema import (
@@ -13,6 +15,29 @@ from src.services.monthly_menu_identity_schema import (
 )
 
 CONTRACT = Path(__file__).resolve().parents[2] / "alembic/catalog_contracts.json"
+ALEMBIC_CONFIG = Path(__file__).resolve().parents[2] / "alembic.ini"
+
+
+def formal_revision_chain():
+    """Return the one linear revision chain declared by the actual Alembic source."""
+    scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
+    heads = scripts.get_heads()
+    if len(heads) != 1:
+        raise RuntimeError("formal migration blocked: source must have exactly one head")
+    head = scripts.get_revision(heads[0])
+    if head is None:
+        raise RuntimeError("formal migration blocked: source head is unknown")
+    chain = tuple(reversed(tuple(scripts.walk_revisions(base="base", head=head.revision))))
+    if not chain or chain[-1].revision != head.revision:
+        raise RuntimeError("formal migration blocked: source chain is incomplete")
+    for previous, current in zip(chain, chain[1:]):
+        if current.down_revision != previous.revision:
+            raise RuntimeError("formal migration blocked: source must have one linear chain")
+    return tuple(revision.revision for revision in chain)
+
+
+def formal_head_revision():
+    return formal_revision_chain()[-1]
 
 
 def _clean(value):
@@ -251,6 +276,7 @@ def require_formal_head(connection):
     if "alembic_version" not in inspector.get_table_names():
         raise RuntimeError("runtime blocked: formal migration head is required; automatic adoption is disabled")
     revisions = list(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalars())
-    if revisions != ["0033"]:
-        raise RuntimeError("runtime blocked: formal migration head 0033 is required")
-    require_revision_catalog(connection, "0033")
+    head = formal_head_revision()
+    if revisions != [head]:
+        raise RuntimeError(f"runtime blocked: formal migration head {head} is required")
+    require_revision_catalog(connection, head)

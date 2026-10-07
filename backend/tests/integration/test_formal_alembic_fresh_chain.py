@@ -18,11 +18,34 @@ from src.monthly_menu_identity import (
 )
 from src.maintenance.formal_migration_schema import (
     read_catalog, require_revision_catalog, table_shapes, _without_identity,
-    _sqlite_table_definition, require_formal_head,
+    _sqlite_table_definition, formal_head_revision, formal_revision_chain, require_formal_head,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
+OWNED_CATALOG_ROOT = ROOT.parent / "tmp/hospital-v1-catalog-20261007"
+
+
+@pytest.mark.parametrize("user,owner,database,message", (
+    ("other", "required", "owned", "connected role mismatch"),
+    ("required", "other", "owned", "database owner mismatch"),
+    ("required", "required", "other", "connected database mismatch"),
+))
+def test_observer_rejects_role_and_owner_before_migration(user, owner, database, message):
+    spec = importlib.util.spec_from_file_location("owned_observer", ROOT / "scripts/observe_hospital_catalogs.py")
+    observer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(observer)
+
+    class Connection:
+        def exec_driver_sql(self, sql):
+            assert sql.startswith("SELECT current_user, current_database()")
+            return self
+
+        def one(self):
+            return user, database, owner
+
+    with pytest.raises(RuntimeError, match=message):
+        observer.require_observation_role(Connection(), "required", "owned")
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +61,8 @@ def _owned_postgres(uri):
     assert owner.database == "postgres"
     assert set(owner.query) == {"host", "port"}, "only owned Unix socket target parameters are permitted"
     targets = {
-        "55470": (Path("/private/tmp/sawa-c2-hospital-catalog-20261006/pg16"), 16),
-        "55469": (Path("/private/tmp/sawa-c2-hospital-catalog-20261006/pg15"), 15),
+        "55482": (OWNED_CATALOG_ROOT / "pg15", 15),
+        "55483": (OWNED_CATALOG_ROOT / "pg16", 16),
     }
     port = owner.query["port"]
     assert port in targets, "only explicitly owned PG15/PG16 ports are permitted"
@@ -53,7 +76,7 @@ def _verify_postgres_owner(connection, root, port, major):
     assert Path(connection.exec_driver_sql("SHOW data_directory").scalar_one()).resolve() == (root / "pgdata").resolve()
     assert connection.exec_driver_sql("SHOW port").scalar_one() == port
     assert connection.exec_driver_sql("SHOW listen_addresses").scalar_one() == ""
-    assert connection.exec_driver_sql("SHOW unix_socket_directories").scalar_one() == str(root / "socket")
+    assert Path(connection.exec_driver_sql("SHOW unix_socket_directories").scalar_one()).resolve() == (root / "socket").resolve()
     assert int(connection.exec_driver_sql("SHOW server_version_num").scalar_one()) // 10000 == major
 
 
@@ -111,7 +134,7 @@ def formal_database(request, tmp_path, monkeypatch):
                 admin.dispose()
 
 
-@pytest.mark.parametrize("revision", [f"{number:04d}" for number in range(1, 29)])
+@pytest.mark.parametrize("revision", formal_revision_chain())
 def test_each_observed_revision_resumes_to_head(formal_database, revision):
     engine, config = formal_database
     command.upgrade(config, revision)
@@ -121,8 +144,8 @@ def test_each_observed_revision_resumes_to_head(formal_database, revision):
         require_revision_catalog(connection, revision)
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0028"
-        require_revision_catalog(connection, "0028")
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == formal_head_revision()
+        require_revision_catalog(connection, formal_head_revision())
         require_canonical_identity_schema(connection)
 
 
@@ -557,7 +580,7 @@ def test_formal_migration_lock_conflict_stops_without_mutation(formal_database):
         assert _catalog_and_rows(engine) == before
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        require_revision_catalog(connection, "0028")
+        require_revision_catalog(connection, formal_head_revision())
 
 
 @pytest.mark.parametrize("outcome", ("success", "failure"))
@@ -610,7 +633,7 @@ def test_preflight_and_ddl_share_lock_and_transaction(formal_database, monkeypat
     command.upgrade(config, "head")
     with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT name FROM facilities WHERE id='lock-preserve'").scalar_one() == "Updated"
-        require_revision_catalog(connection, "0028")
+        require_revision_catalog(connection, formal_head_revision())
 
 
 @pytest.mark.parametrize("revision", (None, "0001", "0028"))
@@ -842,7 +865,7 @@ def test_constraint_index_catalog_mismatch_stops_before_ddl(formal_database, mut
     assert _catalog_and_rows(engine) == before
 
 
-def test_owned_postgres_fresh_all_28_revisions(monkeypatch):
+def test_owned_postgres_fresh_all_source_revisions(monkeypatch):
     monkeypatch.delenv("DB_URI", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     uri = os.environ.get("C2_FORMAL_PG_URI")
@@ -871,13 +894,13 @@ def test_owned_postgres_fresh_all_28_revisions(monkeypatch):
             assert sa.inspect(connection).get_table_names() == []
         config = Config(str(ROOT / "alembic.ini"))
         revisions = list(ScriptDirectory.from_config(config).walk_revisions())
-        assert {revision.revision for revision in revisions} == {f"{number:04d}" for number in range(1, 29)}
+        assert {revision.revision for revision in revisions} == set(formal_revision_chain())
         monkeypatch.setenv("ALEMBIC_DB_URI", target.render_as_string(hide_password=False))
         command.upgrade(config, "0027")
         _verify_0028_transition(engine, config)
         command.upgrade(config, "head")
         with engine.connect() as connection:
-            assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalars().all() == ["0028"]
+            assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalars().all() == [formal_head_revision()]
             _require_model_columns(connection)
             require_canonical_identity_schema(connection)
             inspector = sa.inspect(connection)
@@ -929,7 +952,7 @@ def test_fresh_sqlite_upgrade_uses_all_numbered_revisions(tmp_path, monkeypatch)
     engine = sa.create_engine(f"sqlite:///{database}")
     try:
         with engine.connect() as connection:
-            assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0028"
+            assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == formal_head_revision()
             _require_model_columns(connection)
             require_canonical_identity_schema(connection)
             inspector = sa.inspect(connection)
