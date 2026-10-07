@@ -3,7 +3,7 @@ import { useRouter } from "next/router";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
 import TopNav from "../../components/TopNav";
 import { apiClient } from "../../services/apiClient";
-import { canonicalErrorText, canonicalSaveNotice, requireFacilitySnapshot, type CanonicalFacilityResponse } from "../../services/facilityData";
+import { canonicalErrorText, canonicalSaveNotice, requireFacilitySnapshot, requireFaxTemplateOverride, type CanonicalFacilityResponse } from "../../services/facilityData";
 import {
   buildMarkdownTable,
   buildPreviewBlocks,
@@ -6648,7 +6648,7 @@ export default function OrderDetailPage() {
     try {
       const expectedRevision = requireFacilitySnapshot(snapshot, facility);
       const nextConfig = { ...snapshot.config };
-      const override = { ...(nextConfig.fax_template_override || {}) };
+      const override: Record<string, unknown> = { ...requireFaxTemplateOverride(nextConfig) };
       override.table_box = tableBoxDraft;
       override.grid_table_box = tableBoxDraft;
       if (gridColumnEdgesDraft && gridColumnEdgesDraft.length >= 2) {
@@ -6674,16 +6674,17 @@ export default function OrderDetailPage() {
       if (!current()) return;
       requireFacilitySnapshot(res.data, facility);
       const notice = canonicalSaveNotice(res.data);
-      const savedOverride = res.data.config.fax_template_override as Record<string, any> | undefined;
+      const savedOverride = requireFaxTemplateOverride(res.data.config);
       if (!savedOverride || !Array.isArray(savedOverride.table_box)) {
         throw new Error("JSON は保存済みですが、保存した table_box を確認できません。入力を保持し明示的に再読込してください。");
       }
       const savedGridParams = { ...gridParamsDraft };
       for (const key of Object.keys(savedGridParams) as (keyof GridParams)[]) {
-        if (typeof savedOverride[key] !== "number" || !Number.isFinite(savedOverride[key])) {
+        const value = savedOverride[key];
+        if (typeof value !== "number" || !Number.isFinite(value)) {
           throw new Error("JSON は保存済みですが、保存した grid 設定を確認できません。明示的に再読込してください。");
         }
-        savedGridParams[key] = savedOverride[key];
+        savedGridParams[key] = value;
       }
       facilityEditingSnapshotRef.current = res.data;
       setFacilityConfig(res.data.config);

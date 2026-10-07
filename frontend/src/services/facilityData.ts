@@ -103,6 +103,24 @@ export const canonicalErrorText = (error: any, fallback: string): string => {
   return typeof message === "string" && message.trim() ? message.trim() : fallback;
 };
 
+export const requireFacilityConfigObject = (config: unknown): Record<string, unknown> => {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error("config must be an object");
+  }
+  return Object.fromEntries(Object.entries(config));
+};
+
+export const requireFaxTemplateOverride = (input: unknown): Record<string, unknown> | null | undefined => {
+  const config = requireFacilityConfigObject(input);
+  const value = config.fax_template_override;
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("fax_template_override must be an object");
+  }
+  return Object.fromEntries(Object.entries(value));
+};
+
 export const requireFacilitySnapshot = (data: CanonicalFacilityResponse, target: string): string => {
   const revision = requireCanonicalRevision(data);
   if (data.facility?.id !== target || typeof data.facility.name !== "string" || (data.facility.areas !== null && !Array.isArray(data.facility.areas)) ||
@@ -111,6 +129,7 @@ export const requireFacilitySnapshot = (data: CanonicalFacilityResponse, target:
       !Array.isArray(data.order_form_patterns)) {
     throw new Error("同一 revision の施設・設定 snapshot がありません。保存せず再読込してください。");
   }
+  requireFaxTemplateOverride(data.config);
   return revision;
 };
 
