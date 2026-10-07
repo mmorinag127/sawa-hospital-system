@@ -38,8 +38,7 @@ def _sanitize_filename(name: str) -> str:
 def _validate_file(data: bytes, filename: str) -> None:
     if not data:
         raise ValueError("menu file is empty")
-    safe = _sanitize_filename(filename)
-    suffix = Path(safe).suffix.lower()
+    suffix = Path(filename).suffix.lower()
     if suffix not in _ALLOWED_EXTENSIONS:
         raise ValueError("menu file must be .xlsx, .xlsm, or .csv")
     max_mb = int(os.getenv("MENU_UPLOAD_MAX_MB", "20") or 20)
@@ -65,7 +64,7 @@ def save_monthly_menu_upload(
     _validate_file(file_bytes, original_filename)
     safe_name = _sanitize_filename(original_filename)
     content_sha256 = hashlib.sha256(file_bytes).hexdigest()
-    object_name = f"{content_sha256[:24]}-{safe_name}"
+    object_name = f"{content_sha256}-{safe_name}"
     media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
     prefix = _storage_prefix(month_id, uploaded_at)
     storage_status = get_manual_upload_storage_status()
@@ -82,7 +81,7 @@ def save_monthly_menu_upload(
 
     return SavedMenuUpload(
         file_uri=file_uri,
-        original_filename=safe_name,
+        original_filename=Path(original_filename).name,
         content_sha256=content_sha256,
         media_type=media_type,
     )

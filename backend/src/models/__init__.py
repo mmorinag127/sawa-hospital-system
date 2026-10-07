@@ -8,6 +8,7 @@ from src.models.menu import (  # noqa: F401
     MenuMaster,
     MenuFacilityOverride,
     MonthlyMenu,
+    MonthlyMenuImport,
     MonthlyMenuItem,
     MonthlyMenuEntry,
     MenuRule,

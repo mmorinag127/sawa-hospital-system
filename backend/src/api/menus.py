@@ -4,15 +4,45 @@ from pathlib import Path
 import re
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Form, Query
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Form, Query, Header
 from fastapi.responses import Response
 from loguru import logger
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm.exc import StaleDataError
 
 from src.services import menu_service
+from src.services import menu_edit_revision_service as revisions
 from src.api.auth import require_role
 from src.services.menu_upload_archive_service import save_monthly_menu_upload
 
 router = APIRouter()
+
+
+def _monthly_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except revisions.RevisionPreconditionRequired as exc:
+        raise HTTPException(428, str(exc)) from exc
+    except revisions.RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except revisions.RevisionSchemaNotMigrated as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except StaleDataError as exc:
+        raise HTTPException(409, "monthly import changed; working input retained") from exc
+    except OperationalError as exc:
+        original = exc.orig
+        code = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+        sqlite_code = getattr(original, "sqlite_errorcode", None)
+        if code in {"40001", "40P01"} or (sqlite_code is not None and (sqlite_code & 255) in {5, 6}):
+            raise HTTPException(409, "monthly input conflict; saved source and working input retained") from exc
+        raise
+    except menu_service.MenuMasterResolutionRequired as exc:
+        raise HTTPException(409, {"code": "menu_master_review_required", "issues": exc.issues}) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(409, "saved source archive is unavailable; no menu applied") from exc
+    except ValueError as exc:
+        status = 404 if str(exc) in {"monthly target not found", "saved menu import not found for this month"} else 400
+        raise HTTPException(status, str(exc)) from exc
 
 
 def _attachment_content_disposition(filename: str) -> str:
@@ -45,8 +75,13 @@ def list_recent_menus(limit: int = Query(default=12, ge=1, le=36)):
 
 
 @router.get("/{month_id}", dependencies=[Depends(require_role("operator"))])
-def get_menu(month_id: str, facility_id: str | None = Query(default=None)):
-    menu = menu_service.get_menu_for_facility(month_id, facility_id, allow_unresolved=True) if facility_id else menu_service.get_menu(month_id, allow_unresolved=True)
+def get_menu(month_id: str, facility_id: str | None = Query(default=None), editor: bool = Query(default=False)):
+    if editor and facility_id:
+        raise HTTPException(422, "editor read requires the complete recorded monthly source; facility projection is read-only")
+    if editor:
+        menu = _monthly_call(menu_service.get_monthly_editor_snapshot, month_id)
+    else:
+        menu = menu_service.get_menu_for_facility(month_id, facility_id, allow_unresolved=True) if facility_id else menu_service.get_menu(month_id, allow_unresolved=True)
     if not menu:
         raise HTTPException(status_code=404, detail="not found")
     return menu
@@ -60,7 +95,10 @@ async def upload_menu(
     scope_type: str | None = None,
     scope_value: str | None = None,
     review_resolutions: str | None = Form(None),
+    diet_types: str | None = None,
 ):
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month_id):
+        raise HTTPException(422, "explicit YYYY-MM month is required")
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
@@ -77,55 +115,63 @@ async def upload_menu(
         if not isinstance(raw, list):
             raise HTTPException(status_code=400, detail="review_resolutions must be a list")
         parsed_review_resolutions = raw
-    upload_metadata: dict[str, object] = {}
-    if file.filename:
+    if parsed_review_resolutions is not None:
+        raise HTTPException(400, "save and review the import receipt before applying")
+    selected_diets = None
+    if diet_types is not None:
         try:
-            archived = save_monthly_menu_upload(
-                month_id=month_id,
-                file_bytes=content,
-                original_filename=file.filename,
-                uploaded_at=datetime.utcnow(),
-            )
-            upload_metadata = {
-                "file_uri": archived.file_uri,
-                "content_sha256": archived.content_sha256,
-            }
-            if scope_override:
-                upload_metadata["scope_override"] = scope_override
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Monthly menu upload archive failed", month_id=month_id, error=str(exc))
-            upload_metadata = {
-                "archive_error": str(exc),
-            }
-            if scope_override:
-                upload_metadata["scope_override"] = scope_override
+            selected_diets = json.loads(diet_types)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, "diet_types must be an explicit JSON list") from exc
+        if not isinstance(selected_diets, list) or not selected_diets or any(
+            not isinstance(value, str) or menu_service.normalize_diet_type(value) != value for value in selected_diets
+        ):
+            raise HTTPException(422, "explicit normalized diet_types list is required")
+    if not file.filename:
+        raise HTTPException(400, "original filename is required")
     try:
-        _, replaced, item_count = menu_service.create_menu(
+        archived = save_monthly_menu_upload(
             month_id=month_id,
             file_bytes=content,
-            filename=file.filename,
-            sheet_name=sheet_name,
-            upload_metadata=upload_metadata,
-            scope_override=scope_override,
-            menu_master_resolutions=parsed_review_resolutions,
-            require_menu_master_review=True,
-        )
-    except menu_service.MenuMasterResolutionRequired as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "menu_master_review_required",
-                "issues": exc.issues,
-            },
+            original_filename=file.filename,
+            uploaded_at=datetime.utcnow(),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {
-        "created": True,
-        "replaced": replaced,
-        "item_count": item_count,
-        "scope_override": scope_override,
-    }
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Monthly menu original archive failed", month_id=month_id)
+        raise HTTPException(503, "original upload archive failed; no menu applied") from exc
+    return _monthly_call(menu_service.save_menu_import, month_id, content, archived,
+        sheet_name=sheet_name, scope_override=scope_override, diet_types=selected_diets)
+
+
+@router.get("/{month_id}/imports", dependencies=[Depends(require_role("operator"))])
+def list_menu_imports(month_id: str):
+    return {"items": _monthly_call(menu_service.list_menu_imports, month_id)}
+
+
+@router.get("/{month_id}/imports/{import_id}", dependencies=[Depends(require_role("operator"))])
+def read_menu_import(month_id: str, import_id: str):
+    return _monthly_call(menu_service.read_menu_import, month_id, import_id)
+
+
+@router.post("/{month_id}/imports/{import_id}/review", dependencies=[Depends(require_role("operator"))])
+def review_menu_import(month_id: str, import_id: str, body: dict, if_match: str | None = Header(None)):
+    if not isinstance(body.get("resolutions"), list):
+        raise HTTPException(422, "explicit resolutions list is required")
+    return _monthly_call(menu_service.review_menu_import, month_id, import_id, if_match, body["resolutions"], input_expected=body.get("input_revision"))
+
+
+@router.get("/{month_id}/imports/{import_id}/download", dependencies=[Depends(require_role("operator"))])
+def download_menu_import(month_id: str, import_id: str):
+    source = _monthly_call(menu_service.get_menu_import_download, month_id, import_id)
+    return Response(content=source["bytes"], media_type=source["media_type"],
+        headers={"Content-Disposition": _attachment_content_disposition(source["filename"])})
+
+
+@router.post("/{month_id}/imports/{import_id}/apply", dependencies=[Depends(require_role("operator"))])
+def apply_menu_import(month_id: str, import_id: str, if_match: str | None = Header(None)):
+    return _monthly_call(menu_service.review_menu_import, month_id, import_id, if_match, None, apply=True)
 
 
 @router.get("/{month_id}/uploads", dependencies=[Depends(require_role("operator"))])
@@ -150,39 +196,18 @@ def download_menu_upload(month_id: str, upload_id: str):
 
 
 @router.put("/{month_id}/items/{item_id}", dependencies=[Depends(require_role("operator"))])
-def update_menu_item(month_id: str, item_id: str, body: dict):
-    result = menu_service.update_item_status(month_id, item_id, body)
-    if result == "updated":
-        return {"updated": True}
-    if result in {"not_found", "month_mismatch"}:
-        raise HTTPException(status_code=404, detail="not found")
-    if result == "conflict":
-        raise HTTPException(status_code=409, detail="duplicate monthly menu item")
-    if result == "invalid_name":
-        raise HTTPException(status_code=400, detail="name is required")
-    return {"updated": True}
+def update_menu_item(month_id: str, item_id: str, body: dict, if_match: str | None = Header(None)):
+    return _monthly_call(menu_service.monthly_editor_command, month_id, item_id, body, if_match, action="item")
 
 
 @router.post("/{month_id}/entries/{entry_id}/exceptions", dependencies=[Depends(require_role("operator"))])
-def upsert_menu_entry_exceptions(month_id: str, entry_id: str, body: dict):
-    try:
-        payload = menu_service.upsert_entry_exceptions(month_id, entry_id, body)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if not payload:
-        raise HTTPException(status_code=404, detail="not found")
-    return payload
+def upsert_menu_entry_exceptions(month_id: str, entry_id: str, body: dict, if_match: str | None = Header(None)):
+    return _monthly_call(menu_service.monthly_editor_command, month_id, entry_id, body, if_match, action="exceptions")
 
 
 @router.post("/{month_id}/master-checks/{item_id}/resolve", dependencies=[Depends(require_role("operator"))])
-def resolve_menu_master_check(month_id: str, item_id: str, body: dict):
-    try:
-        payload = menu_service.resolve_menu_master_check(month_id, item_id, body)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if not payload:
-        raise HTTPException(status_code=404, detail="not found")
-    return payload
+def resolve_menu_master_check(month_id: str, item_id: str, body: dict, if_match: str | None = Header(None)):
+    return _monthly_call(menu_service.monthly_editor_command, month_id, item_id, body, if_match, action="master")
 
 
 @router.post("/condiments", dependencies=[Depends(require_role("operator"))])

@@ -1,7 +1,10 @@
 from io import BytesIO
-from contextlib import contextmanager
-import math
+from contextlib import contextmanager, nullcontext
 from numbers import Number
+import hashlib
+import json
+import math
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -23,11 +26,14 @@ from src.models.menu import (
     MenuMaster,
     MenuFacilityOverride,
     MenuRule,
+    MonthlyMenuImport,
+    MenuEditRevision,
 )
 from src.models.facility import Facility, FacilityConfig
 from src.models.user import AuditLog
 from src.services.notification_service import record_event
 from src.services import menu_rule_service
+from src.services import menu_edit_revision_service as menu_revision
 from src.services.monthly_menu_identity_schema import (
     MonthlyMenuIdentitySchemaError,
     require_canonical_identity_schema,
@@ -804,6 +810,8 @@ def _parse_monthly_menu(
     if isinstance(raw, dict):
         if not raw:
             raise ValueError("menu file is empty")
+        if len(raw) != 1:
+            raise ValueError("select an explicit menu sheet; multiple source sheets are present")
         df = next(iter(raw.values()))
     else:
         df = raw
@@ -1109,10 +1117,12 @@ def _find_menu_master_candidates(session, name: str, *, limit: int = 8) -> list[
 
 
 def _index_menu_master_resolutions(menu_master_resolutions: list[dict] | None) -> dict[str, dict]:
+    if menu_master_resolutions is not None and not isinstance(menu_master_resolutions, list):
+        raise ValueError("menu master resolutions must be a list")
     indexed: dict[str, dict] = {}
+    alias_owners: set[str] = set()
     for raw in menu_master_resolutions or []:
-        if not isinstance(raw, dict):
-            continue
+        _validate_import_resolution(raw)
         keys = [
             str(raw.get("source_name") or "").strip(),
             str(raw.get("name") or "").strip(),
@@ -1125,8 +1135,15 @@ def _index_menu_master_resolutions(menu_master_resolutions: list[dict] | None) -
         normalized_name = _normalize_menu_name(raw.get("name"))
         if normalized_name:
             keys.append(normalized_name)
-        for key in keys:
+        canonical_aliases = {_normalize_menu_name(key) for key in keys if key}
+        canonical_aliases.discard("")
+        if alias_owners.intersection(canonical_aliases):
+            raise ValueError("ambiguous normalized menu master resolution")
+        alias_owners.update(canonical_aliases)
+        for key in set(keys):
             if key:
+                if key in indexed:
+                    raise ValueError(f"ambiguous menu master resolution: {key}")
                 indexed[key] = raw
     return indexed
 
@@ -1984,6 +2001,445 @@ def _extract_menu_names(file_bytes: bytes, filename: str, sheet_name: str | None
     return names
 
 
+def _register_month_revision(session, month_id):
+    scope = menu_revision.monthly_scope(month_id)
+    if session.execute(select(MenuEditRevision.revision).where(MenuEditRevision.scope == scope)).scalar_one_or_none() is not None:
+        return
+    if session.get(MonthlyMenu, month_id) is not None:
+        raise menu_revision.RevisionSchemaNotMigrated("monthly revision missing; formal 0031 is required")
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    else:
+        raise menu_revision.RevisionConflict("unsupported monthly revision driver")
+    session.execute(insert(MenuEditRevision).values(scope=scope, revision=1).on_conflict_do_nothing(index_elements=["scope"]))
+
+
+def _lock_month_revision(session, month_id, *, write):
+    scope = menu_revision.monthly_scope(month_id)
+    revision = session.execute(select(MenuEditRevision.revision).where(MenuEditRevision.scope == scope)
+        .with_for_update(read=not write)).scalar_one_or_none()
+    if revision is None:
+        raise menu_revision.RevisionSchemaNotMigrated("monthly revision missing; formal 0031 is required")
+    return revision
+
+
+def _monthly_input_digest(session, month_id):
+    source = {}
+    # Scalar column reads are canonical even when a caller holds old ORM objects.
+    for model, label in ((MonthlyMenu, "menu"), (MonthlyMenuItem, "items"), (MonthlyMenuEntry, "entries"),
+                         (MenuMaster, "master_candidates"), (MenuRule, "rules")):
+        query = select(*model.__table__.columns).order_by(model.__table__.c.id)
+        if model is MonthlyMenu:
+            query = query.where(model.id == month_id)
+        elif model in (MonthlyMenuItem, MonthlyMenuEntry):
+            query = query.where(model.monthly_menu_id == month_id)
+        elif model is MenuRule:
+            query = query.where(model.active.is_(True))
+        source[label] = [dict(row) for row in session.execute(query).mappings()]
+    raw = json.dumps(source, sort_keys=True, separators=(",", ":"), default=lambda value: value.isoformat())
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _monthly_snapshot_body(session, month_id):
+    menu = session.get(MonthlyMenu, month_id)
+    items = session.execute(select(MonthlyMenuItem).where(MonthlyMenuItem.monthly_menu_id == month_id)
+        .where(or_(MonthlyMenuItem.facility_override.is_(None), MonthlyMenuItem.facility_override == ""))
+        .order_by(MonthlyMenuItem.id)).scalars().all()
+    entries = session.execute(select(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == month_id)
+        .where(or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
+        .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index, MonthlyMenuEntry.id)).scalars().all()
+    payloads = []
+    for item in items:
+        payload = serialize_item(item)
+        master = session.get(MenuMaster, item.menu_master_id) if item.menu_master_id else None
+        if item.menu_master_id and master is None:
+            raise ValueError("recorded monthly menu master is missing")
+        if master is not None and item.master_resolution_mode != "month_only":
+            for field in _MASTER_FIELDS:
+                if _is_blank_value(payload.get(field)):
+                    payload[field] = getattr(master, field)
+        payloads.append(payload)
+    upload = _get_latest_menu_upload_log(session, month_id)
+    entry_payloads = [serialize_entry(entry) for entry in entries]
+    entry_payloads.sort(key=_menu_entry_sort_key)
+    return {"menu": serialize_menu(menu, upload) if menu else None, "items": payloads,
+        "source_month_id": month_id,
+        "entries": entry_payloads, "master_checks": _build_menu_master_checks(session, items, entries),
+        "revision": menu_revision.monthly_token(menu_revision.monthly_scope(month_id),
+            menu_revision.current(session, menu_revision.monthly_scope(month_id)), _monthly_input_digest(session, month_id))}
+
+
+def get_monthly_editor_snapshot(month_id):
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=False)
+        source_month = month_id
+        if session.get(MonthlyMenu, month_id) is None:
+            adjacent = [_shift_month_id(month_id, delta) for delta in (-1, 1)]
+            start = date.fromisoformat(f"{month_id}-01")
+            end = date.fromisoformat(f"{_shift_month_id(month_id, 1)}-01")
+            sources = session.execute(select(MonthlyMenuEntry.monthly_menu_id).where(
+                MonthlyMenuEntry.monthly_menu_id.in_(adjacent), MonthlyMenuEntry.menu_date >= start,
+                MonthlyMenuEntry.menu_date < end,
+                or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
+                .distinct()).scalars().all()
+            if len(sources) > 1:
+                raise menu_revision.RevisionConflict("requested month has multiple recorded source menus")
+            if sources:
+                source_month = sources[0]
+                if session.get(MonthlyMenu, source_month) is None:
+                    raise ValueError("recorded monthly source parent is missing")
+            elif menu_revision_scope_exists(session, month_id):
+                _lock_month_revision(session, month_id, write=False)
+                return _monthly_snapshot_body(session, month_id)
+            else:
+                return None
+        _lock_month_revision(session, source_month, write=False)
+        return _canonicalize_resolved_menu_payload(_monthly_snapshot_body(session, source_month), month_id, source_month)
+
+
+def menu_revision_scope_exists(session, month_id):
+    return session.execute(select(MenuEditRevision.scope).where(
+        MenuEditRevision.scope == menu_revision.monthly_scope(month_id))).scalar_one_or_none() is not None
+
+
+def _saved_import(session, month_id, import_id):
+    row = session.execute(select(MonthlyMenuImport).where(MonthlyMenuImport.id == import_id,
+        MonthlyMenuImport.month_id == month_id).with_for_update()).scalar_one_or_none()
+    if row is None:
+        raise ValueError("saved menu import not found for this month")
+    _validate_import_receipt(row)
+    return row
+
+
+def _import_token(session, row, *, captured=False):
+    _validate_import_receipt(row)
+    recorded = row.review_json["input_snapshot"]
+    digest = hashlib.sha256(json.dumps({"source": row.source_json, "review": row.review_json,
+        "monthly_input": recorded["digest"] if captured else _monthly_input_digest(session, row.month_id),
+        "monthly_revision": recorded["revision"] if captured else menu_revision.current(session, menu_revision.monthly_scope(row.month_id))},
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return menu_revision.monthly_token(f"menu-import:{row.id}", row.revision, digest)
+
+
+def _validate_import_source(row):
+    source = row.source_json
+    required = {"file_uri", "filename", "content_sha256", "sheet_name", "scope_override", "diet_types", "media_type"}
+    if (not isinstance(source, dict) or not required.issubset(source)
+        or not isinstance(row.month_id, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", row.month_id)):
+        raise ValueError("saved original source is unresolved")
+    for field in ("file_uri", "filename", "sheet_name", "media_type"):
+        if not isinstance(source[field], str) or not source[field].strip():
+            raise ValueError("saved original source is unresolved")
+    if (Path(source["filename"]).name != source["filename"]
+        or not isinstance(source["content_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", source["content_sha256"])):
+        raise ValueError("saved original source is unresolved")
+    scope = source["scope_override"]
+    if scope is not None and (not isinstance(scope, str) or not scope.strip() or _normalize_scope_override(scope) != scope):
+        raise ValueError("saved original source scope is unresolved")
+    diets = source["diet_types"]
+    if diets is not None and (not isinstance(diets, list) or not diets or any(
+        not isinstance(value, str) or not value.strip() or normalize_diet_type(value) != value for value in diets
+    )):
+        raise ValueError("saved original source food types are unresolved")
+
+
+def _validate_import_fields(value, *, editable=False):
+    if not isinstance(value, dict):
+        raise ValueError("saved nested fields are unresolved")
+    for field in ("qty_per_serving", "bag_max_qty", "count"):
+        if field in value and value[field] == "" and not editable:
+            raise ValueError("saved numeric field is unresolved")
+        if field in value and value[field] is not None and value[field] != "":
+            raw = value[field]
+            number = _coerce_float(raw)
+            if isinstance(raw, bool) or not isinstance(raw, (str, int, float)) or number is None or not math.isfinite(number):
+                raise ValueError("saved numeric field is unresolved")
+    for field in ("unit_type", "bag_max_unit", "temp_type", "daypart", "category", "diet_type"):
+        if field in value and value[field] is not None and not isinstance(value[field], str):
+            raise ValueError("saved text field is unresolved")
+    if "condiments" in value and value["condiments"] is not None and not (
+        isinstance(value["condiments"], str) or isinstance(value["condiments"], list)
+        and all(isinstance(label, str) for label in value["condiments"])
+    ):
+        raise ValueError("saved condiments are unresolved")
+
+
+def _validate_import_resolution(value):
+    if not isinstance(value, dict) or not isinstance(value.get("action"), str):
+        raise ValueError("saved resolution action is unresolved")
+    action = value["action"].strip().lower()
+    if action not in ("existing", "create", "update"):
+        raise ValueError("saved resolution action is unresolved")
+    aliases = ("source_name", "name", "issue_key", "normalized_name")
+    if not any(isinstance(value.get(key), str) and value[key].strip() for key in aliases):
+        raise ValueError("saved resolution source is unresolved")
+    for key in (*aliases, "menu_master_id"):
+        if key in value and value[key] is not None and not isinstance(value[key], str):
+            raise ValueError("saved resolution identity is unresolved")
+    _validate_import_fields(value, editable=True)
+    if action == "create" and (not isinstance(value.get("unit_type"), str)
+        or not value["unit_type"].strip() or "qty_per_serving" not in value
+        or isinstance(value["qty_per_serving"], bool) or _coerce_float(value["qty_per_serving"]) is None):
+        raise ValueError("saved create resolution fields are unresolved")
+
+
+def _validate_import_review_nested(review):
+    for item in review["items"]:
+        if (not {"name", "unit_type", "temp_type", "_inferred_master_fields"}.issubset(item)
+            or not isinstance(item["name"], str) or not item["name"].strip()):
+            raise ValueError("saved item name is unresolved")
+        _validate_import_fields(item)
+        if "_inferred_master_fields" in item and (not isinstance(item["_inferred_master_fields"], list)
+            or any(not isinstance(field, str) or field not in _MASTER_FIELDS for field in item["_inferred_master_fields"])):
+            raise ValueError("saved inferred fields are unresolved")
+    for entry in review["entries"]:
+        if not {"menu_date", "daypart", "name", "category", "diet_type", "slot_index"}.issubset(entry):
+            raise ValueError("saved entry fields are unresolved")
+        if any(not isinstance(entry[key], str) or not entry[key].strip() for key in ("menu_date", "daypart", "name")):
+            raise ValueError("saved entry identity is unresolved")
+        try:
+            if date.fromisoformat(entry["menu_date"]).isoformat() != entry["menu_date"]:
+                raise ValueError("saved entry date is unresolved")
+        except ValueError as error:
+            raise ValueError("saved entry date is unresolved") from error
+        if type(entry["slot_index"]) is not int or entry["slot_index"] < 0:
+            raise ValueError("saved entry slot is unresolved")
+        _validate_import_fields(entry)
+    for name, plan in review["plans"].items():
+        if not isinstance(name, str) or not name.strip() or not {"action", "seed_fields"}.issubset(plan):
+            raise ValueError("saved plan fields are unresolved")
+        if plan["action"] not in ("existing", "create", "update"):
+            raise ValueError("saved plan action is unresolved")
+        identity = "name" if plan["action"] == "create" else "menu_master_id"
+        if not isinstance(plan.get(identity), str) or not plan[identity].strip():
+            raise ValueError("saved plan identity is unresolved")
+        _validate_import_fields(plan["seed_fields"])
+        if plan["action"] == "create":
+            _validate_import_resolution({**plan["seed_fields"], "action": "create", "name": plan["name"]})
+    for issue in review["issues"]:
+        required = {"source_name", "normalized_name", "issue_key", "reason", "suggested_patch", "candidates"}
+        if not required.issubset(issue) or any(not isinstance(issue[key], str) or not issue[key].strip()
+            for key in ("source_name", "normalized_name", "issue_key", "reason")):
+            raise ValueError("saved issue identity is unresolved")
+        _validate_import_fields(issue["suggested_patch"])
+        if not {"name", "unit_type", "qty_per_serving", "temp_type", "daypart", "category", "bag_max_qty", "bag_max_unit", "condiments"}.issubset(issue["suggested_patch"]):
+            raise ValueError("saved issue patch is unresolved")
+        if not isinstance(issue["candidates"], list) or any(not isinstance(candidate, dict)
+            or not isinstance(candidate.get("id"), str) or not candidate["id"]
+            or not isinstance(candidate.get("name"), str) or not candidate["name"] for candidate in issue["candidates"]):
+            raise ValueError("saved issue candidates are unresolved")
+    for diff in review["master_diffs"]:
+        if (not {"source_name", "current_master", "field_diffs"}.issubset(diff)
+            or not isinstance(diff["source_name"], str) or not diff["source_name"].strip()):
+            raise ValueError("saved master difference is unresolved")
+        master = diff["current_master"]
+        if (not isinstance(master, dict) or not {"id", "name", "normalized_name", "unit_type", "qty_per_serving"}.issubset(master)
+            or any(not isinstance(master[key], str) or not master[key].strip() for key in ("id", "name", "normalized_name"))):
+            raise ValueError("saved master identity is unresolved")
+        _validate_import_fields(master)
+        if not isinstance(diff["field_diffs"], list) or any(not isinstance(field, dict)
+            or not {"field", "label", "monthly_value", "master_value"}.issubset(field)
+            or field["field"] not in ("name", *_MASTER_FIELDS) or not isinstance(field["label"], str) for field in diff["field_diffs"]):
+            raise ValueError("saved master fields are unresolved")
+    if review["item_count"] != len(review["items"]):
+        raise ValueError("saved item count is unresolved")
+    item_names = {_normalize_menu_name(item["name"]) for item in review["items"]}
+    planned = {_normalize_menu_name(name) for name in review["plans"]}
+    unresolved = {_normalize_menu_name(issue["source_name"]) for issue in review["issues"]}
+    if planned.intersection(unresolved) or planned.union(unresolved) != item_names:
+        raise ValueError("saved plan/source coverage is unresolved")
+    if any(_normalize_menu_name(entry["name"]) not in item_names for entry in review["entries"]):
+        raise ValueError("saved entry/source coverage is unresolved")
+    _index_menu_master_resolutions(review["resolutions"])
+
+
+def _validate_import_receipt(row):
+    _validate_import_source(row)
+    if (not isinstance(row.id, str) or not row.id or not isinstance(row.state, str) or row.state not in {"review", "applied"}
+        or not isinstance(row.revision, int) or isinstance(row.revision, bool) or row.revision < 1):
+        raise ValueError("saved import identity is unresolved")
+    review = row.review_json
+    required = {"issues", "plans", "item_count", "master_diffs", "entries", "items", "scope_override", "resolutions", "input_snapshot"}
+    if (not isinstance(review, dict) or not required.issubset(review)
+        or review["scope_override"] != row.source_json["scope_override"]
+        or not isinstance(review["item_count"], int) or isinstance(review["item_count"], bool) or review["item_count"] < 0
+        or not isinstance(review["plans"], dict) or any(not isinstance(value, dict) for value in review["plans"].values())):
+        raise ValueError("saved review is unresolved")
+    for field in ("issues", "master_diffs", "entries", "items", "resolutions"):
+        if not isinstance(review[field], list) or any(not isinstance(value, dict) for value in review[field]):
+            raise ValueError("saved review is unresolved")
+    _validate_import_review_nested(review)
+    recorded = review["input_snapshot"]
+    if (not isinstance(recorded, dict) or not {"revision", "digest"}.issubset(recorded)
+        or not isinstance(recorded["revision"], int) or isinstance(recorded["revision"], bool) or recorded["revision"] < 1
+        or not isinstance(recorded["digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", recorded["digest"])):
+        raise ValueError("saved review input is unresolved")
+
+
+def _serialize_import(session, row):
+    token = _import_token(session, row, captured=True)
+    recorded = row.review_json["input_snapshot"]
+    input_revision = menu_revision.monthly_token(menu_revision.monthly_scope(row.month_id), recorded["revision"], recorded["digest"])
+    return {"id": row.id, "month_id": row.month_id, "state": row.state, "source": dict(row.source_json),
+        "review": dict(row.review_json), "revision": token,
+        "input_revision": input_revision, "current_input_revision": input_revision, "current_review": dict(row.review_json)}
+
+
+def _import_review(session, row, preview, resolutions, *, initial=False):
+    if initial:
+        if row not in session.new or row.review_json != {}:
+            raise ValueError("initial review must belong to the new receipt transaction")
+        _validate_import_source(row)
+        recorded = {}
+    else:
+        _validate_import_receipt(row)
+        recorded = row.review_json["input_snapshot"]
+    return {**row.review_json, **preview, "resolutions": resolutions, "input_snapshot": {**recorded,
+        "revision": menu_revision.current(session, menu_revision.monthly_scope(row.month_id)),
+        "digest": _monthly_input_digest(session, row.month_id)}}
+
+
+def _preview_saved_import(session, row, resolutions, *, initial=False):
+    if initial:
+        if row not in session.new or row.review_json != {}:
+            raise ValueError("initial import preview must belong to the new receipt transaction")
+        _validate_import_source(row)
+    else:
+        _validate_import_receipt(row)
+    source = row.source_json
+    content = load_bytes_from_uri(source["file_uri"])
+    if hashlib.sha256(content).hexdigest() != source["content_sha256"]:
+        raise ValueError("saved source archive digest mismatch")
+    preview = create_menu(row.month_id, content, source["filename"], source["sheet_name"],
+        scope_override=source["scope_override"], menu_master_resolutions=resolutions,
+        require_menu_master_review=True, _session=session, preview=True, diet_types=source["diet_types"])
+    return content, preview
+
+
+def save_menu_import(month_id, content, archived, *, sheet_name, scope_override, diet_types=None):
+    if _normalize_month_id(month_id) != month_id:
+        raise ValueError("explicit YYYY-MM month is required")
+    if hashlib.sha256(content).hexdigest() != archived.content_sha256 or not archived.file_uri:
+        raise ValueError("original upload was not archived")
+    with pd.ExcelFile(BytesIO(content)) as workbook:
+        if sheet_name:
+            if sheet_name not in workbook.sheet_names:
+                raise ValueError("selected source sheet is absent from archived workbook")
+        elif len(workbook.sheet_names) == 1:
+            sheet_name = workbook.sheet_names[0]
+        else:
+            raise ValueError("explicit source sheet is required: " + ", ".join(workbook.sheet_names))
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=True)
+        _register_month_revision(session, month_id)
+        _lock_month_revision(session, month_id, write=True)
+        row = MonthlyMenuImport(id=f"MIMP{uuid4().hex}", month_id=month_id, state="review",
+            source_json={"file_uri": archived.file_uri, "content_sha256": archived.content_sha256,
+                "filename": archived.original_filename, "sheet_name": sheet_name, "scope_override": scope_override,
+                "diet_types": diet_types, "media_type": archived.media_type}, review_json={})
+        session.add(row)
+        _, preview = _preview_saved_import(session, row, [], initial=True)
+        row.review_json = _import_review(session, row, preview, [], initial=True)
+        session.flush()
+        return _serialize_import(session, row)
+
+
+def read_menu_import(month_id, import_id):
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=False)
+        _lock_month_revision(session, month_id, write=False)
+        row = _saved_import(session, month_id, import_id)
+        # A stored review is paired only with its recorded input, never re-based on GET.
+        receipt = _serialize_import(session, row)
+        if row.state == "review":
+            _, preview = _preview_saved_import(session, row, row.review_json["resolutions"])
+            receipt["current_review"] = _import_review(session, row, preview, row.review_json["resolutions"])
+            receipt["current_input_revision"] = _monthly_snapshot_body(session, month_id)["revision"]
+        return receipt
+
+
+def list_menu_imports(month_id):
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=False)
+        rows = session.execute(select(MonthlyMenuImport).where(MonthlyMenuImport.month_id == month_id)
+            .order_by(MonthlyMenuImport.created_at.desc(), MonthlyMenuImport.id)).scalars().all()
+        return [_serialize_import(session, row) for row in rows]
+
+
+def get_menu_import_download(month_id, import_id):
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=False)
+        _lock_month_revision(session, month_id, write=False)
+        row = _saved_import(session, month_id, import_id)
+        source = _serialize_import(session, row)["source"]
+        content = load_bytes_from_uri(source["file_uri"])
+        if hashlib.sha256(content).hexdigest() != source["content_sha256"]:
+            raise ValueError("saved source archive digest mismatch")
+        return {"bytes": content, "filename": source["filename"], "media_type": source["media_type"]}
+
+
+def review_menu_import(month_id, import_id, expected, resolutions, *, apply=False, input_expected=None):
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=True)
+        revision = _lock_month_revision(session, month_id, write=True)
+        row = _saved_import(session, month_id, import_id)
+        if row.state == "applied":
+            raise menu_revision.RevisionConflict("import already applied; do not reapply")
+        if row.state != "review":
+            raise menu_revision.RevisionConflict("import is not in recorded review state; do not reapply")
+        menu_revision.require_monthly_token(expected, _import_token(session, row, captured=not apply))
+        if not apply:
+            menu_revision.require_monthly_token(input_expected, _monthly_snapshot_body(session, month_id)["revision"])
+        if apply:
+            if resolutions is not None and resolutions != row.review_json["resolutions"]:
+                raise menu_revision.RevisionConflict("save this exact review before applying")
+            resolutions = row.review_json["resolutions"]
+        content, preview = _preview_saved_import(session, row, resolutions)
+        if apply:
+            if preview["issues"]:
+                raise MenuMasterResolutionRequired(preview["issues"])
+            source = row.source_json
+            _, replaced, count = create_menu(month_id, content, source["filename"], source["sheet_name"],
+                upload_metadata={**source, "import_id": row.id}, scope_override=source["scope_override"],
+                menu_master_resolutions=resolutions, require_menu_master_review=True, _session=session,
+                diet_types=source["diet_types"])
+            menu_revision.compare_and_advance(session, menu_revision.monthly_scope(month_id), revision)
+            row.state = "applied"
+        if not apply:
+            row.review_json = _import_review(session, row, preview, resolutions)
+        session.flush()
+        own = _serialize_import(session, row)
+        return {"created": True, "receipt": own, "snapshot": _monthly_snapshot_body(session, month_id),
+                "replaced": replaced, "item_count": count} if apply else own
+
+
+def monthly_editor_command(month_id, item_id, body, expected, *, action):
+    source_month = menu_revision.monthly_command_source(expected)
+    with session_scope() as session:
+        menu_revision.begin_monthly_snapshot(session, write=True)
+        revision = _lock_month_revision(session, source_month, write=True)
+        before = _monthly_snapshot_body(session, source_month)
+        menu_revision.require_monthly_token(expected, before["revision"])
+        if source_month != month_id and (source_month not in [_shift_month_id(month_id, delta) for delta in (-1, 1)]
+            or not _payload_contains_requested_month(before, month_id) or session.get(MonthlyMenu, month_id) is not None):
+            raise menu_revision.RevisionConflict("command target differs from recorded source month")
+        functions = {"item": update_item_status, "exceptions": upsert_entry_exceptions, "master": resolve_menu_master_check}
+        result = functions[action](source_month, item_id, body, _session=session)
+        if result in (None, "not_found", "month_mismatch"):
+            raise ValueError("monthly target not found")
+        if isinstance(result, str) and result != "updated":
+            if result == "conflict":
+                raise menu_revision.RevisionConflict("duplicate monthly menu item")
+            raise ValueError(result)
+        menu_revision.compare_and_advance(session, menu_revision.monthly_scope(source_month), revision)
+        session.flush()
+        return {**(result if isinstance(result, dict) else {}), "updated": True, "result": result, "snapshot": _canonicalize_resolved_menu_payload(
+            _monthly_snapshot_body(session, source_month), month_id, source_month)}
+
+
 def create_menu(
     month_id: str,
     file_bytes: bytes,
@@ -1995,11 +2451,14 @@ def create_menu(
     scope_override: str | None = None,
     menu_master_resolutions: list[dict] | None = None,
     require_menu_master_review: bool = False,
+    _session=None,
+    preview: bool = False,
+    diet_types: list[str] | None = None,
 ):
-    ensure_menu_schema()
-    # Seed default rules outside the write transaction to avoid sqlite write-lock contention
-    # from nested session_scope calls.
-    menu_rule_service.ensure_default_rules()
+    if _session is None:
+        ensure_menu_schema()
+        # Legacy standalone callers initialize rules outside their write transaction.
+        menu_rule_service.ensure_default_rules()
     parsed_items: list[dict] = []
     entries: list[dict] = []
     month_start = None
@@ -2036,7 +2495,20 @@ def create_menu(
         deduped_names.append(raw_name)
     names = deduped_names
     resolved_scope_override = _normalize_scope_override(scope_override)
-    parsed_items = _apply_rules_to_items(parsed_items)
+    if _session is None:
+        parsed_items = _apply_rules_to_items(parsed_items)
+    else:
+        rules = [menu_rule_service._serialize_rule(rule)
+            for rule in _session.query(MenuRule).filter(MenuRule.active.is_(True)).all()]
+        parsed_items = _apply_rule_payloads_to_items(parsed_items, rules)
+    if diet_types is not None:
+        if not diet_types or any(normalize_diet_type(value) != value for value in diet_types):
+            raise ValueError("explicit normalized diet_types are required")
+        parsed_items = [item for item in parsed_items if normalize_diet_type(item.get("diet_type")) in diet_types]
+        entries = [entry for entry in entries if normalize_diet_type(entry.get("diet_type")) in diet_types]
+        names = list(dict.fromkeys(item["name"] for item in parsed_items))
+        if not parsed_items or not entries:
+            raise ValueError("selected food types are absent from the saved source")
     if parsed_items:
         deduped_items: list[dict] = []
         seen_item_keys: set[tuple[str, str, str, str, str]] = set()
@@ -2050,7 +2522,7 @@ def create_menu(
     else:
         parsed_items = [{"name": name} for name in names]
     resolution_map = _index_menu_master_resolutions(menu_master_resolutions)
-    with session_scope() as session:
+    with (nullcontext(_session) if _session is not None else session_scope()) as session:
         master_plans: dict[str, dict] = {}
         master_plans_by_normalized_name: dict[str, dict] = {}
         issues: list[dict] = []
@@ -2083,9 +2555,24 @@ def create_menu(
             normalized_plan_name = _normalize_menu_name(name)
             if normalized_plan_name:
                 master_plans_by_normalized_name[normalized_plan_name] = plan
+        if preview:
+            master_diffs = []
+            for meta in parsed_items:
+                master = _find_menu_master_by_normalized(session, _normalize_menu_name(meta["name"]))
+                if master is not None:
+                    patch = _extract_master_patch(meta, _MASTER_FIELDS)
+                    for field in meta.get("_inferred_master_fields", []):
+                        patch.pop(field, None)
+                    diffs = _build_master_field_diffs(meta["name"], patch, master)
+                    if diffs:
+                        master_diffs.append({"source_name": meta["name"], "current_master": serialize_menu_master(master), "field_diffs": diffs})
+            return {"issues": issues, "plans": master_plans, "item_count": len(parsed_items),
+                "master_diffs": master_diffs,
+                "entries": [{**entry, "menu_date": entry["menu_date"].isoformat()} for entry in entries],
+                "items": parsed_items, "scope_override": resolved_scope_override}
         if issues and require_menu_master_review:
             raise MenuMasterResolutionRequired(issues)
-    with session_scope() as session:
+    with (nullcontext(_session) if _session is not None else session_scope()) as session:
         replaced = False
         menu = session.get(MonthlyMenu, month_id)
         if menu:
@@ -2106,6 +2593,15 @@ def create_menu(
             else:
                 item_delete = item_delete.where(MonthlyMenuItem.facility_override == resolved_scope_override)
                 entry_delete = entry_delete.where(MonthlyMenuEntry.facility_override == resolved_scope_override)
+            imported_diets = diet_types if diet_types is not None else list({normalize_diet_type(item.get("diet_type")) for item in parsed_items})
+            named_diets = [value for value in imported_diets if value is not None]
+            item_diets = MonthlyMenuItem.diet_type.in_(named_diets)
+            entry_diets = MonthlyMenuEntry.diet_type.in_(named_diets)
+            if None in imported_diets:
+                item_diets = or_(item_diets, MonthlyMenuItem.diet_type.is_(None), MonthlyMenuItem.diet_type == "")
+                entry_diets = or_(entry_diets, MonthlyMenuEntry.diet_type.is_(None), MonthlyMenuEntry.diet_type == "")
+            item_delete = item_delete.where(item_diets)
+            entry_delete = entry_delete.where(entry_diets)
             session.execute(item_delete)
             session.execute(entry_delete)
         else:
@@ -2179,13 +2675,12 @@ def create_menu(
         metadata["sheet_name"] = sheet_name
     if upload_metadata:
         metadata.update(upload_metadata)
-    record_event(
-        "menu_upload",
-        actor=actor,
-        target=month_id,
-        wek=month_id,
-        metadata=metadata,
-    )
+    if _session is not None:
+        if os.getenv("AUDIT_ENABLED", "true").lower() == "true":
+            _session.add(AuditLog(id=f"AUD{uuid4().hex}", actor=actor, action="menu_upload",
+                target=month_id, wek=month_id, metadata_json=metadata))
+    else:
+        record_event("menu_upload", actor=actor, target=month_id, wek=month_id, metadata=metadata)
     return payload, replaced, item_count
 
 
@@ -2292,10 +2787,11 @@ def get_menu_upload_download(month_id: str, upload_id: str) -> dict | None:
     }
 
 
-def update_item_status(month_id: str, item_id: str, body: dict) -> str:
-    ensure_menu_schema()
+def update_item_status(month_id: str, item_id: str, body: dict, *, _session=None) -> str:
+    if _session is None:
+        ensure_menu_schema()
     event_fields: list[str] | None = None
-    with session_scope() as session:
+    with (nullcontext(_session) if _session is not None else session_scope()) as session:
         item = session.get(MonthlyMenuItem, item_id)
         if not item:
             if not item_id.startswith(_REPAIRED_MENU_ITEM_ID_PREFIX):
@@ -2372,13 +2868,13 @@ def update_item_status(month_id: str, item_id: str, body: dict) -> str:
                 setattr(item, field, None)
         logger.info("Menu item updated", month_id=month_id, item_id=item_id)
         event_fields = list(body.keys())
-    record_event(
-        "menu_edit",
-        actor="system",
-        target=item_id,
-        wek=month_id,
-        metadata={"fields": event_fields or []},
-    )
+    if _session is not None:
+        if os.getenv("AUDIT_ENABLED", "true").lower() == "true":
+            _session.add(AuditLog(id=f"AUD{uuid4().hex}", actor="system", action="menu_edit", target=item_id, wek=month_id,
+                metadata_json={"fields": event_fields or []}))
+    else:
+        record_event("menu_edit", actor="system", target=item_id, wek=month_id,
+            metadata={"fields": event_fields or []})
     return "updated"
 
 
@@ -2636,9 +3132,10 @@ def _count_monthly_entry_refs(
     return len(session.execute(query).scalars().all())
 
 
-def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict) -> dict | None:
-    ensure_menu_schema()
-    with session_scope() as session:
+def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict, *, _session=None) -> dict | None:
+    if _session is None:
+        ensure_menu_schema()
+    with (nullcontext(_session) if _session is not None else session_scope()) as session:
         entry = session.get(MonthlyMenuEntry, entry_id)
         if not entry or entry.monthly_menu_id != month_id:
             return None
@@ -3485,9 +3982,10 @@ def get_item(item_id: str) -> dict | None:
         )[0]
 
 
-def resolve_menu_master_check(month_id: str, item_id: str, body: dict) -> dict | None:
-    ensure_menu_schema()
-    with session_scope() as session:
+def resolve_menu_master_check(month_id: str, item_id: str, body: dict, *, _session=None) -> dict | None:
+    if _session is None:
+        ensure_menu_schema()
+    with (nullcontext(_session) if _session is not None else session_scope()) as session:
         item = session.get(MonthlyMenuItem, item_id)
         if not item or item.monthly_menu_id != month_id:
             return None

@@ -173,6 +173,19 @@ class MenuEditRevision(Base):
     revision = Column(Integer, nullable=False, default=1, server_default="1")
 
 
+class MonthlyMenuImport(Base):
+    __tablename__ = "monthly_menu_imports"
+
+    id = Column(String, primary_key=True)
+    month_id = Column(String, nullable=False, index=True)
+    revision = Column(Integer, nullable=False, default=1, server_default="1")
+    __mapper_args__ = {"version_id_col": revision}
+    state = Column(String, nullable=False)
+    source_json = Column(JSON, nullable=False)
+    review_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class MenuEditorRevisionColumnOwnership(Base):
     """Formal 0030 ownership record for revision columns."""
 

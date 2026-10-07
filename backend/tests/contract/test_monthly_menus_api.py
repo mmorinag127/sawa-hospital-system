@@ -2,6 +2,7 @@ import pathlib
 import sys
 from datetime import date
 
+import pytest
 from fastapi.testclient import TestClient
 
 from auth_support import hospital_operator  # noqa: F401
@@ -215,15 +216,14 @@ def test_monthly_menus_upload_allows_operator(monkeypatch, hospital_operator):
 
     captured: dict[str, object] = {}
 
-    def _create_menu(month_id, file_bytes, filename, sheet_name=None, **kwargs):
+    def _save_import(month_id, file_bytes, archived, sheet_name=None, **kwargs):
         captured["month_id"] = month_id
-        captured["filename"] = filename
+        captured["filename"] = archived.original_filename
         captured["sheet_name"] = sheet_name
         captured["scope_override"] = kwargs.get("scope_override")
-        captured["require_menu_master_review"] = kwargs.get("require_menu_master_review")
-        return {"id": month_id}, False, 12
+        return {"id": "saved-12", "month_id": month_id, "state": "review", "revision": "saved-read-12", "review": {"item_count": 12}}
 
-    monkeypatch.setattr(menus_api.menu_service, "create_menu", _create_menu)
+    monkeypatch.setattr(menus_api.menu_service, "save_menu_import", _save_import)
     monkeypatch.setattr(
         menus_api,
         "save_monthly_menu_upload",
@@ -233,6 +233,7 @@ def test_monthly_menus_upload_allows_operator(monkeypatch, hospital_operator):
             {
                 "file_uri": "/tmp/monthly-menu.xlsx",
                 "content_sha256": "abc123",
+                "original_filename": "menu.xlsx",
             },
         )(),
     )
@@ -249,10 +250,33 @@ def test_monthly_menus_upload_allows_operator(monkeypatch, hospital_operator):
         headers=headers,
     )
     assert res.status_code == 200
-    assert res.json()["created"] is True
-    assert res.json()["item_count"] == 12
+    assert res.json()["state"] == "review"
+    assert "created" not in res.json()
+    assert res.json()["review"]["item_count"] == 12
     assert captured["scope_override"] == "TAG:ikebukuro"
-    assert captured["require_menu_master_review"] is True
+    def _apply(month_id, import_id, expected, resolutions, *, apply=False):
+        assert (month_id, import_id, expected, resolutions, apply) == ("2026-03", "saved-12", res.json()["revision"], None, True)
+        return {"created": True, "item_count": 12}
+    monkeypatch.setattr(menus_api.menu_service, "review_menu_import", _apply)
+    own = client.post("/monthly-menus/2026-03/imports/saved-12/apply", headers={**headers, "If-Match": res.json()["revision"]})
+    assert own.status_code == 200
+    assert own.json()["created"] is True
+    assert own.json()["item_count"] == 12
+
+
+def test_monthly_menu_archive_failure_stops_before_saving_or_applying(monkeypatch, hospital_operator):
+    def fail_archive(**_kwargs):
+        raise RuntimeError("archive unavailable")
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("archive failure must not save a receipt or apply business rows")
+    monkeypatch.setattr(menus_api, "save_monthly_menu_upload", fail_archive)
+    monkeypatch.setattr(menus_api.menu_service, "save_menu_import", unexpected)
+    monkeypatch.setattr(menus_api.menu_service, "create_menu", unexpected)
+    response = TestClient(app).post("/monthly-menus", params={"month_id": "2026-03"},
+        files={"file": ("menu.xlsx", b"original", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=hospital_operator.headers)
+    assert response.status_code == 503
+    assert "no menu applied" in response.json()["detail"]
 
 
 def test_monthly_menus_upload_passes_review_resolutions(monkeypatch, hospital_operator):
@@ -260,13 +284,15 @@ def test_monthly_menus_upload_passes_review_resolutions(monkeypatch, hospital_op
 
     captured: dict[str, object] = {}
 
-    def _create_menu(month_id, file_bytes, filename, sheet_name=None, **kwargs):
+    def _review(month_id, import_id, expected, resolutions, *, input_expected=None):
         captured["month_id"] = month_id
-        captured["menu_master_resolutions"] = kwargs.get("menu_master_resolutions")
-        captured["require_menu_master_review"] = kwargs.get("require_menu_master_review")
-        return {"id": month_id}, False, 2
+        captured["menu_master_resolutions"] = resolutions
+        assert expected == "receipt-read-2"
+        assert input_expected == "input-read-2"
+        return {"id": import_id, "revision": "receipt-own-3", "review": {"item_count": 2}}
 
-    monkeypatch.setattr(menus_api.menu_service, "create_menu", _create_menu)
+    monkeypatch.setattr(menus_api.menu_service, "review_menu_import", _review)
+    monkeypatch.setattr(menus_api.menu_service, "read_menu_import", lambda *_args: {"revision": "receipt-read-2", "current_input_revision": "input-read-2"})
     monkeypatch.setattr(
         menus_api,
         "save_monthly_menu_upload",
@@ -281,14 +307,14 @@ def test_monthly_menus_upload_passes_review_resolutions(monkeypatch, hospital_op
     )
 
     client = TestClient(app)
+    read = client.get("/monthly-menus/2026-03/imports/saved-2", headers=headers).json()
     res = client.post(
-        "/monthly-menus",
-        params={"month_id": "2026-03"},
-        data={
-            "review_resolutions": '[{"source_name":"白身魚のフライ","action":"create","unit_type":"count","qty_per_serving":1}]'
+        "/monthly-menus/2026-03/imports/saved-2/review",
+        json={
+            "resolutions": [{"source_name": "白身魚のフライ", "action": "create", "unit_type": "count", "qty_per_serving": 1}],
+            "input_revision": read["current_input_revision"],
         },
-        files={"file": ("menu.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=headers,
+        headers={**headers, "If-Match": read["revision"]},
     )
     assert res.status_code == 200
     assert captured["menu_master_resolutions"] == [
@@ -299,7 +325,7 @@ def test_monthly_menus_upload_passes_review_resolutions(monkeypatch, hospital_op
             "qty_per_serving": 1,
         }
     ]
-    assert captured["require_menu_master_review"] is True
+    assert res.json()["review"]["item_count"] == 2
 
 
 def test_menu_master_resolution_index_accepts_issue_key_and_normalized_name():
@@ -335,7 +361,8 @@ def test_monthly_menus_upload_returns_review_required_payload(monkeypatch, hospi
             ]
         )
 
-    monkeypatch.setattr(menus_api.menu_service, "create_menu", _create_menu)
+    monkeypatch.setattr(menus_api.menu_service, "review_menu_import", _create_menu)
+    monkeypatch.setattr(menus_api.menu_service, "read_menu_import", lambda *_args: {"revision": "review-read"})
     monkeypatch.setattr(
         menus_api,
         "save_monthly_menu_upload",
@@ -350,11 +377,10 @@ def test_monthly_menus_upload_returns_review_required_payload(monkeypatch, hospi
     )
 
     client = TestClient(app)
+    read = client.get("/monthly-menus/2026-03/imports/saved-unresolved", headers=headers).json()
     res = client.post(
-        "/monthly-menus",
-        params={"month_id": "2026-03"},
-        files={"file": ("menu.xlsx", b"dummy", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=headers,
+        "/monthly-menus/2026-03/imports/saved-unresolved/apply",
+        headers={**headers, "If-Match": read["revision"]},
     )
     assert res.status_code == 409
     assert res.json()["detail"]["code"] == "menu_master_review_required"
@@ -434,13 +460,18 @@ def test_monthly_menus_upload_download_allows_operator(monkeypatch, hospital_ope
 def test_monthly_menus_update_item_allows_operator(monkeypatch, hospital_operator):
     headers = hospital_operator.headers
 
-    monkeypatch.setattr(menus_api.menu_service, "update_item_status", lambda *_args, **_kwargs: "updated")
+    monkeypatch.setattr(menus_api.menu_service, "get_monthly_editor_snapshot", lambda _month: {"revision": "item-read"})
+    def _command(month, item, body, expected, *, action):
+        assert expected == "item-read" and action == "item"
+        return {"updated": True}
+    monkeypatch.setattr(menus_api.menu_service, "monthly_editor_command", _command)
 
     client = TestClient(app)
+    read = client.get("/monthly-menus/2026-03?editor=true", headers=headers).json()
     res = client.put(
         "/monthly-menus/2026-03/items/item-1",
         json={"name": "Menu A"},
-        headers=headers,
+        headers={**headers, "If-Match": read["revision"]},
     )
     assert res.status_code == 200
     assert res.json()["updated"] is True
@@ -477,7 +508,8 @@ def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch, hosp
 
     captured: dict[str, object] = {}
 
-    def _upsert(month_id: str, entry_id: str, body: dict):
+    def _upsert(month_id: str, entry_id: str, body: dict, expected, *, action):
+        assert expected == "exceptions-read" and action == "exceptions"
         captured["month_id"] = month_id
         captured["entry_id"] = entry_id
         captured["body"] = body
@@ -489,9 +521,11 @@ def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch, hosp
             "items": [{"id": "MMI_EXCEPTION", "facility_override": "FAC00003", "name": "鮭の塩焼き"}],
         }
 
-    monkeypatch.setattr(menus_api.menu_service, "upsert_entry_exceptions", _upsert)
+    monkeypatch.setattr(menus_api.menu_service, "monthly_editor_command", _upsert)
+    monkeypatch.setattr(menus_api.menu_service, "get_monthly_editor_snapshot", lambda _month: {"revision": "exceptions-read"})
 
     client = TestClient(app)
+    read = client.get("/monthly-menus/2026-03?editor=true", headers=headers).json()
     res = client.post(
         "/monthly-menus/2026-03/entries/MME1/exceptions",
         json={
@@ -500,7 +534,7 @@ def test_monthly_menus_upsert_entry_exceptions_allows_operator(monkeypatch, hosp
             "unit_type": "cut",
             "qty_per_serving": 1,
         },
-        headers=headers,
+        headers={**headers, "If-Match": read["revision"]},
     )
     assert res.status_code == 200
     assert res.json()["updated"] is True
@@ -519,19 +553,22 @@ def test_monthly_menus_resolve_master_check_allows_operator(monkeypatch, hospita
 
     captured: dict[str, object] = {}
 
-    def _resolve(month_id, item_id, body):
+    def _resolve(month_id, item_id, body, expected, *, action):
+        assert expected == "master-read" and action == "master"
         captured["month_id"] = month_id
         captured["item_id"] = item_id
         captured["body"] = body
         return {"resolved": True, "mode": "update", "menu_master_id": "MNU1"}
 
-    monkeypatch.setattr(menus_api.menu_service, "resolve_menu_master_check", _resolve)
+    monkeypatch.setattr(menus_api.menu_service, "monthly_editor_command", _resolve)
+    monkeypatch.setattr(menus_api.menu_service, "get_monthly_editor_snapshot", lambda _month: {"revision": "master-read"})
 
     client = TestClient(app)
+    read = client.get("/monthly-menus/2026-03?editor=true", headers=headers).json()
     res = client.post(
         "/monthly-menus/2026-03/master-checks/item-1/resolve",
         json={"action": "month_only", "unit_type": "cut", "qty_per_serving": 2, "category": "主菜"},
-        headers=headers,
+        headers={**headers, "If-Match": read["revision"]},
     )
     assert res.status_code == 200
     assert res.json()["resolved"] is True
