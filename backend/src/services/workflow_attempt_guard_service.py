@@ -554,6 +554,8 @@ def advance_nonworkflow_order_input(session: Any, boundary: dict[str, Any], orde
     job.order_id = order.id
     boundary["job_order_id"] = order.id
     job.metrics = {**(job.metrics or {}), "nonworkflow_execution": deepcopy(boundary)}
+    # Strict ownership reads refresh from storage even when autoflush is disabled.
+    session.flush([job])
     if boundary.get("ingest_lease") is not None and not boundary.get("ingest_successor_id"):
         from src.services.ingest_delivery_successor_service import advance_preparation
         advance_preparation(session, boundary)
