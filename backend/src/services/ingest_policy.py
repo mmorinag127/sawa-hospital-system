@@ -87,8 +87,22 @@ def _adjust_year(parsed: date, received_at: datetime, fmt: str) -> date:
     return min(candidates, key=lambda candidate: abs((candidate - received_date).days))
 
 
-def parse_date_string(date_str: str, received_at: datetime) -> Optional[date]:
-    policy = load_ingest_policy()
+def require_explicit_ingest_week(value: object) -> str:
+    from src.services.sheet_week_service import parse_sheet_week_value
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("week_hint_required")
+    month, start, end = parse_sheet_week_value(value)
+    if month is None:
+        raise ValueError("week_hint_invalid")
+    if start is None or end is None:
+        raise ValueError("week_choice_required")
+    return value.strip()
+
+
+def parse_date_string(date_str: str, received_at: datetime, *, policy: Optional[dict] = None) -> Optional[date]:
+    if policy is None:
+        policy = load_ingest_policy()
     week_policy = policy.get("week_id_policy", {})
     date_format = week_policy.get("date_format", "MM/DD")
     parsed = _parse_date(date_str, date_format, received_at.year)
@@ -102,7 +116,7 @@ def week_id_from_dates(
     received_at: datetime,
     policy: Optional[dict] = None,
 ) -> Optional[str]:
-    policy = policy or load_ingest_policy()
+    policy = load_ingest_policy() if policy is None else policy
     week_policy = policy.get("week_id_policy", {})
     date_format = week_policy.get("date_format", "MM/DD")
     week_format = week_policy.get("week_format", "WEK%GW%V")
@@ -131,7 +145,7 @@ def month_id_from_dates(
     received_at: datetime,
     policy: Optional[dict] = None,
 ) -> Optional[str]:
-    policy = policy or load_ingest_policy()
+    policy = load_ingest_policy() if policy is None else policy
     month_policy = policy.get("month_id_policy", {})
     week_policy = policy.get("week_id_policy", {})
     date_format = month_policy.get("date_format") or week_policy.get("date_format", "MM/DD")

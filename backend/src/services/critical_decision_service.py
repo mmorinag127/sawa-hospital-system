@@ -6,6 +6,10 @@ from uuid import uuid4
 
 from src.db import session_scope
 from src.models.order_critical_decision import OrderCriticalDecision
+from src.services.workflow_attempt_guard_service import (
+    lock_order_execution_input, lock_current_execution_write,
+    current_nonworkflow_execution, advance_nonworkflow_order_input,
+)
 
 INTERNAL_CANDIDATE_EVIDENCE_ACK_DECISION_TYPE = "_candidate_evidence_ack"
 
@@ -85,6 +89,9 @@ def sync_pending_decisions(
         if isinstance(item, dict) and str(item.get("decision_type") or "").strip()
     }
     with session_scope() as session:
+        order_input = lock_order_execution_input(session, normalized_order_id)
+        if order_input is None or not lock_current_execution_write(session, normalized_order_id):
+            raise ValueError("ocr_execution_owner_changed")
         existing_rows = (
             session.query(OrderCriticalDecision)
             .filter(OrderCriticalDecision.order_id == normalized_order_id)
@@ -137,6 +144,9 @@ def sync_pending_decisions(
                 )
             )
         session.flush()
+        execution_input = current_nonworkflow_execution()
+        if execution_input is not None:
+            advance_nonworkflow_order_input(session, execution_input, order_input)
         rows = (
             session.query(OrderCriticalDecision)
             .filter(OrderCriticalDecision.order_id == normalized_order_id)
@@ -225,6 +235,8 @@ def acknowledge_candidate_evidence(
     if not normalized_order_id or not normalized_candidate_id:
         return None
     with session_scope() as session:
+        if lock_order_execution_input(session, normalized_order_id) is None or not lock_current_execution_write(session, normalized_order_id):
+            return None
         row = (
             session.query(OrderCriticalDecision)
             .filter(
@@ -275,6 +287,8 @@ def choose_decision(
     if not normalized_order_id or not normalized_type or not normalized_value:
         return None
     with session_scope() as session:
+        if lock_order_execution_input(session, normalized_order_id) is None or not lock_current_execution_write(session, normalized_order_id):
+            return None
         row = (
             session.query(OrderCriticalDecision)
             .filter(

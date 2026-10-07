@@ -4,11 +4,12 @@ from uuid import uuid4
 
 import pytest
 
-from src.db import Base, engine, session_scope
+from src.db import session_scope
 from src.models.order import Order
 from src.models.order import OrderLine
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_current_state import OrderCurrentState
+from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
@@ -19,7 +20,11 @@ from src.models.ocr_job import OcrJob
 from src.services import order_workflow_v2_service
 
 
-Base.metadata.create_all(bind=engine)
+def _current_workflow_revision(order_id: str) -> int:
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+    assert error is None
+    assert isinstance(workflow, dict)
+    return workflow["revision"]
 
 
 def _id(prefix: str) -> str:
@@ -290,6 +295,120 @@ def _add_ocr_job(order_id: str, job_id: str = "OCR-job", *, job_order_id: str | 
     return job_id
 
 
+def test_cache_and_evidence_write_use_the_real_captured_workflow_job_and_reject_a_superseded_token() -> None:
+    order_id, _, _ = _create_order_with_evidence()
+    job_id = _add_ocr_job(order_id, job_id=_id("OCR"))
+    workflow_attempt_id = _id("attempt")
+    expected_revision = 7
+    payload = {
+        "status": "done",
+        "input_reference": f"file:///{order_id}.pdf",
+        "output_reference": f"file:///{order_id}.json",
+        "table_raw": "|day|quantity|\n|-|-|\n|1|2|",
+    }
+    with session_scope() as session:
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                revision=expected_revision,
+                state="ocr_running",
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+        job = session.get(OcrJob, job_id)
+        assert job is not None
+        job.metrics = {"workflow_attempt_id": workflow_attempt_id}
+
+    with order_service.workflow_ocr_write_context(workflow_attempt_id, expected_revision):
+        persisted = order_service._save_order_ocr_cache(
+            order_id,
+            payload,
+            job_id=job_id,
+            augment_hakodate_artifacts=False,
+            refresh_workflow=False,
+        )
+
+    assert isinstance(persisted, dict)
+    evidence_id = str(persisted.get("id") or "")
+    assert evidence_id
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order_id)
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id)
+        assert cache is not None
+        assert cache.payload["table_raw"] == payload["table_raw"]
+        assert evidence is not None
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert workflow is not None
+        workflow.revision = expected_revision + 1
+
+    with order_service.workflow_ocr_write_context(workflow_attempt_id, expected_revision):
+        rejected = order_service._save_order_ocr_cache(
+            order_id,
+            {**payload, "table_raw": "|day|quantity|\n|-|-|\n|1|999|"},
+            job_id=job_id,
+            augment_hakodate_artifacts=False,
+            refresh_workflow=False,
+        )
+
+    assert rejected is None
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order_id)
+        assert cache is not None
+        assert cache.payload["table_raw"] == payload["table_raw"]
+
+
+def test_synchronous_cache_repair_requires_its_operator_read_snapshot() -> None:
+    order_id, evidence_id, _ = _create_order_with_evidence()
+    with session_scope() as session:
+        session.add(
+            OrderWorkflowState(
+                order_id=order_id,
+                revision=11,
+                evidence_run_id=evidence_id,
+                state="review_required",
+                last_transition_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            OrderOcrCache(
+                order_id=order_id,
+                payload={"table_raw": "|day|quantity|\n|-|-|\n|1|2|"},
+                updated_at=datetime.utcnow(),
+            )
+        )
+
+    write_input = order_service._capture_synchronous_cache_write_input(order_id)
+    assert isinstance(write_input, dict)
+    saved = order_service._save_order_ocr_cache(
+        order_id,
+        {"table_raw": "|day|quantity|\n|-|-|\n|1|3|"},
+        synchronous_write_input=write_input,
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+    assert saved == {}
+
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        assert workflow is not None
+        workflow.revision = 12
+
+    rejected = order_service._save_order_ocr_cache(
+        order_id,
+        {"table_raw": "|day|quantity|\n|-|-|\n|1|999|"},
+        synchronous_write_input=write_input,
+        augment_hakodate_artifacts=False,
+        persist_evidence=False,
+        refresh_workflow=False,
+    )
+    assert rejected is None
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order_id)
+        assert cache is not None
+        assert cache.payload["table_raw"] == "|day|quantity|\n|-|-|\n|1|3|"
+
+
 @pytest.fixture(autouse=True)
 def _standard_active_template_for_workflow_tests(isolated_formal_schema) -> None:
     _install_active_template_version("FAC00001", "template-fac00001")
@@ -300,6 +419,7 @@ def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
+        expected_revision=0,
         facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
@@ -326,6 +446,7 @@ def test_context_suggestion_is_recorded_without_confirming_step1() -> None:
 
     workflow, error = order_workflow_v2_service.record_context_suggestion(
         order_id=order_id,
+        expected_revision=0,
         suggestion={
             "source": "ingest_first_pass_ocr",
             "facility_id": "FAC00002",
@@ -394,6 +515,7 @@ def test_list_ocr_results_only_returns_current_template_candidates() -> None:
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
+        expected_revision=0,
         facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
@@ -451,6 +573,7 @@ def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch) -> None:
     order_id, _, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
+        expected_revision=0,
         facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
@@ -476,6 +599,7 @@ def test_ensure_ocr_prerequisites_blocks_when_weekly_menu_base_sheet_missing(mon
     order_id, _, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
+        expected_revision=0,
         facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
@@ -487,7 +611,10 @@ def test_ensure_ocr_prerequisites_blocks_when_weekly_menu_base_sheet_missing(mon
         lambda _order_id: "monthly_menu_object_missing",
     )
 
-    workflow, error = order_workflow_v2_service.ensure_ocr_prerequisites(order_id)
+    workflow, error = order_workflow_v2_service.ensure_ocr_prerequisites(
+        order_id,
+        expected_revision=_current_workflow_revision(order_id),
+    )
 
     assert error == "monthly_menu_object_missing"
     assert workflow is not None
@@ -648,7 +775,11 @@ def test_ocr_run_blocks_legacy_context_without_active_template_version(monkeypat
             )
         )
 
-    workflow, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, job_id)
+    workflow, error = order_workflow_v2_service.mark_ocr_run_queued(
+        order_id,
+        job_id,
+        expected_revision=_current_workflow_revision(order_id),
+    )
 
     assert workflow is not None
     assert error == "template_version_required"
@@ -681,6 +812,7 @@ def test_context_confirm_uses_registered_facility_template(monkeypatch) -> None:
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
+        expected_revision=0,
         facility_id=facility_id,
         week_start="2026-04-26",
         week_end="2026-04-30",
@@ -752,7 +884,11 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
     template_version_id = workflow["template_version_id"]
 
     _install_fake_ocr_prerequisite(monkeypatch)
-    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, job_id)
+    queued, error = order_workflow_v2_service.mark_ocr_run_queued(
+        order_id,
+        job_id,
+        expected_revision=workflow["revision"],
+    )
     assert error is None
     assert queued["template_version_id"] == template_version_id
 
@@ -761,11 +897,17 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
         order_id,
         job_id=job_id,
         evidence_run_id=evidence_id_1,
+        expected_revision=queued["revision"],
+        workflow_attempt_id=queued["ocr_job"]["workflow_attempt_id"],
     )
     assert error is None
     assert completed["state"] == "ocr_completed"
 
-    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    selected, error = order_workflow_v2_service.select_ocr_result(
+        order_id,
+        evidence_id_1,
+        expected_revision=completed["revision"],
+    )
     assert error is None
     assert selected["template_version_id"] == template_version_id
 
@@ -773,14 +915,26 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=selected["revision"],
     )
     assert error is None
     _install_fake_materialization(monkeypatch)
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(
+        order_id,
+        expected_revision=saved["workflow"]["revision"],
+    )
     assert error is None
     assert bagging["workflow"]["template_version_id"] == template_version_id
-    order_workflow_v2_service.confirm_bagging(order_id)
-    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    confirmed_bagging, error = order_workflow_v2_service.confirm_bagging(
+        order_id,
+        expected_revision=bagging["workflow"]["revision"],
+    )
+    assert error is None
+    confirmed, error = order_workflow_v2_service.final_confirm(
+        order_id,
+        confirmed_by="tester",
+        expected_revision=confirmed_bagging["revision"],
+    )
     assert error is None
 
     with session_scope() as session:
@@ -3193,6 +3347,7 @@ def test_sheet_auto_edit_job_stores_running_and_done_result(monkeypatch) -> None
         order_id=order_id,
         sheet={"rows": [["menu", "70"]]},
         use_llm=True,
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert started is not None
@@ -3211,6 +3366,7 @@ def test_sheet_auto_edit_job_stores_running_and_done_result(monkeypatch) -> None
         job_id=job_id,
         sheet={"rows": [["menu", "70"]]},
         use_llm=True,
+        expected_revision=started["job"]["workflow_completion_revision"],
     )
     payload, error = order_workflow_v2_service.get_sheet_auto_edit_job(order_id=order_id, job_id=job_id)
 

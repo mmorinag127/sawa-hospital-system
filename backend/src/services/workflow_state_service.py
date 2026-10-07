@@ -11,6 +11,11 @@ from src.db import session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
+from src.services.workflow_attempt_guard_service import (
+    current_nonworkflow_execution, current_workflow_execution,
+    lock_order_execution_input, advance_nonworkflow_order_input,
+    lock_current_execution_write,
+)
 from src.services.ocr_job_service import (
     describe_job_state,
     get_latest_order_job,
@@ -419,10 +424,9 @@ def _resolve_active_evidence_run(
         return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
     draft_base_evidence_run_id = str(draft_sheet.get("base_evidence_run_id") or "").strip() or None
     latest_evidence_run_id = str((latest_evidence_run or {}).get("id") or "").strip() or None
-    if not draft_base_evidence_run_id or draft_base_evidence_run_id == latest_evidence_run_id:
-        return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
-    resolved = ocr_evidence_service.get_evidence_run(draft_base_evidence_run_id)
-    return resolved if isinstance(resolved, dict) else (latest_evidence_run if isinstance(latest_evidence_run, dict) else None)
+    if draft_base_evidence_run_id != latest_evidence_run_id:
+        return None
+    return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
 
 
 def _resolve_candidate_evidence_run(
@@ -436,13 +440,10 @@ def _resolve_candidate_evidence_run(
     if (
         rerun_candidate_id
         and rerun_candidate_id != active_evidence_run_id
-        and (not latest_evidence_run_id or rerun_candidate_id == latest_evidence_run_id)
     ):
         rerun_candidate = ocr_evidence_service.get_evidence_run(rerun_candidate_id)
         if isinstance(rerun_candidate, dict):
             return rerun_candidate
-    if latest_evidence_run_id and latest_evidence_run_id != active_evidence_run_id:
-        return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
     return None
 
 
@@ -518,7 +519,7 @@ def _load_workflow_current_sheet_context(
     except Exception:
         _order_service = None
     if _order_service is None:
-        latest_draft = draft_sheet_service.get_latest_sheet_draft(order_id)
+        latest_draft = draft_sheet_service.get_selected_sheet_draft(order_id)
         if not isinstance(latest_draft, dict):
             return None
         draft_payload = (
@@ -968,6 +969,9 @@ def _build_workflow_state_projection(
     force_refresh_current_sheet: bool = False,
     persist: bool = True,
 ) -> dict[str, Any] | None:
+    captured_workflow = current_workflow_execution()
+    if captured_workflow is not None and (captured_workflow.get("attempt") is not None or captured_workflow.get("revision") is not None):
+        persist = False
     current_sheet_context = (
         current_sheet_context_override
         if isinstance(current_sheet_context_override, dict)
@@ -1002,7 +1006,7 @@ def _build_workflow_state_projection(
         str((current_sheet_context or {}).get("resolved_week_id") or "").strip() or None
     )
     current_week_code = order_week_code or current_sheet_week_code
-    evidence_run = ocr_evidence_service.get_latest_evidence_run(normalized_order_id)
+    evidence_run = ocr_evidence_service.get_selected_evidence_run(normalized_order_id)
     draft_sheet = (
         current_sheet_context.get("draft_record")
         if isinstance(current_sheet_context, dict)
@@ -1184,6 +1188,12 @@ def _build_workflow_state_projection(
     if persist:
         last_transition_at = datetime.utcnow()
         with session_scope() as session:
+            order_input = lock_order_execution_input(session, normalized_order_id)
+            if order_input is None:
+                return None
+            execution_input = current_nonworkflow_execution()
+            if not lock_current_execution_write(session, normalized_order_id):
+                return None
             row = session.get(OrderWorkflowState, normalized_order_id)
             if row is not None and _workflow_v2_meta(row.secondary_actions_json) is not None:
                 secondary = dict(row.secondary_actions_json or {})
@@ -1201,7 +1211,7 @@ def _build_workflow_state_projection(
                 updated = session.execute(
                     update(OrderWorkflowState)
                     .where(OrderWorkflowState.order_id == normalized_order_id)
-                    .values(**update_payload, last_transition_at=last_transition_at)
+                    .values(**update_payload, last_transition_at=last_transition_at, revision=OrderWorkflowState.revision + 1)
                 ).rowcount
                 if not updated:
                     session.add(
@@ -1227,6 +1237,8 @@ def _build_workflow_state_projection(
                     "confidence_band": confidence_band,
                     "last_transition_at": last_transition_at.isoformat(),
                 }
+            if execution_input is not None:
+                advance_nonworkflow_order_input(session, execution_input, order_input)
     else:
         persisted_state = get_workflow_state(normalized_order_id)
         serialized = {

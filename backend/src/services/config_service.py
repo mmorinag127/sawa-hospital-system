@@ -7,17 +7,69 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import select
 
-from src.db import session_scope
-from src.models.facility import Facility
-from src.services.template_field_schema_service import derive_row_fields_from_columns
+def get_authored_facility_config(facility_id: str, selected_template_id: str | None = None) -> dict[str, Any]:
+    from src.services.workflow_attempt_guard_service import current_nonworkflow_execution, current_workflow_execution, processing_start_configured_input
+    if current_nonworkflow_execution() is not None or current_workflow_execution() is not None:
+        config = processing_start_configured_input()["facility"]
+        if config.get("facility_id") != facility_id:
+            raise ValueError("configured_execution_facility_mismatch")
+        return _validate_authored_facility_config(config, selected_template_id)
+    matches = [item for item in load_facility_master().get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
+    if len(matches) != 1:
+        raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
+    config = deepcopy(matches[0])
+    return _validate_authored_facility_config(config, selected_template_id)
+
+
+def _validate_authored_facility_config(config: dict[str, Any], selected_template_id: str | None) -> dict[str, Any]:
+    from src.services.config_validator import validate_facility_config
+    from src.services.facility_template_version_service import validate_template_columns
+
+    template = config.get("fax_template")
+    if not isinstance(template, dict) or not template:
+        raise ValueError("authored_fax_template_missing")
+    columns = template.get("columns")
+    if not isinstance(columns, list) or not columns or not all(isinstance(column, dict) for column in columns):
+        raise ValueError("authored_fax_template_incomplete")
+    validation = validate_facility_config({"fax_template": template})
+    column_validation = validate_template_columns(columns)
+    if validation["errors"] or column_validation["errors"]:
+        raise ValueError("authored_fax_template_incomplete")
+    declared_ids = _normalize_fax_template_ids(config.get("fax_template_ids"))
+    declared_ids.extend(_normalize_fax_template_ids(config.get("fax_template_id")))
+    if selected_template_id is None and len(set(declared_ids)) > 1:
+        raise ValueError("authored_fax_template_ambiguous")
+    if selected_template_id is not None and selected_template_id not in declared_ids:
+        raise ValueError("authored_fax_template_id_mismatch")
+    actual_template_id = template.get("template_id")
+    if selected_template_id is not None and actual_template_id != selected_template_id:
+        raise ValueError("authored_fax_template_id_mismatch")
+    if declared_ids and (not isinstance(actual_template_id, str) or actual_template_id not in declared_ids):
+        raise ValueError("authored_fax_template_id_mismatch")
+    return config
+
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 FACILITY_MASTER_PATH = Path(
     os.getenv("FACILITY_MASTER_PATH", DATA_DIR / "facility_master.template.json")
 )
 INGEST_POLICY_PATH = Path(os.getenv("INGEST_POLICY_PATH", DATA_DIR / "ingest_policy.template.json"))
+
+
+def capture_authored_processing_config(facility_id: str) -> dict[str, Any]:
+    try:
+        master = _load_json(FACILITY_MASTER_PATH)
+        policy = _load_json(INGEST_POLICY_PATH)
+    except (OSError, ValueError) as exc:
+        raise ValueError("configured_source_unavailable") from exc
+    matches = [item for item in master.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
+    if len(matches) != 1:
+        raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
+    facility = _validate_authored_facility_config(deepcopy(matches[0]), None)
+    if not isinstance(policy, dict):
+        raise ValueError("ingest_policy_invalid")
+    return {"facility": facility, "policy": policy}
 
 _NAME_TRANSLATION = str.maketrans(
     "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ",
@@ -99,142 +151,33 @@ def load_facility_master() -> dict:
     return _load_json(FACILITY_MASTER_PATH)
 
 
-@lru_cache(maxsize=1)
 def load_ingest_policy() -> dict:
+    from src.services.workflow_attempt_guard_service import current_nonworkflow_execution, current_workflow_execution, processing_start_configured_input
+    if current_nonworkflow_execution() is not None or current_workflow_execution() is not None:
+        return processing_start_configured_input()["policy"]
+    return _load_cached_ingest_policy()
+
+
+@lru_cache(maxsize=1)
+def _load_cached_ingest_policy() -> dict:
     return _load_json(INGEST_POLICY_PATH)
 
 
 def reload_configs() -> None:
     load_facility_master.cache_clear()
-    load_ingest_policy.cache_clear()
+    _load_cached_ingest_policy.cache_clear()
 
 
-def _merge_template(base: Optional[dict], override: Optional[dict]) -> dict:
-    if not base and not override:
-        return {}
-    result = deepcopy(base or {})
-    if not override:
-        return result
-    for key, value in override.items():
-        if key == "columns" and isinstance(value, list):
-            # `columns` is a schema definition. Appending base+override creates
-            # duplicated/contradicting fields and breaks OCR row mapping.
-            # When override provides columns, treat it as authoritative.
-            result["columns"] = deepcopy(value)
-        elif isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _merge_template(result.get(key), value)
-        else:
-            result[key] = value
-    return result
 
 
 def _normalize_cell_text(value: object) -> str:
     return str(value or "").strip().replace(" ", "").replace("　", "")
 
 
-def _facility_has_explicit_areas(facility: dict[str, Any]) -> bool:
-    areas = facility.get("areas")
-    if not isinstance(areas, list) or not areas:
-        return False
-    for area in areas:
-        if isinstance(area, dict):
-            area_id = str(area.get("area_id") or area.get("id") or "").strip()
-            area_name = str(area.get("name") or "").strip()
-            if area_id or area_name:
-                return True
-        else:
-            if str(area or "").strip():
-                return True
-    return False
 
 
-def _strip_area_suffix(label: str) -> str:
-    text = str(label or "").strip()
-    if not text:
-        return text
-    text = re.sub(r"\s*[0-9０-９]+\s*[FfＦｆ階]\s*$", "", text)
-    return text.strip() or str(label or "").strip()
 
 
-def _normalize_fax_template_for_area_mismatch(
-    *,
-    template: dict[str, Any],
-    facility: dict[str, Any],
-) -> dict[str, Any]:
-    if not isinstance(template, dict):
-        return template
-    # Auto-collapsing area-specific quantity columns was causing destructive
-    # schema changes for facilities with template-specific 2F/3F columns.
-    # Keep original template unless explicitly opted in per facility.
-    if not bool(facility.get("collapse_area_columns_when_no_areas", False)):
-        return template
-    if _facility_has_explicit_areas(facility):
-        return template
-    raw_columns = template.get("columns")
-    if not isinstance(raw_columns, list) or not raw_columns:
-        return template
-
-    has_area_quantity = any(
-        isinstance(col, dict)
-        and str(col.get("role") or "").strip().lower() == "quantity"
-        and str(col.get("area_id") or "").strip()
-        for col in raw_columns
-    )
-    if not has_area_quantity:
-        return template
-
-    changed = False
-    normalized_columns: list[dict[str, Any]] = []
-    seen_quantity: set[str] = set()
-
-    for raw_col in raw_columns:
-        if not isinstance(raw_col, dict):
-            continue
-        col = deepcopy(raw_col)
-        role = str(col.get("role") or "").strip().lower()
-        if role == "quantity":
-            diet_key = str(col.get("diet_type") or "").strip().lower()
-            area_token = str(col.get("area_id") or "").strip()
-            if area_token:
-                col.pop("area_id", None)
-                changed = True
-                for key in ("name", "header", "label"):
-                    if key in col:
-                        col[key] = _strip_area_suffix(str(col.get(key) or ""))
-            dedupe_key = diet_key or str(col.get("name") or col.get("header") or "")
-            if dedupe_key and dedupe_key in seen_quantity:
-                changed = True
-                continue
-            if dedupe_key:
-                seen_quantity.add(dedupe_key)
-        normalized_columns.append(col)
-
-    if not changed:
-        return template
-
-    for idx, col in enumerate(normalized_columns):
-        col["index"] = idx
-
-    normalized = deepcopy(template)
-    normalized["columns"] = normalized_columns
-    if isinstance(normalized.get("main_ocr_row_fields"), list):
-        rebuilt_fields: list[str] = []
-        for col in normalized_columns:
-            role = str(col.get("role") or "").strip().lower()
-            if role == "date":
-                rebuilt_fields.append("date_mmdd")
-            elif role == "daypart":
-                rebuilt_fields.append("daypart")
-            elif role == "menu_name":
-                rebuilt_fields.append("menu")
-            elif role == "note":
-                rebuilt_fields.append("remarks")
-            elif role == "quantity":
-                diet = str(col.get("diet_type") or "").strip() or "unknown"
-                rebuilt_fields.append(f"qty.{diet}_x")
-        if rebuilt_fields:
-            normalized["main_ocr_row_fields"] = rebuilt_fields
-    return normalized
 
 
 def _normalize_field_diet_token(value: object) -> str:
@@ -823,44 +766,10 @@ def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _normalize_fax_template_columns_schema(template: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(template, dict):
-        return template
-    columns = template.get("columns")
-    if not isinstance(columns, list):
-        return template
-    normalized = deepcopy(template)
-    normalized["columns"] = normalize_fax_template_columns(columns)
-    return normalized
 
 
-def _derive_row_fields_from_columns(columns: list[dict[str, Any]]) -> list[str]:
-    return derive_row_fields_from_columns(columns)
 
 
-def _harmonize_main_ocr_row_fields(template: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(template, dict):
-        return template
-    columns = template.get("columns")
-    if not isinstance(columns, list):
-        return template
-    normalized_columns = [col for col in columns if isinstance(col, dict)]
-    if not normalized_columns:
-        return template
-    derived_fields = _derive_row_fields_from_columns(normalized_columns)
-    if not derived_fields:
-        return template
-    existing_fields = template.get("main_ocr_row_fields")
-    existing = (
-        [str(item).strip() for item in existing_fields if str(item).strip()]
-        if isinstance(existing_fields, list)
-        else []
-    )
-    if existing == derived_fields:
-        return template
-    normalized = deepcopy(template)
-    normalized["main_ocr_row_fields"] = derived_fields
-    return normalized
 
 
 def _normalize_order_form_patterns(raw: Any) -> list[dict[str, Any]]:
@@ -963,22 +872,10 @@ def _extract_text_lines(markdown: str) -> list[str]:
 
 
 def _collect_facilities_for_match() -> list[dict]:
-    master = load_facility_master()
-    merged: dict[str, dict] = {}
-    for fac in master.get("facilities", []):
-        facility_id = str(fac.get("facility_id") or "").strip()
-        if not facility_id:
-            continue
-        merged[facility_id] = {"facility_id": facility_id, **fac}
-    with session_scope() as session:
-        for fac in session.execute(select(Facility)).scalars().all():
-            entry = merged.get(fac.id, {"facility_id": fac.id})
-            if not entry.get("facility_name"):
-                entry["facility_name"] = fac.name
-            if fac.config and fac.config.config_json:
-                entry.update(fac.config.config_json)
-            merged[fac.id] = entry
-    return list(merged.values())
+    return deepcopy([
+        facility for facility in load_facility_master().get("facilities", [])
+        if isinstance(facility, dict)
+    ])
 
 
 def match_facility_candidates(
@@ -1097,206 +994,25 @@ def match_facility_candidates(
 
 def resolve_facility_id(facility_name: str) -> Optional[str]:
     target = facility_name.strip()
-    with session_scope() as session:
-        fac = session.execute(select(Facility).where(Facility.name == target)).scalars().first()
-        if fac:
-            return fac.id
-    master = load_facility_master()
-    for fac in master.get("facilities", []):
-        if fac.get("facility_name") == target:
-            return fac.get("facility_id")
-        if target in (fac.get("aliases") or []):
-            return fac.get("facility_id")
-    return None
+    matches = [
+        facility for facility in load_facility_master().get("facilities", [])
+        if isinstance(facility, dict) and (
+            facility.get("facility_name") == target or target in (facility.get("aliases") or [])
+        )
+    ]
+    return matches[0].get("facility_id") if len(matches) == 1 else None
 
 
-def get_facility_by_id(facility_id: str) -> Optional[dict]:
-    with session_scope() as session:
-        fac = session.get(Facility, facility_id)
-        if fac:
-            config = fac.config.config_json if fac.config else {}
-            facility = {
-                "facility_id": fac.id,
-                "facility_name": fac.name,
-                "areas": [
-                    {"area_id": area.id, "name": area.name} for area in (fac.areas or [])
-                ],
-            }
-            if config:
-                facility.update(_strip_facility_template_storage_keys(config))
-            master = load_facility_master()
-            for fac_master in master.get("facilities", []):
-                if fac_master.get("facility_id") == facility_id:
-                    master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
-                    if master_template_id:
-                        facility["fax_template_id"] = master_template_id
-                        facility["fax_template_ids"] = master_template_ids or [master_template_id]
-                    for key in ("fax_template_override",):
-                        value = fac_master.get(key)
-                        if value not in (None, [], {}):
-                            facility[key] = deepcopy(value)
-                    master_override = fac_master.get("fax_template_override")
-                    current_override = facility.get("fax_template_override")
-                    reconciled_override = _reconcile_fax_template_override(
-                        current_override,
-                        master_override,
-                        drop_redundant=False,
-                        prefer_master=bool(master_override),
-                    )
-                    if reconciled_override is None:
-                        facility.pop("fax_template_override", None)
-                    else:
-                        facility["fax_template_override"] = reconciled_override
-                    for key, value in fac_master.items():
-                        if key not in facility or facility[key] in (None, [], {}):
-                            facility[key] = value
-                    break
-            return facility
-    master = load_facility_master()
-    for fac in master.get("facilities", []):
-        if fac.get("facility_id") == facility_id:
-            return fac
-    return None
+def get_facility_by_id(facility_id: str) -> dict[str, Any]:
+    return get_authored_facility_config(facility_id)
 
 
-def _build_facility_config(
-    *,
-    facility_id: str,
-    facility: dict[str, Any],
-    selected_template_id: str | None = None,
-) -> dict[str, Any]:
-    master = load_facility_master()
-    fax_template_override = facility.get("fax_template_override")
-    fax_template = None
-    template_ids = _normalize_fax_template_ids(facility.get("fax_template_ids"))
-    template_id = selected_template_id if isinstance(selected_template_id, str) else facility.get("fax_template_id")
-    if isinstance(template_id, str):
-        template_id = template_id.strip() or None
-    if template_id and template_id not in template_ids:
-        template_ids.insert(0, template_id)
-    fax_template = facility.get("fax_template")
-    fax_template = _merge_template(master.get("fax_template_base"), fax_template)
-    fax_template = _merge_template(fax_template, fax_template_override)
-    fax_template = _normalize_fax_template_columns_schema(fax_template)
-    fax_template = _normalize_fax_template_for_area_mismatch(
-        template=fax_template,
-        facility=facility,
-    )
-    fax_template = _harmonize_main_ocr_row_fields(fax_template)
-    explicit_row_fields = (
-        [str(item).strip() for item in fax_template_override.get("main_ocr_row_fields") if str(item).strip()]
-        if isinstance(fax_template_override, dict)
-        and isinstance(fax_template_override.get("main_ocr_row_fields"), list)
-        else []
-    )
-    if explicit_row_fields and not bool(fax_template.get("columns_authoritative")):
-        fax_template = deepcopy(fax_template)
-        fax_template["main_ocr_row_fields"] = explicit_row_fields
-    facility_prompt = (
-        facility.get("main_ocr_facility_prompt")
-        or facility.get("ocr_prompt")
-        or facility.get("facility_prompt")
-    )
-    if isinstance(facility_prompt, str) and facility_prompt.strip():
-        fax_template = deepcopy(fax_template)
-        fax_template["main_ocr_facility_prompt"] = facility_prompt.strip()
-    for key in (
-        "main_ocr_provider",
-        "openai_ocr_enabled",
-        "openai_ocr_model",
-        "openai_ocr_prompt",
-        "openai_ocr_max_tokens",
-        "openai_ocr_timeout_seconds",
-        "openai_ocr_retry_on_truncation",
-        "openai_ocr_retry_max_tokens",
-        "openai_ocr_fallback_provider",
-        "gemini_ocr_enabled",
-        "gemini_ocr_model",
-        "gemini_ocr_prompt",
-        "gemini_ocr_max_tokens",
-        "gemini_ocr_timeout_seconds",
-        "gemini_ocr_retry_on_truncation",
-        "gemini_ocr_retry_max_tokens",
-        "gemini_ocr_fallback_provider",
-        "large_cell_mode",
-        "body_merge_policy",
-        "quantity_assignment_strategy",
-        "hakodate_header_rows",
-        "hakodate_data_row_count",
-        "hakodate_ocr_resolution",
-        "hakodate_min_edge_margin_ratio",
-        "hakodate_template_signature",
-        "hakodate_template_signature_components",
-    ):
-        if key in facility:
-            fax_template = deepcopy(fax_template)
-            fax_template[key] = facility.get(key)
-    packaging_policy_override = facility.get("packaging_policy_override")
-    packaging_policy = facility.get("packaging_policy") or _merge_template(
-        master.get("packaging_policy_base"),
-        packaging_policy_override,
-    )
-    label_profile_override = facility.get("label_profile_override")
-    label_profile = facility.get("label_profile") or _merge_template(
-        master.get("label_profile_base"),
-        label_profile_override,
-    )
-    bag_types = facility.get("bag_types") or master.get("bag_types") or []
-    bagging_exceptions = facility.get("bagging_exceptions") or []
-
-    merged = {**facility}
-    facility_template_id = str(
-        merged.get("facility_template_id")
-        or merged.get("facility_template_name")
-        or merged.get("facility_name")
-        or merged.get("name")
-        or facility_id
-        or ""
-    ).strip()
-    if facility_template_id:
-        merged["facility_template_id"] = facility_template_id
-        merged["facility_template_name"] = facility_template_id
-    if template_id:
-        merged["fax_template_id"] = template_id
-    if template_ids:
-        merged["fax_template_ids"] = template_ids
-    merged["fax_template"] = fax_template
-    merged["packaging_policy"] = packaging_policy
-    merged["label_profile"] = label_profile
-    merged["bag_types"] = bag_types
-    merged["bagging_exceptions"] = bagging_exceptions
-    pattern_id = merged.get("order_form_pattern_id")
-    if isinstance(pattern_id, str) and pattern_id.strip():
-        resolved_pattern_id = pattern_id.strip()
-        merged["order_form_pattern_id"] = resolved_pattern_id
-        pattern = get_order_form_pattern(resolved_pattern_id)
-        if pattern:
-            merged["order_form_pattern"] = pattern
-    return merged
+def get_facility_config(facility_id: str) -> dict[str, Any]:
+    return get_authored_facility_config(facility_id)
 
 
-def get_facility_config(facility_id: str) -> Optional[dict[str, Any]]:
-    facility = get_facility_by_id(facility_id)
-    if not facility:
-        return None
-    return _build_facility_config(
-        facility_id=facility_id,
-        facility=facility,
-    )
-
-
-def get_facility_config_for_template(
-    facility_id: str,
-    template_id: str | None,
-) -> Optional[dict[str, Any]]:
-    facility = get_facility_by_id(facility_id)
-    if not facility:
-        return None
-    return _build_facility_config(
-        facility_id=facility_id,
-        facility=facility,
-        selected_template_id=template_id,
-    )
+def get_facility_config_for_template(facility_id: str, template_id: str | None) -> dict[str, Any]:
+    return get_authored_facility_config(facility_id, template_id)
 
 
 def _effective_fax_template_signature(template: dict[str, Any] | None) -> tuple[Any, ...] | None:

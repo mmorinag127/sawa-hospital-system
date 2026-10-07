@@ -946,6 +946,7 @@ def test_confirm_context_refreshes_stale_active_template_version_from_repo_maste
         week_start="2026-07-05",
         week_end="2026-07-11",
         template_id="いこいの森",
+        expected_revision=0,
     )
 
     assert error is None

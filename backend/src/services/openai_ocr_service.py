@@ -640,6 +640,8 @@ def run_openai_ocr(
     facility_id: str | None = None,
 ) -> dict[str, Any]:
     _ = facility_id
+    from src.services.storage_service import verify_recognizer_pdf_bytes
+    verify_recognizer_pdf_bytes(pdf_bytes)
     api_key = _get_api_key()
     model = _get_model(template)
     page = max(int(template.get("page", 1)) - 1, 0) + 1
@@ -683,6 +685,7 @@ def run_openai_ocr(
             image_uri=image_uri,
             max_tokens=attempt_max_tokens,
         )
+        verify_recognizer_pdf_bytes(pdf_bytes)
         payload = _request_openai_json(
             api_key=api_key,
             body=body,

@@ -15,7 +15,7 @@ from src.models.ingest_job import IngestJob
 from src.models.order import Order
 from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
 from src.models.user import Notification
-from src.services.ingest_policy import month_id_from_dates, parse_date_string, retry_backoff_seconds
+from src.services.ingest_policy import require_explicit_ingest_week, retry_backoff_seconds
 from src.services.manual_upload_service import ManualUploadSavedFile
 
 
@@ -263,23 +263,6 @@ def _serialize_uploaded_pdf_with_context(session, row: UploadedPdf) -> dict[str,
     return serialized
 
 
-def _derive_week_hint_from_filename(original_filename: object, received_at: object) -> str | None:
-    filename = str(original_filename or "").strip()
-    parsed_received_at = _parse_datetime(received_at)
-    if not filename or parsed_received_at is None:
-        return None
-    match = re.search(r"(?:^|[_-])(\d{2})(\d{2})(?:[_.-]|$)", filename)
-    if not match:
-        return None
-    parsed_date = parse_date_string(f"{match.group(1)}/{match.group(2)}", parsed_received_at)
-    if parsed_date is None:
-        return None
-    month_id = month_id_from_dates([parsed_date], parsed_received_at)
-    if not month_id:
-        return None
-    return None
-
-
 def backfill_uploaded_pdfs_from_ingest_jobs(*, limit: int | None = None) -> int:
     scan_limit = limit or _backfill_scan_limit()
     now = _now()
@@ -356,6 +339,7 @@ def create_uploaded_pdf_from_upload(
     page_count: int | None = None,
     force: bool = False,
 ) -> tuple[dict[str, Any], bool]:
+    week_hint = require_explicit_ingest_week(week_hint)
     now = _now()
     duplicate_blocked = False
     with session_scope() as session:
@@ -421,12 +405,7 @@ def create_uploaded_pdf_from_upload(
 
 
 def build_ingest_payload(uploaded_pdf: dict[str, Any]) -> dict[str, Any]:
-    week_hint = uploaded_pdf.get("week_hint") or None
-    if not week_hint:
-        week_hint = _derive_week_hint_from_filename(
-            uploaded_pdf.get("original_filename"),
-            uploaded_pdf.get("received_at"),
-        )
+    week_hint = require_explicit_ingest_week(uploaded_pdf.get("week_hint"))
     return {
         "message_id": uploaded_pdf.get("message_id"),
         "pdf_uri": uploaded_pdf.get("storage_uri"),

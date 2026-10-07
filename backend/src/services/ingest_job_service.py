@@ -15,7 +15,10 @@ from src.services.ocr_job_service import (
 
 
 def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    from src.services.ingest_policy import require_explicit_ingest_week
+
     normalized = dict(payload)
+    normalized["week_hint"] = require_explicit_ingest_week(normalized.get("week_hint"))
     received_at = normalized.get("received_at")
     if hasattr(received_at, "isoformat"):
         normalized["received_at"] = received_at.isoformat()

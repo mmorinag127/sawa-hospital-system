@@ -157,7 +157,19 @@ def test_download_document_uses_selected_document_version(monkeypatch) -> None:
         captured["uri"] = uri
         return b"%PDF-selected"
 
-    monkeypatch.setattr(orders_api, "_load_document_bytes", lambda uri: (fake_load(uri), "original", "direct"))
+    from hashlib import sha256
+    from src.services import workflow_attempt_guard_service
+    receipt = {"document_id": "DOC-v1", "storage_uri": "gs://bucket/old.pdf",
+               "sha256": sha256(b"%PDF-selected").hexdigest(), "generation": None}
+    def capture_selected(session, order, selected):
+        assert selected["document_id"] == "DOC-v1"
+        assert selected["storage_uri"] == receipt["storage_uri"]
+        return receipt
+    monkeypatch.setattr(workflow_attempt_guard_service, "capture_selected_pdf_receipt", capture_selected)
+    def load_selected(uri, captured_receipt):
+        assert captured_receipt is receipt
+        return fake_load(uri), "original", "direct"
+    monkeypatch.setattr(orders_api, "_load_document_bytes", load_selected)
 
     res = client.get("/orders/ORDdocversion/document?document_id=DOC-v1")
 

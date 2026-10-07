@@ -27,6 +27,8 @@ class FaxExtractedData:
     ocr_provider: Optional[str] = None
     raw_text: Optional[str] = None
     provider_debug: Optional[dict] = None
+    own_pipeline_payload: Optional[dict] = None
+    recognizer_payload: Optional[dict] = None
 
 
 def _get_main_provider(template: dict) -> str:
@@ -2644,7 +2646,11 @@ def extract_fax_data(
     *,
     facility_id: str | None = None,
     preferred_template_id: str | None = None,
+    own_pipeline_payload: dict | None = None,
 ) -> FaxExtractedData:
+    from src.services.storage_service import verify_selected_pdf_bytes
+
+    verify_selected_pdf_bytes(pdf_bytes)
     provider = _get_main_provider(template)
     grid = detect_table_grid(pdf_bytes, template)
     page_index = max(int(template.get("page", 1)) - 1, 0)
@@ -2679,13 +2685,35 @@ def extract_fax_data(
         raise RuntimeError("main_ocr_provider=tesseract has been removed")
 
     if provider == "pipeline":
-        output = run_ocr_pipeline(
-            pdf_bytes=pdf_bytes,
-            job_id=f"MAIN-{uuid.uuid4().hex[:8]}",
-            facility_id=facility_id,
-            input_reference=None,
-            preferred_template_id=preferred_template_id,
-        )
+        from src.services.ocr_job_service import own_pipeline_source, validate_own_pipeline_result
+
+        own_job_id, selected_input_reference = own_pipeline_source()
+        if own_pipeline_payload is not None:
+            output = own_pipeline_payload
+        else:
+            output = run_ocr_pipeline(
+                pdf_bytes=pdf_bytes,
+                job_id=own_job_id,
+                facility_id=facility_id,
+                input_reference=selected_input_reference,
+                force_upload=True,
+                preferred_template_id=preferred_template_id,
+            )
+        validate_own_pipeline_result(output, output.get("output_reference"))
+        from src.services.ocr_pipeline_service import is_ocr_pipeline_output_pending, OCRPipelineOutputPendingError
+
+        if is_ocr_pipeline_output_pending(output):
+            from src.services.ocr_job_service import own_pipeline_delivery_for_output
+
+            receipt = own_pipeline_delivery_for_output(output.get("output_reference"))
+            if type(receipt.get("wait_timeout_seconds")) is not int:
+                raise ValueError("ocr_pipeline_wait_input_missing")
+            raise OCRPipelineOutputPendingError(
+                input_reference=receipt["input_reference"], output_reference=receipt["output_reference"],
+                timeout_seconds=receipt["wait_timeout_seconds"],
+            )
+        if str(output.get("status") or "").lower() in {"failed", "error"}:
+            raise RuntimeError(str(output.get("error") or "own_pipeline_failed"))
         rows = _rows_from_pipeline_payload(output, template) or []
         facility_name = None
         date_strings = []
@@ -2713,6 +2741,8 @@ def extract_fax_data(
             ocr_provider=provider,
             raw_text=raw_text,
             provider_debug=provider_debug,
+            own_pipeline_payload=output,
+            recognizer_payload=output,
         )
 
     if provider == "openai":
@@ -2747,6 +2777,7 @@ def extract_fax_data(
                 ocr_provider=provider,
                 raw_text=raw_text,
                 provider_debug=provider_debug,
+                recognizer_payload=output,
             )
         except Exception:
             raise
@@ -2783,6 +2814,7 @@ def extract_fax_data(
                 ocr_provider=provider,
                 raw_text=raw_text,
                 provider_debug=provider_debug,
+                recognizer_payload=output,
             )
         except Exception:
             raise

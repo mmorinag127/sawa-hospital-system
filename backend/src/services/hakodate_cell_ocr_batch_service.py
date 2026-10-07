@@ -149,6 +149,7 @@ class HakodateCellOcrCaseResult:
     recognized_assignment_count: int
     metrics: dict[str, Any]
     outputs: dict[str, str]
+    expected_sheet_cells: tuple[str, ...] = ()
 
 
 def _normalize_digits(value: object) -> str:
@@ -951,6 +952,60 @@ def _run_yomitoku_contact_sheet(contact_sheet: Image.Image, *, device: str) -> t
     }
 
 
+def expected_sheet_cells_from_target_regions(regions: list[dict[str, Any]]) -> list[str]:
+    """Freeze template/physical-menu targets before any recognizer output exists."""
+    cells = [region.get("sheet_cell") for region in regions]
+    if not cells or any(not isinstance(cell, str) or not cell for cell in cells) or len(set(cells)) != len(cells):
+        raise ValueError("hakodate_expected_cells_missing")
+    return cells
+
+
+def original_physical_draft(*, physical_menu_entries: list, week_code: str) -> dict:
+    from src.services import master_order_form_template_service as master
+    if not isinstance(physical_menu_entries, list) or not physical_menu_entries:
+        raise ValueError("physical_menu_rows_unresolved")
+    hakodate_physical_menu_row_service.physical_row_ids_from_entries(physical_menu_entries)
+    entries = master._normalize_week_menu_entries(entries=physical_menu_entries, week_value=week_code)
+    if len(entries) != len(physical_menu_entries):
+        raise ValueError("hakodate_physical_row_unresolved")
+    row_ids = hakodate_physical_menu_row_service.physical_row_ids_from_entries(entries)
+    return {"fields": ["date", "daypart", "menu"], "rows": [[entry["_menu_date_obj"].isoformat(), entry["daypart"], entry["name"]] for entry in entries], "physical_menu_row_ids": row_ids, "physical_menu_row_count": len(row_ids), "week_id": week_code}
+
+
+def capture_original_target_plan(*, configured_input: dict, physical_menu_entries: list, week_code: str) -> list[dict]:
+    """Derive region identities from the original authored workbook, never OCR output."""
+    from src.services import master_order_form_template_service as master
+    from src.services.hakodate_step_review_pipeline_service import canonical_logical_target_plan
+
+    if not isinstance(physical_menu_entries, list) or not physical_menu_entries:
+        raise ValueError("physical_menu_rows_unresolved")
+    hakodate_physical_menu_row_service.physical_row_ids_from_entries(physical_menu_entries)
+    wb = master.build_facility_template_workbook(
+        facility_config=configured_input["facility"], week_value=week_code,
+        week_menu_entries=physical_menu_entries,
+    )
+    try:
+        ws = wb[master.FACILITY_TEMPLATE_SHEET_NAME]
+        draft = original_physical_draft(physical_menu_entries=physical_menu_entries, week_code=week_code)
+        plan = canonical_logical_target_plan(worksheet=ws, fax_template=configured_input["facility"]["fax_template"], draft_sheet=draft)
+        return plan
+    finally:
+        wb.close()
+
+
+def capture_expected_sheet_cells(*, configured_input: dict, physical_menu_entries: list, week_code: str) -> list[str]:
+    return expected_sheet_cells_from_target_regions(capture_original_target_plan(configured_input=configured_input, physical_menu_entries=physical_menu_entries, week_code=week_code))
+
+
+def validate_original_target_plan(item: dict, regions: list[dict]) -> None:
+    from src.services.hakodate_step_review_pipeline_service import canonical_target_semantics
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    if not snapshots_equal(item.get("original_expected_sheet_cells"), expected_sheet_cells_from_target_regions(regions)):
+        raise ValueError("hakodate_original_expectation_mismatch")
+    if not item.get("original_target_semantics") or not snapshots_equal(canonical_target_semantics(regions), item["original_target_semantics"]):
+        raise ValueError("hakodate_target_semantics_changed")
+
+
 def build_hakodate_best_method_for_manifest_item(
     *,
     item: dict[str, Any],
@@ -965,6 +1020,9 @@ def build_hakodate_best_method_for_manifest_item(
     locally reviewed best_method overlay/records artifacts. Path materialization
     is handled before dispatch; the accepted runtime logic itself is unchanged.
     """
+    template = _fax_template_for_manifest_item(item, str(item.get("facility_code") or ""))
+    if type(page) is not int or page != template["page"]:
+        raise ValueError("geometry_template_page_mismatch")
     runtime_item = _materialize_best_method_item_paths(item=item, output_dir=output_dir)
     from src.hakodate_best_method_runtime.render_best_method_overlay_all_facilities import (
         build_best_method_for_manifest_item,
@@ -983,6 +1041,11 @@ def build_hakodate_best_method_for_manifest_item(
         if value is not None
     }
     metrics = dict(summary.get("metrics") or {})
+    expected = summary.get("expected_sheet_cells")
+    if not isinstance(expected, list) or not expected or any(not isinstance(cell, str) or not cell for cell in expected) or len(set(expected)) != len(expected):
+        raise ValueError("hakodate_expected_cells_missing")
+    if metrics.get("expected_sheet_cells") != expected:
+        raise ValueError("hakodate_expected_cells_changed")
     result = HakodateCellOcrCaseResult(
         page=page,
         facility_code=str(runtime_item.get("facility_code") or ""),
@@ -998,6 +1061,7 @@ def build_hakodate_best_method_for_manifest_item(
         recognized_assignment_count=int(metrics.get("pred_nonempty_count") or 0),
         metrics=metrics,
         outputs=outputs,
+        expected_sheet_cells=tuple(expected),
     )
     return result, review_page
 
@@ -1021,9 +1085,6 @@ def _materialize_best_method_item_paths(*, item: dict[str, Any], output_dir: Pat
 
 
 def _fax_template_for_manifest_item(item: dict[str, Any], facility_code: str) -> dict[str, Any] | None:
-    embedded = item.get("fax_template")
-    if isinstance(embedded, dict):
-        return embedded
     template_id = (
         str(
             item.get("fax_template_id")
@@ -1033,12 +1094,15 @@ def _fax_template_for_manifest_item(item: dict[str, Any], facility_code: str) ->
         ).strip()
         or None
     )
-    try:
-        facility_config = config_service.get_facility_config_for_template(facility_code, template_id)
-    except Exception:
-        facility_config = None
-    fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
-    return fax_template if isinstance(fax_template, dict) else None
+    captured = item.get("configured_input")
+    if not isinstance(captured, dict) or not isinstance(captured.get("facility"), dict) or not isinstance(captured.get("policy"), dict):
+        raise ValueError("hakodate_captured_config_required")
+    facility_config = dict(captured["facility"])
+    config_service._validate_authored_facility_config(facility_config, template_id)
+    page = facility_config["fax_template"].get("page")
+    if type(page) is not int or page <= 0:
+        raise ValueError("geometry_template_page_required")
+    return facility_config["fax_template"]
 
 
 def _draft_sheet_body_row_count(draft_sheet: dict[str, Any] | None) -> int:
@@ -1064,6 +1128,13 @@ def _build_preprocess_for_ocr(
     render_width: int,
     draft_sheet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    original_draft = item.get("original_physical_draft")
+    if not isinstance(original_draft, dict):
+        raise ValueError("hakodate_original_draft_required")
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    if draft_sheet is not None and not snapshots_equal(draft_sheet.get("physical_menu_row_ids"), original_draft.get("physical_menu_row_ids")):
+        raise ValueError("hakodate_original_draft_changed")
+    draft_sheet = original_draft
     timings: dict[str, float] = {}
 
     def mark_timing(name: str, started_at: float) -> None:
@@ -1099,9 +1170,12 @@ def _build_preprocess_for_ocr(
         week_sheet_name=week_sheet_name,
     )
     fax_template = _fax_template_for_manifest_item(item, facility_code)
+    selected_page = fax_template["page"]
+    if type(page) is not int or page != selected_page:
+        raise ValueError("geometry_template_page_mismatch")
     mark_timing("load_template_config_seconds", step_t0)
     step_t0 = time.perf_counter()
-    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width)
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width, page=selected_page)
     mark_timing("resolve_quad_seconds", step_t0)
     step_t0 = time.perf_counter()
     registration, _step_images_np = build_fixed_quad_template_registration(
@@ -1118,10 +1192,11 @@ def _build_preprocess_for_ocr(
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        page=selected_page,
     )
     mark_timing("fixed_quad_registration_seconds", step_t0)
     step_t0 = time.perf_counter()
-    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
+    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width, page=selected_page)
     mark_timing("render_fax_pdf_seconds", step_t0)
     table_bbox = registration.template_outer_grid_bbox_used
     step_t0 = time.perf_counter()
@@ -1297,12 +1372,17 @@ def _build_preprocess_for_ocr(
         menu_body_row_indexes=menu_row_indexes,
     )
     mark_timing("build_target_regions_seconds", step_t0)
+    expected_sheet_cells = expected_sheet_cells_from_target_regions(target_regions)
+    validate_original_target_plan(item, target_regions)
     step_t0 = time.perf_counter()
     target_regions, target_snap_evidence = snap_regions_x_to_local_fax_rulings(
         working_rectified,
         target_regions,
         snap_y=True,
     )
+    if expected_sheet_cells_from_target_regions(target_regions) != expected_sheet_cells:
+        raise ValueError("hakodate_expected_cells_changed")
+    validate_original_target_plan(item, target_regions)
     mark_timing("snap_target_regions_seconds", step_t0)
     step_t0 = time.perf_counter()
     target_overlay = _draw_target_regions(grid_overlay=grid_overlay, regions=target_regions)
@@ -1317,10 +1397,11 @@ def _build_preprocess_for_ocr(
         "worksheet": worksheet,
         "raw_rectified": working_rectified,
         "target_regions": target_regions,
+        "expected_sheet_cells": expected_sheet_cells,
         "rectified_quad_points": rectified_quad_points,
         "template_outer_grid_bbox_used": table_bbox,
         "target_overlay": _draw_quad_points(target_overlay, rectified_quad_points, prefix="Q"),
-        "source_template": _source_template_name(facility_code),
+        "source_template": _source_template_name(facility_code, configured_input=item["configured_input"]),
         "axis_evidence": {
             **axis_evidence,
             "merge": merge_evidence,
@@ -1460,7 +1541,8 @@ def build_all_facility_hakodate_cell_ocr_pdf(
     pages: list[Image.Image] = []
     results: list[dict[str, Any]] = []
     t0 = time.perf_counter()
-    for page, item in enumerate(items, start=1):
+    for item in items:
+        page = _fax_template_for_manifest_item(item, str(item["facility_code"]))["page"]
         result, review_page = build_hakodate_cell_ocr_for_manifest_item(
             item=item,
             page=page,

@@ -1,17 +1,274 @@
 from __future__ import annotations
 
 import os
+import json
+from hashlib import sha256
+from urllib.parse import urlparse
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
+from src.services.workflow_attempt_guard_service import (
+    lock_actual_write_ownership, lock_current_workflow_attempt,
+    current_nonworkflow_execution, lock_nonworkflow_execution_job,
+    current_workflow_execution,
+    is_selected_pdf_failure,
+)
 
 _RECOVERABLE_STATUSES = {"awaiting_output", "recovering"}
 _RECOVERABLE_RESULT_STATES = {"awaiting_output", "recovering"}
 _ORDER_REPARSE_REQUEST_MODES = {"ocr_rerun", "ocr_reparse", "llm_reparse"}
+
+REPARSE_REQUEST_FIELDS = {
+    "ocr_prompt": "reparse_ocr_prompt", "prompt_preset": "reparse_prompt_preset",
+    "ocr_provider": "reparse_requested_provider", "ocr_model": "reparse_ocr_model",
+    "llm_assist": "reparse_llm_assist",
+}
+
+
+class OwnPipelineLineageError(ValueError):
+    pass
+
+
+def _lock_own_execution_job(session, job_id, *, source_failure=None):
+    workflow = current_workflow_execution()
+    execution = current_nonworkflow_execution()
+    owner = workflow if workflow is not None and workflow.get("attempt") is not None else execution
+    if not owner or owner.get("job_id") != job_id or not owner.get("order_id"):
+        return None
+    if not lock_actual_write_ownership(
+        session, job_id=job_id, order_id=owner["order_id"],
+        workflow_attempt_id=owner.get("attempt"),
+        expected_workflow_revision=owner.get("revision"),
+        source_failure=source_failure,
+    ):
+        return None
+    job = session.get(OcrJob, job_id, populate_existing=True)
+    if job is None or (job.metrics or {}).get("rerun_terminal_receipt") is not None:
+        return None
+    if owner.get("attempt") is not None and job.status not in {"running", "pending", "recovering", "awaiting_output"}:
+        return None
+    return job
+
+
+def complete_own_selected_pdf_failure(job_id, error):
+    """Failure-only receipt, never recognized lines, evidence, or adoption."""
+    if not is_selected_pdf_failure(error):
+        return None
+    execution = current_nonworkflow_execution()
+    if not isinstance(execution, dict) or execution.get("job_id") != job_id:
+        return None
+    with session_scope() as session:
+        job = _lock_own_execution_job(session, job_id, source_failure=error)
+        if job is None or job.status in {"done", "failed", "completed", "success"}:
+            return None
+        from src.models.document import OrderDocument
+        captured = execution.get("orders", {}).get(execution["order_id"], {})
+        document = session.get(OrderDocument, (captured.get("document") or {}).get("id"))
+        if document is not None:
+            document.status, document.error_message = "error", str(error)
+        receipt = {"job_id": job_id, "order_id": execution["order_id"],
+            "execution_id": execution["execution_id"], "status": "failed", "error": str(error),
+            "evidence_run_id": None, "adopted": False}
+        job.status, job.error_message = "failed", str(error)
+        job.updated_at = datetime.utcnow()
+        job.metrics = {**(job.metrics or {}), "result_state": "hard_failed",
+            "processing_stage": "source_verification_failed", "status": "failed", "error": str(error),
+            "stage_updated_at": job.updated_at.isoformat(),
+            "source_failure_receipt": receipt, "non_ocr_terminal_receipt": receipt,
+            "rerun_terminal_receipt": receipt, "next_recovery_at": None}
+        session.flush()
+        return receipt
+
+
+def capture_own_reparse_request(job_id, request):
+    if set(request) != set(REPARSE_REQUEST_FIELDS):
+        return False
+    with session_scope() as session:
+        job = _lock_own_execution_job(session, job_id)
+        if job is None:
+            return False
+        metrics = dict(job.metrics or {})
+        present = [key in metrics for key in REPARSE_REQUEST_FIELDS.values()]
+        if any(present):
+            return all(present) and all(metrics[key] == request[name] for name, key in REPARSE_REQUEST_FIELDS.items())
+        job.metrics = {**metrics, **{key: request[name] for name, key in REPARSE_REQUEST_FIELDS.items()}}
+        return True
+
+
+def own_pipeline_source():
+    workflow = current_workflow_execution() or {}
+    execution = current_nonworkflow_execution() or {}
+    owner = workflow if workflow.get("attempt") is not None else execution
+    job_id = owner.get("job_id")
+    if not job_id:
+        raise ValueError("ocr_execution_input_required")
+    with session_scope() as session:
+        job = _lock_own_execution_job(session, job_id)
+        if job is None or not job.input_reference:
+            raise ValueError("ocr_pipeline_source_changed")
+        return job_id, job.input_reference
+
+
+def record_own_pipeline_delivery(job_id, *, selected_input_reference, input_reference, output_reference, generation, input_sha256=None, wait_timeout_seconds=None):
+    if not input_reference or not output_reference or not selected_input_reference:
+        return False
+    with session_scope() as session:
+        job = _lock_own_execution_job(session, job_id)
+        if job is None or job.status not in {"running", "pending", "recovering", "awaiting_output"} or job.input_reference != selected_input_reference:
+            return False
+        workflow = current_workflow_execution() or {}
+        execution = current_nonworkflow_execution() or {}
+        owner = workflow if workflow.get("attempt") is not None else execution
+        selected_pdf = (
+            execution.get("selected_pdf_receipt")
+            if execution else (job.metrics or {}).get("selected_pdf_receipt")
+        )
+        if not isinstance(selected_pdf, dict) or selected_pdf.get("sha256") != input_sha256:
+            return False
+        read_input = execution.get("orders", {}).get(owner["order_id"]) if execution else (job.metrics or {}).get("reparse_read_input")
+        configured_input = read_input.get("configured_input") if isinstance(read_input, dict) else None
+        if not isinstance(configured_input, dict):
+            return False
+        configured_digest = sha256(json.dumps(configured_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        receipt = {
+            "job_id": job_id, "order_id": owner["order_id"],
+            "workflow_attempt_id": workflow.get("attempt"),
+            "workflow_revision": workflow.get("revision"),
+            "execution_id": execution.get("execution_id"),
+            "selected_input_reference": selected_input_reference,
+            "input_reference": input_reference, "output_reference": output_reference,
+            "generation": generation,
+            "input_sha256": input_sha256,
+            "configured_input_sha256": configured_digest,
+            "selected_pdf_receipt": selected_pdf,
+            "wait_timeout_seconds": wait_timeout_seconds,
+            "pipeline_job_id": f"{urlparse(input_reference).netloc}:{urlparse(input_reference).path.lstrip('/')}:{generation}",
+        }
+        job.metrics = {**(job.metrics or {}), "pipeline_delivery_receipt": receipt}
+        return True
+
+
+def own_pipeline_delivery_matches(job, input_reference, output_reference):
+    receipt = (job.metrics or {}).get("pipeline_delivery_receipt")
+    workflow = current_workflow_execution() or {}
+    execution = current_nonworkflow_execution() or {}
+    owner = workflow if workflow.get("attempt") is not None else execution
+    return isinstance(receipt, dict) and (
+        receipt.get("job_id") == job.id and bool(owner.get("order_id"))
+        and receipt.get("order_id") == owner["order_id"]
+        and job.order_id in {None, owner["order_id"]}
+        and receipt.get("workflow_attempt_id") == workflow.get("attempt")
+        and receipt.get("workflow_revision") == workflow.get("revision")
+        and receipt.get("execution_id") == execution.get("execution_id")
+        and receipt.get("selected_input_reference") == job.input_reference
+        and receipt.get("input_reference") == input_reference
+        and receipt.get("output_reference") == output_reference
+    )
+
+
+def own_pipeline_delivery_for_output(output_reference, *, required=True, write_session=None):
+    workflow = current_workflow_execution() or {}
+    execution = current_nonworkflow_execution() or {}
+    owner = workflow if workflow.get("attempt") is not None else execution
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
+        job = _lock_own_execution_job(session, owner.get("job_id"))
+        receipt = (job.metrics or {}).get("pipeline_delivery_receipt") if job is not None else None
+        if not isinstance(receipt, dict) and not required:
+            return None
+        if (
+            job is None or not isinstance(receipt, dict)
+            or not str(receipt.get("generation") or "").isdigit()
+            or (output_reference is not None and receipt.get("output_reference") != output_reference)
+            or not own_pipeline_delivery_matches(job, receipt.get("input_reference"), receipt.get("output_reference"))
+        ):
+            raise OwnPipelineLineageError("ocr_pipeline_delivery_mismatch")
+        return dict(receipt)
+
+
+def validate_own_pipeline_result(payload, output_reference, *, write_session=None):
+    receipt = own_pipeline_delivery_for_output(output_reference, write_session=write_session)
+    if not isinstance(payload, dict) or (
+        payload.get("input_reference") != receipt["input_reference"]
+        or str(payload.get("input_generation") or "") != receipt["generation"]
+        or payload.get("output_reference") != receipt["output_reference"]
+        or payload.get("job_id") != receipt["pipeline_job_id"]
+        or (payload.get("status") == "done" and (
+            not receipt.get("input_sha256") or payload.get("input_sha256") != receipt["input_sha256"]
+            or not receipt.get("configured_input_sha256") or payload.get("configured_input_sha256") != receipt["configured_input_sha256"]
+        ))
+    ):
+        raise OwnPipelineLineageError("ocr_pipeline_result_generation_mismatch")
+    if payload.get("status") in {"done", "failed"} and payload.get("execution_owner") != {
+        "job_id": receipt["job_id"], "order_id": receipt["order_id"],
+        "workflow_attempt_id": receipt["workflow_attempt_id"], "workflow_revision": receipt["workflow_revision"],
+        "nonworkflow_execution_id": receipt["execution_id"],
+    }:
+        raise OwnPipelineLineageError("ocr_pipeline_terminal_owner_mismatch")
+    if payload.get("status") == "failed":
+        raise OwnPipelineLineageError("ocr_pipeline_required_stage_failed")
+    if payload.get("status") == "done":
+        stages = payload.get("canonical_stages")
+        if payload.get("canonical_adoption_allowed") is not True or not isinstance(stages, dict) or set(stages) != {"classification", "roi", "correction"} or any(value not in {"passed", "disabled"} for value in stages.values()):
+            raise OwnPipelineLineageError("ocr_pipeline_required_stage_failed")
+    return payload
+
+
+def validate_own_first_pass_recognizer(payload, *, write_session):
+    execution = current_nonworkflow_execution()
+    provenance = payload.get("_first_pass_recognizer")
+    auxiliary = payload.get("auxiliary_pipeline_result")
+    pipeline = auxiliary if isinstance(auxiliary, dict) else payload
+    validate_own_pipeline_result(pipeline, pipeline.get("output_reference"), write_session=write_session)
+    receipt = own_pipeline_delivery_for_output(pipeline.get("output_reference"), write_session=write_session)
+    if (
+        execution is None or not isinstance(provenance, dict)
+        or provenance.get("job_id") != execution.get("job_id")
+        or provenance.get("execution_id") != execution.get("execution_id")
+        or provenance.get("workflow_attempt_id") is not None
+        or provenance.get("workflow_revision") is not None
+        or provenance.get("input_sha256") != receipt.get("input_sha256")
+        or not provenance.get("selected_input_reference")
+        or provenance.get("selected_input_reference") != receipt.get("selected_input_reference")
+        or provenance.get("template_id") != pipeline.get("template_id")
+    ):
+        raise OwnPipelineLineageError("first_pass_recognizer_lineage_mismatch")
+    from src.services.ingest_policy import require_explicit_ingest_week
+    from src.models.order import Order
+
+    week = require_explicit_ingest_week(provenance.get("week_hint"))
+    order = write_session.get(Order, execution.get("order_id"))
+    if order is None or order.week_code != week:
+        raise OwnPipelineLineageError("first_pass_recognizer_week_mismatch")
+    if isinstance(auxiliary, dict) and not payload.get("error"):
+        if (
+            not isinstance(payload.get("raw_recognizer_payload"), dict)
+            or payload.get("table_rows") != provenance.get("recognized_rows")
+            or payload.get("engine") != provenance.get("provider")
+        ):
+            raise OwnPipelineLineageError("first_pass_recognizer_result_missing")
+    return payload
+
+
+def mark_own_pipeline_waiting(job_id, *, input_reference, output_reference, error_message,
+                              metrics_patch, recovery_count_increment=False):
+    with session_scope() as session:
+        job = _lock_own_execution_job(session, job_id)
+        if job is None or job.status not in {"running", "pending", "recovering", "awaiting_output"} or not own_pipeline_delivery_matches(job, input_reference, output_reference):
+            return None
+        metrics = merge_own_job_metrics_patch(job.metrics, metrics_patch)
+        if recovery_count_increment:
+            metrics["auto_recovery_count"] = int((job.metrics or {}).get("auto_recovery_count") or 0) + 1
+        job.metrics = metrics
+        job.status = "awaiting_output"
+        job.output_reference = output_reference
+        job.error_message = error_message
+        job.updated_at = datetime.utcnow()
+        return _job_to_dict(job)
 
 
 def _job_to_dict(job: OcrJob) -> dict[str, Any]:
@@ -207,6 +464,23 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         }
     normalized_status = str(job.get("status") or "").strip().lower() or "idle"
     effective_status = normalized_status
+    metrics = job.get("metrics") or {}
+    execution_input = metrics.get("nonworkflow_execution")
+    has_execution_input = (
+        isinstance(execution_input, dict)
+        and execution_input.get("job_id") == job.get("id")
+        and bool(execution_input.get("execution_id"))
+        and isinstance(execution_input.get("orders"), dict)
+        and isinstance(execution_input.get("start_orders"), dict)
+        and set(execution_input["orders"]) == {execution_input.get("order_id")}
+        and isinstance(execution_input["start_orders"].get(execution_input.get("order_id")), dict)
+        and bool(execution_input["start_orders"][execution_input.get("order_id")].get("input_sha256"))
+    )
+    missing_execution_input = (
+        metrics.get("request_mode") in {"ingest_first_pass", "ocr_rerun", "ocr_reparse", "llm_reparse"}
+        and metrics.get("workflow_attempt_id") is None
+        and not has_execution_input
+    )
     if is_job_recoverable(job):
         effective_status = "recovering" if is_job_recovery_due(job) else "awaiting_output"
     elif normalized_status in {"running", "pending"} and is_job_stale(job):
@@ -215,6 +489,8 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         effective_status = "hard_failed"
     elif normalized_status in {"done", "success", "completed"}:
         effective_status = "done"
+    if missing_execution_input:
+        effective_status = "hard_failed"
     progress_updated_at = get_job_progress_updated_at(job)
     stale_at = get_job_stale_at(job) if effective_status == "stalled" else None
     recovery_due_at = get_job_next_recovery_at(job) if is_job_recoverable(job) else None
@@ -228,6 +504,7 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         "recovery_attempts": get_job_recovery_attempts(job),
         "stale_threshold_seconds": max(get_stale_minutes(), 0) * 60,
         "job_id": str(job.get("id") or "").strip() or None,
+        "blockers": ["ocr_execution_input_required"] if missing_execution_input else [],
     }
 
 
@@ -328,14 +605,211 @@ def create_job(
         return _job_to_dict(job), True
 
 
-def update_job(job_id: str, **updates: Any) -> dict[str, Any] | None:
+def reserve_workflow_reparse_job(
+    session: Any,
+    *,
+    job_id: str,
+    order_id: str,
+    input_reference: str,
+    template_version_id: str | None,
+    metrics: dict[str, Any],
+    stale_action: str,
+    force: bool,
+) -> tuple[OcrJob | None, str | None]:
+    """Reserve the OCR job inside the workflow command transaction.
+
+    No caller may create or mark a job running before the workflow revision CAS
+    has accepted the same request.
+    """
+    if stale_action not in {"retry", "wait"}:
+        return None, "stale_action_invalid"
+    existing = session.execute(
+        select(OcrJob).where(OcrJob.id == job_id).with_for_update()
+    ).scalar_one_or_none()
+    serialized = _job_to_dict(existing) if existing is not None else None
+    active = bool(
+        is_order_reparse_job(serialized, order_id)
+        and str(existing.status or "").strip().lower() in {"running", "pending", "awaiting_output", "recovering"}
+    ) if existing is not None else False
+    stale = active and is_job_stale(serialized)
+    if stale and stale_action == "wait" and not force:
+        return None, "ocr_rerun_stale_wait"
+    if active and not stale and not force:
+        return None, "ocr_rerun_in_progress"
+
+    now = datetime.utcnow()
+    job = existing
+    if job is None:
+        job = OcrJob(
+            id=job_id,
+            order_id=order_id,
+            input_reference=input_reference,
+            template_version_id=template_version_id,
+            status="running",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(job)
+    else:
+        job.order_id = order_id
+        job.input_reference = input_reference
+        job.template_version_id = template_version_id
+        job.status = "running"
+        job.error_message = None
+        job.template_id = None
+        job.output_reference = None
+        job.updated_at = now
+    job.metrics = dict(metrics)
+    session.flush()
+    return job, None
+
+
+_JOB_STAGE_METRIC_FIELDS = frozenset({
+    "processing_stage", "result_state", "stage_updated_at", "request_mode", "status",
+    "ocr_slot_wait_started_at", "ocr_slot_acquired_at", "ocr_slot_wait_seconds", "ocr_execution_slot",
+    "requested_provider", "effective_provider", "llm_assist", "quality_track",
+    "reparse_origin", "feedback_retry_depth", "error", "error_detail",
+    "error_user_message", "recovery_action", "stage_timeout_seconds",
+    "awaiting_output_since", "ocr_started_at", "next_recovery_at", "failed_cells",
+    "facility_id", "preferred_template_id", "preferred_template_ids", "output_reference",
+    "confirmed_lines_retained", "reused_first_pass", "pipeline_run_skipped",
+    "first_pass_wait_seconds", "actual_provider", "upstream_error_detail", "context_conflict",
+    "provider", "row_count", "line_count", "finish_reason", "truncated_output",
+    "rows_replaced_with_pipeline", "llm_quantity_only_merge", "structural_row_projection",
+    "primary_model", "repair_pass_applied", "repair_pass_reason", "repair_pass_error",
+    "repair_pass_model", "quality_error", "quality_detail", "before_count", "after_count",
+    "changed", "reject_reasons", "validation_detail", "llm_cost", "llm_audit",
+    "llm_pre_inference_audit", "llm_second_pass_audit", "llm_feedback_second_pass_applied",
+    "llm_feedback_second_pass_error", "blank_anchor_realign", "auto_fallback_applied",
+    "auto_fallback_from_provider", "auto_fallback_reason", "pdf_variant_used",
+    "pdf_variant_fallback_reason",
+})
+
+
+def merge_own_job_metrics_patch(
+    current: dict | None, patch: dict | None, *, own_outcome: bool = False,
+) -> dict:
+    """Patch telemetry on an already fenced row; ownership is never caller data."""
+    retained = dict(current or {})
+    protected = {
+        "job_id", "order_id", "input_reference", "first_pass_source", "reparse_read_input",
+        "selected_version_input", "selected_pdf_receipt", "selected_pdf_error", "source_failure_receipt", "selected_document_id", "selected_document_version",
+        "selected_document_is_current", "selected_document_storage_uri", "evidence_run_id",
+        "pending_receipt", "first_pass_terminal_receipt", "non_ocr_terminal_receipt", "rerun_terminal_receipt",
+        "auto_recovery_count",
+        "pipeline_delivery_receipt", *REPARSE_REQUEST_FIELDS.values(),
+    }
+    for key, value in (patch or {}).items():
+        if key in protected or key.startswith(("workflow_", "nonworkflow_")):
+            continue
+        if not own_outcome and key not in _JOB_STAGE_METRIC_FIELDS:
+            continue
+        if key in {"awaiting_output_since", "ocr_started_at"} and key in retained:
+            continue
+        retained[key] = value
+    return retained
+
+
+def update_job(job_id: str, *, actual_order_id: str | None = None, recovery_count_increment: bool = False, **updates: Any) -> dict[str, Any] | None:
     with session_scope() as session:
+        execution_input = current_nonworkflow_execution()
         job = session.get(OcrJob, job_id)
-        if not job:
+        if job is None:
             return None
+        if (job.metrics or {}).get("rerun_terminal_receipt") is not None:
+            return None
+        if execution_input is None and (job.metrics or {}).get("workflow_attempt_id") is not None:
+            return None
+        if actual_order_id is None:
+            actual_order_id = execution_input.get("order_id") if execution_input is not None else job.order_id
+        if actual_order_id is None and execution_input is not None and not lock_nonworkflow_execution_job(session, execution_input):
+            return None
+        if actual_order_id is not None and not lock_actual_write_ownership(
+            session,
+            job_id=job_id,
+            order_id=actual_order_id,
+            workflow_attempt_id=None,
+            expected_workflow_revision=None,
+        ):
+            return None
+        session.refresh(job)
+        if execution_input is None and (job.metrics or {}).get("nonworkflow_execution") is not None:
+            return None
+        if (job.metrics or {}).get("rerun_terminal_receipt") is not None:
+            return None
+        if execution_input is not None:
+            if "metrics" in updates and updates["metrics"] is None:
+                updates.pop("metrics")
+            if "input_reference" in updates and updates["input_reference"] != execution_input.get("input_reference"):
+                return None
+            if "order_id" in updates and updates["order_id"] != execution_input.get("job_order_id"):
+                return None
+            if isinstance(updates.get("metrics"), dict):
+                if updates["metrics"].get("workflow_attempt_id") is not None:
+                    return None
+        if "metrics" in updates:
+            if updates["metrics"] is None:
+                updates.pop("metrics")
+            elif not isinstance(updates["metrics"], dict):
+                return None
+            else:
+                updates["metrics"] = merge_own_job_metrics_patch(job.metrics, updates["metrics"])
+        if recovery_count_increment:
+            metrics = updates.get("metrics", dict(job.metrics or {}))
+            metrics["auto_recovery_count"] = int((job.metrics or {}).get("auto_recovery_count") or 0) + 1
+            updates["metrics"] = metrics
         for key, value in updates.items():
             if hasattr(job, key):
                 setattr(job, key, value)
         job.updated_at = datetime.utcnow()
         session.add(job)
         return _job_to_dict(job)
+
+
+def update_job_for_workflow_attempt(
+    job_id: str,
+    workflow_attempt_id: str,
+    *,
+    order_id: str | None = None,
+    expected_workflow_revision: int | None = None,
+    allow_terminal_metadata: bool = False,
+    **updates: Any,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Atomically update only the claimed attempt of this reusable job id."""
+    with session_scope() as session:
+        if not lock_current_workflow_attempt(
+            session,
+            job_id=job_id,
+            workflow_attempt_id=workflow_attempt_id,
+            order_id=order_id,
+            expected_workflow_revision=expected_workflow_revision,
+        ):
+            return None, False
+        values = {
+            key: value
+            for key, value in updates.items()
+            if key != "metrics" and hasattr(OcrJob, key)
+        }
+        job = session.get(OcrJob, job_id)
+        if job is None:
+            return None, False
+        if updates.get("metrics") is not None and not isinstance(updates["metrics"], dict):
+            return None, False
+        if isinstance(updates.get("metrics"), dict):
+            values["metrics"] = merge_own_job_metrics_patch(job.metrics, updates["metrics"])
+        values["updated_at"] = datetime.utcnow()
+        terminal_statuses = ["done", "failed", "error", "completed", "success"]
+        conditions = [
+            OcrJob.id == job_id,
+            OcrJob.metrics["workflow_attempt_id"].as_string() == workflow_attempt_id,
+        ]
+        # Progress is never allowed to overwrite a terminal result. Only the
+        # workflow completion transaction may opt in to terminal metadata.
+        if not allow_terminal_metadata:
+            conditions.append(OcrJob.status.notin_(terminal_statuses))
+        statement = update(OcrJob).where(*conditions).values(**values)
+        result = session.execute(statement)
+        if result.rowcount != 1:
+            return None, False
+        session.refresh(job)
+        return _job_to_dict(job), True

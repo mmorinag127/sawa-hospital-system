@@ -101,9 +101,6 @@ def _columns_from_facility_config(facility_config: dict[str, Any]) -> list[dict[
     fax_template = facility_config.get("fax_template") if isinstance(facility_config, dict) else None
     if isinstance(fax_template, dict) and isinstance(fax_template.get("columns"), list):
         return _normalise_columns(fax_template.get("columns"))
-    override = facility_config.get("fax_template_override") if isinstance(facility_config, dict) else None
-    if isinstance(override, dict) and isinstance(override.get("columns"), list):
-        return _normalise_columns(override.get("columns"))
     return []
 
 

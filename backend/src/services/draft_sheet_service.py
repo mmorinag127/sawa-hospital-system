@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import nullcontext
 from typing import Any
 from uuid import uuid4
 
 from src.db import session_scope
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_current_state import OrderCurrentState
+from src.models.order_workflow_state import OrderWorkflowState
+from sqlalchemy import delete
 from src.services import ocr_sheet_revision_service
 from src.services import order_current_state_service
+from src.services.workflow_attempt_guard_service import lock_actual_write_ownership, lock_current_synchronous_cache_write, current_nonworkflow_execution
 
 def _field_value_to_str(value: object) -> str:
     if value is None:
@@ -112,6 +117,17 @@ def _build_sheet_from_payload(
     source: str,
     base_evidence_run_id: str | None = None,
 ) -> dict[str, Any] | None:
+    own_result = payload.get("_reparse_recognizer_result")
+    if isinstance(own_result, dict):
+        if not own_result.get("fields") or not isinstance(own_result.get("rows"), list):
+            return None
+        return {
+            "order_id": order_id, "source": source,
+            "base_evidence_run_id": base_evidence_run_id,
+            "fields": list(own_result["fields"]), "header": list(own_result.get("header") or []),
+            "rows": [list(row) for row in own_result["rows"]],
+            "row_ids": [f"ocr-row-{index + 1}" for index in range(len(own_result["rows"]))],
+        }
     edited_revision = ocr_sheet_revision_service.select_edited_sheet_revision(payload, exact_only=False)
     if isinstance(edited_revision, dict):
         revision_sheet = ocr_sheet_revision_service.build_sheet_payload_from_revision(
@@ -166,12 +182,81 @@ def persist_sheet_draft(
     warnings: list[str] | None = None,
     latest_patch_candidate_id: str | None = None,
     edited_by: str | None = None,
+    workflow_attempt_id: str | None = None,
+    workflow_job_id: str | None = None,
+    expected_workflow_revision: int | None = None,
+    synchronous_write_input: dict[str, Any] | None = None,
+    write_session: Any = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id or not isinstance(draft_sheet_json, dict):
         return None
     now = datetime.utcnow()
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
+        if isinstance(synchronous_write_input, dict):
+            if workflow_job_id or workflow_attempt_id is not None or expected_workflow_revision is not None:
+                return None
+            write_allowed = lock_current_synchronous_cache_write(
+                session,
+                order_id=normalized_order_id,
+                expected_order_lines_updated_at=synchronous_write_input.get("order_lines_updated_at"),
+                expected_workflow_revision=synchronous_write_input.get("workflow_revision"),
+                expected_evidence_run_id=synchronous_write_input.get("evidence_run_id"),
+                expected_draft_id=synchronous_write_input.get("draft_id"),
+                expected_draft_base_evidence_run_id=synchronous_write_input.get("draft_base_evidence_run_id"),
+                expected_cache_exists=synchronous_write_input.get("cache_exists") is True,
+                expected_cache_updated_at=synchronous_write_input.get("cache_updated_at"),
+                expected_input_versions=synchronous_write_input.get("input_versions"),
+            )
+            write_allowed = write_allowed and base_evidence_run_id == synchronous_write_input.get("evidence_run_id")
+        else:
+            if not workflow_job_id:
+                return None
+            write_allowed = lock_actual_write_ownership(
+                session,
+                job_id=workflow_job_id,
+                workflow_attempt_id=workflow_attempt_id,
+                order_id=normalized_order_id,
+                expected_workflow_revision=expected_workflow_revision,
+            )
+        if not write_allowed:
+            return None
+        evidence = session.get(OrderOcrEvidenceRun, base_evidence_run_id) if base_evidence_run_id else None
+        if evidence is None or evidence.order_id != normalized_order_id:
+            return None
+        if template_version_id != evidence.template_version_id:
+            return None
+        if synchronous_write_input is not None:
+            from src.services.ocr_evidence_service import evidence_run_is_selectable
+
+            if not evidence_run_is_selectable(evidence):
+                return None
+        if evidence.status == "diagnostic_only" and draft_sheet_json.get("source") != "reparse_candidate":
+            return None
+        if workflow_job_id:
+            execution = (evidence.payload_json or {}).get("_ocr_execution")
+            if (
+                not isinstance(execution, dict)
+                or execution.get("job_id") != workflow_job_id
+                or execution.get("workflow_attempt_id") != workflow_attempt_id
+                or execution.get("workflow_revision") != expected_workflow_revision
+                or execution.get("evidence_run_id") != evidence.id
+                or (
+                    current_nonworkflow_execution() is not None
+                    and execution.get("nonworkflow_execution_id") != current_nonworkflow_execution().get("execution_id")
+                )
+            ):
+                return None
+            if execution.get("disposition") == "rejected" and draft_sheet_json.get("source") != "reparse_candidate":
+                return None
+            draft_sheet_json = {
+                **draft_sheet_json, "_ocr_execution": dict(execution), "adopted": False,
+            }
+        if any(
+            draft_sheet_json.get(key) and draft_sheet_json[key] != base_evidence_run_id
+            for key in ("base_evidence_run_id", "evidence_run_id")
+        ):
+            return None
         draft = OrderSheetDraft(
             id=f"ODR{uuid4().hex[:12]}",
             order_id=normalized_order_id,
@@ -191,7 +276,10 @@ def persist_sheet_draft(
         session.add(draft)
         session.flush()
         serialized = _serialize_draft(draft)
-    order_current_state_service.delete_current_state(normalized_order_id)
+        if write_session is not None:
+            session.execute(delete(OrderCurrentState).where(OrderCurrentState.order_id == normalized_order_id))
+    if write_session is None:
+        order_current_state_service.delete_current_state(normalized_order_id)
     return serialized
 
 
@@ -211,6 +299,31 @@ def get_latest_sheet_draft(order_id: str) -> dict[str, Any] | None:
         return _serialize_draft(draft)
 
 
+def get_selected_sheet_draft(order_id: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        draft = session.get(OrderSheetDraft, workflow.draft_id) if workflow and workflow.draft_id else None
+        if (
+            draft is None or draft.order_id != order_id
+            or not workflow.evidence_run_id or draft.base_evidence_run_id != workflow.evidence_run_id
+            or draft.template_version_id != workflow.template_version_id
+        ):
+            return None
+        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
+        from src.services.ocr_evidence_service import evidence_run_is_selectable
+
+        if (
+            evidence is None or evidence.order_id != order_id
+            or evidence.template_version_id != workflow.template_version_id
+            or not evidence_run_is_selectable(evidence)
+        ):
+            return None
+        payload = draft.draft_sheet_json or {}
+        if payload.get("source") == "reparse_candidate" or payload.get("adopted") is False:
+            return None
+        return _serialize_draft(draft)
+
+
 def build_initial_sheet_draft(order_id: str) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -220,7 +333,7 @@ def build_initial_sheet_draft(order_id: str) -> dict[str, Any] | None:
     # no-draft bootstrap to the canonical sheet builder.
     from src.services import order_service
 
-    latest_draft = get_latest_sheet_draft(normalized_order_id)
+    latest_draft = get_selected_sheet_draft(normalized_order_id)
     if order_service._draft_record_is_authoritative_current_sheet(latest_draft):
         draft_payload = (
             latest_draft.get("draft_sheet_json")
@@ -242,19 +355,27 @@ def build_sheet_draft_from_evidence(
     payload = None
     base_evidence_run_id = None
     if isinstance(evidence_run, dict):
+        if (
+            evidence_run.get("order_id") != normalized_order_id
+            or not evidence_run.get("id")
+            or evidence_run.get("selectable") is not True
+        ):
+            return None
         payload = evidence_run.get("payload_json") if isinstance(evidence_run.get("payload_json"), dict) else None
         base_evidence_run_id = str(evidence_run.get("id") or "").strip() or None
+        if not isinstance(payload, dict):
+            return None
     if not isinstance(payload, dict):
         with session_scope() as session:
-            latest_evidence = (
-                session.query(OrderOcrEvidenceRun)
-                .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
-                .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
-                .first()
-            )
-            if latest_evidence and isinstance(latest_evidence.payload_json, dict):
-                payload = latest_evidence.payload_json
-                base_evidence_run_id = latest_evidence.id
+            workflow = session.get(OrderWorkflowState, normalized_order_id)
+            selected = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id) if workflow and workflow.evidence_run_id else None
+            if selected and selected.order_id == normalized_order_id and selected.template_version_id == workflow.template_version_id:
+                from src.services.ocr_evidence_service import evidence_run_is_selectable
+
+                if not evidence_run_is_selectable(selected):
+                    return None
+                payload = selected.payload_json
+                base_evidence_run_id = selected.id
     if not isinstance(payload, dict):
         return None
     return _build_sheet_from_payload(

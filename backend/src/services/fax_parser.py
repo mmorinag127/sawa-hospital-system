@@ -3,7 +3,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Optional
 
-from src.services.ingest_policy import parse_date_string
+from src.services.ingest_policy import parse_date_string, load_ingest_policy
 
 
 def _parse_number(
@@ -497,7 +497,9 @@ def parse_order_lines(
     tokens: Optional[list[dict]] = None,
     grid: Optional[dict] = None,
     pdf_bytes: bytes | None = None,
+    date_policy: Optional[dict] = None,
 ) -> list[dict[str, Any]]:
+    date_policy = load_ingest_policy() if date_policy is None else date_policy
     quantity_rules = quantity_rules or {}
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
     use_change_column = quantity_rules.get("use_change_column_if_present", True)
@@ -602,7 +604,7 @@ def parse_order_lines(
                 if idx is None or idx >= len(row):
                     continue
                 cell = _normalize_cell(row[idx], normalize_whitespace)
-                parsed = parse_date_string(cell, received_at)
+                parsed = parse_date_string(cell, received_at, policy=date_policy)
                 if parsed:
                     first_date_in_table = parsed
                     break
@@ -644,7 +646,7 @@ def parse_order_lines(
             cell = _normalize_cell(row[idx], normalize_whitespace)
             role = col.get("role")
             if role == "date":
-                base["date"] = parse_date_string(cell, received_at)
+                base["date"] = parse_date_string(cell, received_at, policy=date_policy)
             elif role == "daypart":
                 base["daypart"] = _canonical_daypart(cell) or None
             elif role == "menu_name":

@@ -500,7 +500,6 @@ def facility_template_has_vertical_merged_quantity_cells(
     if isinstance(facility.get("expanded_cell_same_daypart_copy_enabled"), bool):
         return bool(facility.get("expanded_cell_same_daypart_copy_enabled"))
     template_candidates = [
-        facility.get("fax_template_override"),
         facility.get("fax_template"),
     ]
     for template in template_candidates:

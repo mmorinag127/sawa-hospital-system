@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.db import session_scope
 from src.models.order_current_state import OrderCurrentState
+from src.services.workflow_attempt_guard_service import lock_current_execution_write, lock_actual_write_ownership
 
 _CURRENT_STATE_SNAPSHOT_VERSION = "v2"
 
@@ -100,6 +101,8 @@ def persist_current_state(
     safe_state = _json_safe(state_json)
     now = datetime.utcnow()
     with session_scope() as session:
+        if not lock_current_execution_write(session, normalized_order_id):
+            return None
         values = {
             "order_id": normalized_order_id,
             "template_version_id": str(template_version_id or "").strip() or None,
@@ -141,9 +144,22 @@ def persist_current_state(
         return _serialize(row)
 
 
-def delete_current_state(order_id: str) -> None:
+def delete_current_state(
+    order_id: str, *, workflow_job_id: str | None = None,
+    workflow_attempt_id: str | None = None, expected_workflow_revision: int | None = None,
+) -> None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return
     with session_scope() as session:
+        if workflow_job_id is not None or workflow_attempt_id is not None or expected_workflow_revision is not None:
+            allowed = lock_actual_write_ownership(
+                session, job_id=workflow_job_id, order_id=normalized_order_id,
+                workflow_attempt_id=workflow_attempt_id,
+                expected_workflow_revision=expected_workflow_revision,
+            )
+        else:
+            allowed = lock_current_execution_write(session, normalized_order_id)
+        if not allowed:
+            return
         session.execute(delete(OrderCurrentState).where(OrderCurrentState.order_id == normalized_order_id))

@@ -58,7 +58,9 @@ def resolve_fax_menu_row_indexes(sheet: dict[str, Any], row_match: dict[str, Any
     return indexes
 
 
-def physical_row_key_from_entry(entry: dict[str, Any], fallback_index: int) -> tuple[str, str, str] | None:
+def physical_row_key_from_entry(entry: dict[str, Any]) -> tuple[str, str, str]:
+    if not isinstance(entry, dict):
+        raise ValueError("physical_menu_row_invalid")
     menu_date = entry.get("menu_date")
     if isinstance(menu_date, date):
         date_value = menu_date.isoformat()
@@ -66,48 +68,39 @@ def physical_row_key_from_entry(entry: dict[str, Any], fallback_index: int) -> t
         date_value = str(menu_date or "").strip()
     daypart_value = str(entry.get("daypart_key") or entry.get("daypart") or "").strip()
     slot_raw = entry.get("slot_index")
+    if type(slot_raw) is not int or slot_raw < 0:
+        raise ValueError("physical_menu_slot_identity_required")
+    slot_value = str(slot_raw)
+    if not date_value or not daypart_value:
+        raise ValueError("physical_menu_row_identity_required")
     try:
-        slot_value = str(int(slot_raw)) if slot_raw is not None else str(fallback_index)
-    except Exception:
-        slot_value = str(slot_raw or fallback_index).strip()
-    if not date_value or not daypart_value or not slot_value:
-        return None
+        date.fromisoformat(date_value)
+    except ValueError:
+        raise ValueError("physical_menu_row_identity_required") from None
     return date_value, daypart_value, slot_value
 
 
-def physical_row_id_from_entry(entry: dict[str, Any], fallback_index: int) -> str:
-    key = physical_row_key_from_entry(entry, fallback_index)
-    if key is None:
-        return f"physical-row-{fallback_index + 1}"
+def physical_row_id_from_entry(entry: dict[str, Any]) -> str:
+    key = physical_row_key_from_entry(entry)
     return "__".join([key[0], key[1], key[2]])
 
 
 def physical_row_keys_from_entries(entries: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
     keys: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            continue
-        key = physical_row_key_from_entry(entry, idx)
-        if key is None or key in seen:
-            continue
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("physical_menu_rows_unresolved")
+    for entry in entries:
+        key = physical_row_key_from_entry(entry)
+        if key in seen:
+            raise ValueError("physical_menu_row_duplicate")
         seen.add(key)
         keys.append(key)
     return keys
 
 
 def physical_row_ids_from_entries(entries: list[dict[str, Any]]) -> list[str]:
-    row_ids: list[str] = []
-    seen: set[str] = set()
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            continue
-        row_id = physical_row_id_from_entry(entry, idx)
-        if not row_id or row_id in seen:
-            continue
-        seen.add(row_id)
-        row_ids.append(row_id)
-    return row_ids
+    return ["__".join(key) for key in physical_row_keys_from_entries(entries)]
 
 
 def physical_row_count_from_entries(entries: list[dict[str, Any]]) -> int:
@@ -118,17 +111,19 @@ def physical_row_count_from_sheet(sheet: dict[str, Any] | None) -> tuple[int, st
     if not isinstance(sheet, dict):
         return 0, "sheet_missing"
     explicit_count = sheet.get("physical_menu_row_count")
-    try:
-        normalized_count = int(explicit_count)
-    except Exception:
-        normalized_count = 0
-    if normalized_count > 0:
-        return normalized_count, "physical_menu_row_count"
-    physical_row_ids = [
-        str(item or "").strip()
-        for item in (sheet.get("physical_menu_row_ids") or [])
-        if str(item or "").strip()
-    ]
-    if physical_row_ids:
-        return len(set(physical_row_ids)), "physical_menu_row_ids"
-    return 0, "physical_menu_rows_unresolved"
+    physical_row_ids = sheet.get("physical_menu_row_ids")
+    if not isinstance(physical_row_ids, list) or not physical_row_ids:
+        return 0, "physical_menu_rows_unresolved"
+    if any(not isinstance(item, str) for item in physical_row_ids) or len(set(physical_row_ids)) != len(physical_row_ids):
+        return 0, "physical_menu_row_identity_invalid"
+    for row_id in physical_row_ids:
+        parts = row_id.split("__")
+        if len(parts) != 3 or not parts[1] or not parts[2].isdigit() or str(int(parts[2])) != parts[2]:
+            return 0, "physical_menu_row_identity_invalid"
+        try:
+            date.fromisoformat(parts[0])
+        except ValueError:
+            return 0, "physical_menu_row_identity_invalid"
+    if explicit_count is not None and (type(explicit_count) is not int or explicit_count != len(physical_row_ids)):
+        return 0, "physical_menu_row_count_mismatch"
+    return len(physical_row_ids), "physical_menu_row_ids"
