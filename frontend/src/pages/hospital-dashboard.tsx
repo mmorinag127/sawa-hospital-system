@@ -1,3 +1,4 @@
+import { Button } from "@mui/material";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
@@ -410,14 +411,14 @@ export default function HomePage() {
       {error && (
         <div className="error-banner">
           <p className="error">{error}</p>
-          <button
+          <Button
             type="button"
-            className="retry-button"
+            className="retry-button hospital-dashboard-control"
             onClick={() => window.location.reload()}
             disabled={ordersLoading}
           >
             {ordersLoading ? "再試行中..." : "再読み込み"}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -1236,7 +1237,8 @@ export default function HomePage() {
           flex: 1 1 320px;
         }
 
-        .retry-button {
+        .retry-button,
+        :global(.hospital-dashboard-control.retry-button) {
           border: none;
           border-radius: 999px;
           min-height: 40px;
@@ -1247,11 +1249,13 @@ export default function HomePage() {
           cursor: pointer;
         }
 
-        .retry-button:disabled {
+        .retry-button:disabled,
+        :global(.hospital-dashboard-control.retry-button:disabled) {
           opacity: 0.6;
           cursor: progress;
         }
 
+        :global(.hospital-dashboard-control.MuiButton-root){font-family:inherit;line-height:normal;text-transform:none;min-width:0}
         @keyframes rise {
           from {
             opacity: 0;

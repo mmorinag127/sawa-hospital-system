@@ -1,3 +1,4 @@
+import { Button, Input, NativeSelect } from "@mui/material";
 import { useState, type FormEvent } from "react";
 import { clearAuth, setBearerToken } from "../../services/apiClient";
 import { publishSchoolLunchSessionGeneration } from "../../services/browserSession";
@@ -55,21 +56,21 @@ export default function AutomationLoginPage() {
       <form className="form-grid" onSubmit={submit} autoComplete="off">
         <label className="field">
           <span>対象システム</span>
-          <select value={system} onChange={(event) => setSystem(event.target.value)} disabled={busy}>
+          <NativeSelect disableUnderline className="hospital-automation-control" value={system} onChange={(event) => setSystem(event.target.value)} disabled={busy}>
             <option value="shift">シフト</option>
             <option value="school-lunch">学校給食</option>
-          </select>
+          </NativeSelect>
         </label>
         <label className="field">
           <span>認証トークン</span>
-          <input type="password" autoComplete="off" value={token}
+          <Input disableUnderline className="hospital-automation-control" type="password" inputProps={{ autoComplete: "off" }} value={token}
             onChange={(event) => setToken(event.target.value)} disabled={busy} required />
         </label>
-        <button className="btn primary" type="submit" disabled={busy || !token.trim()}>
+        <Button className="btn primary hospital-automation-control" type="submit" disabled={busy || !token.trim()}>
           {busy ? "認証中" : "ログイン"}
-        </button>
+        </Button>
         {error && <p role="alert">{error}</p>}
-      </form>
+      </form><style jsx>{`:global(.hospital-automation-control.MuiButton-root){all:revert;font:inherit;outline-color:var(--sawa-accent)}:global(.hospital-automation-control.MuiInput-root){all:revert;display:inline-block;font:inherit}:global(.hospital-automation-control.MuiInput-root input),:global(.hospital-automation-control.MuiInput-root select){all:revert;font:inherit;outline-color:var(--sawa-accent)}:global(.hospital-automation-control.MuiInput-root .MuiNativeSelect-icon){display:none}`}</style>
     </main>
   );
 }
