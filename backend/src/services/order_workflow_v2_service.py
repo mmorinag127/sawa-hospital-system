@@ -783,6 +783,25 @@ def _effective_workflow_template_version_id(row: OrderWorkflowState, meta: dict[
     return _normalize_id(row.template_version_id) or _normalize_id(meta.get("template_version_id")) or None
 
 
+def _canonical_workflow_template_version(session, template_version_id, facility_id):
+    from src.services import canonical_facility_lineage as lineage
+    from src.services.canonical_facility_store import CanonicalStoreError
+
+    version = lineage.read_projection(session, template_version_id)
+    if version is None:
+        return None, "template_version_mismatch"
+    try:
+        lineage.verify_projection(version)
+    except CanonicalStoreError:
+        return None, "template_version_mismatch"
+    if facility_id and _normalize_id(version.facility_id) != facility_id:
+        return None, "template_version_mismatch"
+    validation = facility_template_version_service.validate_template_columns(list(version.columns_json or []))
+    if validation.get("errors"):
+        return None, "facility_template_unresolved"
+    return version, None
+
+
 def _require_workflow_template_version_from_context(
     session: Any,
     *,
@@ -793,21 +812,15 @@ def _require_workflow_template_version_from_context(
     template_version_id = _effective_workflow_template_version_id(workflow, meta)
     if template_version_id:
         facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
-        version = session.get(FacilityTemplateVersion, template_version_id)
-        if version is None or version.status != "active":
-            return None, "template_version_mismatch"
-        if facility_id and _normalize_id(version.facility_id) != facility_id:
-            return None, "template_version_mismatch"
+        version, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
+        if error:
+            return None, error
         effective_date = _effective_facility_config_date_from_meta(meta, order)
         if effective_date is not None and not facility_template_version_service.template_version_applies_on(
             version,
             effective_date,
         ):
             return None, "template_version_mismatch"
-        columns = list(version.columns_json or [])
-        validation = facility_template_version_service.validate_template_columns(columns)
-        if validation.get("errors"):
-            return None, "facility_template_unresolved"
         return template_version_id, None
     if not _workflow_meta_has_confirmed_context(meta):
         return None, "context_not_confirmed"
@@ -816,15 +829,7 @@ def _require_workflow_template_version_from_context(
     facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
     if not facility_id:
         return None, "facility_missing"
-    effective_date = _effective_facility_config_date_from_meta(meta, order)
-    template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
-        session,
-        facility_id,
-        effective_date=effective_date,
-    )
-    if template_error:
-        return None, template_error
-    return template_version.id, None
+    return None, "template_version_required"
 
 
 def _resolve_evidence_template_version(
@@ -1217,15 +1222,10 @@ def _workflow_lineage_error(
     if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
         if not template_version_id:
             return "template_version_required"
-        version = session.get(FacilityTemplateVersion, template_version_id)
         facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
-        if version is None or version.status != "active":
-            return "template_version_mismatch"
-        if facility_id and _normalize_id(version.facility_id) != facility_id:
-            return "template_version_mismatch"
-        validation = facility_template_version_service.validate_template_columns(list(version.columns_json or []))
-        if validation.get("errors"):
-            return "facility_template_unresolved"
+        _, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
+        if error:
+            return error
 
     if _workflow_state_requires_selected_ocr(state):
         if not workflow.evidence_run_id:
@@ -1517,15 +1517,9 @@ def _require_existing_workflow_template_version(
     if not template_version_id:
         return None, "template_version_required"
     facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
-    version = session.get(FacilityTemplateVersion, template_version_id)
-    if version is None or version.status != "active":
-        return None, "template_version_mismatch"
-    if facility_id and _normalize_id(version.facility_id) != facility_id:
-        return None, "template_version_mismatch"
-    columns = list(version.columns_json or [])
-    validation = facility_template_version_service.validate_template_columns(columns)
-    if validation.get("errors"):
-        return None, "facility_template_unresolved"
+    _, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
+    if error:
+        return None, error
     return template_version_id, None
 
 
@@ -3595,8 +3589,17 @@ def _restore_bagging_write_input(proof: object, revision: int) -> dict[str, Any]
     return captured
 
 
+def _canonical_payload_json(payload: object) -> str:
+    def supported_date(value):
+        if type(value) in (date, datetime):
+            return value.isoformat()
+        raise TypeError(f"Unsupported canonical payload type: {type(value).__name__}")
+
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=supported_date, allow_nan=False)
+
+
 def _canonical_payload_digest(payload: object) -> str:
-    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_payload_json(payload).encode("utf-8")).hexdigest()
 
 
 def _build_order_payload_for_outputs(*, order: Order, lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3677,7 +3680,7 @@ def _build_bagging_result_payload(
         )
     bag_rows = _build_bag_rows_for_candidate(order=order, lines=lines, materialization_candidate=materialization_candidate)
     materialization_digest = _canonical_payload_digest(materialization_candidate)
-    return {
+    return json.loads(_canonical_payload_json({
         "bagging_result_id": _new_id("OBG"),
         "order_id": order.id,
         "source_saved_sheet_id": saved_sheet.id,
@@ -3695,7 +3698,7 @@ def _build_bagging_result_payload(
         "quantity_cells": quantity_cells,
         "bag_rows": bag_rows,
         "created_at": _now().isoformat(),
-    }
+    }))
 
 
 def _is_excluded_aggregation_diet(diet_type: object) -> bool:

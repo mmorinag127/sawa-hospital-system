@@ -26,16 +26,8 @@ def _reset_orders_and_menus() -> None:
         session.execute(delete(MonthlyMenu))
 
 
-def test_condiment_bags_are_merged_across_diet_and_area():
-    _reset_orders_and_menus()
-
-    payload = IngestEmailPayload(
-        message_id="bag-condiment-001",
-        pdf_uri="file:///tmp/bag-condiment.pdf",
-        received_at=datetime(2025, 1, 5, 12, 0, 0),
-        facility_hint="FAC00001",
-        week_hint="2025-01",
-    )
+def test_condiment_bags_are_merged_across_diet_and_area(isolated_formal_schema, monkeypatch, tmp_path):
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
     lines = [
         {
             "line_id": "1",
@@ -58,9 +50,10 @@ def test_condiment_bags_are_merged_across_diet_and_area():
             "quantity_original": 4,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
-
-    rebuilt = rebuild_bags(order["id"])
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines)
+    with session_scope() as session:
+        original = output_builder._capture_output_adoption(order["id"], session)
+        rebuilt = rebuild_bags(order["id"], write_session=session, original_adoption=original)
     condiments = [bag for bag in rebuilt["bags"] if bag.get("bag_type") == "condiment"]
 
     assert len(condiments) == 1
@@ -70,16 +63,8 @@ def test_condiment_bags_are_merged_across_diet_and_area():
     assert condiments[0]["area_id"] is None
 
 
-def test_get_bag_summary_rebuilds_stale_materialized_bags():
-    _reset_orders_and_menus()
-
-    payload = IngestEmailPayload(
-        message_id="bag-stale-001",
-        pdf_uri="file:///tmp/bag-stale.pdf",
-        received_at=datetime(2025, 2, 18, 12, 0, 0),
-        facility_hint="FAC00003",
-        week_hint="2025-02",
-    )
+def test_get_bag_summary_rebuilds_stale_materialized_bags(isolated_formal_schema, monkeypatch, tmp_path):
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
     lines = [
         {
             "line_id": "1",
@@ -122,7 +107,7 @@ def test_get_bag_summary_rebuilds_stale_materialized_bags():
             "quantity_original": 3,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines)
 
     with session_scope() as session:
         session.add(
