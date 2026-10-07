@@ -1607,25 +1607,29 @@ def test_monthly_entry_physical_rows_keep_diet_specific_rows_with_global_source_
             "daypart": "夕",
             "menu_name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
             "diet_type": "regular",
-            "source_row_index": 14,
+            "source_row_index": 13,
         },
         {
             "date": "2026-07-13",
             "daypart": "夕",
             "menu_name": "豆腐の煮物",
             "diet_type": "regular",
-            "source_row_index": 15,
+            "source_row_index": 14,
         },
         {
             "date": "2026-07-13",
             "daypart": "夕",
             "menu_name": "ブロッコリーｺﾞﾏﾄﾞﾚ和え",
             "diet_type": "regular",
-            "source_row_index": 16,
+            "source_row_index": 15,
         },
     ]
 
     physical_rows = output_builder._build_monthly_entry_physical_rows(entries, lines)
+
+    assert len(physical_rows) == 16
+    assert len(physical_rows[13]) == 2
+    assert output_builder._build_monthly_entry_physical_rows(entries, [lines[3]]) == physical_rows
 
     assert output_builder._resolve_monthly_entry_by_source_row(lines[0], physical_rows)["name"] == "焼きチキン南蛮　添）ｷｬﾍﾞﾂ"
     assert output_builder._resolve_monthly_entry_by_source_row(lines[1], physical_rows)["name"] == "チキン南蛮　添）ｷｬﾍﾞﾂ"
@@ -1640,17 +1644,42 @@ def test_monthly_entry_physical_rows_keep_diet_specific_rows_with_global_source_
             "source_row_index": 13,
         },
         physical_rows,
-    ) == {"_exclude_from_outputs": True}
+    )["name"] == "チキン南蛮　添）ｷｬﾍﾞﾂ"
     assert output_builder._resolve_monthly_entry_by_source_row(
         {
             "date": "2026-07-13",
             "daypart": "夕",
             "menu_name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
             "diet_type": "soft",
-            "source_row_index": 14,
+            "source_row_index": 13,
         },
         physical_rows,
-    ) == {"_exclude_from_outputs": True}
+    )["name"] == "焼きチキン南蛮　添）ｷｬﾍﾞﾂ"
+
+
+@pytest.mark.parametrize("index", [-1, 1, True, 0.0, "0"])
+def test_captured_physical_source_index_rejects_recovery(index):
+    entries = [{"menu_date": "2026-07-13", "daypart": "昼", "slot_index": 0, "name": "own", "diet_type": "regular"}]
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder._build_monthly_entry_physical_rows(entries, [{"source_row_index": index}])
+    rows = output_builder._build_monthly_entry_physical_rows(entries)
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder._resolve_monthly_entry_by_source_row({"source_row_index": index}, rows)
+
+
+@pytest.mark.parametrize("slot", [None, -1, True, 0.0, "0"])
+def test_captured_physical_slot_has_no_ordinal_substitution(slot):
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder._build_monthly_entry_physical_rows([{"menu_date": "2026-07-13", "daypart": "昼", "slot_index": slot, "diet_type": "regular"}])
+
+
+def test_captured_physical_same_diet_duplicate_and_ambiguous_choice_stop():
+    base = {"menu_date": "2026-07-13", "daypart": "昼", "slot_index": 0, "name": "own", "diet_type": "regular"}
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder._build_monthly_entry_physical_rows([base, dict(base, name="contradiction")])
+    rows = output_builder._build_monthly_entry_physical_rows([dict(base, diet_type="soft"), dict(base, diet_type="mixer")])
+    with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
+        output_builder._resolve_monthly_entry_by_source_row({"source_row_index": 0, "diet_type": "soft_mixer"}, rows)
 
 
 def test_label_slot_categories_ignore_excluded_split_monthly_lines():

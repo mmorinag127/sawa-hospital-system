@@ -788,6 +788,8 @@ def _normalize_week_menu_entries(*, entries: Any, week_value: object) -> list[di
         menu_date = _parse_menu_date(entry.get("menu_date"))
         daypart = str(entry.get("daypart") or "").strip()
         menu_name = str(entry.get("name") or "").strip()
+        if "diet_variants" in entry and not menu_name:
+            raise ValueError("physical_menu_common_name_unresolved")
         if not isinstance(menu_date, date) or not daypart or not menu_name:
             continue
         if not (start_date <= menu_date <= end_date):

@@ -77,12 +77,36 @@ def physical_row_key_from_entry(entry: dict[str, Any]) -> tuple[str, str, str]:
         date.fromisoformat(date_value)
     except ValueError:
         raise ValueError("physical_menu_row_identity_required") from None
-    return date_value, daypart_value, slot_value
+    key = (date_value, daypart_value, slot_value)
+    if "diet_variants" in entry:
+        variants = entry["diet_variants"]
+        if not isinstance(variants, dict) or len(variants) < 2:
+            raise ValueError("physical_menu_variants_required")
+        for diet, variant in variants.items():
+            if not isinstance(diet, str) or not diet or not isinstance(variant, dict) or variant.get("diet_type") != diet or "diet_variants" in variant:
+                raise ValueError("physical_menu_variant_invalid")
+            if physical_row_key_from_entry(variant) != key:
+                raise ValueError("physical_menu_variant_identity_mismatch")
+            if not isinstance(variant.get("menu_name"), str) or not variant["menu_name"].strip():
+                raise ValueError("physical_menu_variant_name_required")
+    return key
 
 
 def physical_row_id_from_entry(entry: dict[str, Any]) -> str:
     key = physical_row_key_from_entry(entry)
     return "__".join([key[0], key[1], key[2]])
+
+
+def entry_for_explicit_diet(entry: dict[str, Any], diet: str) -> dict[str, Any]:
+    physical_row_key_from_entry(entry)
+    variants = entry.get("diet_variants")
+    if variants is None:
+        if entry.get("diet_type") != diet:
+            raise ValueError("physical_menu_diet_variant_missing")
+        return entry
+    if diet not in variants:
+        raise ValueError("physical_menu_diet_variant_missing")
+    return variants[diet]
 
 
 def physical_row_keys_from_entries(entries: list[dict[str, Any]]) -> list[tuple[str, str, str]]:

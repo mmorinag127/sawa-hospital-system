@@ -17,6 +17,7 @@ def test_first_bagging_producer_then_consumer_uses_same_captured_output(isolated
     draft = SimpleNamespace(id="sheet-own", template_version_id="template-own", base_evidence_run_id="evidence-own")
     configured = {"facility": {"facility_id": "fixture", "packaging_policy": {}, "label_profile": {}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}
     candidate = {"configured_input": deepcopy(configured), "lines": [{"date": "2026-10-07", "daypart": "lunch", "menu_name": "own", "diet_type": "regular", "quantity_original": 0, "quantity_corrected": 0, "menu_qty_per_serving": 1, "menu_unit_type": "g"}]}
+    candidate["lines"][0]["menu_category"] = "主菜"
     # No prior artifact exists. Actual common enrichment and bag-row allocation run.
     with patch.object(output_builder, "_accepted_output_candidate", side_effect=AssertionError("producer cannot consume a prior artifact")), patch("src.services.config_service.get_facility_config", side_effect=AssertionError("current master recapture")), patch("src.services.config_service.load_ingest_policy", side_effect=AssertionError("current policy recapture")):
         artifact = workflow_service._build_bagging_result_payload(order=order, saved_sheet=draft, materialization_candidate=candidate, processing_input={"evidence": {"payload_json": {"own": 0}}, "output_ocr_menu_entries": [], "output_ocr_menu_defaults": {}})
@@ -93,7 +94,7 @@ def test_actual_nonempty_delivery_columns_use_only_authored_mapping(area, quanti
         assert rows[0][column["name"]] == quantity
     signature = output_builder._invoice_quantity_signature(column, {})
     assert signature == ("regular", None if area is None else str(area))
-    invoice = output_builder._build_invoice_template_from_fax_columns({"fax_template": {"columns": [{**column, "role": "quantity"}]}})
+    invoice = output_builder._resolve_captured_invoice_template({"invoice_template": {"columns": [column]}})
     quantity_columns = [col for col in invoice["columns"] if col.get("source") == "quantity"]
     assert len(quantity_columns) == 1
     assert quantity_columns[0]["area_id"] == (None if area is None else str(area))
@@ -136,8 +137,8 @@ def test_authored_optional_area_aggregates_without_display_name_inference(area_d
 
 
 def test_generated_invoice_aggregate_and_explicit_x_preserve_both_quantities(monkeypatch, tmp_path):
-    facility = {"fax_template": {"columns": [{"role": "quantity", "diet_type": "soft"}, {"role": "quantity", "diet_type": "soft", "area_id": "X"}]}}
-    invoice = output_builder._build_invoice_template_from_fax_columns(facility)
+    facility = {"invoice_template": {"columns": [{"name": "soft total", "header": "soft total", "source": "quantity", "diet_type": "soft"}, {"name": "soft X", "header": "soft X", "source": "quantity", "diet_type": "soft", "area_id": "X"}]}}
+    invoice = output_builder._resolve_captured_invoice_template(facility)
     columns = [col for col in invoice["columns"] if col.get("source") == "quantity"]
     assert len(columns) == 2 and columns[0]["name"] != columns[1]["name"]
     lines = [{"date": "2026-10-07", "menu_name": "own", "diet_type": "soft", "area_id": area, "quantity": qty} for area, qty in [("2F", 7), ("X", 3)]]
@@ -175,9 +176,21 @@ def test_existing_no_fried_forbidden_other_business_aggregate_is_retained():
 
 
 @pytest.mark.parametrize("consumer", ["bundle", "preview", "delivery_preview", "outputs"])
-def test_actual_delivery_consumers_empty_quantity_mapping_stop_before_output_write(monkeypatch, consumer):
+def test_actual_delivery_consumers_empty_quantity_mapping_stop_before_output_write(isolated_formal_schema, monkeypatch, tmp_path, consumer):
+    if consumer == "outputs":
+        from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+        from src.db import session_scope
+        order = accepted_bagging_order(monkeypatch, tmp_path, [{"line_id": "1", "date": "2026-10-07", "daypart": "昼", "menu_name": "own", "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 7}], invoice_template={"columns": [{"name": "menu_name", "source": "menu_name"}]}, confirm=True)
+        monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path / "outputs")
+        monkeypatch.setattr(output_builder, "_write_label_csv", lambda *args: pytest.fail("output before quantity gate"))
+        with session_scope() as session:
+            original = output_builder._capture_output_adoption(order["id"], session)
+            with pytest.raises(ValueError, match="mapping_unresolved"):
+                output_builder.build_outputs(order["id"], write_session=session, original_adoption=original)
+        return
     line = {"date": "2026-10-07", "menu_name": "own", "diet_type": "regular", "quantity_original": 7, "quantity_corrected": 7}
     candidate = {"configured_input": {"facility": {"facility_id": "fixture", "fax_template": {"columns": []}, "invoice_template": {"columns": []}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}, "lines": [line], "output_lines": [line], "output_menu_entries": [], "output_ocr_menu_entries": [], "output_ocr_menu_defaults": {}}
+    candidate["configured_input"]["facility"]["invoice_template"] = {"columns": [{"name": "menu_name", "source": "menu_name"}]}
     monkeypatch.setattr(output_builder, "get_order_by_id", lambda oid: {"id": oid, "facility": "fixture", "week": "2026-10"})
     monkeypatch.setattr(output_builder, "_accepted_output_candidate", lambda order: candidate)
     monkeypatch.setattr(output_builder, "_write_label_csv", lambda *args: pytest.fail("output before quantity gate"))
@@ -233,6 +246,9 @@ def test_existing_authored_floor_invoice_and_aggregate_exact_coexistence():
     facilities = [facility for facility in authored["facilities"] if facility["facility_id"] == "FAC00003"]
     assert len(facilities) == 1
     template = deepcopy(facilities[0]["invoice_template"])
+    captured = {"invoice_template": template, "fax_template": {"columns": []}}
+    assert output_builder._resolve_captured_invoice_template(captured) == template
+    assert output_builder._resolve_captured_invoice_template(captured) is not template
     errors = []
     config_validator._validate_invoice_columns(template["columns"], "invoice_template.columns", errors)
     assert errors == []
@@ -270,6 +286,7 @@ def test_actual_delivery_context_duplicate_preserves_producer_first(monkeypatch)
     from copy import deepcopy
     entries = [{"date": "2026-10-07", "menu_name": "own", "quantity_map": {"regular": 0}}, {"date": "2026-10-07", "menu_name": "own", "quantity_map": {"regular": 99}}]
     candidate = {"configured_input": {"facility": {"fax_template": {"columns": []}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}, "output_lines": [], "output_ocr_menu_entries": entries, "output_ocr_menu_defaults": {}, "lines": []}
+    candidate["configured_input"]["facility"]["invoice_template"] = {"columns": [{"name": "menu_name", "source": "menu_name"}]}
     artifact = {"source_saved_sheet_id": "own-sheet", "template_version_id": "own-template", "materialization_candidate": candidate, "materialization_digest": _canonical_payload_digest(candidate)}
     state = SimpleNamespace(secondary_actions_json={"workflow_v2": {"bagging_result": artifact}})
     sheet = SimpleNamespace(id="own-sheet", template_version_id="own-template")
@@ -289,6 +306,158 @@ def test_actual_delivery_context_duplicate_preserves_producer_first(monkeypatch)
     empty_context = output_builder._prepare_output_context("own", include_bags=False)
     assert empty_context["ocr_menu_meta"]["entries"] == []
     assert output_builder._build_delivery_rows(empty_context["order_for_outputs"], empty_context["invoice_template"], empty_context["quantity_rules"], empty_context["facility_config"], empty_context["ocr_menu_meta"]) == []
+    del candidate["configured_input"]["facility"]["invoice_template"]
+    artifact["materialization_digest"] = _canonical_payload_digest(candidate)
+    label_context = output_builder._prepare_output_context("own", include_bags=False, require_invoice=False)
+    assert label_context["invoice_template"] is None
+    with pytest.raises(ValueError, match="accepted_invoice_template_required"):
+        output_builder._prepare_output_context("own", include_bags=False)
+
+
+@pytest.mark.parametrize("template", [None, {}, {"columns": []}, {"columns": "bad"}, {"columns": [{"name": "qty", "source": None}]}, {"columns": [{"name": "qty", "source": "quantity"}], "template_uri": False}, {"columns": [{"name": "qty", "source": "quantity"}], "include_menu_name": 1}])
+def test_captured_invoice_invalid_stops_without_fax_replacement(template):
+    with pytest.raises(ValueError, match="accepted_invoice_|delivery_quantity_"):
+        output_builder._resolve_captured_invoice_template({"invoice_template": template, "fax_template": {"columns": [{"name": "regular2F", "source": "quantity"}]}})
+
+
+def test_captured_invoice_retains_template_and_slot_metadata():
+    from copy import deepcopy
+    template = {"template_uri": "file:///owned/invoice.xlsx", "sheet_name": "Template", "columns": [{"name": "soft aggregate", "source": "quantity", "diet_type": "soft", "area_id": None, "column_index": 4}], "slot_metadata": {"raw": [0, None, False]}, "include_menu_name": False}
+    original = deepcopy(template)
+    resolved = output_builder._resolve_captured_invoice_template({"invoice_template": template})
+    assert resolved == original
+    resolved["slot_metadata"]["raw"].append(9)
+    assert template == original
+
+
+@pytest.mark.parametrize("sheet_name", ["missing", None])
+def test_delivery_template_worksheet_selection_stops_before_file(tmp_path, sheet_name):
+    from openpyxl import Workbook
+    workbook = Workbook()
+    workbook.create_sheet("second")
+    source = tmp_path / "source.xlsx"
+    workbook.save(source)
+    workbook.close()
+    target = tmp_path / "output.xlsx"
+    with pytest.raises(ValueError, match="delivery_worksheet_"):
+        output_builder._write_delivery_note(target, [], [{"name": "menu_name", "source": "menu_name"}], source.as_uri(), False, sheet_name)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("category,daypart,slot,expected", [("主A", "朝", 0, "主A"), ("主Ａ", "夕", 0, "主Ａ"), ("主A", "朝", 1, "主A"), ("主菜", "夕", 0, "主菜"), ("副菜1", "昼", 2, "副菜1")])
+def test_delivery_authored_category_precedes_slot_inference(category, daypart, slot, expected):
+    assert output_builder._menu_entry_category_label({"category": category, "daypart": daypart, "slot_index": slot}) == expected
+
+
+@pytest.mark.parametrize("category", [None, "", "generic", "主B", "主Ｂ"])
+def test_delivery_missing_or_unresolved_category_stops(category):
+    with pytest.raises(ValueError, match="delivery_menu_category_unresolved"):
+        output_builder._menu_entry_category_label({"category": category, "daypart": "朝", "slot_index": 0})
+
+
+@pytest.mark.parametrize("daypart,count", [("朝", 2), ("昼", 3), ("夕", 3), ("昼", 4)])
+def test_canonical_generic_side_slots_ignore_diet_variants(daypart, count):
+    lines = [{"date": "2026-10-07", "daypart": daypart, "menu_name": f"side{slot}", "menu_category": "副菜", "diet_type": diet, "source_row_index": slot, "_monthly_entry_raw_category": "副菜", "_monthly_entry_override_applied": True, "_monthly_entry_slot_index": slot} for slot in range(count) for diet in ("regular", "soft")]
+    entries = [{"menu_date": "2026-10-07", "daypart": daypart, "slot_index": slot, "category": "副菜", "name": f"side{slot}", "diet_type": "regular"} for slot in range(count)]
+    result = output_builder._apply_label_meal_slot_categories(output_builder._apply_menu_entry_overrides(lines, entries))
+    assert [line["menu_category"] for line in result] == [f"副菜{slot + 1}" for slot in range(count) for _ in range(2)]
+    assert [line["diet_type"] for line in result] == [line["diet_type"] for line in lines]
+
+
+@pytest.mark.parametrize("excluded_first", [False, True])
+def test_complete_captured_sides_survive_partial_output(excluded_first):
+    entries = [{"menu_date": "2026-10-07", "daypart": "昼", "slot_index": slot, "category": "副菜1" if slot == 1 else "副菜", "name": f"side{slot}", "diet_type": "regular"} for slot in (1, 2)]
+    lines = [{"date": "2026-10-07", "daypart": "昼", "menu_name": "side2", "diet_type": "regular"}]
+    if excluded_first:
+        lines.insert(0, {"date": "2026-10-07", "daypart": "昼", "menu_name": "side1", "diet_type": "regular", "_exclude_from_outputs": True})
+    result = output_builder._apply_label_meal_slot_categories(output_builder._apply_menu_entry_overrides(lines, entries))
+    assert result[-1]["menu_category"] == "副菜2"
+
+
+def test_contradictory_captured_slot_stops():
+    entry = {"menu_date": "2026-10-07", "daypart": "昼", "slot_index": 1, "category": "副菜", "name": "own", "diet_type": "regular"}
+    with pytest.raises(ValueError, match="delivery_monthly_slot_ambiguous"):
+        output_builder._captured_monthly_categories([entry, {**entry, "category": "主菜", "diet_type": "soft"}])
+
+
+@pytest.mark.parametrize("categories,expected", [(["副菜2"], ["副菜2"]), (["副菜1", "副菜3"], ["副菜1", "副菜3"]), (["副菜", "副菜2"], ["副菜1", "副菜2"])])
+def test_captured_explicit_side_numbers_preserve_gaps(categories, expected):
+    entries = [{"menu_date": "2026-10-07", "daypart": "昼", "slot_index": slot, "category": category, "name": f"side{slot}", "diet_type": diet} for slot, category in enumerate(categories) for diet in ("regular", "soft")]
+    resolved = output_builder._captured_monthly_categories(entries)
+    assert [resolved[("2026-10-07", "昼", slot)] for slot in range(len(categories))] == expected
+    lines = [{"date": "2026-10-07", "daypart": "昼", "menu_name": f"side{slot}", "diet_type": "regular", "source_row_index": slot} for slot in range(len(categories))]
+    result = output_builder._apply_label_meal_slot_categories(output_builder._apply_menu_entry_overrides(lines, entries))
+    assert [line["menu_category"] for line in result] == expected
+
+
+@pytest.mark.parametrize("categories", [["副菜", "副菜1"]])
+def test_captured_side_number_conflicts_stop_without_shift(categories):
+    entries = [{"menu_date": "2026-10-07", "daypart": "昼", "slot_index": slot, "category": category, "name": f"side{slot}", "diet_type": "regular"} for slot, category in enumerate(categories)]
+    with pytest.raises(ValueError, match="delivery_monthly_slot_ambiguous"):
+        output_builder._captured_monthly_categories(entries)
+
+
+def test_repeated_explicit_side_numbers_preserved_through_shared_paths_and_writer(tmp_path):
+    from openpyxl import load_workbook
+    entries = [{"menu_date": "2026-10-07", "daypart": "昼", "slot_index": slot, "category": "副菜2", "name": f"own{slot}", "diet_type": "regular"} for slot in (0, 1)]
+    lines = [{"date": "2026-10-07", "daypart": "昼", "menu_name": f"own{slot}", "diet_type": "regular", "source_row_index": slot, "quantity_original": quantity} for slot, quantity in [(0, 5), (1, 7)]]
+    enriched = output_builder._apply_label_meal_slot_categories(output_builder._apply_menu_entry_overrides(lines, entries))
+    assert [line["menu_category"] for line in enriched] == ["副菜2", "副菜2"]
+    assert [line["menu_name"] for line in enriched] == ["own0", "own1"]
+    columns = [{"name": "menu_category", "source": "menu_category"}, {"name": "menu_name", "source": "menu_name"}, {"name": "qty", "source": "quantity", "diet_type": "regular", "area_id": None}]
+    rows = output_builder._build_delivery_rows({"facility": "fixture", "lines": enriched}, {"columns": columns}, {"zero_as_empty": False}, {}, {"entries": [], "entry_defaults": {}})
+    assert len(rows) == 2
+    target = tmp_path / "repeated-categories.xlsx"
+    output_builder._write_delivery_note(target, rows, columns, None, False)
+    workbook = load_workbook(target, read_only=True)
+    try:
+        assert list(workbook.active.values) == [("menu_category", "menu_name", "qty"), ("副②", "own0", 5), ("副②", "own1", 7)]
+    finally:
+        workbook.close()
+
+
+def test_canonical_explicit_categories_survive_shared_label_path():
+    categories = ["主A", "主Ａ", "主菜", "副菜1", "副菜2", "副菜3"]
+    lines = [{"date": "2026-10-07", "daypart": "朝", "menu_name": f"own{index}", "menu_category": raw, "_monthly_entry_override_applied": True, "_monthly_entry_raw_category": raw} for index, raw in enumerate(categories)]
+    assert [line["menu_category"] for line in output_builder._apply_label_meal_slot_categories(lines)] == categories
+
+
+@pytest.mark.parametrize("slot", [None, -1, True, "1"])
+def test_generic_category_without_canonical_slot_stops(slot):
+    with pytest.raises(ValueError, match="delivery_monthly_slot_required"):
+        output_builder._apply_label_meal_slot_categories([{"date": "2026-10-07", "daypart": "朝", "menu_category": "副菜", "_monthly_entry_raw_category": "副菜", "_monthly_entry_override_applied": True, "_monthly_entry_slot_index": slot}])
+
+
+@pytest.mark.parametrize("daypart,count", [("朝", 2), ("昼", 3), ("夕", 3), ("昼", 4)])
+def test_actual_monthly_generic_categories_reach_owned_bagging(isolated_formal_schema, monkeypatch, tmp_path, daypart, count):
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+    from src.db import session_scope
+    lines = [{"line_id": str(slot), "date": "2026-10-07", "daypart": daypart, "menu_name": f"side{slot}", "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": slot + 1} for slot in range(count)]
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, menu_category="副菜", confirm=True)
+    with session_scope() as session:
+        original = output_builder._capture_output_adoption(order["id"], session)
+        context = output_builder._prepare_output_context(order["id"], original_adoption=original, require_invoice=True)
+        assert [line["menu_category"] for line in context["order_lines"]] == [f"副菜{slot + 1}" for slot in range(count)]
+        assert [line["quantity_original"] for line in context["order_lines"]] == [slot + 1 for slot in range(count)]
+
+
+def test_actual_invoice_free_label_consumers_and_delivery_stop(isolated_formal_schema, monkeypatch, tmp_path):
+    from datetime import date
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+    order = accepted_bagging_order(monkeypatch, tmp_path, [{"line_id": "1", "date": "2026-10-07", "daypart": "昼", "menu_name": "own", "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 7}], confirm=True, omit_invoice=True)
+    target = date(2026, 10, 7)
+    directory = tmp_path / "outputs"
+    directory.mkdir()
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", directory)
+    for consumer in (output_builder.build_label_workbook_for_order, output_builder.build_label_csv_for_order):
+        path, _ = consumer(order["id"])
+        assert path.exists() and path.stat().st_size > 0
+    for mode in ("labels", "labels_csv"):
+        path, manifest = output_builder.build_daily_output_bundle(target, bundle_type=mode)
+        assert path.exists() and path.stat().st_size > 0
+    assert output_builder._weekly_weight_collect_rows(target)
+    with pytest.raises(ValueError, match="accepted_invoice_template_required"):
+        output_builder.build_delivery_preview(order["id"])
 
 
 @pytest.mark.parametrize("per_quantity", [0, 7, None])

@@ -163,15 +163,8 @@ def test_get_bag_summary_rebuilds_stale_materialized_bags(isolated_formal_schema
     }
 
 
-def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(tmp_path):
-    _reset_orders_and_menus()
-
-    week_id = "2025-02"
-    menu_am = menu_service.create_item_stub(week_id, "メニュー朝")
-    menu_service.update_item(week_id, menu_am["id"], {"category": "主A"})
-    menu_pm = menu_service.create_item_stub(week_id, "メニュー夕")
-    menu_service.update_item(week_id, menu_pm["id"], {"category": "主A"})
-
+def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(isolated_formal_schema, monkeypatch, tmp_path):
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
     template_path = tmp_path / "delivery_slot_template.xlsx"
     wb = Workbook()
     ws = wb.active
@@ -194,15 +187,7 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(tmp_pa
 
     wb.save(template_path)
 
-    slot_area_id = f"ARE_SLOT_{uuid4().hex[:8]}"
-    facility = facility_service.create_facility(
-        "Slot Writer Facility",
-        [{"id": slot_area_id, "name": "2F"}],
-    )
-    updated = facility_service.update_config(
-        facility["id"],
-        {
-            "invoice_template": {
+    invoice_template = {
                 "template_uri": template_path.as_uri(),
                 "sheet_name": "Template",
                 "include_menu_name": False,
@@ -219,17 +204,6 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(tmp_pa
                     },
                 ],
             }
-        },
-    )
-    assert updated
-
-    payload = IngestEmailPayload(
-        message_id="delivery-slot-001",
-        pdf_uri="file:///tmp/delivery-slot.pdf",
-        received_at=datetime(2025, 2, 20, 9, 0, 0),
-        facility_hint=facility["id"],
-        week_hint=week_id,
-    )
     lines = [
         {
             "line_id": "1",
@@ -252,9 +226,17 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(tmp_pa
             "quantity_original": 7,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
-
-    outputs = build_outputs(order["id"])
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path / "outputs")
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines,
+                                  invoice_template=invoice_template, menu_category="主A", confirm=True)
+    with session_scope() as session:
+        original = output_builder._capture_output_adoption(order["id"], session)
+        context = output_builder._prepare_output_context(order["id"], original_adoption=original)
+        assert [line["quantity_original"] for line in context["order_lines"]] == [5, 7], context["order_lines"]
+        delivery_rows = output_builder._build_delivery_rows(context["order_for_outputs"],
+            context["invoice_template"], context["quantity_rules"], context["facility_config"], context.get("ocr_menu_meta"))
+        assert len(delivery_rows) == 2, (delivery_rows, context["order_for_outputs"])
+        outputs = build_outputs(order["id"], write_session=session, original_adoption=original)
     delivery_wb = load_workbook(outputs["delivery_note"])
     ws_out = delivery_wb["2025-02-20"]
 

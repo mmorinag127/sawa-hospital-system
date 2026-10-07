@@ -17,20 +17,33 @@ from tests.helpers.ingest_original import (
 )
 
 
-def accepted_bagging_order(monkeypatch, tmp_path, lines):
+def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False):
     day = date.fromisoformat(lines[0]["date"])
-    facility = "bagging-component"
+    facility = f"bagging-component-{uuid4().hex}"
     configure_delivery(monkeypatch)
     path, _ = authored_sources(monkeypatch, tmp_path, facility_id=facility, menu_date=day)
     master_path = tmp_path / "authored-facilities.json"
     master = json.loads(master_path.read_text())
     configured = master["facilities"][0]
     columns = configured["fax_template"]["columns"][:3]
-    for index, line in enumerate(lines, 3):
+    quantities = list(dict.fromkeys((line["diet_type"], line["area_id"]) for line in lines))
+    for index, (diet, area) in enumerate(quantities, 3):
         columns.append({"index": index, "source_index": index, "role": "quantity",
-                        "name": f"qty.{line['diet_type']}_{line['area_id']}",
-                        "diet_type": line["diet_type"], "area_id": line["area_id"]})
+                        "name": f"qty.{diet}_{area}",
+                        "diet_type": diet, "area_id": area})
     configured["fax_template"]["columns"] = columns
+    if invoice_template is None:
+        # Explicit authored tabular component contract; not a production fallback.
+        invoice_template = {"columns": [
+            {"name": "日付", "source": "date"},
+            {"name": "区分", "source": "daypart"},
+            {"name": "献立", "source": "menu_display"},
+            *[{"name": f"qty.{diet}_{area}", "source": "quantity", "diet_type": diet,
+               "area_id": area} for diet, area in quantities]], "include_menu_name": True}
+    if invoice_template is not None:
+        configured["invoice_template"] = deepcopy(invoice_template)
+    if omit_invoice:
+        configured.pop("invoice_template", None)
     configured["versions"][0]["facility"] = deepcopy({key: value for key, value in configured.items() if key != "versions"})
     master_path.write_text(json.dumps(master))
     with fitz.open() as pdf:
@@ -39,28 +52,30 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines):
         body = pdf.tobytes()
     from pathlib import Path
     Path(path).write_bytes(body)
-    menu_name = lines[0]["menu_name"]
+    groups = {}
+    for line in lines:
+        assert date.fromisoformat(line["date"]) == day
+        groups.setdefault((line["daypart"], line["menu_name"]), []).append(line)
     with session_scope() as session:
         entry = session.get(MonthlyMenuEntry, "authored-physical-row")
-        entry.name = menu_name
-        entry.daypart = "breakfast" if lines[0]["daypart"] == "朝" else "lunch"
-        entry.diet_type = lines[0]["diet_type"]
-        entry.category = "主菜"
-        # Explicit menu amounts; no unresolved default is supplied by a mock.
-        master_id = str(uuid4())
-        session.add(MenuMaster(id=master_id, name=menu_name, normalized_name=menu_name,
-                               qty_per_serving=1, unit_type="g", category="主菜",
-                               condiments=["ソース"] if lines[0]["bag_type"] == "condiment" else []))
-        for diet in dict.fromkeys(line["diet_type"] for line in lines):
-            if diet != entry.diet_type:
+        session.delete(entry)
+        slots_by_daypart = {}
+        for (daypart, menu_name), group in groups.items():
+            slot = slots_by_daypart.get(daypart, 0)
+            slots_by_daypart[daypart] = slot + 1
+            canonical_daypart = {"朝": "breakfast", "昼": "lunch", "夕": "supper"}[daypart]
+            master_id = str(uuid4())
+            session.add(MenuMaster(id=master_id, name=menu_name, normalized_name=menu_name,
+                qty_per_serving=1, unit_type="g", category=menu_category,
+                condiments=["ソース"] if group[0]["bag_type"] == "condiment" else []))
+            for diet in dict.fromkeys(line["diet_type"] for line in group):
                 session.add(MonthlyMenuEntry(id=str(uuid4()), monthly_menu_id=day.strftime("%Y-%m"),
-                    menu_date=day, name=menu_name, daypart=entry.daypart, diet_type=diet, category="主菜",
-                    facility_override=facility, slot_index=1))
-            session.add(MonthlyMenuItem(id=str(uuid4()), monthly_menu_id=day.strftime("%Y-%m"),
-                menu_master_id=master_id,
-                name=menu_name, diet_type=diet, facility_override=facility,
-                qty_per_serving=1, unit_type="g", category="主菜", daypart=entry.daypart,
-                master_resolution_mode="manual"))
+                    menu_date=day, name=menu_name, daypart=canonical_daypart, diet_type=diet,
+                    category=menu_category, facility_override=facility, slot_index=slot))
+                session.add(MonthlyMenuItem(id=str(uuid4()), monthly_menu_id=day.strftime("%Y-%m"),
+                    menu_master_id=master_id, name=menu_name, diet_type=diet, facility_override=facility,
+                    qty_per_serving=1, unit_type="g", category=menu_category, daypart=canonical_daypart,
+                    master_resolution_mode="manual"))
         upload_id, message = str(uuid4()), str(uuid4())
         session.add(UploadedPdf(id=upload_id, message_id=message, storage_uri=path,
             content_sha256=sha256(body).hexdigest(), original_filename="synthetic.pdf",
@@ -73,9 +88,12 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines):
     context, error = workflow.confirm_context(order_id=registered["id"], facility_id=facility,
         week_start=day.isoformat(), week_end=day.isoformat(), expected_revision=current["revision"])
     assert error is None, error
-    authored_pipeline_provider(monkeypatch, table_rows=[[
-        day.strftime("%m/%d"), lines[0]["daypart"], menu_name,
-        *[str(line["quantity_original"]) for line in lines]]])
+    rows = []
+    for (daypart, menu_name), group in groups.items():
+        amounts = {(line["diet_type"], line["area_id"]): line["quantity_original"] for line in group}
+        rows.append([day.strftime("%m/%d"), daypart, menu_name,
+                     *[str(amounts[key]) if key in amounts else "" for key in quantities]])
+    authored_pipeline_provider(monkeypatch, table_rows=rows)
     delivered = process_uploaded_original(upload_id)
     assert delivered["result"] == "business_done", delivered
     results, error = workflow.list_ocr_results(registered["id"])
@@ -87,9 +105,9 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines):
                                                expected_revision=current["revision"])
     assert error is None, error
     sheet = {"fields": ["date", "daypart", "menu", *[
-        f"qty.{line['diet_type']}_{line['area_id']}" for line in lines]],
-        "rows": [[day.isoformat(), lines[0]["daypart"], menu_name,
-                  *[line["quantity_original"] for line in lines]]],
+        f"qty.{diet}_{area}" for diet, area in quantities]],
+        "rows": [[day.isoformat(), row[1], row[2],
+                  *[int(value) if value != "" else None for value in row[3:]]] for row in rows],
         "week_id": f"{day:%Y-%m}@{day.isoformat()}~{day.isoformat()}"}
     current, error = workflow.get_workflow_readonly(registered["id"])
     assert error is None, error
@@ -114,4 +132,8 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines):
         assert receipt.payload_digest == payload_digest(receipt.payload_json)
         assert receipt.payload_json["materialization_digest"] == workflow._canonical_payload_digest(bagging["bagging_result"]["materialization_candidate"])
         assert workflow._canonical_payload_digest(receipt.payload_json["materialization_candidate"]) == receipt.payload_json["materialization_digest"]
+    if confirm:
+        confirmed, error = workflow.final_confirm(registered["id"], expected_revision=bagging["workflow"]["revision"])
+        assert error is None, error
+        assert confirmed is not None
     return registered

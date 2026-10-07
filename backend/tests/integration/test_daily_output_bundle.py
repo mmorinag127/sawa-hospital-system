@@ -2372,15 +2372,17 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
     assert rows[0]["note"] == "青魚1、添え10、ソース10"
 
 
-def test_delivery_template_derived_from_fax_uses_display_menu_name():
-    template = output_builder._build_invoice_template_from_fax_columns(  # noqa: SLF001
+def test_authored_delivery_template_uses_display_menu_name():
+    template = output_builder._resolve_captured_invoice_template(
         {
-            "fax_template": {
+            "invoice_template": {
+                "include_menu_name": True,
                 "columns": [
+                        {"name": "メニュー名", "source": "menu_display"},
                         {
                             "name": "regular_x",
                             "header": "常食",
-                            "role": "quantity",
+                            "source": "quantity",
                             "diet_type": "regular",
                             "area_id": "X",
                         }

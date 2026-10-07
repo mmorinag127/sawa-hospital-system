@@ -1317,7 +1317,32 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
             }
             current = selected_by_physical_slot.get(physical_key)
             if current is not None:
-                raise ValueError("physical_menu_row_duplicate")
+                variants = current.get("diet_variants")
+                if variants is None:
+                    variants = {current["diet_type"]: deepcopy(current)}
+                    current["diet_variants"] = variants
+                diet = menu_service.normalize_diet_type(raw.get("diet_type"))
+                if not isinstance(diet, str) or not diet:
+                    raise ValueError("physical_menu_diet_identity_required")
+                if diet in variants:
+                    raise ValueError("physical_menu_row_duplicate")
+                payload["diet_type"] = diet
+                variants[diet] = payload
+                common_fields = set.intersection(*(set(variant) for variant in variants.values()))
+                common = {
+                    field: deepcopy(next(iter(variants.values()))[field])
+                    for field in common_fields
+                    if all(snapshots_equal(variant[field], next(iter(variants.values()))[field]) for variant in variants.values())
+                }
+                physical_order = current["order"]
+                current.clear()
+                current.update(common)
+                current.update(order=physical_order, diet_variants=variants)
+                continue
+            diet = menu_service.normalize_diet_type(raw.get("diet_type"))
+            if not isinstance(diet, str) or not diet:
+                raise ValueError("physical_menu_diet_identity_required")
+            payload["diet_type"] = diet
             selected_by_physical_slot[physical_key] = payload
             order_index += 1
     entries = list(selected_by_physical_slot.values())
@@ -3912,6 +3937,8 @@ def _validate_reparse_lines_against_weekly_menu(
     weekly_key_set: set[tuple[str, str, str]] = set()
     weekly_key_by_source_row: dict[int, tuple[str, str, str]] = {}
     for idx, entry in enumerate(entries):
+        if "diet_variants" in entry and not entry.get("menu_name"):
+            raise ValueError("physical_menu_common_name_unresolved")
         key = _build_canonical_menu_key(
             menu_date=entry.get("menu_date"),
             daypart=entry.get("daypart_key"),

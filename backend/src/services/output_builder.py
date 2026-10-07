@@ -1090,6 +1090,40 @@ def _resolve_menu_entry_override(
     return None
 
 
+def _captured_monthly_categories(menu_entries: list[dict]) -> dict:
+    slots = {}
+    for entry in menu_entries:
+        menu_date = _ensure_date(entry.get("menu_date"))
+        daypart = _normalize_output_daypart(entry.get("daypart"))
+        slot = entry.get("slot_index")
+        if menu_date is None or not daypart or type(slot) is not int or slot < 0:
+            raise ValueError("delivery_monthly_slot_required")
+        key = (menu_date.isoformat(), daypart, slot)
+        category = _menu_entry_category_label(entry)
+        if key in slots and slots[key] != category:
+            raise ValueError("delivery_monthly_slot_ambiguous")
+        slots[key] = category
+    sides = {}
+    for (menu_date, daypart, slot), category in slots.items():
+        if category == "副菜" or category in {"副菜1", "副菜2", "副菜3"}:
+            sides.setdefault((menu_date, daypart), []).append(slot)
+    for (menu_date, daypart), indexes in sides.items():
+        assigned = {
+            slots[(menu_date, daypart, slot)]
+            for slot in indexes
+            if slots[(menu_date, daypart, slot)] != "副菜"
+        }
+        for number, slot in enumerate(sorted(indexes), 1):
+            key = (menu_date, daypart, slot)
+            if slots[key] != "副菜":
+                continue
+            resolved = f"副菜{number}"
+            if resolved in assigned:
+                raise ValueError("delivery_monthly_slot_ambiguous")
+            slots[key] = resolved
+    return slots
+
+
 def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> list[dict]:
     if not menu_entries:
         return lines
@@ -1126,43 +1160,28 @@ def _normalize_output_daypart(value: object) -> str:
 
 
 def _menu_entry_category_label(entry: dict) -> str:
+    if entry.get("category") in {"主A", "主Ａ"}:
+        return entry["category"]
     normalized = _normalize_delivery_category_label(entry.get("category"))
-    daypart = _normalize_output_daypart(entry.get("daypart"))
-    try:
-        slot_index = int(entry.get("slot_index"))
-    except Exception:
+    if normalized in {"副菜1", "副菜2", "副菜3", "主菜", "副菜", "主食"}:
         return normalized
-    if daypart == "朝" and slot_index > 0:
-        return {1: "副菜1", 2: "副菜2"}.get(slot_index, normalized)
-    if normalized in {"副菜1", "副菜2", "副菜3", "主菜"}:
-        return normalized
-    if daypart == "朝":
-        return {0: "副菜1", 1: "副菜2"}.get(slot_index, normalized)
-    if daypart == "昼":
-        return {0: "主菜", 1: "副菜1", 2: "副菜2", 3: "副菜3"}.get(slot_index, normalized)
-    if daypart == "夕":
-        return {0: "副菜1", 1: "副菜2", 2: "主菜", 3: "副菜3"}.get(slot_index, normalized)
-    return normalized
+    raise ValueError("delivery_menu_category_unresolved")
 
 
 def _is_specific_delivery_category(value: object) -> bool:
-    return _normalize_delivery_category_label(value) in {"副菜1", "副菜2", "副菜3", "主菜"}
+    return _normalize_delivery_category_label(value) in {"副菜1", "副菜2", "副菜3", "主菜", "主A", "主Ａ"}
 
 
 def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> bool:
     if isinstance(entry_diet, dict):
         entry_key = _normalize_diet_key(entry_diet.get("diet_type"))
-        block_soft_mixer = bool(entry_diet.get("_block_soft_mixer_line_match"))
     else:
         entry_key = _normalize_diet_key(entry_diet)
-        block_soft_mixer = False
     if not entry_key:
         return True
     line_key = _normalize_diet_key(line_diet) or "regular"
     if entry_key == line_key:
         return True
-    if block_soft_mixer and line_key in {"soft", "mixer", "soft_mixer"}:
-        return False
     if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
         return True
     if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
@@ -1199,124 +1218,36 @@ def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
     return 99
 
 
-def _monthly_entry_physical_sort_key(entry: dict, order_index: int) -> tuple[str, int, int, int, int, str]:
-    menu_date = str(entry.get("menu_date") or "").strip()
-    daypart = _normalize_output_daypart(entry.get("daypart"))
-    try:
-        slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else order_index
-    except Exception:
-        slot_index = order_index
-    diet_key = _normalize_diet_key(entry.get("diet_type")) or "regular"
-    if diet_key in {"soft", "mixer", "soft_mixer"}:
-        diet_order = 0
-    elif diet_key == "regular":
-        diet_order = 1
-    else:
-        diet_order = 2
-    return (
-        menu_date,
-        {"朝": 0, "昼": 1, "夕": 2}.get(daypart, 99),
-        slot_index,
-        diet_order,
-        order_index,
-        str(entry.get("id") or ""),
-    )
-
-
 def _build_monthly_entry_physical_rows(
     menu_entries: list[dict],
     lines: list[dict] | None = None,
 ) -> list[list[dict]]:
-    scoped_date_dayparts: set[tuple[str, str]] = set()
-    has_source_row_index = False
+    grouped: dict[tuple[str, str, int], list[dict]] = {}
+    for entry in menu_entries:
+        menu_date = _ensure_date(entry.get("menu_date"))
+        daypart = _normalize_output_daypart(entry.get("daypart"))
+        slot = entry.get("slot_index")
+        if menu_date is None or daypart not in {"朝", "昼", "夕"} or type(slot) is not int or slot < 0:
+            raise ValueError("monthly_entry_source_row_unresolved")
+        key = (menu_date.isoformat(), daypart, slot)
+        row = grouped.setdefault(key, [])
+        diet = _normalize_diet_key(entry.get("diet_type"))
+        if not diet or any(_normalize_diet_key(existing.get("diet_type")) == diet for existing in row):
+            raise ValueError("monthly_entry_source_row_unresolved")
+        row.append(entry)
+    rows = [grouped[key] for key in sorted(grouped, key=lambda key: (key[0], {"朝": 0, "昼": 1, "夕": 2}[key[1]], key[2]))]
     for line in lines or []:
-        if not isinstance(line, dict):
-            continue
-        if line.get("source_row_index") is not None:
-            has_source_row_index = True
-        line_date = _ensure_date(line.get("date"))
-        if not line_date:
-            continue
-        daypart = _normalize_output_daypart(line.get("daypart"))
-        if daypart:
-            scoped_date_dayparts.add((line_date.isoformat(), daypart))
-    if has_source_row_index and not scoped_date_dayparts:
-        raise ValueError("monthly_entry_source_row_unresolved")
-    sorted_entries = sorted(
-        enumerate(menu_entries),
-        key=lambda item: _monthly_entry_physical_sort_key(item[1], item[0]),
-    )
-    def build_rows(scoped_only: bool, split_diet_rows: bool) -> list[list[dict]]:
-        grouped: dict[tuple[str, str, int, str], list[dict]] = {}
-        regular_entries_by_slot: dict[tuple[str, str, int], list[dict]] = {}
-        for idx, entry in sorted_entries:
-            menu_date = str(entry.get("menu_date") or "").strip()
-            daypart = _normalize_output_daypart(entry.get("daypart"))
-            if not menu_date:
-                continue
-            if scoped_only and scoped_date_dayparts and (menu_date, daypart) not in scoped_date_dayparts:
-                continue
-            try:
-                slot_index = int(entry.get("slot_index")) if entry.get("slot_index") is not None else idx
-            except Exception:
-                slot_index = idx
-            diet_key = _normalize_diet_key(entry.get("diet_type")) or "regular"
-            if split_diet_rows and diet_key in {"soft", "mixer", "soft_mixer"}:
-                physical_diet_key = diet_key
-            else:
-                physical_diet_key = "regular"
-            key = (menu_date, daypart, slot_index, physical_diet_key)
-            grouped.setdefault(key, []).append(
-                {
-                    **entry,
-                    "_physical_row_diet_key": physical_diet_key,
-                    "_physical_row_split_diet_rows": split_diet_rows,
-                }
-            )
-            if physical_diet_key == "regular":
-                regular_entries_by_slot.setdefault((menu_date, daypart, slot_index), []).append(entry)
-        split_slots = {
-            (menu_date, daypart, slot_index)
-            for menu_date, daypart, slot_index, physical_diet_key in grouped
-            if physical_diet_key != "regular"
-        }
-        for menu_date, daypart, slot_index, physical_diet_key in list(grouped):
-            if physical_diet_key == "regular" and (menu_date, daypart, slot_index) in split_slots:
-                grouped[(menu_date, daypart, slot_index, physical_diet_key)] = [
-                    {**entry, "_block_soft_mixer_line_match": True, "_physical_row_split_slot": True}
-                    for entry in grouped[(menu_date, daypart, slot_index, physical_diet_key)]
-                ]
-                continue
-            if physical_diet_key == "regular":
-                continue
-            grouped[(menu_date, daypart, slot_index, physical_diet_key)] = [
-                {**entry, "_physical_row_split_slot": True}
-                for entry in grouped[(menu_date, daypart, slot_index, physical_diet_key)]
-            ]
-        return list(grouped.values())
-
-    rows = build_rows(scoped_only=True, split_diet_rows=False)
-    source_row_indexes: list[int] = []
-    for line in lines or []:
-        try:
-            if line.get("source_row_index") is not None:
-                source_row_indexes.append(int(line.get("source_row_index")))
-        except Exception:
-            continue
-    if source_row_indexes and rows and max(source_row_indexes) >= len(rows):
-        split_scoped_rows = build_rows(scoped_only=True, split_diet_rows=True)
-        if max(source_row_indexes) < len(split_scoped_rows):
-            return split_scoped_rows
-        return build_rows(scoped_only=False, split_diet_rows=True)
+        index = line.get("source_row_index")
+        if index is not None and (type(index) is not int or index < 0 or index >= len(rows)):
+            raise ValueError("monthly_entry_source_row_unresolved")
     return rows
 
 
 def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[dict]]) -> dict | None:
     source_row_raw = line.get("source_row_index")
-    try:
-        source_row_index = int(source_row_raw) if source_row_raw is not None else None
-    except Exception:
-        raise ValueError("monthly_entry_source_row_unresolved") from None
+    if source_row_raw is not None and type(source_row_raw) is not int:
+        raise ValueError("monthly_entry_source_row_unresolved")
+    source_row_index = source_row_raw
     if source_row_index is None:
         return None
     if source_row_index < 0 or source_row_index >= len(physical_rows):
@@ -1327,11 +1258,13 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
         if _monthly_entry_diet_matches_line(entry, _monthly_entry_line_diet(line))
     ]
     if not candidates:
-        if any(entry.get("_physical_row_split_slot") for entry in physical_rows[source_row_index]):
-            return {"_exclude_from_outputs": True}
         raise ValueError("monthly_entry_source_row_unresolved")
     line_diet = _monthly_entry_line_diet(line)
-    return min(candidates, key=lambda entry: _monthly_entry_diet_priority(entry, line_diet))
+    best_priority = min(_monthly_entry_diet_priority(entry, line_diet) for entry in candidates)
+    selected = [entry for entry in candidates if _monthly_entry_diet_priority(entry, line_diet) == best_priority]
+    if len(selected) != 1:
+        raise ValueError("monthly_entry_source_row_unresolved")
+    return selected[0]
 
 
 def _build_menu_entry_indexes(
@@ -1370,6 +1303,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
     if not menu_entries:
         return lines
     by_exact, by_date_name = _build_menu_entry_indexes(menu_entries)
+    captured_categories = _captured_monthly_categories(menu_entries)
     physical_rows = _build_monthly_entry_physical_rows(menu_entries, lines)
     if not by_exact and not by_date_name and not physical_rows:
         return lines
@@ -1411,11 +1345,14 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         entry_menu_name = _canonical_monthly_entry_menu_name(entry, updated)
         if entry_menu_name:
             updated["menu_name"] = entry_menu_name
-        entry_category = _menu_entry_category_label(entry)
+        entry_date = _ensure_date(entry.get("menu_date"))
+        entry_category = captured_categories[(entry_date.isoformat(), _normalize_output_daypart(entry.get("daypart")), entry["slot_index"])]
         if entry_category:
             updated["menu_category"] = entry_category
         updated["_monthly_entry_raw_category"] = _normalize_delivery_category_label(entry.get("category"))
         updated["_monthly_entry_override_applied"] = True
+        updated["_monthly_entry_slot_index"] = entry.get("slot_index")
+        updated["_monthly_entry_resolved_category"] = entry_category
         enriched.append(updated)
     return enriched
 
@@ -1509,68 +1446,29 @@ def _apply_garnish_parent_categories(lines: list[dict]) -> list[dict]:
     return enriched
 
 
-def _label_meal_slot_sequence(daypart: str) -> list[str]:
-    if daypart == "朝":
-        return ["副菜1", "副菜2"]
-    if daypart in {"昼", "夕"}:
-        return ["主菜", "副菜1", "副菜2", "副菜3"]
-    return []
-
-
 def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
-    grouped: dict[tuple[Any, str], list[dict]] = {}
-    for line in lines:
-        daypart = _normalize_output_daypart(line.get("daypart"))
-        if not daypart:
-            continue
-        grouped.setdefault((line.get("date"), daypart), []).append(line)
-
     slot_by_id: dict[int, str] = {}
-    for (_date_value, daypart), daypart_lines in grouped.items():
-        slot_sequence = _label_meal_slot_sequence(daypart)
-        if not slot_sequence:
+    for line in lines:
+        if line.get("_exclude_from_outputs"):
             continue
-        has_explicit_main = any(
-            not line.get("_exclude_from_outputs")
-            and line.get("_monthly_entry_override_applied")
-            and line.get("_monthly_entry_raw_category") == "主菜"
-            and _normalize_delivery_category_label(line.get("menu_category")) == "主菜"
-            for line in daypart_lines
-        )
-        generic_slot_sequence = (
-            [slot for slot in slot_sequence if slot != "主菜"]
-            if has_explicit_main
-            else slot_sequence
-        )
-        menu_slot_by_physical_key: dict[str, str] = {}
-        physical_keys: list[str] = []
-        for line in sorted(daypart_lines, key=_line_order_key):
-            if line.get("_exclude_from_outputs"):
+        category = _normalize_delivery_category_label(line.get("menu_category"))
+        if _is_daily_label_garnish_category(category):
+            continue
+        if line.get("_monthly_entry_override_applied"):
+            raw = line.get("_monthly_entry_raw_category")
+            if _is_specific_delivery_category(raw) or raw == "主食":
+                slot_by_id[id(line)] = raw
                 continue
-            category = _normalize_delivery_category_label(line.get("menu_category"))
-            if _is_daily_label_garnish_category(category):
+            if raw == "副菜":
+                resolved = line.get("_monthly_entry_resolved_category")
+                if not isinstance(resolved, str) or not resolved.startswith("副菜") or not resolved[2:].isdigit() or int(resolved[2:]) < 1:
+                    raise ValueError("delivery_monthly_slot_required")
+                slot_by_id[id(line)] = resolved
                 continue
-            if (
-                line.get("_monthly_entry_override_applied")
-                and line.get("_monthly_entry_raw_category") == "主菜"
-                and category == "主菜"
-            ):
-                slot_by_id[id(line)] = category
-                continue
-            menu_name = str(line.get("menu_name") or "").strip()
-            if not menu_name:
-                continue
-            source_row_index = line.get("source_row_index")
-            physical_key = f"source:{source_row_index}" if source_row_index is not None else f"name:{menu_name}"
-            if physical_key not in menu_slot_by_physical_key:
-                physical_keys.append(physical_key)
-                if len(physical_keys) <= len(generic_slot_sequence):
-                    menu_slot_by_physical_key[physical_key] = generic_slot_sequence[len(physical_keys) - 1]
-                else:
-                    menu_slot_by_physical_key[physical_key] = category
-            slot = menu_slot_by_physical_key.get(physical_key)
-            if slot:
-                slot_by_id[id(line)] = slot
+            raise ValueError("delivery_menu_category_unresolved")
+        if not _is_specific_delivery_category(category) and category != "主食":
+            raise ValueError("delivery_monthly_category_required")
+        slot_by_id[id(line)] = line["menu_category"]
 
     enriched: list[dict] = []
     for line in lines:
@@ -3945,10 +3843,16 @@ def _write_delivery_note(
     except Exception as exc:  # noqa: BLE001
         raise ValueError("delivery_template_load_failed") from exc
     workbook = load_workbook(BytesIO(template_bytes))
-    if sheet_name and sheet_name in workbook.sheetnames:
+    if sheet_name:
+        if sheet_name not in workbook.sheetnames:
+            workbook.close()
+            raise ValueError("delivery_worksheet_missing")
         ws = workbook[sheet_name]
+    elif len(workbook.worksheets) == 1:
+        ws = workbook.worksheets[0]
     else:
-        ws = workbook.active
+        workbook.close()
+        raise ValueError("delivery_worksheet_required")
     _apply_delivery_facility_name(ws, facility_name)
 
     header_row = _find_delivery_header_row(ws, columns)
@@ -5334,7 +5238,7 @@ def _create_daily_label_csv_bytes(
 
 
 def build_label_workbook_for_order(order_id: str, *, target_date: dt_date | None = None) -> tuple[Path, str]:
-    ctx = _prepare_output_context(order_id, include_bags=True, include_ocr_menu_meta=False)
+    ctx = _prepare_output_context(order_id, include_bags=True, include_ocr_menu_meta=False, require_invoice=False)
     bags = ctx.get("bags") or []
     if target_date is not None:
         bags = [bag for bag in bags if _ensure_date(bag.get("date")) == target_date]
@@ -5364,7 +5268,7 @@ def build_label_workbook_for_order(order_id: str, *, target_date: dt_date | None
 
 
 def build_label_csv_for_order(order_id: str, *, target_date: dt_date | None = None) -> tuple[Path, str]:
-    ctx = _prepare_output_context(order_id, include_bags=True, include_ocr_menu_meta=False)
+    ctx = _prepare_output_context(order_id, include_bags=True, include_ocr_menu_meta=False, require_invoice=False)
     bags = ctx.get("bags") or []
     if target_date is not None:
         bags = [bag for bag in bags if _ensure_date(bag.get("date")) == target_date]
@@ -5777,6 +5681,7 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
                 continue
             ctx = _prepare_output_context_for_bundle(
                 order_id,
+                require_invoice=False,
                 include_bags=False,
                 include_ocr_menu_meta=False,
                 include_expanded_copy=True,
@@ -5921,112 +5826,25 @@ def _fax_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple
     return _authored_quantity_signature(column, area_aliases)
 
 
-def _delivery_invoice_header(column: dict, signature: tuple[str | None, str | None]) -> str:
-    delivery_header = str(column.get("delivery_header") or "").strip()
-    if delivery_header:
-        return delivery_header
-    raw_header = str(column.get("header") or "").strip()
-    diet_key, area_key = signature
-    diet_labels = {
-        "regular": "常食",
-        "regular_bag": "小口",
-        "soft": "軟菜",
-        "mixer": "ミキサー",
-        "daycare": "通所",
-        "staff": "職員",
-        "diabetes": "糖尿",
-        "no_meat": "肉禁",
-        "no_fish": "魚禁",
-        "no_fried": "揚げ物禁",
-        "forbidden_other": "その他禁食",
-        "sesame_allergy": "ゴマアレルギー",
-    }
-    label = diet_labels.get(str(diet_key or ""), str(column.get("header") or column.get("name") or diet_key or "").strip())
-    header_group = str(column.get("header_group") or "").strip()
-    if header_group and header_group != label:
-        label = f"{header_group} {label}"
-    if area_key and area_key != "X":
-        return f"{label}{area_key}"
-    if raw_header and raw_header not in {"-", "－"} and not header_group:
-        return raw_header
-    return label
+def _resolve_captured_invoice_template(facility_config: dict) -> dict:
+    from src.services.config_validator import _validate_invoice_columns
 
-
-def _build_invoice_template_from_fax_columns(facility_config: dict | None) -> dict:
-    if not isinstance(facility_config, dict):
-        return {}
-    fax_template = facility_config.get("fax_template") or {}
-    fax_columns = (fax_template.get("columns") or [])
-    if not isinstance(fax_columns, list):
-        return {}
-    extra_columns = fax_template.get("delivery_extra_columns") or []
-    if not isinstance(extra_columns, list):
-        extra_columns = []
-    area_aliases = _build_area_alias_map(facility_config)
-    fax_quantity_columns = [
-        column
-        for column in list(fax_columns) + list(extra_columns)
-        if _fax_quantity_signature(column, area_aliases)
-    ]
-    fax_signatures = {
-        signature
-        for column in fax_quantity_columns
-        if (signature := _fax_quantity_signature(column, area_aliases))
-    }
-    if not fax_signatures:
-        return {}
-
-    derived_columns: list[dict] = [
-        {"name": "日付", "header": "日付", "source": "date"},
-        {"name": "区分", "header": "区分", "source": "daypart"},
-        {"name": "献立区分", "header": "献立区分", "source": "menu_category"},
-        {"name": "メニュー名", "header": "メニュー名", "source": "menu_display"},
-    ]
-    seen: set[tuple[str | None, str | None]] = set()
-    for column in fax_quantity_columns:
-        signature = _fax_quantity_signature(column, area_aliases)
-        if not signature:
-            continue
-        if signature in seen:
-            raise ValueError("delivery_quantity_mapping_ambiguous")
-        seen.add(signature)
-        diet_key, area_key = signature
-        if diet_key in {"change_1", "change_2", "unknown"}:
-            continue
-        scope_key = "aggregate" if area_key is None else "exact." + json.dumps(area_key, ensure_ascii=False, separators=(",", ":"))
-        name = f"qty.{diet_key}.{scope_key}"
-        derived_columns.append(
-            {
-                "name": name,
-                "header": _delivery_invoice_header(column, signature),
-                "source": "quantity",
-                "diet_type": diet_key,
-                "area_id": area_key,
-            }
-        )
-    for column in list(fax_columns) + list(extra_columns):
-        if not isinstance(column, dict) or column.get("delivery_enabled") is False:
-            continue
-        delivery_source = str(column.get("delivery_source") or "").strip()
-        delivery_header = str(column.get("delivery_header") or "").strip()
-        if delivery_source not in {"note", "static"}:
-            continue
-        header = delivery_header or str(column.get("header") or column.get("name") or "").strip()
-        if not header:
-            continue
-        derived_columns.append(
-            {
-                "name": str(column.get("delivery_name") or column.get("name") or header).strip(),
-                "header": header,
-                "source": delivery_source,
-            }
-        )
-    derived_columns.append({"name": "備考欄", "header": "備考欄", "source": "note"})
-
-    return {
-        "columns": derived_columns,
-        "include_menu_name": True,
-    }
+    template = facility_config.get("invoice_template")
+    if not isinstance(template, dict) or not isinstance(template.get("columns"), list) or not template["columns"]:
+        raise ValueError("accepted_invoice_template_required")
+    errors = []
+    _validate_invoice_columns(template["columns"], "invoice_template.columns", errors)
+    if errors:
+        raise ValueError("accepted_invoice_columns_invalid: " + "; ".join(errors))
+    for column in template["columns"]:
+        if column["source"] == "quantity":
+            _authored_quantity_signature(column, _build_area_alias_map(facility_config))
+    for key in ("template_uri", "sheet_name"):
+        if key in template and template[key] is not None and (not isinstance(template[key], str) or not template[key].strip()):
+            raise ValueError("accepted_invoice_" + key + "_invalid")
+    if "include_menu_name" in template and type(template["include_menu_name"]) is not bool:
+        raise ValueError("accepted_invoice_include_menu_name_invalid")
+    return deepcopy(template)
 
 
 def _daily_bundle_status_counts(manifest_items: list[dict]) -> dict[str, int]:
@@ -6077,6 +5895,7 @@ def build_daily_output_bundle(
         try:
             ctx = _prepare_output_context_for_bundle(
                 order_id,
+                require_invoice=normalized_type in {"delivery", "both"},
                 include_bags=normalized_type in {"labels", "labels_csv", "both"},
                 include_ocr_menu_meta=normalized_type != "delivery",
                 include_expanded_copy=normalized_type != "delivery",
@@ -6363,6 +6182,7 @@ def _prepare_output_context(
     include_expanded_copy: bool = True,
     timings: dict[str, float] | None = None,
     original_adoption: dict | None = None,
+    require_invoice: bool = True,
 ) -> dict:
     order_started = time.perf_counter()
     order = original_adoption["order"] if original_adoption is not None else get_order_by_id(order_id)
@@ -6382,7 +6202,7 @@ def _prepare_output_context(
 
     packaging_policy = facility_config.get("packaging_policy", {})
     label_profile = facility_config.get("label_profile", {})
-    invoice_template = _build_invoice_template_from_fax_columns(facility_config)
+    invoice_template = _resolve_captured_invoice_template(facility_config) if require_invoice else None
     policy_started = time.perf_counter()
     quantity_rules = accepted_candidate["configured_input"]["policy"].get("quantity_rules", {})
     if timings is not None:
@@ -6457,6 +6277,7 @@ def _prepare_output_context_for_bundle(
     include_bags: bool,
     include_ocr_menu_meta: bool,
     include_expanded_copy: bool,
+    require_invoice: bool,
 ) -> dict:
     return _prepare_output_context(
         order_id,
@@ -6464,11 +6285,12 @@ def _prepare_output_context_for_bundle(
         include_ocr_menu_meta=include_ocr_menu_meta,
         include_expanded_copy=include_expanded_copy,
         timings=None,
+        require_invoice=require_invoice,
     )
 
 
 def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
-    ctx = _prepare_output_context(order_id, include_bags=output_type in {"labels", "aggregate"})
+    ctx = _prepare_output_context(order_id, include_bags=output_type in {"labels", "aggregate"}, require_invoice=output_type == "delivery")
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
@@ -6523,6 +6345,7 @@ def build_delivery_preview(
         include_bags=False,
         include_expanded_copy=False,
         timings=timings,
+        require_invoice=True,
     )
     timings["prepare_context_ms"] = round((time.perf_counter() - context_started) * 1000, 1)
     if target_date is not None:
@@ -6614,7 +6437,7 @@ def build_outputs(order_id: str, *, write_session=None, original_adoption: dict 
             return build_outputs(order_id, write_session=session, original_adoption=original)
     if original_adoption is None or original_adoption["order"]["id"] != order_id:
         raise ValueError("output original ownership input missing")
-    ctx = _prepare_output_context(order_id, original_adoption=original_adoption)
+    ctx = _prepare_output_context(order_id, original_adoption=original_adoption, require_invoice=True)
     order = ctx["order"]
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
