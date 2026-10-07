@@ -2,7 +2,7 @@ import sys
 import pathlib
 import asyncio
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 import fitz
 import pytest
@@ -23,6 +23,13 @@ from src.models.order import Order  # noqa: E402
 from src.services.uploaded_pdf_service import claim_uploaded_pdf, mark_uploaded_pdf_completed  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from sqlalchemy import select  # noqa: E402
+from tests.helpers.ingest_original import (  # noqa: E402
+    configure_delivery, authored_sources, register_authored_original,
+    authored_pipeline_provider, process_uploaded_original,
+)
+from src.services import ingest_job_service as retry_ingest_jobs  # noqa: E402
+from src.services import uploaded_pdf_service as retry_uploads  # noqa: E402
+from src.services import ingest_delivery_service as retry_delivery  # noqa: E402
 
 
 def _operator_header() -> dict[str, str]:
@@ -719,14 +726,48 @@ def test_ingest_uploads_list_backfills_legacy_manual_upload_jobs(monkeypatch):
     assert row["current_stage"] == "uploaded"
 
 
-def test_retry_uploaded_pdf_requeues_row(monkeypatch):
+def _observe_retry_dispatch(monkeypatch, processed_uploaded_pdf_ids, restarted_job_ids):
+    """Record scheduler entry only; preserve the actual transactional restart."""
+    restart = retry_ingest_jobs.restart_ingest_job
+
+    def observed_restart(job_id, *, write_session=None):
+        assert write_session is not None
+        assert write_session.in_transaction()
+        restarted_job_ids.append(job_id)
+        return restart(job_id, write_session=write_session)
+
+    monkeypatch.setattr(retry_ingest_jobs, "restart_ingest_job", observed_restart)
+    monkeypatch.setattr(
+        ingest_api, "enqueue_uploaded_pdf_async",
+        lambda uploaded_pdf_id: processed_uploaded_pdf_ids.append(uploaded_pdf_id),
+    )
+
+
+def _assert_retry_original_reset(saved, before, previous_delivery, original_payload):
+    after = retry_ingest_jobs.get_ingest_job_snapshot(saved.message_id)
+    assert after["generation"] != before["generation"]
+    assert after["attempts"] == before["attempts"]
+    assert after["generation_attempts"] == 0
+    assert after["claim_id"] is None
+    assert after["input_digest"] == before["input_digest"]
+    assert retry_ingest_jobs.get_ingest_payload(saved.message_id) == original_payload
+    assert retry_ingest_jobs.get_ingest_payload(saved.message_id)["content_sha256"] == saved.content_sha256
+    assert retry_delivery.delivery_for_job(
+        saved.message_id, after["generation"], after["input_digest"],
+    ) != previous_delivery
+
+
+def test_retry_uploaded_pdf_requeues_row(monkeypatch, tmp_path, isolated_formal_schema):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     order_service.clear_all()
     client = TestClient(app)
+    configure_delivery(monkeypatch)
+    uri, digest = authored_sources(monkeypatch, tmp_path,
+        facility_id="FAC001", menu_date=date(2026, 2, 15))
     saved = ManualUploadSavedFile(
         message_id="upload:sha256:retry-row",
-        pdf_uri="gs://bucket/retry.pdf",
-        content_sha256="sha-retry",
+        pdf_uri=uri,
+        content_sha256=digest,
         original_filename="retry.pdf",
         received_at=ingest_api._parse_optional_datetime(None),
     )
@@ -743,16 +784,12 @@ def test_retry_uploaded_pdf_requeues_row(monkeypatch):
     ingest_api.requeue_uploaded_pdf(uploaded_pdf["id"])
 
     restarted_job_ids: list[str] = []
-    monkeypatch.setattr(
-        ingest_api,
-        "process_uploaded_pdf_job",
-        lambda uploaded_pdf_id: processed_uploaded_pdf_ids.append(uploaded_pdf_id),
+    before = retry_ingest_jobs.get_ingest_job_snapshot(saved.message_id)
+    original_payload = retry_ingest_jobs.get_ingest_payload(saved.message_id)
+    previous_delivery = retry_delivery.delivery_for_job(
+        saved.message_id, before["generation"], before["input_digest"],
     )
-    monkeypatch.setattr(
-        ingest_api,
-        "restart_ingest_job",
-        lambda job_id: restarted_job_ids.append(job_id) or True,
-    )
+    _observe_retry_dispatch(monkeypatch, processed_uploaded_pdf_ids, restarted_job_ids)
 
     res = client.post(
         f"/ingest/uploads/{uploaded_pdf['id']}/retry",
@@ -767,24 +804,28 @@ def test_retry_uploaded_pdf_requeues_row(monkeypatch):
     assert body["item"]["current_stage"] == "uploaded"
     assert processed_uploaded_pdf_ids == [uploaded_pdf["id"]]
     assert restarted_job_ids == [saved.message_id]
+    _assert_retry_original_reset(saved, before, previous_delivery, original_payload)
 
 
-def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch):
+def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch, tmp_path, isolated_formal_schema):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     order_service.clear_all()
     client = TestClient(app)
+    configure_delivery(monkeypatch)
+    uri, digest = authored_sources(monkeypatch, tmp_path,
+        facility_id="FAC001", menu_date=date(2026, 2, 15))
     now = ingest_api._parse_optional_datetime(None)
     completed = ManualUploadSavedFile(
         message_id="upload:sha256:completed-row",
-        pdf_uri="gs://bucket/completed.pdf",
-        content_sha256="sha-completed",
+        pdf_uri=uri,
+        content_sha256=digest,
         original_filename="completed.pdf",
         received_at=now,
     )
     processing = ManualUploadSavedFile(
         message_id="upload:sha256:processing-row",
-        pdf_uri="gs://bucket/processing.pdf",
-        content_sha256="sha-processing",
+        pdf_uri=uri,
+        content_sha256=digest,
         original_filename="processing.pdf",
         received_at=now,
     )
@@ -804,33 +845,22 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch):
         skip_ocr=False,
         source_kind="manual_upload",
     )
-    mark_uploaded_pdf_completed(completed_row["id"])
-    claim_uploaded_pdf(processing_row["id"], worker_instance="test-worker")
-
+    register_authored_original(completed_row["id"], effective_date=date(2026, 2, 15))
+    authored_pipeline_provider(monkeypatch, table_rows=[["02/15", "昼", "Menu A", "2"]])
+    assert process_uploaded_original(completed_row["id"])["result"] == "business_done"
+    completed_state = retry_uploads.get_uploaded_pdf(completed_row["id"])
+    assert completed_state["status"] == "completed"
     with session_scope() as session:
-        healthy_document = OrderDocument(
-            id="DOC-RETRY-COMPLETE",
-            facility_code="FAC001",
-            week_code="2026-02@2026-02-15~2026-02-21",
-            storage_uri=completed.pdf_uri,
-            source_email_id=completed.message_id,
-            received_at=completed.received_at,
-            ocr_attempts=1,
-            status="processed",
-        )
-        healthy_order = Order(
-            id="ORD-RETRY-COMPLETE",
-            facility_code="FAC001",
-            week_code="2026-02@2026-02-15~2026-02-21",
-            status="要確認",
-            current_document_id=healthy_document.id,
-            superseded_document_ids=[],
-            document_uri=completed.pdf_uri,
-            message_id=completed.message_id,
-            received_at=completed.received_at,
-        )
-        session.add(healthy_document)
-        session.add(healthy_order)
+        healthy_order = session.get(Order, completed_state["current_order_id"])
+        healthy_document = session.get(OrderDocument, completed_state["current_document_id"])
+        assert healthy_order.current_document_id == healthy_document.id
+        assert healthy_order.message_id == completed.message_id
+        assert healthy_document.storage_uri == completed.pdf_uri
+        assert healthy_order.week_code == "2026-02@2026-02-15~2026-02-21"
+    processing_lease = claim_uploaded_pdf(processing_row["id"], worker_instance="test-worker")
+    assert processing_lease is not None
+    assert processing_lease["status"] == "processing"
+    assert processing_lease["lease_token"]
 
     completed_res = client.post(
         f"/ingest/uploads/{completed_row['id']}/retry",
@@ -841,16 +871,13 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch):
 
     processed_uploaded_pdf_ids: list[str] = []
     restarted_job_ids: list[str] = []
-    monkeypatch.setattr(
-        ingest_api,
-        "process_uploaded_pdf_job",
-        lambda uploaded_pdf_id: processed_uploaded_pdf_ids.append(uploaded_pdf_id),
+    before = retry_ingest_jobs.get_ingest_job_snapshot(processing.message_id)
+    original_payload = retry_ingest_jobs.get_ingest_payload(processing.message_id)
+    previous_delivery = retry_delivery.delivery_for_job(
+        processing.message_id, before["generation"], before["input_digest"],
     )
-    monkeypatch.setattr(
-        ingest_api,
-        "restart_ingest_job",
-        lambda job_id: restarted_job_ids.append(job_id) or True,
-    )
+    _observe_retry_dispatch(monkeypatch, processed_uploaded_pdf_ids, restarted_job_ids)
+
     processing_res = client.post(
         f"/ingest/uploads/{processing_row['id']}/retry",
         headers=_operator_header(),
@@ -859,6 +886,10 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch):
     assert processing_res.json()["item"]["status"] == "pending"
     assert processed_uploaded_pdf_ids == [processing_row["id"]]
     assert restarted_job_ids == [processing.message_id]
+    current_upload = retry_uploads.get_uploaded_pdf(processing_row["id"])
+    assert current_upload["attempt_count"] == processing_lease["attempt_count"]
+    assert current_upload["lease_token"] is None
+    _assert_retry_original_reset(processing, before, previous_delivery, original_payload)
 
 
 def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(monkeypatch):
@@ -894,65 +925,49 @@ def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(monkeypatch):
     assert enqueued_uploaded_ids == ["UPL-1", "UPL-2"]
 
 
-def test_retry_uploaded_pdf_allows_completed_row_with_missing_week(monkeypatch):
+def test_retry_uploaded_pdf_allows_completed_row_with_missing_week(monkeypatch, tmp_path, isolated_formal_schema):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     order_service.clear_all()
     client = TestClient(app)
+    configure_delivery(monkeypatch)
+    uri, digest = authored_sources(monkeypatch, tmp_path,
+        facility_id="FAC001", menu_date=date(2026, 2, 15))
     now = ingest_api._parse_optional_datetime(None)
     saved = ManualUploadSavedFile(
         message_id="upload:sha256:completed-missing-week",
-        pdf_uri="gs://bucket/completed-missing-week.pdf",
-        content_sha256="sha-completed-missing-week",
-        original_filename="completed-missing-week_0405_.pdf",
+        pdf_uri=uri,
+        content_sha256=digest,
+        original_filename="authored-component_20260215.pdf",
         received_at=now,
     )
     row, _ = ingest_api.create_uploaded_pdf_from_upload(
         saved=saved,
-        facility_hint=None,
-        week_hint=None,
+        facility_hint="FAC001",
+        week_hint="2026-02@2026-02-15~2026-02-21",
         facility_name=None,
         skip_ocr=False,
         source_kind="manual_upload",
     )
 
+    register_authored_original(row["id"], effective_date=date(2026, 2, 15))
+    authored_pipeline_provider(monkeypatch, table_rows=[["02/15", "昼", "Menu A", "2"]])
+    assert process_uploaded_original(row["id"])["result"] == "business_done"
+    completed = retry_uploads.get_uploaded_pdf(row["id"])
+    assert completed["status"] == "completed"
     with session_scope() as session:
-        document = OrderDocument(
-            id="DOC-RETRY-MISSING-WEEK",
-            facility_code=None,
-            week_code=None,
-            storage_uri=saved.pdf_uri,
-            source_email_id=saved.message_id,
-            received_at=saved.received_at,
-            ocr_attempts=1,
-            status="processed",
-        )
-        order = Order(
-            id="ORD-RETRY-MISSING-WEEK",
-            facility_code=None,
-            week_code=None,
-            status="要確認",
-            current_document_id=document.id,
-            superseded_document_ids=[],
-            document_uri=saved.pdf_uri,
-            message_id=saved.message_id,
-            received_at=saved.received_at,
-        )
-        session.add(document)
-        session.add(order)
+        order = session.get(Order, completed["current_order_id"])
+        assert order.current_document_id == completed["current_document_id"]
+        assert order.week_code == "2026-02@2026-02-15~2026-02-21"
+        order.week_code = None  # Explicit legacy-corrupted component fixture only.
 
-    mark_uploaded_pdf_completed(row["id"])
     processed_uploaded_pdf_ids: list[str] = []
     restarted_job_ids: list[str] = []
-    monkeypatch.setattr(
-        ingest_api,
-        "process_uploaded_pdf_job",
-        lambda uploaded_pdf_id: processed_uploaded_pdf_ids.append(uploaded_pdf_id),
+    before = retry_ingest_jobs.get_ingest_job_snapshot(saved.message_id)
+    original_payload = retry_ingest_jobs.get_ingest_payload(saved.message_id)
+    previous_delivery = retry_delivery.delivery_for_job(
+        saved.message_id, before["generation"], before["input_digest"],
     )
-    monkeypatch.setattr(
-        ingest_api,
-        "restart_ingest_job",
-        lambda job_id: restarted_job_ids.append(job_id) or True,
-    )
+    _observe_retry_dispatch(monkeypatch, processed_uploaded_pdf_ids, restarted_job_ids)
 
     res = client.post(
         f"/ingest/uploads/{row['id']}/retry",
@@ -963,3 +978,4 @@ def test_retry_uploaded_pdf_allows_completed_row_with_missing_week(monkeypatch):
     assert res.json()["item"]["status"] == "pending"
     assert processed_uploaded_pdf_ids == [row["id"]]
     assert restarted_job_ids == [saved.message_id]
+    _assert_retry_original_reset(saved, before, previous_delivery, original_payload)
