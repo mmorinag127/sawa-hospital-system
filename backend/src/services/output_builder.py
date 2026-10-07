@@ -879,7 +879,7 @@ def _resolve_current_menu_defaults(names, facility):
     return menu_service.resolve_menu_defaults(names, facility)
 
 
-def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] | None:
+def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int] | None:
     item_daypart = _normalize_delivery_daypart(item.get("daypart"))
     line_daypart = _normalize_delivery_daypart(line.get("daypart"))
     item_category = _normalize_delivery_category_label(item.get("category"))
@@ -914,7 +914,7 @@ def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] |
             return None
         elif line_diet:
             score -= 2
-    return score, specificity, str(item.get("id") or "")
+    return score, specificity
 
 
 def _select_menu_item_for_line(line: dict, menu_items_by_key: dict[str, list[dict]]) -> dict | None:
@@ -922,15 +922,21 @@ def _select_menu_item_for_line(line: dict, menu_items_by_key: dict[str, list[dic
     candidates = menu_items_by_key.get(name_key) or []
     if not candidates:
         return None
-    ranked: list[tuple[tuple[int, int, str], dict]] = []
+    ranked: list[tuple[tuple[int, int], dict]] = []
     for item in candidates:
         score = _menu_item_matches_context(item, line)
         if score is not None:
             ranked.append((score, item))
     if not ranked:
         return None
-    ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return ranked[0][1]
+    best_rank = max(rank for rank, _item in ranked)
+    best: list[dict] = []
+    for rank, item in ranked:
+        if rank == best_rank and item not in best:
+            best.append(item)
+    if len(best) != 1:
+        raise ValueError("monthly_menu_item_source_ambiguous")
+    return best[0]
 
 
 def _apply_menu_overrides(lines: list[dict], menu_items: list[dict], *, apply_category: bool = True) -> list[dict]:
@@ -954,7 +960,7 @@ def _apply_menu_overrides(lines: list[dict], menu_items: list[dict], *, apply_ca
         if item.get("daypart") and not updated.get("daypart"):
             updated["daypart"] = item.get("daypart")
         item_category = _normalize_delivery_category_label(item.get("category"))
-        if apply_category and item_category and (
+        if apply_category and not _derived_accessory(line) and item_category and (
             _is_specific_delivery_category(item_category)
             or not _is_specific_delivery_category(updated.get("menu_category"))
         ):
@@ -989,6 +995,10 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
                 index[key] = item
     enriched: list[dict] = []
     for line in lines:
+        if _derived_accessory(line):
+            # A saved parent snapshot is not the derived component's current source.
+            enriched.append(line)
+            continue
         name_key = _normalize_menu_key(line.get("menu_name"))
         item = index.get(name_key)
         if not item:
@@ -1105,6 +1115,14 @@ def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> b
 
 def _monthly_entry_line_diet(line: dict) -> str:
     return _normalize_diet_key(line.get("source_diet_type") or line.get("diet_type")) or "regular"
+
+
+def _derived_accessory(line: dict) -> bool:
+    if not line.get("parent_menu_name") and not line.get("_derived_accessory_kind"):
+        return False
+    if not str(line.get("parent_menu_name") or "").strip() or not _is_daily_label_garnish_category(line.get("menu_category")) or not str(line.get("menu_name") or "").strip():
+        raise ValueError("derived_accessory_identity_unresolved")
+    return True
 
 
 def _canonical_monthly_entry_menu_name(entry: dict, line: dict) -> str | None:
@@ -1227,6 +1245,23 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         daypart = _normalize_output_daypart(line.get("daypart"))
         line_diet_key = _monthly_entry_line_diet(line)
         entry = _resolve_monthly_entry_by_source_row(line, physical_rows)
+        if _derived_accessory(line):
+            if entry is None:
+                raise ValueError("derived_accessory_parent_unresolved")
+            parent, garnish = _split_garnish_name(entry.get("name"))
+            if (
+                _normalize_menu_key(parent) != _normalize_menu_key(line["parent_menu_name"])
+                or _ensure_date(entry.get("menu_date")) != line_date
+                or _normalize_output_daypart(entry.get("daypart")) != daypart
+                or not str(line.get("menu_name") or "").strip()
+                or (line.get("bag_type") != "condiment" and _normalize_menu_key(garnish) != menu_name_key)
+            ):
+                raise ValueError("derived_accessory_parent_unresolved")
+            updated = dict(line)
+            if entry.get("_exclude_from_outputs"):
+                updated["_exclude_from_outputs"] = True
+            enriched.append(updated)
+            continue
         if isinstance(entry, dict) and entry.get("_exclude_from_outputs"):
             updated = dict(line)
             updated["_exclude_from_outputs"] = True
@@ -1299,16 +1334,14 @@ def _clear_stale_menu_qty_from_monthly_entry(lines: list[dict]) -> list[dict]:
 
 
 def _apply_garnish_defaults(lines: list[dict]) -> list[dict]:
-    enriched: list[dict] = []
     for line in lines:
-        if _normalize_category_key(line.get("menu_category")) != "添え" or line.get("menu_qty_per_serving") is not None:
-            enriched.append(line)
+        if not _derived_accessory(line):
             continue
-        updated = dict(line)
-        updated["menu_unit_type"] = _normalize_unit_type(updated.get("menu_unit_type")) or "g"
-        updated["menu_qty_per_serving"] = 30
-        enriched.append(updated)
-    return enriched
+        quantity = line.get("menu_qty_per_serving")
+        unit = line.get("menu_unit_type")
+        if type(quantity) not in {int, float} or not math.isfinite(quantity) or quantity < 0 or not isinstance(unit, str) or not unit.strip():
+            raise ValueError("derived_accessory_amount_unresolved")
+    return lines
 
 
 def _line_order_key(line: dict) -> tuple[int, str]:
@@ -1421,7 +1454,7 @@ def _apply_menu_master_defaults(
         if payload.get("condiments") is not None:
             updated["condiments"] = payload.get("condiments")
         payload_category = _normalize_delivery_category_label(payload.get("category"))
-        if apply_category and not updated.get("_monthly_entry_override_applied") and payload_category and (
+        if apply_category and not _derived_accessory(line) and not updated.get("_monthly_entry_override_applied") and payload_category and (
             _is_specific_delivery_category(payload_category)
             or not _is_specific_delivery_category(updated.get("menu_category"))
         ):
@@ -1455,6 +1488,7 @@ def _apply_condiment_lines(lines: list[dict]) -> list[dict]:
             condiment_line = dict(updated)
             condiment_line["menu_name"] = label
             condiment_line["menu_category"] = "添え"
+            condiment_line["_derived_accessory_kind"] = "condiment"
             condiment_line["parent_menu_name"] = updated.get("menu_name")
             condiment_line["parent_menu_category"] = updated.get("menu_category")
             condiment_line["condiments"] = []
@@ -1791,14 +1825,13 @@ def build_order_lines_for_outputs(
     order_lines = _apply_menu_overrides(order_lines, menu_items)
     order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
     order_lines = _apply_menu_rules(order_lines, facility_id, rules=sources["rules"])
-    order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id, sources=sources)
     order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
-    order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id, sources=sources)
+    order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_label_meal_slot_categories(order_lines)
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
@@ -2069,6 +2102,7 @@ def _apply_garnish_lines(lines: list[dict]) -> list[dict]:
         garnish_line = dict(line)
         garnish_line["menu_name"] = garnish
         garnish_line["menu_category"] = "添え"
+        garnish_line["_derived_accessory_kind"] = "garnish"
         garnish_line["parent_menu_name"] = base
         garnish_line["parent_menu_category"] = line.get("menu_category")
         for field in (

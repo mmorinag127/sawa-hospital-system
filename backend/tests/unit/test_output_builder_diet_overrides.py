@@ -911,6 +911,7 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
             "name": "玉子焼き",
             "category": "副菜",
             "slot_index": 2,
+            "diet_type": "mixer",
         },
         {
             "menu_date": "2026-06-12",
@@ -918,6 +919,7 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
             "name": "豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ",
             "category": "主菜",
             "slot_index": 1,
+            "diet_type": "soft",
         },
     ]
     items = [
@@ -946,7 +948,6 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
     enriched = output_builder._apply_menu_entry_overrides(lines, entries)
     enriched = output_builder._apply_menu_overrides(enriched, items)
     enriched = output_builder._clear_stale_menu_qty_from_monthly_entry(enriched)
-    enriched = output_builder._apply_builtin_menu_defaults(enriched)
 
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
@@ -965,73 +966,65 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
     assert tofu_label["内容詳細"] == "2個"
 
 
-def test_bag_level_monthly_menu_item_qty_overrides_stale_materialized_amounts(monkeypatch):
-    monkeypatch.setattr(output_builder, "_collect_current_menu_entries_for_week", lambda _week_value, _facility_id: [])
-    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
-    monkeypatch.setattr(
-        output_builder,
-        "_collect_current_menu_items_for_week",
-        lambda _week_value, _facility_id: [
-            {
-                "id": "MMI-tofu",
-                "name": "豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ",
-                "daypart": "昼食",
-                "category": "主菜",
-                "diet_type": "regular",
-                "unit_type": "count",
-                "qty_per_serving": 2,
-                "temp_type": "hot",
-            },
-            {
-                "id": "MMI-tamago",
-                "name": "玉子焼き",
-                "daypart": "夕食",
-                "category": "副菜",
-                "diet_type": "regular",
-                "unit_type": "count",
-                "qty_per_serving": 2,
-                "temp_type": "hot",
-            },
-        ],
-    )
+def test_bag_level_monthly_menu_item_qty_overrides_stale_materialized_amounts(monkeypatch, tmp_path, isolated_formal_schema):
+    from pathlib import Path
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from src import db
+    from sqlalchemy import select
+    from src.db import session_scope
+    from src.models.menu import MonthlyMenuItem
+    from src.models.order import Order
+    from src.services import order_workflow_v2_service as workflow
 
-    bags = output_builder.build_bag_rows_for_outputs(
-        {
-            "id": "ORD-stale-materialized",
-            "facility": "FAC00010",
-            "week_value": "2026-06",
-            "lines": [
-                {
-                    "date": "2026-06-12",
-                    "daypart": "昼",
-                    "menu_name": "豆腐ﾊﾝﾊﾞｰｸﾞ",
-                    "menu_category": "主菜（軟菜）",
-                    "diet_type": "soft",
-                    "area_id": "2F",
-                    "quantity_original": 5,
-                    "menu_qty_per_serving": 100,
-                    "menu_unit_type": "g",
-                },
-                {
-                    "date": "2026-06-10",
-                    "daypart": "夕",
-                    "menu_name": "玉子焼き",
-                    "menu_category": "主菜（ミキサー）",
-                    "diet_type": "mixer",
-                    "area_id": "3F",
-                    "quantity_original": 4,
-                    "menu_qty_per_serving": 100,
-                    "menu_unit_type": "g",
-                },
-            ],
-        },
-        facility_config={"packaging_policy": {}, "fax_template_override": {"columns": []}},
-    )
+    bags = []
+    for index, (day, daypart, name, diet, area, quantity) in enumerate([
+        ("2026-06-12", "昼", "豆腐ﾊﾝﾊﾞｰｸﾞ　添)おろしｿｰｽ", "soft", "2F", 5),
+        ("2026-06-10", "夕", "玉子焼き", "mixer", "3F", 4),
+    ]):
+        owned_path = tmp_path / str(index)
+        owned_path.mkdir()
+        engine = create_engine(f"sqlite:///{owned_path / 'formal.sqlite3'}")
+        try:
+            monkeypatch.setenv("DB_URI", str(engine.url))
+            monkeypatch.setenv("ALEMBIC_DB_URI", str(engine.url))
+            config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+            with engine.connect() as connection:
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
+            with monkeypatch.context() as owned_patch:
+                owned_patch.setattr(db, "SessionLocal", sessionmaker(engine, autoflush=False))
+                registered, old_candidate = _actual_bagging_candidate(owned_patch, owned_path, [{
+                    "date": day, "daypart": daypart, "menu_name": name, "diet_type": diet,
+                    "area_id": area, "quantity_original": quantity, "bag_type": "normal",
+                }], menu_qty_per_serving=100, menu_unit_type="g", accessory_masters={"おろしｿｰｽ": {"qty_per_serving": 12, "unit_type": "g"}})
+                with session_scope() as session:
+                    facility = session.get(Order, registered["id"]).facility_code
+                    item = session.execute(select(MonthlyMenuItem).where(
+                        MonthlyMenuItem.facility_override == facility)).scalar_one()
+                    item.qty_per_serving = 2
+                    item.unit_type = "count"
+                state, error = workflow.get_workflow_readonly(registered["id"])
+                assert error is None, error
+                result, error = workflow.run_bagging(registered["id"], expected_revision=state["revision"])
+                assert error is None, error
+                candidate = result["bagging_result"]["materialization_candidate"]
+                assert old_candidate["output_lines"][0]["menu_qty_per_serving"] == 100
+                assert old_candidate["output_lines"][0]["menu_unit_type"] == "g"
+                bags.extend(output_builder.build_bag_rows_for_outputs(
+                    {"id": registered["id"], "facility": facility}, accepted_candidate=candidate))
+        finally:
+            engine.dispose()
     labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
 
     tofu_label = next(row for row in labels if row["商品名１"] == "豆腐ﾊﾝﾊﾞｰｸﾞ")
     assert tofu_label["内容量"] == "10個"
     assert tofu_label["内容詳細"] == "2個"
+    sauce_label = next(row for row in labels if row["商品名１"] == "おろしｿｰｽ")
+    assert sauce_label["内容量"] == "60g"
+    assert sauce_label["内容詳細"] == "12g"
     tamago_label = next(row for row in labels if row["商品名１"] == "玉子焼き")
     assert tamago_label["内容量"] == "8個"
     assert tamago_label["内容詳細"] == "2個"
@@ -1150,82 +1143,32 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
     ]
 
 
-def test_output_diet_type_override_maps_diabetes_to_regular(monkeypatch):
-    facility_config = {
-        "fax_template_override": {
-            "columns": [
-                {
-                    "role": "quantity",
-                    "diet_type": "diabetes",
-                    "area_id": "X",
-                    "output_diet_type": "regular",
-                }
-            ]
-        }
-    }
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: facility_config)
-    monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
+def _actual_bagging_candidate(monkeypatch, tmp_path, lines, **authored):
+    from sqlalchemy import select
+    from src.db import session_scope
+    from src.models.order_output_artifact import OrderBaggingResult
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+    registered = accepted_bagging_order(monkeypatch, tmp_path, lines, **authored)
+    with session_scope() as session:
+        receipt = session.execute(select(OrderBaggingResult).where(OrderBaggingResult.order_id == registered["id"])).scalar_one()
+        from copy import deepcopy
+        return registered, deepcopy(receipt.payload_json["materialization_candidate"])
 
-    lines = output_builder.build_order_lines_for_outputs(
-        {
-            "id": "ORD-test",
-            "facility": "FAC00016",
-            "week_value": "2026-05",
-            "lines": [
-                {
-                    "date": "2026-05-10",
-                    "daypart": "朝",
-                    "menu_name": "ごぼうと竹輪の煮物",
-                    "diet_type": "diabetes",
-                    "area_id": "X",
-                    "quantity": 4,
-                }
-            ],
-        }
-    )
 
+def test_output_diet_type_override_maps_diabetes_to_regular(monkeypatch, tmp_path, isolated_formal_schema):
+    registered, candidate = _actual_bagging_candidate(monkeypatch, tmp_path, [{"date": "2026-05-10", "daypart": "朝", "menu_name": "ごぼうと竹輪の煮物", "diet_type": "diabetes", "area_id": "X", "quantity_original": 4, "bag_type": "normal"}], output_diet_types={"diabetes": "regular"})
+    lines = output_builder.build_order_lines_for_outputs({"id": registered["id"]}, accepted_candidate=candidate)
     assert lines[0]["diet_type"] == "regular"
     assert lines[0]["source_diet_type"] == "diabetes"
 
 
-def test_output_diet_type_is_unchanged_without_facility_override(monkeypatch):
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
-    monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
-
-    lines = output_builder.build_order_lines_for_outputs(
-        {
-            "id": "ORD-test",
-            "facility": "FAC00016",
-            "week_value": "2026-05",
-            "lines": [
-                {
-                    "date": "2026-05-10",
-                    "daypart": "朝",
-                    "menu_name": "ごぼうと竹輪の煮物",
-                    "diet_type": "diabetes",
-                    "area_id": "X",
-                    "quantity": 4,
-                }
-            ],
-        }
-    )
-
+def test_output_diet_type_is_unchanged_without_facility_override(monkeypatch, tmp_path, isolated_formal_schema):
+    registered, candidate = _actual_bagging_candidate(monkeypatch, tmp_path, [{"date": "2026-05-10", "daypart": "朝", "menu_name": "ごぼうと竹輪の煮物", "diet_type": "diabetes", "area_id": "X", "quantity_original": 4, "bag_type": "normal"}])
+    lines = output_builder.build_order_lines_for_outputs({"id": registered["id"]}, accepted_candidate=candidate)
     assert lines[0]["diet_type"] == "diabetes"
     assert "source_diet_type" not in lines[0]
+
+
 
 
 def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypatch):

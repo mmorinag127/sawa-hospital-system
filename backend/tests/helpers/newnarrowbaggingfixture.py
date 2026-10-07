@@ -10,14 +10,14 @@ import fitz
 from src.db import session_scope
 from src.models.menu import MonthlyMenuEntry, MonthlyMenuItem, MenuMaster
 from src.models.uploaded_pdf import UploadedPdf
-from src.services import order_workflow_v2_service as workflow
+from src.services import order_workflow_v2_service as workflow, menu_service
 from tests.helpers.ingest_original import (
     authored_sources, configure_delivery, reserve_uploaded_original,
     register_authored_original, authored_pipeline_provider, process_uploaded_original,
 )
 
 
-def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False):
+def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None):
     day = date.fromisoformat(lines[0]["date"])
     facility = f"bagging-component-{uuid4().hex}"
     configure_delivery(monkeypatch)
@@ -31,6 +31,8 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         columns.append({"index": index, "source_index": index, "role": "quantity",
                         "name": f"qty.{diet}_{area}",
                         "diet_type": diet, "area_id": area})
+        if output_diet_types and diet in output_diet_types:
+            columns[-1]["output_diet_type"] = output_diet_types[diet]
     configured["fax_template"]["columns"] = columns
     if invoice_template is None:
         # Explicit authored tabular component contract; not a production fallback.
@@ -57,6 +59,9 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         assert date.fromisoformat(line["date"]) == day
         groups.setdefault((line["daypart"], line["menu_name"]), []).append(line)
     with session_scope() as session:
+        for name, values in (accessory_masters or {}).items():
+            session.add(MenuMaster(id=str(uuid4()), name=name, normalized_name=menu_service._normalize_menu_name(name),
+                qty_per_serving=values["qty_per_serving"], unit_type=values["unit_type"], category="添え"))
         entry = session.get(MonthlyMenuEntry, "authored-physical-row")
         session.delete(entry)
         slots_by_daypart = {}
@@ -65,8 +70,8 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
             slots_by_daypart[daypart] = slot + 1
             canonical_daypart = {"朝": "breakfast", "昼": "lunch", "夕": "supper"}[daypart]
             master_id = str(uuid4())
-            session.add(MenuMaster(id=master_id, name=menu_name, normalized_name=menu_name,
-                qty_per_serving=1, unit_type="g", category=menu_category,
+            session.add(MenuMaster(id=master_id, name=menu_name, normalized_name=menu_service._normalize_menu_name(menu_name),
+                qty_per_serving=menu_qty_per_serving, unit_type=menu_unit_type, category=menu_category,
                 condiments=["ソース"] if group[0]["bag_type"] == "condiment" else []))
             for diet in dict.fromkeys(line["diet_type"] for line in group):
                 session.add(MonthlyMenuEntry(id=str(uuid4()), monthly_menu_id=day.strftime("%Y-%m"),
@@ -74,7 +79,7 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
                     category=menu_category, facility_override=facility, slot_index=slot))
                 session.add(MonthlyMenuItem(id=str(uuid4()), monthly_menu_id=day.strftime("%Y-%m"),
                     menu_master_id=master_id, name=menu_name, diet_type=diet, facility_override=facility,
-                    qty_per_serving=1, unit_type="g", category=menu_category, daypart=canonical_daypart,
+                    qty_per_serving=menu_qty_per_serving, unit_type=menu_unit_type, category=menu_category, daypart=canonical_daypart,
                     master_resolution_mode="manual"))
         upload_id, message = str(uuid4()), str(uuid4())
         session.add(UploadedPdf(id=upload_id, message_id=message, storage_uri=path,
