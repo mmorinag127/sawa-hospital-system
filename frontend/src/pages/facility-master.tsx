@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
 import TopNav from "../components/TopNav";
-import { apiClient } from "../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
+import { useH1LeaveGuard } from "../hooks/useH1LeaveGuard";
 
 type ValidationResult = {
   errors: string[];
@@ -8,6 +11,18 @@ type ValidationResult = {
 };
 
 type FacilityEntry = Record<string, unknown>;
+
+type FacilityDraft = {
+  facility_id: string;
+  facility_name: string;
+  address: string;
+  phone: string;
+  delivery_note_facility_name: string;
+  order_form_pattern_id: string;
+  fax_template_id: string;
+  valid_from: string;
+  valid_to: string;
+};
 
 type FacilityMaster = {
   schema_version?: string;
@@ -84,25 +99,6 @@ const areaLabel = (value: string) => {
   return AREA_OPTIONS.find((option) => option.value.toLowerCase() === normalized.toLowerCase())?.label || normalized || "共通";
 };
 
-const DEFAULT_DAILY_LABEL_DIETS_BY_FACILITY_ID: Record<string, string[]> = {
-  FAC00001: ["no_meat", "no_fish"],
-  FAC00002: ["no_meat", "no_fish"],
-  FAC00003: ["soft", "mixer", "no_fish"],
-  FAC00004: ["daycare", "staff", "no_meat", "no_fish", "no_fried", "forbidden_other"],
-  FAC00006: ["soft", "mixer", "no_meat", "no_fish"],
-  FAC00007: ["no_meat", "no_fish"],
-  FAC00008: ["soft", "mixer"],
-  FAC00009: ["soft", "mixer"],
-  FAC00010: ["soft", "mixer"],
-  FAC00011: ["no_meat", "no_fish"],
-  FAC00012: ["no_meat", "no_fish"],
-  FAC00013: ["diabetes", "no_fish"],
-  FAC00014: ["staff", "no_meat", "no_fish", "sesame_allergy"],
-  FAC00015: ["no_meat", "no_fish"],
-  FAC00016: ["diabetes", "no_fish"],
-  FAC636208: ["mixer", "no_meat", "no_fish"],
-};
-
 const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
 const cloneFacility = (facility: FacilityEntry | null) =>
@@ -133,6 +129,29 @@ const generateFacilityId = (existing: Set<string>) => {
 
 const readString = (value: unknown) => (typeof value === "string" ? value : "");
 
+const facilityDraft = (facility: FacilityEntry): FacilityDraft => ({
+  facility_id: readString(facility.facility_id),
+  facility_name: readString(facility.facility_name),
+  address: readString(facility.address),
+  phone: readString(facility.phone),
+  delivery_note_facility_name: readString(facility.delivery_note_facility_name),
+  order_form_pattern_id: readString(facility.order_form_pattern_id),
+  fax_template_id: readString(facility.fax_template_id),
+  valid_from: readString(facility.valid_from),
+  valid_to: readString(facility.valid_to),
+});
+
+const mergeFacilityDraft = (facility: FacilityEntry, draft: FacilityDraft): FacilityEntry => {
+  const next = { ...facility };
+  (Object.keys(draft) as Array<keyof FacilityDraft>).forEach((key) => {
+    // An absent field remains absent until an operator supplies a value.
+    if (draft[key] !== "" || Object.prototype.hasOwnProperty.call(facility, key)) {
+      next[key] = draft[key];
+    }
+  });
+  return next;
+};
+
 const readStringList = (value: unknown) => {
   if (!Array.isArray(value)) return [];
   return value
@@ -148,11 +167,7 @@ const readEditableStringList = (value: unknown) => {
 const readDailyLabelDietTypes = (facility?: FacilityEntry | null) => {
   if (!facility || typeof facility !== "object") return [];
   const raw = (facility as Record<string, unknown>).daily_label_comparable_diet_types;
-  if (Array.isArray(raw)) {
-    return readStringList(raw);
-  }
-  const facilityId = readString((facility as Record<string, unknown>).facility_id);
-  return DEFAULT_DAILY_LABEL_DIETS_BY_FACILITY_ID[facilityId] || [];
+  return Array.isArray(raw) ? readStringList(raw) : [];
 };
 
 const formatDeliveryNamePreview = (value: string) => {
@@ -389,7 +404,7 @@ const sanitizeMasterForSave = (master: FacilityMaster): FacilityMaster => {
 };
 
 
-export default function FacilityMasterPage() {
+function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   const [master, setMaster] = useState<FacilityMaster | null>(null);
   const [masterText, setMasterText] = useState("");
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
@@ -399,8 +414,25 @@ export default function FacilityMasterPage() {
   const [message, setMessage] = useState("");
   const [path, setPath] = useState("");
   const [saving, setSaving] = useState(false);
+  const loadGeneration = useRef(0);
+  const editGeneration = useRef(0);
+  const dirtyRef = useRef(false);
+  const [formDirty, setFormDirty] = useState(false);
+  const [facilityDraftValues, setFacilityDraftValues] = useState<FacilityDraft | null>(null);
+  const facilityDraftRef = useRef<FacilityDraft | null>(null);
+  const [specialDirty, setSpecialDirty] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [selectedFaxColumnIndex, setSelectedFaxColumnIndex] = useState<number>(-1);
+  const [periodVersion, setPeriodVersion] = useState<Record<string, unknown> | null>(null);
+  const [periodVersionError, setPeriodVersionError] = useState("");
+  const periodGeneration = useRef(0);
+  const hasUnsavedChanges = formDirty || specialDirty;
+  const syncFacilityDraft = useCallback((values: FacilityDraft) => {
+    facilityDraftRef.current = values;
+    setFacilityDraftValues(values);
+  }, []);
+  dirtyRef.current = hasUnsavedChanges;
+  useH1LeaveGuard(hasUnsavedChanges, ["/facility-master", "/hospital/facility-master"]);
 
   const facilities = useMemo(() => {
     if (!master?.facilities || !Array.isArray(master.facilities)) return [];
@@ -428,10 +460,16 @@ export default function FacilityMasterPage() {
   }, [facilities, searchText]);
 
   const loadMaster = async () => {
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
     try {
       const res = await apiClient.get("/facility-master");
+      if (generation !== loadGeneration.current || dirtyRef.current) return;
       const data = res.data;
       const nextMaster = data.facility_master as FacilityMaster;
+      if (!nextMaster || typeof nextMaster !== "object" || !Array.isArray(nextMaster.facilities)) {
+        throw new Error("Facility master の応答に facilities 配列がありません。");
+      }
       setMaster(nextMaster);
       setMasterText(prettyJson(nextMaster));
       setValidation(data.validation || null);
@@ -444,8 +482,12 @@ export default function FacilityMasterPage() {
       }
       setEditingIndex(-1);
       setEditBaseline(null);
+      setFacilityDraftValues(null);
+      setFormDirty(false);
+      setSpecialDirty(false);
       setMessage("");
     } catch (err) {
+      if (generation !== loadGeneration.current) return;
       setMessage("Facility master の取得に失敗しました。");
     }
   };
@@ -457,10 +499,11 @@ export default function FacilityMasterPage() {
   const selectFacility = (index: number) => {
     const target = facilities[index];
     if (!target) return;
-    if (editingIndex >= 0 && index !== selectedIndex) {
+    if (hasUnsavedChanges && index !== selectedIndex) {
       setMessage("編集中です。保存またはキャンセルしてから別の施設を選択してください。");
       return;
     }
+    editGeneration.current += 1;
     setSelectedIndex(index);
     setSelectedFaxColumnIndex(-1);
   };
@@ -485,12 +528,18 @@ export default function FacilityMasterPage() {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
     const nextFacility = { ...(selectedFacility as FacilityEntry), ...patch };
     updateFacilityState(nextFacility);
+    setSpecialDirty(true);
   };
 
   const beginEdit = () => {
     if (!selectedFacility || typeof selectedFacility !== "object") return;
     setEditingIndex(selectedIndex);
+    editGeneration.current += 1;
     setEditBaseline(cloneFacility(selectedFacility));
+    setFacilityDraftValues(facilityDraft(selectedFacility));
+    facilityDraftRef.current = facilityDraft(selectedFacility);
+    setFormDirty(false);
+    setSpecialDirty(false);
     setMessage("編集モードにしました。");
   };
 
@@ -508,6 +557,11 @@ export default function FacilityMasterPage() {
     }
     setEditingIndex(-1);
     setEditBaseline(null);
+    editGeneration.current += 1;
+    setFacilityDraftValues(null);
+    facilityDraftRef.current = null;
+    setFormDirty(false);
+    setSpecialDirty(false);
     setMessage("編集をキャンセルしました。");
   };
 
@@ -648,6 +702,11 @@ export default function FacilityMasterPage() {
     setSelectedIndex(nextFacilities.length - 1);
     setEditingIndex(nextFacilities.length - 1);
     setEditBaseline(null);
+    editGeneration.current += 1;
+    setFacilityDraftValues(facilityDraft(nextFacility));
+    facilityDraftRef.current = facilityDraft(nextFacility);
+    setFormDirty(false);
+    setSpecialDirty(true);
     setSelectedFaxColumnIndex(-1);
     setMasterText(prettyJson(nextMaster));
     setMessage("新規施設を追加しました。編集内容を保存してください。");
@@ -670,6 +729,11 @@ export default function FacilityMasterPage() {
     setSelectedIndex(nextFacilities.length - 1);
     setEditingIndex(nextFacilities.length - 1);
     setEditBaseline(null);
+    editGeneration.current += 1;
+    setFacilityDraftValues(facilityDraft(nextFacility));
+    facilityDraftRef.current = facilityDraft(nextFacility);
+    setFormDirty(false);
+    setSpecialDirty(true);
     setSearchText("");
     setSelectedFaxColumnIndex(-1);
     setMessage("選択中の施設を複製しました。施設名と表示名を確認して保存してください。");
@@ -694,25 +758,52 @@ export default function FacilityMasterPage() {
     } else {
       setSelectedIndex(-1);
     }
-    setEditingIndex(-1);
+    const nextSelected = nextFacilities.length > 0 ? 0 : -1;
+    setEditingIndex(nextSelected);
+    setFacilityDraftValues(nextSelected >= 0 ? facilityDraft(nextFacilities[nextSelected]) : null);
+    facilityDraftRef.current = nextSelected >= 0 ? facilityDraft(nextFacilities[nextSelected]) : null;
     setEditBaseline(null);
+    editGeneration.current += 1;
+    setFormDirty(false);
+    setSpecialDirty(true);
     setMessage("Master JSON を反映しました。");
   };
 
   const saveMaster = async () => {
     if (!master || saving) return;
-    const payload = sanitizeMasterForSave(master);
+    const owner = editGeneration.current;
+    const current = selectedFacility && selectedIndex >= 0 ? selectedFacility as FacilityEntry : null;
+    const mergedCurrent = current && facilityDraftRef.current && isEditing
+      ? mergeFacilityDraft(current, facilityDraftRef.current)
+      : current;
+    const nextFacilities = mergedCurrent && selectedIndex >= 0
+      ? facilities.map((item, index) => index === selectedIndex ? mergedCurrent : item)
+      : facilities;
+    const payload = sanitizeMasterForSave({ ...master, facilities: nextFacilities });
+    const expectedFacilityId = mergedCurrent ? readString(mergedCurrent.facility_id) : "";
     setSaving(true);
     setMessage("保存中です...");
     try {
       const res = await apiClient.put("/facility-master", payload);
+      if (res.data?.updated !== true || !res.data?.facility_master || typeof res.data.facility_master !== "object") {
+        throw new Error("保存 API の正常応答を確認できませんでした。");
+      }
+      if (owner !== editGeneration.current) return;
       const updatedMaster = res.data.facility_master as FacilityMaster;
+      if (!Array.isArray(updatedMaster.facilities)) throw new Error("保存後の施設正本を確認できませんでした。");
+      if (expectedFacilityId && !updatedMaster.facilities.some((item) => readString(item.facility_id) === expectedFacilityId)) {
+        throw new Error("保存後の施設を正本で確認できませんでした。");
+      }
       setMaster(updatedMaster);
       setMasterText(prettyJson(updatedMaster));
       setValidation(res.data.validation || null);
       setPath(res.data.path || path);
       setEditingIndex(-1);
       setEditBaseline(null);
+      setFacilityDraftValues(null);
+      facilityDraftRef.current = null;
+      setFormDirty(false);
+      setSpecialDirty(false);
       setMessage("保存しました。反映先の環境で表示を確認してください。");
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
@@ -728,11 +819,106 @@ export default function FacilityMasterPage() {
     }
   };
 
+  const saveFacilityDraft = async (values: FacilityDraft) => {
+    if (!master || !selectedFacility || editingIndex !== selectedIndex) {
+      throw new Error("編集対象が変わったため保存を中止しました。");
+    }
+    const owner = editGeneration.current;
+    setFacilityDraftValues(values);
+    facilityDraftRef.current = values;
+    const original = selectedFacility as FacilityEntry;
+    const nextFacility = mergeFacilityDraft(original, values);
+    const nextFacilities = [...facilities];
+    nextFacilities[selectedIndex] = nextFacility;
+    const payload = sanitizeMasterForSave({ ...master, facilities: nextFacilities });
+    setSaving(true);
+    setMessage("保存中です...");
+    try {
+      const res = await apiClient.put("/facility-master", payload);
+      if (res.data?.updated !== true || !res.data?.facility_master || typeof res.data.facility_master !== "object") {
+        throw new Error("保存 API の正常応答を確認できませんでした。");
+      }
+      if (owner !== editGeneration.current) {
+        throw new Error("選択が変わったため、保存応答を適用しませんでした。");
+      }
+      const savedMaster = res.data.facility_master as FacilityMaster;
+      const savedFacilities = Array.isArray(savedMaster.facilities) ? savedMaster.facilities : [];
+      const saved = savedFacilities.find((item) => readString(item.facility_id) === values.facility_id);
+      if (!saved) throw new Error("保存後の施設を再読込結果で確認できませんでした。");
+      setMaster(savedMaster);
+      setMasterText(prettyJson(savedMaster));
+      setValidation(res.data.validation || null);
+      setPath(res.data.path || path);
+      setEditBaseline(cloneFacility(saved));
+      setFacilityDraftValues(facilityDraft(saved));
+      facilityDraftRef.current = facilityDraft(saved);
+      setFormDirty(false);
+      setSpecialDirty(false);
+      setMessage("保存しました。");
+      return facilityDraft(saved);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      if (detail?.errors) setValidation({ errors: detail.errors, warnings: [] });
+      setMessage(detail?.errors ? "Facility master の検証に失敗しました。" : err?.message || "保存に失敗しました。");
+      throw err;
+    } finally {
+      if (owner === editGeneration.current) setSaving(false);
+    }
+  };
+
+  const reloadFacilityDraft = async (facilityId: string) => {
+    const owner = editGeneration.current;
+    const res = await apiClient.get("/facility-master");
+    if (owner !== editGeneration.current) throw new Error("選択が変わったため、再読込結果を適用しませんでした。");
+    const reloaded = res.data?.facility_master as FacilityMaster | undefined;
+    if (!reloaded || !Array.isArray(reloaded.facilities)) throw new Error("再読込した施設正本を確認できませんでした。");
+    const saved = reloaded.facilities.find((item) => readString(item.facility_id) === facilityId);
+    if (!saved) throw new Error("再読込した正本に対象施設がありません。");
+    setMaster(reloaded);
+    setMasterText(prettyJson(reloaded));
+    setValidation(res.data?.validation || null);
+    setPath(res.data?.path || path);
+    setEditBaseline(cloneFacility(saved));
+    setFacilityDraftValues(facilityDraft(saved));
+    facilityDraftRef.current = facilityDraft(saved);
+    setFormDirty(false);
+    setSpecialDirty(false);
+    setMessage("再読込しました。");
+    return facilityDraft(saved);
+  };
+
   const selectedFacility = useMemo(
     () => (selectedIndex >= 0 && selectedIndex < facilities.length ? facilities[selectedIndex] : null),
     [facilities, selectedIndex]
   );
   const isEditing = editingIndex === selectedIndex && Boolean(selectedFacility);
+  const selectedFacilityId = readString(selectedFacility?.facility_id);
+  const hasPeriodMetadata = Boolean(
+    selectedFacility &&
+      (Object.prototype.hasOwnProperty.call(selectedFacility, "valid_from") ||
+        Object.prototype.hasOwnProperty.call(selectedFacility, "valid_to"))
+  );
+
+  useEffect(() => {
+    const facilityId = selectedFacilityId;
+    const generation = periodGeneration.current + 1;
+    periodGeneration.current = generation;
+    setPeriodVersion(null);
+    setPeriodVersionError("");
+    if (!facilityId) return;
+    apiClient
+      .get(`/facilities/${encodeURIComponent(facilityId)}`)
+      .then((res) => {
+        if (generation !== periodGeneration.current) return;
+        const version = res.data?.resolved_config?.facility_template_version;
+        if (version && typeof version === "object") setPeriodVersion(version as Record<string, unknown>);
+      })
+      .catch((err: any) => {
+        if (generation !== periodGeneration.current) return;
+        const status = err?.response?.status;
+        setPeriodVersionError(status ? `期間版の取得に失敗しました。HTTP ${status}` : "期間版の取得に失敗しました。");
+      });
+  }, [selectedFacilityId]);
   const facilityInfo = useMemo(() => {
     if (!selectedFacility || typeof selectedFacility !== "object") {
       return null;
@@ -777,6 +963,8 @@ export default function FacilityMasterPage() {
     ? selectedFaxColumn.header || selectedFaxColumn.deliveryName || selectedFaxColumn.name || `列 ${selectedFaxColumn.index || selectedFaxColumnIndex + 1}`
     : "";
   const labelPreviewItems = (facilityInfo?.dailyLabelDietTypes || []).map((dietType) => dietLabel(dietType));
+
+  if (!authenticated) return <main className="page">ログインを確認しています。</main>;
 
   return (
     <main className="page">
@@ -901,8 +1089,8 @@ export default function FacilityMasterPage() {
                       <button className="btn ghost compact" onClick={cancelEdit} disabled={saving}>
                         キャンセル
                       </button>
-                      <button className="btn primary compact" onClick={saveMaster} disabled={saving}>
-                        {saving ? "保存中..." : "変更を保存"}
+                      <button className="btn primary compact" onClick={saveMaster} disabled={saving || formDirty}>
+                        {saving ? "保存中..." : "FAX等の専用編集を保存"}
                       </button>
                     </div>
                   ) : (
@@ -936,34 +1124,55 @@ export default function FacilityMasterPage() {
                     <p className="mode-text">施設一覧や候補選択で使う名前と連絡先です。</p>
                   </div>
                 </div>
-                <div className="form-grid">
-                  <label className="field">
-                    <span className="field-label">施設名</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.name || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("facility_name", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span className="field-label">住所</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.address || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("address", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span className="field-label">電話番号</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.phone || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("phone", e.target.value)}
-                    />
-                  </label>
+                {isEditing && selectedFacility ? (
+                  <EditForm<FacilityDraft>
+                    key={`${readString(selectedFacility.facility_id)}-${editGeneration.current}`}
+                    label="通常施設項目"
+                    defaultValues={facilityDraft(selectedFacility)}
+                    onDirtyChange={setFormDirty}
+                    onValuesChange={syncFacilityDraft}
+                    classifyError={(error) => ({
+                      kind: (error as any)?.response?.status === 409 ? "conflict" : "error",
+                      message: error instanceof Error ? error.message : "保存に失敗しました。",
+                    })}
+                    onSave={saveFacilityDraft}
+                    onReload={async () => {
+                      if (hasUnsavedChanges && !window.confirm("未保存の変更を破棄して再読込しますか？")) {
+                        throw new Error("再読込を中止しました。");
+                      }
+                      return reloadFacilityDraft(readString(selectedFacility.facility_id));
+                    }}
+                  >
+                    <FormTextField<FacilityDraft> name="facility_id" label="内部施設ID" rules={{ required: "内部施設IDは必須です。" }} />
+                    <FormTextField<FacilityDraft> name="facility_name" label="施設名" rules={{ required: "施設名は必須です。" }} />
+                    <FormTextField<FacilityDraft> name="address" label="住所" />
+                    <FormTextField<FacilityDraft> name="phone" label="電話番号" />
+                    <FormTextField<FacilityDraft> name="delivery_note_facility_name" label="納品書の施設名" />
+                    <FormTextField<FacilityDraft> name="order_form_pattern_id" label="旧 注文書パターンID" />
+                    <FormTextField<FacilityDraft> name="fax_template_id" label="旧 FAXテンプレートID" />
+                    {hasPeriodMetadata ? (
+                      <>
+                        <FormTextField<FacilityDraft> name="valid_from" label="正本に登録済みの有効開始日" type="date" />
+                        <FormTextField<FacilityDraft> name="valid_to" label="正本に登録済みの有効終了日" type="date" />
+                      </>
+                    ) : (
+                      <p className="subtle">期間版の日付は正本に未設定です。期間版作成 API は公開されていないため、既定値を補完して保存しません。</p>
+                    )}
+                  </EditForm>
+                ) : (
+                  <div className="detail-grid overview-grid">
+                    <div className="detail-card"><p className="detail-label">施設名</p><p className="detail-value">{facilityInfo?.name || "未設定"}</p></div>
+                    <div className="detail-card"><p className="detail-label">住所</p><p className="detail-value">{facilityInfo?.address || "未設定"}</p></div>
+                    <div className="detail-card"><p className="detail-label">電話番号</p><p className="detail-value">{facilityInfo?.phone || "未設定"}</p></div>
+                  </div>
+                )}
+                <div className="period-version-status">
+                  <p className="detail-label">現在解決されている期間版</p>
+                  {periodVersion ? (
+                    <p className="detail-meta">{readString(periodVersion.id) || "ID未設定"} / {readString(periodVersion.valid_from) || "開始日未設定"} - {readString(periodVersion.valid_to) || "終了日未設定"}</p>
+                  ) : (
+                    <p className="subtle">{periodVersionError || "期間版は未設定です。"}</p>
+                  )}
                 </div>
               </div>
 
@@ -1205,16 +1414,10 @@ export default function FacilityMasterPage() {
                   </table>
                 </div>
                 <div className="delivery-editor-grid">
-                  <label className="field">
+                  <div className="field">
                     <span className="field-label">納品書の施設名</span>
-                    <input
-                      className="input"
-                      value={facilityInfo?.deliveryNoteFacilityName || ""}
-                      disabled={!isEditing}
-                      onChange={(e) => updateSelectedField("delivery_note_facility_name", e.target.value)}
-                      placeholder="未設定の場合は施設名を使用"
-                    />
-                  </label>
+                    <p className="detail-meta">通常施設項目のフォームで編集します。{facilityInfo?.deliveryNoteFacilityName || "未設定"}</p>
+                  </div>
                   {selectedFaxColumn ? (
                     <>
                       <label className="field">
@@ -1249,33 +1452,9 @@ export default function FacilityMasterPage() {
                     <details className="advanced-details">
                       <summary>上級設定を開く</summary>
                       <div className="legacy-settings">
-                        <label className="field">
-                          <span className="field-label">内部施設ID</span>
-                          <input
-                            className="input"
-                            value={facilityInfo?.id || ""}
-                            disabled={!isEditing}
-                            onChange={(e) => updateSelectedField("facility_id", e.target.value)}
-                          />
-                        </label>
-                        <label className="field">
-                          <span className="field-label">旧 注文書パターンID</span>
-                          <input
-                            className="input"
-                            value={facilityInfo?.orderFormPatternId || ""}
-                            disabled={!isEditing}
-                            onChange={(e) => updateSelectedField("order_form_pattern_id", e.target.value)}
-                          />
-                        </label>
-                        <label className="field">
-                          <span className="field-label">旧 FAXテンプレートID</span>
-                          <input
-                            className="input"
-                            value={facilityInfo?.faxTemplateId || ""}
-                            disabled={!isEditing}
-                            onChange={(e) => updateSelectedField("fax_template_id", e.target.value)}
-                          />
-                        </label>
+                        <div className="field"><span className="field-label">内部施設ID</span><p className="detail-meta">通常施設項目のフォームで編集します。{facilityInfo?.id || "未設定"}</p></div>
+                        <div className="field"><span className="field-label">旧 注文書パターンID</span><p className="detail-meta">通常施設項目のフォームで編集します。{facilityInfo?.orderFormPatternId || "未設定"}</p></div>
+                        <div className="field"><span className="field-label">旧 FAXテンプレートID</span><p className="detail-meta">通常施設項目のフォームで編集します。{facilityInfo?.faxTemplateId || "未設定"}</p></div>
                       </div>
                       <details className="nested-details">
                         <summary>読み取り名・旧テンプレート候補</summary>
@@ -1555,8 +1734,8 @@ export default function FacilityMasterPage() {
                   <button className="btn ghost" onClick={cancelEdit} disabled={saving}>
                     キャンセル
                   </button>
-                  <button className="btn primary" onClick={saveMaster} disabled={saving}>
-                    {saving ? "保存中..." : "保存する"}
+                  <button className="btn primary" onClick={saveMaster} disabled={saving || formDirty}>
+                    {saving ? "保存中..." : "FAX等の専用編集を保存"}
                   </button>
                 </div>
               )}
@@ -1577,7 +1756,10 @@ export default function FacilityMasterPage() {
             className="textarea json-textarea"
             value={masterText}
             disabled={!isEditing}
-            onChange={(e) => setMasterText(e.target.value)}
+            onChange={(e) => {
+              setMasterText(e.target.value);
+              setSpecialDirty(true);
+            }}
             rows={16}
             wrap="soft"
           />
@@ -2598,4 +2780,10 @@ export default function FacilityMasterPage() {
       `}</style>
     </main>
   );
+}
+
+export default function FacilityMasterPage() {
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false);
+  return <SawaProvider sessionKey={`hospital-facility-master:${sessionKey}`}><FacilityMasterScreen authenticated={authenticated} /></SawaProvider>;
 }

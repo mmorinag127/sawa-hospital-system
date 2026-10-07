@@ -13,6 +13,7 @@ def test_base_menu_service_normalizes_diet_type_on_save_and_serialize():
     with session_scope() as session:
         session.query(BaseMenuCycleItem).delete()
 
+    first_read = base_menu_service.list_items()
     base_menu_service.replace_items(
         [
             {
@@ -23,23 +24,25 @@ def test_base_menu_service_normalizes_diet_type_on_save_and_serialize():
                 "diet_type": "糖尿",
                 "slot_index": 0,
             }
-        ]
+        ],
+        first_read["revision"],
     )
 
     items = base_menu_service.list_items(1)
-    assert items[0]["diet_type"] == "diabetes"
+    assert items["items"][0]["diet_type"] == "diabetes"
 
-    item_id = items[0]["id"]
-    assert base_menu_service.update_item(item_id, {"diet_type": "禁食(魚禁)"}) is True
+    item_id = items["items"][0]["id"]
+    assert base_menu_service.update_item(item_id, {"diet_type": "禁食(魚禁)"}, items["revision"]) is not None
 
     updated = base_menu_service.list_items(1)
-    assert updated[0]["diet_type"] == "no_fish"
+    assert updated["items"][0]["diet_type"] == "no_fish"
 
 
 def test_menu_rule_service_normalizes_diet_type_on_create_and_update():
     with session_scope() as session:
         session.query(MenuRule).delete()
 
+    initial = menu_rule_service.list_rules("global")
     created = menu_rule_service.create_rule(
         {
             "rule_type": "global",
@@ -49,12 +52,14 @@ def test_menu_rule_service_normalizes_diet_type_on_create_and_update():
             "unit_type": "g",
             "qty_per_serving": 80,
             "active": True,
-        }
-    )
+        },
+        initial["revision"],
+    )["rule"]
 
     assert created["diet_type"] == "soft"
 
-    assert menu_rule_service.update_rule(created["id"], {"diet_type": "ゴマアレルギー"}) is True
+    current = menu_rule_service.list_rules("global")
+    assert menu_rule_service.update_rule(created["id"], {"diet_type": "ゴマアレルギー"}, current["revision"]) is not None
 
     rules = menu_rule_service.list_rules("global")
-    assert rules[0]["diet_type"] == "sesame_allergy"
+    assert rules["rules"][0]["diet_type"] == "sesame_allergy"

@@ -99,6 +99,7 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
               facility_override: null,
             },
           ],
+          master_checks: { count: 0, issues: [] },
         },
       });
       return;
@@ -111,7 +112,7 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
 
   await expect(page.getByRole("heading", { name: "月次メニュー編集" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "月次シート" })).toBeVisible();
-  await expect(page.getByText("メニュー一覧（補助）")).toBeVisible();
+  await expect(page.getByText("メニュー一覧")).toBeVisible();
   const sheet = page.locator("[data-testid='monthly-menu-sheet']");
   await expect(sheet.getByRole("rowheader", { name: "03/24" })).toBeVisible();
   await expect(sheet.locator("thead").getByText("共通(base)")).toHaveCount(3);
@@ -223,15 +224,58 @@ test("monthly menu detail selects same-name item by daypart and uses daypart dro
   await page.goto(`${baseUrl}/menus/2026-06`);
   const sheet = page.locator("[data-testid='monthly-menu-sheet']");
   await expect(page.getByTestId("selected-entry-name")).toHaveText("ジャーマンポテト");
-  await expect(page.getByLabel("量").first()).toHaveValue("70");
-  await expect(page.getByLabel("時間帯").first()).toHaveValue("朝食");
-  await expect(page.getByLabel("時間帯").first().locator("option")).toHaveText(["未選択", "朝食", "昼食", "夕食"]);
+  await expect(page.getByLabel("1人前の量").first()).toHaveValue("70");
+  await expect(page.getByLabel("朝昼夕").first()).toHaveValue("朝食");
+  await expect(page.getByLabel("朝昼夕").first().locator("option")).toHaveText(["未選択", "朝食", "昼食", "夕食"]);
 
   await sheet.getByRole("button", { name: "ジャーマンポテト" }).nth(1).click();
 
   await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
-  await expect(page.getByLabel("量").first()).toHaveValue("40");
-  await expect(page.getByLabel("時間帯").first()).toHaveValue("昼食");
+  await expect(page.getByLabel("1人前の量").first()).toHaveValue("40");
+  await expect(page.getByLabel("朝昼夕").first()).toHaveValue("昼食");
+});
+
+test("monthly menu editor sends the selected item's EditForm values as the item payload", async ({ page }) => {
+  const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
+  let savedPayload: Record<string, unknown> | null = null;
+  let saved = false;
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("auth_header", "Bearer e2e-token");
+    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
+  });
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const method = route.request().method().toUpperCase();
+    if (path.endsWith("/auth/me")) return route.fulfill({ status: 200, json: { role: "admin" } });
+    if (path.endsWith("/monthly-menus/scope-options")) return route.fulfill({ status: 200, json: { facilities: [], tags: [] } });
+    if (path.endsWith("/monthly-menus/2026-07/uploads")) return route.fulfill({ status: 200, json: { items: [] } });
+    if (path.endsWith("/monthly-menus/2026-07/items/MMI1") && method === "PUT") {
+      savedPayload = JSON.parse(route.request().postData() || "{}");
+      saved = true;
+      return route.fulfill({ status: 200, json: { updated: true } });
+    }
+    if (path.endsWith("/monthly-menus/2026-07") && method === "GET") {
+      return route.fulfill({ status: 200, json: {
+        menu: { id: "2026-07", display_name: "2026年7月献立" },
+        items: [{ id: "MMI1", month_id: "2026-07", name: "鯖の味噌煮", unit_type: "g", qty_per_serving: saved ? 85 : 70, temp_type: "hot", daypart: "昼食", category: "主菜", diet_type: "", facility_override: null, bag_max_qty: null, bag_max_unit: null }],
+        entries: [{ id: "MME1", month_id: "2026-07", menu_date: "2026-07-01", name: "鯖の味噌煮", daypart: "昼食", category: "主菜", diet_type: "", slot_index: 1, facility_override: null }],
+        master_checks: { count: 0, issues: [] },
+      } });
+    }
+    return route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto(`${baseUrl}/menus/2026-07`);
+  await page.getByRole("form", { name: "献立を編集" }).getByLabel("1人前の量").fill("85");
+  await page.getByRole("form", { name: "献立を編集" }).getByRole("button", { name: "保存" }).click();
+
+  expect(savedPayload).toEqual({
+    name: "鯖の味噌煮", unit_type: "g", qty_per_serving: 85, temp_type: "hot", daypart: "昼食",
+    category: "主菜", diet_type: "", facility_override: "", bag_max_qty: null, bag_max_unit: "",
+  });
+  await expect(page.getByRole("form", { name: "献立を編集" }).getByLabel("1人前の量")).toHaveValue("85");
 });
 
 test("monthly menu page can create a facility exception from the selected entry", async ({ page }) => {
@@ -357,6 +401,7 @@ test("monthly menu page can create a facility exception from the selected entry"
                   facility_override: null,
                 },
               ],
+          master_checks: { count: 0, issues: [] },
         },
       });
       return;
@@ -454,6 +499,7 @@ test("monthly menu upload asks for menu master review when backend returns 409",
           },
           items: [],
           entries: [],
+          master_checks: { count: 0, issues: [] },
         },
       });
       return;

@@ -1724,6 +1724,9 @@ def _build_master_defaults_index(
     names: list[str],
     menu_master_ids: list[str] | None = None,
     facility_id: str | None = None,
+    *,
+    lock_sources: bool = False,
+    source_revisions: list[tuple[str, int]] | None = None,
 ) -> tuple[dict[str, dict], dict[str, dict]]:
     normalized_keys = [_normalize_menu_name(name) for name in names if name]
     normalized_keys = [key for key in normalized_keys if key]
@@ -1743,6 +1746,8 @@ def _build_master_defaults_index(
     else:
         query = query.where(or_(*predicates))
 
+    if lock_sources:
+        query = query.with_for_update()
     masters = session.execute(query).scalars().all()
     if not masters:
         return {}, {}
@@ -1776,6 +1781,8 @@ def _build_master_defaults_index(
     defaults_by_normalized: dict[str, dict] = {}
     defaults_by_id: dict[str, dict] = {}
     for master in masters:
+        if source_revisions is not None:
+            source_revisions.append((master.id, master.revision))
         override = overrides.get(master.id) if facility_id else None
         payload: dict[str, object] = {}
         for field in _MASTER_FIELDS:
@@ -3601,6 +3608,13 @@ def resolve_menu_defaults(names: list[str], facility_id: str | None = None) -> d
         normalized = _normalize_menu_name(name or "")
         resolved[name] = defaults.get(normalized, {})
     return resolved
+
+
+def resolve_menu_defaults_in_session(session, names: list[str], facility_id: str | None = None, *, lock_sources: bool = False) -> tuple[dict[str, dict], list[tuple[str, int]]]:
+    """Resolve the existing canonical defaults and their exact locked sources together."""
+    sources: list[tuple[str, int]] = []
+    defaults, _ = _build_master_defaults_index(session, names, None, facility_id, lock_sources=lock_sources, source_revisions=sources)
+    return ({name: defaults.get(_normalize_menu_name(name or ""), {}) for name in names}, sorted(sources))
 
 
 def _find_condiment_header_row(ws, max_scan: int = 20) -> int | None:

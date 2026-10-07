@@ -1,8 +1,12 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { MenuItem } from "@mui/material";
+import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
 import TopNav from "../../components/TopNav";
-import { apiClient } from "../../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
+import { useH1LeaveGuard } from "../../hooks/useH1LeaveGuard";
 
 type FacilityArea = {
   id: string;
@@ -27,19 +31,33 @@ type FacilityResponse = {
   validation?: ValidationResult;
 };
 
+type FacilityDraft = {
+  name: string;
+};
+
+type ConfigDraft = {
+  order_form_pattern_id: string;
+  menu_override_tags: string;
+  main_ocr_provider: string;
+  openai_ocr_enabled: string;
+  openai_ocr_model: string;
+  openai_ocr_prompt: string;
+  openai_ocr_fallback_provider: string;
+  gemini_ocr_enabled: string;
+  gemini_ocr_model: string;
+  gemini_ocr_prompt: string;
+  gemini_ocr_fallback_provider: string;
+  hakodate_header_rows: string;
+  hakodate_ocr_resolution: string;
+  hakodate_min_edge_margin_ratio: string;
+  large_cell_mode: string;
+};
+
 type OrderFormPattern = {
   pattern_id: string;
   label?: string;
   description?: string;
 };
-
-const DEFAULT_ORDER_FORM_PATTERNS: OrderFormPattern[] = [
-  { pattern_id: "PATTERN_A", label: "標準A" },
-  { pattern_id: "PATTERN_B", label: "標準B" },
-  { pattern_id: "PATTERN_C", label: "標準C" },
-  { pattern_id: "PATTERN_D", label: "標準D" },
-  { pattern_id: "PATTERN_E", label: "標準E" },
-];
 
 const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
@@ -60,17 +78,6 @@ const errorDetailText = (err: any, fallback: string) => {
     if (typeof message === "string" && message.trim()) return message.trim();
   }
   return fallback;
-};
-
-const parseBoolean = (value: unknown, defaultValue = false): boolean => {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value !== 0;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (["true", "1", "yes", "on"].includes(normalized)) return true;
-    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
-  }
-  return defaultValue;
 };
 
 const parseStringList = (value: unknown): string[] => {
@@ -98,50 +105,119 @@ const parseConfigNumberText = (value: unknown, defaultValue = ""): string => {
   return defaultValue;
 };
 
-export default function FacilityConfigPage() {
+const optionalBooleanText = (value: unknown) => (typeof value === "boolean" ? String(value) : "");
+
+const configDraft = (config: Record<string, unknown>): ConfigDraft => ({
+  order_form_pattern_id: parseConfigString(config.order_form_pattern_id),
+  menu_override_tags: parseStringList(config.menu_override_tags).join(","),
+  main_ocr_provider: parseConfigString(config.main_ocr_provider),
+  openai_ocr_enabled: optionalBooleanText(config.openai_ocr_enabled),
+  openai_ocr_model: parseConfigString(config.openai_ocr_model),
+  openai_ocr_prompt: parseConfigString(config.openai_ocr_prompt),
+  openai_ocr_fallback_provider: parseConfigString(config.openai_ocr_fallback_provider),
+  gemini_ocr_enabled: optionalBooleanText(config.gemini_ocr_enabled),
+  gemini_ocr_model: parseConfigString(config.gemini_ocr_model),
+  gemini_ocr_prompt: parseConfigString(config.gemini_ocr_prompt),
+  gemini_ocr_fallback_provider: parseConfigString(config.gemini_ocr_fallback_provider),
+  hakodate_header_rows: parseConfigNumberText(config.hakodate_header_rows),
+  hakodate_ocr_resolution: parseConfigNumberText(config.hakodate_ocr_resolution),
+  hakodate_min_edge_margin_ratio: parseConfigNumberText(config.hakodate_min_edge_margin_ratio),
+  large_cell_mode: optionalBooleanText(config.large_cell_mode),
+});
+
+const setOptionalString = (target: Record<string, unknown>, key: string, value: string) => {
+  if (value.trim()) target[key] = value;
+  else delete target[key];
+};
+
+const setOptionalNumber = (target: Record<string, unknown>, key: string, value: string, minimum: number) => {
+  if (!value.trim()) {
+    delete target[key];
+    return;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < minimum) throw new Error(`${key} の値が不正です。`);
+  target[key] = parsed;
+};
+
+const mergeConfigDraft = (base: Record<string, unknown>, values: ConfigDraft) => {
+  const next = { ...base };
+  setOptionalString(next, "order_form_pattern_id", values.order_form_pattern_id);
+  setOptionalString(next, "main_ocr_provider", values.main_ocr_provider);
+  setOptionalString(next, "openai_ocr_model", values.openai_ocr_model);
+  setOptionalString(next, "openai_ocr_prompt", values.openai_ocr_prompt);
+  setOptionalString(next, "openai_ocr_fallback_provider", values.openai_ocr_fallback_provider);
+  setOptionalString(next, "gemini_ocr_model", values.gemini_ocr_model);
+  setOptionalString(next, "gemini_ocr_prompt", values.gemini_ocr_prompt);
+  setOptionalString(next, "gemini_ocr_fallback_provider", values.gemini_ocr_fallback_provider);
+  ["openai_ocr_enabled", "gemini_ocr_enabled", "large_cell_mode"].forEach((key) => {
+    const value = values[key as "openai_ocr_enabled" | "gemini_ocr_enabled" | "large_cell_mode"];
+    if (value === "true" || value === "false") next[key] = value === "true";
+    else delete next[key];
+  });
+  setOptionalNumber(next, "hakodate_header_rows", values.hakodate_header_rows, 0);
+  setOptionalNumber(next, "hakodate_ocr_resolution", values.hakodate_ocr_resolution, Number.MIN_VALUE);
+  setOptionalNumber(next, "hakodate_min_edge_margin_ratio", values.hakodate_min_edge_margin_ratio, 0);
+  const tags = values.menu_override_tags.split(",").map((item) => item.trim()).filter(Boolean);
+  if (tags.length) next.menu_override_tags = tags;
+  else delete next.menu_override_tags;
+  return next;
+};
+
+const validateConfigSave = (config: Record<string, unknown>, values: ConfigDraft) => {
+  for (const key of ["openai_ocr_fallback_provider", "gemini_ocr_fallback_provider"] as const) {
+    const value = values[key].trim();
+    if (value && value.toLowerCase() !== "none") throw new Error(`${key} は none 以外を保存できません。`);
+    const raw = config[key];
+    if (typeof raw === "string" && raw.trim() && raw.trim().toLowerCase() !== "none" && raw !== values[key]) {
+      throw new Error(`${key} に禁止値が登録されています。JSONで明示的に none へ修正してください。`);
+    }
+  }
+};
+
+function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
   const router = useRouter();
   const { id } = router.query;
   const [facility, setFacility] = useState<Facility | null>(null);
-  const [name, setName] = useState("");
   const [areasText, setAreasText] = useState("[]");
   const [configText, setConfigText] = useState("{}");
   const [resolvedText, setResolvedText] = useState("{}");
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [orderFormPatterns, setOrderFormPatterns] = useState<OrderFormPattern[]>(
-    DEFAULT_ORDER_FORM_PATTERNS
-  );
-  const [orderFormPatternId, setOrderFormPatternId] = useState("");
-  const [mainOcrProvider, setMainOcrProvider] = useState<string>("pipeline");
-  const [openaiOcrEnabled, setOpenaiOcrEnabled] = useState<boolean>(false);
-  const [openaiOcrModel, setOpenaiOcrModel] = useState<string>("");
-  const [openaiOcrPrompt, setOpenaiOcrPrompt] = useState<string>("");
-  const [openaiFallbackProvider, setOpenaiFallbackProvider] = useState<string>("none");
-  const [geminiOcrEnabled, setGeminiOcrEnabled] = useState<boolean>(false);
-  const [geminiOcrModel, setGeminiOcrModel] = useState<string>("");
-  const [geminiOcrPrompt, setGeminiOcrPrompt] = useState<string>("");
-  const [geminiFallbackProvider, setGeminiFallbackProvider] = useState<string>("none");
-  const [quantityAssignmentStrategy, setQuantityAssignmentStrategy] = useState<string>("hakodate");
-  const [hakodateHeaderRows, setHakodateHeaderRows] = useState<string>("");
-  const [hakodateOcrResolution, setHakodateOcrResolution] = useState<string>("");
-  const [hakodateMinEdgeMarginRatio, setHakodateMinEdgeMarginRatio] = useState<string>("");
-  const [largeCellMode, setLargeCellMode] = useState<boolean>(false);
-  const [menuOverrideTags, setMenuOverrideTags] = useState<string>("");
+  const [orderFormPatterns, setOrderFormPatterns] = useState<OrderFormPattern[]>([]);
+  const [orderFormPatternsError, setOrderFormPatternsError] = useState("");
   const [sourceWorkbookMonthId, setSourceWorkbookMonthId] = useState<string>("");
   const [sourceWorkbookUploading, setSourceWorkbookUploading] = useState<boolean>(false);
+  const loadGeneration = useRef(0);
+  const saveGeneration = useRef(0);
+  const dirtyRef = useRef(false);
+  const [facilityFormDirty, setFacilityFormDirty] = useState(false);
+  const [configFormDirty, setConfigFormDirty] = useState(false);
+  const [specialDirty, setSpecialDirty] = useState(false);
+  const [configRecord, setConfigRecord] = useState<Record<string, unknown>>({});
+  const configDraftRef = useRef<ConfigDraft | null>(null);
+  const hasUnsavedChanges = facilityFormDirty || configFormDirty || specialDirty;
+  dirtyRef.current = hasUnsavedChanges;
+  const facilityPath = !Array.isArray(id) && id ? `/facilities/${id}` : "/facilities";
+  useH1LeaveGuard(hasUnsavedChanges, [facilityPath]);
 
   const loadFacility = async () => {
     if (!id || Array.isArray(id)) return;
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
     setLoadError("");
     try {
-      const [facilityRes, patternsRes] = await Promise.all([
+      const [facilityRes, patternResult] = await Promise.all([
         apiClient.get<FacilityResponse>(`/facilities/${id}`),
-        apiClient.get("/order-forms/patterns").catch(() => null),
+        apiClient.get("/order-forms/patterns")
+          .then((res) => ({ data: res.data, error: "" }))
+          .catch(() => ({ data: null, error: "注文書パターン API の取得に失敗しました。既存値は変更していません。" })),
       ]);
+      if (generation !== loadGeneration.current || dirtyRef.current) return;
       const data = facilityRes.data;
+      if (!data?.facility || typeof data.facility !== "object") throw new Error("施設設定の応答に facility がありません。");
       setFacility(data.facility);
-      setName(data.facility.name || "");
       setAreasText(prettyJson(data.facility.areas || []));
       setConfigText(prettyJson(data.config || {}));
       setResolvedText(prettyJson(data.resolved_config || {}));
@@ -150,40 +226,9 @@ export default function FacilityConfigPage() {
         data.config && typeof data.config === "object"
           ? (data.config as Record<string, unknown>)
           : {};
-      const selectedPattern = configRecord.order_form_pattern_id;
-      setOrderFormPatternId(typeof selectedPattern === "string" ? selectedPattern : "");
-      const provider = configRecord.main_ocr_provider;
-      const normalizedProvider = typeof provider === "string" && provider.trim()
-        ? provider.trim().toLowerCase()
-        : "pipeline";
-      setMainOcrProvider(normalizedProvider);
-      setOpenaiOcrEnabled(parseBoolean(configRecord.openai_ocr_enabled));
-      const model = configRecord.openai_ocr_model;
-      setOpenaiOcrModel(typeof model === "string" ? model : "");
-      const prompt = configRecord.openai_ocr_prompt;
-      setOpenaiOcrPrompt(typeof prompt === "string" ? prompt : "");
-      const fallback = configRecord.openai_ocr_fallback_provider;
-      setOpenaiFallbackProvider(
-        typeof fallback === "string" && fallback.trim() ? fallback.trim().toLowerCase() : "none"
-      );
-      setGeminiOcrEnabled(parseBoolean(configRecord.gemini_ocr_enabled));
-      const geminiModel = configRecord.gemini_ocr_model;
-      setGeminiOcrModel(typeof geminiModel === "string" ? geminiModel : "");
-      const geminiPrompt = configRecord.gemini_ocr_prompt;
-      setGeminiOcrPrompt(typeof geminiPrompt === "string" ? geminiPrompt : "");
-      const geminiFallback = configRecord.gemini_ocr_fallback_provider;
-      setGeminiFallbackProvider(
-        typeof geminiFallback === "string" && geminiFallback.trim()
-          ? geminiFallback.trim().toLowerCase()
-          : "none"
-      );
-      setQuantityAssignmentStrategy("hakodate");
-      setHakodateHeaderRows(parseConfigNumberText(configRecord.hakodate_header_rows));
-      setHakodateOcrResolution(parseConfigNumberText(configRecord.hakodate_ocr_resolution));
-      setHakodateMinEdgeMarginRatio(parseConfigNumberText(configRecord.hakodate_min_edge_margin_ratio));
-      setLargeCellMode(parseBoolean(configRecord.large_cell_mode));
-      setMenuOverrideTags(parseStringList(configRecord.menu_override_tags).join(","));
-      const rawPatterns = patternsRes?.data?.patterns;
+      setConfigRecord(configRecord);
+      configDraftRef.current = configDraft(configRecord);
+      const rawPatterns = patternResult.data?.patterns;
       if (Array.isArray(rawPatterns)) {
         const normalized = rawPatterns
           .map((item: any) => ({
@@ -198,12 +243,20 @@ export default function FacilityConfigPage() {
                 : undefined,
           }))
           .filter((item: OrderFormPattern) => Boolean(item.pattern_id));
-        setOrderFormPatterns(normalized.length ? normalized : DEFAULT_ORDER_FORM_PATTERNS);
+        setOrderFormPatterns(normalized);
+        setOrderFormPatternsError(patternResult.error || (normalized.length ? "" : "注文書パターン API に候補がありません。既存値は保持し、候補から自動設定しません。"));
       } else {
-        setOrderFormPatterns(DEFAULT_ORDER_FORM_PATTERNS);
+        setOrderFormPatterns([]);
+        setOrderFormPatternsError(patternResult.error || "注文書パターン API の応答が不正です。既存値は保持し、候補から自動設定しません。");
       }
       setMessage("");
+      setFacilityFormDirty(false);
+      setConfigFormDirty(false);
+      setSpecialDirty(false);
     } catch (err: any) {
+      if (generation !== loadGeneration.current) return;
+      setOrderFormPatterns([]);
+      setOrderFormPatternsError("注文書パターン API または施設設定の取得に失敗しました。既存値は変更していません。");
       const status = err?.response?.status;
       if (status === 404) {
         setLoadError("Facility not found. Create it first.");
@@ -214,132 +267,84 @@ export default function FacilityConfigPage() {
   };
 
   useEffect(() => {
+    saveGeneration.current += 1;
+    setFacilityFormDirty(false);
+    setConfigFormDirty(false);
+    setSpecialDirty(false);
     loadFacility();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const saveFacility = async () => {
-    if (!facility) return;
+  const saveFacility = async (values: FacilityDraft) => {
+    if (!facility) throw new Error("施設が読み込まれていません。");
+    const owner = saveGeneration.current;
     const parsed = parseJson(areasText);
     if (parsed.error) {
       setMessage(`Areas JSON error: ${parsed.error}`);
-      return;
+      throw new Error(`Areas JSON error: ${parsed.error}`);
     }
     if (!Array.isArray(parsed.value)) {
       setMessage("Areas JSON must be an array.");
-      return;
+      throw new Error("Areas JSON must be an array.");
     }
     try {
       const res = await apiClient.put(`/facilities/${facility.id}`, {
-        name,
+        name: values.name,
         areas: parsed.value,
       });
-      setFacility(res.data);
+      if (!res.data || typeof res.data !== "object" || typeof res.data.name !== "string") throw new Error("施設保存の応答を確認できませんでした。");
+      if (owner !== saveGeneration.current) throw new Error("施設の選択が変わったため保存応答を適用しませんでした。");
+      setFacility(res.data as Facility);
+      setAreasText(prettyJson(res.data.areas || []));
+      setFacilityFormDirty(false);
       setMessage("Facility saved.");
+      return { name: res.data.name };
     } catch (err: any) {
       setMessage(`Failed to save facility: ${errorDetailText(err, "Unknown error")}`);
+      throw err;
     }
   };
 
-  const saveConfig = async () => {
-    if (!facility) return;
+  const saveConfig = async (values: ConfigDraft) => {
+    if (!facility) throw new Error("施設が読み込まれていません。");
+    const owner = saveGeneration.current;
     const parsed = parseJson(configText);
     if (parsed.error) {
       setMessage(`Config JSON error: ${parsed.error}`);
-      return;
+      throw new Error(`Config JSON error: ${parsed.error}`);
     }
     if (parsed.value == null || typeof parsed.value !== "object") {
       setMessage("Config JSON must be an object.");
-      return;
+      throw new Error("Config JSON must be an object.");
     }
     try {
-      const nextConfig = { ...(parsed.value as Record<string, unknown>) };
-      const selectedPattern = orderFormPatternId.trim();
-      if (selectedPattern) {
-        nextConfig.order_form_pattern_id = selectedPattern;
-      } else {
-        delete nextConfig.order_form_pattern_id;
-      }
-      nextConfig.main_ocr_provider = mainOcrProvider || "pipeline";
-      nextConfig.openai_ocr_enabled = openaiOcrEnabled;
-      if (openaiOcrModel.trim()) {
-        nextConfig.openai_ocr_model = openaiOcrModel.trim();
-      } else {
-        delete nextConfig.openai_ocr_model;
-      }
-      if (openaiOcrPrompt.trim()) {
-        nextConfig.openai_ocr_prompt = openaiOcrPrompt.trim();
-      } else {
-        delete nextConfig.openai_ocr_prompt;
-      }
-      if (openaiFallbackProvider.trim()) {
-        nextConfig.openai_ocr_fallback_provider = openaiFallbackProvider.trim();
-      } else {
-        delete nextConfig.openai_ocr_fallback_provider;
-      }
-      nextConfig.gemini_ocr_enabled = geminiOcrEnabled;
-      if (geminiOcrModel.trim()) {
-        nextConfig.gemini_ocr_model = geminiOcrModel.trim();
-      } else {
-        delete nextConfig.gemini_ocr_model;
-      }
-      if (geminiOcrPrompt.trim()) {
-        nextConfig.gemini_ocr_prompt = geminiOcrPrompt.trim();
-      } else {
-        delete nextConfig.gemini_ocr_prompt;
-      }
-      if (geminiFallbackProvider.trim()) {
-        nextConfig.gemini_ocr_fallback_provider = geminiFallbackProvider.trim();
-      } else {
-        delete nextConfig.gemini_ocr_fallback_provider;
-      }
-      nextConfig.quantity_assignment_strategy = "hakodate";
-      const parsedHakodateHeaderRows = Number.parseInt(hakodateHeaderRows, 10);
-      if (Number.isFinite(parsedHakodateHeaderRows) && parsedHakodateHeaderRows >= 0) {
-        nextConfig.hakodate_header_rows = parsedHakodateHeaderRows;
-      } else {
-        delete nextConfig.hakodate_header_rows;
-      }
-      const parsedHakodateOcrResolution = Number.parseInt(hakodateOcrResolution, 10);
-      if (Number.isFinite(parsedHakodateOcrResolution) && parsedHakodateOcrResolution > 0) {
-        nextConfig.hakodate_ocr_resolution = parsedHakodateOcrResolution;
-      } else {
-        delete nextConfig.hakodate_ocr_resolution;
-      }
-      const parsedHakodateMinEdgeMarginRatio = Number.parseFloat(hakodateMinEdgeMarginRatio);
-      if (Number.isFinite(parsedHakodateMinEdgeMarginRatio) && parsedHakodateMinEdgeMarginRatio >= 0) {
-        nextConfig.hakodate_min_edge_margin_ratio = parsedHakodateMinEdgeMarginRatio;
-      } else {
-        delete nextConfig.hakodate_min_edge_margin_ratio;
-      }
-      nextConfig.large_cell_mode = largeCellMode;
-      const tags = menuOverrideTags
-        .split(",")
-        .map((item) => item.trim())
-        .filter((item) => Boolean(item));
-      if (tags.length > 0) {
-        nextConfig.menu_override_tags = tags;
-      } else {
-        delete nextConfig.menu_override_tags;
-      }
-      setConfigText(prettyJson(nextConfig));
+      const currentConfig = parsed.value as Record<string, unknown>;
+      validateConfigSave(currentConfig, values);
+      const nextConfig = mergeConfigDraft(currentConfig, values);
       const res = await apiClient.put(`/facilities/${facility.id}/config`, nextConfig);
-      if (res.data?.validation) {
-        setValidation(res.data.validation);
+      if (res.data?.updated !== true) throw new Error("設定保存の応答を確認できませんでした。");
+      if (owner !== saveGeneration.current) throw new Error("施設の選択が変わったため保存応答を適用しませんでした。");
+      const fresh = await apiClient.get<FacilityResponse>(`/facilities/${facility.id}`);
+      if (owner !== saveGeneration.current || !fresh.data?.config || typeof fresh.data.config !== "object") {
+        throw new Error("保存後の設定正本を確認できませんでした。");
       }
-      if (res.data?.resolved_config) {
-        setResolvedText(prettyJson(res.data.resolved_config));
-      }
-      setOrderFormPatternId(selectedPattern);
+      const savedConfig = fresh.data.config as Record<string, unknown>;
+      setConfigRecord(savedConfig);
+      setConfigText(prettyJson(savedConfig));
+      setResolvedText(prettyJson(fresh.data.resolved_config || {}));
+      setValidation(fresh.data.validation || res.data.validation || null);
+      setConfigFormDirty(false);
       setMessage("Config saved.");
+      return configDraft(savedConfig);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       if (detail?.errors) {
         setValidation({ errors: detail.errors, warnings: [] });
         setMessage("Config validation failed.");
-        return;
+        throw err;
       }
       setMessage("Failed to save config.");
+      throw err;
     }
   };
 
@@ -354,6 +359,7 @@ export default function FacilityConfigPage() {
         return;
       }
       setConfigText(prettyJson(parsed.value));
+      setSpecialDirty(true);
       setMessage("Config loaded from file.");
     };
     reader.readAsText(file);
@@ -361,6 +367,7 @@ export default function FacilityConfigPage() {
 
   const uploadSourceWorkbook = async (file: File | null) => {
     if (!facility || !file) return;
+    const owner = saveGeneration.current;
     const form = new FormData();
     form.append("file", file);
     if (sourceWorkbookMonthId.trim()) {
@@ -372,12 +379,14 @@ export default function FacilityConfigPage() {
       const res = await apiClient.post(`/facilities/${facility.id}/order-form-source-workbook`, form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
+      if (owner !== saveGeneration.current) throw new Error("施設の選択が変わったため upload 応答を適用しませんでした。");
       if (res.data?.resolved_config) {
         setResolvedText(prettyJson(res.data.resolved_config));
       }
       const nextConfig = res.data?.config || res.data?.resolved_config;
       if (nextConfig) {
         setConfigText(prettyJson(nextConfig));
+        if (res.data?.config && typeof res.data.config === "object") setConfigRecord(res.data.config as Record<string, unknown>);
       }
       setMessage("施設テンプレートExcelを登録しました。次回OCR再実行からこのExcelを使います。");
     } catch (err: any) {
@@ -387,6 +396,8 @@ export default function FacilityConfigPage() {
       setSourceWorkbookUploading(false);
     }
   };
+
+  if (!authenticated) return <main className="page">ログインを確認しています。</main>;
 
   return (
     <main className="page">
@@ -409,32 +420,44 @@ export default function FacilityConfigPage() {
         <>
           <section className="panel">
             <header className="panel-header">
-              <h2>Facility</h2>
+              <h2>施設情報</h2>
               <span className="badge">{facility.id}</span>
             </header>
+            <EditForm<FacilityDraft>
+              key={`${facility.id}-${saveGeneration.current}`}
+              label="通常施設情報"
+              defaultValues={{ name: facility.name || "" }}
+              onDirtyChange={setFacilityFormDirty}
+              classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: errorDetailText(error, "施設保存に失敗しました。") })}
+              onSave={saveFacility}
+              onReload={async () => {
+                if (specialDirty) throw new Error("JSON の未保存変更があるため再読込を中止しました。");
+                const owner = saveGeneration.current;
+                const res = await apiClient.get<FacilityResponse>(`/facilities/${facility.id}`);
+                if (owner !== saveGeneration.current || !res.data?.facility) throw new Error("再読込結果を適用できませんでした。");
+                setFacility(res.data.facility);
+                setAreasText(prettyJson(res.data.facility.areas || []));
+                return { name: res.data.facility.name || "" };
+              }}
+            >
+              <FormTextField<FacilityDraft> name="name" label="施設名" rules={{ required: "施設名は必須です。" }} />
+            </EditForm>
             <div className="form-grid">
               <label className="field">
-                <span className="field-label">Name</span>
-                <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
-              </label>
-              <label className="field">
-                <span className="field-label">Areas (JSON array)</span>
+                <span className="field-label">配達エリア（JSON配列）</span>
                 <textarea
                   className="textarea"
                   value={areasText}
-                  onChange={(e) => setAreasText(e.target.value)}
+                  onChange={(e) => { setAreasText(e.target.value); setSpecialDirty(true); }}
                   rows={6}
                 />
               </label>
-              <button className="btn primary" onClick={saveFacility}>
-                Save Facility
-              </button>
             </div>
           </section>
 
           <section className="panel">
             <header className="panel-header">
-              <h2>Config</h2>
+              <h2>施設設定</h2>
               <input
                 type="file"
                 accept="application/json"
@@ -443,207 +466,66 @@ export default function FacilityConfigPage() {
             </header>
             <div className="form-grid">
               <label className="field">
-                <span className="field-label">Order Form Pattern</span>
-                <select
-                  className="input"
-                  value={orderFormPatternId}
-                  onChange={(e) => setOrderFormPatternId(e.target.value)}
-                >
-                  <option value="">未設定</option>
-                  {orderFormPatterns.map((pattern) => (
-                    <option key={pattern.pattern_id} value={pattern.pattern_id}>
-                      {pattern.label ? `${pattern.label} (${pattern.pattern_id})` : pattern.pattern_id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="subtle">注文書自動生成とOCR補正の既定パターンです。</p>
-              <label className="field">
                 <span className="field-label">施設テンプレートExcel</span>
-                <input
-                  className="input"
-                  type="file"
-                  accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
-                  onChange={(e) => void uploadSourceWorkbook(e.target.files?.[0] || null)}
-                  disabled={sourceWorkbookUploading}
-                />
+                <input className="input" type="file" accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onChange={(e) => void uploadSourceWorkbook(e.target.files?.[0] || null)} disabled={sourceWorkbookUploading} />
               </label>
               <label className="field">
                 <span className="field-label">月指定（任意: YYYY-MM）</span>
-                <input
-                  className="input"
-                  value={sourceWorkbookMonthId}
-                  onChange={(e) => setSourceWorkbookMonthId(e.target.value)}
-                  placeholder="例: 2026-04。空なら施設の既定テンプレートとして登録"
-                  disabled={sourceWorkbookUploading}
-                />
-              </label>
-              <p className="subtle">
-                登録すると `order_form_source_workbook_uri` または `order_form_month_source_uris` が更新されます。
-                同じ施設でテンプレートが変わった場合は、新しいExcelを再登録すれば置き換わります。
-              </p>
-              <label className="field">
-                <span className="field-label">Menu Override Tags</span>
-                <input
-                  className="input"
-                  value={menuOverrideTags}
-                  onChange={(e) => setMenuOverrideTags(e.target.value)}
-                  placeholder="larger"
-                />
-              </label>
-              <p className="subtle">
-                カンマ区切り。例: <code>larger</code>。`TAG:larger` のメニュー上書きを適用します。
-              </p>
-            </div>
-            <div className="form-grid">
-              <label className="field">
-                <span className="field-label">Main OCR Provider</span>
-                <select
-                  className="input"
-                  value={mainOcrProvider}
-                  onChange={(e) => setMainOcrProvider(e.target.value)}
-                >
-                  <option value="pipeline">pipeline (default)</option>
-                  <option value="openai">openai</option>
-                  <option value="gemini">gemini</option>
-                </select>
-              </label>
-              <label className="field checkbox">
-                <span className="field-label">OpenAI OCR Enabled</span>
-                <input
-                  type="checkbox"
-                  checked={openaiOcrEnabled}
-                  onChange={(e) => setOpenaiOcrEnabled(e.target.checked)}
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">OpenAI Model</span>
-                <input
-                  className="input"
-                  value={openaiOcrModel}
-                  onChange={(e) => setOpenaiOcrModel(e.target.value)}
-                  placeholder="gpt-4.1-mini"
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">OpenAI Fallback</span>
-                <select
-                  className="input"
-                  value={openaiFallbackProvider}
-                  onChange={(e) => setOpenaiFallbackProvider(e.target.value)}
-                >
-                  <option value="none">none</option>
-                </select>
-              </label>
-              <label className="field">
-                <span className="field-label">OpenAI Prompt</span>
-                <textarea
-                  className="textarea"
-                  value={openaiOcrPrompt}
-                  onChange={(e) => setOpenaiOcrPrompt(e.target.value)}
-                  rows={5}
-                  placeholder="施設固有のOCR指示（任意）"
-                />
-              </label>
-              <label className="field checkbox">
-                <span className="field-label">Gemini OCR Enabled</span>
-                <input
-                  type="checkbox"
-                  checked={geminiOcrEnabled}
-                  onChange={(e) => setGeminiOcrEnabled(e.target.checked)}
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">Gemini Model</span>
-                <input
-                  className="input"
-                  value={geminiOcrModel}
-                  onChange={(e) => setGeminiOcrModel(e.target.value)}
-                  placeholder="gemini-2.5-flash"
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">Gemini Fallback</span>
-                <select
-                  className="input"
-                  value={geminiFallbackProvider}
-                  onChange={(e) => setGeminiFallbackProvider(e.target.value)}
-                >
-                  <option value="none">none</option>
-                </select>
-              </label>
-              <label className="field">
-                <span className="field-label">Gemini Prompt</span>
-                <textarea
-                  className="textarea"
-                  value={geminiOcrPrompt}
-                  onChange={(e) => setGeminiOcrPrompt(e.target.value)}
-                  rows={5}
-                  placeholder="施設固有のOCR指示（任意）"
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">Quantity Assignment Strategy</span>
-                <div className="input" aria-readonly="true">{quantityAssignmentStrategy}: 箱館方式</div>
-                <span className="subtle">
-                  シート構造への数量割当方式は箱館方式に固定されています。
-                </span>
-              </label>
-              <label className="field">
-                <span className="field-label">Hakodate Header Rows</span>
-                <input
-                  className="input"
-                  value={hakodateHeaderRows}
-                  onChange={(e) => setHakodateHeaderRows(e.target.value)}
-                  placeholder="例: 2"
-                  inputMode="numeric"
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">Hakodate OCR Resolution</span>
-                <input
-                  className="input"
-                  value={hakodateOcrResolution}
-                  onChange={(e) => setHakodateOcrResolution(e.target.value)}
-                  placeholder="例: 300"
-                  inputMode="numeric"
-                />
-              </label>
-              <label className="field">
-                <span className="field-label">Hakodate Min Edge Margin Ratio</span>
-                <input
-                  className="input"
-                  value={hakodateMinEdgeMarginRatio}
-                  onChange={(e) => setHakodateMinEdgeMarginRatio(e.target.value)}
-                  placeholder="例: 0.08"
-                  inputMode="decimal"
-                />
-              </label>
-              <label className="field checkbox">
-                <span className="field-label">Large Cell Mode</span>
-                <input
-                  type="checkbox"
-                  checked={largeCellMode}
-                  onChange={(e) => setLargeCellMode(e.target.checked)}
-                />
-                <span className="subtle">
-                  結合セルを含む注文書向けに日付/時間帯/メニューの引き継ぎを強化します。
-                </span>
+                <input className="input" value={sourceWorkbookMonthId} onChange={(e) => { setSourceWorkbookMonthId(e.target.value); setSpecialDirty(true); }} disabled={sourceWorkbookUploading} />
               </label>
             </div>
+            <EditForm<ConfigDraft>
+              key={`${facility.id}-${saveGeneration.current}-config`}
+              label="通常施設設定"
+              defaultValues={configDraft(configRecord)}
+              onDirtyChange={setConfigFormDirty}
+              onValuesChange={(values) => { configDraftRef.current = values; }}
+              classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: errorDetailText(error, "設定保存に失敗しました。") })}
+              onSave={saveConfig}
+              onReload={async () => {
+                if (specialDirty) throw new Error("JSON または workbook の未保存変更があるため再読込を中止しました。");
+                const owner = saveGeneration.current;
+                const res = await apiClient.get<FacilityResponse>(`/facilities/${facility.id}`);
+                if (owner !== saveGeneration.current || !res.data?.config || typeof res.data.config !== "object") throw new Error("再読込結果を適用できませんでした。");
+                const saved = res.data.config as Record<string, unknown>;
+                setConfigRecord(saved); setConfigText(prettyJson(saved)); setResolvedText(prettyJson(res.data.resolved_config || {}));
+                return configDraft(saved);
+              }}
+            >
+              <FormTextField<ConfigDraft> name="order_form_pattern_id" label="注文書パターン" select><MenuItem value="">未設定</MenuItem>{orderFormPatterns.length === 0 && configDraft(configRecord).order_form_pattern_id ? <MenuItem value={configDraft(configRecord).order_form_pattern_id}>{`現在値（API候補外）: ${configDraft(configRecord).order_form_pattern_id}`}</MenuItem> : null}{orderFormPatterns.map((pattern) => <MenuItem key={pattern.pattern_id} value={pattern.pattern_id}>{pattern.label ? `${pattern.label} (${pattern.pattern_id})` : pattern.pattern_id}</MenuItem>)}</FormTextField>
+              {orderFormPatternsError ? <p className="message">{orderFormPatternsError}</p> : null}
+              <FormTextField<ConfigDraft> name="menu_override_tags" label="メニュー上書きタグ" helperText="カンマ区切り" />
+              <FormTextField<ConfigDraft> name="main_ocr_provider" label="主OCRプロバイダ" select><MenuItem value="">未設定</MenuItem><MenuItem value="pipeline">pipeline</MenuItem><MenuItem value="openai">openai</MenuItem><MenuItem value="gemini">gemini</MenuItem></FormTextField>
+              <FormTextField<ConfigDraft> name="openai_ocr_enabled" label="OpenAI OCRを使う" select><MenuItem value="">未設定</MenuItem><MenuItem value="true">有効</MenuItem><MenuItem value="false">無効</MenuItem></FormTextField>
+              <FormTextField<ConfigDraft> name="openai_ocr_model" label="OpenAIモデル" /><FormTextField<ConfigDraft> name="openai_ocr_fallback_provider" label="OpenAIフォールバック（noneのみ）" rules={{ validate: (value) => !value || value.trim().toLowerCase() === "none" || "フォールバックは none のみ指定できます。" }} />
+              <FormTextField<ConfigDraft> name="openai_ocr_prompt" label="OpenAI OCR指示" multiline minRows={4} />
+              <FormTextField<ConfigDraft> name="gemini_ocr_enabled" label="Gemini OCRを使う" select><MenuItem value="">未設定</MenuItem><MenuItem value="true">有効</MenuItem><MenuItem value="false">無効</MenuItem></FormTextField>
+              <FormTextField<ConfigDraft> name="gemini_ocr_model" label="Geminiモデル" /><FormTextField<ConfigDraft> name="gemini_ocr_fallback_provider" label="Geminiフォールバック（noneのみ）" rules={{ validate: (value) => !value || value.trim().toLowerCase() === "none" || "フォールバックは none のみ指定できます。" }} />
+              <FormTextField<ConfigDraft> name="gemini_ocr_prompt" label="Gemini OCR指示" multiline minRows={4} />
+              <FormTextField<ConfigDraft> name="hakodate_header_rows" label="函館帳票の見出し行数" inputMode="numeric" />
+              <FormTextField<ConfigDraft> name="hakodate_ocr_resolution" label="函館OCR解像度" inputMode="numeric" />
+              <FormTextField<ConfigDraft> name="hakodate_min_edge_margin_ratio" label="函館OCRの最小余白比率" inputMode="decimal" />
+              <FormTextField<ConfigDraft> name="large_cell_mode" label="結合セルを含む帳票モード" select><MenuItem value="">未設定</MenuItem><MenuItem value="true">有効</MenuItem><MenuItem value="false">無効</MenuItem></FormTextField>
+            </EditForm>
             <details className="json-panel">
               <summary>Config JSON (上級)</summary>
               <textarea
                 className="textarea json-textarea"
                 value={configText}
-                onChange={(e) => setConfigText(e.target.value)}
+                onChange={(e) => { setConfigText(e.target.value); setSpecialDirty(true); }}
                 rows={14}
                 wrap="soft"
               />
             </details>
             <div className="actions">
-              <button className="btn primary" onClick={saveConfig}>
-                Save Config
+              <button className="btn primary" onClick={() => {
+                if (!configDraftRef.current) {
+                  setMessage("通常施設設定を読み込めていないため、JSON設定を保存できません。");
+                  return;
+                }
+                void saveConfig(configDraftRef.current).catch(() => undefined);
+              }}>
+                JSON設定を保存
               </button>
             </div>
           </section>
@@ -861,4 +743,10 @@ export default function FacilityConfigPage() {
       `}</style>
     </main>
   );
+}
+
+export default function FacilityConfigPage() {
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  const authenticated = useSyncExternalStore(subscribeBrowserSession, hasActiveSessionAuthHeader, () => false);
+  return <SawaProvider sessionKey={`hospital-facility-config:${sessionKey}`}><FacilityConfigScreen authenticated={authenticated} /></SawaProvider>;
 }
