@@ -2,7 +2,8 @@ import { type KeyboardEvent, type MouseEvent, useEffect, useMemo, useRef, useSta
 import { useRouter } from "next/router";
 import Link from "next/link";
 
-import { apiClient } from "../../../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../../../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
 import TopNav from "../../../components/TopNav";
 import {
   deriveWeekValueFromCalendarRange,
@@ -60,6 +61,7 @@ type WorkflowV2 = {
   } | null;
   ocr_job?: {
     ocr_job_id?: string | null;
+    workflow_attempt_id?: string | null;
     status?: string | null;
     created_at?: string | null;
     updated_at?: string | null;
@@ -129,12 +131,13 @@ type PreSaveStatus = {
 
 type QuadReviewPayload = {
   order_id: string;
-  source_receipt?: Record<string, unknown>;
+  source_receipt?: Record<string, unknown> | null;
   status?: string | null;
   image_png_base64?: string | null;
   image_size?: number[] | null;
   suggested_quad_px?: number[][] | null;
   saved_override?: {
+    source_receipt?: Record<string, unknown> | null;
     quad_px?: number[][];
     quad_source?: string | null;
     decision?: string | null;
@@ -155,6 +158,7 @@ type QuadReviewPayload = {
 
 type HeaderAxisReviewPayload = {
   order_id: string;
+  source_receipt?: Record<string, unknown> | null;
   status?: string | null;
   image_png_base64?: string | null;
   image_size?: number[] | null;
@@ -163,6 +167,7 @@ type HeaderAxisReviewPayload = {
   x_positions?: number[] | null;
   y_levels?: number[] | null;
   saved_override?: {
+    source_receipt?: Record<string, unknown> | null;
     corrected_xs?: number[];
     coordinate_space?: { mode?: string; width?: number; height?: number };
   } | null;
@@ -172,6 +177,7 @@ type HeaderAxisReviewPayload = {
 
 type RowAxisReviewPayload = {
   order_id: string;
+  source_receipt?: Record<string, unknown> | null;
   status?: string | null;
   image_png_base64?: string | null;
   image_size?: number[] | null;
@@ -179,6 +185,7 @@ type RowAxisReviewPayload = {
   y_positions?: number[] | null;
   x_levels?: number[] | null;
   saved_override?: {
+    source_receipt?: Record<string, unknown> | null;
     corrected_ys?: number[];
     coordinate_space?: { mode?: string; width?: number; height?: number };
   } | null;
@@ -463,6 +470,26 @@ const formatJson = (value: unknown) => JSON.stringify(value ?? null, null, 2);
 const isPositiveWorkflowRevision = (value: unknown): value is number => (
   typeof value === "number" && Number.isInteger(value) && value > 0
 );
+
+const sameRecordedValue = (left: unknown, right: unknown): boolean => {
+  if (left===right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right)
+    && left.length===right.length && left.every((value,index)=>sameRecordedValue(value,right[index]));
+  if (!left || !right || typeof left!=="object" || typeof right!=="object") return false;
+  const a=left as Record<string,unknown>, b=right as Record<string,unknown>;
+  return Object.keys(a).length===Object.keys(b).length
+    && Object.keys(a).every(key=>Object.prototype.hasOwnProperty.call(b,key) && sameRecordedValue(a[key],b[key]));
+};
+
+const sameQuadOverrideSource = (saved: unknown, selected: Record<string,unknown>) => {
+  if (!saved || typeof saved!=="object" || Array.isArray(saved)) return false;
+  const receipt=saved as Record<string,unknown>;
+  return ["selected_pdf_receipt","selected_version_input","geometry_source_digest","configured_input_digest","order_input_identity"]
+    .every(key=>Object.prototype.hasOwnProperty.call(receipt,key) && Object.prototype.hasOwnProperty.call(selected,key)
+      && sameRecordedValue(receipt[key],selected[key]))
+    && typeof receipt.geometry_source_digest==="string" && Boolean(receipt.geometry_source_digest)
+    && typeof receipt.configured_input_digest==="string" && Boolean(receipt.configured_input_digest);
+};
 
 type WorkflowRevisionToken = {
   revision: number;
@@ -1247,6 +1274,8 @@ export default function OrderWorkflowV2Page() {
   const activeOrderIdRef = useRef(orderId);
   activeOrderIdRef.current = orderId;
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
+  const workflowJobRef = useRef({orderId,jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state});
+  workflowJobRef.current={orderId,jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state};
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
@@ -1283,12 +1312,12 @@ export default function OrderWorkflowV2Page() {
   const [sheetJsonStale, setSheetJsonStale] = useState(false);
   const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
-  const [quadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
+  const [storedQuadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
   const [quadReviewLoading, setQuadReviewLoading] = useState(false);
   const [quadReviewMessage, setQuadReviewMessage] = useState("");
   const [manualQuadMode, setManualQuadMode] = useState(false);
   const [manualQuadPoints, setManualQuadPoints] = useState<number[][]>([]);
-  const [headerAxisReview, setHeaderAxisReview] = useState<HeaderAxisReviewPayload | null>(null);
+  const [storedHeaderAxisReview, setHeaderAxisReview] = useState<HeaderAxisReviewPayload | null>(null);
   const [headerAxisLoading, setHeaderAxisLoading] = useState(false);
   const [headerAxisMessage, setHeaderAxisMessage] = useState("");
   const [headerAxisXs, setHeaderAxisXs] = useState<number[]>([]);
@@ -1298,17 +1327,25 @@ export default function OrderWorkflowV2Page() {
   );
   const [selectedHeaderAxisIndex, setSelectedHeaderAxisIndex] = useState<number | null>(null);
   const [headerAxisAddMode, setHeaderAxisAddMode] = useState(false);
-  const [rowAxisReview, setRowAxisReview] = useState<RowAxisReviewPayload | null>(null);
+  const [storedRowAxisReview, setRowAxisReview] = useState<RowAxisReviewPayload | null>(null);
   const [rowAxisLoading, setRowAxisLoading] = useState(false);
   const [rowAxisMessage, setRowAxisMessage] = useState("");
   const [rowAxisYs, setRowAxisYs] = useState<number[]>([]);
   const [draggingRowAxisIndex, setDraggingRowAxisIndex] = useState<number | null>(null);
   const [selectedRowAxisIndex, setSelectedRowAxisIndex] = useState<number | null>(null);
   const [rowAxisAddMode, setRowAxisAddMode] = useState(false);
-  const [pdfUrl, setPdfUrl] = useState<string>("");
+  const [storedPdfUrl, setPdfUrl] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string>("");
-  const [busy, setBusy] = useState<string>("");
+  const [selectedDocumentId, setSelectedDocumentIdState] = useState<string>("");
+  const [busy, setBusyState] = useState<string>("");
+  const busyGenerationRef = useRef(0);
+  const quadContextGenerationRef = useRef(0), quadReadGenerationRef = useRef(0), quadCommandGenerationRef = useRef(0);
+  const quadAliveRef = useRef(false), quadBusyOwnerRef = useRef<number | null>(null);
+  const setBusy = (value:string) => { ++busyGenerationRef.current; setBusyState(value); };
+  const setSelectedDocumentId = (value:string) => {
+    ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current;
+    setSelectedDocumentIdState(value);
+  };
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
@@ -1369,6 +1406,81 @@ export default function OrderWorkflowV2Page() {
     || "",
   ).trim();
   const effectiveSelectedDocumentId = selectedDocumentId || currentDocumentId;
+  const quadContextRef = useRef({orderId, documentId:effectiveSelectedDocumentId, route:router.asPath});
+  if (quadContextRef.current.orderId!==orderId || quadContextRef.current.documentId!==effectiveSelectedDocumentId || quadContextRef.current.route!==router.asPath) {
+    ++quadContextGenerationRef.current;
+    quadContextRef.current={orderId,documentId:effectiveSelectedDocumentId,route:router.asPath};
+  }
+  const quadSourceRef = useRef<{review:QuadReviewPayload; context:typeof quadContextRef.current; generation:number; auth:string} | null>(null);
+  const quadAuth = () => hasActiveSessionAuthHeader() ? browserSessionKey() : null;
+  const workingInputGenerationRef = useRef(0);
+  const pageOperationGenerationRef = useRef(0);
+  const facilitySaveGenerationRef = useRef(0), copySaveGenerationRef = useRef(0);
+  const facilityReadGenerationRef = useRef(0);
+  const capturePageOwner = () => ({
+    context:{orderId,documentId:effectiveSelectedDocumentId,route:router.asPath}, generation:quadContextGenerationRef.current,
+    auth:quadAuth(), inputGeneration:workingInputGenerationRef.current,
+  });
+  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current
+    && own.auth!==null && own.auth===quadAuth() && own.generation===quadContextGenerationRef.current
+    && own.context.orderId===quadContextRef.current.orderId && own.context.documentId===quadContextRef.current.documentId
+    && own.context.route===quadContextRef.current.route;
+  const ownsPageInput = (own:ReturnType<typeof capturePageOwner>) => ownsPageContext(own)
+    && own.inputGeneration===workingInputGenerationRef.current;
+  const pdfSourceOwnerRef = useRef<ReturnType<typeof capturePageOwner> | null>(null);
+  const pdfUrl = pdfSourceOwnerRef.current && ownsPageContext(pdfSourceOwnerRef.current) ? storedPdfUrl : "";
+  const renderedInputGeneration=workingInputGenerationRef.current;
+  const axisReadGenerationRef = useRef({header:0,row:0});
+  const captureAxisOwner = (axis:"header"|"row") => ({...capturePageOwner(),editorGeneration:editorVersion(axis).generation,sheetGeneration:sheetEditGenerationRef.current});
+  const ownsAxisInput = (axis:"header"|"row",own:ReturnType<typeof captureAxisOwner>) => ownsPageInput(own)
+    && own.editorGeneration===editorVersion(axis).generation && own.sheetGeneration===sheetEditGenerationRef.current;
+  const axisSourceRef = useRef<Partial<Record<"header"|"row",{
+    review:HeaderAxisReviewPayload|RowAxisReviewPayload; own:ReturnType<typeof captureAxisOwner>;
+  }>>>({});
+  const captureQuadOwner = () => ({
+    context:{orderId,documentId:effectiveSelectedDocumentId,route:router.asPath}, generation:quadContextGenerationRef.current,
+    auth:quadAuth(), editorGeneration:editorVersion("quad").generation,
+    sheetGeneration:sheetEditGenerationRef.current,
+    inputGeneration:workingInputGenerationRef.current,
+  });
+  const ownsQuadContext = (own:ReturnType<typeof captureQuadOwner>) => quadAliveRef.current
+    && own.auth!==null && own.auth===quadAuth() && own.generation===quadContextGenerationRef.current
+    && own.context.orderId===quadContextRef.current.orderId && own.context.documentId===quadContextRef.current.documentId
+    && own.context.route===quadContextRef.current.route;
+  const ownsQuadInput = (own:ReturnType<typeof captureQuadOwner>) => ownsQuadContext(own)
+    && own.editorGeneration===editorVersion("quad").generation && own.sheetGeneration===sheetEditGenerationRef.current
+    && own.inputGeneration===workingInputGenerationRef.current;
+  const quadSource=quadSourceRef.current;
+  const quadReview=quadSource && quadAliveRef.current && quadSource.auth===quadAuth()
+    && quadSource.generation===quadContextGenerationRef.current
+    && sameRecordedValue(quadSource.context,quadContextRef.current) ? storedQuadReview : null;
+  const headerAxisReview=axisSourceRef.current.header && ownsPageContext(axisSourceRef.current.header.own) ? storedHeaderAxisReview : null;
+  const rowAxisReview=axisSourceRef.current.row && ownsPageContext(axisSourceRef.current.row.own) ? storedRowAxisReview : null;
+  useEffect(()=>{
+    quadAliveRef.current=true;
+    const retire = () => {
+      ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current;
+      quadSourceRef.current=null; setQuadReview(null); setQuadReviewLoading(false);
+      setHeaderAxisReview(null); setRowAxisReview(null);
+      axisSourceRef.current={};
+      setHeaderAxisLoading(false); setRowAxisLoading(false);
+      if (quadBusyOwnerRef.current===busyGenerationRef.current) setBusy("");
+      quadBusyOwnerRef.current=null;
+    };
+    const unsubscribe=subscribeBrowserSession(retire);
+    router.events.on("routeChangeStart",retire);
+    return ()=>{quadAliveRef.current=false; ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current; unsubscribe(); router.events.off("routeChangeStart",retire);};
+  },[router.events]);
+  useEffect(()=>{
+    quadSourceRef.current=null; setQuadReview(null); setQuadReviewMessage(""); setQuadReviewLoading(false);
+    setHeaderAxisReview(null); setRowAxisReview(null);
+    axisSourceRef.current={};
+    if (renderedInputGeneration===workingInputGenerationRef.current) {
+      setManualQuadPoints([]); setManualQuadMode(false); finishWorkflowEditorEdit("quad");
+    }
+    if (quadBusyOwnerRef.current===busyGenerationRef.current) setBusy("");
+    quadBusyOwnerRef.current=null;
+  },[orderId,effectiveSelectedDocumentId,router.asPath]);
   const selectedDocumentVersion = documentVersionOptions.find(
     (version) => String(version.document_id || "").trim() === effectiveSelectedDocumentId,
   ) || null;
@@ -1398,7 +1510,9 @@ export default function OrderWorkflowV2Page() {
     return workflowEditorVersionsRef.current[editor];
   };
   const hasDirtyWorkflowEditor = () => Object.values(workflowEditorVersionsRef.current).some((entry) => entry.dirty);
-  const beginWorkflowEditorEdit = (editor: string) => {
+  const beginWorkflowEditorEdit = (editor: string, command = false) => {
+    if (!command) ++workingInputGenerationRef.current;
+    if (editor==="quad") { ++quadReadGenerationRef.current; setQuadReviewLoading(false); }
     const current = editorVersion(editor);
     if (!current.dirty) {
       current.baseRevision = workflowRevisionRef.current?.revision ?? null;
@@ -1415,6 +1529,7 @@ export default function OrderWorkflowV2Page() {
   };
   const adoptReadWorkflow = (next: WorkflowV2 | null | undefined) => {
     if (!next) return;
+    workflowJobRef.current={orderId:next.order_id,jobId:next.ocr_job?.ocr_job_id ?? null,attemptId:next.ocr_job?.workflow_attempt_id ?? null,state:next.state};
     setWorkflow(next);
     const token = workflowRevisionTokenFromRead(next);
     if (token) {
@@ -1434,6 +1549,9 @@ export default function OrderWorkflowV2Page() {
       editorGeneration: current.generation,
       revision: current.baseRevision,
       bootstrap: current.baseIsBootstrap,
+      owner: capturePageOwner(),
+      operationGeneration: pageOperationGenerationRef.current,
+      busyGeneration: busyGenerationRef.current,
     };
   };
   const workflowMutationConfig = (
@@ -1441,6 +1559,10 @@ export default function OrderWorkflowV2Page() {
     config: any = {},
   ) => {
     const revision = captured.revision;
+    if (!ownsPageInput(captured.owner) || captured.operationGeneration!==pageOperationGenerationRef.current
+      || captured.busyGeneration!==busyGenerationRef.current) {
+      throw new Error("注文・PDF・認証または入力が変更されました。元の操作は送信していません。");
+    }
     if (
       workflowRevisionRef.current === null
       || (!isPositiveWorkflowRevision(revision) && !(revision === 0 && captured.bootstrap))
@@ -1452,7 +1574,7 @@ export default function OrderWorkflowV2Page() {
   };
   const workflowFromMutationResponse = (data: unknown): WorkflowV2 | null => {
     if (!data || typeof data !== "object") return null;
-    const candidate = (data as { workflow?: unknown }).workflow || data;
+    const candidate = Object.prototype.hasOwnProperty.call(data,"workflow") ? (data as { workflow?: unknown }).workflow : data;
     return candidate && typeof candidate === "object" ? candidate as WorkflowV2 : null;
   };
   const adoptOwnWorkflowCommandResponse = (
@@ -1467,10 +1589,14 @@ export default function OrderWorkflowV2Page() {
       && captured.editorGeneration === current.generation
       && captured.revision === current.baseRevision
       && captured.bootstrap === current.baseIsBootstrap
+      && ownsPageInput(captured.owner)
+      && captured.operationGeneration===pageOperationGenerationRef.current
+      && captured.busyGeneration===busyGenerationRef.current
     ) {
       const nextWorkflow = workflowFromMutationResponse(response);
       const nextRevision = nextWorkflow?.revision;
-      if (!isPositiveWorkflowRevision(nextRevision)) {
+      if (nextWorkflow?.order_id!==captured.orderId || !isPositiveWorkflowRevision(nextRevision)
+        || nextRevision<=captured.revision!) {
         throw new Error("workflow command の応答 revision を取得できません。再読込してから操作してください。");
       }
       adoptReadWorkflow(nextWorkflow);
@@ -1484,8 +1610,9 @@ export default function OrderWorkflowV2Page() {
     editor: string,
     request: (config: ReturnType<typeof workflowMutationConfig>) => Promise<T>,
   ) => {
-    beginWorkflowEditorEdit(editor);
+    beginWorkflowEditorEdit(editor, true);
     const captured = captureWorkflowInputVersion(editor);
+    if (!ownsPageInput(captured.owner)) throw new Error("注文・PDF・認証または入力が変更されました。");
     const response = await request(workflowMutationConfig(captured));
     if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
       throw new Error("workflow command の処理中に注文または入力が変更されました。再読込してから操作してください。");
@@ -1498,7 +1625,7 @@ export default function OrderWorkflowV2Page() {
     onSuccess?: (captured: ReturnType<typeof captureWorkflowInputVersion>, response: T) => void,
   ) => {
     const wasDirty = sheetDirtyRef.current;
-    if (!wasDirty) beginWorkflowEditorEdit("sheet");
+    if (!wasDirty) beginWorkflowEditorEdit("sheet", true);
     const captured = captureWorkflowInputVersion("sheet");
     const response = await request(workflowMutationConfig(captured));
     if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
@@ -1976,21 +2103,31 @@ export default function OrderWorkflowV2Page() {
     setError("");
   };
 
-  const refreshAll = async () => {
+  const refreshAll = async (callerCurrent: () => boolean = () => true, expectedJob: {jobId:string;attemptId:string} | null = null) => {
     if (!orderId) return;
+    const own=capturePageOwner();
+    if (!ownsPageInput(own) || !callerCurrent()) return;
     const requestedOrderId = orderId;
     const refreshGeneration = refreshGenerationRef.current + 1;
     refreshGenerationRef.current = refreshGeneration;
-    const [workflowRes, ocrRes, inspectionRes, orderRes] = await Promise.all([
+    const responses = await Promise.all([
       apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`),
       apiClient.get<{ results: OcrResult[] }>(`/orders/${orderId}/workflow-v2/ocr-results`),
       apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
       apiClient.get<OrderDetail>(`/orders/${orderId}`),
-    ]);
+    ]).catch(err=>{
+      if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
+        && ownsPageInput(own) && callerCurrent()) throw err;
+      return null;
+    });
+    if (!responses) return;
+    const [workflowRes, ocrRes, inspectionRes, orderRes]=responses;
     if (
       refreshGeneration !== refreshGenerationRef.current
       || requestedOrderId !== activeOrderIdRef.current
+      || !ownsPageInput(own) || !callerCurrent()
     ) return;
+    if (expectedJob!==null && (workflowRes.data.ocr_job?.ocr_job_id!==expectedJob.jobId || workflowRes.data.ocr_job?.workflow_attempt_id!==expectedJob.attemptId)) return false;
     adoptReadWorkflow(workflowRes.data);
     setOrderDetail(orderRes.data);
     applyPreSaveState(
@@ -2029,6 +2166,7 @@ export default function OrderWorkflowV2Page() {
       const workflowWeekValue = weekValueFromRange(workflowRes.data.week_start, workflowRes.data.week_end);
       setWeekDraft((current) => workflowWeekValue || current || "");
     }
+    return true;
   };
 
   useEffect(() => {
@@ -2051,10 +2189,14 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     if (!orderId) return;
-    refreshAll().catch((err) => {
-      setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
+    const own=capturePageOwner();
+    let active=true;
+    const current=()=>active && ownsPageInput(own);
+    void refreshAll(current).catch((err) => {
+      if (current()) setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
-  }, [orderId]);
+    return ()=>{active=false;};
+  }, [orderId,effectiveSelectedDocumentId,router.asPath]);
 
   useEffect(() => {
     sheetPayloadRef.current = sheetPayload;
@@ -2088,36 +2230,51 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     if (!orderId || workflow?.state !== "ocr_running") return undefined;
+    const own=capturePageOwner();
+    const jobId=workflow.ocr_job?.ocr_job_id;
+    const attemptId=workflow.ocr_job?.workflow_attempt_id;
+    if (typeof jobId!=="string" || !jobId || typeof attemptId!=="string" || !attemptId) {
+      if (ownsPageContext(own)) setError("OCR進捗の実job IDまたはattempt IDが未記録です。進捗読取を停止しています。");
+      return undefined;
+    }
+    let active=true;
+    const current=()=>active && ownsPageContext(own) && workflowJobRef.current.orderId===own.context.orderId
+      && workflowJobRef.current.jobId===jobId && workflowJobRef.current.attemptId===attemptId && workflowJobRef.current.state==="ocr_running";
     const timer = window.setInterval(() => {
-      refreshAll().catch((err) => {
-        setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+      if (!current()) return;
+      const readOwn=capturePageOwner();
+      const readCurrent=()=>current() && ownsPageInput(readOwn);
+      void refreshAll(readCurrent,{jobId,attemptId}).then(accepted=>{
+        if (accepted===false && readCurrent()) {
+          setError("OCR進捗のjobが変更、またはattemptが変更されました。元のjobの進捗読取を停止しています。");
+          active=false; window.clearInterval(timer);
+        }
+      }).catch((err) => {
+        if (readCurrent()) setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
       });
     }, 3000);
-    return () => window.clearInterval(timer);
-  }, [orderId, workflow?.state]);
+    return () => {active=false;window.clearInterval(timer);};
+  }, [orderId, workflow?.state,workflow?.ocr_job?.ocr_job_id,workflow?.ocr_job?.workflow_attempt_id,effectiveSelectedDocumentId,router.asPath]);
 
   useEffect(() => {
     if (!router.isReady || !orderId || visibleStep !== 1.5) return;
-    loadQuadReview().catch((err) => {
-      setQuadReviewMessage(formatApiError(err, "4点確認データの取得に失敗しました"));
-    });
-  }, [router.isReady, orderId, visibleStep]);
+    void loadQuadReview();
+  }, [router.isReady, orderId, visibleStep,effectiveSelectedDocumentId]);
 
   useEffect(() => {
     if (!router.isReady || !orderId || visibleStep !== 1.6) return;
-    loadHeaderAxisReview().catch((err) => {
-      setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
-    });
-  }, [router.isReady, orderId, visibleStep]);
+    void loadHeaderAxisReview();
+  }, [router.isReady, orderId, visibleStep,effectiveSelectedDocumentId]);
 
   useEffect(() => {
     if (!router.isReady || !orderId || visibleStep !== 1.7) return;
-    loadRowAxisReview().catch((err) => {
-      setRowAxisMessage(formatApiError(err, "行推定確認データの取得に失敗しました"));
-    });
-  }, [router.isReady, orderId, visibleStep]);
+    void loadRowAxisReview();
+  }, [router.isReady, orderId, visibleStep,effectiveSelectedDocumentId]);
 
-  const loadFacilityTemplateStatus = async (facilityId: string) => {
+  const loadFacilityTemplateStatus = async (facilityId: string, callerCurrent: () => boolean = () => true) => {
+    const own=capturePageOwner(), request=++facilityReadGenerationRef.current;
+    const current=()=>request===facilityReadGenerationRef.current && ownsPageInput(own) && callerCurrent();
+    if (!current()) return;
     const normalizedFacilityId = facilityId.trim();
     if (!normalizedFacilityId) {
       setFacilityTemplateStatus({
@@ -2146,6 +2303,7 @@ export default function OrderWorkflowV2Page() {
     }));
     try {
       const res = await apiClient.get(`/facilities/${normalizedFacilityId}`);
+      if (!current()) return;
       const resolved = res.data?.resolved_config || {};
       const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns);
       const templateId = String(resolved?.fax_template_id || "").trim();
@@ -2170,6 +2328,7 @@ export default function OrderWorkflowV2Page() {
         error: "",
       });
     } catch (err: any) {
+      if (!current()) return;
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
         templateId: "",
@@ -2184,6 +2343,10 @@ export default function OrderWorkflowV2Page() {
         setFacilityTemplateColumnDraft([]);
         setFacilityTemplateSwapLeft("");
         setFacilityTemplateSwapRight("");
+      }
+    } finally {
+      if (request===facilityReadGenerationRef.current && quadAliveRef.current) {
+        setFacilityTemplateStatus(status=>({...status,loading:false}));
       }
     }
   };
@@ -2313,57 +2476,83 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     if (!router.isReady || !orderId) return;
+    const own=capturePageOwner();
     let active = true;
     let objectUrl = "";
+    const current=()=>active && ownsPageContext(own);
+    const retire=()=>{
+      active=false;
+      if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl=""; }
+      pdfSourceOwnerRef.current=null;
+      setPdfUrl(""); setPdfError("");
+    };
+    const unsubscribe=subscribeBrowserSession(retire);
+    router.events.on("routeChangeStart",retire);
     setPdfUrl("");
     setPdfError("");
+    if (!current() || !own.context.documentId) {
+      setPdfError("選択PDF・注文・認証を確認してから再取得してください。");
+      return ()=>{active=false;unsubscribe();router.events.off("routeChangeStart",retire);};
+    }
     apiClient
-      .get<Blob>(`/orders/${orderId}/document`, {
-        params: effectiveSelectedDocumentId ? { document_id: effectiveSelectedDocumentId } : undefined,
+      .get<Blob>(`/orders/${own.context.orderId}/document`, {
+        params: { document_id: own.context.documentId },
         responseType: "blob",
       })
       .then((res) => {
-        if (!active) return;
+        if (!current()) return;
         objectUrl = URL.createObjectURL(res.data);
+        pdfSourceOwnerRef.current=own;
         setPdfUrl(objectUrl);
       })
       .catch((err) => {
-        if (!active) return;
+        if (!current()) return;
         const status = err?.response?.status;
         setPdfError(status === 404 ? "原本FAX PDFを現在取得できません。" : "PDFの取得に失敗しました。");
       });
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      unsubscribe(); router.events.off("routeChangeStart",retire);
     };
-  }, [router.isReady, orderId, effectiveSelectedDocumentId]);
+  }, [router.isReady, orderId, effectiveSelectedDocumentId,router.asPath,router.events]);
 
   const runAction = async (
     label: string,
     action: () => Promise<void>,
     options: { successMessage?: string; nextStep?: number; refreshAfter?: boolean } = {},
   ) => {
+    const own=capturePageOwner(), operation=++pageOperationGenerationRef.current;
+    if (!ownsPageInput(own)) { setError("注文・PDF・認証を確認してから操作してください。"); return; }
     setBusy(label);
+    const busyOwner=busyGenerationRef.current;
+    const current=()=>operation===pageOperationGenerationRef.current && ownsPageInput(own) && busyOwner===busyGenerationRef.current;
     setError("");
     setMessage("");
     try {
+      if (!current()) return;
       await action();
+      if (!current()) return;
       if (options.refreshAfter !== false) {
-        await refreshAll();
+        await refreshAll(current);
       }
+      if (!current()) return;
       if (options.nextStep) {
         setVisibleStep(options.nextStep);
       }
       setMessage(options.successMessage || `${label} が完了しました`);
     } catch (err: any) {
+      if (!current()) return;
       if (err?.response?.data?.detail === "facility_template_unresolved") {
         setVisibleStep(1);
-        await refreshAll().catch(() => undefined);
-        await loadFacilityTemplateStatus(contextForm.facility_id).catch(() => undefined);
+        await refreshAll(current).catch(() => undefined);
+        if (!current()) return;
+        await loadFacilityTemplateStatus(contextForm.facility_id,current).catch(() => undefined);
       }
+      if (!current()) return;
       setError(formatApiError(err, `${label} に失敗しました`));
     } finally {
-      setBusy("");
+      if (operation===pageOperationGenerationRef.current && busyOwner===busyGenerationRef.current && quadAliveRef.current) setBusy("");
     }
   };
 
@@ -2373,7 +2562,7 @@ export default function OrderWorkflowV2Page() {
         throw new Error(canonicalFacilityResolutionMessage(contextFacilityResolution));
       }
       const fallbackRange = weekRangeFromValue(selectedWeekValue);
-      beginWorkflowEditorEdit("context");
+      beginWorkflowEditorEdit("context", true);
       const contextInputVersion = captureWorkflowInputVersion("context");
       const response = await apiClient.post(`/orders/${orderId}/workflow-v2/context`, {
         facility_id: contextForm.facility_id,
@@ -2447,6 +2636,12 @@ export default function OrderWorkflowV2Page() {
   };
 
   const saveFacilityTemplateColumns = async () => {
+    const own=capturePageOwner(), operation=++facilitySaveGenerationRef.current;
+    const pageOperation=++pageOperationGenerationRef.current;
+    const busyOwner=busyGenerationRef.current;
+    const current=()=>operation===facilitySaveGenerationRef.current && pageOperation===pageOperationGenerationRef.current
+      && busyOwner===busyGenerationRef.current && ownsPageInput(own);
+    if (!current()) { setFacilityTemplateMessage("注文・PDF・認証を確認してから保存してください。"); return; }
     if (contextFacilityResolution.status !== "ready") {
       setFacilityTemplateMessage(canonicalFacilityResolutionMessage(contextFacilityResolution));
       return;
@@ -2465,7 +2660,9 @@ export default function OrderWorkflowV2Page() {
     setError("");
     try {
       const columns = buildFacilityTemplateColumnsPayload(facilityTemplateColumnDraft);
-      const response = await executeWorkflowMutation("templateColumns", (config) => apiClient.put(`/orders/${orderId}/workflow-v2/facility-template-columns`, { columns }, config));
+      if (!current()) return;
+      const response = await executeWorkflowMutation("templateColumns", (config) => apiClient.put(`/orders/${own.context.orderId}/workflow-v2/facility-template-columns`, { columns }, config));
+      if (!current()) return;
       const resolved = response.data?.resolved_config || null;
       const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns ?? columns);
       setFacilityResolvedConfig(resolved);
@@ -2476,25 +2673,35 @@ export default function OrderWorkflowV2Page() {
         `施設区分列を保存しました。OCR結果を${Number(response.data?.ocr_results_cleared || 0)}件破棄したため、Step1からOCRを再実行してください。`,
       );
       setVisibleStep(1);
-      await refreshAll();
-      await loadFacilityTemplateStatus(facilityId);
+      await refreshAll(current);
+      if (!current()) return;
+      await loadFacilityTemplateStatus(facilityId,current);
     } catch (err: any) {
-      setFacilityTemplateMessage(formatApiError(err, "施設区分列の保存に失敗しました"));
+      if (current()) setFacilityTemplateMessage(formatApiError(err, "施設区分列の保存に失敗しました"));
     } finally {
-      setFacilityTemplateSaving(false);
+      if (operation===facilitySaveGenerationRef.current && quadAliveRef.current) setFacilityTemplateSaving(false);
     }
   };
 
   const updateExpandedCellCopyMode = async (nextMode: ExpandedCellCopyMode) => {
     if (nextMode === expandedCellCopyMode) return;
+    const own=capturePageOwner(), operation=++copySaveGenerationRef.current;
+    const pageOperation=++pageOperationGenerationRef.current;
+    const busyOwner=busyGenerationRef.current;
+    const current=()=>operation===copySaveGenerationRef.current && pageOperation===pageOperationGenerationRef.current
+      && busyOwner===busyGenerationRef.current && ownsPageInput(own);
+    if (!current()) { setError("注文・PDF・認証を確認してから保存してください。"); return; }
     setExpandedCellCopySaving(true);
     setError("");
     setMessage("");
     try {
-      const response = await executeWorkflowMutation("expandedCellCopy", (config) => apiClient.put(`/orders/${orderId}/workflow-v2/expanded-cell-copy-mode`, { mode: nextMode }, config));
+      if (!current()) return;
+      const response = await executeWorkflowMutation("expandedCellCopy", (config) => apiClient.put(`/orders/${own.context.orderId}/workflow-v2/expanded-cell-copy-mode`, { mode: nextMode }, config));
+      if (!current()) return;
       setExpandedCellCopyMode(normalizeExpandedCellCopyMode(response.data?.expanded_cell_copy_mode));
       discardSheetDraft();
-      await refreshAll();
+      await refreshAll(current);
+      if (!current()) return;
       if (response.data?.selected_ocr_result_id) {
         setVisibleStep(3);
         setMessage("拡大セルコピー設定を変更しました。選択OCRからシートを再生成してください。");
@@ -2503,9 +2710,9 @@ export default function OrderWorkflowV2Page() {
         setMessage("拡大セルコピー設定を変更しました。OCR実行前に設定を確認できます。");
       }
     } catch (err: any) {
-      setError(formatApiError(err, "拡大セルコピー設定の保存に失敗しました"));
+      if (current()) setError(formatApiError(err, "拡大セルコピー設定の保存に失敗しました"));
     } finally {
-      setExpandedCellCopySaving(false);
+      if (operation===copySaveGenerationRef.current && quadAliveRef.current) setExpandedCellCopySaving(false);
     }
   };
 
@@ -2521,232 +2728,196 @@ export default function OrderWorkflowV2Page() {
   };
 
   const loadQuadReview = async () => {
-    if (!orderId) return;
-    setQuadReviewLoading(true);
-    setQuadReviewMessage("");
+    const own=captureQuadOwner(), request=++quadReadGenerationRef.current;
+    const current=()=>request===quadReadGenerationRef.current && ownsQuadInput(own);
+    if (!own.context.orderId || !own.context.documentId || !ownsQuadContext(own)) {
+      if (quadAliveRef.current) setQuadReviewMessage("注文・選択PDF・認証を確認してから再取得してください。");
+      return;
+    }
+    setQuadReviewLoading(true); setQuadReviewMessage("");
     try {
-      const response = await apiClient.get<QuadReviewPayload>(`/orders/${orderId}/workflow-v2/quad-review`, {
-        params: { document_id: effectiveSelectedDocumentId || undefined },
-      });
+      if (!current()) return;
+      const response = await apiClient.get<QuadReviewPayload>(`/orders/${own.context.orderId}/workflow-v2/quad-review`,
+        {params:{document_id:own.context.documentId}});
+      if (!current()) return;
+      const receipt=response.data?.source_receipt;
+      const pdf=receipt?.selected_pdf_receipt as Record<string,unknown> | undefined;
+      if (response.data?.order_id!==own.context.orderId || !receipt || !pdf
+        || pdf.order_id!==own.context.orderId || pdf.document_id!==own.context.documentId
+        || !isPositiveWorkflowRevision(receipt.workflow_revision)) {
+        throw new Error("4点確認の選択PDFまたはsource receiptを確認できません。");
+      }
+      quadSourceRef.current={review:response.data,context:own.context,generation:own.generation,auth:own.auth!};
       setQuadReview(response.data);
       const savedQuad = response.data?.saved_override?.quad_px;
-      if (canAdoptReadEditorInput("quad") && Array.isArray(savedQuad) && savedQuad.length === 4) {
-        setManualQuadPoints(savedQuad);
-      }
+      if (canAdoptReadEditorInput("quad") && Array.isArray(savedQuad) && savedQuad.length===4) {
+        if (sameQuadOverrideSource(response.data.saved_override?.source_receipt,receipt)) setManualQuadPoints(savedQuad);
+        else {
+          setManualQuadPoints([]);
+          setQuadReviewMessage("保存済み4点のPDF・入力の正本を確認できません。保存済み補正点は反映していません。");
+        }
+      } else if (canAdoptReadEditorInput("quad")) setManualQuadPoints([]);
     } catch (err: any) {
-      setQuadReviewMessage(formatApiError(err, "4点確認データの取得に失敗しました"));
+      if (current()) setQuadReviewMessage(formatApiError(err,"4点確認データの取得に失敗しました"));
     } finally {
-      setQuadReviewLoading(false);
+      if (request===quadReadGenerationRef.current && quadAliveRef.current) setQuadReviewLoading(false);
     }
   };
 
   const saveQuadAndRerun = async (decision: "approved_estimate" | "manual_override", quadPx: number[][]) => {
-    if (!orderId || !Array.isArray(quadPx) || quadPx.length !== 4) {
-      setQuadReviewMessage("4点が揃っていません。");
-      return;
+    if (!orderId || !Array.isArray(quadPx) || quadPx.length!==4) {
+      setQuadReviewMessage("4点が揃っていません。"); return;
     }
-    setBusy("quad review save");
-    setError("");
-    setQuadReviewMessage("");
+    const source=quadSourceRef.current;
+    if (!source || source.review!==quadReview || source.generation!==quadContextGenerationRef.current
+      || source.context.orderId!==quadContextRef.current.orderId || source.context.documentId!==quadContextRef.current.documentId
+      || source.context.route!==quadContextRef.current.route || source.auth!==quadAuth()) {
+      setQuadReviewMessage("選択PDFの4点確認source receiptを取得してから保存してください。"); return;
+    }
+    const receipt=source.review.source_receipt;
+    if (!receipt) { setQuadReviewMessage("4点確認source receiptがありません。"); return; }
+    if (typeof receipt.geometry_source_digest!=="string" || !receipt.geometry_source_digest) {
+      setQuadReviewMessage("4点のgeometry_source_digestが未記録です。補正保存・OCR再実行を停止しています。"); return;
+    }
+    beginWorkflowEditorEdit("quad", true);
+    const captured=captureWorkflowInputVersion("quad"), own=captureQuadOwner();
+    const operation=++quadCommandGenerationRef.current;
+    ++pageOperationGenerationRef.current;
+    captured.operationGeneration=pageOperationGenerationRef.current;
+    let busyOwner:number | null=null;
+    const current=()=>operation===quadCommandGenerationRef.current && ownsQuadInput(own)
+      && captured.operationGeneration===pageOperationGenerationRef.current
+      && (busyOwner===null || busyOwner===busyGenerationRef.current);
+    const points=quadPx.map(point=>[...point]);
+    if (!current()) return;
+    setBusy("quad review save"); busyOwner=busyGenerationRef.current; quadBusyOwnerRef.current=busyOwner;
+    captured.busyGeneration=busyOwner;
+    setError(""); setQuadReviewMessage("");
     try {
-      beginWorkflowEditorEdit("quad");
-      const quadInputVersion = captureWorkflowInputVersion("quad");
-      const quadResponse = await apiClient.put(`/orders/${orderId}/workflow-v2/quad-review`, {
-        decision,
-        quad_px: quadPx,
-        source_receipt: quadReview?.source_receipt,
-      }, workflowMutationConfig(quadInputVersion));
-      if (!adoptOwnWorkflowCommandResponse(quadResponse.data, quadInputVersion)) {
-        throw new Error("4点補正の保存中に注文または入力が変更されました。再読込してから操作してください。");
-      }
-      const rerunInputVersion = captureWorkflowInputVersion("quad");
-      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
-        stale_action: "retry",
-        force: true,
-        mode: "hakodate",
-        document_id: effectiveSelectedDocumentId || undefined,
-      }, workflowMutationConfig(rerunInputVersion));
-      if (!adoptOwnWorkflowCommandResponse(response.data, rerunInputVersion)) {
-        throw new Error("OCR再実行中に注文または入力が変更されました。再読込してから操作してください。");
-      }
+      if (captured.revision!==receipt.workflow_revision) throw new Error("4点確認後にworkflow版が変わりました。元の入力は保存していません。");
+      if (!current()) return;
+      const quadResponse=await apiClient.put(`/orders/${own.context.orderId}/workflow-v2/quad-review`,
+        {decision,quad_px:points,source_receipt:receipt},workflowMutationConfig(captured));
+      if (!current()) return;
+      if (workflowFromMutationResponse(quadResponse.data)?.revision!==captured.revision!+1)
+        throw new Error("4点補正のown revision遷移を確認できません。");
+      if (!adoptOwnWorkflowCommandResponse(quadResponse.data,captured))
+        throw new Error("4点補正の保存中に注文または入力が変更されました。");
+      const ownRevision=workflowFromMutationResponse(quadResponse.data)?.revision;
+      if (!isPositiveWorkflowRevision(ownRevision)) throw new Error("4点補正のown revisionを確認できません。");
+      const rerunInputVersion={...captured,revision:ownRevision,bootstrap:false};
+      if (!current()) return;
+      const response=await apiClient.post(`/orders/${own.context.orderId}/workflow-v2/ocr-runs`,
+        {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId},
+        workflowMutationConfig(rerunInputVersion));
+      if (!current()) return;
+      if (!adoptOwnWorkflowCommandResponse(response.data,rerunInputVersion))
+        throw new Error("OCR再実行中に注文または入力が変更されました。");
       finishWorkflowEditorEdit("quad");
-      discardSheetDraft();
-      invalidateSheetPreSaveChecks();
+      quadSourceRef.current=null;
+      discardSheetDraft(); invalidateSheetPreSaveChecks();
       setMessage("4点補正を保存し、OCRを再実行中です。完了後に正解OCRを選択してください。");
       setVisibleStep(2);
-    } catch (err: any) {
-      setError(formatApiError(err, "4点補正の保存またはOCR再実行に失敗しました"));
+    } catch (err:any) {
+      if (current()) setError(formatApiError(err,"4点補正の保存またはOCR再実行に失敗しました"));
     } finally {
-      setBusy("");
+      if (operation===quadCommandGenerationRef.current && busyOwner===busyGenerationRef.current && ownsQuadContext(own)) {
+        setBusy(""); quadBusyOwnerRef.current=null;
+      }
     }
   };
 
-  const loadHeaderAxisReview = async () => {
-    if (!orderId) return;
-    setHeaderAxisLoading(true);
-    setHeaderAxisMessage("");
-    try {
-      const timeoutMs = getHeaderAxisTimeoutMs();
-      const response = await apiClient.get<HeaderAxisReviewPayload>(
-        `/orders/${orderId}/workflow-v2/header-axis-review`,
-        { timeout: timeoutMs },
-      );
-      setHeaderAxisReview(response.data);
-      const savedXs = response.data?.saved_override?.corrected_xs;
-      const detectedXs = response.data?.x_positions;
-      const nextXs = Array.isArray(savedXs) && savedXs.length >= 2 ? savedXs : detectedXs;
-      if (canAdoptReadEditorInput("header")) {
-        setHeaderAxisXs((Array.isArray(nextXs) ? nextXs : []).map((value) => Number(value)).filter(Number.isFinite));
-        setSelectedHeaderAxisIndex(null);
-        setHeaderAxisAddMode(false);
-      }
-    } catch (err: any) {
-      setHeaderAxisMessage(formatApiError(err, "ヘッダー交点確認データの取得に失敗しました"));
-    } finally {
-      setHeaderAxisLoading(false);
+  const loadAxisReview = async (axis:"header"|"row") => {
+    const own=captureAxisOwner(axis), request=++axisReadGenerationRef.current[axis];
+    const loading=axis==="header"?setHeaderAxisLoading:setRowAxisLoading;
+    const message=axis==="header"?setHeaderAxisMessage:setRowAxisMessage;
+    const current=()=>request===axisReadGenerationRef.current[axis] && ownsAxisInput(axis,own);
+    if (!current() || !own.context.documentId) {
+      if (quadAliveRef.current) message("注文・選択PDF・認証を確認してから再取得してください。");
+      return;
     }
+    loading(true); message(""); delete axisSourceRef.current[axis];
+    try {
+      if (!current()) return;
+      const response=await apiClient.get<HeaderAxisReviewPayload|RowAxisReviewPayload>(`/orders/${own.context.orderId}/workflow-v2/${axis}-axis-review`,
+        {params:{document_id:own.context.documentId},timeout:getHeaderAxisTimeoutMs()});
+      if (!current()) return;
+      const review=response.data, receipt=review?.source_receipt;
+      const pdf=receipt?.selected_pdf_receipt as Record<string,unknown>|undefined;
+      if (review?.order_id!==own.context.orderId || !receipt || !pdf || pdf.order_id!==own.context.orderId
+        || pdf.document_id!==own.context.documentId || !isPositiveWorkflowRevision(receipt.workflow_revision)) {
+        throw new Error("選択PDFのsource_receipt契約を確認できません。補正保存・OCR再実行を停止しています。");
+      }
+      axisSourceRef.current[axis]={review,own};
+      if (axis==="header") setHeaderAxisReview(review as HeaderAxisReviewPayload);
+      else setRowAxisReview(review as RowAxisReviewPayload);
+      if (canAdoptReadEditorInput(axis)) {
+        const saved=axis==="header"?(review as HeaderAxisReviewPayload).saved_override?.corrected_xs:(review as RowAxisReviewPayload).saved_override?.corrected_ys;
+        const detected=axis==="header"?(review as HeaderAxisReviewPayload).x_positions:(review as RowAxisReviewPayload).y_positions;
+        const validSaved=Array.isArray(saved) && saved.length>=2;
+        const validSource=!validSaved || sameQuadOverrideSource(review.saved_override?.source_receipt,receipt);
+        const next=validSource?(validSaved?saved:detected):[];
+        const points=(Array.isArray(next)?next:[]).map(value=>Number(value)).filter(Number.isFinite);
+        if (axis==="header") { setHeaderAxisXs(points); setSelectedHeaderAxisIndex(null); setHeaderAxisAddMode(false); }
+        else { setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false); }
+        if (!validSource) message("保存済み補正のPDF・入力の正本を確認できません。補正点は反映していません。");
+      }
+    } catch(err:any) { if (current()) message(formatApiError(err,"交点確認データの取得に失敗しました")); }
+    finally { if (request===axisReadGenerationRef.current[axis] && quadAliveRef.current) loading(false); }
   };
 
-  const saveHeaderAxisAndRerun = async () => {
-    if (!orderId || headerAxisXs.length < 2) {
-      setHeaderAxisMessage("ヘッダー交点の縦軸が不足しています。");
-      return;
+  const saveAxisAndRerun = async (axis:"header"|"row") => {
+    const message=axis==="header"?setHeaderAxisMessage:setRowAxisMessage;
+    const review=axis==="header"?headerAxisReview:rowAxisReview;
+    const points=[...(axis==="header"?headerAxisXs:rowAxisYs)];
+    const source=axisSourceRef.current[axis], receipt=source?.review.source_receipt;
+    if (!source || source.review!==review || !receipt || !ownsPageContext(source.own)) {
+      message("選択PDFのsource_receiptを取得してから保存してください。"); return;
     }
-    const coordinateSpace = headerAxisReview?.coordinate_space;
-    if (!coordinateSpace?.width || !coordinateSpace?.height) {
-      setHeaderAxisMessage("ヘッダー交点の座標系が取得できていません。");
-      return;
+    if (typeof receipt.geometry_source_digest!=="string" || !receipt.geometry_source_digest) {
+      message("交点のgeometry_source_digestが未記録です。補正保存・OCR再実行を停止しています。"); return;
     }
-    setBusy("header axis save");
-    setError("");
-    setHeaderAxisMessage("");
+    const coordinateSpace=review?.coordinate_space;
+    if (points.length<2 || !coordinateSpace?.width || !coordinateSpace.height) { message("交点または座標系が不足しています。"); return; }
+    if (axis==="header") {
+      const expectedCount=getHeaderAxisExpectedCount();
+      if (expectedCount>0 && points.length!==expectedCount && typeof window!=="undefined"
+        && !window.confirm(`ヘッダー縦軸の本数がテンプレート期待値と一致しません。期待 ${expectedCount} 本 / 現在 ${points.length} 本です。このまま保存してOCRを再実行しますか？`)) return;
+    }
+    beginWorkflowEditorEdit(axis,true);
+    const operation=++pageOperationGenerationRef.current;
+    ++axisReadGenerationRef.current[axis];
+    if (axis==="header") setHeaderAxisLoading(false); else setRowAxisLoading(false);
+    setBusy(`${axis} axis save`);
+    const busyOwner=busyGenerationRef.current, captured=captureWorkflowInputVersion(axis), own=captureAxisOwner(axis);
+    const current=()=>operation===pageOperationGenerationRef.current && busyOwner===busyGenerationRef.current && ownsAxisInput(axis,own);
+    setError(""); message("");
     try {
-      const timeoutMs = getHeaderAxisTimeoutMs();
-      const expectedCount = getHeaderAxisExpectedCount();
-      if (
-        expectedCount > 0
-        && headerAxisXs.length !== expectedCount
-        && typeof window !== "undefined"
-        && !window.confirm(`ヘッダー縦軸の本数がテンプレート期待値と一致しません。期待 ${expectedCount} 本 / 現在 ${headerAxisXs.length} 本です。このまま保存してOCRを再実行しますか？`)
-      ) {
-        return;
-      }
-      beginWorkflowEditorEdit("header");
-      const headerInputVersion = captureWorkflowInputVersion("header");
-      const headerResponse = await apiClient.put(
-        `/orders/${orderId}/workflow-v2/header-axis-review`,
-        {
-          corrected_xs: headerAxisXs,
-          coordinate_space: coordinateSpace,
-        },
-        workflowMutationConfig(headerInputVersion, { timeout: timeoutMs }),
-      );
-      if (!adoptOwnWorkflowCommandResponse(headerResponse.data, headerInputVersion)) {
-        throw new Error("ヘッダー補正の保存中に注文または入力が変更されました。再読込してから操作してください。");
-      }
-      const rerunInputVersion = captureWorkflowInputVersion("header");
-      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
-        stale_action: "retry",
-        force: true,
-        mode: "hakodate",
-        document_id: effectiveSelectedDocumentId || undefined,
-      }, workflowMutationConfig(rerunInputVersion, { timeout: timeoutMs }));
-      if (!adoptOwnWorkflowCommandResponse(response.data, rerunInputVersion)) {
-        throw new Error("OCR再実行中に注文または入力が変更されました。再読込してから操作してください。");
-      }
-      finishWorkflowEditorEdit("header");
-      discardSheetDraft();
-      setSheetAutoEditResult(null);
-      setLocalAnomalyReview(null);
-      setSelectedAnomalyIndex(null);
-      setSelectedAutoEditIndex(null);
-      setMessage("ヘッダー交点補正を保存し、OCRを再実行しました。");
-      setVisibleStep(2);
-    } catch (err: any) {
-      setError(formatApiError(err, "ヘッダー交点補正の保存またはOCR再実行に失敗しました"));
-    } finally {
-      setBusy("");
-    }
+      if (!current()) return;
+      if (captured.revision!==receipt.workflow_revision) throw new Error("交点確認後にworkflow版が変わりました。元の入力は保存していません。");
+      const response=await apiClient.put(`/orders/${own.context.orderId}/workflow-v2/${axis}-axis-review`,
+        {...(axis==="header"?{corrected_xs:points}:{corrected_ys:points}),coordinate_space:coordinateSpace,source_receipt:receipt},
+        workflowMutationConfig(captured,{timeout:getHeaderAxisTimeoutMs()}));
+      if (!current()) return;
+      if (!adoptOwnWorkflowCommandResponse(response.data,captured)) throw new Error("補正保存中に入力が変更されました。");
+      const ownRevision=workflowFromMutationResponse(response.data)?.revision;
+      if (!isPositiveWorkflowRevision(ownRevision)) throw new Error("補正保存のown revisionを確認できません。");
+      const rerunInputVersion={...captured,revision:ownRevision,bootstrap:false};
+      if (!current()) return;
+      const rerun=await apiClient.post(`/orders/${own.context.orderId}/workflow-v2/ocr-runs`,
+        {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId},workflowMutationConfig(rerunInputVersion,{timeout:getHeaderAxisTimeoutMs()}));
+      if (!current()) return;
+      if (!adoptOwnWorkflowCommandResponse(rerun.data,rerunInputVersion)) throw new Error("OCR再実行中に入力が変更されました。");
+      finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis]; discardSheetDraft();
+      setSheetAutoEditResult(null); setLocalAnomalyReview(null); setSelectedAnomalyIndex(null); setSelectedAutoEditIndex(null);
+      setMessage(axis==="header"?"ヘッダー交点補正を保存し、OCRを再実行しました。":"行境界補正を保存し、OCRを再実行しました。"); setVisibleStep(2);
+    } catch(err:any) { if (current()) setError(formatApiError(err,"交点補正の保存またはOCR再実行に失敗しました")); }
+    finally { if (operation===pageOperationGenerationRef.current && busyOwner===busyGenerationRef.current && quadAliveRef.current) setBusy(""); }
   };
-
-  const loadRowAxisReview = async () => {
-    if (!orderId) return;
-    setRowAxisLoading(true);
-    setRowAxisMessage("");
-    try {
-      const timeoutMs = getHeaderAxisTimeoutMs();
-      const response = await apiClient.get<RowAxisReviewPayload>(
-        `/orders/${orderId}/workflow-v2/row-axis-review`,
-        { timeout: timeoutMs },
-      );
-      setRowAxisReview(response.data);
-      const savedYs = response.data?.saved_override?.corrected_ys;
-      const detectedYs = response.data?.y_positions;
-      const nextYs = Array.isArray(savedYs) && savedYs.length >= 2 ? savedYs : detectedYs;
-      if (canAdoptReadEditorInput("row")) {
-        setRowAxisYs((Array.isArray(nextYs) ? nextYs : []).map((value) => Number(value)).filter(Number.isFinite));
-        setSelectedRowAxisIndex(null);
-        setRowAxisAddMode(false);
-      }
-    } catch (err: any) {
-      setRowAxisMessage(formatApiError(err, "行推定確認データの取得に失敗しました"));
-    } finally {
-      setRowAxisLoading(false);
-    }
-  };
-
-  const saveRowAxisAndRerun = async () => {
-    if (!orderId || rowAxisYs.length < 2) {
-      setRowAxisMessage("行境界のY軸が不足しています。");
-      return;
-    }
-    const coordinateSpace = rowAxisReview?.coordinate_space;
-    if (!coordinateSpace?.width || !coordinateSpace?.height) {
-      setRowAxisMessage("行推定の座標系が取得できていません。");
-      return;
-    }
-    setBusy("row axis save");
-    setError("");
-    setRowAxisMessage("");
-    try {
-      beginWorkflowEditorEdit("row");
-      const rowInputVersion = captureWorkflowInputVersion("row");
-      const timeoutMs = getHeaderAxisTimeoutMs();
-      const rowResponse = await apiClient.put(
-        `/orders/${orderId}/workflow-v2/row-axis-review`,
-        {
-          corrected_ys: rowAxisYs,
-          coordinate_space: coordinateSpace,
-        },
-        workflowMutationConfig(rowInputVersion, { timeout: timeoutMs }),
-      );
-      if (!adoptOwnWorkflowCommandResponse(rowResponse.data, rowInputVersion)) {
-        throw new Error("行境界補正の保存中に注文または入力が変更されました。再読込してから操作してください。");
-      }
-      const rerunInputVersion = captureWorkflowInputVersion("row");
-      const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
-        stale_action: "retry",
-        force: true,
-        mode: "hakodate",
-        document_id: effectiveSelectedDocumentId || undefined,
-      }, workflowMutationConfig(rerunInputVersion, { timeout: timeoutMs }));
-      if (!adoptOwnWorkflowCommandResponse(response.data, rerunInputVersion)) {
-        throw new Error("OCR再実行中に注文または入力が変更されました。再読込してから操作してください。");
-      }
-      finishWorkflowEditorEdit("row");
-      discardSheetDraft();
-      setSheetAutoEditResult(null);
-      setLocalAnomalyReview(null);
-      setSelectedAnomalyIndex(null);
-      setSelectedAutoEditIndex(null);
-      setMessage("行推定補正を保存し、OCRを再実行しました。");
-      setVisibleStep(2);
-    } catch (err: any) {
-      setError(formatApiError(err, "行推定補正の保存またはOCR再実行に失敗しました"));
-    } finally {
-      setBusy("");
-    }
-  };
+  const loadHeaderAxisReview = async () => { await loadAxisReview("header"); };
+  const saveHeaderAxisAndRerun = async () => { await saveAxisAndRerun("header"); };
+  const loadRowAxisReview = async () => { await loadAxisReview("row"); };
+  const saveRowAxisAndRerun = async () => { await saveAxisAndRerun("row"); };
 
   const handleQuadImageClick = (event: MouseEvent<HTMLImageElement>) => {
     if (!manualQuadMode || manualQuadPoints.length >= 4) return;
@@ -2925,10 +3096,11 @@ export default function OrderWorkflowV2Page() {
         if (contextFacilityResolution.status !== "ready") {
           throw new Error(canonicalFacilityResolutionMessage(contextFacilityResolution));
         }
+        if (!effectiveSelectedDocumentId) throw new Error("選択PDFが未解決です。OCRを開始できません。");
         const payload: Record<string, unknown> = {
           stale_action: "retry",
           mode: ocrRunMode,
-          document_id: effectiveSelectedDocumentId || undefined,
+          document_id: effectiveSelectedDocumentId,
         };
         if (ocrRunMode === "llm") {
           payload.llm_assist = true;
@@ -3422,7 +3594,7 @@ export default function OrderWorkflowV2Page() {
       if (!effectiveAnomalyReviewConfirmed || !effectiveSheetReviewConfirmed) {
         throw new Error("シート保存前に、異常チェックとシート確認を完了してください。");
       }
-      beginWorkflowEditorEdit("sheet");
+      beginWorkflowEditorEdit("sheet", true);
       const sheetInputVersion = captureWorkflowInputVersion("sheet");
       const saveResponse = await apiClient.put<{ workflow?: WorkflowV2 }>(`/orders/${orderId}/workflow-v2/sheet`, {
         sheet: parsed,
@@ -4029,7 +4201,7 @@ export default function OrderWorkflowV2Page() {
               </label>
               <label className="toolbar-field ocr-mode-field">
                 <span>OCR実行方式</span>
-                <select value={ocrRunMode} onChange={(event) => setOcrRunMode(event.target.value as OcrRunMode)} disabled={Boolean(busy)}>
+                <select value={ocrRunMode} onChange={(event) => { ++workingInputGenerationRef.current; setOcrRunMode(event.target.value as OcrRunMode); }} disabled={Boolean(busy)}>
                   <option value="hakodate">箱館方式</option>
                   <option value="llm">AIに任せる</option>
                 </select>
@@ -4068,7 +4240,7 @@ export default function OrderWorkflowV2Page() {
               <div className="ocr-run-options compact">
                 <label className="toolbar-field">
                   <span>自動調整プリセット</span>
-                  <select value={llmPromptPreset} onChange={(event) => setLlmPromptPreset(event.target.value as LlmPromptPreset)} disabled={Boolean(busy)}>
+                  <select value={llmPromptPreset} onChange={(event) => { ++workingInputGenerationRef.current; setLlmPromptPreset(event.target.value as LlmPromptPreset); }} disabled={Boolean(busy)}>
                     {(Object.keys(llmPromptPresetLabels) as LlmPromptPreset[]).map((preset) => (
                       <option key={preset} value={preset}>{llmPromptPresetLabels[preset]}</option>
                     ))}
@@ -4076,7 +4248,7 @@ export default function OrderWorkflowV2Page() {
                 </label>
                 <label className="toolbar-field">
                   <span>AIエンジン</span>
-                  <select value={llmProvider} onChange={(event) => setLlmProvider(event.target.value)} disabled={Boolean(busy)}>
+                  <select value={llmProvider} onChange={(event) => { ++workingInputGenerationRef.current; setLlmProvider(event.target.value); }} disabled={Boolean(busy)}>
                     <option value="openai">OpenAI</option>
                     <option value="gemini">Gemini</option>
                   </select>
@@ -4084,7 +4256,7 @@ export default function OrderWorkflowV2Page() {
                 {llmProvider === "gemini" ? (
                   <label className="toolbar-field">
                     <span>Geminiモデル</span>
-                    <select value={llmModelMode} onChange={(event) => setLlmModelMode(event.target.value as "flash" | "pro" | "other")} disabled={Boolean(busy)}>
+                    <select value={llmModelMode} onChange={(event) => { ++workingInputGenerationRef.current; setLlmModelMode(event.target.value as "flash" | "pro" | "other"); }} disabled={Boolean(busy)}>
                       <option value="flash">Flash</option>
                       <option value="pro">Pro</option>
                       <option value="other">カスタム</option>
@@ -4095,7 +4267,7 @@ export default function OrderWorkflowV2Page() {
                   <input
                     className="compact-input llm-model-input"
                     value={llmCustomModel}
-                    onChange={(event) => setLlmCustomModel(event.target.value)}
+                    onChange={(event) => { ++workingInputGenerationRef.current; setLlmCustomModel(event.target.value); }}
                     placeholder="gemini model"
                   />
                 ) : null}
@@ -4104,7 +4276,7 @@ export default function OrderWorkflowV2Page() {
                   <textarea
                     className="ocr-llm-prompt-textarea"
                     value={ocrPrompt}
-                    onChange={(event) => setOcrPrompt(event.target.value)}
+                    onChange={(event) => { ++workingInputGenerationRef.current; setOcrPrompt(event.target.value); }}
                     placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
                   />
                 </details>
