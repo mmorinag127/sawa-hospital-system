@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Checkbox, Input, NativeSelect } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import Link from "next/link";
 import { useRouter } from "next/router";
 
@@ -1084,7 +1087,7 @@ export default function OrdersPage() {
                   </span>
                 ))}
             </div>
-            <button
+            <Button
               type="button"
               className="week-group-toggle"
               aria-expanded={expanded}
@@ -1092,36 +1095,36 @@ export default function OrdersPage() {
               onClick={() => toggleWeekGroup(group.key)}
             >
               {expanded ? "閉じる" : "開く"}
-            </button>
+            </Button>
             {group.key !== "unresolved" && canBulkRerunOcrWeekGroup(group) ? (
-              <button
+              <Button
                 type="button"
                 className="week-group-action week-group-action-ocr"
                 onClick={() => rerunOcrWeekGroup(group)}
                 disabled={Boolean(bulkOcrBusyWeek)}
               >
                 {bulkOcrBusyWeek === group.key ? `OCR再実行中 ${bulkOcrProgress}` : "OCR一括再実行"}
-              </button>
+              </Button>
             ) : null}
             {group.key !== "unresolved" && canArchiveWeekGroup(group) ? (
-              <button
+              <Button
                 type="button"
                 className="week-group-action week-group-action-archive"
                 onClick={() => archiveWeekGroup(group)}
                 disabled={archiveBusyWeek === group.key || Boolean(bulkOcrBusyWeek)}
               >
                 {archiveBusyWeek === group.key ? "処理中..." : "アーカイブ"}
-              </button>
+              </Button>
             ) : null}
             {group.key !== "unresolved" && canUnarchiveWeekGroup(group) ? (
-              <button
+              <Button
                 type="button"
                 className="week-group-action week-group-action-restore"
                 onClick={() => unarchiveWeekGroup(group)}
                 disabled={archiveBusyWeek === group.key || Boolean(bulkOcrBusyWeek)}
               >
                 {archiveBusyWeek === group.key ? "処理中..." : "戻す"}
-              </button>
+              </Button>
             ) : null}
           </div>
         </header>
@@ -1137,7 +1140,7 @@ export default function OrdersPage() {
   };
 
   return (
-    <main className="page">
+    <ThemeProvider theme={sawaTheme}><main className="page">
       <header className="hero">
         <div>
           <p className="eyebrow">Orders</p>
@@ -1159,18 +1162,18 @@ export default function OrdersPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">ステータス</span>
-            <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <NativeSelect className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">全て</option>
               <option value="アップロード済み">アップロード済み</option>
               <option value="未着">未着</option>
               <option value="要確認">要確認</option>
               <option value="確定">確定</option>
               <option value="エラー">エラー</option>
-            </select>
+            </NativeSelect>
           </label>
           <label className="field">
             <span className="field-label">検索</span>
-            <input
+            <Input
               className="input"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -1179,16 +1182,14 @@ export default function OrdersPage() {
           </label>
           <label className="field checkbox">
             <span className="field-label">施設未確定のみ</span>
-            <input
-              type="checkbox"
+            <Checkbox
               checked={unresolvedOnly}
               onChange={(e) => setUnresolvedOnly(e.target.checked)}
             />
           </label>
           <label className="field checkbox">
             <span className="field-label">アーカイブ済みを表示</span>
-            <input
-              type="checkbox"
+            <Checkbox
               checked={showArchived}
               onChange={(e) => setShowArchived(e.target.checked)}
             />
@@ -1202,9 +1203,9 @@ export default function OrdersPage() {
             <h2>週次ごとの注文</h2>
             <p className="subtle">OCRから読めた暫定週次で束ねています。ここでは受付IDと受信日時は省いています。</p>
           </div>
-          <button className="ghost-link" type="button" onClick={() => setReloadToken((value) => value + 1)}>
+          <Button className="ghost-link" type="button" onClick={() => setReloadToken((value) => value + 1)}>
             最新に更新
-          </button>
+          </Button>
         </header>
         {archiveNotice ? <p className="archive-feedback archive-feedback-success">{archiveNotice}</p> : null}
         {archiveError ? <p className="archive-feedback archive-feedback-error">{archiveError}</p> : null}
@@ -1212,7 +1213,7 @@ export default function OrdersPage() {
         {bulkArchivableWeekGroups.length > 0 || bulkRestorableWeekGroups.length > 0 ? (
           <div className="week-bulk-actions">
             {bulkArchivableWeekGroups.length > 0 ? (
-              <button
+              <Button
                 type="button"
                 className="week-group-action week-group-action-archive"
                 onClick={archiveAllVisibleWeekGroups}
@@ -1221,10 +1222,10 @@ export default function OrdersPage() {
                 {archiveBusyWeek === "__bulk_archive__"
                   ? "処理中..."
                   : `表示中の週次を一括アーカイブ (${bulkArchivableWeekGroups.length})`}
-              </button>
+              </Button>
             ) : null}
             {bulkRestorableWeekGroups.length > 0 ? (
-              <button
+              <Button
                 type="button"
                 className="week-group-action week-group-action-restore"
                 onClick={unarchiveAllVisibleWeekGroups}
@@ -1233,7 +1234,7 @@ export default function OrdersPage() {
                 {archiveBusyWeek === "__bulk_restore__"
                   ? "処理中..."
                   : `表示中の週次のアーカイブを解除 (${bulkRestorableWeekGroups.length})`}
-              </button>
+              </Button>
             ) : null}
           </div>
         ) : null}
@@ -1243,9 +1244,9 @@ export default function OrdersPage() {
           ) : loadError ? (
             <div className="error-box">
               <p>{loadError}</p>
-              <button className="retry-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>
+              <Button className="retry-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>
                 再読み込み
-              </button>
+              </Button>
             </div>
           ) : sortedOrders.length === 0 ? (
             <p className="subtle">
@@ -1256,9 +1257,9 @@ export default function OrdersPage() {
           )}
           {!isLoading && !loadError && hasMoreOrders ? (
             <div className="load-more-row">
-              <button className="retry-button" type="button" onClick={loadMoreOrders} disabled={isLoadingMore}>
+              <Button className="retry-button" type="button" onClick={loadMoreOrders} disabled={isLoadingMore}>
                 {isLoadingMore ? "読み込み中..." : `さらに ${ORDER_LIST_PAGE_SIZE} 件読み込む`}
-              </button>
+              </Button>
             </div>
           ) : null}
         </div>
@@ -1369,7 +1370,8 @@ export default function OrdersPage() {
           text-transform: uppercase;
         }
 
-        .input {
+        .page :global(.MuiInput-root.input),
+        .page :global(.MuiInput-root .MuiNativeSelect-select) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
@@ -1389,7 +1391,7 @@ export default function OrdersPage() {
           gap: 12px;
         }
 
-        .ghost-link {
+        .page :global(.MuiButton-root.ghost-link) {
           border: none;
           background: transparent;
           padding: 0;
@@ -1398,7 +1400,7 @@ export default function OrdersPage() {
           cursor: pointer;
         }
 
-        .ghost-link:hover {
+        .page :global(.MuiButton-root.ghost-link:hover) {
           text-decoration: underline;
           text-underline-offset: 2px;
         }
@@ -1794,7 +1796,7 @@ export default function OrdersPage() {
           margin-top: auto;
         }
 
-        .retry-button {
+        .page :global(.MuiButton-root.retry-button) {
           border: none;
           background: #7a2f2a;
           color: #fff;
@@ -1853,7 +1855,7 @@ export default function OrdersPage() {
           cursor: pointer;
         }
 
-        .week-group-action:disabled {
+        .page :global(.MuiButton-root.week-group-action:disabled) {
           opacity: 0.6;
           cursor: wait;
         }
@@ -1898,6 +1900,6 @@ export default function OrdersPage() {
       <style jsx global>{`
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
-    </main>
+    </main></ThemeProvider>
   );
 }
