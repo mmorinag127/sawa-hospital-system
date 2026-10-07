@@ -3,11 +3,9 @@ import os
 import threading
 from hashlib import sha256
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from src.workers import celery_app
 from src.workers.ingest_mail_adapter import parse_ingest_payload, to_job_kwargs
 from src.services.order_service import (
     create_order_from_ingest,
@@ -41,6 +39,7 @@ from src.services.ocr_job_service import (
     get_auto_recovery_interval_seconds,
     get_auto_recovery_max_attempts,
     get_job,
+    get_job_request_mode,
     get_job_recovery_attempts,
     is_job_recovery_due,
     list_recoverable_jobs,
@@ -69,9 +68,6 @@ from src.services.uploaded_pdf_service import (
 from loguru import logger
 
 _INGEST_MAX_WORKERS = int(os.getenv("INGEST_MAX_WORKERS", "4") or 4)
-_INGEST_EXECUTOR = ThreadPoolExecutor(max_workers=_INGEST_MAX_WORKERS)
-_AUTO_REPARSE_MAX_WORKERS = int(os.getenv("OCR_AUTO_LLM_REPARSE_MAX_WORKERS", "2") or 2)
-_AUTO_REPARSE_EXECUTOR = ThreadPoolExecutor(max_workers=_AUTO_REPARSE_MAX_WORKERS)
 _UPLOADED_PDF_RECOVERY_THREAD: threading.Thread | None = None
 _UPLOADED_PDF_RECOVERY_LOCK = threading.Lock()
 _UPLOADED_PDF_RECOVERY_STOP = threading.Event()
@@ -189,10 +185,16 @@ def _mark_ocr_job_awaiting_output(
 
 
 def _mark_ocr_job_final_failed(job_id: str, *, error_message: str) -> dict | None:
+    boundary = current_nonworkflow_execution()
+    if isinstance(boundary, dict) and boundary.get("ingest_successor_id"):
+        from src.services.order_service import _persist_ocr_rerun_completion
+        result, _ = _persist_ocr_rerun_completion(boundary["order_id"], job_id, None,
+            error=error_message, metrics_patch={"request_mode": "llm_reparse"})
+        return result["terminal_receipt"]
     if is_selected_pdf_failure(error_message):
         receipt = complete_own_selected_pdf_failure(job_id, error_message)
         boundary = current_nonworkflow_execution()
-        if receipt is not None and isinstance(boundary, dict) and boundary.get("ingest_lease") is not None:
+        if receipt is not None and isinstance(boundary, dict) and boundary.get("ingest_lease") is not None and not boundary.get("ingest_successor_id"):
             ingest_job_service.fail_ingest_attempt(boundary["ingest_lease"], error_message)
         return receipt
     current = get_job(job_id) or {}
@@ -342,13 +344,17 @@ def run_ocr_job_recovery_once(limit: int | None = None) -> int:
         if not isinstance(execution_input, dict):
             logger.warning("OCR recovery stopped: processing-start input missing", job_id=job.get("id"))
             continue
-        with nonworkflow_execution_context(deepcopy(execution_input)):
-            try:
-                recovered += int(_recover_captured_ocr_job(job))
-            except ValueError as exc:
-                if not is_selected_pdf_failure(exc):
-                    raise
-                recovered += int(_mark_ocr_job_final_failed(job.get("id"), error_message=str(exc)) is not None)
+        from src.services.ingest_delivery_service import recovery_context
+        with recovery_context(execution_input) as eligible:
+            if not eligible:
+                continue
+            with nonworkflow_execution_context(deepcopy(execution_input)):
+                try:
+                    recovered += int(_recover_captured_ocr_job(job))
+                except ValueError as exc:
+                    if not is_selected_pdf_failure(exc):
+                        raise
+                    recovered += int(_mark_ocr_job_final_failed(job.get("id"), error_message=str(exc)) is not None)
     return recovered
 
 
@@ -375,19 +381,7 @@ def _submit_uploaded_pdf_job(uploaded_pdf_id: str) -> bool:
     token = str(uploaded_pdf_id or "").strip()
     if not token:
         return False
-    with _UPLOADED_PDF_RECOVERY_LOCK:
-        if token in _UPLOADED_PDF_INFLIGHT:
-            return False
-        _UPLOADED_PDF_INFLIGHT.add(token)
-
-    def _runner() -> None:
-        try:
-            process_uploaded_pdf_job(token)
-        finally:
-            with _UPLOADED_PDF_RECOVERY_LOCK:
-                _UPLOADED_PDF_INFLIGHT.discard(token)
-
-    _INGEST_EXECUTOR.submit(_runner)
+    enqueue_uploaded_pdf_async(token)
     return True
 
 
@@ -410,7 +404,8 @@ def _looks_like_first_pass_ocr_payload(payload: object) -> bool:
     return False
 
 
-def _run_auto_llm_reparse(order_id: str, *, job_id: str, execution_input: dict, own_payload: dict, provider: str | None = None) -> None:
+def _run_auto_llm_reparse(order_id: str, *, job_id: str, execution_input: dict, own_payload: dict,
+    provider: str | None = None, original_request: dict) -> None:
     from src.services import order_service
 
     updated = None
@@ -419,6 +414,7 @@ def _run_auto_llm_reparse(order_id: str, *, job_id: str, execution_input: dict, 
             updated, error = run_order_reparse(
                 order_id, ocr_provider=provider, llm_assist=True,
                 ocr_job_id=job_id, resume_first_pass_payload=own_payload,
+                _original_request=deepcopy(original_request),
             )
             if error is None and order_service.is_own_pending_ocr_result(
                 updated, order_id=order_id, job_id=job_id,
@@ -457,6 +453,7 @@ def _run_auto_llm_reparse(order_id: str, *, job_id: str, execution_input: dict, 
                     metrics_patch={"request_mode": "llm_reparse"},
                 )
         logger.exception("Auto LLM reparse failed", order_id=order_id, error=str(exc))
+        raise
 
 
 def _enqueue_auto_llm_reparse(
@@ -468,40 +465,19 @@ def _enqueue_auto_llm_reparse(
     own_evidence: dict | None,
     own_job: dict | None,
 ) -> None:
-    if not _auto_llm_reparse_enabled():
-        return
-    if os.getenv("PYTEST_CURRENT_TEST") and isinstance(_AUTO_REPARSE_EXECUTOR, ThreadPoolExecutor):
-        logger.info("Skipping auto LLM reparse background submit during pytest")
-        return
-    if str(ocr_status or "").strip().lower() != "success":
-        return
-    if not _looks_like_first_pass_ocr_payload(pipeline_output):
-        return
-    if not isinstance(own_evidence, dict) or own_evidence.get("selectable") is not True:
-        return
-    if not isinstance(order, dict):
-        return
-    order_id = str(order.get("id") or "").strip()
-    facility_id = str(order.get("facility") or "").strip()
-    document_uri = str(order.get("document") or "").strip()
-    if not order_id or not facility_id or not document_uri:
-        return
-    existing_job = own_job
-    if isinstance(existing_job, dict):
-        job_state = describe_job_state(existing_job)
-        if str(job_state.get("status") or "").strip().lower() in {"running", "pending", "stalled"}:
-            logger.info(
-                "Skipping auto LLM reparse because reparse job is already active",
-                order_id=order_id,
-                job_status=job_state.get("status"),
-            )
-            return
-    provider = str(os.getenv("OCR_AUTO_LLM_REPARSE_PROVIDER", "") or "").strip().lower() or None
-    _AUTO_REPARSE_EXECUTOR.submit(
-        _run_auto_llm_reparse, order_id, provider=provider,
-        job_id=execution_input["job_id"], execution_input=deepcopy(execution_input),
-        own_payload=deepcopy(own_evidence["payload_json"]),
-    )
+    # Acceptance already occurred with evidence/terminal in the producer transaction.
+    # The independent drain dispatches it after predecessor ACK, without this call.
+    from src.models.ingest_delivery_successor import IngestDeliverySuccessor
+    from src.services.ingest_delivery_service import transaction
+    from src.services.ingest_delivery_successor_service import dispatch
+    from sqlalchemy import select
+    with transaction() as session:
+        successor = session.execute(select(IngestDeliverySuccessor).where(
+            IngestDeliverySuccessor.predecessor_job_id == execution_input["job_id"])).scalar_one_or_none()
+        if successor is None:
+            return  # Disabled/ineligible at the recorded producer, not re-evaluated now.
+        identity, generation = successor.id, successor.generation
+    dispatch(identity, generation)
 
 
 def _build_pipeline_match_text(payload: dict | None) -> str:
@@ -628,23 +604,21 @@ def _get_ocr_storage() -> StorageService:
 
 def enqueue_ingest(payload: dict, force: bool = False) -> tuple[str, bool]:
     """
-    For now process inline to avoid external broker dependency during bring-up.
+    Reserve an original input and dispatch its durable recorded transport intent.
     """
     receipt = ingest_job_service.create_ingest_receipt(payload, force=force)
     job_id, should_enqueue = receipt["id"], receipt["enqueued"]
     if not should_enqueue:
         logger.info("Existing ingest input/state did not accept enqueue", job_id=job_id)
         return job_id, False
-    process_ingest_job(job_id, generation=receipt["generation"], input_digest=receipt["input_digest"])
+    enqueue_ingest_job_async(job_id, generation=receipt["generation"], input_digest=receipt["input_digest"])
     return job_id, True
 
 
 def enqueue_ingest_async(payload: dict, force: bool = False) -> tuple[str, bool]:
     """
-    Run ingest on a background thread so API handlers stay responsive.
+    Preserve the public entry point without a process-local executor fallback.
     """
-    if _ingest_runs_inline():
-        return enqueue_ingest(payload, force=force)
     receipt = ingest_job_service.create_ingest_receipt(payload, force=force)
     job_id, should_enqueue = receipt["id"], receipt["enqueued"]
     if not should_enqueue:
@@ -655,18 +629,27 @@ def enqueue_ingest_async(payload: dict, force: bool = False) -> tuple[str, bool]
 
 
 def enqueue_ingest_job_async(job_id: str, *, generation: str, input_digest: str) -> None:
-    _INGEST_EXECUTOR.submit(process_ingest_job, job_id=job_id, generation=generation, input_digest=input_digest)
+    from src.services.ingest_delivery_service import delivery_for_job
+    from src.services.ingest_delivery_dispatch_service import dispatch
+    delivery_id, delivery_generation = delivery_for_job(job_id, generation, input_digest)
+    dispatch(delivery_id, delivery_generation)
 
 
 def enqueue_uploaded_pdf_async(uploaded_pdf_id: str) -> None:
-    if _ingest_runs_inline():
-        process_uploaded_pdf_job(uploaded_pdf_id)
-        return
-    _submit_uploaded_pdf_job(uploaded_pdf_id)
+    from src.services.uploaded_pdf_service import get_uploaded_pdf
+    row = get_uploaded_pdf(uploaded_pdf_id)
+    if row is None:
+        raise ValueError("ingest_delivery_upload_missing")
+    original = ingest_job_service.get_ingest_job_snapshot(row["message_id"])
+    if original is None:
+        raise ValueError("ingest_delivery_original_missing")
+    enqueue_ingest_job_async(original["id"], generation=original["generation"], input_digest=original["input_digest"])
 
 
-def process_ingest_job(job_id: str, *, generation: str, input_digest: str, uploaded_lease=None):
-    lease = ingest_job_service.claim_ingest_job(job_id, generation=generation, input_digest=input_digest, uploaded_lease=uploaded_lease)
+def process_ingest_job(job_id: str, *, generation: str, input_digest: str, uploaded_lease=None, owned_lease=None):
+    if owned_lease is None:
+        raise ValueError("ingest_delivery_owned_runner_required")
+    lease = owned_lease
     if lease is None:
         logger.info("Ingest job already claimed", job_id=job_id)
         return
@@ -675,76 +658,39 @@ def process_ingest_job(job_id: str, *, generation: str, input_digest: str, uploa
         return lease
     with ingest_job_service.ingest_execution_context(lease):
         try:
-            result = _process_ingest_inline(**lease["payload"])
+            try:
+                result = _process_ingest_inline(**lease["payload"])
+            except ValueError as exc:
+                from src.services.ingest_delivery_service import persist_uncaptured_failure
+                receipt = persist_uncaptured_failure(lease, exc)
+                if receipt is not None:
+                    return {"source_failure_receipt": receipt}
+                raise
             if result is None:
                 return None
             terminal = result.get("first_pass_terminal_receipt") or result.get("non_ocr_terminal_receipt")
             if not isinstance(terminal, dict) or terminal.get("status") not in {"done", "failed"}:
                 raise ValueError("first_pass_terminal_receipt_missing")
+            from src.services.ingest_delivery_service import persist_runner_receipt
+            persist_runner_receipt(lease, terminal)
             if terminal.get("status") == "failed":
-                ingest_job_service.fail_ingest_attempt(lease, "first_pass_output_rejected")
+                if not ingest_job_service.fail_ingest_attempt(lease, "first_pass_output_rejected"):
+                    original = ingest_job_service.get_ingest_job_snapshot(job_id)
+                    if original is None or original["status"] != "error":
+                        raise ValueError("ingest_delivery_failed_settlement_refused")
             else:
-                ingest_job_service.complete_ingest_job(job_id, lease=lease)
+                if not ingest_job_service.complete_ingest_job(job_id, lease=lease):
+                    original = ingest_job_service.get_ingest_job_snapshot(job_id)
+                    if original is None or original["status"] != "done":
+                        raise ValueError("ingest_delivery_done_settlement_refused")
             return result
         except Exception as exc:  # noqa: BLE001
-            ingest_job_service.fail_ingest_attempt(lease, str(exc))
             logger.exception("Ingest job failed", job_id=job_id)
-            return None
+            raise
 
 
 def process_uploaded_pdf_job(uploaded_pdf_id: str) -> None:
-    worker_instance = _uploaded_pdf_worker_instance()
-    claimed = claim_uploaded_pdf(uploaded_pdf_id, worker_instance=worker_instance)
-    if claimed is None:
-        logger.info("Uploaded PDF not ready or already claimed", uploaded_pdf_id=uploaded_pdf_id)
-        return
-    try:
-        payload = build_ingest_payload(claimed)
-    except ValueError as exc:
-        schedule_uploaded_pdf_retry(
-            uploaded_pdf_id, error_code=str(exc), error_message=str(exc), worker_instance=worker_instance,
-            lease=claimed, terminal=True,
-        )
-        return
-    job_id = str(payload.get("message_id") or "").strip()
-    if not job_id:
-        schedule_uploaded_pdf_retry(
-            uploaded_pdf_id,
-            error_code="payload_invalid",
-            error_message="uploaded pdf payload missing message_id",
-            worker_instance=worker_instance,
-            lease=claimed, terminal=True,
-        )
-        return
-    current_order_id = claimed.get("current_order_id")
-    if current_order_id:
-        payload["ocr_job_id"] = f"OCR-{current_order_id}"
-        payload["order_id"] = current_order_id
-    current_document_id = claimed.get("current_document_id")
-    if current_document_id:
-        payload["order_document_id"] = current_document_id
-    existing_job = ingest_job_service.get_ingest_job_snapshot(job_id)
-    receipt = existing_job if existing_job is not None else ingest_job_service.create_ingest_receipt(payload)
-    if receipt.get("status") == "done" and ingest_job_service.recover_completed_upload(claimed, receipt):
-        return
-    if receipt.get("status") in {"done", "error"}:
-        schedule_uploaded_pdf_retry(uploaded_pdf_id, error_code="ingest_terminal_requires_manual_retry",
-            error_message="Terminal ingest is not an automatic recovery input", worker_instance=worker_instance,
-            lease=claimed, terminal=True)
-        return
-    if not receipt.get("generation") or not receipt.get("input_digest"):
-        schedule_uploaded_pdf_retry(uploaded_pdf_id, error_code="ingest_original_ownership_missing",
-            error_message="Original ingest ownership is unavailable; explicit retry is required",
-            worker_instance=worker_instance, lease=claimed, terminal=True)
-        return
-    try:
-        outcome = process_ingest_job(job_id, generation=receipt["generation"], input_digest=receipt["input_digest"], uploaded_lease=claimed)
-        if isinstance(outcome, dict) and outcome.get("claim_refusal") == "budget_exhausted":
-            logger.warning("Uploaded PDF stopped by original ingest budget", uploaded_pdf_id=uploaded_pdf_id)
-            return
-    except ValueError as exc:
-        schedule_uploaded_pdf_retry(uploaded_pdf_id, error_code="ingest_input_invalid", error_message=str(exc),
-            worker_instance=worker_instance, lease=claimed, terminal=True)
+    enqueue_uploaded_pdf_async(uploaded_pdf_id)
 
 
 def run_uploaded_pdf_recovery_once(limit: int | None = None) -> int:
@@ -774,27 +720,12 @@ def _run_uploaded_pdf_recovery_loop() -> None:
 
 
 def start_uploaded_pdf_recovery_loop() -> None:
-    global _UPLOADED_PDF_RECOVERY_THREAD
-    if not _uploaded_pdf_recovery_enabled():
-        logger.info("Uploaded PDF recovery loop disabled")
-        return
-    with _UPLOADED_PDF_RECOVERY_LOCK:
-        if _UPLOADED_PDF_RECOVERY_THREAD is not None and _UPLOADED_PDF_RECOVERY_THREAD.is_alive():
-            return
-        _UPLOADED_PDF_RECOVERY_STOP.clear()
-        _UPLOADED_PDF_RECOVERY_THREAD = threading.Thread(
-            target=_run_uploaded_pdf_recovery_loop,
-            name="uploaded-pdf-recovery",
-            daemon=True,
-        )
-        _UPLOADED_PDF_RECOVERY_THREAD.start()
-        logger.info("Uploaded PDF recovery loop started")
+    raise ValueError("ingest_delivery_independent_authenticated_drain_required")
 
 
 def _process_ingest_inline(**kwargs):
     """
-    In Cloud Run we execute ingest in-process (ThreadPoolExecutor).
-    Keep this path independent from Celery task plumbing to avoid request_stack issues.
+    Run the original first-pass business implementation under durable ownership.
     """
     payload = parse_ingest_payload(kwargs)
     payload.week_hint = require_explicit_ingest_week(payload.week_hint)
@@ -869,6 +800,10 @@ def _capture_and_process_ingest(payload, ocr_job_id, lease, *, original=None, pr
                     document_status="error", error_message=str(exc),
                     execution_input=execution_input,
                 )
+                receipt = failed.get("non_ocr_terminal_receipt") if isinstance(failed, dict) else None
+                if isinstance(receipt, dict):
+                    from src.services.ingest_delivery_service import persist_runner_receipt
+                    persist_runner_receipt(execution_input["ingest_lease"], receipt)
                 if isinstance(exc, OwnPipelineLineageError):
                     return failed
             except Exception as terminal_error:
@@ -1159,6 +1094,10 @@ def _process_ingest_captured(payload, ocr_job_id: str, execution_input: dict):
         receipt = order.get("non_ocr_terminal_receipt") if isinstance(order, dict) else None
         if not isinstance(receipt, dict) or receipt.get("job_id") != ocr_job_id or receipt.get("result_state") != "skipped":
             raise ValueError("non_ocr_terminal_receipt_missing")
+        from src.services.ingest_delivery_service import persist_runner_receipt
+        persist_runner_receipt(execution_input["ingest_lease"], receipt)
+        from src.services.ingest_delivery_service import settle_non_ocr_skip
+        settle_non_ocr_skip(execution_input["ingest_lease"], receipt)
         finalize_first_pass_side_effects(
             job_id=ocr_job_id, order_id=order["id"], message_id=payload.message_id,
         )
@@ -1200,9 +1139,9 @@ def _process_ingest_captured(payload, ocr_job_id: str, execution_input: dict):
     return order
 
 
-@celery_app.task(name="backend.src.workers.ingest_worker.process_ingest", bind=True, max_retries=3)
 def process_ingest(self=None, **kwargs):
     receipt = ingest_job_service.create_ingest_receipt(kwargs)
     if not receipt["enqueued"]:
         return None
-    return process_ingest_job(receipt["id"], generation=receipt["generation"], input_digest=receipt["input_digest"])
+    enqueue_ingest_job_async(receipt["id"], generation=receipt["generation"], input_digest=receipt["input_digest"])
+    return receipt

@@ -92,6 +92,11 @@ def capture_own_reparse_request(job_id, request):
         job = _lock_own_execution_job(session, job_id)
         if job is None:
             return False
+        execution = current_nonworkflow_execution()
+        if isinstance(execution, dict) and execution.get("ingest_successor_id"):
+            from src.services.ingest_delivery_successor_service import validate_request
+            if not validate_request(session, execution, request):
+                return False
         metrics = dict(job.metrics or {})
         present = [key in metrics for key in REPARSE_REQUEST_FIELDS.values()]
         if any(present):

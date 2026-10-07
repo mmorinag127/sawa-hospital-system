@@ -1,5 +1,6 @@
 """Source-authored regression definitions; execution belongs to parent verification."""
 import pytest
+from copy import deepcopy
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -284,3 +285,25 @@ def test_exact_lookup_notfound_is_distinct_from_unknown():
     client.error = PermissionDenied("lookup authorization unresolved")
     with pytest.raises(RuntimeError, match="lookup_unknown"):
         dispatch.inspect_task(client, contract)
+
+
+@pytest.mark.parametrize("conflict", ["body", "oauth_token"])
+def test_bodyless_workflow_contract_rejects_foreign_request_content(conflict):
+    from google.cloud import tasks_v2
+    contract = {"name": "projects/fixture/locations/fixture/queues/fixture/tasks/original",
+        "http_request": {"url": "https://fixture.invalid/worker/original", "http_method": "POST",
+            "oidc_token": {"service_account_email": "fixture@fixture.iam.gserviceaccount.com", "audience": "fixture"}},
+        "dispatch_deadline": {"seconds": 15}}
+    request = deepcopy(contract["http_request"])
+    request["http_method"] = tasks_v2.HttpMethod.POST
+    if conflict == "body":
+        request["body"] = b'{"foreign":true}'
+    else:
+        request["oauth_token"] = {"service_account_email": "foreign@fixture.iam.gserviceaccount.com", "scope": "foreign"}
+    task = tasks_v2.Task(name=contract["name"], http_request=request, dispatch_deadline=contract["dispatch_deadline"])
+    class Client:
+        def get_task(self, **kwargs):
+            assert kwargs["request"]["response_view"] == tasks_v2.Task.View.FULL
+            return task
+    with pytest.raises(RuntimeError, match="task_contract_mismatch"):
+        dispatch.inspect_task(Client(), contract)

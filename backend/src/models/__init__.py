@@ -17,6 +17,8 @@ from src.models.document import OrderDocument  # noqa: F401
 from src.models.order_version import OrderVersion  # noqa: F401
 from src.models.ocr_job import OcrJob  # noqa: F401
 from src.models.ingest_job import IngestJob  # noqa: F401
+from src.models.ingest_delivery import IngestDelivery  # noqa: F401
+from src.models.ingest_delivery_successor import IngestDeliverySuccessor  # noqa: F401
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: F401
 from src.models.order_ocr_revision import OrderOcrRevision  # noqa: F401
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: F401

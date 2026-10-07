@@ -12,6 +12,45 @@ from src.services.workflow_ocr_delivery_execution_service import execution_mutex
 router = APIRouter()
 
 
+@router.post("/worker/ingest-deliveries/process")
+def process_ingest_delivery(body: dict, authorization: str | None = Header(default=None)):
+    from src.services.ingest_delivery_auth_service import require_identity
+    from src.services import ingest_delivery_service
+    require_identity(authorization)
+    if set(body) != {"delivery_id", "generation"} or not isinstance(body["delivery_id"], str) or not body["delivery_id"]:
+        raise HTTPException(status_code=422, detail="ingest_delivery_request_invalid")
+    try:
+        return ingest_delivery_service.process(body["delivery_id"], body["generation"])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/worker/ingest-deliveries/drain")
+def drain_ingest_deliveries(limit: int, authorization: str | None = Header(default=None)):
+    from src.services.ingest_delivery_auth_service import require_identity
+    from src.services.ingest_delivery_dispatch_service import drain
+    require_identity(authorization, drain=True)
+    result = drain(limit)
+    from src.services.ingest_delivery_successor_service import drain as drain_successors
+    result["auto_llm"] = drain_successors(limit)
+    from src.workers.ingest_worker import run_ocr_job_recovery_once
+    result["ocr_reconciled"] = run_ocr_job_recovery_once(limit)
+    return result
+
+
+@router.post("/worker/ingest-deliveries/auto-llm")
+def process_ingest_auto_llm(body: dict, authorization: str | None = Header(default=None)):
+    from src.services.ingest_delivery_auth_service import require_identity
+    from src.services.ingest_delivery_successor_service import process
+    require_identity(authorization)
+    if set(body) != {"delivery_id", "generation"} or not isinstance(body["delivery_id"], str) or not body["delivery_id"]:
+        raise HTTPException(status_code=422, detail="auto_llm_request_invalid")
+    try:
+        return process(body["delivery_id"], body["generation"])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _required_worker_identity(request, authorization, *, drain=False):
     prefix = "HOSPITAL_WORKFLOW_OCR_DELIVERY_" + ("DRAIN_" if drain else "WORKER_")
     config = {key: str(os.getenv(prefix + key) or "").strip() for key in ("EMAIL", "SUBJECT", "AUDIENCE")}

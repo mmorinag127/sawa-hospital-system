@@ -524,6 +524,9 @@ def advance_nonworkflow_order_input(session: Any, boundary: dict[str, Any], orde
     job.order_id = order.id
     boundary["job_order_id"] = order.id
     job.metrics = {**(job.metrics or {}), "nonworkflow_execution": deepcopy(boundary)}
+    if boundary.get("ingest_lease") is not None and not boundary.get("ingest_successor_id"):
+        from src.services.ingest_delivery_successor_service import advance_preparation
+        advance_preparation(session, boundary)
 
 
 def lock_current_workflow_revision(
