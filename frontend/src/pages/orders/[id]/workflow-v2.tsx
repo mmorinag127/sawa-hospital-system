@@ -1,3 +1,6 @@
+import { Button, Input, NativeSelect } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { type KeyboardEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
@@ -3871,6 +3874,7 @@ export default function OrderWorkflowV2Page() {
     : "現行FAX";
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page workflow-v2-page">
       <header className="hero">
         <div>
@@ -3934,13 +3938,13 @@ export default function OrderWorkflowV2Page() {
           </div>
         </div>
         <div className="state-actions">
-          <button className="btn ghost" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
+          <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => void refreshAll()} disabled={Boolean(busy)}>
             再読込
-          </button>
+          </Button>
           {canReviewQuad ? (
-            <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy)}>
+            <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy)}>
               4点確認/補正
-            </button>
+            </Button>
           ) : null}
           {orderId ? (
             <>
@@ -3963,9 +3967,9 @@ export default function OrderWorkflowV2Page() {
           {ocrJobRecoveryAction === "review_or_edit_quad" ? (
             <span>
               {" "}Step1.5で推定4点を確認してください。
-              <button className="inline-action-btn" type="button" onClick={() => setVisibleStep(1.5)}>
+              <Button className="inline-action-btn workflow-ordinary-control" type="button" onClick={() => setVisibleStep(1.5)}>
                 4点を確認/補正
-              </button>
+              </Button>
             </span>
           ) : null}
         </div>
@@ -3984,15 +3988,15 @@ export default function OrderWorkflowV2Page() {
 
       <nav className="step-nav" aria-label="workflow steps">
         {stepLabels.map((item) => (
-          <button
+          <Button
             key={item.step}
-            className={`step-nav-btn ${visibleStep === item.step ? "active" : ""}`}
+            className={(`step-nav-btn ${visibleStep === item.step ? "active" : ""}`) + " workflow-ordinary-control"}
             type="button"
             onClick={() => setVisibleStep(item.step)}
           >
             <span>Step{item.step}</span>
             <strong>{item.label}</strong>
-          </button>
+          </Button>
         ))}
       </nav>
 
@@ -4017,8 +4021,8 @@ export default function OrderWorkflowV2Page() {
             {documentVersionOptions.length > 1 ? (
               <label className="field">
                 <span className="field-label">OCR入力にするFAX PDF</span>
-                <select
-                  className="input"
+                <NativeSelect disableUnderline
+                  className="input workflow-ordinary-control"
                   value={effectiveSelectedDocumentId}
                   onChange={(event) => {
                     setQuadReview(null);
@@ -4037,7 +4041,7 @@ export default function OrderWorkflowV2Page() {
                       </option>
                     );
                   })}
-                </select>
+                </NativeSelect>
                 <span className="subtle">選択中: {selectedFaxVersionLabel}。このPDFを表示し、OCR再実行の入力にも使います。</span>
               </label>
             ) : null}
@@ -4078,9 +4082,9 @@ export default function OrderWorkflowV2Page() {
                         </ul>
                       ) : null}
                     </div>
-                    <button className="btn secondary" type="button" onClick={applyContextSuggestion} disabled={Boolean(busy)}>
+                    <Button className="btn secondary workflow-ordinary-control" type="button" onClick={applyContextSuggestion} disabled={Boolean(busy)}>
                       推定を反映
-                    </button>
+                    </Button>
                   </div>
                 ) : (
                   <div className="context-suggestion-card compact muted">
@@ -4092,8 +4096,8 @@ export default function OrderWorkflowV2Page() {
                 )}
                 <label className="field">
                   <span className="field-label">施設 (Step1 必須)</span>
-                  <select
-                    className="input"
+                  <NativeSelect disableUnderline
+                    className="input workflow-ordinary-control"
                     value={contextFacilityResolution.status === "ready" ? contextForm.facility_id : ""}
                     onChange={(event) => {
                       const facilityId = event.target.value;
@@ -4112,7 +4116,7 @@ export default function OrderWorkflowV2Page() {
                         {formatFacilityLabel(option)}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                   {facilityOptionsError ? (
                     <span className="subtle">{facilityOptionsError}</span>
                   ) : facilityOptionsLoading ? (
@@ -4126,8 +4130,8 @@ export default function OrderWorkflowV2Page() {
               <div className="step1-control-column">
                 <label className="field">
                   <span className="field-label">週 (Step1 必須)</span>
-                  <select
-                    className="input"
+                  <NativeSelect disableUnderline
+                    className="input workflow-ordinary-control"
                     value={weekDraft}
                     onChange={(event) => applyWeekValue(event.target.value)}
                     disabled={weekOptionsLoading || Boolean(busy)}
@@ -4141,7 +4145,7 @@ export default function OrderWorkflowV2Page() {
                         {option.label}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                   {weekOptionsError ? (
                     <span className="subtle">{weekOptionsError}</span>
                   ) : weekOptionsLoading ? (
@@ -4158,23 +4162,23 @@ export default function OrderWorkflowV2Page() {
                   <summary>例外範囲を指定する</summary>
                   <div className="step1-week-range">
                     <div className="summary-actions compact">
-                      <input
-                        className="input"
+                      <Input disableUnderline
+                        className="input workflow-ordinary-control"
                         type="date"
                         value={customWeekRangeStart}
                         onChange={(event) => setCustomWeekRangeStart(event.target.value)}
                         disabled={Boolean(busy)}
                       />
-                      <input
-                        className="input"
+                      <Input disableUnderline
+                        className="input workflow-ordinary-control"
                         type="date"
                         value={customWeekRangeEnd}
                         onChange={(event) => setCustomWeekRangeEnd(event.target.value)}
                         disabled={Boolean(busy)}
                       />
-                      <button type="button" className="btn secondary" onClick={applyCustomWeekRange} disabled={Boolean(busy)}>
+                      <Button type="button" className="btn secondary workflow-ordinary-control" onClick={applyCustomWeekRange} disabled={Boolean(busy)}>
                         反映
-                      </button>
+                      </Button>
                     </div>
                     {selectedWeekValue ? (
                       <span className="subtle">設定予定: {formatWeekLabel(selectedWeekValue) || selectedWeekValue}</span>
@@ -4184,12 +4188,12 @@ export default function OrderWorkflowV2Page() {
               </div>
             </div>
             <div className="step1-action-row">
-              <button className="btn primary" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady || facilityTemplateMissing)}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={confirmContext} disabled={Boolean(busy || !contextReady || facilityTemplateMissing)}>
                 {facilityTemplateMissing ? "先にテンプレート登録" : contextReady ? "設定を保存" : "施設と週を選択"}
-              </button>
+              </Button>
               <label className="toolbar-field expanded-cell-toggle">
                 <span>拡大セルコピー</span>
-                <select
+                <NativeSelect disableUnderline className="workflow-ordinary-control"
                   value={expandedCellCopyMode}
                   onChange={(event) => void updateExpandedCellCopyMode(event.target.value as ExpandedCellCopyMode)}
                   disabled={Boolean(busy || expandedCellCopySaving || !workflow?.order_id)}
@@ -4197,17 +4201,17 @@ export default function OrderWorkflowV2Page() {
                   <option value="auto">自動</option>
                   <option value="enabled">ON</option>
                   <option value="disabled">OFF</option>
-                </select>
+                </NativeSelect>
               </label>
               <label className="toolbar-field ocr-mode-field">
                 <span>OCR実行方式</span>
-                <select value={ocrRunMode} onChange={(event) => { ++workingInputGenerationRef.current; setOcrRunMode(event.target.value as OcrRunMode); }} disabled={Boolean(busy)}>
+                <NativeSelect disableUnderline className="workflow-ordinary-control" value={ocrRunMode} onChange={(event) => { ++workingInputGenerationRef.current; setOcrRunMode(event.target.value as OcrRunMode); }} disabled={Boolean(busy)}>
                   <option value="hakodate">箱館方式</option>
                   <option value="llm">AIに任せる</option>
-                </select>
+                </NativeSelect>
               </label>
-              <button
-                className="btn"
+              <Button
+                className="btn workflow-ordinary-control"
                 type="button"
                 onClick={runOcr}
                 disabled={Boolean(
@@ -4220,7 +4224,7 @@ export default function OrderWorkflowV2Page() {
                 )}
               >
                 OCRを実行
-              </button>
+              </Button>
             </div>
             {!facilityTemplateReadyForOcr && contextForm.facility_id ? (
               <p className="workflow-warning">
@@ -4240,32 +4244,32 @@ export default function OrderWorkflowV2Page() {
               <div className="ocr-run-options compact">
                 <label className="toolbar-field">
                   <span>自動調整プリセット</span>
-                  <select value={llmPromptPreset} onChange={(event) => { ++workingInputGenerationRef.current; setLlmPromptPreset(event.target.value as LlmPromptPreset); }} disabled={Boolean(busy)}>
+                  <NativeSelect disableUnderline className="workflow-ordinary-control" value={llmPromptPreset} onChange={(event) => { ++workingInputGenerationRef.current; setLlmPromptPreset(event.target.value as LlmPromptPreset); }} disabled={Boolean(busy)}>
                     {(Object.keys(llmPromptPresetLabels) as LlmPromptPreset[]).map((preset) => (
                       <option key={preset} value={preset}>{llmPromptPresetLabels[preset]}</option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </label>
                 <label className="toolbar-field">
                   <span>AIエンジン</span>
-                  <select value={llmProvider} onChange={(event) => { ++workingInputGenerationRef.current; setLlmProvider(event.target.value); }} disabled={Boolean(busy)}>
+                  <NativeSelect disableUnderline className="workflow-ordinary-control" value={llmProvider} onChange={(event) => { ++workingInputGenerationRef.current; setLlmProvider(event.target.value); }} disabled={Boolean(busy)}>
                     <option value="openai">OpenAI</option>
                     <option value="gemini">Gemini</option>
-                  </select>
+                  </NativeSelect>
                 </label>
                 {llmProvider === "gemini" ? (
                   <label className="toolbar-field">
                     <span>Geminiモデル</span>
-                    <select value={llmModelMode} onChange={(event) => { ++workingInputGenerationRef.current; setLlmModelMode(event.target.value as "flash" | "pro" | "other"); }} disabled={Boolean(busy)}>
+                    <NativeSelect disableUnderline className="workflow-ordinary-control" value={llmModelMode} onChange={(event) => { ++workingInputGenerationRef.current; setLlmModelMode(event.target.value as "flash" | "pro" | "other"); }} disabled={Boolean(busy)}>
                       <option value="flash">Flash</option>
                       <option value="pro">Pro</option>
                       <option value="other">カスタム</option>
-                    </select>
+                    </NativeSelect>
                   </label>
                 ) : null}
                 {llmProvider === "gemini" && llmModelMode === "other" ? (
-                  <input
-                    className="compact-input llm-model-input"
+                  <Input disableUnderline
+                    className="compact-input llm-model-input workflow-ordinary-control"
                     value={llmCustomModel}
                     onChange={(event) => { ++workingInputGenerationRef.current; setLlmCustomModel(event.target.value); }}
                     placeholder="gemini model"
@@ -4273,8 +4277,8 @@ export default function OrderWorkflowV2Page() {
                 ) : null}
                 <details className="inline-details">
                   <summary>AI追加指示（任意）</summary>
-                  <textarea
-                    className="ocr-llm-prompt-textarea"
+                  <Input disableUnderline multiline
+                    className="ocr-llm-prompt-textarea workflow-ordinary-control"
                     value={ocrPrompt}
                     onChange={(event) => { ++workingInputGenerationRef.current; setOcrPrompt(event.target.value); }}
                     placeholder="例: 読みづらい手書き数量は前後セルの連続性を見て補完する"
@@ -4329,17 +4333,17 @@ export default function OrderWorkflowV2Page() {
                     </p>
                   </div>
                   <div className="row-actions">
-                    <button className="btn ghost" type="button" onClick={() => setShowFacilityTemplateEditor((current) => !current)}>
+                    <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => setShowFacilityTemplateEditor((current) => !current)}>
                       {showFacilityTemplateEditor ? "列設定を閉じる" : "列設定を確認/修正"}
-                    </button>
-                    <button
-                      className="btn primary"
+                    </Button>
+                    <Button
+                      className="btn primary workflow-ordinary-control"
                       type="button"
                       onClick={saveFacilityTemplateColumns}
                       disabled={Boolean(busy || facilityTemplateSaving || !facilityTemplateDirty || !facilityTemplateColumnDraft.length)}
                     >
                       {facilityTemplateSaving ? "保存中..." : "施設区分列を保存"}
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 {facilityTemplateMessage ? <p className="subtle">{facilityTemplateMessage}</p> : null}
@@ -4352,8 +4356,8 @@ export default function OrderWorkflowV2Page() {
                       </p>
                     </div>
                     <div className="facility-template-actions">
-                      <select
-                        className="input"
+                      <NativeSelect disableUnderline
+                        className="input workflow-ordinary-control"
                         value={facilityTemplateSwapLeft}
                         onChange={(event) => setFacilityTemplateSwapLeft(event.target.value)}
                       >
@@ -4363,9 +4367,9 @@ export default function OrderWorkflowV2Page() {
                             {column.index + 1}: {column.header || column.name || column.role}
                           </option>
                         ))}
-                      </select>
-                      <select
-                        className="input"
+                      </NativeSelect>
+                      <NativeSelect disableUnderline
+                        className="input workflow-ordinary-control"
                         value={facilityTemplateSwapRight}
                         onChange={(event) => setFacilityTemplateSwapRight(event.target.value)}
                       >
@@ -4375,13 +4379,13 @@ export default function OrderWorkflowV2Page() {
                             {column.index + 1}: {column.header || column.name || column.role}
                           </option>
                         ))}
-                      </select>
-                      <button className="btn ghost" type="button" onClick={applySelectedFacilityTemplateColumnSwap}>
+                      </NativeSelect>
+                      <Button className="btn ghost workflow-ordinary-control" type="button" onClick={applySelectedFacilityTemplateColumnSwap}>
                         列を入れ替える
-                      </button>
-                      <button className="btn ghost" type="button" onClick={appendFacilityTemplateColumn}>
+                      </Button>
+                      <Button className="btn ghost workflow-ordinary-control" type="button" onClick={appendFacilityTemplateColumn}>
                         列を追加
-                      </button>
+                      </Button>
                     </div>
                     <div className="facility-template-table-wrap">
                       <table className="facility-template-table">
@@ -4400,27 +4404,27 @@ export default function OrderWorkflowV2Page() {
                               <tr key={`facility-template-column-${column.index}-${idx}`}>
                                 <td>{idx + 1}</td>
                                 <td>
-                                  <select
-                                    className="input"
+                                  <NativeSelect disableUnderline
+                                    className="input workflow-ordinary-control"
                                     value={column.role}
                                     onChange={(event) => updateFacilityTemplateColumn(idx, "role", event.target.value)}
                                   >
                                     {columnRoleOptions.map((option) => (
                                       <option key={option.value} value={option.value}>{option.label}</option>
                                     ))}
-                                  </select>
+                                  </NativeSelect>
                                 </td>
                                 <td>
-                                  <input
-                                    className="input"
+                                  <Input disableUnderline
+                                    className="input workflow-ordinary-control"
                                     value={column.header || ""}
                                     onChange={(event) => updateFacilityTemplateColumn(idx, "header", event.target.value)}
                                     placeholder="表示名"
                                   />
                                 </td>
                                 <td>
-                                  <input
-                                    className="input"
+                                  <Input disableUnderline
+                                    className="input workflow-ordinary-control"
                                     value={column.header_group || ""}
                                     onChange={(event) => updateFacilityTemplateColumn(idx, "header_group", event.target.value)}
                                     placeholder="空欄なら1段"
@@ -4429,15 +4433,15 @@ export default function OrderWorkflowV2Page() {
                                 </td>
                                 <td>
                                   <div className="facility-template-row-actions">
-                                    <button className="btn ghost" type="button" onClick={() => applyFacilityTemplateColumnSwap(idx, idx - 1)} disabled={idx <= 0}>
+                                    <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => applyFacilityTemplateColumnSwap(idx, idx - 1)} disabled={idx <= 0}>
                                       前へ
-                                    </button>
-                                    <button className="btn ghost" type="button" onClick={() => applyFacilityTemplateColumnSwap(idx, idx + 1)} disabled={idx >= facilityTemplateColumnDraft.length - 1}>
+                                    </Button>
+                                    <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => applyFacilityTemplateColumnSwap(idx, idx + 1)} disabled={idx >= facilityTemplateColumnDraft.length - 1}>
                                       次へ
-                                    </button>
-                                    <button className="btn danger" type="button" onClick={() => deleteFacilityTemplateColumn(idx)}>
+                                    </Button>
+                                    <Button className="btn danger workflow-ordinary-control" type="button" onClick={() => deleteFacilityTemplateColumn(idx)}>
                                       削除
-                                    </button>
+                                    </Button>
                                   </div>
                                 </td>
                               </tr>
@@ -4483,9 +4487,9 @@ export default function OrderWorkflowV2Page() {
                 OCRが失敗した場合や、OCR結果の行・列位置がずれている場合に使います。推定4点が表外枠に合っていればOK、合っていなければ手動で左上→右上→右下→左下の順に指定します。
               </p>
             </div>
-            <button className="btn ghost" type="button" onClick={() => void loadQuadReview()} disabled={quadReviewLoading || Boolean(busy)}>
+            <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => void loadQuadReview()} disabled={quadReviewLoading || Boolean(busy)}>
               {quadReviewLoading ? "取得中..." : "4点推定を再取得"}
-            </button>
+            </Button>
           </header>
           {quadReviewMessage ? <div className="notice error">{quadReviewMessage}</div> : null}
           {quadReview?.estimate ? (
@@ -4513,16 +4517,16 @@ export default function OrderWorkflowV2Page() {
             </div>
           ) : null}
           <div className="quad-review-actions">
-            <button
-              className="btn primary"
+            <Button
+              className="btn primary workflow-ordinary-control"
               type="button"
               onClick={() => void saveQuadAndRerun("approved_estimate", suggestedQuad)}
               disabled={Boolean(busy || suggestedQuad.length !== 4)}
             >
               推定4点をOKにしてOCR再実行
-            </button>
-            <button
-              className="btn ghost"
+            </Button>
+            <Button
+              className="btn ghost workflow-ordinary-control"
               type="button"
               onClick={() => {
                 beginWorkflowEditorEdit("quad");
@@ -4532,23 +4536,23 @@ export default function OrderWorkflowV2Page() {
               disabled={Boolean(busy)}
             >
               NG: 手動で4点指定
-            </button>
+            </Button>
             {manualQuadMode ? (
               <>
-                <button className="btn ghost" type="button" onClick={() => {
+                <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => {
                   beginWorkflowEditorEdit("quad");
                   setManualQuadPoints([]);
                 }} disabled={Boolean(busy)}>
                   手動点をクリア
-                </button>
-                <button
-                  className="btn primary"
+                </Button>
+                <Button
+                  className="btn primary workflow-ordinary-control"
                   type="button"
                   onClick={() => void saveQuadAndRerun("manual_override", manualQuadPoints)}
                   disabled={Boolean(busy || manualQuadPoints.length !== 4)}
                 >
                   手動4点を保存してOCR再実行
-                </button>
+                </Button>
               </>
             ) : null}
           </div>
@@ -4633,22 +4637,18 @@ export default function OrderWorkflowV2Page() {
             <div className="row-actions">
               <label className="header-axis-timeout-control">
                 <span>timeout</span>
-                <input
+                <Input inputProps={{ "min": String(MIN_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000), "max": String(MAX_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000), "step": "30", "aria-label": "ヘッダー補正API timeout 秒" }} disableUnderline className="workflow-ordinary-control"
                   type="number"
-                  min={String(MIN_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000)}
-                  max={String(MAX_HEADER_AXIS_REQUEST_TIMEOUT_MS / 1000)}
-                  step="30"
                   value={headerAxisTimeoutSeconds}
                   onChange={(event) => setHeaderAxisTimeoutSeconds(event.target.value)}
-                  aria-label="ヘッダー補正API timeout 秒"
                 />
                 <span>秒</span>
               </label>
-              <button className="btn ghost" type="button" onClick={() => void loadHeaderAxisReview()} disabled={headerAxisLoading || Boolean(busy)}>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => void loadHeaderAxisReview()} disabled={headerAxisLoading || Boolean(busy)}>
                 {headerAxisLoading ? "取得中..." : "ヘッダーを再取得"}
-              </button>
-              <button
-                className={`btn ghost ${headerAxisAddMode ? "active" : ""}`}
+              </Button>
+              <Button
+                className={(`btn ghost ${headerAxisAddMode ? "active" : ""}`) + " workflow-ordinary-control"}
                 type="button"
                 onClick={() => {
                   setHeaderAxisAddMode((current) => !current);
@@ -4657,16 +4657,16 @@ export default function OrderWorkflowV2Page() {
                 disabled={headerAxisLoading || Boolean(busy) || !headerAxisImageSrc}
               >
                 {headerAxisAddMode ? "追加位置をクリック" : "縦軸を追加"}
-              </button>
-              <button className="btn ghost" type="button" onClick={deleteSelectedHeaderAxis} disabled={headerAxisLoading || Boolean(busy) || selectedHeaderAxisIndex === null}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={deleteSelectedHeaderAxis} disabled={headerAxisLoading || Boolean(busy) || selectedHeaderAxisIndex === null}>
                 選択軸を削除
-              </button>
-              <button className="btn ghost" type="button" onClick={resetHeaderAxisXs} disabled={headerAxisLoading || Boolean(busy) || !headerAxisReview}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={resetHeaderAxisXs} disabled={headerAxisLoading || Boolean(busy) || !headerAxisReview}>
                 自動検出に戻す
-              </button>
-              <button className="btn primary" type="button" onClick={() => void saveHeaderAxisAndRerun()} disabled={Boolean(busy || headerAxisXs.length < 2)}>
+              </Button>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => void saveHeaderAxisAndRerun()} disabled={Boolean(busy || headerAxisXs.length < 2)}>
                 ヘッダー補正を保存してOCR再実行
-              </button>
+              </Button>
             </div>
           </header>
           {headerAxisCountWarning ? <div className="notice warning">{headerAxisCountWarning}</div> : null}
@@ -4751,11 +4751,11 @@ export default function OrderWorkflowV2Page() {
               </p>
             </div>
             <div className="row-actions">
-              <button className="btn ghost" type="button" onClick={() => void loadRowAxisReview()} disabled={rowAxisLoading || Boolean(busy)}>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => void loadRowAxisReview()} disabled={rowAxisLoading || Boolean(busy)}>
                 {rowAxisLoading ? "取得中..." : "行推定を再取得"}
-              </button>
-              <button
-                className={`btn ghost ${rowAxisAddMode ? "active" : ""}`}
+              </Button>
+              <Button
+                className={(`btn ghost ${rowAxisAddMode ? "active" : ""}`) + " workflow-ordinary-control"}
                 type="button"
                 onClick={() => {
                   setRowAxisAddMode((current) => !current);
@@ -4764,16 +4764,16 @@ export default function OrderWorkflowV2Page() {
                 disabled={rowAxisLoading || Boolean(busy) || !rowAxisImageSrc}
               >
                 {rowAxisAddMode ? "追加位置をクリック" : "行境界を追加"}
-              </button>
-              <button className="btn ghost" type="button" onClick={deleteSelectedRowAxis} disabled={rowAxisLoading || Boolean(busy) || selectedRowAxisIndex === null}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={deleteSelectedRowAxis} disabled={rowAxisLoading || Boolean(busy) || selectedRowAxisIndex === null}>
                 選択行を削除
-              </button>
-              <button className="btn ghost" type="button" onClick={resetRowAxisYs} disabled={rowAxisLoading || Boolean(busy) || !rowAxisReview}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={resetRowAxisYs} disabled={rowAxisLoading || Boolean(busy) || !rowAxisReview}>
                 自動検出に戻す
-              </button>
-              <button className="btn primary" type="button" onClick={() => void saveRowAxisAndRerun()} disabled={Boolean(busy || rowAxisYs.length < 2)}>
+              </Button>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => void saveRowAxisAndRerun()} disabled={Boolean(busy || rowAxisYs.length < 2)}>
                 行推定補正を保存してOCR再実行
-              </button>
+              </Button>
             </div>
           </header>
           {rowAxisWarning ? <div className="notice warning">{rowAxisWarning}</div> : null}
@@ -4851,15 +4851,15 @@ export default function OrderWorkflowV2Page() {
               <p className="subtle">選択変更または削除時は、派生 sheet / bagging / output / confirmed snapshot を無効化します。</p>
             </div>
             <div className="row-actions">
-              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
                 4点推定
-              </button>
-              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.6)} disabled={Boolean(busy)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => setVisibleStep(1.6)} disabled={Boolean(busy)}>
                 ヘッダー推定
-              </button>
-              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.7)} disabled={Boolean(busy)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => setVisibleStep(1.7)} disabled={Boolean(busy)}>
                 行推定
-              </button>
+              </Button>
             </div>
           </header>
           <div className="ocr-result-list">
@@ -4886,20 +4886,20 @@ export default function OrderWorkflowV2Page() {
                         </div>
                         <div className="preview-header-actions">
                           <div className="preview-mode-toggle" aria-label="OCR preview display mode">
-                            <button
-                              className={ocrPreviewMode !== "original" ? "active" : ""}
+                            <Button
+                              className={(ocrPreviewMode !== "original" ? "active" : "") + " workflow-ordinary-control"}
                               type="button"
                               onClick={() => setOcrPreviewMode("overlay")}
                             >
                               オーバーレイ
-                            </button>
-                            <button
-                              className={ocrPreviewMode === "original" ? "active" : ""}
+                            </Button>
+                            <Button
+                              className={(ocrPreviewMode === "original" ? "active" : "") + " workflow-ordinary-control"}
                               type="button"
                               onClick={() => setOcrPreviewMode("original")}
                             >
                               原本PDF
-                            </button>
+                            </Button>
                           </div>
                           {ocrPreviewMode !== "original" && item.overlay_url ? (
                             <a className="ghost-link" href={item.overlay_url} target="_blank" rel="noreferrer">
@@ -4927,12 +4927,12 @@ export default function OrderWorkflowV2Page() {
                     </div>
                   </div>
                   <div className="row-actions">
-                    <button className="btn" type="button" onClick={() => selectOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
+                    <Button className="btn workflow-ordinary-control" type="button" onClick={() => selectOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
                       正解にする
-                    </button>
-                    <button className="btn danger" type="button" onClick={() => deleteOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
+                    </Button>
+                    <Button className="btn danger workflow-ordinary-control" type="button" onClick={() => deleteOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
                       完全削除
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))
@@ -4954,56 +4954,56 @@ export default function OrderWorkflowV2Page() {
           ) : null}
           <div className="row-actions step3-top-actions">
             <div className="step3-top-actions-left">
-              <button
-                className="btn"
+              <Button
+                className="btn workflow-ordinary-control"
                 type="button"
                 onClick={generateSheetFromSelectedOcr}
                 disabled={Boolean(busy || !workflow?.selected_ocr_result_id)}
               >
                 選択OCRからシート生成
-              </button>
-              <button className="btn ghost" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
                 AI自動補正を提案
-              </button>
-              <button className="btn ghost" type="button" onClick={applySheetAutoEditPatches} disabled={!autoEditPatches.length || Boolean(busy)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={applySheetAutoEditPatches} disabled={!autoEditPatches.length || Boolean(busy)}>
                 AI提案を反映
-              </button>
-              <button className="btn ghost" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={runAnomalyReview} disabled={Boolean(busy || !sheetPayload)}>
                 異常チェック
-              </button>
-              <button className="btn ghost" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => setVisibleStep(1.5)} disabled={Boolean(busy || !canReviewQuad)}>
                 4点からOCR再実行
-              </button>
-              <button className="btn ghost" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={applyAnomalyCorrections} disabled={!anomalyWarnings.some((warning) => String(warning.suggested_value || "").trim()) || Boolean(busy)}>
                 異常を補正
-              </button>
-              <button className="btn ghost" type="button" onClick={showSheetReview} disabled={Boolean(!sheetPayload || !step3PreviewImageUrl)}>
+              </Button>
+              <Button className="btn ghost workflow-ordinary-control" type="button" onClick={showSheetReview} disabled={Boolean(!sheetPayload || !step3PreviewImageUrl)}>
                 {effectiveSheetReviewConfirmed ? "シート確認済み" : "シート確認"}
-              </button>
-              <button
-                className="btn primary"
+              </Button>
+              <Button
+                className="btn primary workflow-ordinary-control"
                 type="button"
                 onClick={saveSheet}
                 disabled={Boolean(busy || !canSaveSheet)}
                 title={!effectiveAnomalyReviewConfirmed || !effectiveSheetReviewConfirmed ? "保存前に異常チェックとシート確認を完了してください。" : undefined}
               >
                 {busy === "Step3 sheet save" ? "保存中..." : "シートを保存"}
-              </button>
+              </Button>
               <span className={["pre-save-checks", effectiveAnomalyReviewConfirmed && effectiveSheetReviewConfirmed ? "ready" : ""].filter(Boolean).join(" ")}>
                 異常チェック: {effectiveAnomalyReviewConfirmed ? "済" : "未"} / シート確認: {effectiveSheetReviewConfirmed ? "済" : "未"}
               </span>
             </div>
             <div className="step3-top-actions-right">
-              <button
-                className="btn ghost"
+              <Button
+                className="btn ghost workflow-ordinary-control"
                 type="button"
                 onClick={() => setStep3LayoutMode((current) => (current === "side-by-side" ? "stacked" : "side-by-side"))}
               >
                 {step3LayoutMode === "side-by-side" ? "上下表示に切替" : "左右表示に切替"}
-              </button>
+              </Button>
               <label className="toolbar-field expanded-cell-toggle">
                 <span>拡大セルコピー</span>
-                <select
+                <NativeSelect disableUnderline className="workflow-ordinary-control"
                   value={expandedCellCopyMode}
                   onChange={(event) => void updateExpandedCellCopyMode(event.target.value as ExpandedCellCopyMode)}
                   disabled={Boolean(busy || expandedCellCopySaving)}
@@ -5011,7 +5011,7 @@ export default function OrderWorkflowV2Page() {
                   <option value="auto">自動</option>
                   <option value="enabled">ON</option>
                   <option value="disabled">OFF</option>
-                </select>
+                </NativeSelect>
               </label>
             </div>
           </div>
@@ -5036,27 +5036,27 @@ export default function OrderWorkflowV2Page() {
                   </div>
                   <div className="preview-header-actions">
                     <div className="preview-mode-toggle" aria-label="Step3 preview display mode">
-                      <button
-                        className={ocrPreviewMode === "overlay" ? "active" : ""}
+                      <Button
+                        className={(ocrPreviewMode === "overlay" ? "active" : "") + " workflow-ordinary-control"}
                         type="button"
                         onClick={() => setOcrPreviewMode("overlay")}
                       >
                         オーバーレイ
-                      </button>
-                      <button
-                        className={ocrPreviewMode === "original" ? "active" : ""}
+                      </Button>
+                      <Button
+                        className={(ocrPreviewMode === "original" ? "active" : "") + " workflow-ordinary-control"}
                         type="button"
                         onClick={() => setOcrPreviewMode("original")}
                       >
                         原本PDF
-                      </button>
-                      <button
-                        className={ocrPreviewMode === "sheet" ? "active" : ""}
+                      </Button>
+                      <Button
+                        className={(ocrPreviewMode === "sheet" ? "active" : "") + " workflow-ordinary-control"}
                         type="button"
                         onClick={() => setOcrPreviewMode("sheet")}
                       >
                         シート確認
-                      </button>
+                      </Button>
                     </div>
                     {ocrPreviewMode !== "original" && step3PreviewImageUrl ? (
                       <a className="ghost-link" href={step3PreviewImageUrl} target="_blank" rel="noreferrer">
@@ -5165,53 +5165,53 @@ export default function OrderWorkflowV2Page() {
               <div className="step3-sheet-pane">
                 <div className="sheet-toolbar">
                   <div className="toolbar-row">
-                    <button className="btn ghost" type="button" onClick={applyVisibleOcrSuggestions} disabled={!ocrOverlayItemMap.size || Boolean(busy)}>
+                    <Button className="btn ghost workflow-ordinary-control" type="button" onClick={applyVisibleOcrSuggestions} disabled={!ocrOverlayItemMap.size || Boolean(busy)}>
                       表示中提案を採用
-                    </button>
+                    </Button>
                     <label className="toolbar-field">
                       <span>OCR信頼度表示</span>
-                      <select value={ocrConfidenceDisplayMode} onChange={(event) => setOcrConfidenceDisplayMode(event.target.value as ConfidenceDisplayMode)}>
+                      <NativeSelect disableUnderline className="workflow-ordinary-control" value={ocrConfidenceDisplayMode} onChange={(event) => setOcrConfidenceDisplayMode(event.target.value as ConfidenceDisplayMode)}>
                         <option value="strict">厳格表示</option>
                         <option value="assisted">補助表示</option>
                         <option value="suggestion">提案表示</option>
-                      </select>
+                      </NativeSelect>
                     </label>
                   </div>
                   <div className="toolbar-row">
                     <label className="toolbar-field">
                       <span>入替元数量列</span>
-                      <select value={swapLeftColumn} onChange={(event) => setSwapLeftColumn(event.target.value)}>
+                      <NativeSelect disableUnderline className="workflow-ordinary-control" value={swapLeftColumn} onChange={(event) => setSwapLeftColumn(event.target.value)}>
                         <option value="">数量列</option>
                         {quantityColumnOptions.map((option) => (
                           <option key={`swap-left-${option.idx}`} value={option.idx}>{option.label}</option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </label>
                     <label className="toolbar-field">
                       <span>入替先数量列</span>
-                      <select value={swapRightColumn} onChange={(event) => setSwapRightColumn(event.target.value)}>
+                      <NativeSelect disableUnderline className="workflow-ordinary-control" value={swapRightColumn} onChange={(event) => setSwapRightColumn(event.target.value)}>
                         <option value="">数量列</option>
                         {quantityColumnOptions.map((option) => (
                           <option key={`swap-right-${option.idx}`} value={option.idx}>{option.label}</option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </label>
-                    <button className="btn ghost" type="button" onClick={swapQuantityColumns} disabled={!swapLeftColumn || !swapRightColumn || Boolean(busy)}>
+                    <Button className="btn ghost workflow-ordinary-control" type="button" onClick={swapQuantityColumns} disabled={!swapLeftColumn || !swapRightColumn || Boolean(busy)}>
                       数量列を入替
-                    </button>
+                    </Button>
                     <label className="toolbar-field">
                       <span>数量列一括入力</span>
-                      <select value={columnFillTarget} onChange={(event) => setColumnFillTarget(event.target.value)}>
+                      <NativeSelect disableUnderline className="workflow-ordinary-control" value={columnFillTarget} onChange={(event) => setColumnFillTarget(event.target.value)}>
                         <option value="">数量列</option>
                         {quantityColumnOptions.map((option) => (
                           <option key={`fill-${option.idx}`} value={option.idx}>{option.label}</option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </label>
-                    <input className="compact-input" value={columnFillValue} onChange={(event) => setColumnFillValue(event.target.value)} placeholder="数字" />
-                    <button className="btn ghost" type="button" onClick={fillQuantityColumn} disabled={!columnFillTarget || !columnFillValue.trim() || Boolean(busy)}>
+                    <Input disableUnderline className="compact-input workflow-ordinary-control" value={columnFillValue} onChange={(event) => setColumnFillValue(event.target.value)} placeholder="数字" />
+                    <Button className="btn ghost workflow-ordinary-control" type="button" onClick={fillQuantityColumn} disabled={!columnFillTarget || !columnFillValue.trim() || Boolean(busy)}>
                       列全体へ入力
-                    </button>
+                    </Button>
                   </div>
                   <p className="subtle">
                     raw {Number(sheetPayload.ocr_numeric_cell_summary?.raw_ocr_numeric_count || 0)} / accepted {Number(sheetPayload.ocr_numeric_cell_summary?.accepted_count || 0)} / deterministic {Number(sheetPayload.ocr_numeric_cell_summary?.deterministic_candidate_count || 0)} / weak {Number(sheetPayload.ocr_numeric_cell_summary?.weak_candidate_count || 0)}
@@ -5253,8 +5253,8 @@ export default function OrderWorkflowV2Page() {
                                 >
                                   <td className="anomaly-row-actions-cell">
                                     <div className="inline-row-actions">
-                                      <button
-                                        className="btn tiny row-apply-button"
+                                      <Button
+                                        className="btn tiny row-apply-button workflow-ordinary-control"
                                         type="button"
                                         disabled={!String(patch.suggested_value || "").trim()}
                                         onClick={(event) => {
@@ -5263,9 +5263,9 @@ export default function OrderWorkflowV2Page() {
                                         }}
                                       >
                                         採用
-                                      </button>
-                                      <button
-                                        className="btn tiny ghost"
+                                      </Button>
+                                      <Button
+                                        className="btn tiny ghost workflow-ordinary-control"
                                         type="button"
                                         onClick={(event) => {
                                           event.stopPropagation();
@@ -5273,7 +5273,7 @@ export default function OrderWorkflowV2Page() {
                                         }}
                                       >
                                         却下
-                                      </button>
+                                      </Button>
                                     </div>
                                   </td>
                                   <td>R{patch.row_index + 1}</td>
@@ -5339,8 +5339,8 @@ export default function OrderWorkflowV2Page() {
                                 >
                                   <td className="anomaly-row-actions-cell">
                                     <div className="inline-row-actions">
-                                      <button
-                                        className="btn tiny row-apply-button"
+                                      <Button
+                                        className="btn tiny row-apply-button workflow-ordinary-control"
                                         type="button"
                                         disabled={!String(warning.suggested_value || "").trim()}
                                         onClick={(event) => {
@@ -5349,9 +5349,9 @@ export default function OrderWorkflowV2Page() {
                                         }}
                                       >
                                         反映
-                                      </button>
-                                      <button
-                                        className="btn tiny ghost"
+                                      </Button>
+                                      <Button
+                                        className="btn tiny ghost workflow-ordinary-control"
                                         type="button"
                                         onClick={(event) => {
                                           event.stopPropagation();
@@ -5359,7 +5359,7 @@ export default function OrderWorkflowV2Page() {
                                         }}
                                       >
                                         却下
-                                      </button>
+                                      </Button>
                                     </div>
                                   </td>
                                   <td>{formatAnomalySeverity(warning.severity)}</td>
@@ -5484,7 +5484,7 @@ export default function OrderWorkflowV2Page() {
             }}
           >
             <summary>保存予定JSONを確認</summary>
-            <textarea
+            <Input inputProps={{ "spellCheck": false }} disableUnderline multiline className="workflow-ordinary-control"
               value={sheetJson}
               onChange={(event) => {
                 const nextJson = event.target.value;
@@ -5497,7 +5497,6 @@ export default function OrderWorkflowV2Page() {
                   setSheetPayload(null);
                 }
               }}
-              spellCheck={false}
             />
           </details>
         </section>
@@ -5512,12 +5511,12 @@ export default function OrderWorkflowV2Page() {
               <p className="subtle">袋分け、ラベル、納品書、総量をまとめて確認して、問題なければ注文を確定します。</p>
             </div>
             <div className="row-actions">
-              <button className="btn primary" type="button" onClick={runBagging} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={runBagging} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
                 出力確認を作成
-              </button>
-              <button className="btn primary" type="button" onClick={finalConfirm} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.output_bundle_id)}>
+              </Button>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.output_bundle_id)}>
                 確定して一覧にもどる
-              </button>
+              </Button>
             </div>
           </header>
           {inspection?.bagging_result ? (
@@ -5619,39 +5618,39 @@ export default function OrderWorkflowV2Page() {
               <div className="outputs">
                 <div className="output-card">
                   <span className="output-link">ラベルCSV</span>
-                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/labels?order_id=${orderId}`, "ラベルCSV")}>
+                  <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => openOutput(`/outputs/labels?order_id=${orderId}`, "ラベルCSV")}>
                     ダウンロード
-                  </button>
-                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("labels")} disabled={outputPreviewLoading}>
+                  </Button>
+                  <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => loadOutputPreview("labels")} disabled={outputPreviewLoading}>
                     プレビュー
-                  </button>
+                  </Button>
                 </div>
                 <div className="output-card">
                   <span className="output-link">納品書HTML</span>
-                  <button className="btn primary" type="button" onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${orderId}`, "納品書HTML")}>
+                  <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${orderId}`, "納品書HTML")}>
                     開く
-                  </button>
-                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("delivery")} disabled={outputPreviewLoading}>
+                  </Button>
+                  <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => loadOutputPreview("delivery")} disabled={outputPreviewLoading}>
                     プレビュー
-                  </button>
+                  </Button>
                 </div>
                 <div className="output-card">
                   <span className="output-link">FAX読取シートExcel</span>
-                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${orderId}`, "FAX読取シートExcel")}>
+                  <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${orderId}`, "FAX読取シートExcel")}>
                     ダウンロード
-                  </button>
-                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("order_form_saved_sheet")} disabled={outputPreviewLoading}>
+                  </Button>
+                  <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => loadOutputPreview("order_form_saved_sheet")} disabled={outputPreviewLoading}>
                     プレビュー
-                  </button>
+                  </Button>
                 </div>
                 <div className="output-card">
                   <span className="output-link">総量CSV</span>
-                  <button className="btn primary" type="button" onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${orderId}`, "総量CSV")}>
+                  <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${orderId}`, "総量CSV")}>
                     ダウンロード
-                  </button>
-                  <button className="btn ghost" type="button" onClick={() => loadOutputPreview("aggregate")} disabled={outputPreviewLoading}>
+                  </Button>
+                  <Button className="btn ghost workflow-ordinary-control" type="button" onClick={() => loadOutputPreview("aggregate")} disabled={outputPreviewLoading}>
                     プレビュー
-                  </button>
+                  </Button>
                 </div>
               </div>
               {downloadMessage ? <p className="subtle">{downloadMessage}</p> : null}
@@ -5750,6 +5749,25 @@ export default function OrderWorkflowV2Page() {
 
         :global(*) {
           box-sizing: border-box;
+        }
+
+        :global(.workflow-ordinary-control.MuiButton-root) {
+          font: inherit;
+          letter-spacing: inherit;
+          text-transform: none;
+          min-width: 0;
+          line-height: normal;
+        }
+        :global(.workflow-ordinary-control.MuiInputBase-root) {
+          line-height: normal;
+        }
+        :global(.workflow-ordinary-control.MuiInputBase-root .MuiInputBase-input) {
+          background: transparent;
+          border: 0;
+          border-radius: 0;
+          color: inherit;
+          font: inherit;
+          padding: 0;
         }
 
         .workflow-v2-page {
@@ -5857,7 +5875,8 @@ export default function OrderWorkflowV2Page() {
           margin: 16px 36px;
           overflow-x: auto;
         }
-        .step-nav-btn {
+        .step-nav-btn,
+        :global(.workflow-ordinary-control.step-nav-btn) {
           background: rgba(255, 255, 255, 0.74);
           border: 1px solid rgba(54, 82, 68, 0.14);
           border-radius: 16px;
@@ -5871,27 +5890,32 @@ export default function OrderWorkflowV2Page() {
           padding: 12px 14px;
           text-align: left;
         }
-        .step-nav-btn span {
+        .step-nav-btn span,
+        :global(.workflow-ordinary-control.step-nav-btn span) {
           color: #a15f2d;
           font-size: 11px;
           font-weight: 800;
           letter-spacing: 0.08em;
           text-transform: uppercase;
         }
-        .step-nav-btn strong {
+        .step-nav-btn strong,
+        :global(.workflow-ordinary-control.step-nav-btn strong) {
           color: #1c2822;
           font-size: 14px;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .step-nav-btn.active {
+        .step-nav-btn.active,
+        :global(.workflow-ordinary-control.step-nav-btn.active) {
           background: #1c2822;
           border-color: #1c2822;
           box-shadow: 0 12px 28px rgba(28, 40, 34, 0.16);
         }
         .step-nav-btn.active span,
-        .step-nav-btn.active strong {
+        :global(.workflow-ordinary-control.step-nav-btn.active span),
+        .step-nav-btn.active strong,
+        :global(.workflow-ordinary-control.step-nav-btn.active strong) {
           color: #fffdf7;
         }
         .step-tag {
@@ -6372,7 +6396,8 @@ export default function OrderWorkflowV2Page() {
           flex-wrap: wrap;
           gap: 8px;
         }
-        .facility-template-actions .input {
+        .facility-template-actions .input,
+        :global(.facility-template-actions .workflow-ordinary-control.input) {
           min-width: 180px;
         }
         .facility-template-table-wrap {
@@ -6402,7 +6427,8 @@ export default function OrderWorkflowV2Page() {
           top: 0;
           z-index: 1;
         }
-        .facility-template-table .input {
+        .facility-template-table .input,
+        :global(.facility-template-table .workflow-ordinary-control.input) {
           min-width: 120px;
           padding: 7px 8px;
         }
@@ -6457,7 +6483,8 @@ export default function OrderWorkflowV2Page() {
         }
         input,
         select,
-        textarea {
+        textarea,
+        :global(.workflow-ordinary-control.MuiInputBase-root) {
           background: #fffdf7;
           border: 1px solid #d7d1c0;
           border-radius: 12px;
@@ -6465,7 +6492,8 @@ export default function OrderWorkflowV2Page() {
           font: inherit;
           padding: 10px 12px;
         }
-        textarea {
+        textarea,
+        :global(.workflow-ordinary-control.MuiInputBase-multiline) {
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           min-height: 260px;
           width: 100%;
@@ -6621,7 +6649,8 @@ export default function OrderWorkflowV2Page() {
           font-size: 11px;
           font-weight: 800;
         }
-        .compact-input {
+        .compact-input,
+        :global(.workflow-ordinary-control.compact-input) {
           max-width: 120px;
           min-height: 38px;
           padding: 8px 10px;
@@ -6646,7 +6675,8 @@ export default function OrderWorkflowV2Page() {
           cursor: pointer;
           font-weight: 800;
         }
-        .ocr-llm-prompt-textarea {
+        .ocr-llm-prompt-textarea,
+        :global(.workflow-ordinary-control.ocr-llm-prompt-textarea) {
           margin-top: 8px;
           min-height: 120px;
           width: 100%;
@@ -6939,7 +6969,8 @@ export default function OrderWorkflowV2Page() {
           font-weight: 800;
           margin-right: 6px;
         }
-        .row-apply-button {
+        .row-apply-button,
+        :global(.workflow-ordinary-control.row-apply-button) {
           margin-left: 8px;
           vertical-align: middle;
         }
@@ -6959,6 +6990,7 @@ export default function OrderWorkflowV2Page() {
           margin-bottom: 10px;
         }
         .btn,
+        :global(.workflow-ordinary-control.btn),
         .ghost-link {
           align-items: center;
           background: #f0eadc;
@@ -6973,27 +7005,33 @@ export default function OrderWorkflowV2Page() {
           padding: 0 16px;
           text-decoration: none;
         }
-        .btn.primary {
+        .btn.primary,
+        :global(.workflow-ordinary-control.btn.primary) {
           background: #1c2822;
           color: #fffdf7;
         }
-        .btn.ghost {
+        .btn.ghost,
+        :global(.workflow-ordinary-control.btn.ghost) {
           background: #ebe5d5;
         }
-        .btn.ghost.active {
+        .btn.ghost.active,
+        :global(.workflow-ordinary-control.btn.ghost.active) {
           background: #f4c78d;
           color: #1c2822;
         }
-        .btn.tiny {
+        .btn.tiny,
+        :global(.workflow-ordinary-control.btn.tiny) {
           font-size: 12px;
           min-height: 30px;
           padding: 0 10px;
         }
-        .btn.danger {
+        .btn.danger,
+        :global(.workflow-ordinary-control.btn.danger) {
           background: #f5d5cb;
           color: #8a2c18;
         }
-        .btn:disabled {
+        .btn:disabled,
+        :global(.workflow-ordinary-control.btn:disabled) {
           cursor: not-allowed;
           opacity: 0.48;
         }
@@ -7015,7 +7053,8 @@ export default function OrderWorkflowV2Page() {
           background: #fff3d8;
           color: #7a4a0f;
         }
-        .inline-action-btn {
+        .inline-action-btn,
+        :global(.workflow-ordinary-control.inline-action-btn) {
           background: #fffdf7;
           border: 1px solid #c9bda2;
           border-radius: 999px;
@@ -7160,7 +7199,8 @@ export default function OrderWorkflowV2Page() {
           gap: 6px;
           padding: 6px 10px;
         }
-        .header-axis-timeout-control input {
+        .header-axis-timeout-control input,
+        :global(.header-axis-timeout-control .workflow-ordinary-control.MuiInputBase-root) {
           background: #fffdf7;
           border: 1px solid #d8cdb6;
           border-radius: 10px;
@@ -7324,7 +7364,8 @@ export default function OrderWorkflowV2Page() {
           gap: 2px;
           padding: 3px;
         }
-        .preview-mode-toggle button {
+        .preview-mode-toggle button,
+        :global(.preview-mode-toggle .workflow-ordinary-control) {
           background: transparent;
           border: 0;
           border-radius: 999px;
@@ -7334,7 +7375,8 @@ export default function OrderWorkflowV2Page() {
           font-weight: 900;
           padding: 7px 10px;
         }
-        .preview-mode-toggle button.active {
+        .preview-mode-toggle button.active,
+        :global(.preview-mode-toggle .workflow-ordinary-control.active) {
           background: #1b2a22;
           color: #fffdf7;
         }
@@ -7392,5 +7434,6 @@ export default function OrderWorkflowV2Page() {
         }
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }
