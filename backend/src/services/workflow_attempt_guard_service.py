@@ -135,10 +135,34 @@ def snapshots_equal(left: Any, right: Any) -> bool:
     return canonical_snapshot_json(left) == canonical_snapshot_json(right)
 
 
-def _order_execution_input(session: Any, order: Any, *, lock: bool = False) -> dict[str, Any]:
-    from src.services.config_service import capture_authored_processing_config
+def _order_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: dict[str, Any] | None = None) -> dict[str, Any]:
+    from src.services import canonical_facility_lineage as lineage
+    from src.models.facility_template_version import FacilityTemplateVersion
+    from src.services.config_service import capture_authored_processing_config, captured_processing_config_matches
     from src.services.order_service import _build_position_menu_entries_safe
-    configured_input = capture_authored_processing_config(order.facility_code)
+    selected_id = str(order.template_version_id or "").strip()
+    projection = lineage.read_projection(session, selected_id, lock=lock) if selected_id else None
+    if projection is None:
+        raise ValueError("original_template_projection_missing")
+    receipt = lineage.verify_projection(projection)
+    authored = receipt["authored_version"]
+    if receipt["facility_id"] != order.facility_code:
+        raise ValueError("original_template_configured_source_mismatch")
+    if original_input is None:
+        configured_input = capture_authored_processing_config(order.facility_code, selected_authored_version=authored)
+    else:
+        configured_input = deepcopy(original_input.get("configured_input"))
+        if (not snapshots_equal(original_input.get("original_template_lineage"), receipt)
+                or not snapshots_equal((configured_input or {}).get("selected_authored_version"), authored)
+                or not captured_processing_config_matches(order.facility_code, configured_input)):
+            raise ValueError("configured_execution_input_changed")
+    original_projection = _json_snapshot({
+        column.key: getattr(projection, column.key)
+        for column in FacilityTemplateVersion.__table__.columns
+    })
+    if original_input is not None and (not snapshots_equal(original_input.get("original_template_projection"), original_projection)
+            or not snapshots_equal(original_input.get("original_template_source_proof"), projection.validation_json["creation_source_proof"])):
+        raise ValueError("original_template_projection_changed")
     physical_menu_entries = _build_position_menu_entries_safe(order.week_code, order.facility_code)
     workflow = session.get(OrderWorkflowState, order.id, populate_existing=True, with_for_update=lock)
     lines_query = select(OrderLine).where(OrderLine.order_id == order.id).order_by(OrderLine.id).execution_options(populate_existing=True)
@@ -158,6 +182,9 @@ def _order_execution_input(session: Any, order: Any, *, lock: bool = False) -> d
     return _json_snapshot({
         "order_exists": True,
         "configured_input": configured_input,
+        "original_template_projection": original_projection,
+        "original_template_lineage": receipt,
+        "original_template_source_proof": projection.validation_json["creation_source_proof"],
         "physical_menu_entries": physical_menu_entries,
         "order": {column.key: getattr(order, column.key) for column in order.__table__.columns},
         "lines": [{column.key: getattr(line, column.key) for column in line.__table__.columns} for line in lines],
@@ -513,7 +540,10 @@ def advance_nonworkflow_order_input(session: Any, boundary: dict[str, Any], orde
     _track_execution_input(session, boundary)
     session.flush()
     original_config = boundary["orders"][order.id]["configured_input"]
-    advanced = _order_execution_input(session, order)
+    advanced = _order_execution_input(session, order, original_input=boundary["orders"][order.id])
+    for key in ("original_template_projection", "original_template_lineage", "original_template_source_proof"):
+        if not snapshots_equal(advanced[key], boundary["orders"][order.id].get(key)):
+            raise ValueError("original_template_projection_changed")
     if not snapshots_equal(advanced["configured_input"], original_config):
         raise ValueError("configured_execution_input_changed")
     if not snapshots_equal(advanced["physical_menu_entries"], boundary["orders"][order.id]["physical_menu_entries"]):
@@ -607,9 +637,9 @@ def lock_current_workflow_attempt(
     ):
         return False
     captured = (job.metrics or {}).get("reparse_read_input")
-    from src.services.config_service import capture_authored_processing_config
+    from src.services.config_service import captured_processing_config_matches
     order = session.get(Order, order_id, populate_existing=True)
-    if not isinstance(captured, dict) or order is None or not snapshots_equal(captured.get("configured_input"), capture_authored_processing_config(order.facility_code)):
+    if not isinstance(captured, dict) or order is None or not captured_processing_config_matches(order.facility_code, captured.get("configured_input")):
         return False
     from src.services.order_service import _build_position_menu_entries_safe
     if not snapshots_equal(captured.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code)):
@@ -703,7 +733,7 @@ def lock_actual_write_ownership(
             return False
     elif captured.get("workflow_exists") is not False or session.get(OrderWorkflowState, order_id) is not None:
         return False
-    if not snapshots_equal(_order_execution_input(session, order, lock=True), captured):
+    if not snapshots_equal(_order_execution_input(session, order, lock=True, original_input=captured), captured):
         return False
     job_conditions = (OcrJob.id == job_id,)
     if session.bind.dialect.name == "sqlite":

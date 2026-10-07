@@ -14,7 +14,7 @@ from src.services.order_service import (
     reconcile_completed_ocr_job,
     reparse_order as run_order_reparse,
 )
-from src.services import config_service, ocr_evidence_service
+from src.services import config_service, ocr_evidence_service, order_service
 from src.services.workflow_attempt_guard_service import (
     capture_nonworkflow_execution, nonworkflow_execution_context,
     current_nonworkflow_execution,

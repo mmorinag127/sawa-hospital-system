@@ -618,20 +618,36 @@ def persist_evidence_run(
                 or order is None or order.template_version_id != normalized_template_version_id
             ):
                 return None
-        if not normalized_template_version_id and order is not None:
-            normalized_template_version_id = str(order.template_version_id or "").strip()
-        template_version = (
-            session.get(FacilityTemplateVersion, normalized_template_version_id)
-            if normalized_template_version_id
-            else None
-        )
-        if normalized_template_version_id:
-            if template_version is None or template_version.status != "active":
-                return None
-            if order is not None:
-                facility_id = str(order.facility_code or "").strip()
-                if facility_id and str(template_version.facility_id or "").strip() != facility_id:
-                    return None
+        from src.services import canonical_facility_lineage as lineage
+        from src.services.workflow_attempt_guard_service import processing_start_read_input, snapshots_equal
+
+        original = processing_start_read_input()
+        original_order = original.get("order") or {}
+        captured_projection = original.get("original_template_projection")
+        captured_lineage = original.get("original_template_lineage")
+        captured_proof = original.get("original_template_source_proof")
+        if (not normalized_template_version_id or order is None
+                or original_order.get("id") != order.id
+                or original_order.get("template_version_id") != normalized_template_version_id
+                or order.template_version_id != normalized_template_version_id
+                or original_order.get("facility_code") != order.facility_code
+                or not isinstance(captured_projection, dict)
+                or not isinstance(captured_lineage, dict)
+                or not isinstance(captured_proof, dict)):
+            raise ValueError("original_template_capture_missing_or_mismatched")
+        template_version = lineage.read_projection(session, normalized_template_version_id, lock=True)
+        if template_version is None:
+            raise ValueError("original_template_projection_missing")
+        lineage.verify_projection(template_version, captured_lineage)
+        lineage.validate_source_proof(captured_proof, captured_lineage["authored_version"])
+        physical_projection = {column.key: getattr(template_version, column.key)
+                               for column in FacilityTemplateVersion.__table__.columns}
+        if (captured_lineage["facility_id"] != order.facility_code
+                or captured_projection.get("id") != normalized_template_version_id
+                or not snapshots_equal((original.get("configured_input") or {}).get("facility"), captured_lineage["authored_version"]["facility"])
+                or not snapshots_equal(physical_projection, captured_projection)
+                or not snapshots_equal(template_version.validation_json["creation_source_proof"], captured_proof)):
+            raise ValueError("original_template_projection_changed")
         run = OrderOcrEvidenceRun(
             id=evidence_id,
             order_id=record["order_id"],

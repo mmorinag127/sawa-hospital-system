@@ -29,20 +29,22 @@ def cells_presence(template):
 
 
 def verify_projection(row, receipt=None):
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+
     try:
         recorded = row.validation_json.get("canonical_lineage") if isinstance(row.validation_json, dict) else None
         if row.source != SOURCE or not isinstance(recorded, dict):
             raise CanonicalStoreError("canonical_lineage_provenance_missing", status_code=409)
         if row.status != "archived":
             raise CanonicalStoreError("canonical_lineage_projection_status_mismatch", status_code=409)
-        if receipt is not None and recorded != receipt:
+        if receipt is not None and not snapshots_equal(recorded, receipt):
             raise CanonicalStoreError("canonical_lineage_receipt_mismatch", status_code=409)
         authored = recorded.get("authored_version")
         payload = {"version_id": row.version,
                    "valid_from": row.valid_from.isoformat() if row.valid_from is not None else None,
                    "valid_to": row.valid_to.isoformat() if row.valid_to is not None else None,
                    "facility": row.config_json}
-        if not isinstance(authored, dict) or any(payload[key] != authored.get(key) for key in payload):
+        if not isinstance(authored, dict) or not snapshots_equal(payload, authored):
             raise CanonicalStoreError("canonical_lineage_snapshot_mismatch", status_code=409)
         semantic = identity(recorded)
         if not all(isinstance(value, str) and value for value in semantic.values()) or \
@@ -51,8 +53,8 @@ def verify_projection(row, receipt=None):
                 row.template_digest != digest(semantic):
             raise CanonicalStoreError("canonical_lineage_digest_mismatch", status_code=409)
         template = row.config_json.get("fax_template")
-        if not isinstance(template, dict) or row.columns_json != template.get("columns") or \
-                row.template_id != template.get("template_id") or row.cells_json != template.get("cells") or \
+        if not isinstance(template, dict) or not snapshots_equal(row.columns_json, template.get("columns")) or \
+                row.template_id != template.get("template_id") or not snapshots_equal(row.cells_json, template.get("cells")) or \
                 row.validation_json.get("cells_presence") != cells_presence(template) or \
                 row.validation_json.get("authored_template_digest") != digest(template):
             raise CanonicalStoreError("canonical_lineage_template_mismatch", status_code=409)
@@ -131,6 +133,8 @@ def read_projection(session, projection_id, *, lock=False):
 
 def materialize(session, selection):
     """Explicit caller-owned write using an already selected own JSON receipt, never a reread."""
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+
     if session.new or session.dirty or session.deleted:
         raise CanonicalStoreError("canonical_lineage_pending_session_changes", status_code=409)
     if not isinstance(selection, dict) or not isinstance(selection.get("canonical_lineage"), dict):
@@ -153,8 +157,8 @@ def materialize(session, selection):
     expected_facility = receipt["authored_version"]["facility"]
     metadata_keys = {"canonical_lineage", "canonical_source_proof", "facility_template_version_id",
                      "facility_template_version", "effective_date"}
-    if {key: value for key, value in selection.items() if key not in metadata_keys} != expected_facility or \
-            selection.get("effective_date") != selection["canonical_source_proof"]["effective_date"] or \
+    if not snapshots_equal({key: value for key, value in selection.items() if key not in metadata_keys}, expected_facility) or \
+            not snapshots_equal(selection.get("effective_date"), selection["canonical_source_proof"]["effective_date"]) or \
             selection.get("facility_template_version_id") != candidate.id:
         raise CanonicalStoreError("canonical_lineage_selection_changed", status_code=409)
     parent = Facility.__table__
