@@ -15,7 +15,7 @@
     "check:menu-master-api": "python3 ../scripts/export_menu_master_openapi.py --check --output src/generated/menu-master-openapi.json && openapi-typescript src/generated/menu-master-openapi.json -o src/generated/menu-master-api.ts --check"
   },
   "dependencies": {
-    "@sawa/ui": "file:vendor/sawa-ui-0.1.0-8004321e0364f54d1294df4bb3143dc091fc5a86.tgz",
+    "@sawa/ui": "file:vendor/sawa-ui-0.1.0-5cf1420252d9b116742842a237e44c97bc21a2c9.tgz",
     "axios": "^1.20.0",
     "next": "16.3.8",
     "postcss": "8.5.26",
