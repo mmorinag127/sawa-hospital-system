@@ -1,4 +1,5 @@
 import { Button, Input, NativeSelect } from "@mui/material";
+import { JobStatus, type JobStatusRecord } from "@sawa/ui";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
@@ -150,6 +151,7 @@ type CandidateSheetStatePayload = {
 };
 
 type ReparseStatePayload = {
+  job_status?: JobStatusRecord | null;
   status?: string | null;
   request_mode?: string | null;
   processing_stage?: string | null;
@@ -9007,12 +9009,9 @@ export default function OrderDetailPage() {
     isHakodateOverlayMode &&
     Boolean(activeHakodateServerOverlayUrl);
   const hakodatePreviewImageUrl = hakodatePreviewUsesServerOverlay ? activeHakodateServerOverlayUrl : null;
-  const effectiveHakodateJobStatus = hakodateJobStatus || order?.workflow_state?.reparse_state || null;
+  const effectiveHakodateJobStatus = hakodateJobStatus;
   const hakodateJobStatusCode = String(effectiveHakodateJobStatus?.status || "").trim().toLowerCase();
-  const hakodateJobStage = firstNonEmptyText(
-    effectiveHakodateJobStatus?.processing_stage,
-    order?.ocr_processing_stage,
-  );
+  const hakodateJobStage = firstNonEmptyText(effectiveHakodateJobStatus?.processing_stage);
   const hakodateJobStatusLabel = (() => {
     if (!hakodateJobStatusCode || hakodateJobStatusCode === "idle") return "未実行";
     if (["queued", "pending"].includes(hakodateJobStatusCode)) return "待機中";
@@ -11946,6 +11945,7 @@ export default function OrderDetailPage() {
                                 </div>
                                 <div className="hakodate-job-status" data-testid="hakodate-job-status">
                                   <strong>OCRジョブ</strong>
+                                  {effectiveHakodateJobStatus?.job_status ? <JobStatus job={effectiveHakodateJobStatus.job_status} showDetails /> : <span>ジョブ記録未取得</span>}
                                   <span>{hakodateJobStatusLabel}</span>
                                   {hakodateJobDetail ? <span className="subtle">{hakodateJobDetail}</span> : null}
                                 </div>
