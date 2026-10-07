@@ -9,6 +9,10 @@ import json
 import os
 import time
 import logging
+import hashlib
+import threading
+from contextvars import ContextVar
+from copy import deepcopy
 from importlib.util import module_from_spec, spec_from_file_location
 from types import SimpleNamespace
 from typing import Any, Iterable, Optional, Tuple
@@ -44,6 +48,40 @@ def definitions(path, names, bindings):
                  "figure_markup": _figure_markup, **URI_BINDINGS, **bindings}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
+
+
+def owned_pipeline(stores=None, names=(), bindings=None, claim=True):
+    """Integrated producer definitions and real receipt/claim validation.
+
+    No legacy uploader alternative: this fixture requires the parent's retained
+    H2 implementation and conditional transport fixture in the integrated tree.
+    """
+    spec = spec_from_file_location("h2_conditional_transport", ROOT / "ocr_pipeline/tests/terminal_store_fakes.py")
+    transport = module_from_spec(spec)
+    spec.loader.exec_module(transport)
+    stores = stores or transport.Stores()
+    validator = definitions(ROOT / "ocr_pipeline/app/rois.py", ["validate_captured_config"],
+                            {"hashlib": hashlib, "json": json, "deepcopy": deepcopy})["validate_captured_config"]
+    required = ["TerminalPersistenceIncomplete", "TerminalReceiptConflict", "MandatoryOcrStageFailed",
+                "_owned_output_context", "_assert_output_owner", "_terminal_digest", "_same_original_source",
+                "_original_pipeline_source", "_terminal_source", "_owned_output_name", "_download_generation_input", "_verify_selected_pdf_input",
+                "_load_configured_input", "_upload_bytes"]
+    namespace = definitions(MAIN, list(dict.fromkeys(required + list(names))), {
+        "hashlib": hashlib, "json": json, "re": re, "os": os, "time": time,
+        "gcs": stores, "db": stores, "validate_captured_config": validator,
+        "_OUTPUT_OWNER": ContextVar("source_case_original_owner", default=None),
+        "_ACTIVE_PRODUCER_JOBS": set(), "_ACTIVE_PRODUCER_LOCK": threading.Lock(),
+        **(bindings or {})})
+    with transport.install_transport_exceptions():
+        source = namespace["_original_pipeline_source"]("own-bucket", stores.name, "19")
+    assert "output_reference" not in source
+    stores.output = namespace["_owned_output_name"]("output/", source)
+    source["output_reference"] = _uri_codec.format_gcs_uri("own-bucket", stores.output)
+    if claim:
+        stores.create({"status": "running", "execution_claim": {
+            "job_id": source["job_id"], "output_reference": source["output_reference"]}})
+        namespace["_OUTPUT_OWNER"].set((source, stores))
+    return namespace, stores, source, transport
 
 
 @pytest.mark.parametrize("name,path", [("detect_table_grid", GRID), ("_render_pdf_page_image", HAKODATE)])
@@ -290,18 +328,6 @@ def test_actual_html_and_markdown_mixed_supported_destinations():
 
 
 def test_actual_full_handler_html_page_loop_metadata_tables_and_normal_return():
-    uploads = {}
-    job_updates = []
-    class Blob:
-        metadata = {"facility_id": "facility", "template_id": "template"}
-        generation = "73"
-        def __init__(self, name): self.name = name
-        def reload(self): pass
-        def download_as_bytes(self): return b"provider PDF fixture"
-        def upload_from_string(self, value, content_type): uploads[self.name] = (value, content_type)
-    job = SimpleNamespace(id="job", get=lambda: SimpleNamespace(exists=False),
-                          set=lambda value: job_updates.append(value), update=lambda value: job_updates.append(value))
-    gcs = SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=lambda name: Blob(name)))
     contents = []
     directories = []
     for color in [(2, 3, 4), (5, 6, 7)]:
@@ -324,33 +350,52 @@ def test_actual_full_handler_html_page_loop_metadata_tables_and_normal_return():
     names = ["handler", "parse_gcs_event", "_normalize_prefix", "_safe_job_id", "_update_job_stage",
              "_upload_bytes", "_upload_text", "_upload_figure_artifact", "_publish_page_figures", "_validate_figure_pages",
              "_write_output_partial", "_extract_metadata", "_upload_corrected_pdf_artifact", "_count_non_empty_roi_cells",
-             "_extract_markdown_images", "_replace_markdown_images", "_image_reference_spans"]
-    namespace = definitions(MAIN, names, {"re": re, "os": os, "json": json, "time": time,
-        "storage": SimpleNamespace(Blob=Blob), "gcs": gcs, "firestore": SimpleNamespace(SERVER_TIMESTAMP="timestamp"),
+             "_extract_markdown_images", "_replace_markdown_images", "_image_reference_spans",
+             "_recognition_input_receipt", "_complete_terminal", "_persist_terminal_intent", "_update_owned_terminal_job",
+             "_replay_terminal", "_duplicate_outcome", "_terminal_ack"]
+    namespace, stores, source, protocol = owned_pipeline(names=names, claim=False, bindings={
+        "storage": SimpleNamespace(Blob=Any), "firestore": SimpleNamespace(SERVER_TIMESTAMP="timestamp"),
         "app": SimpleNamespace(logger=logging.getLogger("source_case"), post=lambda *args, **kw: lambda fn: fn),
-        "request": SimpleNamespace(get_json=lambda **kw: {"bucket": "bucket", "name": "input/sample.pdf", "generation": "1"}),
-        "jsonify": lambda value: value, "db": SimpleNamespace(collection=lambda name: SimpleNamespace(document=lambda key: job)),
+        "request": SimpleNamespace(get_json=lambda **kw: {"bucket": "own-bucket", "name": "input/own.pdf", "generation": "19"}),
+        "jsonify": lambda value: value,
         "INPUT_PREFIX": "input/", "OUTPUT_PREFIX": "output/", "JOB_COLLECTION": "jobs",
-        "OCR_ENABLE_PAGE_CORRECTION": False, "OCR_ENABLE_TEMPLATE_ROI": False, "OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS": False,
+        "OCR_ENABLE_PAGE_CORRECTION": False, "OCR_ENABLE_TEMPLATE_ROI": False, "OCR_ENABLE_TEMPLATE_MATCH": False,
+        "OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS": False,
         "OCR_PIPELINE_MODE": "structured_v2", "YOMITOKU_DPI": 300, "YOMITOKU_DEVICE": "cpu", "YOMITOKU_VIS": False,
         "YOMITOKU_VIS_PDF": False, "YOMITOKU_IGNORE_LINE_BREAK": False, "YOMITOKU_NO_FIGURE": False,
         "YOMITOKU_FIGURE_WIDTH": 200, "YOMITOKU_FIGURE_DIR": "figures", "run_yomitoku": provider,
         "_run_template_classification": lambda **kw: (None, None), "detect_table_cell_issues": lambda **kw: [],
         "merge_cell_issues": lambda a, b: a+b, "build_template_resolution": lambda **kw: kw,
         "ensure_evidence_manifest": lambda value: value})
-    response, status = namespace["handler"]()
+    uploads = {}
+    conditional_upload = protocol.Blob.upload_from_string
+    def observed_upload(blob, value, **kwargs):
+        result = conditional_upload(blob, value, **kwargs)
+        uploads[blob.name] = (value, kwargs["content_type"])
+        if "/assets/" in blob.name:
+            assert kwargs["if_generation_match"] == 0
+        return result
+    with protocol.install_transport_exceptions(), patch.object(protocol.Blob, "upload_from_string", observed_upload):
+        response, status = namespace["handler"]()
     assert status == 200 and response["status"] == "done"
     assert all(not directory.exists() for directory in directories)
-    payload = json.loads(uploads["output/sample.pdf.json"][0])
+    payload = json.loads(stores.objects[stores.output])
     assert payload["status"] == "done" and payload["metrics"]["figure_count"] == 2
     assert payload["tables"] == [{"page": 1, "cells": [0, None], "raw": "unchanged"}, {"page": 2, "cells": [0, None], "raw": "unchanged"}]
     for index, page in enumerate(payload["pages"], 1):
-        asset = f"output/sample/figures/p{index}/figures/page_1_figure_0.png"
+        prefix = stores.output.rsplit("/", 1)[0] + "/assets/"
+        asset = f"{prefix}figures/p{index}/figures/page_1_figure_0.png"
+        assert stores.objects[asset] == contents[index-1]
         assert uploads[asset] == (contents[index-1], "image/png")
-        assert page["figure_uris"] == [f"gs://bucket/{asset}?generation=73"]
+        assert stores.object_metadata[asset]["sha256"] == hashlib.sha256(contents[index-1]).hexdigest()
+        assert json.loads(stores.object_metadata[asset]["original_source"]) == source
+        assert page["figure_uris"] == [f"gs://own-bucket/{asset}?generation=2"]
         assert page["tables"] == [payload["tables"][index-1]]
-        assert uploads[f"output/sample/sample_p{index}.md"][0] == f'<img src="gs://bucket/{asset}?generation=73" width="200px"><br>\nraw 0/null'.encode("utf-8")
-    assert job_updates[-1]["status"] == "done"
+        assert stores.objects[f"{prefix}own_p{index}.md"] == f'<img src="gs://own-bucket/{asset}?generation=2" width="200px"><br>\nraw 0/null'.encode("utf-8")
+    assert stores.job["status"] == "done"
+    assert stores.job["execution_claim"] == {"job_id": source["job_id"], "output_reference": source["output_reference"]}
+    assert stores.job["terminal_receipt"]["result_digest"] == namespace["_terminal_digest"](payload)
+    assert namespace["_OUTPUT_OWNER"].get() is None
 
 
 @pytest.mark.parametrize("raw", [
