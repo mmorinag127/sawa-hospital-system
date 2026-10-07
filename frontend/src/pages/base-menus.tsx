@@ -8,6 +8,11 @@ import { apiClient, hasActiveSessionAuthHeader } from "../services/apiClient";
 import { DIET_TYPE_OPTIONS } from "../services/menuVocabulary";
 import { useH1EditorOwner } from "../hooks/useH1EditorOwner";
 import { useH1LeaveGuard } from "../hooks/useH1LeaveGuard";
+import type { components } from "../generated/base-menu-api";
+
+type BaseMenuListResponse = components["schemas"]["BaseMenuListResponse"];
+type BaseMenuReplaceResponse = components["schemas"]["BaseMenuReplaceResponse"];
+type BaseMenuUpdateResponse = components["schemas"]["BaseMenuUpdateResponse"];
 
 type BaseMenuItem = { id?: string; clientKey: string; cycle_day?: number | string; daypart?: string | null; category?: string | null; name?: string | null; diet_type?: string | null; slot_index?: number | string | null; unit_type?: string | null; qty_per_serving?: number | null; temp_type?: string | null; bag_max_qty?: number | null; bag_max_unit?: string | null; condiments?: string[] | null };
 type BaseMenuDraft = Required<Pick<BaseMenuItem, "cycle_day" | "daypart" | "category" | "name" | "diet_type" | "slot_index">>;
@@ -43,9 +48,9 @@ function Screen({ authenticated }: { authenticated: boolean }) {
   const ownership = useH1EditorOwner(generation.current);
   useH1LeaveGuard(dirty, baseMenuPaths);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const all = useQuery({ queryKey: ["base-menus", "all"], enabled: authenticated, queryFn: async ({ signal }) => { const response = await apiClient.get<{ items?: unknown; revision?: unknown }>("/base-menus", { signal }); return toSnapshot(response.data || {}); } });
-  const update = useMutation({ mutationFn: async ({ item, revision, current }: { item: BaseMenuItem; revision: string; current: () => void }) => { validate(item); if (!item.id) throw new Error("新規項目は全件一括保存で登録してください。"); current(); const response = await apiClient.put(`/base-menus/${item.id}`, serialize(item), { headers: { "If-Match": revision } }); if (response.data?.updated !== true) throw new Error("保存結果を確認できませんでした。"); return toSnapshot(response.data); } });
-  const replace = useMutation({ mutationFn: async ({ items, revision, current }: { items: BaseMenuItem[]; revision: string; current: () => void }) => { items.forEach(validate); current(); const response = await apiClient.post("/base-menus", { items: items.map(serialize) }, { headers: { "If-Match": revision } }); if (typeof response.data?.created !== "number") throw new Error("一括保存結果を確認できませんでした。"); return { created: response.data.created as number, snapshot: toSnapshot(response.data) }; } });
+  const all = useQuery({ queryKey: ["base-menus", "all"], enabled: authenticated, queryFn: async ({ signal }) => { const response = await apiClient.get<BaseMenuListResponse>("/base-menus", { signal }); return toSnapshot(response.data || {}); } });
+  const update = useMutation({ mutationFn: async ({ item, revision, current }: { item: BaseMenuItem; revision: string; current: () => void }) => { validate(item); if (!item.id) throw new Error("新規項目は全件一括保存で登録してください。"); current(); const response = await apiClient.put<BaseMenuUpdateResponse>(`/base-menus/${item.id}`, serialize(item), { headers: { "If-Match": revision } }); if (response.data?.updated !== true) throw new Error("保存結果を確認できませんでした。"); return toSnapshot(response.data); } });
+  const replace = useMutation({ mutationFn: async ({ items, revision, current }: { items: BaseMenuItem[]; revision: string; current: () => void }) => { items.forEach(validate); current(); const response = await apiClient.post<BaseMenuReplaceResponse>("/base-menus", { items: items.map(serialize) }, { headers: { "If-Match": revision } }); if (typeof response.data?.created !== "number") throw new Error("一括保存結果を確認できませんでした。"); return { created: response.data.created as number, snapshot: toSnapshot(response.data) }; } });
   const rows = useMemo(() => (all.data?.items || []).filter((item) => !filter || String(item.cycle_day) === filter).sort((a, b) => Number(a.cycle_day || 0) - Number(b.cycle_day || 0) || String(a.daypart || "").localeCompare(String(b.daypart || "")) || Number(a.slot_index || 0) - Number(b.slot_index || 0)), [all.data, filter]);
   const visibleRows = rows.slice(page * rowsPerPage, (page + 1) * rowsPerPage); const choose = (item: BaseMenuItem | null, baseline = all.data) => { if (dirty && !window.confirm("未保存の変更を破棄して別の項目を開きますか？")) return; if (item && !baseline) { setNotice("全件正本を読み込めていないため、編集できません。"); return; } ownership.edit(); generation.current += 1; setDirty(false); setSelected(item && baseline ? { item, baseline } : null); };
   const reload = async () => { const result = await all.refetch(); if (result.error) throw result.error; if (!result.data) throw new Error("基準メニュー一覧の再読込結果がありません。"); return result.data; };

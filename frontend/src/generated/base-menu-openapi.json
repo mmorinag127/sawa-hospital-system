@@ -1,0 +1,285 @@
+{
+  "components": {
+    "schemas": {
+      "BaseMenuItemResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "bag_max_qty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bag Max Qty"
+          },
+          "bag_max_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bag Max Unit"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "condiments": {
+            "items": {},
+            "title": "Condiments",
+            "type": "array"
+          },
+          "cycle_day": {
+            "title": "Cycle Day",
+            "type": "integer"
+          },
+          "daypart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daypart"
+          },
+          "diet_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diet Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "qty_per_serving": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qty Per Serving"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "slot_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Index"
+          },
+          "temp_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temp Type"
+          },
+          "unit_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Type"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "cycle_day",
+          "daypart",
+          "category",
+          "name",
+          "diet_type",
+          "slot_index",
+          "unit_type",
+          "qty_per_serving",
+          "temp_type",
+          "bag_max_qty",
+          "bag_max_unit",
+          "condiments"
+        ],
+        "title": "BaseMenuItemResponse",
+        "type": "object"
+      },
+      "BaseMenuListResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BaseMenuItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "revision"
+        ],
+        "title": "BaseMenuListResponse",
+        "type": "object"
+      },
+      "BaseMenuReplaceResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BaseMenuItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "revision",
+          "created"
+        ],
+        "title": "BaseMenuReplaceResponse",
+        "type": "object"
+      },
+      "BaseMenuUpdateResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/BaseMenuItemResponse"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BaseMenuItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "revision",
+          "updated",
+          "item"
+        ],
+        "title": "BaseMenuUpdateResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Registered Base Menu Response Contract",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/base-menus": {
+      "get": {
+        "operationId": "list_base_menus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BaseMenuListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      },
+      "post": {
+        "operationId": "replace_base_menus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BaseMenuReplaceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/base-menus/{item_id}": {
+      "put": {
+        "operationId": "update_base_menu",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BaseMenuUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    }
+  }
+}
