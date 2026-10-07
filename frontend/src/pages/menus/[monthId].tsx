@@ -1,6 +1,7 @@
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { MenuItem as MuiMenuItem } from "@mui/material";
+import type { ChangeEvent } from "react";
+import { Button, Checkbox, Input, NativeSelect, MenuItem as MuiMenuItem } from "@mui/material";
 import { DataTable, EditForm, FormTextField, SawaProvider, type TableColumn } from "@sawa/ui";
 import TopNav from "../../components/TopNav";
 import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
@@ -771,11 +772,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     { id: "daypart", label: "朝昼夕", render: (item) => item.daypart || "-" }, { id: "category", label: "区分", render: (item) => item.category || "-" },
     { id: "diet", label: "食種", render: (item) => formatDietTypeLabel(item.diet_type || "") || "-" }, { id: "qty", label: "量 / 単位", render: (item) => item.qty_per_serving == null ? "-" : `${item.qty_per_serving}${item.unit_type || ""}` },
     { id: "bag", label: "袋上限", render: (item) => item.bag_max_qty == null ? "-" : `${item.bag_max_qty}${item.bag_max_unit || ""}` },
-    { id: "edit", label: "", render: (item) => <button className="btn compact" onClick={() => {
+    { id: "edit", label: "", render: (item) => <Button type="submit" className="btn compact" onClick={() => {
       const targets = entries.filter((entry) => findMatchingItemIndex(items, entry) >= 0 && items[findMatchingItemIndex(items, entry)]?.id === item.id);
       if (targets.length !== 1) { setMessage("シートで編集する位置を選択してください。"); return; }
       selectEntry(targets[0].id);
-    }}>編集</button> },
+    }}>編集</Button> },
   ];
   const selectedGarnish = splitGarnishMenuName(selectedEntry?.name);
   const selectedGarnishItem = selectedGarnish
@@ -1551,14 +1552,14 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     { id: "scope", label: "適用先", render: (upload) => formatScopeLabel(upload.scope_override) },
     { id: "count", label: "件数", align: "right", render: (upload) => upload.item_count ?? "-" },
     { id: "kind", label: "更新種別", render: (upload) => upload.replaced ? "置換" : "新規" },
-    { id: "download", label: "", render: (upload) => upload.download_available ? <button className="btn" type="button" onClick={() => handleDownloadUpload(upload)} disabled={downloadingUploadId === upload.id}>{downloadingUploadId === upload.id ? "取得中..." : "ダウンロード"}</button> : <span className="history-note">{upload.archive_error ? "保存失敗" : "履歴のみ"}</span> },
+    { id: "download", label: "", render: (upload) => upload.download_available ? <Button className="btn" type="button" onClick={() => handleDownloadUpload(upload)} disabled={downloadingUploadId === upload.id}>{downloadingUploadId === upload.id ? "取得中..." : "ダウンロード"}</Button> : <span className="history-note">{upload.archive_error ? "保存失敗" : "履歴のみ"}</span> },
   ];
   const masterCheckColumns: readonly TableColumn<MenuMasterReviewIssue>[] = [
     { id: "name", label: "献立名", render: (issue) => getReviewSourceName(issue) },
     { id: "kind", label: "種別", render: (issue) => issue.issue_type === "diff" ? "差分あり" : "新規登録候補" },
     { id: "scope", label: "適用先", render: (issue) => getMasterCheckScopeLabel(issue) },
     { id: "detail", label: "差分", render: (issue) => `${(issue.field_diffs || []).length + (issue.condiment_issues || []).length}件` },
-    { id: "edit", label: "", render: (issue) => <button className="btn compact" type="button" onClick={() => { owner.changed(); setSelectedMasterCheckKey(getReviewIssueKey(issue, masterCheckState.issues.indexOf(issue))); }}>設定</button> },
+    { id: "edit", label: "", render: (issue) => <Button className="btn compact" type="button" onClick={() => { owner.changed(); setSelectedMasterCheckKey(getReviewIssueKey(issue, masterCheckState.issues.indexOf(issue))); }}>設定</Button> },
   ];
   if (!authenticated) return <main className="page">ログインを確認しています。</main>;
 
@@ -1591,18 +1592,18 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           </div>
         </div>
         <div className="upload-actions">
-          <input
+          <Input disableUnderline
             key={uploadInputKey}
             type="file"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setFile(e.target.files?.[0] || null)}
           />
-          <input
+          <Input disableUnderline
             className="input"
             placeholder="シート名 (任意)"
             value={sheetName}
             onChange={(e) => setSheetName(e.target.value)}
           />
-          <select
+          <NativeSelect
             className="input scope-select"
             value={scopeType}
             onChange={(e) => {
@@ -1613,19 +1614,19 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
             <option value="base">共通(base)</option>
             <option value="facility">施設差分</option>
             <option value="tag">タグ差分</option>
-          </select>
+          </NativeSelect>
           {scopeType === "facility" && (
-            <select className="input scope-input" value={scopeValue} onChange={(e) => setScopeValue(e.target.value)}>
+            <NativeSelect className="input scope-input" value={scopeValue} onChange={(e) => setScopeValue(e.target.value)}>
               <option value="">施設を選択</option>
               {facilities.map((facility) => (
                 <option key={facility.id} value={facility.id}>
                   {facility.name} ({facility.id})
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           )}
           {scopeType === "tag" && (
-            <select className="input scope-input" value={scopeValue} onChange={(e) => setScopeValue(e.target.value)}>
+            <NativeSelect className="input scope-input" value={scopeValue} onChange={(e) => setScopeValue(e.target.value)}>
               <option value="">タグを選択</option>
               {tagOptions.map((tag) => (
                 <option key={tag.value} value={tag.value}>
@@ -1633,16 +1634,16 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                   {tag.facility_count ? ` (${tag.facility_count}施設)` : ""}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           )}
-          <button className="btn primary" onClick={handleUpload} disabled={uploading}>
+          <Button type="submit" className="btn primary" onClick={handleUpload} disabled={uploading}>
             {uploading ? "アップロード中..." : "アップロード"}
-          </button>
+          </Button>
         </div>
         <fieldset>
           <legend>対象食種（未選択は原本に含まれる食種）</legend>
           {DIET_TYPE_OPTIONS.filter((choice) => choice.value).map((choice) => <label key={choice.value}>
-            <input type="checkbox" checked={importDiets.includes(choice.value)} onChange={(event) => {
+            <Checkbox checked={importDiets.includes(choice.value)} onChange={(event) => {
               const checked = event.target.checked;
               setImportDiets((current) => checked ? [...current, choice.value] : current.filter((value) => value !== choice.value));
             }} />
@@ -1655,14 +1656,14 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
             <div className="month-option-list" aria-label="登録済み月次">
               {menuOptions.length ? (
                 menuOptions.map((option) => (
-                  <button
+                  <Button
                     key={option.id}
                     type="button"
                     className={`month-option${option.id === monthId ? " active" : ""}`}
                     onClick={() => handleMonthChange(option.id)}
                   >
                     {formatMonthOptionLabel(option)}
-                  </button>
+                  </Button>
                 ))
               ) : (
                 <span className="subtle">登録済み月次がありません</span>
@@ -1671,7 +1672,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           </label>
           <label className="field compact-field">
             <span className="field-label">対象月を直接指定</span>
-            <input
+            <Input disableUnderline
               className="input"
               type="month"
               value={selectedMonth}
@@ -1689,13 +1690,13 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         )}
         {message && <p className="message">{message}</p>}
         <h3>保存済みimport</h3>
-        <button className="btn" type="button" onClick={() => void loadSavedImports()}>一覧を再読込</button>
+        <Button className="btn" type="button" onClick={() => void loadSavedImports()}>一覧を再読込</Button>
         <ul>
           {savedImports.map((receipt) => <li key={receipt.id}>
-            <button className="btn" type="button" onClick={() => void resumeImport(receipt.id)}>
+            <Button className="btn" type="button" onClick={() => void resumeImport(receipt.id)}>
               {receipt.source.filename} / {formatScopeLabel(receipt.source.scope_override)} / {receipt.state === "applied" ? "反映済み" : receipt.state === "review" ? "差分確認" : "状態未解決"}
-            </button>
-            <button className="btn" type="button" onClick={() => void downloadImport(receipt)}>原本</button>
+            </Button>
+            <Button className="btn" type="button" onClick={() => void downloadImport(receipt)}>原本</Button>
           </li>)}
         </ul>
         <div className="upload-history">
@@ -1730,9 +1731,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                 <p className="field-label">Upload Review</p>
                 <h2 id="menu-master-review-title">未登録メニューの確認</h2>
               </div>
-              <button className="btn" type="button" onClick={closePendingReview} disabled={reviewSubmitting}>
+              <Button className="btn" type="button" onClick={closePendingReview} disabled={reviewSubmitting}>
                 閉じる
-              </button>
+              </Button>
             </div>
             <p className="subtle">
               既存メニューマスターにない献立、または候補が複数ある献立があります。アップロード前に、既存マスターを使うか新規登録するかを確定してください。
@@ -1746,14 +1747,14 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                   </p>
                   <div className="review-summary-list">
                     {incompletePendingReviewIssues.map((issueState) => (
-                      <button
+                      <Button
                         key={`pending-review-summary-${issueState.issueKey}`}
                         type="button"
                         className={`review-summary-link${highlightedReviewIssueKey === issueState.issueKey ? " active" : ""}`}
                         onClick={() => focusPendingReviewIssue(issueState.issueKey)}
                       >
                         {issueState.sourceName}（{issueState.missingRequirements.join("、")}）
-                      </button>
+                      </Button>
                     ))}
                   </div>
                 </>
@@ -1807,10 +1808,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                     <div className="review-mode-row">
                       {candidates.length > 0 && (
                         <label className="review-radio">
-                          <input
+                          <Input disableUnderline inputProps={{ checked: resolution.action === "existing" }}
                             type="radio"
                             name={`review-action-${issueKey}`}
-                            checked={resolution.action === "existing"}
                             onChange={() => updateReviewResolution(issueKey, { action: "existing" })}
                           />
                           <span>既存マスターを使う</span>
@@ -1818,10 +1818,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       )}
                       {issue.current_master?.id && (
                         <label className="review-radio">
-                          <input
+                          <Input disableUnderline inputProps={{ checked: resolution.action === "update" }}
                             type="radio"
                             name={`review-action-${issueKey}`}
-                            checked={resolution.action === "update"}
                             onChange={() =>
                               updateReviewResolution(issueKey, {
                                 action: "update",
@@ -1833,10 +1832,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         </label>
                       )}
                       <label className="review-radio">
-                        <input
+                        <Input disableUnderline inputProps={{ checked: resolution.action === "create" }}
                           type="radio"
                           name={`review-action-${issueKey}`}
-                          checked={resolution.action === "create"}
                           onChange={() => updateReviewResolution(issueKey, { action: "create" })}
                         />
                         <span>新規登録する</span>
@@ -1847,7 +1845,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       <div className="review-existing">
                         <label>
                           <span>候補マスター</span>
-                          <select
+                          <NativeSelect
                             className="input"
                             aria-label={`候補マスター-${index + 1}`}
                             value={resolution.menu_master_id}
@@ -1865,11 +1863,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                 {candidate.category ? ` / ${candidate.category}` : ""}
                               </option>
                             ))}
-                          </select>
+                          </NativeSelect>
                         </label>
                         <div className="review-candidate-list">
                           {candidates.map((candidate) => (
-                            <button
+                            <Button
                               key={candidate.id}
                               type="button"
                               className={`review-candidate${resolution.menu_master_id === candidate.id ? " active" : ""}`}
@@ -1885,7 +1883,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                               <span>{toResolutionQty(candidate.qty_per_serving) || "-"}</span>
                               {candidate.daypart && <span>{candidate.daypart}</span>}
                               {candidate.category && <span>{candidate.category}</span>}
-                            </button>
+                            </Button>
                           ))}
                         </div>
                       </div>
@@ -1895,7 +1893,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       <div className="review-create-grid">
                         <label>
                           <span>{resolution.action === "update" ? "更新後メニュー名" : "新規メニュー名"}</span>
-                          <input
+                          <Input disableUnderline
                             className="input"
                             aria-label={`新規メニュー名-${index + 1}`}
                             value={resolution.name}
@@ -1904,7 +1902,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         </label>
                         <label>
                           <span>基準単位</span>
-                          <select
+                          <NativeSelect
                             className="input"
                             aria-label={`新規単位-${index + 1}`}
                             value={normalizeUnitChoice(resolution.unit_type)}
@@ -1916,35 +1914,31 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                 {choice.label}
                               </option>
                             ))}
-                          </select>
+                          </NativeSelect>
                         </label>
                         <label>
                           <span>基準量</span>
-                          <input
+                          <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                             className="input"
                             aria-label={`新規量-${index + 1}`}
                             type="number"
-                            min="0"
-                            step="1"
                             value={resolution.qty_per_serving}
                             onChange={(e) => updateReviewResolution(issueKey, { qty_per_serving: e.target.value })}
                           />
                         </label>
                         <label>
                           <span>袋上限数</span>
-                          <input
+                          <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                             className="input"
                             aria-label={`新規袋上限数-${index + 1}`}
                             type="number"
-                            min="0"
-                            step="1"
                             value={resolution.bag_max_qty}
                             onChange={(e) => updateReviewResolution(issueKey, { bag_max_qty: e.target.value })}
                           />
                         </label>
                         <label>
                           <span>袋上限単位</span>
-                          <select
+                          <NativeSelect
                             className="input"
                             aria-label={`新規袋上限単位-${index + 1}`}
                             value={normalizeUnitChoice(resolution.bag_max_unit)}
@@ -1956,11 +1950,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                 {choice.label}
                               </option>
                             ))}
-                          </select>
+                          </NativeSelect>
                         </label>
                         <label>
                           <span>付属品</span>
-                          <input
+                          <Input disableUnderline
                             className="input"
                             aria-label={`新規付属品-${index + 1}`}
                             value={resolution.condiments}
@@ -1976,26 +1970,26 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
             <div className="review-footer">
               <div>
                 <p>{pendingReview.receipt.source.filename} / {pendingReview.receipt.month_id} / {formatScopeLabel(pendingReview.receipt.source.scope_override)} / {pendingReview.receipt.current_review.item_count}件</p>
-                <button className="btn" type="button" onClick={() => void downloadImport(pendingReview.receipt)}>原本をダウンロード</button>
+                <Button className="btn" type="button" onClick={() => void downloadImport(pendingReview.receipt)}>原本をダウンロード</Button>
                 <ul>{pendingReview.receipt.current_review.master_diffs.map((diff, index) => <li key={index}>
                   {diff.source_name}: {diff.field_diffs?.map((field) => `${field.label}: ${field.master_value ?? "未登録"} → ${field.monthly_value ?? "未登録"}`).join("、")}
                 </li>)}</ul>
               </div>
-              <button className="btn" type="button" onClick={closePendingReview} disabled={reviewSubmitting}>
+              <Button className="btn" type="button" onClick={closePendingReview} disabled={reviewSubmitting}>
                 キャンセル
-              </button>
-              <button
+              </Button>
+              <Button
                 className="btn primary"
                 type="button"
                 onClick={() => void confirmPendingReview(false)}
                 disabled={reviewSubmitting || pendingReview.receipt.state !== "review"}
               >
                 {reviewSubmitting ? "確認中..." : canSubmitPendingReview ? "差分設定を保存" : "未完了項目を確認する"}
-              </button>
-              <button className="btn primary" type="button" onClick={() => void confirmPendingReview(true)}
+              </Button>
+              <Button className="btn primary" type="button" onClick={() => void confirmPendingReview(true)}
                 disabled={reviewSubmitting || !pendingReview.saved || !canSubmitPendingReview || pendingReview.receipt.state !== "review"}>
                 保存済み差分を反映
-              </button>
+              </Button>
             </div>
           </section>
         </div>
@@ -2006,7 +2000,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           <header className="panel-header">
             <div>
               <h2>メニューマスター差分チェック</h2>
-              <button className="btn" type="button" onClick={reloadMonthlyEditor}>差分を再読込</button>
+              <Button className="btn" type="button" onClick={reloadMonthlyEditor}>差分を再読込</Button>
               <p className="subtle">
                 月次メニューとメニューマスターを突き合わせ、新規登録が必要なものと、マスター更新が必要な差分を確認します。
               </p>
@@ -2066,10 +2060,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                     <>
                       <div className="review-mode-row">
                         <label className="review-radio">
-                          <input
+                          <Input disableUnderline inputProps={{ checked: resolution.action === "update" }}
                             type="radio"
                             name={`master-check-action-${issueKey}`}
-                            checked={resolution.action === "update"}
                             onChange={() =>
                               updateMasterCheckResolution(issueKey, {
                                 action: "update",
@@ -2079,10 +2072,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           <span>マスターを更新</span>
                         </label>
                         <label className="review-radio">
-                          <input
+                          <Input disableUnderline inputProps={{ checked: resolution.action === "month_only" }}
                             type="radio"
                             name={`master-check-action-${issueKey}`}
-                            checked={resolution.action === "month_only"}
                             onChange={() =>
                               updateMasterCheckResolution(issueKey, {
                                 action: "month_only",
@@ -2094,10 +2086,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           <span>当月にのみ適用</span>
                         </label>
                         <label className="review-radio">
-                          <input
+                          <Input disableUnderline inputProps={{ checked: resolution.action === "category_only" }}
                             type="radio"
                             name={`master-check-action-${issueKey}`}
-                            checked={resolution.action === "category_only"}
                             onChange={() =>
                               updateMasterCheckResolution(issueKey, {
                                 action: "category_only",
@@ -2155,7 +2146,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         <div className="review-create-grid">
                           <label>
                             <span>更新後メニュー名</span>
-                            <input
+                            <Input disableUnderline
                               className="input"
                               aria-label={`差分メニュー名-${index + 1}`}
                               value={resolution.name}
@@ -2164,7 +2155,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           </label>
                           <label>
                             <span>単位</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`差分単位-${index + 1}`}
                               value={normalizeUnitChoice(resolution.unit_type)}
@@ -2176,35 +2167,31 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {choice.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label>
                             <span>量</span>
-                            <input
+                            <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                               className="input"
                               aria-label={`差分量-${index + 1}`}
                               type="number"
-                              min="0"
-                              step="1"
                               value={resolution.qty_per_serving}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { qty_per_serving: e.target.value })}
                             />
                           </label>
                           <label>
                             <span>袋上限数</span>
-                            <input
+                            <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                               className="input"
                               aria-label={`差分袋上限数-${index + 1}`}
                               type="number"
-                              min="0"
-                              step="1"
                               value={resolution.bag_max_qty}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_qty: e.target.value })}
                             />
                           </label>
                           <label>
                             <span>袋上限単位</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`差分袋上限単位-${index + 1}`}
                               value={normalizeUnitChoice(resolution.bag_max_unit)}
@@ -2216,11 +2203,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {choice.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label>
                             <span>付属品</span>
-                            <input
+                            <Input disableUnderline
                               className="input"
                               aria-label={`差分付属品-${index + 1}`}
                               value={resolution.condiments}
@@ -2229,11 +2216,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           </label>
                           <label>
                             <span>区分</span>
-                            <input
+                            <Input disableUnderline inputProps={{ list: "category-options" }}
                               className="input"
                               aria-label={`差分区分-${index + 1}`}
                               value={resolution.category}
-                              list="category-options"
                               onChange={(e) => updateMasterCheckResolution(issueKey, { category: e.target.value })}
                             />
                           </label>
@@ -2243,7 +2229,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         <div className="review-create-grid">
                           <label>
                             <span>単位</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`当月のみ単位-${index + 1}`}
                               value={normalizeUnitChoice(resolution.unit_type)}
@@ -2255,35 +2241,31 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {choice.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label>
                             <span>量</span>
-                            <input
+                            <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                               className="input"
                               aria-label={`当月のみ量-${index + 1}`}
                               type="number"
-                              min="0"
-                              step="1"
                               value={resolution.qty_per_serving}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { qty_per_serving: e.target.value })}
                             />
                           </label>
                           <label>
                             <span>袋上限数</span>
-                            <input
+                            <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                               className="input"
                               aria-label={`当月のみ袋上限数-${index + 1}`}
                               type="number"
-                              min="0"
-                              step="1"
                               value={resolution.bag_max_qty}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_qty: e.target.value })}
                             />
                           </label>
                           <label>
                             <span>袋上限単位</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`当月のみ袋上限単位-${index + 1}`}
                               value={normalizeUnitChoice(resolution.bag_max_unit)}
@@ -2295,15 +2277,14 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {choice.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label>
                             <span>区分</span>
-                            <input
+                            <Input disableUnderline inputProps={{ list: "category-options" }}
                               className="input"
                               aria-label={`当月のみ区分-${index + 1}`}
                               value={resolution.category}
-                              list="category-options"
                               onChange={(e) => updateMasterCheckResolution(issueKey, { category: e.target.value })}
                             />
                           </label>
@@ -2316,11 +2297,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         <div className="review-create-grid">
                           <label>
                             <span>メニューマスターの区分</span>
-                            <input
+                            <Input disableUnderline inputProps={{ list: "category-options" }}
                               className="input"
                               aria-label={`区分だけ-${index + 1}`}
                               value={resolution.category}
-                              list="category-options"
                               onChange={(e) => updateMasterCheckResolution(issueKey, { category: e.target.value })}
                             />
                           </label>
@@ -2332,10 +2312,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       <div className="review-mode-row">
                         {candidates.length > 0 && (
                           <label className="review-radio">
-                            <input
+                            <Input disableUnderline inputProps={{ checked: resolution.action === "existing" }}
                               type="radio"
                               name={`master-check-action-${issueKey}`}
-                              checked={resolution.action === "existing"}
                               onChange={() =>
                                 updateMasterCheckResolution(issueKey, {
                                   action: "existing",
@@ -2348,10 +2327,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           </label>
                         )}
                         <label className="review-radio">
-                          <input
+                          <Input disableUnderline inputProps={{ checked: resolution.action === "create" }}
                             type="radio"
                             name={`master-check-action-${issueKey}`}
-                            checked={resolution.action === "create"}
                             onChange={() =>
                               updateMasterCheckResolution(issueKey, {
                                 action: "create",
@@ -2368,7 +2346,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         <div className="review-existing">
                           <label>
                             <span>候補マスター</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`差分候補マスター-${index + 1}`}
                               value={resolution.menu_master_id}
@@ -2380,7 +2358,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {candidate.name} / {formatUnitChoiceLabel(candidate.unit_type)} / {toResolutionQty(candidate.qty_per_serving) || "-"}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                         </div>
                       )}
@@ -2389,7 +2367,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                         <div className="review-create-grid">
                           <label>
                             <span>新規メニュー名</span>
-                            <input
+                            <Input disableUnderline
                               className="input"
                               aria-label={`差分新規メニュー名-${index + 1}`}
                               value={resolution.name}
@@ -2398,7 +2376,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           </label>
                           <label>
                             <span>基準単位</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`差分新規単位-${index + 1}`}
                               value={normalizeUnitChoice(resolution.unit_type)}
@@ -2410,35 +2388,31 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {choice.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label>
                             <span>基準量</span>
-                            <input
+                            <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                               className="input"
                               aria-label={`差分新規量-${index + 1}`}
                               type="number"
-                              min="0"
-                              step="1"
                               value={resolution.qty_per_serving}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { qty_per_serving: e.target.value })}
                             />
                           </label>
                           <label>
                             <span>袋上限数</span>
-                            <input
+                            <Input disableUnderline inputProps={{ min: "0", step: "1" }}
                               className="input"
                               aria-label={`差分新規袋上限数-${index + 1}`}
                               type="number"
-                              min="0"
-                              step="1"
                               value={resolution.bag_max_qty}
                               onChange={(e) => updateMasterCheckResolution(issueKey, { bag_max_qty: e.target.value })}
                             />
                           </label>
                           <label>
                             <span>袋上限単位</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               aria-label={`差分新規袋上限単位-${index + 1}`}
                               value={normalizeUnitChoice(resolution.bag_max_unit)}
@@ -2450,7 +2424,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                                   {choice.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                         </div>
                       )}
@@ -2458,7 +2432,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                   )}
 
                   <div className="review-footer review-footer-inline">
-                    <button
+                    <Button
                       className="btn primary"
                       type="button"
                       onClick={() => applyMasterCheck(issue, index)}
@@ -2473,7 +2447,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                               ? "区分だけ反映"
                               : "マスターを更新"
                           : "この内容で登録"}
-                    </button>
+                    </Button>
                   </div>
                 </article>
               );
@@ -2500,10 +2474,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
             <p>付属品フラグは、ソース等の付属品情報がまとまったファイルを一括反映するための補助機能です。</p>
           </div>
           <div className="upload-actions condiment-actions">
-            <input type="file" onChange={(e) => setCondimentFile(e.target.files?.[0] || null)} />
-            <button className="btn primary" onClick={handleCondimentUpload} disabled={condimentUploading}>
+            <Input disableUnderline type="file" onChange={(e: ChangeEvent<HTMLInputElement>) => setCondimentFile(e.target.files?.[0] || null)} />
+            <Button type="submit" className="btn primary" onClick={handleCondimentUpload} disabled={condimentUploading}>
               {condimentUploading ? "反映中..." : "反映する"}
-            </button>
+            </Button>
           </div>
           {condimentMessage && <p className="message">{condimentMessage}</p>}
         </section>
@@ -2564,14 +2538,14 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                             ) : (
                               <div className="sheet-cell-stack">
                                 {cellEntries.map((entry) => (
-                                  <button
+                                  <Button
                                     key={entry.id}
                                     type="button"
                                     className={`sheet-chip${selectedEntryId === entry.id ? " active" : ""}`}
                                     onClick={() => selectEntry(entry.id)}
                                   >
                                     {entry.name}
-                                  </button>
+                                  </Button>
                                 ))}
                               </div>
                             )}
@@ -2675,7 +2649,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                     <>
                       <label>
                         <span>例外メニュー名</span>
-                        <input
+                        <Input disableUnderline
                           className="input"
                           value={entryExceptionDraft.name}
                           onChange={(e) => updateEntryExceptionField("name", e.target.value)}
@@ -2683,7 +2657,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       </label>
                       <label>
                         <span>単位</span>
-                        <select
+                        <NativeSelect
                           className="input"
                           value={entryExceptionDraft.unit_type}
                           onChange={(e) => updateEntryExceptionField("unit_type", e.target.value)}
@@ -2694,11 +2668,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                               {choice.label}
                             </option>
                           ))}
-                        </select>
+                        </NativeSelect>
                       </label>
                       <label>
                         <span>量</span>
-                        <input
+                        <Input disableUnderline
                           className="input"
                           type="number"
                           value={entryExceptionDraft.qty_per_serving}
@@ -2707,7 +2681,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       </label>
                       <label>
                         <span>袋最大量</span>
-                        <input
+                        <Input disableUnderline
                           className="input"
                           type="number"
                           value={entryExceptionDraft.bag_max_qty}
@@ -2716,7 +2690,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                       </label>
                       <label>
                         <span>袋単位</span>
-                        <select
+                        <NativeSelect
                           className="input"
                           value={entryExceptionDraft.bag_max_unit}
                           onChange={(e) => updateEntryExceptionField("bag_max_unit", e.target.value)}
@@ -2727,11 +2701,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                               {choice.label}
                             </option>
                           ))}
-                        </select>
+                        </NativeSelect>
                       </label>
                       <label>
                         <span>温冷</span>
-                        <select
+                        <NativeSelect
                           className="input"
                           value={entryExceptionDraft.temp_type}
                           onChange={(e) => updateEntryExceptionField("temp_type", e.target.value)}
@@ -2741,20 +2715,19 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                               {choice.label}
                             </option>
                           ))}
-                        </select>
+                        </NativeSelect>
                       </label>
                       <label>
                         <span>区分</span>
-                        <input
+                        <Input disableUnderline inputProps={{ list: "category-options" }}
                           className="input"
                           value={entryExceptionDraft.category}
-                          list="category-options"
                           onChange={(e) => updateEntryExceptionField("category", e.target.value)}
                         />
                       </label>
                       <label>
                         <span>食種</span>
-                        <select
+                        <NativeSelect
                           className="input"
                           value={entryExceptionDraft.diet_type}
                           onChange={(e) => updateEntryExceptionField("diet_type", e.target.value)}
@@ -2764,7 +2737,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                               {choice.label}
                             </option>
                           ))}
-                        </select>
+                        </NativeSelect>
                       </label>
                       <div className="exception-targets">
                         <p className="field-label">対象施設</p>
@@ -2774,8 +2747,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           ) : (
                             facilities.map((facility) => (
                               <label key={facility.id} className="exception-target">
-                                <input
-                                  type="checkbox"
+                                <Checkbox
                                   checked={entryExceptionDraft.facilityIds.includes(facility.id)}
                                   onChange={() => toggleEntryExceptionFacility(facility.id)}
                                 />
@@ -2787,13 +2759,13 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                           )}
                         </div>
                       </div>
-                      <button className="btn primary" onClick={saveEntryException} disabled={entryExceptionSaving}>
+                      <Button type="submit" className="btn primary" onClick={saveEntryException} disabled={entryExceptionSaving}>
                         {entryExceptionSaving
                           ? "保存中..."
                           : selectedEntry.facility_override
                             ? "この例外メニューを更新"
                             : "この位置に例外メニューを追加"}
-                      </button>
+                      </Button>
                     </>
                   ) : (
                     <p className="subtle">例外メニューを編集できません。</p>
@@ -2896,7 +2868,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           max-width: min(720px, 80vw);
         }
 
-        .month-option {
+        .month-option,
+        .page :global(.MuiButton-root.month-option) {
           border: 1px solid #1f2a2a24;
           background: #ffffff;
           color: #1f2a2a;
@@ -2907,7 +2880,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           white-space: nowrap;
         }
 
-        .month-option.active {
+        .month-option.active,
+        .page :global(.MuiButton-root.month-option.active) {
           background: #1f2a2a;
           border-color: #1f2a2a;
           color: #f7f2e7;
@@ -3337,7 +3311,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           font-size: 13px;
         }
 
-        .btn {
+        .btn,
+        .page :global(.MuiButton-root.btn) {
           border: none;
           border-radius: 999px;
           padding: 8px 14px;
@@ -3347,17 +3322,22 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           cursor: pointer;
         }
 
-        .btn.primary {
+        .btn.primary,
+        .page :global(.MuiButton-root.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .input {
+        .input,
+        .page :global(.MuiInputBase-root.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
           background: #fbfbf9;
         }
+
+        .page :global(.MuiInputBase-root) { min-width: 0; max-width: 100%; }
+        .page :global(.MuiInputBase-input) { min-width: 0; font: inherit; }
 
         .table-wrap {
           overflow-x: auto;
