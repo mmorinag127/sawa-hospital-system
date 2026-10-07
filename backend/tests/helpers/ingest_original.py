@@ -51,7 +51,7 @@ def process_uploaded_original(uploaded_pdf_id):
     return delivery.process(delivery_id, generation)
 
 
-def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date):
+def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="lunch"):
     """Explicit component JSON/menu/PDF inputs, never operator scenario proof."""
     facility = {
         "facility_id": facility_id, "facility_name": "Authored component facility",
@@ -76,7 +76,7 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date):
         month = menu_date.strftime("%Y-%m")
         session.add(MonthlyMenu(id=month, month_start=menu_date.replace(day=1)))
         session.add(MonthlyMenuEntry(id="authored-physical-row", monthly_menu_id=month,
-            menu_date=menu_date, daypart="lunch", name="Menu A", slot_index=0,
+            menu_date=menu_date, daypart=daypart, name="Menu A", slot_index=0,
             facility_override=facility_id))
     with fitz.open() as pdf:
         pdf.new_page()

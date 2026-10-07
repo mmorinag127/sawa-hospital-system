@@ -526,46 +526,37 @@ def test_get_draft_sheet_endpoint_prefers_semantic_shell_over_raw_evidence_when_
     assert payload["draft_sheet_json"]["source"] == "weekly_menu"
 
 
-def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkeypatch):
+def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkeypatch, tmp_path):
+    from datetime import date
+    from src.models.order import OrderLine
+    from src.services.manual_upload_service import ManualUploadSavedFile
+    from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
+    from tests.helpers.ingest_original import (
+        authored_sources, configure_delivery, register_authored_original,
+        reserve_uploaded_original, process_uploaded_original, authored_pipeline_provider,
+    )
+
     order_service.clear_all()
-    original_create_order = ingest_worker.create_order_from_ingest
-
-    def create_order_with_template(*args, **kwargs):
-        order = original_create_order(*args, **kwargs)
-        if isinstance(order, dict):
-            _attach_active_template_version(order["id"], facility_id=order.get("facility_code") or "FAC00001")
-        return order
-
-    monkeypatch.setattr(ingest_worker.config_service, "load_ingest_policy", lambda: {"ocr_retry_limit": 1, "quantity_rules": {}})
-    monkeypatch.setattr(
-        ingest_worker.config_service,
-        "load_facility_master",
-        lambda: {"fax_template_base": {}, "facilities": [{"facility_id": "FAC00001", "facility_name": "施設A"}]},
+    configure_delivery(monkeypatch)
+    # Synthetic component sources and external OCR double, not verified FAX/operator OCR.
+    uri, digest = authored_sources(
+        monkeypatch, tmp_path, facility_id="FAC00001",
+        menu_date=date(2026, 3, 22), daypart="breakfast",
     )
-    monkeypatch.setattr(ingest_worker, "should_skip_ocr", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(ingest_worker, "load_bytes_from_uri", lambda _uri: b"%PDF-1.4 test")
-    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", lambda **_kwargs: _sample_payload("7"))
-    monkeypatch.setattr(
-        ingest_worker,
-        "extract_fax_data",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            facility_name=None,
-            date_strings=[],
-            tokens=[],
-            table_rows=[],
-        ),
+    saved = ManualUploadSavedFile(
+        message_id="msg-evidence-inline-ingest", pdf_uri=uri, content_sha256=digest,
+        original_filename="original.pdf", received_at=datetime(2026, 3, 22, 10, 0, 0),
     )
-    monkeypatch.setattr(ingest_worker.config_service, "get_facility_config", lambda _facility_id: None)
-    monkeypatch.setattr(ingest_worker, "_enqueue_auto_llm_reparse", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(ingest_worker, "create_order_from_ingest", create_order_with_template)
-
-    ingest_worker._process_ingest_inline(
-        message_id="msg-evidence-inline-ingest",
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 3, 22, 10, 0, 0).isoformat(),
-        facility_hint="FAC00001",
-        week_hint="2026-03",
+    uploaded, _ = create_uploaded_pdf_from_upload(
+        saved=saved, facility_hint="FAC00001",
+        week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
+        skip_ocr=False, source_kind="manual_upload",
     )
+    receipt = reserve_uploaded_original(uploaded["id"])
+    assert receipt["id"] == saved.message_id
+    register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
+    authored_pipeline_provider(monkeypatch, table_rows=[["03/22", "朝", "Menu A", "7"]])
+    process_uploaded_original(uploaded["id"])
 
     order = order_service.find_order_by_message_id("msg-evidence-inline-ingest")
     assert isinstance(order, dict)
@@ -573,6 +564,9 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
     assert isinstance(evidence, dict)
     assert evidence["producer_version"] == "ocr_pipeline_ingest"
     assert evidence["capabilities_json"]["step2_view_ready"] is True
+    with session_scope() as session:
+        line = session.query(OrderLine).filter_by(order_id=order["id"]).one()
+        assert line.quantity_original == 7
 
 
 def test_persist_evidence_run_uses_resolved_template_registry_grid_metadata_when_classifier_differs():
