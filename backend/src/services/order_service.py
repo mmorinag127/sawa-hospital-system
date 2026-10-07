@@ -4861,6 +4861,10 @@ def create_order_from_ingest(
         error_message = error_message or "first_pass_output_not_applied"
     with session_scope() as session:
         received_at = _normalize_received_at(payload.received_at)
+        from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
+        ingest_lease = current_ingest_lease()
+        if ingest_lease is not None and not lock_ingest_lease(session, ingest_lease):
+            raise ValueError("ingest_attempt_changed")
         effective_week_hint = _derive_ingest_week_hint(payload)
         if execution_input is None and lines is None:
             # Serialize the existing registration keys before a new parent exists.
@@ -4882,6 +4886,8 @@ def create_order_from_ingest(
         existing, match_reason, effective_week_hint = _find_existing_order_for_ingest(
             session, payload, effective_week_hint=effective_week_hint,
         )
+        if ingest_lease is not None and payload.order_id is not None and (existing is None or existing.id != payload.order_id):
+            raise ValueError("ingest_registered_order_changed")
         if execution_input is None and existing is not None:
             if lock_order_execution_input(session, existing.id) is None:
                 raise ValueError("ocr_order_input_missing")
@@ -4908,6 +4914,8 @@ def create_order_from_ingest(
             .first()
         )
         continuation_document = None
+        if ingest_lease is not None and payload.order_document_id is not None and (existing_document is None or existing_document.id != payload.order_document_id):
+            raise ValueError("ingest_registered_source_changed")
         terminal_without_result = execution_input is not None and pipeline_result is None and document_status in {"skipped", "error"}
         if terminal_without_result and lines is not None:
             raise ValueError("non_ocr_terminal_result_invalid")
@@ -4941,12 +4949,18 @@ def create_order_from_ingest(
                     if needs_context_update:
                         pass
                     else:
+                        if ingest_lease is not None and execution_input is None:
+                            if existing_document.id != current_document_id or existing_document.storage_uri != payload.pdf_uri:
+                                raise ValueError("ingest_registered_source_changed")
+                            existing_document.status = "processing"
+                            existing_document.error_message = "ocr_pending"
                         _ensure_legacy_current_order_version(session, existing_order)
                         if existing_document.id == current_document_id:
                             _record_current_order_version(session, existing_order, existing_document)
                         if execution_input is not None:
                             advance_nonworkflow_order_input(session, execution_input, existing_order)
                         serialized = serialize_order(existing_order, allow_unresolved_menu_amount=True)
+                        serialized["ingest_registration_receipt"] = {"order_id": existing_order.id, "document_id": existing_document.id}
                         if isinstance(pipeline_result, dict):
                             serialized["first_pass_evidence"] = _persist_ingest_pipeline_evidence(
                                 session, existing_order, pipeline_result, document_status,
@@ -5041,6 +5055,7 @@ def create_order_from_ingest(
             if current_state is not None:
                 session.delete(current_state)
         serialized = serialize_order(order, allow_unresolved_menu_amount=True)
+        serialized["ingest_registration_receipt"] = {"order_id": order.id, "document_id": document.id}
         serialized["first_pass_result_applied"] = lines is not None and document_status == "success"
         if terminal_without_result:
             job = session.get(OcrJob, execution_input["job_id"])
@@ -14302,8 +14317,8 @@ def _finalize_async_first_pass_side_effects(
     if normalized_message_id:
         try:
             from src.services import ingest_job_service
-
-            ingest_job_service.complete_ingest_job(normalized_message_id)
+            execution = current_nonworkflow_execution()
+            settled = ingest_job_service.settle_ingest_ocr_terminal(execution) if isinstance(execution, dict) and execution.get("job_id") == job_id and execution.get("order_id") == order_id and (execution.get("ingest_lease") or {}).get("id") == normalized_message_id else None
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Ingest job completion sync failed after OCR reconcile",
@@ -14311,10 +14326,15 @@ def _finalize_async_first_pass_side_effects(
                 message_id=normalized_message_id,
                 error=str(exc),
             )
+            settled = None
         try:
-            from src.services.uploaded_pdf_service import mark_uploaded_pdf_completed_by_message_id_if_ready
-
-            mark_uploaded_pdf_completed_by_message_id_if_ready(normalized_message_id)
+            from src.services.uploaded_pdf_service import mark_uploaded_pdf_completed_by_message_id_if_ready, schedule_uploaded_pdf_retry
+            uploaded = settled["lease"].get("uploaded_lease") if settled is not None else None
+            if uploaded is not None and settled["status"] == "done":
+                mark_uploaded_pdf_completed_by_message_id_if_ready(normalized_message_id, lease=uploaded, completion=settled)
+            elif uploaded is not None and settled["status"] == "failed":
+                schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
+                    error_code="ingest_failed", error_message=settled["error"], terminal=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Uploaded PDF completion sync failed after OCR reconcile",

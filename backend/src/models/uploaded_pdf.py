@@ -28,6 +28,7 @@ class UploadedPdf(Base):
     attempt_count = Column(Integer, nullable=False, default=0)
     max_attempts = Column(Integer, nullable=False, default=5)
     lease_owner = Column(String, nullable=True)
+    lease_token = Column(String, nullable=True)
     lease_expires_at = Column(DateTime, nullable=True, index=True)
     next_retry_at = Column(DateTime, nullable=True, index=True)
     last_error_code = Column(String, nullable=True)

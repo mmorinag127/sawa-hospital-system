@@ -1,8 +1,14 @@
 from datetime import datetime, timedelta
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+from hashlib import sha256
+import json
 import os
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, update, func, desc
+from sqlalchemy import and_, or_, select, update, func, desc, exists
 
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
@@ -12,6 +18,112 @@ from src.services.ocr_job_service import (
     is_job_recoverable,
     is_job_stale,
 )
+
+_execution_lease = ContextVar("ingest_execution_lease", default=None)
+
+
+def payload_digest(payload: dict[str, Any]) -> str:
+    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+@contextmanager
+def ingest_execution_context(lease):
+    token = _execution_lease.set(deepcopy(lease))
+    try:
+        yield
+    finally:
+        _execution_lease.reset(token)
+
+
+def current_ingest_lease():
+    return deepcopy(_execution_lease.get())
+
+
+def original_ingest_ocr_reference(lease):
+    with session_scope() as session:
+        if not lock_ingest_lease(session, lease):
+            raise ValueError("ingest_attempt_changed")
+        owner = OcrJob.metrics["ingest_lease"]
+        ids = session.execute(select(OcrJob.id).where(owner["id"].as_string() == lease["id"],
+            owner["claim_id"].as_string() == lease["recovery_claim_id"],
+            owner["input_digest"].as_string() == lease["input_digest"])).scalars().all()
+        if len(ids) != 1:
+            raise ValueError("ingest_recovery_original_capture_missing")
+        return ids[0]
+
+
+def prepare_ingest_ocr_job(lease, job_id, payload):
+    from src.services.ocr_job_service import _job_to_dict
+    with session_scope() as session:
+        if not lock_ingest_lease(session, lease):
+            raise ValueError("ingest_attempt_changed")
+        session.execute(update(OcrJob).where(OcrJob.id == job_id).values(status=OcrJob.status))
+        job = session.get(OcrJob, job_id, populate_existing=True, with_for_update=True)
+        if job is not None and (job.metrics or {}).get("workflow_attempt_id") is not None:
+            raise ValueError("ocr_execution_owner_changed")
+        if lease.get("recovery_claim_id") is not None and job is not None:
+            recorded = (job.metrics or {}).get("nonworkflow_execution")
+            prior = recorded.get("ingest_lease") if isinstance(recorded, dict) else None
+            if not isinstance(prior, dict) or prior.get("claim_id") != lease["recovery_claim_id"] or prior.get("input_digest") != lease["input_digest"] or prior.get("id") != lease["id"]:
+                raise ValueError("ingest_recovery_original_capture_missing")
+            recorded = deepcopy(recorded)
+            recorded["ingest_lease"] = deepcopy(lease)
+            job.metrics = {**job.metrics, "ingest_lease": deepcopy(lease), "nonworkflow_execution": recorded}
+            session.flush()
+            return _job_to_dict(job)
+        if job is None:
+            job = OcrJob(id=job_id, created_at=datetime.utcnow())
+            session.add(job)
+        job.status = "running"
+        job.input_reference = payload.pdf_uri
+        job.order_id = payload.order_id
+        job.uploaded_pdf_id = payload.uploaded_pdf_id
+        job.order_document_id = payload.order_document_id
+        job.input_artifact_digest = payload.content_sha256
+        job.error_message = None
+        job.updated_at = datetime.utcnow()
+        retained = {key: value for key, value in (job.metrics or {}).items() if key not in {
+            "nonworkflow_execution", "pipeline_delivery_receipt", "pending_receipt", "first_pass_terminal_receipt",
+            "non_ocr_terminal_receipt", "source_failure_receipt", "rerun_terminal_receipt", "evidence_run_id", "reparse_evidence_run_id",
+        }}
+        job.metrics = {**retained, "ingest_lease": deepcopy(lease), "result_state": "processing",
+                       "processing_stage": "input_capture", "next_recovery_at": None}
+        job.output_reference = None
+        session.flush()
+        return _job_to_dict(job)
+
+
+def fail_ingest_ocr_capture(lease, job_id, error):
+    with session_scope() as session:
+        if not lock_ingest_lease(session, lease):
+            return False
+        session.execute(update(OcrJob).where(OcrJob.id == job_id).values(status=OcrJob.status))
+        job = session.get(OcrJob, job_id, populate_existing=True, with_for_update=True)
+        if job is None or (job.metrics or {}).get("ingest_lease") != lease or (job.metrics or {}).get("nonworkflow_execution") is not None or (job.metrics or {}).get("workflow_attempt_id") is not None:
+            return False
+        job.status = "failed"
+        job.error_message = str(error)
+        job.updated_at = datetime.utcnow()
+        return True
+
+
+def lock_ingest_lease(session, lease, *, terminal=False):
+    if not isinstance(lease, dict) or type(lease.get("attempts")) is not int or lease["attempts"] < 1 or any(not lease.get(key) for key in ("id", "generation", "claim_id", "input_digest")):
+        return False
+    uploaded = lease.get("uploaded_lease")
+    if uploaded is not None:
+        from src.services.uploaded_pdf_service import lock_uploaded_pdf_lease
+        if not lock_uploaded_pdf_lease(session, uploaded, terminal=terminal):
+            return False
+    conditions = (IngestJob.id == lease["id"], IngestJob.generation == lease["generation"],
+                  IngestJob.claim_id == lease["claim_id"], IngestJob.input_digest == lease["input_digest"],
+                  IngestJob.attempts == lease["attempts"])
+    states = ["processing", "done"] if terminal else ["processing"]
+    result = session.execute(update(IngestJob).where(*conditions, IngestJob.status.in_(states)).values(status=IngestJob.status))
+    if result.rowcount != 1:
+        return False
+    job = session.get(IngestJob, lease["id"], populate_existing=True)
+    return job is not None and payload_digest(job.payload) == lease["input_digest"]
 
 
 def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -25,46 +137,65 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def create_ingest_job(payload: dict[str, Any], force: bool = False) -> tuple[str, bool]:
+def create_ingest_receipt(payload: dict[str, Any], force: bool = False) -> dict[str, Any]:
     normalized = _normalize_payload(payload)
     job_id = normalized["message_id"]
     now = datetime.utcnow()
     should_enqueue = True
     with session_scope() as session:
-        job = session.get(IngestJob, job_id)
+        if session.bind.dialect.name == "postgresql":
+            session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended("ingest-job:" + job_id, 0))))
+        session.execute(update(IngestJob).where(IngestJob.id == job_id).values(status=IngestJob.status))
+        job = session.get(IngestJob, job_id, populate_existing=True, with_for_update=True)
         if job:
             if force:
                 job.status = "pending"
                 job.started_at = None
                 job.finished_at = None
                 job.last_error = None
+                job.failure_kind = None
+                job.generation = uuid4().hex
+                job.generation_attempts = 0
+                job.claim_id = None
+                job.recovery_claim_id = None
+                job.payload = normalized
+                job.input_digest = payload_digest(normalized)
                 should_enqueue = True
             else:
-                if job.status == "done":
-                    should_enqueue = False
-                elif job.status == "processing":
-                    should_enqueue = False
-                elif job.status != "processing":
-                    job.status = "pending"
-            job.payload = normalized
-            job.updated_at = now
+                should_enqueue = job.status == "pending" and job.input_digest == payload_digest(normalized)
+            if force:
+                job.updated_at = now
         else:
-            session.add(
-                IngestJob(
+            job = IngestJob(
                     id=job_id,
                     status="pending",
                     payload=normalized,
                     attempts=0,
+                    generation_attempts=0,
+                    input_digest=payload_digest(normalized),
+                    generation=uuid4().hex,
                     created_at=now,
                     updated_at=now,
                 )
-            )
-    return job_id, should_enqueue
+            session.add(job)
+        session.flush()
+        return {"id": job.id, "generation": job.generation, "input_digest": job.input_digest, "enqueued": should_enqueue}
+
+
+def create_ingest_job(payload: dict[str, Any], force: bool = False) -> tuple[str, bool]:
+    receipt = create_ingest_receipt(payload, force=force)
+    return receipt["id"], receipt["enqueued"]
 
 
 def restart_ingest_job(job_id: str) -> bool:
     now = datetime.utcnow()
     with session_scope() as session:
+        session.execute(update(IngestJob).where(IngestJob.id == job_id).values(status=IngestJob.status))
+        job = session.get(IngestJob, job_id, populate_existing=True, with_for_update=True)
+        if job is None:
+            return False
+        _normalize_payload(job.payload)
+        digest = payload_digest(job.payload)
         result = session.execute(
             update(IngestJob)
             .where(IngestJob.id == job_id)
@@ -74,6 +205,12 @@ def restart_ingest_job(job_id: str) -> bool:
                 finished_at=None,
                 updated_at=now,
                 last_error=None,
+                failure_kind=None,
+                generation=uuid4().hex,
+                generation_attempts=0,
+                claim_id=None,
+                recovery_claim_id=None,
+                input_digest=digest,
             )
         )
         return result.rowcount > 0
@@ -94,6 +231,11 @@ def get_ingest_job_snapshot(job_id: str) -> dict[str, Any] | None:
             "id": job.id,
             "status": job.status,
             "attempts": job.attempts,
+            "generation_attempts": job.generation_attempts,
+            "input_digest": job.input_digest,
+            "generation": job.generation,
+            "claim_id": job.claim_id,
+            "failure_kind": job.failure_kind,
             "last_error": job.last_error,
             "created_at": job.created_at.isoformat() if job.created_at else None,
             "updated_at": job.updated_at.isoformat() if job.updated_at else None,
@@ -102,6 +244,7 @@ def get_ingest_job_snapshot(job_id: str) -> dict[str, Any] | None:
             "message_id": payload.get("message_id"),
             "pdf_uri": payload.get("pdf_uri"),
             "received_at": payload.get("received_at"),
+            "uploaded_pdf_id": payload.get("uploaded_pdf_id"),
         }
 
 
@@ -157,64 +300,223 @@ def _max_auto_attempts() -> int:
 
 def _eligible_ingest_job_condition(stale_before: datetime, recovery_cutoff: datetime):
     max_attempts = _max_auto_attempts()
-    return or_(
+    return and_(IngestJob.generation.is_not(None), IngestJob.input_digest.is_not(None), IngestJob.generation_attempts.is_not(None), or_(
         and_(
             IngestJob.status == "pending",
             IngestJob.updated_at >= recovery_cutoff,
-            IngestJob.attempts < max_attempts,
-        ),
-        and_(
-            IngestJob.status == "error",
-            IngestJob.updated_at >= recovery_cutoff,
-            IngestJob.attempts < max_attempts,
+            IngestJob.generation_attempts < max_attempts,
         ),
         and_(
             IngestJob.status == "processing",
             IngestJob.started_at < stale_before,
-            IngestJob.attempts < max_attempts,
+            IngestJob.generation_attempts < max_attempts,
+            ~exists(select(OcrJob.id).where(OcrJob.status.in_(["awaiting_output", "recovering"]),
+                OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["id"].as_string() == IngestJob.id,
+                OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["claim_id"].as_string() == IngestJob.claim_id)),
         ),
-    )
+    ))
 
 
-def claim_ingest_job(job_id: str) -> bool:
+def claim_ingest_job(job_id: str, *, generation: str, input_digest: str, uploaded_lease=None):
+    if not generation or not input_digest:
+        return None
     now = datetime.utcnow()
     stale_before = _stale_threshold()
     with session_scope() as session:
+        if uploaded_lease is not None:
+            from src.services.uploaded_pdf_service import lock_uploaded_pdf_lease
+            if not lock_uploaded_pdf_lease(session, uploaded_lease):
+                return None
+        session.execute(update(IngestJob).where(IngestJob.id == job_id, IngestJob.generation == generation, IngestJob.input_digest == input_digest).values(status=IngestJob.status))
+        previous = session.get(IngestJob, job_id, populate_existing=True, with_for_update=True)
+        original = previous.payload if previous is not None and previous.generation == generation and previous.input_digest == input_digest else None
+        if original is None or previous.generation_attempts is None:
+            return None
+        if previous.status == "processing" and session.execute(select(OcrJob.id).where(
+            OcrJob.status.in_(["awaiting_output", "recovering"]),
+            OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["id"].as_string() == job_id,
+            OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["claim_id"].as_string() == previous.claim_id,
+        ).limit(1)).first() is not None:
+            return None
+        if original.get("uploaded_pdf_id") is not None and uploaded_lease is None:
+            return None
+        if uploaded_lease is not None:
+            from src.services.uploaded_pdf_service import build_ingest_payload
+            captured = build_ingest_payload(uploaded_lease)
+            for key in ("message_id", "pdf_uri", "received_at", "facility_hint", "week_hint", "facility_name", "skip_ocr", "source_kind", "original_filename", "content_sha256", "uploaded_pdf_id"):
+                if original.get(key) != captured.get(key):
+                    raise ValueError("uploaded_pdf_original_input_changed")
+        if payload_digest(original) != input_digest:
+            raise ValueError("ingest_persisted_input_changed")
+        eligible = or_(IngestJob.status == "pending",
+                       and_(IngestJob.status == "processing", IngestJob.started_at < stale_before))
+        exhausted = session.execute(update(IngestJob).where(
+            IngestJob.id == job_id, IngestJob.generation == generation, IngestJob.input_digest == input_digest,
+            IngestJob.claim_id == previous.claim_id, IngestJob.attempts == previous.attempts,
+            eligible, IngestJob.generation_attempts >= _max_auto_attempts(),
+        ).values(status="error", failure_kind="budget_exhausted", last_error="ingest_recovery_budget_exhausted",
+                 finished_at=now, updated_at=now))
+        if exhausted.rowcount == 1:
+            if uploaded_lease is not None:
+                from src.services.uploaded_pdf_service import stop_uploaded_pdf_budget
+                stop_uploaded_pdf_budget(session, uploaded_lease)
+            return {"claim_refusal": "budget_exhausted", "id": job_id,
+                    "generation": generation, "input_digest": input_digest,
+                    "uploaded_lease": deepcopy(uploaded_lease)}
+        claim_id = uuid4().hex
+        recovery_claim_id = previous.claim_id if previous.status == "processing" else previous.recovery_claim_id
         result = session.execute(
             update(IngestJob)
             .where(IngestJob.id == job_id)
+            .where(IngestJob.generation == generation, IngestJob.input_digest == input_digest)
+            .where(IngestJob.generation_attempts < _max_auto_attempts())
             .where(
-                (IngestJob.status.in_(["pending", "error"]))
+                (IngestJob.status == "pending")
                 | ((IngestJob.status == "processing") & (IngestJob.started_at < stale_before))
             )
             .values(
                 status="processing",
                 attempts=IngestJob.attempts + 1,
+                generation_attempts=IngestJob.generation_attempts + 1,
                 started_at=now,
                 updated_at=now,
+                claim_id=claim_id,
+                recovery_claim_id=recovery_claim_id,
             )
         )
-        return result.rowcount > 0
+        if result.rowcount != 1:
+            return None
+        job = session.get(IngestJob, job_id, populate_existing=True)
+        if payload_digest(job.payload) != input_digest:
+            raise ValueError("ingest_persisted_input_changed")
+        return {"id": job.id, "generation": generation, "input_digest": input_digest,
+                "claim_id": claim_id, "attempts": job.attempts, "payload": deepcopy(job.payload),
+                "recovery_claim_id": recovery_claim_id,
+                "uploaded_lease": deepcopy(uploaded_lease)}
 
 
-def complete_ingest_job(job_id: str) -> None:
+def complete_ingest_job(job_id: str, *, lease) -> bool:
     now = datetime.utcnow()
     with session_scope() as session:
+        if not isinstance(lease, dict) or job_id != lease.get("id") or not lock_ingest_lease(session, lease):
+            return False
         session.execute(
             update(IngestJob)
             .where(IngestJob.id == job_id)
             .values(status="done", finished_at=now, updated_at=now, last_error=None)
         )
+        return True
 
 
-def fail_ingest_job(job_id: str, error_message: str) -> None:
+def fail_ingest_job(job_id: str, error_message: str, *, lease) -> bool:
     now = datetime.utcnow()
     with session_scope() as session:
+        if not isinstance(lease, dict) or job_id != lease.get("id") or not lock_ingest_lease(session, lease):
+            return False
         session.execute(
             update(IngestJob)
             .where(IngestJob.id == job_id)
-            .values(status="error", updated_at=now, last_error=error_message)
+            .values(status="error", finished_at=now, updated_at=now, last_error=error_message, failure_kind="business")
         )
+        return True
+
+
+def fail_ingest_attempt(lease, error):
+    accepted = fail_ingest_job(lease["id"], str(error), lease=lease)
+    uploaded = lease.get("uploaded_lease")
+    if accepted and uploaded is not None:
+        from src.services.uploaded_pdf_service import schedule_uploaded_pdf_retry
+        schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
+            error_code="ingest_failed", error_message=str(error), terminal=True)
+    return accepted
+
+
+def settle_ingest_ocr_terminal(execution):
+    lease = execution.get("ingest_lease") if isinstance(execution, dict) else None
+    if lease is None:
+        return None
+    with session_scope() as session:
+        if not lock_ingest_lease(session, lease):
+            return None
+        session.execute(update(OcrJob).where(OcrJob.id == execution["job_id"]).values(status=OcrJob.status))
+        job = session.get(OcrJob, execution["job_id"], populate_existing=True, with_for_update=True)
+        stored = (job.metrics or {}).get("nonworkflow_execution") if job is not None else None
+        receipt = ((job.metrics or {}).get("first_pass_terminal_receipt") or (job.metrics or {}).get("non_ocr_terminal_receipt")) if job is not None else None
+        if (job is None or not isinstance(stored, dict) or stored.get("execution_id") != execution["execution_id"]
+            or stored.get("ingest_lease") != lease or not isinstance(receipt, dict)
+            or receipt.get("execution_id") != execution["execution_id"] or receipt.get("job_id") != job.id
+            or receipt.get("status") != job.status or job.status not in {"done", "failed"}
+            or job.input_reference != execution["input_reference"]):
+            return None
+        now = datetime.utcnow()
+        failed = job.status == "failed"
+        error = job.error_message or receipt.get("error") or ("first_pass_output_rejected" if failed else None)
+        session.execute(update(IngestJob).where(IngestJob.id == lease["id"]).values(
+            status="error" if failed else "done", finished_at=now, updated_at=now,
+            last_error=error, failure_kind="business" if failed else None))
+        return {"status": job.status, "error": error, "lease": deepcopy(lease)}
+
+
+def list_ocr_recovery_candidates(limit):
+    from src.services.ocr_job_service import _job_to_dict
+    original = OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]
+    owns_ingest = exists(select(IngestJob.id).where(
+        IngestJob.id == original["id"].as_string(), IngestJob.status == "processing",
+        IngestJob.generation == original["generation"].as_string(),
+        IngestJob.claim_id == original["claim_id"].as_string(),
+        IngestJob.input_digest == original["input_digest"].as_string()))
+    with session_scope() as session:
+        rows = session.execute(select(OcrJob).where(
+            or_(OcrJob.status.in_(["awaiting_output", "recovering", "running", "pending"]),
+                and_(OcrJob.status.in_(["failed", "error"]), OcrJob.error_message.ilike("%ocr pipeline output not found%"))),
+            or_(OcrJob.metrics["workflow_attempt_id"].as_string().is_not(None), original["id"].as_string().is_(None), owns_ingest),
+        ).order_by(OcrJob.updated_at.asc()).limit(limit)).scalars().all()
+        return [value for value in (_job_to_dict(row) for row in rows) if is_job_recoverable(value)]
+
+
+def recover_completed_upload(uploaded, captured):
+    from src.services.uploaded_pdf_service import lock_uploaded_pdf_lease, build_ingest_payload, _write_attempt
+    from src.services.workflow_attempt_guard_service import lock_order_execution_input
+    from src.models.document import OrderDocument
+    from src.models.uploaded_pdf import UploadedPdf
+    with session_scope() as session:
+        if not lock_uploaded_pdf_lease(session, uploaded):
+            return False
+        session.execute(update(IngestJob).where(IngestJob.id == captured["id"]).values(status=IngestJob.status))
+        job = session.get(IngestJob, captured["id"], populate_existing=True)
+        if job is None or job.status != "done" or job.generation != captured["generation"] or job.claim_id != captured["claim_id"] or job.input_digest != captured["input_digest"] or payload_digest(job.payload) != job.input_digest:
+            return False
+        authored = build_ingest_payload(uploaded)
+        if any(job.payload.get(key) != authored.get(key) for key in ("message_id", "pdf_uri", "received_at", "facility_hint", "week_hint", "facility_name", "skip_ocr", "source_kind", "original_filename", "content_sha256", "uploaded_pdf_id")):
+            return False
+        original = OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]
+        rows = session.execute(select(OcrJob).where(original["id"].as_string() == job.id,
+            original["generation"].as_string() == job.generation, original["claim_id"].as_string() == job.claim_id,
+            OcrJob.status == "done")).scalars().all()
+        if len(rows) != 1:
+            return False
+        ocr = rows[0]
+        boundary = deepcopy(ocr.metrics["nonworkflow_execution"])
+        order = lock_order_execution_input(session, boundary.get("order_id"))
+        ocr = session.get(OcrJob, ocr.id, populate_existing=True, with_for_update=True)
+        if order is None or ocr.status != "done" or ocr.metrics.get("nonworkflow_execution") != boundary:
+            return False
+        receipt = ocr.metrics.get("first_pass_terminal_receipt") or ocr.metrics.get("non_ocr_terminal_receipt")
+        document = boundary.get("orders", {}).get(boundary.get("order_id"), {}).get("document")
+        if not isinstance(receipt, dict) or receipt.get("job_id") != ocr.id or receipt.get("execution_id") != boundary["execution_id"] or receipt.get("status") != "done" or not isinstance(document, dict) or document.get("storage_uri") != uploaded["storage_uri"] or document.get("source_email_id") != uploaded["message_id"]:
+            return False
+        saved_document = session.get(OrderDocument, document["id"], populate_existing=True, with_for_update=True)
+        if saved_document is None or order.current_document_id != saved_document.id or saved_document.storage_uri != uploaded["storage_uri"] or saved_document.source_email_id != uploaded["message_id"] or order.archived_at is not None:
+            return False
+        row = session.get(UploadedPdf, uploaded["id"])
+        row.current_order_id, row.current_document_id = order.id, saved_document.id
+        row.status, row.current_stage = "completed", "completed"
+        row.lease_expires_at, row.next_retry_at = None, None
+        row.last_error_code, row.last_error_message = None, None
+        row.updated_at = datetime.utcnow()
+        _write_attempt(session, uploaded_pdf_id=row.id, attempt_no=row.attempt_count, stage="completed",
+            status="completed", worker_instance=uploaded["lease_owner"], finished_at=row.updated_at)
+        return True
 
 
 def list_pending_jobs(limit: int = 10) -> list[str]:
@@ -248,6 +550,11 @@ def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str, Any]
                     "id": job.id,
                     "status": job.status,
                     "attempts": job.attempts,
+                    "generation_attempts": job.generation_attempts,
+                    "generation": job.generation,
+                    "claim_id": job.claim_id,
+                    "input_digest": job.input_digest,
+                    "failure_kind": job.failure_kind,
                     "last_error": job.last_error,
                     "created_at": job.created_at,
                     "updated_at": job.updated_at,
@@ -269,22 +576,33 @@ def reset_stale_processing(minutes: int | None = None, limit: int = 100) -> list
     with session_scope() as session:
         stale_ids = (
             session.execute(
-                select(IngestJob.id)
+                select(IngestJob.id, IngestJob.generation, IngestJob.claim_id, IngestJob.started_at)
                 .where((IngestJob.status == "processing") & (IngestJob.started_at < stale_before))
+                .where(IngestJob.generation.is_not(None), IngestJob.input_digest.is_not(None))
                 .order_by(IngestJob.started_at.asc())
                 .limit(limit)
             )
-            .scalars()
             .all()
         )
         if not stale_ids:
             return []
-        session.execute(
-            update(IngestJob)
-            .where(IngestJob.id.in_(stale_ids))
-            .values(status="pending", updated_at=now)
-        )
-        return list(stale_ids)
+        reset = []
+        for job_id, generation, claim_id, started_at in stale_ids:
+            locked = session.execute(update(IngestJob).where(IngestJob.id == job_id, IngestJob.generation == generation,
+                IngestJob.claim_id == claim_id, IngestJob.status == "processing", IngestJob.started_at == started_at)
+                .values(status=IngestJob.status))
+            if locked.rowcount != 1:
+                continue
+            if session.execute(select(OcrJob.id).where(OcrJob.status.in_(["awaiting_output", "recovering"]),
+                OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["id"].as_string() == job_id,
+                OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["claim_id"].as_string() == claim_id).limit(1)).first() is not None:
+                continue
+            result = session.execute(update(IngestJob).where(IngestJob.id == job_id, IngestJob.generation == generation,
+                IngestJob.claim_id == claim_id, IngestJob.status == "processing", IngestJob.started_at == started_at)
+                .values(status="pending", updated_at=now, claim_id=None, recovery_claim_id=claim_id, generation=uuid4().hex))
+            if result.rowcount == 1:
+                reset.append(job_id)
+        return reset
 
 
 def summarize_ingest_jobs() -> dict[str, Any]:
@@ -332,7 +650,7 @@ def summarize_ingest_jobs() -> dict[str, Any]:
             session.execute(
                 select(func.count(IngestJob.id)).where(
                     IngestJob.status.in_(["pending", "error", "processing"]),
-                    IngestJob.attempts >= max_attempts,
+                    IngestJob.generation_attempts >= max_attempts,
                 )
             ).scalar_one()
             or 0

@@ -13,6 +13,7 @@ from src.db import session_scope
 from src.models.document import OrderDocument
 from src.models.ingest_job import IngestJob
 from src.models.order import Order
+from src.models.ocr_job import OcrJob
 from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
 from src.models.user import Notification
 from src.services.ingest_policy import require_explicit_ingest_week, retry_backoff_seconds
@@ -190,6 +191,7 @@ def _serialize_uploaded_pdf(row: UploadedPdf) -> dict[str, Any]:
         "attempt_count": int(row.attempt_count or 0),
         "max_attempts": int(row.max_attempts or 0),
         "lease_owner": row.lease_owner,
+        "lease_token": row.lease_token,
         "lease_expires_at": row.lease_expires_at.isoformat() if row.lease_expires_at else None,
         "next_retry_at": row.next_retry_at.isoformat() if row.next_retry_at else None,
         "last_error_code": row.last_error_code,
@@ -343,9 +345,12 @@ def create_uploaded_pdf_from_upload(
     now = _now()
     duplicate_blocked = False
     with session_scope() as session:
+        if session.bind.dialect.name == "postgresql":
+            session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended("uploaded-pdf:" + saved.message_id, 0))))
+        session.execute(update(UploadedPdf).where(UploadedPdf.message_id == saved.message_id).values(status=UploadedPdf.status))
         row = (
             session.execute(
-                select(UploadedPdf).where(UploadedPdf.message_id == saved.message_id)
+                select(UploadedPdf).where(UploadedPdf.message_id == saved.message_id).with_for_update()
             )
             .scalars()
             .first()
@@ -385,9 +390,9 @@ def create_uploaded_pdf_from_upload(
             row.skip_ocr = bool(skip_ocr)
             row.status = "pending"
             row.current_stage = "uploaded"
-            row.attempt_count = 0
             row.max_attempts = _max_attempts()
             row.lease_owner = None
+            row.lease_token = None
             row.lease_expires_at = None
             row.next_retry_at = None
             row.last_error_code = None
@@ -428,8 +433,6 @@ def get_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         if row is None:
             return None
-        _link_current_entities(session, row)
-        session.flush()
         return _serialize_uploaded_pdf_with_context(session, row)
 
 
@@ -449,31 +452,35 @@ def get_uploaded_pdf_by_message_id(message_id: str) -> dict[str, Any] | None:
         )
         if row is None:
             return None
-        _link_current_entities(session, row)
-        session.flush()
         return _serialize_uploaded_pdf_with_context(session, row)
 
 
-def refresh_uploaded_pdf_links(uploaded_pdf_id: str) -> dict[str, Any] | None:
+def refresh_uploaded_pdf_links(uploaded_pdf_id: str, *, lease, order_id: str, document_id: str) -> dict[str, Any] | None:
     with session_scope() as session:
-        row = session.get(UploadedPdf, uploaded_pdf_id)
-        if row is None:
+        if not lock_uploaded_pdf_lease(session, lease) or uploaded_pdf_id != lease.get("id"):
             return None
-        _link_current_entities(session, row)
+        from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
+        original = current_ingest_lease()
+        if original is None or original.get("uploaded_lease") != lease or not lock_ingest_lease(session, original):
+            return None
+        row = session.get(UploadedPdf, uploaded_pdf_id)
+        from src.services.workflow_attempt_guard_service import lock_order_execution_input
+        order = lock_order_execution_input(session, order_id)
+        document = session.get(OrderDocument, document_id, populate_existing=True, with_for_update=True)
+        if document is None or order is None or document.source_email_id != row.message_id or document.storage_uri != row.storage_uri or order.current_document_id != document.id:
+            return None
+        row.current_order_id = order_id
+        row.current_document_id = document_id
         session.flush()
         return _serialize_uploaded_pdf_with_context(session, row)
 
 
 def list_uploaded_pdfs(status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-    backfill_uploaded_pdfs_from_ingest_jobs(limit=max(limit, _backfill_scan_limit()))
     with session_scope() as session:
         query = select(UploadedPdf).order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc())
         if status:
             query = query.where(UploadedPdf.status == status)
         rows = session.execute(query.limit(limit)).scalars().all()
-        for row in rows:
-            _link_current_entities(session, row)
-        session.flush()
         return [_serialize_uploaded_pdf_with_context(session, row) for row in rows]
 
 
@@ -532,9 +539,17 @@ def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str) -> dict[st
     now = _now()
     lease_until = now + timedelta(seconds=_lease_seconds())
     with session_scope() as session:
-        row = session.get(UploadedPdf, uploaded_pdf_id)
+        session.execute(update(UploadedPdf).where(UploadedPdf.id == uploaded_pdf_id).values(status=UploadedPdf.status))
+        row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True, with_for_update=True)
         if row is None:
             return None
+        if row.status == "processing":
+            for job in session.execute(select(OcrJob).where(OcrJob.uploaded_pdf_id == uploaded_pdf_id, OcrJob.status.in_(["awaiting_output", "recovering"]))).scalars():
+                recorded = (job.metrics or {}).get("nonworkflow_execution")
+                lease = recorded.get("ingest_lease") if isinstance(recorded, dict) else None
+                owner = lease.get("uploaded_lease") if isinstance(lease, dict) else None
+                if isinstance(owner, dict) and owner.get("lease_token") == row.lease_token:
+                    return None
         next_attempt = int(row.attempt_count or 0) + 1
         result = session.execute(
             update(UploadedPdf)
@@ -558,6 +573,7 @@ def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str) -> dict[st
                 current_stage="ingest_running",
                 attempt_count=next_attempt,
                 lease_owner=worker_instance,
+                lease_token=uuid4().hex,
                 lease_expires_at=lease_until,
                 next_retry_at=None,
                 updated_at=now,
@@ -565,7 +581,7 @@ def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str) -> dict[st
         )
         if result.rowcount <= 0:
             return None
-        row = session.get(UploadedPdf, uploaded_pdf_id)
+        row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True)
         if row is None:
             return None
         _write_attempt(
@@ -621,16 +637,20 @@ def _link_current_entities(session, row: UploadedPdf) -> None:
     row.current_order_id = order.id if order is not None else None
 
 
-def _is_linked_order_ready(session, row: UploadedPdf) -> bool:
-    _link_current_entities(session, row)
+def _is_linked_order_ready(session, row: UploadedPdf, *, lock=False) -> bool:
     if not row.current_order_id:
         return False
-    order = session.get(Order, row.current_order_id)
+    if lock:
+        from src.services.workflow_attempt_guard_service import lock_order_execution_input
+        order = lock_order_execution_input(session, row.current_order_id)
+    else:
+        order = session.get(Order, row.current_order_id)
     if order is None:
         return False
     if order.archived_at is not None:
-        row.current_order_id = None
-        session.flush()
+        return False
+    document = session.get(OrderDocument, row.current_document_id, populate_existing=lock, with_for_update=lock) if row.current_document_id else None
+    if document is None or order.current_document_id != document.id or document.source_email_id != row.message_id or document.storage_uri != row.storage_uri:
         return False
     return bool(str(order.week_code or "").strip())
 
@@ -643,17 +663,44 @@ def is_uploaded_pdf_completion_ready(uploaded_pdf_id: str) -> bool:
         return _is_linked_order_ready(session, row)
 
 
-def mark_uploaded_pdf_completed(uploaded_pdf_id: str) -> dict[str, Any] | None:
+def lock_uploaded_pdf_lease(session, lease, *, terminal=False):
+    required = {"id", "lease_token", "lease_owner", "attempt_count", "message_id", "storage_uri",
+                "content_sha256", "received_at", "facility_hint", "week_hint", "facility_name",
+                "skip_ocr", "source_kind", "original_filename", "page_count"}
+    if not isinstance(lease, dict) or not required.issubset(lease) or not lease.get("lease_token") or not lease.get("lease_owner"):
+        return False
+    result = session.execute(update(UploadedPdf).where(
+        UploadedPdf.id == lease["id"], UploadedPdf.status.in_(["processing", "completed"] if terminal else ["processing"]),
+        UploadedPdf.lease_token == lease["lease_token"], UploadedPdf.lease_owner == lease["lease_owner"],
+        UploadedPdf.attempt_count == lease["attempt_count"],
+        UploadedPdf.message_id == lease["message_id"], UploadedPdf.storage_uri == lease["storage_uri"],
+        UploadedPdf.content_sha256 == lease["content_sha256"],
+    ).values(status=UploadedPdf.status))
+    if result.rowcount != 1:
+        return False
+    row = session.get(UploadedPdf, lease["id"], populate_existing=True)
+    return row.received_at.isoformat() == lease.get("received_at") and all(getattr(row, key) == lease.get(key) for key in ("facility_hint", "week_hint", "facility_name", "skip_ocr", "source_kind", "original_filename", "page_count"))
+
+
+def mark_uploaded_pdf_completed(uploaded_pdf_id: str, *, lease, completion=None) -> dict[str, Any] | None:
     now = _now()
     with session_scope() as session:
+        if not lock_uploaded_pdf_lease(session, lease) or uploaded_pdf_id != lease.get("id"):
+            return None
+        if not isinstance(completion, dict) or completion.get("status") != "done" or (completion.get("lease") or {}).get("uploaded_lease") != lease:
+            return None
+        from src.services.ingest_job_service import lock_ingest_lease
+        if not lock_ingest_lease(session, completion["lease"], terminal=True):
+            return None
+        ingest = session.get(IngestJob, completion["lease"]["id"])
+        if ingest.status != "done":
+            return None
         row = session.get(UploadedPdf, uploaded_pdf_id)
-        if row is None:
+        if not _is_linked_order_ready(session, row, lock=True):
             return None
         worker_instance = row.lease_owner
-        _link_current_entities(session, row)
         row.status = "completed"
         row.current_stage = "completed"
-        row.lease_owner = None
         row.lease_expires_at = None
         row.next_retry_at = None
         row.last_error_code = None
@@ -672,50 +719,13 @@ def mark_uploaded_pdf_completed(uploaded_pdf_id: str) -> dict[str, Any] | None:
         return _serialize_uploaded_pdf(row)
 
 
-def mark_uploaded_pdf_completed_by_message_id_if_ready(message_id: str) -> dict[str, Any] | None:
+def mark_uploaded_pdf_completed_by_message_id_if_ready(message_id: str, *, lease, completion=None) -> dict[str, Any] | None:
     token = str(message_id or "").strip()
     if not token:
         return None
-    now = _now()
-    with session_scope() as session:
-        row = (
-            session.execute(
-                select(UploadedPdf)
-                .where(UploadedPdf.message_id == token)
-                .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc())
-            )
-            .scalars()
-            .first()
-        )
-        if row is None:
-            return None
-        _link_current_entities(session, row)
-        if not _is_linked_order_ready(session, row):
-            session.flush()
-            return None
-        if str(row.status or "").strip().lower() == "completed":
-            session.flush()
-            return _serialize_uploaded_pdf_with_context(session, row)
-        worker_instance = row.lease_owner
-        row.status = "completed"
-        row.current_stage = "completed"
-        row.lease_owner = None
-        row.lease_expires_at = None
-        row.next_retry_at = None
-        row.last_error_code = None
-        row.last_error_message = None
-        row.updated_at = now
-        _write_attempt(
-            session,
-            uploaded_pdf_id=row.id,
-            attempt_no=int(row.attempt_count or 0),
-            stage=row.current_stage,
-            status="completed",
-            worker_instance=worker_instance,
-            finished_at=now,
-        )
-        session.flush()
-        return _serialize_uploaded_pdf_with_context(session, row)
+    if not isinstance(lease, dict) or lease.get("message_id") != token:
+        return None
+    return mark_uploaded_pdf_completed(lease["id"], lease=lease, completion=completion)
 
 
 def _maybe_alert(session, row: UploadedPdf) -> None:
@@ -740,25 +750,52 @@ def _maybe_alert(session, row: UploadedPdf) -> None:
     row.alerted_at = now
 
 
+def stop_uploaded_pdf_budget(session, lease):
+    # Called under the upload -> ingest locks in the same refusal transaction.
+    if not lock_uploaded_pdf_lease(session, lease):
+        return False
+    row = session.get(UploadedPdf, lease["id"])
+    now = _now()
+    row.status = "failed"
+    row.current_stage = "failed"
+    row.last_error_code = "ingest_recovery_budget_exhausted"
+    row.last_error_message = "Ingest recovery budget exhausted; explicit manual retry is required"
+    row.lease_owner = None
+    row.lease_expires_at = None
+    row.next_retry_at = None
+    row.updated_at = now
+    _maybe_alert(session, row)
+    _write_attempt(session, uploaded_pdf_id=row.id, attempt_no=row.attempt_count,
+                   stage="failed", status="failed", worker_instance=lease["lease_owner"],
+                   error_code=row.last_error_code, error_message=row.last_error_message, finished_at=now)
+    return True
+
+
 def schedule_uploaded_pdf_retry(
     uploaded_pdf_id: str,
     *,
     error_code: str,
     error_message: str,
     worker_instance: str | None = None,
+    lease,
+    terminal: bool = False,
 ) -> dict[str, Any] | None:
     now = _now()
     with session_scope() as session:
-        row = session.get(UploadedPdf, uploaded_pdf_id)
-        if row is None:
+        if not lock_uploaded_pdf_lease(session, lease) or uploaded_pdf_id != lease.get("id") or worker_instance != lease.get("lease_owner"):
             return None
+        row = session.get(UploadedPdf, uploaded_pdf_id)
         row.last_error_code = error_code
         row.last_error_message = error_message
         row.lease_owner = None
         row.lease_expires_at = None
         attempt_no = int(row.attempt_count or 0)
         _maybe_alert(session, row)
-        if attempt_no >= int(row.max_attempts or _max_attempts()):
+        if terminal:
+            row.status = "failed"
+            row.current_stage = "failed"
+            row.next_retry_at = None
+        elif attempt_no >= int(row.max_attempts or _max_attempts()):
             row.status = "manual_review"
             row.current_stage = "manual_review"
             row.next_retry_at = None
@@ -785,12 +822,14 @@ def schedule_uploaded_pdf_retry(
 def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
     now = _now()
     with session_scope() as session:
-        row = session.get(UploadedPdf, uploaded_pdf_id)
+        session.execute(update(UploadedPdf).where(UploadedPdf.id == uploaded_pdf_id).values(status=UploadedPdf.status))
+        row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True, with_for_update=True)
         if row is None:
             return None
         row.status = "pending"
         row.current_stage = "uploaded"
         row.lease_owner = None
+        row.lease_token = None
         row.lease_expires_at = None
         row.next_retry_at = None
         row.last_error_code = None
@@ -827,7 +866,6 @@ def list_ready_uploaded_pdf_ids(limit: int = 10) -> list[str]:
 
 
 def summarize_uploaded_pdfs() -> dict[str, Any]:
-    backfill_uploaded_pdfs_from_ingest_jobs()
     now = _now()
     with session_scope() as session:
         status_rows = session.execute(

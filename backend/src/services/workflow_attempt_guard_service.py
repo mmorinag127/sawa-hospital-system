@@ -118,6 +118,11 @@ def _order_execution_input(session: Any, order: Any, *, lock: bool = False) -> d
 
 
 def lock_order_execution_input(session: Any, order_id: str) -> Any:
+    from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
+    boundary = current_nonworkflow_execution()
+    lease = boundary.get("ingest_lease") if isinstance(boundary, dict) else current_ingest_lease()
+    if lease is not None and not lock_ingest_lease(session, lease, terminal=True):
+        return None
     # The parent row serializes the explicit absent-workflow case with bootstrap.
     if session.bind.dialect.name == "sqlite":
         claim = session.execute(update(Order).where(Order.id == order_id).values(status=Order.status))
@@ -262,18 +267,28 @@ def capture_nonworkflow_execution(
     job_id: str, *, order_id: str | None = None, input_reference: str | None = None,
     expected_order: dict[str, Any] | None = None,
     selected_version_input: dict[str, Any] | None = None,
+    expected_document_id: str | None = None,
 ) -> dict[str, Any]:
     """Claim a real execution and snapshot inputs before any OCR computation.
 
     Registration must resolve the real target before recognition starts.
     """
     with session_scope() as session:
+        from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
+        ingest_lease = current_ingest_lease()
+        if ingest_lease is not None and not lock_ingest_lease(session, ingest_lease):
+            raise ValueError("ingest_attempt_changed")
         if not order_id:
             raise ValueError("ocr_order_input_required")
         order = lock_order_execution_input(session, order_id)
         if order is None:
             raise ValueError("ocr_order_input_missing")
         inputs = {order.id: _order_execution_input(session, order, lock=True)}
+        if ingest_lease is not None:
+            document = inputs[order.id].get("document")
+            if (not expected_document_id or not isinstance(document, dict) or document.get("id") != expected_document_id
+                or document.get("storage_uri") != input_reference or document.get("source_email_id") != ingest_lease["id"]):
+                raise ValueError("ingest_registered_source_changed")
         pdf_error = None
         try:
             pdf_receipt = capture_selected_pdf_receipt(session, order, selected_version_input, input_reference)
@@ -288,6 +303,8 @@ def capture_nonworkflow_execution(
         job = session.execute(select(OcrJob).where(OcrJob.id == job_id).with_for_update()).scalar_one_or_none()
         if job is None or (job.metrics or {}).get("workflow_attempt_id") is not None:
             raise ValueError("ocr_execution_owner_changed")
+        if ingest_lease is not None and (job.metrics or {}).get("ingest_lease") != ingest_lease:
+            raise ValueError("ingest_attempt_changed")
         if order_id is not None and job.order_id not in {None, order_id}:
             raise ValueError("ocr_execution_order_mismatch")
         selected_order_id = order_id if order_id is not None else job.order_id
@@ -311,6 +328,7 @@ def capture_nonworkflow_execution(
                 "expected_target_semantics": canonical_target_semantics(plan),
             })
         boundary = {
+            "ingest_lease": ingest_lease,
             "job_id": job_id, "execution_id": uuid4().hex,
             "input_reference": job.input_reference,
             "order_id": selected_order_id, "orders": inputs,
@@ -340,6 +358,8 @@ def capture_nonworkflow_execution(
                            "reparse_ocr_prompt", "reparse_prompt_preset", "reparse_requested_provider",
                            "reparse_ocr_model", "reparse_llm_assist", "pipeline_delivery_receipt", "pending_receipt"}
         }
+        if ingest_lease is None:
+            retained_metrics.pop("ingest_lease", None)
         job.metrics = {**retained_metrics, "nonworkflow_execution": deepcopy(boundary)}
         job.output_reference = None
         return boundary
@@ -411,6 +431,10 @@ def lock_current_execution_write(session: Any, order_id: str) -> bool:
 def lock_nonworkflow_execution_job(session: Any, boundary: dict[str, Any] | None) -> bool:
     if not isinstance(boundary, dict) or not boundary.get("job_id") or not boundary.get("execution_id"):
         return False
+    if boundary.get("ingest_lease") is not None:
+        from src.services.ingest_job_service import lock_ingest_lease
+        if not lock_ingest_lease(session, boundary["ingest_lease"], terminal=True):
+            return False
     _track_execution_input(session, boundary)
     if session.bind.dialect.name == "sqlite":
         claim = session.execute(update(OcrJob).where(OcrJob.id == boundary["job_id"]).values(status=OcrJob.status))
@@ -576,6 +600,10 @@ def lock_actual_write_ownership(
     boundary = current_nonworkflow_execution()
     if not isinstance(boundary, dict) or boundary.get("job_id") != job_id:
         return False
+    if boundary.get("ingest_lease") is not None:
+        from src.services.ingest_job_service import lock_ingest_lease
+        if not lock_ingest_lease(session, boundary["ingest_lease"], terminal=True):
+            return False
     if set(boundary.get("orders", {})) != {order_id}:
         return False
     start_input = boundary.get("start_orders", {}).get(order_id)
