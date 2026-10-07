@@ -26,6 +26,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.services import workflow_ocr_delivery_service
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
@@ -2171,12 +2172,16 @@ def mark_ocr_run_queued(
     input_reference: str | None = None,
     request_mode: str | None = None,
     job_metrics: dict[str, Any] | None = None,
+    delivery_selected_document_id: str | None = None,
     stale_action: str = "retry",
     force: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_job_id = _normalize_id(job_id)
     if not normalized_job_id:
         return None, "ocr_job_id_required"
+
+    if not isinstance(input_reference, str) or not input_reference:
+        return None, "workflow_ocr_delivery_input_reference_required"
 
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -2237,6 +2242,7 @@ def mark_ocr_run_queued(
             return finalize_queue_blocker(prerequisite_blocker)
         ocr_job = session.get(OcrJob, normalized_job_id)
         workflow_attempt_id = _new_id("OCA") if input_reference is not None else None
+        delivery_request_identity: dict[str, Any] | None = None
         if input_reference is not None:
             reservation_metrics = dict(job_metrics or {})
             try:
@@ -2244,7 +2250,7 @@ def mark_ocr_run_queued(
             except ValueError as exc:
                 return finalize_queue_blocker(str(exc))
             selected_input = reservation_metrics.get("selected_version_input")
-            if reservation_metrics.get("selected_document_id") and selected_input is None:
+            if delivery_selected_document_id and selected_input is None:
                 return finalize_queue_blocker("selected_document_input_missing")
             if selected_input is not None and (
                 selected_input.get("storage_uri") != input_reference
@@ -2256,7 +2262,9 @@ def mark_ocr_run_queued(
             except ValueError as exc:
                 return finalize_queue_blocker(str(exc))
             reservation_metrics["job_id"] = normalized_job_id
-            reservation_metrics["request_mode"] = _normalize_id(request_mode) or "ocr_rerun"
+            if request_mode not in {"ocr_reparse", "llm_reparse", "ocr_rerun"}:
+                raise ValueError("workflow_ocr_delivery_request_mode_unknown")
+            reservation_metrics["request_mode"] = request_mode
             reservation_metrics["status"] = "running"
             reservation_metrics["workflow_attempt_id"] = workflow_attempt_id
             selected_evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id) if workflow.evidence_run_id else None
@@ -2264,6 +2272,20 @@ def mark_ocr_run_queued(
                 captured_evidence_source(order.id, {column.key: getattr(selected_evidence, column.key) for column in selected_evidence.__table__.columns})
                 if selected_evidence is not None else None
             )
+            delivery_request_identity = {
+                "reparse_read_input": reservation_metrics["reparse_read_input"],
+                "selected_version_input": selected_input,
+                "selected_document_id": delivery_selected_document_id,
+                "first_pass_source": reservation_metrics["first_pass_source"],
+                "request_parameters": {
+                    "request_mode": reservation_metrics["request_mode"],
+                    "reparse_ocr_prompt": reservation_metrics.get("reparse_ocr_prompt"),
+                    "reparse_prompt_preset": reservation_metrics.get("reparse_prompt_preset"),
+                    "reparse_requested_provider": reservation_metrics.get("reparse_requested_provider"),
+                    "reparse_ocr_model": reservation_metrics.get("reparse_ocr_model"),
+                    "reparse_llm_assist": reservation_metrics.get("reparse_llm_assist"),
+                },
+            }
             ocr_job, reservation_error = ocr_job_service.reserve_workflow_reparse_job(
                 session,
                 job_id=normalized_job_id,
@@ -2307,6 +2329,7 @@ def mark_ocr_run_queued(
         revision_error = _finalize_workflow_mutation(session, workflow)
         if revision_error:
             return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
+        delivery_payload = None
         if input_reference is not None and ocr_job is not None:
             # The workflow may have flushed while clearing old evidence/drafts.
             # Persist the actual final CAS revision without touching workflow again.
@@ -2314,9 +2337,24 @@ def mark_ocr_run_queued(
             queued_metrics["workflow_completion_revision"] = _workflow_revision(workflow)
             ocr_job.metrics = queued_metrics
             session.flush()
+            delivery = workflow_ocr_delivery_service.create_intent_in_session(
+                session,
+                order_id=order.id,
+                job_id=normalized_job_id,
+                workflow_attempt_id=workflow_attempt_id or "",
+                workflow_revision=_workflow_revision(workflow),
+                request_mode=queued_metrics.get("request_mode") or "",
+                selected_pdf_receipt=queued_metrics.get("selected_pdf_receipt") or {},
+                request_identity=delivery_request_identity or {},
+            )
+            delivery_payload = {
+                "id": delivery.id,
+                "generation": delivery.delivery_generation,
+            }
         return {
             "workflow": _serialize_workflow(workflow, ocr_job=ocr_job),
             "ocr_job": _serialize_ocr_job(ocr_job),
+            "delivery": delivery_payload,
         }, None
 
 

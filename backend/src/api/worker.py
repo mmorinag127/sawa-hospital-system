@@ -1,3 +1,103 @@
-from fastapi import APIRouter
+from datetime import datetime, timedelta
+import os
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+
+from src.services import workflow_ocr_delivery_service as delivery
+from src.services import workflow_ocr_delivery_dispatch_service
+from src.services.workflow_ocr_delivery_execution_service import execution_mutex
 
 router = APIRouter()
+
+
+def _required_worker_identity(request, authorization, *, drain=False):
+    prefix = "HOSPITAL_WORKFLOW_OCR_DELIVERY_" + ("DRAIN_" if drain else "WORKER_")
+    config = {key: str(os.getenv(prefix + key) or "").strip() for key in ("EMAIL", "SUBJECT", "AUDIENCE")}
+    if not all(config.values()) or not config["EMAIL"].endswith(".iam.gserviceaccount.com"):
+        raise HTTPException(status_code=503, detail="workflow_ocr_delivery_auth_config_missing")
+    if not authorization or not authorization.startswith("Bearer ") or not authorization[7:].strip():
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        payload = id_token.verify_oauth2_token(
+            authorization[7:].strip(), google_requests.Request(), config["AUDIENCE"])
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Unauthorized") from exc
+    if (payload.get("email") != config["EMAIL"] or payload.get("sub") != config["SUBJECT"]
+            or payload.get("email_verified") is not True or payload.get("aud") != config["AUDIENCE"]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _lease_expiry():
+    raw = str(os.getenv("HOSPITAL_WORKFLOW_OCR_DELIVERY_PROCESS_LEASE_SECONDS") or "").strip()
+    try:
+        seconds = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="workflow_ocr_delivery_process_lease_config_missing") from exc
+    if seconds < 1:
+        raise HTTPException(status_code=503, detail="workflow_ocr_delivery_process_lease_config_missing")
+    return datetime.utcnow() + timedelta(seconds=seconds)
+
+
+def _execute_claim(claim):
+    from src.api.orders import _run_ocr_rerun_background, _run_reparse_background
+    from src.services import order_service, ocr_job_service
+    params = claim["request_identity"]["request_parameters"]
+    common = {
+        "order_id": claim["order_id"], "ocr_job_id": claim["job_id"],
+        "selected_document_id": claim["request_identity"]["selected_document_id"],
+        "expected_revision": claim["workflow_revision"],
+        "workflow_attempt_id": claim["workflow_attempt_id"],
+    }
+    if claim["business_status"] == "awaiting_output":
+        # Reconcile the original saved pending receipt, never relaunch its OCR.
+        job = ocr_job_service.get_job(claim["job_id"])
+        pending = (job.get("metrics") or {}).get("pending_receipt") if isinstance(job, dict) else None
+        if not isinstance(pending, dict) or not order_service.reconcile_pending_workflow_reparse(job, pending):
+            raise ValueError("workflow_ocr_delivery_pending_reconciliation_not_complete")
+        return {"reconciled": True}
+    if claim["request_mode"] == "ocr_rerun":
+        return _run_ocr_rerun_background(**common)
+    if claim["request_mode"] in {"ocr_reparse", "llm_reparse"}:
+        if type(params["reparse_llm_assist"]) is not bool:
+            raise ValueError("workflow_ocr_delivery_llm_assist_required")
+        return _run_reparse_background(
+            ocr_prompt=params["reparse_ocr_prompt"], prompt_preset=params["reparse_prompt_preset"],
+            ocr_provider=params["reparse_requested_provider"], ocr_model=params["reparse_ocr_model"],
+            llm_assist=params["reparse_llm_assist"], **common)
+    raise ValueError("workflow_ocr_delivery_request_mode_unknown")
+
+
+@router.post("/worker/workflow-ocr-deliveries/{delivery_id}/{generation}")
+def process_workflow_ocr_delivery(delivery_id: str, generation: int, request: Request,
+                                 authorization: str | None = Header(default=None)):
+    _required_worker_identity(request, authorization)
+    try:
+        # Validate identity/generation before an active duplicate can receive ACK.
+        observed = delivery.inspect_generation(delivery_id, generation)
+        if observed["duplicate"]:
+            return {"acknowledged": True, "duplicate": True}
+        with execution_mutex(delivery_id) as acquired:
+            if not acquired:
+                return {"acknowledged": True, "duplicate": True, "active_owner": True}
+            claim = delivery.claim_delivery(delivery_id, generation, lease_expires_at=_lease_expiry())
+            if claim.get("duplicate"):
+                return {"acknowledged": True, "duplicate": True}
+            with delivery.claim_context(claim):
+                _execute_claim(claim)
+            if not delivery.acknowledge_claim(delivery_id, generation, claim["claim_token"]):
+                raise ValueError("workflow_ocr_delivery_ack_rejected")
+            return {"acknowledged": True, "duplicate": False}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/worker/workflow-ocr-deliveries/drain")
+def drain_workflow_ocr_deliveries(request: Request, limit: int,
+                                authorization: str | None = Header(default=None)):
+    _required_worker_identity(request, authorization, drain=True)
+    try:
+        return workflow_ocr_delivery_dispatch_service.drain_pending(limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
