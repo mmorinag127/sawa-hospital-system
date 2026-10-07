@@ -105,6 +105,11 @@ pipeline_main = importlib.import_module("app.main")
 
 
 class MainArtifactTests(unittest.TestCase):
+    def _captured_terminal_source(self, stores):
+        original = pipeline_main._original_pipeline_source("own-bucket", stores.name, "19")
+        stores.output = pipeline_main._owned_output_name("output/", original)
+        return pipeline_main._terminal_source("own-bucket", stores.name, "19", stores.output)
+
     def test_handler_required_stage_failures_are_owned_terminal_not_done(self):
         import json
         from contextlib import ExitStack
@@ -115,17 +120,20 @@ class MainArtifactTests(unittest.TestCase):
                 stack.enter_context(install_transport_exceptions())
                 patches = {
                     "db": stores, "gcs": stores, "request": types.SimpleNamespace(get_json=lambda **_: {}),
-                    "INPUT_PREFIX": "input/", "parse_gcs_event": lambda _: ("own-bucket", "input/own.pdf", "19"),
+                    "INPUT_PREFIX": "input/", "OUTPUT_PREFIX": "output/",
+                    "parse_gcs_event": lambda _: ("own-bucket", "input/own.pdf", "19"),
                     "OCR_ENABLE_TEMPLATE_MATCH": True, "OCR_ENABLE_TEMPLATE_ROI": True, "OCR_ENABLE_PAGE_CORRECTION": True,
                     "run_yomitoku": lambda **_: self.fail("recognizer after mandatory failure"),
                 }
                 for name, value in patches.items():
                     stack.enter_context(mock.patch.object(pipeline_main, name, value))
+                source = self._captured_terminal_source(stores)
                 classify = stack.enter_context(mock.patch.object(pipeline_main, "_run_template_classification", return_value=({"matched_template_id": "own-template"}, {"template": stores.configured["facility"]["fax_template"]})))
                 roi = stack.enter_context(mock.patch.object(pipeline_main, "_run_template_roi_extraction", return_value={"qty": {"own": 0}}))
                 correction = stack.enter_context(mock.patch.object(pipeline_main, "correct_pdf_for_yomitoku"))
                 {"classification": classify, "roi": roi, "correction": correction}[stage].side_effect = ValueError("required computation failed")
                 _, status = pipeline_main.handler()
+                {"classification": classify, "roi": roi, "correction": correction}[stage].assert_called_once()
                 writes = [json.loads(value) for name, value in stores.writes if name == stores.output]
                 self.assertEqual(status, 200)
                 self.assertEqual(writes[-1]["status"], "failed")
@@ -133,6 +141,7 @@ class MainArtifactTests(unittest.TestCase):
                 self.assertEqual(writes[-1]["input_generation"], "19")
                 self.assertFalse(any(write["status"] == "done" for write in writes))
                 self.assertEqual(stores.job["status"], "failed")
+                self.assertEqual(stores.job["terminal_receipt"]["source"], source)
                 self.assertEqual(stores.job["terminal_receipt"]["result_digest"], pipeline_main._terminal_digest(writes[-1]))
 
     def test_captured_roi_template_reaches_actual_loader_without_firestore(self):
@@ -244,138 +253,112 @@ class MainArtifactTests(unittest.TestCase):
                 pipeline_main._download_generation_input("bucket", "input/pdf", "42")
 
     def test_handler_writes_failed_payload_when_run_yomitoku_aborts(self):
-        class _FakeJobRef:
-            id = "job-doc"
+        import json
+        from contextlib import ExitStack
+        from terminal_store_fakes import Stores, install_transport_exceptions
 
-            def __init__(self):
-                self.set_payload = None
-                self.updates = []
-
-            def get(self):
-                return types.SimpleNamespace(exists=False)
-
-            def set(self, payload):
-                self.set_payload = dict(payload)
-
-            def update(self, payload):
-                self.updates.append(dict(payload))
-
-        class _FakeCollection:
-            def __init__(self, job_ref):
-                self._job_ref = job_ref
-
-            def document(self, _doc_id):
-                return self._job_ref
-
-        class _FakeDB:
-            def __init__(self, job_ref):
-                self._job_ref = job_ref
-
-            def collection(self, _name):
-                return _FakeCollection(self._job_ref)
-
-        class _FakeBlob:
-            def __init__(self):
-                self.metadata = {"selected_pdf_receipt": json.dumps({
-                    "storage_uri": "local-authoritative-upload.pdf", "generation": None,
-                    "sha256": pipeline_main.hashlib.sha256(b"%PDF-1.4\n%EOF\n").hexdigest(),
-                })}
-
-            def reload(self):
-                return None
-
-            def download_as_bytes(self, *, if_generation_match):
-                self_outer.assertEqual(if_generation_match, 1)
-                return b"%PDF-1.4\n%EOF\n"
-
-        class _FakeBucket:
-            def __init__(self, blob):
-                self._blob = blob
-
-            def blob(self, _name, *, generation):
-                self_outer.assertEqual(generation, 1)
-                return self._blob
-
-        class _FakeGCS:
-            def __init__(self, blob):
-                self._blob = blob
-
-            def bucket(self, _name):
-                return _FakeBucket(self._blob)
-
-        job_ref = _FakeJobRef()
-        self_outer = self
-        partial_calls = []
-
-        with mock.patch.object(
-            pipeline_main,
-            "request",
-            types.SimpleNamespace(
-                get_json=lambda *args, **kwargs: {
-                    "bucket": "bucket",
-                    "name": "input/test.pdf",
-                    "generation": "1",
-                }
-            ),
-        ), mock.patch.object(
-            pipeline_main,
-            "db",
-            _FakeDB(job_ref),
-        ), mock.patch.object(
-            pipeline_main,
-            "gcs",
-            _FakeGCS(_FakeBlob()),
-        ), mock.patch.object(
-            pipeline_main,
-            "_write_output_partial",
-            side_effect=lambda **kwargs: partial_calls.append(dict(kwargs)),
-        ), mock.patch.object(
-            pipeline_main,
-            "_run_template_classification",
-            return_value=(None, None),
-        ), mock.patch.object(
-            pipeline_main,
-            "correct_pdf_for_yomitoku",
-            return_value=(b"%PDF-1.4\n%EOF\n", {"applied": False, "corrected_pdf_generated": False}, []),
-        ), mock.patch.object(
-            pipeline_main,
-            "run_yomitoku",
-            side_effect=SystemExit(1),
-        ):
-            with self.assertRaises(SystemExit):
-                pipeline_main.handler()
-
-        self.assertTrue(partial_calls)
-        self.assertEqual(partial_calls[-1]["status"], "failed")
-        self.assertEqual(partial_calls[-1]["stage"], "error")
-        self.assertEqual(partial_calls[-1]["payload"]["error_type"], "SystemExit")
-        self.assertTrue(job_ref.updates)
-        self.assertEqual(job_ref.updates[-1]["status"], "failed")
-        self.assertEqual(job_ref.updates[-1]["error_type"], "SystemExit")
+        with ExitStack() as stack:
+            stores = Stores()
+            stack.enter_context(install_transport_exceptions())
+            patches = {
+                "db": stores, "gcs": stores,
+                "request": types.SimpleNamespace(get_json=lambda **_: {}),
+                "INPUT_PREFIX": "input/", "OUTPUT_PREFIX": "output/",
+                "parse_gcs_event": lambda _: ("own-bucket", stores.name, "19"),
+                "OCR_ENABLE_TEMPLATE_MATCH": True, "OCR_ENABLE_TEMPLATE_ROI": True,
+                "OCR_ENABLE_PAGE_CORRECTION": True,
+            }
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(pipeline_main, name, value))
+            source = self._captured_terminal_source(stores)
+            stack.enter_context(mock.patch.object(
+                pipeline_main, "_run_template_classification",
+                return_value=({"matched_template_id": "own-template"},
+                              {"template": stores.configured["facility"]["fax_template"]})))
+            stack.enter_context(mock.patch.object(
+                pipeline_main, "_run_template_roi_extraction", return_value={"qty": {"own": 0}}))
+            correction = stack.enter_context(mock.patch.object(
+                pipeline_main, "correct_pdf_for_yomitoku",
+                return_value=(stores.body, {"applied": False, "corrected_pdf_generated": False}, [])))
+            recognizer = stack.enter_context(mock.patch.object(
+                pipeline_main, "run_yomitoku", side_effect=SystemExit(1)))
+            response, status = pipeline_main.handler()
+            recognizer.assert_called_once()
+            correction.assert_called_once()
+            self.assertEqual(recognizer.call_args.kwargs["pdf_bytes"], stores.body)
+            writes = [json.loads(value) for name, value in stores.writes if name == stores.output]
+            payload = writes[-1]
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["stage"], "error")
+            self.assertEqual(payload["error_type"], "SystemExit")
+            self.assertEqual(payload["error"], "SystemExit(1)")
+            self.assertFalse(payload["canonical_adoption_allowed"])
+            self.assertFalse(any(write["status"] == "done" for write in writes))
+            self.assertEqual({key: payload[key] for key in source}, source)
+            self.assertEqual(stores.job["execution_claim"], {
+                "job_id": source["job_id"], "output_reference": source["output_reference"]})
+            self.assertEqual(stores.job["status"], "failed")
+            digest = pipeline_main._terminal_digest(payload)
+            self.assertEqual(stores.job["terminal_receipt"]["source"], source)
+            self.assertEqual(stores.job["terminal_receipt"]["result_digest"], digest)
+            intent = json.loads(stores.objects[stores.output + ".terminal-intent.json"])
+            self.assertEqual(intent, {"source": source, "result": payload, "result_digest": digest})
+            ack = response.get_json() if hasattr(response, "get_json") else response["args"][0]
+            self.assertEqual(ack, pipeline_main._terminal_ack(payload))
+            self.assertEqual(ack["terminal_receipt"]["result_digest"], digest)
+            self.assertEqual(stores.configured["facility"]["fax_template"]["zero"], 0)
+            self.assertIsNone(stores.configured["facility"]["fax_template"]["unknown"])
 
     def test_upload_corrected_pdf_artifact_returns_uri_when_correction_applied(self):
-        blob = mock.Mock(generation=42)
-        gcs = mock.Mock()
-        gcs.bucket.return_value.blob.return_value = blob
-        summary = {"applied": True, "corrected_pdf_generated": True}
-        with mock.patch.object(pipeline_main, "gcs", gcs):
-            uri = pipeline_main._upload_corrected_pdf_artifact(
-                bucket="bucket",
-                artifact_prefix="output/doc/",
-                base="doc",
-                original_pdf_bytes=b"%PDF-raw\n%EOF\n",
-                corrected_pdf_bytes=b"%PDF-corrected\n%EOF\n",
-                page_correction_summary=summary,
-            )
+        import json
+        from terminal_store_fakes import Blob, Stores, install_transport_exceptions
 
-        self.assertEqual(uri, "gs://bucket/output/doc/doc_corrected.pdf?generation=42")
-        gcs.bucket.return_value.blob.assert_called_once_with("output/doc/doc_corrected.pdf")
-        blob.upload_from_string.assert_called_once_with(
-            b"%PDF-corrected\n%EOF\n",
-            content_type="application/pdf",
-        )
+        stores = Stores()
+        original = b"%PDF-raw\n%EOF\n"
+        corrected = b"%PDF-corrected\n%EOF\n"
+        stores.body = original
+        stores.objects[stores.name] = original
+        selected = json.loads(stores.metadata["selected_pdf_receipt"])
+        selected["sha256"] = pipeline_main.hashlib.sha256(original).hexdigest()
+        stores.metadata["selected_pdf_receipt"] = json.dumps(selected)
+        summary = {"applied": True, "corrected_pdf_generated": True}
+        uploads = []
+        upload = Blob.upload_from_string
+
+        def conditional_upload(blob, data, **kwargs):
+            uploads.append((blob.name, data, kwargs))
+            return upload(blob, data, **kwargs)
+
+        with install_transport_exceptions(), mock.patch.object(pipeline_main, "gcs", stores):
+            source = self._captured_terminal_source(stores)
+            claim = {"job_id": source["job_id"], "output_reference": source["output_reference"]}
+            stores.create({"status": "running", "execution_claim": claim})
+            prefix = stores.output.rsplit("/", 1)[0] + "/assets/"
+            object_name = prefix + "doc_corrected.pdf"
+            stores.initial_generations[object_name] = 41
+            token = pipeline_main._OUTPUT_OWNER.set((source, stores))
+            try:
+                with mock.patch.object(Blob, "upload_from_string", conditional_upload):
+                    uri = pipeline_main._upload_corrected_pdf_artifact(
+                        bucket="own-bucket", artifact_prefix=prefix, base="doc",
+                        original_pdf_bytes=original, corrected_pdf_bytes=corrected,
+                        page_correction_summary=summary)
+            finally:
+                pipeline_main._OUTPUT_OWNER.reset(token)
+
+        self.assertEqual(uri, f"gs://own-bucket/{object_name}?generation=42")
+        self.assertEqual(uploads, [(object_name, corrected, {
+            "content_type": "application/pdf", "if_generation_match": 0})])
+        self.assertEqual(stores.objects[object_name], corrected)
+        self.assertEqual(stores.generations[(object_name, 42)], corrected)
+        self.assertEqual(json.loads(stores.object_metadata[object_name]["original_source"]), source)
+        self.assertEqual(stores.job["execution_claim"], claim)
         self.assertEqual(summary["corrected_pdf_receipt"]["generation"], "42")
-        self.assertEqual(summary["corrected_pdf_receipt"]["source_sha256"], pipeline_main.hashlib.sha256(b"%PDF-raw\n%EOF\n").hexdigest())
+        self.assertEqual(summary["corrected_pdf_receipt"]["sha256"],
+                         pipeline_main.hashlib.sha256(corrected).hexdigest())
+        self.assertEqual(summary["corrected_pdf_receipt"]["source_sha256"],
+                         pipeline_main.hashlib.sha256(original).hexdigest())
 
     def test_selected_pdf_input_rejects_missing_changed_and_foreign_generation(self):
         data = b"original"
