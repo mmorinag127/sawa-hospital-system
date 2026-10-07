@@ -1,3 +1,7 @@
+import { Button, Input } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
+import type { ChangeEvent } from "react";
 import { useState } from "react";
 import Link from "next/link";
 import TopNav from "../components/TopNav";
@@ -238,6 +242,7 @@ export default function ShippingPage() {
   };
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page">
       <header className="hero">
         <div>
@@ -260,16 +265,16 @@ export default function ShippingPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">送り状PDF</span>
-            <input
-              className="input"
+            <Input
+              className="input shipping-ordinary-control"
               type="file"
-              accept="application/pdf"
-              onChange={(e) => setPdfFile(e.target.files?.[0] ?? null)}
+              disableUnderline
+              inputProps={{ "accept": "application/pdf", "onChange": (e: ChangeEvent<HTMLInputElement>) => setPdfFile(e.target.files?.[0] ?? null) }}
             />
           </label>
-          <button className="btn primary" onClick={handleUpload} disabled={pdfLoading}>
+          <Button className="btn primary shipping-ordinary-control" onClick={handleUpload} disabled={pdfLoading} type="submit">
             {pdfLoading ? "解析中..." : "解析してExcelをダウンロード"}
-          </button>
+          </Button>
         </div>
         {pdfFile ? <p className="file-name">選択中: {pdfFile.name}</p> : null}
         {pdfMessage ? <p className="message">{pdfMessage}</p> : null}
@@ -282,16 +287,16 @@ export default function ShippingPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">伝票管理Excel (.xlsx)</span>
-            <input
-              className="input"
+            <Input
+              className="input shipping-ordinary-control"
               type="file"
-              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              onChange={(e) => setExcelFile(e.target.files?.[0] ?? null)}
+              disableUnderline
+              inputProps={{ "accept": ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "onChange": (e: ChangeEvent<HTMLInputElement>) => setExcelFile(e.target.files?.[0] ?? null) }}
             />
           </label>
-          <button className="btn primary" onClick={enrichExcel} disabled={excelLoading}>
+          <Button className="btn primary shipping-ordinary-control" onClick={enrichExcel} disabled={excelLoading} type="submit">
             {excelLoading ? "更新中..." : "到着日時を更新してExcelをダウンロード"}
-          </button>
+          </Button>
         </div>
         {excelFile ? <p className="file-name">選択中: {excelFile.name}</p> : null}
         {excelMessage ? <p className="message">{excelMessage}</p> : null}
@@ -314,18 +319,20 @@ export default function ShippingPage() {
         </header>
         <label className="field">
           <span className="field-label">伝票番号（改行・スペース・カンマ区切り）</span>
-          <textarea
-            className="input textarea"
+          <Input
+            className="input textarea shipping-ordinary-control"
             value={trackingText}
             onChange={(e) => setTrackingText(e.target.value)}
             rows={4}
             placeholder="4917-2168-9734"
+            disableUnderline
+            multiline
           />
         </label>
         <div className="actions">
-          <button className="btn primary" onClick={trackStatuses} disabled={trackingLoading}>
+          <Button className="btn primary shipping-ordinary-control" onClick={trackStatuses} disabled={trackingLoading} type="submit">
             {trackingLoading ? "取得中..." : "追跡状況を取得"}
-          </button>
+          </Button>
         </div>
         {trackingMessage ? <p className="message">{trackingMessage}</p> : null}
         {trackingSummary ? (
@@ -357,22 +364,22 @@ export default function ShippingPage() {
                     <td>{item.error || "-"}</td>
                     <td>
                       <div className="row-actions">
-                        <button
+                        <Button
                           type="button"
-                          className="mini-btn"
+                          className="mini-btn shipping-ordinary-control"
                           onClick={() => markTrackingStatus(item.tracking_number, "発送済み")}
                           disabled={trackingLoading || item.status === "発送済み"}
                         >
                           発送完了
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                           type="button"
-                          className="mini-btn muted"
+                          className="mini-btn muted shipping-ordinary-control"
                           onClick={() => markTrackingStatus(item.tracking_number, "発送しなかった")}
                           disabled={trackingLoading || item.status === "発送しなかった"}
                         >
                           発送しなかった
-                        </button>
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -409,6 +416,22 @@ export default function ShippingPage() {
       </section>
 
       <style jsx>{`
+        :global(.shipping-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          font-size: inherit;
+          min-width: 0;
+        }
+
+        :global(.shipping-ordinary-control .MuiInputBase-input) {
+          padding: 0;
+          min-width: 0;
+        }
+
+        :global(.shipping-ordinary-control.textarea .MuiInputBase-input) {
+          resize: vertical;
+        }
+
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
@@ -502,20 +525,20 @@ export default function ShippingPage() {
           text-transform: uppercase;
         }
 
-        .input {
+        :global(.shipping-ordinary-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
           background: #fbfbf9;
         }
 
-        .textarea {
+        :global(.shipping-ordinary-control.textarea) {
           width: 100%;
           resize: vertical;
           min-height: 88px;
         }
 
-        .btn {
+        :global(.shipping-ordinary-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 8px 14px;
@@ -530,12 +553,12 @@ export default function ShippingPage() {
           margin-top: 10px;
         }
 
-        .btn.primary {
+        :global(.shipping-ordinary-control.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn:disabled {
+        :global(.shipping-ordinary-control.btn:disabled) {
           opacity: 0.6;
           cursor: not-allowed;
         }
@@ -611,7 +634,7 @@ export default function ShippingPage() {
           gap: 6px;
         }
 
-        .mini-btn {
+        :global(.shipping-ordinary-control.mini-btn) {
           border: 1px solid rgba(25, 32, 30, 0.12);
           border-radius: 999px;
           padding: 5px 9px;
@@ -622,12 +645,12 @@ export default function ShippingPage() {
           cursor: pointer;
         }
 
-        .mini-btn.muted {
+        :global(.shipping-ordinary-control.mini-btn.muted) {
           background: #eef3f1;
           color: #243330;
         }
 
-        .mini-btn:disabled {
+        :global(.shipping-ordinary-control.mini-btn:disabled) {
           opacity: 0.55;
           cursor: not-allowed;
         }
@@ -642,5 +665,6 @@ export default function ShippingPage() {
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }

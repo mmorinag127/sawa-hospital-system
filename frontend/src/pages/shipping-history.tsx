@@ -1,3 +1,6 @@
+import { Button, Input, NativeSelect } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
@@ -853,22 +856,22 @@ export default function ShippingHistoryPage() {
         </div>
         <div className="tracking-card-actions">
           <div className="manual-status-actions" aria-label="手動ステータス更新">
-            <button
+            <Button
               type="button"
-              className="mini-btn"
+              className="mini-btn shipping-ordinary-control"
               onClick={() => markTrackingStatus(item, "発送済み")}
               disabled={manualLoading || item.status === "発送済み"}
             >
               送り済み
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="mini-btn muted"
+              className="mini-btn muted shipping-ordinary-control"
               onClick={() => markTrackingStatus(item, "発送しなかった")}
               disabled={manualLoading || item.status === "発送しなかった"}
             >
               未使用
-            </button>
+            </Button>
           </div>
           <details className="tracking-events tracking-events-compact">
             <summary className="tracking-events-summary">履歴 {item.events.length}件</summary>
@@ -961,6 +964,7 @@ export default function ShippingHistoryPage() {
   };
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page shipping-history-page">
       <header className="hero">
         <div>
@@ -991,14 +995,14 @@ export default function ShippingHistoryPage() {
             { id: "all", label: "全件" },
             { id: "logs", label: "監査ログ" },
           ].map((tab) => (
-            <button
+            <Button
               key={tab.id}
               type="button"
-              className={`tab ${activeTab === tab.id ? "active" : ""}`}
+              className={`tab ${activeTab === tab.id ? "active" : ""} shipping-ordinary-control`}
               onClick={() => setActiveTab(tab.id as HistoryTab)}
             >
               {tab.label}
-            </button>
+            </Button>
           ))}
         </div>
 
@@ -1006,47 +1010,49 @@ export default function ShippingHistoryPage() {
           <div className="filters">
             <label className="field">
               <span className="field-label">開始日</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="date"
                 value={dateFrom}
                 onChange={(e) => setDateFrom(e.target.value)}
+                disableUnderline
               />
             </label>
             <label className="field">
               <span className="field-label">終了日</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="date"
                 value={dateTo}
                 onChange={(e) => setDateTo(e.target.value)}
+                disableUnderline
               />
             </label>
             <label className="field">
               <span className="field-label">件数上限</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="number"
-                min={1}
-                max={1000}
                 value={limit}
                 onChange={(e) => setLimit(Number(e.target.value || 200))}
+                disableUnderline
+                inputProps={{ "min": 1, "max": 1000 }}
               />
             </label>
-            <button className="btn primary" onClick={loadHistory} disabled={loading}>
+            <Button className="btn primary shipping-ordinary-control" onClick={loadHistory} disabled={loading} type="submit">
               {loading ? "取得中..." : "監査ログを更新"}
-            </button>
+            </Button>
             {isAdmin ? (
               <>
-                <button className="btn ghost" onClick={() => downloadHistory("csv")} disabled={loading}>
+                <Button className="btn ghost shipping-ordinary-control" onClick={() => downloadHistory("csv")} disabled={loading} type="submit">
                   CSV保存
-                </button>
-                <button className="btn ghost" onClick={() => downloadHistory("json")} disabled={loading}>
+                </Button>
+                <Button className="btn ghost shipping-ordinary-control" onClick={() => downloadHistory("json")} disabled={loading} type="submit">
                   JSON保存
-                </button>
-                <button className="btn danger" onClick={clearAllHistory} disabled={loading}>
+                </Button>
+                <Button className="btn danger shipping-ordinary-control" onClick={clearAllHistory} disabled={loading} type="submit">
                   全件クリア
-                </button>
+                </Button>
               </>
             ) : null}
           </div>
@@ -1054,69 +1060,71 @@ export default function ShippingHistoryPage() {
           <div className="filters">
             <label className="field">
               <span className="field-label">基準日</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="date"
                 value={baseDate}
                 onChange={(e) => setBaseDate(e.target.value)}
+                disableUnderline
               />
             </label>
             <label className="field narrow">
               <span className="field-label">±日数</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="number"
-                min={0}
-                max={90}
                 value={windowDays}
                 onChange={(e) => setWindowDays(Number(e.target.value || 0))}
+                disableUnderline
+                inputProps={{ "min": 0, "max": 90 }}
               />
             </label>
             <label className="field">
               <span className="field-label">施設</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="text"
                 placeholder="施設名、複数はカンマ区切り"
                 value={facilityFilter}
                 onChange={(e) => setFacilityFilter(e.target.value)}
+                disableUnderline
               />
             </label>
             <label className="field">
               <span className="field-label">取得元</span>
-              <select className="input" value={source} onChange={(e) => setSource(e.target.value)}>
+              <NativeSelect className="input shipping-ordinary-control" value={source} onChange={(e) => setSource(e.target.value)} disableUnderline>
                 <option value="">すべて</option>
                 <option value="shipping_pdf_parse">PDF解析</option>
                 <option value="excel_enrich">Excel更新</option>
                 <option value="manual_track">手動照会</option>
                 <option value="scheduled_refresh">自動再照会</option>
-              </select>
+              </NativeSelect>
             </label>
             <label className="field narrow">
               <span className="field-label">停滞時間(h)</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="number"
-                min={1}
-                max={336}
                 value={attentionStaleHours}
                 onChange={(e) => setAttentionStaleHours(Number(e.target.value || 24))}
+                disableUnderline
+                inputProps={{ "min": 1, "max": 336 }}
               />
             </label>
             <label className="field narrow">
               <span className="field-label">件数上限</span>
-              <input
-                className="input"
+              <Input
+                className="input shipping-ordinary-control"
                 type="number"
-                min={1}
-                max={1000}
                 value={limit}
                 onChange={(e) => setLimit(Number(e.target.value || 200))}
+                disableUnderline
+                inputProps={{ "min": 1, "max": 1000 }}
               />
             </label>
-            <button className="btn primary" onClick={() => loadLatest()} disabled={loading}>
+            <Button className="btn primary shipping-ordinary-control" onClick={() => loadLatest()} disabled={loading} type="submit">
               {loading ? "取得中..." : "状態を更新"}
-            </button>
+            </Button>
           </div>
         )}
 
@@ -1195,56 +1203,58 @@ export default function ShippingHistoryPage() {
             </div>
             {activeTab !== "logs" ? (
               <div className="calendar-month-controls" aria-label="表示月">
-                <button
+                <Button
                   type="button"
-                  className="btn ghost"
+                  className="btn ghost shipping-ordinary-control"
                   onClick={() => void loadSelectedMonth(addMonths(calendarMonth.monthValue, -1))}
                   disabled={loading}
                 >
                   前月
-                </button>
+                </Button>
                 <label className="field month-field">
                   <span className="field-label">表示月</span>
-                  <select
-                    className="input"
+                  <NativeSelect
+                    className="input shipping-ordinary-control"
                     value={calendarMonth.monthValue}
                     onChange={(event) => {
                       if (event.target.value) void loadSelectedMonth(event.target.value);
                     }}
                     disabled={loading}
+                    disableUnderline
                   >
                     {recentMonthOptions.map((monthValue) => (
                       <option key={monthValue} value={monthValue}>
                         {formatMonthOptionLabel(monthValue)}
                       </option>
                     ))}
-                  </select>
-                  <input
-                    className="input month-input"
+                  </NativeSelect>
+                  <Input
+                    className="input month-input shipping-ordinary-control"
                     type="month"
                     value={calendarMonth.monthValue}
                     onChange={(event) => {
                       if (event.target.value) void loadSelectedMonth(event.target.value);
                     }}
                     disabled={loading}
+                    disableUnderline
                   />
                 </label>
-                <button
+                <Button
                   type="button"
-                  className="btn ghost"
+                  className="btn ghost shipping-ordinary-control"
                   onClick={() => void loadSelectedMonth(toMonthInput(new Date()))}
                   disabled={loading}
                 >
                   今月
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  className="btn ghost"
+                  className="btn ghost shipping-ordinary-control"
                   onClick={() => void loadSelectedMonth(addMonths(calendarMonth.monthValue, 1))}
                   disabled={loading}
                 >
                   翌月
-                </button>
+                </Button>
               </div>
             ) : null}
           </header>
@@ -1269,12 +1279,12 @@ export default function ShippingHistoryPage() {
                         0,
                       ) || 0;
                     return (
-                      <button
+                      <Button
                         key={cell.key}
                         type="button"
                         className={`calendar-day${cell.inMonth ? "" : " outside-month"}${
                           group ? " has-items" : ""
-                        }`}
+                        } shipping-ordinary-control`}
                         data-testid={group ? "shipping-date-group" : "shipping-empty-day"}
                         onClick={() => {
                           if (group) setSelectedDateGroupKey(group.key);
@@ -1306,7 +1316,7 @@ export default function ShippingHistoryPage() {
                             <span className="calendar-day-summary muted">完了 0 / 未完了 0</span>
                           </>
                         )}
-                      </button>
+                      </Button>
                     );
                   }),
                 )}
@@ -1321,10 +1331,10 @@ export default function ShippingHistoryPage() {
                         0,
                       );
                       return (
-                        <button
+                        <Button
                           key={group.key}
                           type="button"
-                          className="calendar-day has-items"
+                          className="calendar-day has-items shipping-ordinary-control"
                           data-testid="shipping-date-group"
                           onClick={() => setSelectedDateGroupKey(group.key)}
                         >
@@ -1344,7 +1354,7 @@ export default function ShippingHistoryPage() {
                               {notFoundCount > 0 ? `該当無し ${notFoundCount}` : ""}
                             </span>
                           ) : null}
-                        </button>
+                        </Button>
                       );
                     })}
                 </div>
@@ -1370,9 +1380,9 @@ export default function ShippingHistoryPage() {
                 <p className="week-group-kicker">取得日</p>
                 <h2 id="shipping-detail-title">{selectedDateGroup.label}</h2>
               </div>
-              <button type="button" className="week-group-toggle" onClick={() => setSelectedDateGroupKey(null)}>
+              <Button type="button" className="week-group-toggle shipping-ordinary-control" onClick={() => setSelectedDateGroupKey(null)}>
                 閉じる
-              </button>
+              </Button>
             </header>
             <div className="week-group-summary">
               <span className="week-group-summary-item">件数 {selectedDateGroup.total}件</span>
@@ -1408,6 +1418,18 @@ export default function ShippingHistoryPage() {
       ) : null}
 
       <style jsx>{`
+        :global(.shipping-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          font-size: inherit;
+          min-width: 0;
+        }
+
+        :global(.shipping-ordinary-control .MuiInputBase-input) {
+          padding: 0;
+          min-width: 0;
+        }
+
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
@@ -1490,7 +1512,7 @@ export default function ShippingHistoryPage() {
           white-space: nowrap;
         }
 
-        .week-group-toggle {
+        :global(.shipping-ordinary-control.week-group-toggle) {
           border: 1px solid rgba(25, 32, 30, 0.12);
           background: #ffffff;
           color: #243330;
@@ -1509,7 +1531,7 @@ export default function ShippingHistoryPage() {
           margin-bottom: 16px;
         }
 
-        .tab {
+        :global(.shipping-ordinary-control.tab) {
           border: 1px solid rgba(25, 32, 30, 0.12);
           border-radius: 999px;
           padding: 8px 14px;
@@ -1519,7 +1541,7 @@ export default function ShippingHistoryPage() {
           cursor: pointer;
         }
 
-        .tab.active {
+        :global(.shipping-ordinary-control.tab.active) {
           background: #1f2a2a;
           border-color: #1f2a2a;
           color: #f7f2e7;
@@ -1562,7 +1584,7 @@ export default function ShippingHistoryPage() {
           text-transform: uppercase;
         }
 
-        .input {
+        :global(.shipping-ordinary-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
@@ -1570,7 +1592,7 @@ export default function ShippingHistoryPage() {
           min-height: 40px;
         }
 
-        .btn {
+        :global(.shipping-ordinary-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 10px 16px;
@@ -1581,21 +1603,21 @@ export default function ShippingHistoryPage() {
           justify-self: start;
         }
 
-        .btn.primary {
+        :global(.shipping-ordinary-control.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn.ghost {
+        :global(.shipping-ordinary-control.btn.ghost) {
           background: #eef3f1;
         }
 
-        .btn.danger {
+        :global(.shipping-ordinary-control.btn.danger) {
           background: #7a2d2d;
           color: #fff6f6;
         }
 
-        .btn:disabled {
+        :global(.shipping-ordinary-control.btn:disabled) {
           opacity: 0.6;
           cursor: not-allowed;
         }
@@ -1679,7 +1701,7 @@ export default function ShippingHistoryPage() {
           align-items: center;
         }
 
-        .mini-btn {
+        :global(.shipping-ordinary-control.mini-btn) {
           min-height: 30px;
           border: 1px solid rgba(31, 42, 42, 0.18);
           border-radius: 8px;
@@ -1692,12 +1714,12 @@ export default function ShippingHistoryPage() {
           cursor: pointer;
         }
 
-        .mini-btn.muted {
+        :global(.shipping-ordinary-control.mini-btn.muted) {
           background: #f6f2e8;
           color: #4f4636;
         }
 
-        .mini-btn:disabled {
+        :global(.shipping-ordinary-control.mini-btn:disabled) {
           opacity: 0.45;
           cursor: not-allowed;
         }
@@ -1893,7 +1915,7 @@ export default function ShippingHistoryPage() {
           gap: 10px;
         }
 
-        .calendar-day {
+        :global(.shipping-ordinary-control.calendar-day) {
           min-height: 132px;
           border: 1px solid rgba(25, 32, 30, 0.1);
           border-radius: 12px;
@@ -1907,28 +1929,28 @@ export default function ShippingHistoryPage() {
           cursor: pointer;
         }
 
-        .calendar-day:disabled {
+        :global(.shipping-ordinary-control.calendar-day:disabled) {
           cursor: default;
         }
 
-        .calendar-day:hover,
-        .calendar-day:focus-visible {
+        :global(.shipping-ordinary-control.calendar-day:hover),
+        :global(.shipping-ordinary-control.calendar-day:focus-visible) {
           border-color: rgba(36, 51, 48, 0.28);
           background: #f2f6f4;
           outline: none;
         }
 
-        .calendar-day:disabled:hover {
+        :global(.shipping-ordinary-control.calendar-day:disabled:hover) {
           border-color: rgba(25, 32, 30, 0.08);
           background: #f7f7f4;
         }
 
-        .calendar-day.outside-month {
+        :global(.shipping-ordinary-control.calendar-day.outside-month) {
           background: #f1f2ef;
           color: #8a938e;
         }
 
-        .calendar-day.has-items {
+        :global(.shipping-ordinary-control.calendar-day.has-items) {
           background: #fbfbf9;
           border-color: rgba(36, 51, 48, 0.18);
         }
@@ -2431,5 +2453,6 @@ export default function ShippingHistoryPage() {
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }

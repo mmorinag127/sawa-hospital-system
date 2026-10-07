@@ -1,0 +1,147 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const ts = require('typescript');
+
+const root = path.resolve(__dirname, '../..');
+const base = '4677ef58dd94c5c99eef228b03691bf6cace8a75';
+const marker = 'shipping-ordinary-control';
+const expected = {
+  shipping: { button: 5, input: 2, select: 0, textarea: 1 },
+  'shipping-history': { button: 14, input: 9, select: 2, textarea: 0 },
+  'order-forms': { button: 1, input: 1, select: 2, textarea: 0 },
+};
+const mapped = { button: 'Button', input: 'Input', select: 'NativeSelect', textarea: 'Input' };
+const emit = source => ts.transpileModule(source, {
+  compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+}).outputText;
+const parse = source => ts.createSourceFile('page.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+function controls(source) {
+  const ast = parse(source);
+  assert.deepEqual(ast.parseDiagnostics, []);
+  const result = [];
+  function visit(node) {
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const open = node.openingElement || node;
+      const tag = open.tagName.getText(ast);
+      if ([...Object.keys(mapped), ...Object.values(mapped)].includes(tag)) {
+        result.push({ ast, node, open, tag });
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  return result;
+}
+
+function nonrender(source) {
+  const ast = parse(source);
+  const edits = [];
+  function visit(node) {
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node)) {
+      edits.push([node.getStart(ast), node.end, 'RENDER']);
+      return;
+    }
+    if (ts.isImportDeclaration(node)) {
+      const moduleName = node.moduleSpecifier.text;
+      if (['@mui/material', '@mui/material/styles', '@sawa/ui'].includes(moduleName)
+          || (node.importClause?.isTypeOnly && moduleName === 'react'
+              && node.importClause.namedBindings.getText(ast) === '{ ChangeEvent }')) {
+        edits.push([node.getStart(ast), node.end + 1, '']);
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  for (const [start, end, replacement] of edits.sort((a, b) => b[0] - a[0])) {
+    source = source.slice(0, start) + replacement + source.slice(end);
+  }
+  return source;
+}
+
+function properties(control, flatten) {
+  const result = new Map();
+  for (const prop of control.open.attributes.properties) {
+    assert.ok(ts.isJsxAttribute(prop), 'unexpected spread must not hide native props');
+    const key = prop.name.getText(control.ast);
+    if (key === 'inputProps' && flatten) {
+      const expression = prop.initializer.expression;
+      assert.ok(ts.isObjectLiteralExpression(expression));
+      for (const entry of expression.properties) {
+        assert.ok(ts.isPropertyAssignment(entry));
+        const name = ts.isStringLiteral(entry.name) ? entry.name.text : entry.name.getText(control.ast);
+        assert.equal(result.has(name), false, 'duplicate mapped native prop');
+        result.set(name, entry.initializer.getText(control.ast));
+      }
+    } else {
+      const value = !prop.initializer ? 'true'
+        : ts.isJsxExpression(prop.initializer) ? prop.initializer.expression.getText(control.ast)
+          : prop.initializer.getText(control.ast);
+      assert.equal(result.has(key), false);
+      result.set(key, value);
+    }
+  }
+  return result;
+}
+
+for (const [name, counts] of Object.entries(expected)) {
+  const file = 'frontend/src/pages/' + name + '.tsx';
+  const original = execFileSync('git', ['show', base + ':' + file], { cwd: root, encoding: 'utf8' });
+  const current = fs.readFileSync(path.join(root, file), 'utf8');
+
+  test(name + ' exact non-rendered source, hooks/auth/API/constants unchanged', () => {
+    assert.equal(nonrender(current), nonrender(original));
+    assert.equal((current.match(/<ThemeProvider theme=\{sawaTheme\}>/g) || []).length, 1);
+    assert.equal(/SawaProvider|sessionKey|QueryClient/.test(current), false);
+    assert.ok(current.includes('import { sawaTheme } from "@sawa/ui";'));
+  });
+
+  test(name + ' AST counts, all native props/options/handlers/default submit retained', () => {
+    const before = controls(original);
+    const after = controls(current);
+    const actual = { button: 0, input: 0, select: 0, textarea: 0 };
+    for (const control of before) actual[control.tag]++;
+    assert.deepEqual(actual, counts);
+    assert.equal(after.length, before.length);
+    assert.equal(after.some(control => Object.hasOwn(mapped, control.tag)), false);
+
+    for (let index = 0; index < before.length; index++) {
+      const oldControl = before[index];
+      const newControl = after[index];
+      assert.equal(newControl.tag, mapped[oldControl.tag]);
+      const oldProps = properties(oldControl, false);
+      const newProps = properties(newControl, true);
+      assert.ok(newProps.get('className').includes(marker));
+      newProps.set('className', newProps.get('className').replace(' ' + marker, ''));
+      if (oldControl.tag === 'button' && !oldProps.has('type')) oldProps.set('type', '"submit"');
+      if (oldControl.tag !== 'button') {
+        assert.equal(newProps.get('disableUnderline'), 'true');
+        newProps.delete('disableUnderline');
+      }
+      if (oldControl.tag === 'textarea') {
+        assert.equal(newProps.get('multiline'), 'true');
+        newProps.delete('multiline');
+      }
+      assert.deepEqual([...newProps.keys()].sort(), [...oldProps.keys()].sort());
+      for (const [key, value] of oldProps) {
+        assert.equal(emit('const value = ' + newProps.get(key)), emit('const value = ' + value),
+          name + ' control ' + index + ' ' + key);
+      }
+      if (ts.isJsxElement(oldControl.node)) {
+        assert.equal(newControl.node.children.map(node => node.getText(newControl.ast)).join(''),
+          oldControl.node.children.map(node => node.getText(oldControl.ast)).join(''));
+      }
+    }
+  });
+
+  test(name + ' newly global control selectors restricted to converted marker', () => {
+    const oldGlobals = new Set(original.match(/:global\([^\n]+?\)/g) || []);
+    const added = (current.match(/:global\([^\n]+?\)/g) || []).filter(selector => !oldGlobals.has(selector));
+    assert.ok(added.length > 0);
+    for (const selector of added) assert.ok(selector.includes('.' + marker), selector);
+  });
+}

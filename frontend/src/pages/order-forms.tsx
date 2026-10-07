@@ -1,3 +1,6 @@
+import { Button, Input, NativeSelect } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useMemo, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -146,6 +149,7 @@ export default function OrderFormsPage() {
   };
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page">
       <header className="hero">
         <div>
@@ -163,50 +167,63 @@ export default function OrderFormsPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">施設</span>
-            <select className="input" value={facilityId} onChange={(e) => setFacilityId(e.target.value)}>
+            <NativeSelect className="input shipping-ordinary-control" value={facilityId} onChange={(e) => setFacilityId(e.target.value)} disableUnderline>
               {facilities.map((facility) => (
                 <option key={facility.id} value={facility.id}>
                   {facility.name ? `${facility.name} (${facility.id})` : facility.id}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
 
           <label className="field">
             <span className="field-label">対象月</span>
-            <input
-              className="input"
+            <Input
+              className="input shipping-ordinary-control"
               type="month"
               value={monthId}
               onChange={(e) => setMonthId(e.target.value)}
+              disableUnderline
             />
           </label>
 
           <label className="field">
             <span className="field-label">注文書パターン</span>
-            <select className="input" value={patternId} onChange={(e) => setPatternId(e.target.value)}>
+            <NativeSelect className="input shipping-ordinary-control" value={patternId} onChange={(e) => setPatternId(e.target.value)} disableUnderline>
               <option value="">施設既定を使う</option>
               {patterns.map((pattern) => (
                 <option key={pattern.pattern_id} value={pattern.pattern_id}>
                   {pattern.label ? `${pattern.label} (${pattern.pattern_id})` : pattern.pattern_id}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
         </div>
 
         {selectedPattern?.description ? <p className="subtle">説明: {selectedPattern.description}</p> : null}
 
         <div className="actions">
-          <button className="btn primary" onClick={generate} disabled={loading}>
+          <Button className="btn primary shipping-ordinary-control" onClick={generate} disabled={loading} type="submit">
             {loading ? "生成中..." : "注文書を生成してダウンロード"}
-          </button>
+          </Button>
         </div>
       </section>
 
       {message ? <p className="message">{message}</p> : null}
 
       <style jsx>{`
+        :global(.shipping-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          font-size: inherit;
+          min-width: 0;
+        }
+
+        :global(.shipping-ordinary-control .MuiInputBase-input) {
+          padding: 0;
+          min-width: 0;
+        }
+
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
@@ -295,7 +312,7 @@ export default function OrderFormsPage() {
           text-transform: uppercase;
         }
 
-        .input {
+        :global(.shipping-ordinary-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
@@ -306,7 +323,7 @@ export default function OrderFormsPage() {
           margin-top: 16px;
         }
 
-        .btn {
+        :global(.shipping-ordinary-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 10px 18px;
@@ -316,12 +333,12 @@ export default function OrderFormsPage() {
           cursor: pointer;
         }
 
-        .btn.primary {
+        :global(.shipping-ordinary-control.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn:disabled {
+        :global(.shipping-ordinary-control.btn:disabled) {
           opacity: 0.6;
           cursor: not-allowed;
         }
@@ -339,5 +356,6 @@ export default function OrderFormsPage() {
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }
