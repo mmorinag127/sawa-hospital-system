@@ -1213,9 +1213,9 @@ def _canonical_slot_from_template_column(
     role = str(column.get("role") or "").strip().lower()
     if not field:
         return None
-    if role == "note":
+    if role in {"note", "remarks"}:
         slot_role = "note"
-        slot_name = "note"
+        slot_name = "remarks"
     elif field == "date_mmdd":
         slot_role = "date"
         slot_name = "date"
@@ -1358,6 +1358,39 @@ def _apply_implicit_canonical_slots(
                 }
             )
             assigned_cols.add(worksheet_col)
+    return slots
+
+
+def canonical_generated_column_slots(template: dict[str, Any], *, col_count: int) -> list[dict[str, Any]]:
+    """Use the authored roles and the master generator's physical column layout."""
+    from src.services import master_order_form_template_service as master
+
+    columns = template.get("columns") if isinstance(template, dict) else None
+    if not isinstance(columns, list) or not columns:
+        raise ValueError("hakodate_authored_columns_required")
+    if any(not isinstance(col, dict) or type(col.get("index")) is not int or not isinstance(col.get("role"), str) for col in columns):
+        raise ValueError("hakodate_authored_columns_invalid")
+    menus = [col for col in columns if col["role"] in {"menu", "menu_name"}]
+    if len(menus) != 1 or len({col["index"] for col in columns}) != len(columns):
+        raise ValueError("hakodate_authored_menu_role_unresolved")
+    generated = master._generated_columns(master._columns_from_facility_config({"fax_template": template}))
+    if col_count != master.GENERATED_START_COL + len(generated) - 1:
+        raise ValueError("hakodate_generated_columns_changed")
+    slots = [{"worksheet_col_index": master.GENERATED_START_COL - 1, "role": "menu_name", "slot_name": "menu_name", "label": menus[0].get("header") or menus[0].get("column_id"), "canonical_source": "facility_fax_template"}]
+    for offset, column in enumerate(generated):
+        if column["role"] in {"quantity", "quantity_change"}:
+            if not isinstance(column.get("diet_type"), str) or not column["diet_type"].strip():
+                raise ValueError("hakodate_authored_quantity_diet_required")
+            authored = dict(column)
+            authored.pop("name", None)
+            authored.pop("header", None)
+            authored.pop("name_locked", None)
+        else:
+            authored = column
+        spec = _canonical_slot_from_template_column(authored, fallback_index=column["index"])
+        if not spec:
+            raise ValueError("hakodate_authored_column_role_unresolved")
+        slots.append({"worksheet_col_index": master.GENERATED_START_COL + offset, "role": spec["role"], "slot_name": spec["slot_name"], "label": column.get("header") or column.get("column_id") or spec["label"], "canonical_source": "facility_fax_template"})
     return slots
 
 

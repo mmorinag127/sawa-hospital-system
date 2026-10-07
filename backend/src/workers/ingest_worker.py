@@ -1,31 +1,36 @@
 import json
 import os
 import threading
+from hashlib import sha256
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from src.workers import celery_app
-from src.workers.ingest_mail_adapter import parse_ingest_payload
+from src.workers.ingest_mail_adapter import parse_ingest_payload, to_job_kwargs
 from src.services.order_service import (
     create_order_from_ingest,
+    preview_existing_order_for_ingest,
     finalize_first_pass_side_effects,
     reconcile_completed_ocr_job,
     reparse_order as run_order_reparse,
 )
 from src.services import config_service, ocr_evidence_service
+from src.services.workflow_attempt_guard_service import (
+    capture_nonworkflow_execution, nonworkflow_execution_context,
+    current_nonworkflow_execution,
+    is_selected_pdf_failure,
+)
 from src.services.ingest_policy import (
     parse_date_string,
-    month_id_from_dates,
+    require_explicit_ingest_week,
     should_skip_ocr,
     retry_backoff_seconds,
 )
-from src.services.storage_service import load_bytes_from_uri
+from src.services.storage_service import load_bytes_from_uri, load_selected_pdf_bytes
 from src.services.storage_service import (
     StorageService,
-    save_output_json,
-    save_output_bytes_to_gcs,
-    get_default_output_bucket,
 )
 from src.services.fax_extractor import extract_fax_data, filter_tokens_by_box
 from src.services.grid_detector import detect_table_grid
@@ -36,11 +41,14 @@ from src.services.ocr_job_service import (
     get_auto_recovery_interval_seconds,
     get_auto_recovery_max_attempts,
     get_job,
-    get_latest_order_job,
     get_job_recovery_attempts,
     is_job_recovery_due,
     list_recoverable_jobs,
     update_job,
+    complete_own_selected_pdf_failure,
+    mark_own_pipeline_waiting,
+    validate_own_pipeline_result,
+    OwnPipelineLineageError,
 )
 from src.services.ocr_pipeline_service import (
     OCRPipelineOutputPendingError,
@@ -117,8 +125,10 @@ def _first_pass_job_metrics(
     failed_cells: int | None = None,
     error: str | None = None,
 ) -> dict[str, object]:
-    current = get_job(job_id) or {}
-    metrics = dict(current.get("metrics") or {})
+    execution_input = current_nonworkflow_execution()
+    if not isinstance(execution_input, dict) or execution_input.get("job_id") != job_id:
+        raise ValueError("ocr_execution_input_required")
+    metrics = {}
     metrics.update(
         {
             "request_mode": "ingest_first_pass",
@@ -147,19 +157,14 @@ def _mark_ocr_job_awaiting_output(
     preferred_template_ids: list[str] | None = None,
     increment_recovery_count: bool = False,
 ) -> dict | None:
-    current = get_job(job_id) or {}
-    metrics = dict(current.get("metrics") or {})
-    recovery_count = get_job_recovery_attempts(current)
-    if increment_recovery_count:
-        recovery_count += 1
+    metrics = {}
     metrics.update(
         {
             "request_mode": request_mode,
             "processing_stage": "ocr_pipeline",
             "result_state": "awaiting_output",
             "error": "ocr_output_pending",
-            "auto_recovery_count": recovery_count,
-            "awaiting_output_since": str(metrics.get("awaiting_output_since") or datetime.utcnow().isoformat()),
+            "awaiting_output_since": datetime.utcnow().isoformat(),
             "next_recovery_at": _next_ocr_job_recovery_at(),
             "stage_updated_at": datetime.utcnow().isoformat(),
             "facility_id": facility_id,
@@ -170,19 +175,44 @@ def _mark_ocr_job_awaiting_output(
             "input_reference": input_reference,
         }
     )
-    return update_job(
+    result = mark_own_pipeline_waiting(
         job_id,
-        status="awaiting_output",
+        recovery_count_increment=increment_recovery_count,
         input_reference=input_reference,
         output_reference=output_reference,
         error_message=error_message,
-        metrics=metrics,
+        metrics_patch=metrics,
     )
+    if result is None:
+        raise ValueError("ocr_pending_delivery_conflict")
+    return result
 
 
 def _mark_ocr_job_final_failed(job_id: str, *, error_message: str) -> dict | None:
+    if is_selected_pdf_failure(error_message):
+        return complete_own_selected_pdf_failure(job_id, error_message)
     current = get_job(job_id) or {}
-    metrics = dict(current.get("metrics") or {})
+    boundary = current_nonworkflow_execution()
+    if get_job_request_mode(current) == "ingest_first_pass":
+        if not isinstance(boundary, dict) or boundary.get("job_id") != job_id:
+            return None
+        captured = boundary["orders"].get(boundary.get("order_id"))
+        document = captured.get("document") if isinstance(captured, dict) else None
+        if not isinstance(document, dict):
+            return None
+        payload = parse_ingest_payload({
+            "message_id": document["source_email_id"], "pdf_uri": document["storage_uri"],
+            "received_at": document["received_at"], "order_id": boundary["order_id"],
+            "order_document_id": document["id"],
+            "facility_hint": captured["order"]["facility_code"],
+            "week_hint": captured["order"]["week_code"],
+        })
+        failed = create_order_from_ingest(
+            payload, lines=None, document_status="error", error_message=error_message,
+            execution_input=boundary,
+        )
+        return failed.get("non_ocr_terminal_receipt")
+    metrics = {}
     metrics.update(
         {
             "processing_stage": "ocr_pipeline",
@@ -205,6 +235,9 @@ def _load_completed_ocr_output(output_reference: str | None) -> dict | None:
     try:
         payload = load_bytes_from_uri(output_reference)
         parsed = json.loads(payload.decode("utf-8"))
+        validate_own_pipeline_result(parsed, output_reference)
+    except OwnPipelineLineageError:
+        raise
     except Exception:
         return None
     if is_ocr_pipeline_output_pending(parsed):
@@ -223,7 +256,13 @@ def _resubmit_ocr_job(job: dict[str, object]) -> bool:
     metrics = job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
     try:
-        pdf_bytes = load_bytes_from_uri(input_reference)
+        from src.services.ocr_job_service import own_pipeline_delivery_for_output
+
+        delivery = own_pipeline_delivery_for_output(job.get("output_reference"))
+        from src.services.workflow_attempt_guard_service import processing_start_pdf_receipt
+
+        start_pdf = processing_start_pdf_receipt()
+        pdf_bytes = load_selected_pdf_bytes(start_pdf["storage_uri"], start_pdf)
         output = run_ocr_pipeline(
             pdf_bytes=pdf_bytes,
             job_id=job_id,
@@ -238,6 +277,9 @@ def _resubmit_ocr_job(job: dict[str, object]) -> bool:
             force_upload=True,
             wait_for_output=False,
         )
+    except OwnPipelineLineageError as exc:
+        _mark_ocr_job_final_failed(job_id, error_message=str(exc))
+        return False
     except Exception as exc:  # noqa: BLE001
         logger.warning("OCR job recovery resubmit failed", job_id=job_id, error=str(exc))
         if get_job_recovery_attempts(job) + 1 >= get_auto_recovery_max_attempts():
@@ -246,7 +288,7 @@ def _resubmit_ocr_job(job: dict[str, object]) -> bool:
             _mark_ocr_job_awaiting_output(
                 job_id,
                 error_message=f"ocr_recovery_retry_failed:{exc}",
-                input_reference=input_reference,
+                input_reference=(metrics.get("pipeline_delivery_receipt") or {}).get("input_reference"),
                 output_reference=str(job.get("output_reference") or "").strip() or None,
                 request_mode=str(metrics.get("request_mode") or "ingest_first_pass").strip() or "ingest_first_pass",
                 facility_id=str(metrics.get("facility_id") or "").strip() or None,
@@ -263,7 +305,7 @@ def _resubmit_ocr_job(job: dict[str, object]) -> bool:
     _mark_ocr_job_awaiting_output(
         job_id,
         error_message="ocr_output_pending",
-        input_reference=str(output.get("input_reference") or input_reference or "").strip() or input_reference,
+        input_reference=output.get("input_reference"),
         output_reference=str(output.get("output_reference") or "").strip() or None,
         request_mode=str(metrics.get("request_mode") or "ingest_first_pass").strip() or "ingest_first_pass",
         facility_id=str(metrics.get("facility_id") or "").strip() or None,
@@ -283,25 +325,43 @@ def run_ocr_job_recovery_once(limit: int | None = None) -> int:
     recovery_limit = limit or _INGEST_MAX_WORKERS
     recovered = 0
     for job in list_recoverable_jobs(limit=recovery_limit):
-        job_id = str(job.get("id") or "").strip()
-        if not job_id:
+        pending_receipt = (job.get("metrics") or {}).get("pending_receipt")
+        if isinstance(pending_receipt, dict) and pending_receipt.get("workflow_attempt_id") is not None:
+            from src.services import order_service
+
+            recovered += int(order_service.reconcile_pending_workflow_reparse(job, deepcopy(pending_receipt)))
             continue
-        output_reference = str(job.get("output_reference") or "").strip() or None
-        if output_reference:
-            payload = _load_completed_ocr_output(output_reference)
-            if isinstance(payload, dict):
-                if reconcile_completed_ocr_job(job_id):
-                    recovered += 1
-                continue
-        if not is_job_recovery_due(job):
+        execution_input = (job.get("metrics") or {}).get("nonworkflow_execution")
+        if not isinstance(execution_input, dict):
+            logger.warning("OCR recovery stopped: processing-start input missing", job_id=job.get("id"))
             continue
-        if get_job_recovery_attempts(job) >= get_auto_recovery_max_attempts():
-            _mark_ocr_job_final_failed(job_id, error_message="ocr_recovery_exhausted")
-            recovered += 1
-            continue
-        if _resubmit_ocr_job(job):
-            recovered += 1
+        with nonworkflow_execution_context(deepcopy(execution_input)):
+            try:
+                recovered += int(_recover_captured_ocr_job(job))
+            except ValueError as exc:
+                if not is_selected_pdf_failure(exc):
+                    raise
+                recovered += int(complete_own_selected_pdf_failure(job.get("id"), str(exc)) is not None)
     return recovered
+
+
+def _recover_captured_ocr_job(job: dict) -> bool:
+    job_id = str(job.get("id") or "").strip()
+    if not job_id:
+        return False
+    output_reference = str(job.get("output_reference") or "").strip() or None
+    if output_reference:
+        try:
+            payload = _load_completed_ocr_output(output_reference)
+        except OwnPipelineLineageError as exc:
+            return _mark_ocr_job_final_failed(job_id, error_message=str(exc)) is not None
+        if isinstance(payload, dict):
+            return reconcile_completed_ocr_job(job_id, execution_input=current_nonworkflow_execution())
+    if not is_job_recovery_due(job):
+        return False
+    if get_job_recovery_attempts(job) >= get_auto_recovery_max_attempts():
+        return _mark_ocr_job_final_failed(job_id, error_message="ocr_recovery_exhausted") is not None
+    return _resubmit_ocr_job(job)
 
 
 def _submit_uploaded_pdf_job(uploaded_pdf_id: str) -> bool:
@@ -343,13 +403,38 @@ def _looks_like_first_pass_ocr_payload(payload: object) -> bool:
     return False
 
 
-def _run_auto_llm_reparse(order_id: str, *, provider: str | None = None) -> None:
+def _run_auto_llm_reparse(order_id: str, *, job_id: str, execution_input: dict, own_payload: dict, provider: str | None = None) -> None:
+    from src.services import order_service
+
+    updated = None
     try:
-        updated, error = run_order_reparse(
-            order_id,
-            ocr_provider=provider,
-            llm_assist=True,
-        )
+        with nonworkflow_execution_context(execution_input):
+            updated, error = run_order_reparse(
+                order_id, ocr_provider=provider, llm_assist=True,
+                ocr_job_id=job_id, resume_first_pass_payload=own_payload,
+            )
+            if error is None and order_service.is_own_pending_ocr_result(
+                updated, order_id=order_id, job_id=job_id,
+                execution_id=execution_input.get("execution_id"),
+            ):
+                return
+            receipt = (updated or {}).get("terminal_receipt")
+            if not isinstance(receipt, dict):
+                updated, error = order_service._persist_ocr_rerun_completion(
+                    order_id, job_id, own_payload,
+                    error=error or "llm_reparse_terminal_receipt_missing",
+                    metrics_patch={"request_mode": "llm_reparse"},
+                )
+                receipt = updated["terminal_receipt"]
+            if (
+                receipt.get("job_id") != job_id or receipt.get("order_id") != order_id
+                or receipt.get("execution_id") != execution_input.get("execution_id")
+                or receipt.get("evidence_run_id") != (
+                    (updated or {}).get("reparse_evidence_run_id") or (updated or {}).get("id")
+                )
+                or receipt.get("status") not in {"done", "failed"}
+            ):
+                raise ValueError("llm_reparse_terminal_receipt_mismatch")
         logger.info(
             "Auto LLM reparse finished",
             order_id=order_id,
@@ -358,6 +443,12 @@ def _run_auto_llm_reparse(order_id: str, *, provider: str | None = None) -> None
             error=error,
         )
     except Exception as exc:  # noqa: BLE001
+        if not isinstance((updated or {}).get("terminal_receipt"), dict):
+            with nonworkflow_execution_context(execution_input):
+                order_service._persist_ocr_rerun_completion(
+                    order_id, job_id, own_payload, error=f"llm_reparse_failed:{exc}",
+                    metrics_patch={"request_mode": "llm_reparse"},
+                )
         logger.exception("Auto LLM reparse failed", order_id=order_id, error=str(exc))
 
 
@@ -366,6 +457,9 @@ def _enqueue_auto_llm_reparse(
     *,
     ocr_status: str,
     pipeline_output: dict | None,
+    execution_input: dict,
+    own_evidence: dict | None,
+    own_job: dict | None,
 ) -> None:
     if not _auto_llm_reparse_enabled():
         return
@@ -376,6 +470,8 @@ def _enqueue_auto_llm_reparse(
         return
     if not _looks_like_first_pass_ocr_payload(pipeline_output):
         return
+    if not isinstance(own_evidence, dict) or own_evidence.get("selectable") is not True:
+        return
     if not isinstance(order, dict):
         return
     order_id = str(order.get("id") or "").strip()
@@ -383,7 +479,7 @@ def _enqueue_auto_llm_reparse(
     document_uri = str(order.get("document") or "").strip()
     if not order_id or not facility_id or not document_uri:
         return
-    existing_job = get_latest_order_job(order_id)
+    existing_job = own_job
     if isinstance(existing_job, dict):
         job_state = describe_job_state(existing_job)
         if str(job_state.get("status") or "").strip().lower() in {"running", "pending", "stalled"}:
@@ -394,7 +490,11 @@ def _enqueue_auto_llm_reparse(
             )
             return
     provider = str(os.getenv("OCR_AUTO_LLM_REPARSE_PROVIDER", "") or "").strip().lower() or None
-    _AUTO_REPARSE_EXECUTOR.submit(_run_auto_llm_reparse, order_id, provider=provider)
+    _AUTO_REPARSE_EXECUTOR.submit(
+        _run_auto_llm_reparse, order_id, provider=provider,
+        job_id=execution_input["job_id"], execution_input=deepcopy(execution_input),
+        own_payload=deepcopy(own_evidence["payload_json"]),
+    )
 
 
 def _build_pipeline_match_text(payload: dict | None) -> str:
@@ -582,7 +682,13 @@ def process_uploaded_pdf_job(uploaded_pdf_id: str) -> None:
     if claimed is None:
         logger.info("Uploaded PDF not ready or already claimed", uploaded_pdf_id=uploaded_pdf_id)
         return
-    payload = build_ingest_payload(claimed)
+    try:
+        payload = build_ingest_payload(claimed)
+    except ValueError as exc:
+        schedule_uploaded_pdf_retry(
+            uploaded_pdf_id, error_code=str(exc), error_message=str(exc), worker_instance=worker_instance,
+        )
+        return
     parsed_payload = parse_ingest_payload(payload)
     job_id = str(payload.get("message_id") or "").strip()
     if not job_id:
@@ -718,29 +824,142 @@ def _process_ingest_inline(**kwargs):
     Keep this path independent from Celery task plumbing to avoid request_stack issues.
     """
     payload = parse_ingest_payload(kwargs)
-    policy = config_service.load_ingest_policy()
-    master = config_service.load_facility_master()
+    payload.week_hint = require_explicit_ingest_week(payload.week_hint)
+    ocr_job_id = str(payload.ocr_job_id or f"OCR-{payload.message_id}").strip()
+    create_job(
+        ocr_job_id, input_reference=payload.pdf_uri, order_id=payload.order_id,
+        uploaded_pdf_id=payload.uploaded_pdf_id,
+        order_document_id=payload.order_document_id,
+        input_artifact_digest=payload.content_sha256,
+    )
+    if not payload.order_id:
+        existing = preview_existing_order_for_ingest(payload)
+        registered = {"id": existing["order_id"]} if existing is not None else create_order_from_ingest(
+            payload, lines=None, ocr_attempts=0,
+            document_status="processing", error_message="ocr_pending",
+            registration_job_id=ocr_job_id,
+        )
+        if not isinstance(registered, dict) or not registered.get("id"):
+            raise ValueError("ocr_order_input_required")
+        payload.order_id = registered["id"]
+    execution_input = capture_nonworkflow_execution(ocr_job_id, order_id=payload.order_id, input_reference=payload.pdf_uri)
+    with nonworkflow_execution_context(execution_input):
+        try:
+            if execution_input.get("selected_pdf_error"):
+                raise ValueError(execution_input["selected_pdf_error"])
+            return _process_ingest_captured(payload, ocr_job_id, execution_input)
+        except BaseException as exc:
+            if is_selected_pdf_failure(exc):
+                receipt = complete_own_selected_pdf_failure(ocr_job_id, str(exc))
+                if receipt is not None:
+                    return {"id": payload.order_id, "document_status": "error", "non_ocr_terminal_receipt": receipt}
+                raise
+            try:
+                failed = create_order_from_ingest(
+                    payload, lines=None, ocr_attempts=0,
+                    document_status="error", error_message=str(exc),
+                    execution_input=execution_input,
+                )
+                if isinstance(exc, OwnPipelineLineageError):
+                    return failed
+            except Exception as terminal_error:
+                logger.warning("Own OCR failure receipt refused", job_id=ocr_job_id, error=str(terminal_error))
+            raise
+
+
+def map_own_ingest_result(payload, pdf_bytes, pipeline_result, mapping_input):
+    require_explicit_ingest_week(payload.week_hint)
+    if not isinstance(mapping_input, dict) or not isinstance(mapping_input.get("policy"), dict):
+        raise ValueError("first_pass_mapping_input_missing")
+    validate_own_pipeline_result(pipeline_result, pipeline_result.get("output_reference"))
+    template = deepcopy(mapping_input["template"])
+    if not template.get("template_id") or pipeline_result.get("template_id") != template["template_id"]:
+        raise ValueError("first_pass_template_input_mismatch")
+    extracted = extract_fax_data(
+        pdf_bytes, template, facility_id=payload.facility_hint,
+        preferred_template_id=mapping_input["preferred_template_id"], own_pipeline_payload=pipeline_result,
+    )
+    if extracted.facility_name and not payload.facility_name:
+        payload.facility_name = extracted.facility_name
+    if extracted.date_strings and not payload.date_hints:
+        payload.date_hints = extracted.date_strings
+    tokens = filter_tokens_by_box(extracted.tokens, template.get("table_box"))
+    grid = detect_table_grid(pdf_bytes, template)
+    extracted.tokens = tokens
+    extracted.grid = grid
+    _dump_ocr_debug(payload, extracted)
+    parsed_dates = [parse_date_string(raw, payload.received_at, policy=mapping_input["policy"]) for raw in extracted.date_strings]
+    parsed_dates = [date for date in parsed_dates if date]
+    lines = parse_order_lines(
+        extracted.table_rows, template, payload.received_at, mapping_input["policy"].get("quantity_rules", {}),
+        default_date=min(parsed_dates) if parsed_dates else None,
+        tokens=tokens, grid=grid.__dict__ if grid else None, pdf_bytes=pdf_bytes,
+        date_policy=mapping_input["policy"],
+    )
+    raw = extracted.recognizer_payload
+    result = deepcopy(raw) if isinstance(raw, dict) else {}
+    if extracted.own_pipeline_payload is None:
+        from src.services.storage_service import verify_selected_pdf_bytes
+        from src.services.workflow_attempt_guard_service import processing_start_pdf_receipt
+        input_receipt = processing_start_pdf_receipt()
+        verify_selected_pdf_bytes(pdf_bytes, input_receipt)
+        result = {
+            **(deepcopy(raw) if isinstance(raw, dict) else {}),
+            "engine": extracted.ocr_provider, "raw_recognizer_payload": deepcopy(raw),
+            "table_raw": extracted.raw_text, "table_rows": deepcopy(extracted.table_rows),
+            "date_strings": deepcopy(extracted.date_strings), "provider_debug": deepcopy(extracted.provider_debug),
+            "auxiliary_pipeline_result": deepcopy(pipeline_result),
+            "page_correction_artifacts": {"recognition_input": {
+                "representation": "original_identity", "receipt": input_receipt,
+            }},
+        }
+    result["raw_recognizer_payload"] = deepcopy(raw)
+    if not isinstance(raw, dict):
+        result.update(status="error", error="first_pass_own_recognizer_result_missing")
+        lines = None
+    execution = current_nonworkflow_execution()
+    if execution is None or not execution.get("input_reference"):
+        raise ValueError("ocr_execution_input_required")
+    if extracted.own_pipeline_payload is None:
+        result["input_reference"] = execution["input_reference"]
+    result["_first_pass_recognizer"] = {
+        "selected_pdf_receipt": deepcopy((current_nonworkflow_execution() or {}).get("selected_pdf_receipt")),
+        "job_id": execution["job_id"], "execution_id": execution["execution_id"],
+        "workflow_attempt_id": None, "workflow_revision": None,
+        "template_id": template["template_id"], "week_hint": payload.week_hint,
+        "input_sha256": sha256(pdf_bytes).hexdigest(), "provider": extracted.ocr_provider,
+        "selected_input_reference": execution["input_reference"],
+        "recognized_rows": deepcopy(extracted.table_rows),
+        "mapped_lines": [
+            {key: value.isoformat() if isinstance(value, (datetime, date)) else deepcopy(value) for key, value in line.items()}
+            for line in lines
+        ] if lines is not None else None,
+    }
+    return {"lines": lines, "recognizer_result": result}
+
+
+def _process_ingest_captured(payload, ocr_job_id: str, execution_input: dict):
+    week = require_explicit_ingest_week(payload.week_hint)
+    captured_order = execution_input.get("orders", {}).get(payload.order_id, {}).get("order")
+    if not isinstance(captured_order, dict) or captured_order.get("week_code") != week:
+        raise ValueError("first_pass_week_input_mismatch")
+    configured_input = execution_input.get("orders", {}).get(payload.order_id, {}).get("configured_input")
+    if not isinstance(configured_input, dict):
+        raise ValueError("configured_execution_input_missing")
+    policy = deepcopy(configured_input["policy"])
     lines = None
     ocr_attempts = 0
     ocr_status = "success"
     ocr_error = None
     pipeline_output = None
+    pipeline_pending = False
     facility_candidates: list[dict[str, object]] = []
     retry_limit = int(policy.get("ocr_retry_limit", 3) or 3)
-    ocr_job_id = str(payload.ocr_job_id or f"OCR-{payload.message_id}").strip() or f"OCR-{payload.message_id}"
-    create_job(
-        ocr_job_id,
-        input_reference=payload.pdf_uri,
-        order_id=payload.order_id,
-        uploaded_pdf_id=payload.uploaded_pdf_id,
-        order_document_id=payload.order_document_id,
-        input_artifact_digest=payload.content_sha256,
-    )
     update_job(
         ocr_job_id,
         status="running",
         input_reference=payload.pdf_uri,
-        order_id=payload.order_id,
+        order_id=execution_input.get("job_order_id"),
         uploaded_pdf_id=payload.uploaded_pdf_id,
         order_document_id=payload.order_document_id,
         input_artifact_digest=payload.content_sha256,
@@ -762,29 +981,23 @@ def _process_ingest_inline(**kwargs):
         retry_limit = 0
     preferred_template_id = None
     preferred_template_ids: list[str] = []
+    mapping_input = None
+    if retry_limit:
+        if not payload.facility_hint:
+            raise ValueError("facility_unresolved")
+        fac_config = deepcopy(configured_input["facility"])
+        preferred_template_id = fac_config.get("fax_template_id")
+        preferred_template_ids = list(fac_config.get("fax_template_ids") or [])
+        if preferred_template_id and preferred_template_id not in preferred_template_ids:
+            preferred_template_ids.insert(0, preferred_template_id)
+        mapping_input = {"template": deepcopy(fac_config["fax_template"]), "policy": deepcopy(policy),
+                         "preferred_template_id": preferred_template_id}
     try:
         for attempt in range(1, retry_limit + 1):
             ocr_attempts = attempt
             try:
-                pdf_bytes = load_bytes_from_uri(payload.pdf_uri)
+                pdf_bytes = load_selected_pdf_bytes(payload.pdf_uri)
                 if attempt == 1:
-                    if payload.facility_hint:
-                        fac_config = config_service.get_facility_config(payload.facility_hint)
-                        if fac_config:
-                            preferred_template_id = fac_config.get("fax_template_id")
-                            raw_template_ids = fac_config.get("fax_template_ids")
-                            if isinstance(raw_template_ids, list):
-                                preferred_template_ids = [
-                                    str(item).strip()
-                                    for item in raw_template_ids
-                                    if str(item).strip()
-                                ]
-                            if (
-                                isinstance(preferred_template_id, str)
-                                and preferred_template_id
-                                and preferred_template_id not in preferred_template_ids
-                            ):
-                                preferred_template_ids.insert(0, preferred_template_id)
                     try:
                         output = run_ocr_pipeline(
                             pdf_bytes=pdf_bytes,
@@ -796,10 +1009,11 @@ def _process_ingest_inline(**kwargs):
                             wait_for_output=_wait_for_pipeline_output_on_ingest(),
                         )
                         if is_ocr_pipeline_output_pending(output):
+                            pipeline_pending = True
                             _mark_ocr_job_awaiting_output(
                                 ocr_job_id,
                                 error_message="ocr_output_pending",
-                                input_reference=str(output.get("input_reference") or payload.pdf_uri or "").strip() or None,
+                                input_reference=output.get("input_reference"),
                                 output_reference=str(output.get("output_reference") or "").strip() or None,
                                 request_mode="ingest_first_pass",
                                 facility_id=payload.facility_hint,
@@ -808,35 +1022,24 @@ def _process_ingest_inline(**kwargs):
                                 preferred_template_ids=preferred_template_ids,
                             )
                         else:
-                            pipeline_output = output if _looks_like_first_pass_ocr_payload(output) else None
-                            output_ref = None
-                            bucket = get_default_output_bucket()
-                            if bucket:
-                                output_bytes = json.dumps(output, ensure_ascii=False).encode("utf-8")
-                                output_ref = save_output_bytes_to_gcs(
-                                    bucket,
-                                    ocr_job_id,
-                                    "ocr_output.json",
-                                    output_bytes,
-                                    content_type="application/json; charset=utf-8",
-                                )
-                            else:
-                                storage = _get_ocr_storage()
-                                output_ref = save_output_json(storage, ocr_job_id, "ocr_output.json", output)
+                            pipeline_output = deepcopy(output) if isinstance(output, dict) else None
+                            output_ref = output.get("output_reference")
+                            validate_own_pipeline_result(output, output_ref)
                             update_job(
                                 ocr_job_id,
-                                status=output.get("status") or "done",
+                                status="running",
                                 template_id=output.get("template_id"),
                                 output_reference=output_ref,
                                 error_message=None,
                                 metrics=_first_pass_job_metrics(
                                     ocr_job_id,
                                     processing_stage="ocr_pipeline",
-                                    result_state="done",
+                                    result_state="persist_pending",
                                     failed_cells=len(output.get("failed_cells") or []),
                                 ),
                             )
                     except OCRPipelineOutputPendingError as exc:
+                        pipeline_pending = True
                         logger.info(
                             "ROI OCR pipeline awaiting output",
                             job_id=ocr_job_id,
@@ -854,109 +1057,116 @@ def _process_ingest_inline(**kwargs):
                             preferred_template_id=preferred_template_id,
                             preferred_template_ids=preferred_template_ids,
                         )
+                    except OwnPipelineLineageError:
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("ROI OCR pipeline failed", job_id=ocr_job_id, error=str(exc))
                         update_job(
                             ocr_job_id,
-                            status="failed",
+                            status="running",
                             error_message=str(exc),
                             metrics=_first_pass_job_metrics(
                                 ocr_job_id,
                                 processing_stage="ocr_pipeline",
-                                result_state="hard_failed",
+                                result_state="persist_failure_pending",
                                 error=str(exc),
                             ),
                         )
-                base_template = master.get("fax_template_base", {})
-                extracted = extract_fax_data(
-                    pdf_bytes,
-                    base_template,
-                    facility_id=payload.facility_hint,
-                    preferred_template_id=preferred_template_id,
-                )
-                if extracted.facility_name and not payload.facility_name:
-                    payload.facility_name = extracted.facility_name
-                if extracted.date_strings and not payload.date_hints:
-                    payload.date_hints = extracted.date_strings
-                if not payload.facility_hint and payload.facility_name:
-                    payload.facility_hint = config_service.resolve_facility_id(payload.facility_name)
-                if not payload.facility_hint and isinstance(pipeline_output, dict):
-                    match_text = _build_pipeline_match_text(pipeline_output)
-                    candidates = config_service.match_facility_candidates(match_text)
-                    facility_candidates = [
-                        dict(item)
-                        for item in candidates
-                        if isinstance(item, dict)
-                    ][:5]
-                    auto_match = next((item for item in candidates if item.get("auto")), None)
-                    if auto_match:
-                        payload.facility_hint = auto_match.get("facility_id")
-                        if not payload.facility_name:
-                            payload.facility_name = auto_match.get("facility_name")
-                        logger.info(
-                            "Facility auto matched from OCR",
-                            facility_id=payload.facility_hint,
-                            reason=auto_match.get("reason"),
-                            score=auto_match.get("score"),
-                        )
-                if not payload.week_hint and payload.date_hints:
-                    payload.week_hint = month_id_from_dates(payload.date_hints, payload.received_at, policy)
-                if payload.facility_hint:
-                    facility_config = config_service.get_facility_config(payload.facility_hint)
-                    if facility_config:
-                        template = facility_config.get("fax_template", base_template)
-                        tokens = filter_tokens_by_box(extracted.tokens, template.get("table_box"))
-                        grid = detect_table_grid(pdf_bytes, template)
-                        extracted.tokens = tokens
-                        extracted.grid = grid
-                        _dump_ocr_debug(payload, extracted)
-                        default_date = None
-                        if extracted.date_strings:
-                            parsed_dates = []
-                            for raw in extracted.date_strings:
-                                parsed = parse_date_string(raw, payload.received_at)
-                                if parsed:
-                                    parsed_dates.append(parsed)
-                            if parsed_dates:
-                                default_date = min(parsed_dates)
-                        lines = parse_order_lines(
-                            extracted.table_rows,
-                            template,
-                            payload.received_at,
-                            policy.get("quantity_rules", {}),
-                            default_date=default_date,
-                            tokens=tokens,
-                            grid=grid.__dict__ if grid else None,
-                            pdf_bytes=pdf_bytes,
-                        )
-                        if not payload.week_hint and lines:
-                            line_dates = [line.get("date") for line in lines if line.get("date")]
-                            if line_dates:
-                                payload.week_hint = month_id_from_dates(line_dates, payload.received_at, policy)
-                ocr_status = "success"
-                ocr_error = None
+                if pipeline_pending:
+                    break
+                if not isinstance(pipeline_output, dict):
+                    raise ValueError("first_pass_pipeline_result_missing")
+                mapped = map_own_ingest_result(payload, pdf_bytes, pipeline_output, mapping_input)
+                lines = mapped["lines"]
+                pipeline_output = mapped["recognizer_result"]
+                ocr_status = "success" if lines is not None else "error"
+                ocr_error = None if lines is not None else pipeline_output.get("error")
                 break
+            except OCRPipelineOutputPendingError as exc:
+                pipeline_pending = True
+                pipeline_output = None
+                _mark_ocr_job_awaiting_output(
+                    ocr_job_id, error_message="ocr_output_pending",
+                    input_reference=exc.input_reference, output_reference=exc.output_reference,
+                    request_mode="ingest_first_pass", facility_id=payload.facility_hint,
+                    order_id=payload.order_id, preferred_template_id=preferred_template_id,
+                    preferred_template_ids=preferred_template_ids,
+                )
+                break
+            except OwnPipelineLineageError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 ocr_status = "error"
                 ocr_error = str(exc)
                 logger.exception("OCR extraction failed", attempt=attempt)
                 if attempt >= retry_limit:
                     logger.warning("OCR retries exhausted", attempts=attempt)
+    except OwnPipelineLineageError:
+        raise
     except Exception:  # noqa: BLE001
         logger.exception("OCR pipeline failed; continuing without lines")
+    if pipeline_pending:
+        execution_input["first_pass_application"] = {
+            "payload": to_job_kwargs(payload), "mapping_input": deepcopy(mapping_input),
+            "ocr_attempts": ocr_attempts or 1,
+        }
+    if not isinstance(pipeline_output, dict):
+        if not pipeline_pending and ocr_status != "skipped":
+            raise ValueError("first_pass_pipeline_result_missing")
+        lines = None
+    elif not order_service._classify_owned_evidence_payload(pipeline_output).get("persistable") or ocr_status != "success":
+        lines = None
     order = create_order_from_ingest(
         payload,
         lines=lines,
-        ocr_attempts=ocr_attempts or 1,
-        document_status=ocr_status,
-        error_message=ocr_error,
+        ocr_attempts=0 if ocr_status == "skipped" else ocr_attempts or 1,
+        document_status="processing" if pipeline_pending else ocr_status,
+        error_message="ocr_output_pending" if pipeline_pending else ocr_error,
+        execution_input=execution_input,
+        pipeline_result=pipeline_output,
+        mapping_policy=mapping_input["policy"] if mapping_input is not None else None,
     )
+    own_evidence = None
+    saved_job = None
+    if isinstance(order, dict) and isinstance(pipeline_output, dict):
+        own_evidence = order.pop("first_pass_evidence", None)
+        if not isinstance(own_evidence, dict) or not own_evidence.get("id"):
+            raise ValueError("first_pass_own_evidence_persist_failed")
+        if own_evidence.get("selectable") is True and order.get("first_pass_result_applied") is not True:
+            raise ValueError("first_pass_result_not_applied")
+        receipt = order.get("first_pass_terminal_receipt")
+        if (
+            not isinstance(receipt, dict) or receipt.get("job_id") != ocr_job_id
+            or receipt.get("execution_id") != execution_input["execution_id"]
+            or receipt.get("evidence_run_id") != own_evidence["id"]
+        ):
+            raise ValueError("first_pass_terminal_receipt_missing")
+        saved_job = {"id": receipt["job_id"], "status": receipt["status"]}
+        finalize_first_pass_side_effects(
+            job_id=ocr_job_id, order_id=order["id"], message_id=payload.message_id,
+        )
+    elif pipeline_pending:
+        # The registration is not an OCR result. Recovery replays the start input
+        # persisted on this exact real job; it may not recapture current tokens.
+        return
+    elif ocr_status == "skipped":
+        receipt = order.get("non_ocr_terminal_receipt") if isinstance(order, dict) else None
+        if not isinstance(receipt, dict) or receipt.get("job_id") != ocr_job_id or receipt.get("result_state") != "skipped":
+            raise ValueError("non_ocr_terminal_receipt_missing")
+        finalize_first_pass_side_effects(
+            job_id=ocr_job_id, order_id=order["id"], message_id=payload.message_id,
+        )
+        return
+    elif ocr_status != "skipped":
+        raise ValueError("first_pass_pipeline_result_missing")
     if isinstance(order, dict):
         try:
             from src.services import order_workflow_v2_service  # noqa: PLC0415
 
             order_workflow_v2_service.record_context_suggestion(
                 order_id=str(order.get("id") or "").strip(),
+                expected_revision=(execution_input["orders"][order["id"]]["workflow_revision"]
+                                   if execution_input["orders"][order["id"]]["workflow_exists"] else 0),
                 suggestion={
                     "source": "ingest_first_pass_ocr",
                     "facility_id": payload.facility_hint,
@@ -974,31 +1184,11 @@ def _process_ingest_inline(**kwargs):
                 message_id=payload.message_id,
                 error=str(exc),
             )
-    if isinstance(order, dict) and isinstance(pipeline_output, dict):
-        try:
-            ocr_evidence_service.persist_evidence_run(
-                order_id=str(order.get("id") or "").strip(),
-                payload=pipeline_output,
-                schema_version="v1_legacy",
-                producer_version="ocr_pipeline_ingest",
-                status="ready",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "OCR evidence persistence failed",
-                order_id=str(order.get("id") or "").strip() or None,
-                message_id=payload.message_id,
-                error=str(exc),
-            )
-        finalize_first_pass_side_effects(
-            job_id=ocr_job_id,
-            order_id=str(order.get("id") or "").strip() or None,
-            message_id=payload.message_id,
-        )
     _enqueue_auto_llm_reparse(
         order,
         ocr_status=ocr_status,
         pipeline_output=pipeline_output if isinstance(pipeline_output, dict) else None,
+        execution_input=execution_input, own_evidence=own_evidence, own_job=saved_job,
     )
 
 

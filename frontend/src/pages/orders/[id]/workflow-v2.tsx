@@ -127,6 +127,7 @@ type PreSaveStatus = {
 
 type QuadReviewPayload = {
   order_id: string;
+  source_receipt?: Record<string, unknown>;
   status?: string | null;
   image_png_base64?: string | null;
   image_size?: number[] | null;
@@ -1821,6 +1822,8 @@ export default function OrderWorkflowV2Page() {
   useEffect(() => {
     if (!orderDetail || !currentDocumentId) return;
     if (!selectedDocumentId) {
+      setQuadReview(null);
+      setManualQuadPoints([]);
       setSelectedDocumentId(currentDocumentId);
       return;
     }
@@ -1828,6 +1831,8 @@ export default function OrderWorkflowV2Page() {
       documentVersionOptions.length
       && !documentVersionOptions.some((version) => String(version.document_id || "").trim() === selectedDocumentId)
     ) {
+      setQuadReview(null);
+      setManualQuadPoints([]);
       setSelectedDocumentId(currentDocumentId);
     }
   }, [currentDocumentId, documentVersionOptions, orderDetail, selectedDocumentId]);
@@ -2342,7 +2347,9 @@ export default function OrderWorkflowV2Page() {
     setQuadReviewLoading(true);
     setQuadReviewMessage("");
     try {
-      const response = await apiClient.get<QuadReviewPayload>(`/orders/${orderId}/workflow-v2/quad-review`);
+      const response = await apiClient.get<QuadReviewPayload>(`/orders/${orderId}/workflow-v2/quad-review`, {
+        params: { document_id: effectiveSelectedDocumentId || undefined },
+      });
       setQuadReview(response.data);
       const savedQuad = response.data?.saved_override?.quad_px;
       if (Array.isArray(savedQuad) && savedQuad.length === 4) {
@@ -2364,16 +2371,17 @@ export default function OrderWorkflowV2Page() {
     setError("");
     setQuadReviewMessage("");
     try {
-      await apiClient.put(`/orders/${orderId}/workflow-v2/quad-review`, {
+      const saved = await apiClient.put(`/orders/${orderId}/workflow-v2/quad-review`, {
         decision,
         quad_px: quadPx,
-      });
+        source_receipt: quadReview?.source_receipt,
+      }, { headers: { "If-Match": String(quadReview?.source_receipt?.workflow_revision) } });
       const response = await apiClient.post(`/orders/${orderId}/workflow-v2/ocr-runs`, {
         stale_action: "retry",
         force: true,
         mode: "hakodate",
         document_id: effectiveSelectedDocumentId || undefined,
-      });
+      }, { headers: { "If-Match": String(saved.data?.workflow?.revision ?? saved.data?.revision) } });
       const nextWorkflow = response.data?.workflow || response.data || null;
       if (nextWorkflow) {
         setWorkflow(nextWorkflow);
@@ -3559,7 +3567,11 @@ export default function OrderWorkflowV2Page() {
                 <select
                   className="input"
                   value={effectiveSelectedDocumentId}
-                  onChange={(event) => setSelectedDocumentId(event.target.value)}
+                  onChange={(event) => {
+                    setQuadReview(null);
+                    setManualQuadPoints([]);
+                    setSelectedDocumentId(event.target.value);
+                  }}
                   disabled={Boolean(busy)}
                 >
                   {documentVersionOptions.map((version) => {

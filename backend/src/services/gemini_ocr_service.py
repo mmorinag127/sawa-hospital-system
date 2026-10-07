@@ -790,6 +790,8 @@ def run_gemini_ocr(
     facility_id: str | None = None,
 ) -> dict[str, Any]:
     _ = facility_id
+    from src.services.storage_service import verify_recognizer_pdf_bytes
+    verify_recognizer_pdf_bytes(pdf_bytes)
     api_key = _get_api_key()
     model = _get_model(template)
     page = max(int(template.get("page", 1)) - 1, 0) + 1
@@ -834,6 +836,7 @@ def run_gemini_ocr(
             schema=schema,
             max_tokens=attempt_max_tokens,
         )
+        verify_recognizer_pdf_bytes(pdf_bytes)
         payload = _request_gemini_json(
             model=model,
             api_key=api_key,

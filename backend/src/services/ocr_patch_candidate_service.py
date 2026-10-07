@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import nullcontext
 from typing import Any
 from uuid import uuid4
+from sqlalchemy import select
 
 from src.db import session_scope
 from src.models.order_sheet_draft import OrderSheetDraft
@@ -42,32 +44,6 @@ def _normalize_patch_payload(value: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _mark_latest_draft_with_patch_candidate(
-    *,
-    order_id: str,
-    base_draft_id: str | None,
-    patch_candidate_id: str,
-) -> None:
-    normalized_order_id = str(order_id or "").strip()
-    if not normalized_order_id or not str(patch_candidate_id or "").strip():
-        return
-    with session_scope() as session:
-        draft = None
-        if str(base_draft_id or "").strip():
-            draft = session.get(OrderSheetDraft, str(base_draft_id).strip())
-        if draft is None:
-            draft = (
-                session.query(OrderSheetDraft)
-                .filter(OrderSheetDraft.order_id == normalized_order_id)
-                .order_by(OrderSheetDraft.edited_at.desc(), OrderSheetDraft.created_at.desc(), OrderSheetDraft.id.desc())
-                .first()
-            )
-        if draft is None:
-            return
-        draft.latest_patch_candidate_id = str(patch_candidate_id).strip()
-        session.flush()
-
-
 def persist_patch_candidate(
     *,
     order_id: str,
@@ -83,12 +59,21 @@ def persist_patch_candidate(
     issues_json: list[dict[str, Any]] | None = None,
     patches_json: dict[str, Any] | None = None,
     proposed_draft_sheet_json: dict[str, Any] | None = None,
+    synchronous_write_input: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
     now = datetime.utcnow()
+    from src.services import order_service
+
+    if not isinstance(synchronous_write_input, dict):
+        return None
+    if base_evidence_run_id != synchronous_write_input.get("evidence_run_id") or base_draft_id != synchronous_write_input.get("draft_id"):
+        return None
     with session_scope() as session:
+        if not order_service._synchronous_cache_write_fence(session, normalized_order_id, synchronous_write_input):
+            return None
         row = OrderSheetPatchCandidate(
             id=f"OPC{uuid4().hex[:12]}",
             order_id=normalized_order_id,
@@ -125,11 +110,12 @@ def persist_patch_candidate(
         session.add(row)
         session.flush()
         serialized = _serialize_candidate(row)
-    _mark_latest_draft_with_patch_candidate(
-        order_id=normalized_order_id,
-        base_draft_id=str(base_draft_id or "").strip() or None,
-        patch_candidate_id=serialized["id"],
-    )
+        if base_draft_id:
+            draft = session.get(OrderSheetDraft, base_draft_id)
+            if draft is None or draft.order_id != normalized_order_id or draft.base_evidence_run_id != base_evidence_run_id:
+                raise ValueError("patch_candidate_input_lineage_mismatch")
+            draft.latest_patch_candidate_id = row.id
+            session.flush()
     return serialized
 
 
@@ -183,12 +169,22 @@ def mark_patch_candidate_applied(
     patch_candidate_id: str,
     *,
     applied_by: str | None = None,
+    write_session: Any = None,
+    synchronous_write_input: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     normalized_candidate_id = str(patch_candidate_id or "").strip()
     if not normalized_order_id or not normalized_candidate_id:
         return None
-    with session_scope() as session:
+    if write_session is None:
+        return None
+    from src.services import order_service
+
+    if not isinstance(synchronous_write_input, dict):
+        return None
+    with nullcontext(write_session) as session:
+        if not order_service._synchronous_cache_write_fence(session, normalized_order_id, synchronous_write_input):
+            return None
         row = (
             session.query(OrderSheetPatchCandidate)
             .filter(
@@ -198,6 +194,8 @@ def mark_patch_candidate_applied(
             .first()
         )
         if row is None:
+            return None
+        if row.base_evidence_run_id != synchronous_write_input.get("evidence_run_id") or row.base_draft_id != synchronous_write_input.get("draft_id"):
             return None
         row.candidate_state = "applied"
         row.status = "applied"
@@ -218,17 +216,21 @@ def apply_patch_candidate_to_draft(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None, "order_not_found"
-    candidate = (
-        get_patch_candidate(normalized_order_id, patch_candidate_id)
-        if str(patch_candidate_id or "").strip()
-        else get_latest_patch_candidate(normalized_order_id)
-    )
+    from src.services import order_service
+
+    synchronous_write_input = order_service._capture_synchronous_cache_write_input(normalized_order_id)
+    if synchronous_write_input is None:
+        return None, "synchronous_input_missing"
+    selected_candidate_id = str(patch_candidate_id or "").strip()
+    if not selected_candidate_id:
+        return None, "patch_candidate_id_required"
+    candidate = get_patch_candidate(normalized_order_id, selected_candidate_id)
     if not isinstance(candidate, dict):
         return None, "patch_candidate_not_found"
     proposed_draft = candidate.get("proposed_draft_sheet_json")
     if not isinstance(proposed_draft, dict) or not isinstance(proposed_draft.get("rows"), list):
         return None, "patch_candidate_not_applicable"
-    latest_draft = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
+    latest_draft = synchronous_write_input.get("draft")
     latest_draft_id = str((latest_draft or {}).get("id") or "").strip() or None
     expected_id = str(expected_draft_id or "").strip() or None
     if expected_id and latest_draft_id and expected_id != latest_draft_id:
@@ -236,10 +238,33 @@ def apply_patch_candidate_to_draft(
     base_draft_id = str(candidate.get("base_draft_id") or "").strip() or None
     if base_draft_id and latest_draft_id and base_draft_id != latest_draft_id:
         return None, "stale_patch_candidate"
+    if candidate.get("base_evidence_run_id") != synchronous_write_input["evidence_run_id"]:
+        return None, "stale_patch_candidate"
+    with session_scope() as write_session:
+        if not order_service._synchronous_cache_write_fence(write_session, normalized_order_id, synchronous_write_input):
+            return None, "synchronous_input_conflict"
+        candidate_query = select(OrderSheetPatchCandidate).where(OrderSheetPatchCandidate.id == selected_candidate_id)
+        if write_session.bind.dialect.name != "sqlite":
+            candidate_query = candidate_query.with_for_update()
+        actual_candidate = write_session.execute(candidate_query.execution_options(populate_existing=True)).scalar_one_or_none()
+        if actual_candidate is None or _serialize_candidate(actual_candidate) != candidate:
+            return None, "stale_patch_candidate"
+        return _adopt_patch_candidate(
+            normalized_order_id, candidate=candidate, proposed_draft=proposed_draft,
+            synchronous_write_input=synchronous_write_input, edited_by=edited_by,
+            write_session=write_session,
+        )
+
+
+def _adopt_patch_candidate(
+    normalized_order_id: str, *, candidate: dict[str, Any], proposed_draft: dict[str, Any],
+    synchronous_write_input: dict[str, Any], edited_by: str | None, write_session: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
     persisted = draft_sheet_service.persist_sheet_draft(
         order_id=normalized_order_id,
         draft_sheet_json=proposed_draft,
         base_evidence_run_id=str(candidate.get("base_evidence_run_id") or "").strip() or None,
+        template_version_id=synchronous_write_input["evidence"].get("template_version_id"),
         base_template_resolution_id=None,
         base_menu_snapshot_id=None,
         draft_state="draft_ready",
@@ -247,15 +272,23 @@ def apply_patch_candidate_to_draft(
         warnings=[],
         latest_patch_candidate_id=str(candidate.get("id") or "").strip() or None,
         edited_by=str(edited_by or "").strip() or "llm_patch_candidate",
+        synchronous_write_input=synchronous_write_input,
+        write_session=write_session,
     )
     if not isinstance(persisted, dict):
+        write_session.rollback()
         return None, "draft_persist_failed"
     applied_candidate = mark_patch_candidate_applied(
         normalized_order_id,
         str(candidate.get("id") or ""),
         applied_by=edited_by or "llm_patch_candidate",
+        write_session=write_session,
+        synchronous_write_input=synchronous_write_input,
     )
+    if applied_candidate is None:
+        write_session.rollback()
+        return None, "patch_candidate_adoption_conflict"
     return {
-        "candidate": applied_candidate or candidate,
+        "candidate": applied_candidate,
         "draft": persisted,
     }, None

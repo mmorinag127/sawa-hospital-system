@@ -177,6 +177,7 @@ def _try_template_warp(
     page_image_bgr: np.ndarray,
     template_ids: list[str] | None,
     preferred_template_id: str | None = None,
+    authored_templates: dict[str, dict] | None = None,
 ) -> tuple[np.ndarray | None, dict[str, Any] | None]:
     if not template_ids:
         return None, None
@@ -193,6 +194,7 @@ def _try_template_warp(
             ocr_bgr,
             img_alt_bgr=rotated,
             template_ids=template_ids,
+            authored_templates=authored_templates,
         )
         if preferred_token and str(matched_template_id or "").strip() != preferred_token:
             continue
@@ -580,6 +582,7 @@ def correct_page_images(
     db: Any,
     preferred_template_id: str | None = None,
     preferred_template_ids: list[str] | None = None,
+    authored_templates: dict[str, dict] | None = None,
 ) -> tuple[list[tuple[int, np.ndarray]], dict[str, Any]]:
     pages = [(int(page_index), image.copy()) for page_index, image in page_images if image is not None]
     if not pages:
@@ -603,7 +606,10 @@ def correct_page_images(
             page_image_bgr=first_page_image,
             template_ids=template_ids,
             preferred_template_id=preferred_template_id,
+            authored_templates=authored_templates,
         )
+        if authored_templates is not None and (first_corrected is None or not isinstance(first_diag, dict)):
+            raise ValueError("required_template_warp_unresolved")
         if isinstance(first_diag, dict):
             document_rotation_deg = int(first_diag.get("right_angle_rotation_deg") or 0) % 360
     for page_index, page_image in pages:
@@ -659,6 +665,7 @@ def correct_pdf_for_yomitoku(
     db: Any,
     preferred_template_id: str | None = None,
     preferred_template_ids: list[str] | None = None,
+    authored_templates: dict[str, dict] | None = None,
 ) -> tuple[bytes, dict[str, Any], list[tuple[int, np.ndarray]] | None]:
     if not _read_bool_env("OCR_ENABLE_PAGE_CORRECTION", True):
         return pdf_bytes, _empty_correction_summary(enabled=False), None
@@ -668,6 +675,7 @@ def correct_pdf_for_yomitoku(
         db=db,
         preferred_template_id=preferred_template_id,
         preferred_template_ids=preferred_template_ids,
+        authored_templates=authored_templates,
     )
     if not summary.get("applied"):
         return pdf_bytes, summary, None

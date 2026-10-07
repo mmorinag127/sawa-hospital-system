@@ -493,6 +493,7 @@ def validate_facility_config(config: Any) -> dict:
         errors,
     )
     fax_template = _ensure_dict(config_dict.get("fax_template"), "fax_template", errors)
+    _validate_columns(fax_template.get("columns"), "fax_template.columns", errors, warnings)
     _validate_main_ocr_row_fields(
         fax_template.get("main_ocr_row_fields"),
         "fax_template.main_ocr_row_fields",

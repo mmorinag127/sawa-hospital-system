@@ -126,23 +126,6 @@ def _fetch_draft_sheet(order_id: str, out_dir: Path, auth_header: str) -> dict[s
     return json.loads(payload)
 
 
-def _target_field_mapping(fields: list[str], target_cols: list[int]) -> dict[int, str]:
-    if not fields or not target_cols:
-        return {}
-    try:
-        menu_index = fields.index("menu")
-    except ValueError:
-        menu_index = 2 if len(fields) > 2 else -1
-    after_menu = fields[menu_index + 1 :]
-    if len(after_menu) == len(target_cols):
-        target_fields = after_menu
-    elif len(after_menu) > len(target_cols) and after_menu[-1] == "remarks":
-        target_fields = after_menu[: len(target_cols) - 1] + [after_menu[-1]]
-    else:
-        target_fields = after_menu[: len(target_cols)]
-    return {col: str(field) for col, field in zip(target_cols, target_fields)}
-
-
 def _sheet_field_from_region(region: dict[str, Any]) -> str:
     target = (region.get("logical_targets") or [{}])[0]
     candidates = (
@@ -167,8 +150,7 @@ def _build_truth_for_facility(
     fields = [str(field) for field in (draft_sheet.get("fields") or [])]
     rows = list(draft_sheet.get("rows") or [])
     field_indexes = {field: index for index, field in enumerate(fields)}
-    target_cols = sorted({int(region.get("worksheet_col") or 0) for region in regions})
-    field_by_col = _target_field_mapping(fields, target_cols)
+    field_by_col: dict[int, str] = {}
     truth: dict[str, dict[str, Any]] = {}
     for region in regions:
         sheet_cell = str(region.get("sheet_cell") or region.get("region_id") or "")
@@ -179,9 +161,12 @@ def _build_truth_for_facility(
             continue
         row_index = worksheet_row - ROWS_START
         region_field = _sheet_field_from_region(region)
-        field = region_field if region_field in field_indexes else field_by_col.get(worksheet_col) or region_field
-        if field is None or row_index < 0:
-            continue
+        field = region_field
+        if not field or row_index < 0:
+            raise ValueError("hakodate_original_field_unresolved")
+        previous = field_by_col.setdefault(worksheet_col, field)
+        if previous != field:
+            raise ValueError("hakodate_original_field_changed")
         expected = ""
         field_index = field_indexes.get(field)
         if row_index < len(rows) and field_index is not None:
@@ -800,6 +785,7 @@ def build_best_method_for_manifest_item(
     total_t0 = time.perf_counter()
     preprocess_t0 = time.perf_counter()
     pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width, draft_sheet=draft_sheet)
+    expected_sheet_cells = list(pre["expected_sheet_cells"])
     preprocess_seconds = time.perf_counter() - preprocess_t0
     eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)
@@ -819,6 +805,8 @@ def build_best_method_for_manifest_item(
         snap_seconds = time.perf_counter() - snap_t0
     facility_dir = output_dir / f"{page_index:02d}_{facility_code}_{order_id}"
     facility_dir.mkdir(parents=True, exist_ok=True)
+    if [region.get("sheet_cell") for region in snapped_regions] != expected_sheet_cells:
+        raise ValueError("hakodate_expected_cells_changed")
     records, ocr_metrics, contact_sheet = _run_text_recognizer_records(
         raw_rectified_bgr=pre["raw_rectified"],
         regions=snapped_regions,
@@ -826,6 +814,7 @@ def build_best_method_for_manifest_item(
     )
     records = _restore_display_bboxes(records, snapped_regions)
     metrics = cmp._evaluate(records)
+    metrics["expected_sheet_cells"] = expected_sheet_cells
     metrics.update(
         {
             "ocr_seconds": ocr_metrics.get("ocr_seconds"),
@@ -963,6 +952,7 @@ def build_best_method_for_manifest_item(
     metrics["total_seconds"] = round(float(time.perf_counter() - total_t0), 4)
     summary = {
         "page": page_index,
+        "expected_sheet_cells": expected_sheet_cells,
         "facility_code": facility_code,
         "order_id": order_id,
         "method": "fax_line_snap_current_frame_noise_text_recognizer_topk",

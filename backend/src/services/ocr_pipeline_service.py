@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from datetime import datetime
 import json
+from hashlib import sha256
 import os
 import socket
 import time
@@ -245,6 +246,24 @@ def _parse_gs_uri(uri: str) -> tuple[str, str] | None:
     return bucket, name
 
 
+def _owned_pipeline_output_name(output_prefix: str, source: dict) -> str:
+    identity = {key: value for key, value in source.items() if key != "output_reference"}
+    digest = sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"{output_prefix}{digest}/{os.path.basename(urlparse(source['input_reference']).path)}.g{source['input_generation']}.json"
+
+
+def _upload_configured_input(*, bucket, object_name, configured_input):
+    from google.cloud import storage
+    data = json.dumps(configured_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    name = object_name + ".configured.json"
+    blob = storage.Client().bucket(bucket).blob(name)
+    blob.upload_from_string(data, content_type="application/json", if_generation_match=0)
+    generation = str(blob.generation or "")
+    if not generation.isdigit():
+        raise ValueError("configured_input_generation_missing")
+    return {"bucket": bucket, "object_name": name, "generation": generation, "sha256": sha256(data).hexdigest()}
+
+
 def _upload_pdf_bytes(
     *,
     bucket: str,
@@ -260,9 +279,12 @@ def _upload_pdf_bytes(
     blob = client.bucket(bucket).blob(object_name)
     if metadata:
         blob.metadata = metadata
-    blob.upload_from_string(pdf_bytes, content_type="application/pdf")
-    blob.reload()
+    from src.services.storage_service import verify_selected_pdf_bytes
+    verify_selected_pdf_bytes(pdf_bytes)
+    blob.upload_from_string(pdf_bytes, content_type="application/pdf", if_generation_match=0)
     generation = str(blob.generation or "")
+    if not generation.isdigit():
+        raise ValueError("ocr_pipeline_upload_generation_missing")
     return generation
 
 
@@ -285,8 +307,12 @@ def _wait_for_output(
         try:
             blob = client.bucket(bucket).blob(object_name)
             if blob.exists(timeout=read_timeout, retry=None):
-                data = blob.download_as_bytes(timeout=read_timeout, retry=None)
+                blob.reload(timeout=read_timeout, retry=None)
+                data = blob.download_as_bytes(if_generation_match=int(blob.generation), timeout=read_timeout, retry=None)
                 payload = json.loads(data.decode("utf-8"))
+                from src.services.ocr_job_service import validate_own_pipeline_result
+
+                validate_own_pipeline_result(payload, f"gs://{bucket}/{object_name}")
                 status = str((payload or {}).get("status") or "").strip().lower()
                 stage = str((payload or {}).get("stage") or "").strip().lower()
                 if status == "done" or stage == "done":
@@ -318,6 +344,8 @@ def _wait_for_output(
                     status or "-",
                     stage or "-",
                 )
+        except ValueError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "OCR pipeline output poll failed bucket=%s name=%s timeout=%ss error=%s",
@@ -348,6 +376,26 @@ def run_ocr_pipeline(
     force_upload: bool = False,
     wait_for_output: bool = True,
 ) -> dict[str, Any]:
+    from src.services.storage_service import verify_selected_pdf_bytes
+
+    verify_selected_pdf_bytes(pdf_bytes)
+    from src.services import config_service
+
+    if not facility_id:
+        raise ValueError("facility_unresolved")
+    from src.services.workflow_attempt_guard_service import (
+        current_nonworkflow_execution, current_workflow_execution, processing_start_configured_input,
+    )
+    if current_nonworkflow_execution() is not None or current_workflow_execution() is not None:
+        configured_input = processing_start_configured_input()
+    else:
+        configured_input = config_service.capture_authored_processing_config(facility_id)
+    facility_config = configured_input["facility"]
+    if facility_config.get("facility_id") != facility_id:
+        raise ValueError("configured_execution_facility_mismatch")
+    config_service._validate_authored_facility_config(facility_config, preferred_template_id)
+    for template_id in preferred_template_ids or []:
+        config_service._validate_authored_facility_config(facility_config, template_id)
     semaphore = _get_pipeline_semaphore()
     acquired = False
     if semaphore:
@@ -375,6 +423,7 @@ def run_ocr_pipeline(
         input_prefix = _get_prefix("OCR_PIPELINE_INPUT_PREFIX", "input/")
         output_prefix = _get_prefix("OCR_PIPELINE_OUTPUT_PREFIX", "output/")
 
+        selected_input_reference = input_reference
         generation = ""
         input_name = None
         parsed_input = _parse_gs_uri(input_reference) if input_reference else None
@@ -384,21 +433,38 @@ def run_ocr_pipeline(
             and parsed_input[0] == bucket
             and parsed_input[1].startswith(input_prefix)
         ):
-            input_name = parsed_input[1]
-            logger.info(
-                "OCR pipeline input reuse bucket=%s name=%s",
-                bucket,
-                input_name,
-            )
+            from src.services.ocr_job_service import own_pipeline_delivery_for_output
+            from src.services.storage_service import load_bytes_from_uri
+
+            previous = own_pipeline_delivery_for_output(None, required=False)
+            if previous is not None and previous["input_reference"] == input_reference:
+                input_name = parsed_input[1]
+                generation = previous["generation"]
+                if load_bytes_from_uri(input_reference, generation=generation) != pdf_bytes:
+                    raise ValueError("ocr_pipeline_input_bytes_mismatch")
         if force_upload or not input_name:
             safe_job_id = _sanitize_object_name(job_id)
             stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
             input_name = f"{input_prefix}{safe_job_id}_{stamp}.pdf"
             metadata = {}
+            from src.services.workflow_attempt_guard_service import processing_start_pdf_receipt
+            selected_pdf = processing_start_pdf_receipt()
+            metadata["selected_pdf_receipt"] = json.dumps(selected_pdf, separators=(",", ":"))
+            configured_receipt = _upload_configured_input(bucket=bucket, object_name=input_name, configured_input=configured_input)
+            metadata["configured_input_receipt"] = json.dumps(configured_receipt, separators=(",", ":"))
+            workflow_owner = current_workflow_execution() or {}
+            nonworkflow_owner = current_nonworkflow_execution() or {}
+            owner = workflow_owner if workflow_owner.get("attempt") is not None else nonworkflow_owner
+            if not isinstance(owner, dict) or not owner.get("job_id"):
+                raise ValueError("ocr_execution_input_required")
+            metadata["execution_owner"] = json.dumps({
+                "job_id": owner["job_id"], "order_id": owner.get("order_id"),
+                "workflow_attempt_id": owner.get("attempt"), "workflow_revision": owner.get("revision"),
+                "nonworkflow_execution_id": owner.get("execution_id"),
+            }, separators=(",", ":"))
             if facility_id:
                 metadata["facility_id"] = facility_id
-            if preferred_template_id:
-                metadata["template_id"] = preferred_template_id
+            metadata["template_id"] = facility_config["fax_template"]["template_id"]
             normalized_template_ids = [
                 str(template_id).strip()
                 for template_id in (preferred_template_ids or [])
@@ -428,9 +494,58 @@ def run_ocr_pipeline(
                 generation,
             )
 
-        output_name = f"{output_prefix}{os.path.basename(input_name)}.json"
+        if not generation or not str(generation).isdigit():
+            raise ValueError("ocr_pipeline_input_generation_missing")
+        from google.cloud import storage
+        original_blob = storage.Client().bucket(bucket).blob(input_name, generation=int(generation))
+        original_blob.reload()
+        original_metadata = original_blob.metadata or {}
+        configured_receipt = json.loads(original_metadata.get("configured_input_receipt", "null"))
+        if not isinstance(configured_receipt, dict):
+            raise ValueError("configured_input_receipt_required")
+        configured_digest = sha256(json.dumps(configured_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if configured_receipt.get("sha256") != configured_digest:
+            raise ValueError("configured_input_changed")
+        original_source = {
+            "job_id": f"{bucket}:{input_name}:{generation}",
+            "input_reference": f"gs://{bucket}/{input_name}",
+            "input_generation": str(generation),
+            "input_sha256": sha256(pdf_bytes).hexdigest(),
+            "configured_input_sha256": configured_digest,
+            "configured_input_receipt": configured_receipt,
+            "execution_owner": json.loads(original_metadata.get("execution_owner", "null")),
+            "selected_pdf_receipt": json.loads(original_metadata.get("selected_pdf_receipt", "null")),
+        }
+        if not isinstance(original_source["execution_owner"], dict) or not isinstance(original_source["selected_pdf_receipt"], dict):
+            raise ValueError("ocr_original_input_owner_required")
+        from src.services.workflow_attempt_guard_service import processing_start_pdf_receipt, snapshots_equal
+        workflow_owner = current_workflow_execution() or {}
+        nonworkflow_owner = current_nonworkflow_execution() or {}
+        owner = workflow_owner if workflow_owner.get("attempt") is not None else nonworkflow_owner
+        expected_owner = {
+            "job_id": owner.get("job_id"), "order_id": owner.get("order_id"),
+            "workflow_attempt_id": owner.get("attempt"), "workflow_revision": owner.get("revision"),
+            "nonworkflow_execution_id": owner.get("execution_id"),
+        }
+        if not snapshots_equal(original_source["execution_owner"], expected_owner) or not snapshots_equal(original_source["selected_pdf_receipt"], processing_start_pdf_receipt()):
+            raise ValueError("ocr_original_input_owner_changed")
+        original_data = original_blob.download_as_bytes(if_generation_match=int(generation))
+        if sha256(original_data).hexdigest() != original_source["input_sha256"]:
+            raise ValueError("ocr_original_input_bytes_changed")
+        output_name = _owned_pipeline_output_name(output_prefix, original_source)
         output_reference = f"gs://{bucket}/{output_name}"
         input_reference = f"gs://{bucket}/{input_name}"
+        timeout_seconds = int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
+
+        from src.services.ocr_job_service import record_own_pipeline_delivery
+
+        if not record_own_pipeline_delivery(
+            job_id, selected_input_reference=selected_input_reference,
+            input_reference=input_reference, output_reference=output_reference, generation=generation,
+            input_sha256=sha256(pdf_bytes).hexdigest(),
+            wait_timeout_seconds=timeout_seconds,
+        ):
+            raise ValueError("ocr_pipeline_delivery_owner_changed")
 
         payload = {"bucket": bucket, "name": input_name}
         if generation:
@@ -494,11 +609,12 @@ def run_ocr_pipeline(
                 "status": "running",
                 "output_reference": output_reference,
                 "input_reference": input_reference,
+                "input_generation": generation,
+                "job_id": f"{bucket}:{input_name}:{generation}",
             }
             if trigger_error_message:
                 response["trigger_error"] = trigger_error_message
             return response
-        timeout_seconds = int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
         poll_interval = float(os.getenv("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0"))
         logger.info(
             "OCR pipeline wait output bucket=%s name=%s timeout=%ss interval=%ss",
@@ -520,6 +636,8 @@ def run_ocr_pipeline(
                 output_reference=output_reference,
                 timeout_seconds=timeout_seconds,
             ) from exc
+        from src.services.ocr_job_service import validate_own_pipeline_result
+        validate_own_pipeline_result(output, output_reference)
         try:
             save_pipeline_success(job_id, output_reference)
         except Exception:  # noqa: BLE001
@@ -527,6 +645,9 @@ def run_ocr_pipeline(
         if trigger_error_message and isinstance(output, dict):
             output = dict(output)
             output.setdefault("trigger_error", trigger_error_message)
+        from src.services.ocr_job_service import validate_own_pipeline_result
+
+        validate_own_pipeline_result(output, output_reference)
         return output
     except Exception as exc:  # noqa: BLE001
         try:

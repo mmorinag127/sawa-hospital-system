@@ -27,7 +27,7 @@ def _save_canonical_sheet(*, message_id: str, rows: list[list[str]]):
         lines=None,
     )
     workflow, error = order_workflow_v2_service.confirm_context(
-        order_id=order["id"], facility_id="FAC00001", week_start="2025-12-22", week_end="2025-12-28", template_id="大和なでしこ"
+        order_id=order["id"], facility_id="FAC00001", week_start="2025-12-22", week_end="2025-12-28", template_id="大和なでしこ", expected_revision=0
     )
     assert error is None
     evidence = order_service.persist_ocr_evidence_run(
@@ -42,12 +42,13 @@ def _save_canonical_sheet(*, message_id: str, rows: list[list[str]]):
         producer_version="c2-ci-contract", source="c2-ci-contract",
     )
     assert evidence is not None
-    _, error = order_workflow_v2_service.select_ocr_result(order["id"], evidence["id"])
+    selected, error = order_workflow_v2_service.select_ocr_result(order["id"], evidence["id"], expected_revision=workflow["revision"])
     assert error is None
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order["id"],
         sheet={"fields": FIELDS, "header": HEADER, "rows": rows, "row_ids": [f"row-{index}" for index in range(len(rows))]},
         edited_by="c2-ci-contract",
+        expected_revision=selected["revision"],
     )
     assert error is None
     assert saved["saved_sheet"]["template_version_id"] == workflow["template_version_id"]

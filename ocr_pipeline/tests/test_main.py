@@ -88,11 +88,6 @@ def _install_stub_modules() -> None:
     preprocess_module.build_images_for_match_and_ocr = lambda *args, **kwargs: (None, None)
     sys.modules.setdefault("app.preprocess", preprocess_module)
 
-    rois_module = types.ModuleType("app.rois")
-    rois_module.crop_rois = lambda *args, **kwargs: {}
-    rois_module.load_template_config = lambda *args, **kwargs: {}
-    sys.modules.setdefault("app.rois", rois_module)
-
     template_match_module = types.ModuleType("app.template_match")
     template_match_module.choose_template_and_warp = lambda *args, **kwargs: {}
     sys.modules.setdefault("app.template_match", template_match_module)
@@ -110,6 +105,144 @@ pipeline_main = importlib.import_module("app.main")
 
 
 class MainArtifactTests(unittest.TestCase):
+    def test_handler_required_stage_failures_are_owned_terminal_not_done(self):
+        import json
+        from contextlib import ExitStack
+        from terminal_store_fakes import Stores, install_transport_exceptions
+        for stage in ("classification", "roi", "correction"):
+            with self.subTest(stage=stage), ExitStack() as stack:
+                stores = Stores()
+                stack.enter_context(install_transport_exceptions())
+                patches = {
+                    "db": stores, "gcs": stores, "request": types.SimpleNamespace(get_json=lambda **_: {}),
+                    "INPUT_PREFIX": "input/", "parse_gcs_event": lambda _: ("own-bucket", "input/own.pdf", "19"),
+                    "OCR_ENABLE_TEMPLATE_MATCH": True, "OCR_ENABLE_TEMPLATE_ROI": True, "OCR_ENABLE_PAGE_CORRECTION": True,
+                    "run_yomitoku": lambda **_: self.fail("recognizer after mandatory failure"),
+                }
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(pipeline_main, name, value))
+                classify = stack.enter_context(mock.patch.object(pipeline_main, "_run_template_classification", return_value=({"matched_template_id": "own-template"}, {"template": stores.configured["facility"]["fax_template"]})))
+                roi = stack.enter_context(mock.patch.object(pipeline_main, "_run_template_roi_extraction", return_value={"qty": {"own": 0}}))
+                correction = stack.enter_context(mock.patch.object(pipeline_main, "correct_pdf_for_yomitoku"))
+                {"classification": classify, "roi": roi, "correction": correction}[stage].side_effect = ValueError("required computation failed")
+                _, status = pipeline_main.handler()
+                writes = [json.loads(value) for name, value in stores.writes if name == stores.output]
+                self.assertEqual(status, 200)
+                self.assertEqual(writes[-1]["status"], "failed")
+                self.assertFalse(writes[-1]["canonical_adoption_allowed"])
+                self.assertEqual(writes[-1]["input_generation"], "19")
+                self.assertFalse(any(write["status"] == "done" for write in writes))
+                self.assertEqual(stores.job["status"], "failed")
+                self.assertEqual(stores.job["terminal_receipt"]["result_digest"], pipeline_main._terminal_digest(writes[-1]))
+
+    def test_captured_roi_template_reaches_actual_loader_without_firestore(self):
+        import hashlib
+        import json
+        import numpy as np
+        from app.rois import crop_rois
+        configured = {"facility": {"facility_id": "fixture", "fax_template": {
+            "template_id": "own-template", "rois": {"table_box": [0, 0, 1, 1]}, "zero": 0, "unknown": None,
+        }}, "policy": {"quantity_rules": {"minimum": 0}}}
+        digest = hashlib.sha256(json.dumps(configured, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        image = np.zeros((10, 10, 3), dtype=np.uint8)
+        forbidden_db = types.SimpleNamespace(collection=lambda *_: self.fail("runtime Firestore template substituted"))
+        def match(*args, **kwargs):
+            self.assertEqual(kwargs["authored_templates"], {"own-template": configured["facility"]["fax_template"]})
+            return "own-template", image, image, image, {}
+        with mock.patch.object(pipeline_main, "db", forbidden_db), \
+             mock.patch.object(pipeline_main, "OCR_ENABLE_TEMPLATE_MATCH", True), \
+             mock.patch.object(pipeline_main, "render_pdf_to_png_bytes", return_value=b"png"), \
+             mock.patch.object(pipeline_main, "build_images_for_match_and_ocr", return_value=(image, image, image)), \
+             mock.patch.object(pipeline_main, "choose_template_and_warp", side_effect=match):
+            _, context = pipeline_main._run_template_classification(pdf_bytes=b"own", requested_template_id="own-template",
+                                captured_config=configured, configured_digest=digest)
+        self.assertEqual(context["template"], configured["facility"]["fax_template"])
+        rois = crop_rois(context["warped_ocr_bgr"], context["template"])
+        self.assertEqual(rois["table"].shape, image.shape)
+        self.assertFalse(rois["table"].any())
+        with self.assertRaisesRegex(ValueError, "captured_template_receipt_mismatch"):
+            pipeline_main.load_template_config(forbidden_db, "own-template", captured_config=configured, expected_digest="wrong")
+
+    def test_full_configured_sidecar_is_generation_pinned_and_content_verified(self):
+        import json
+        import hashlib
+        configured = {"facility": {"fax_template": {"template_id": "own", "zero": 0, "unknown": None}}, "policy": {}}
+        data = json.dumps(configured, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        receipt = {"bucket": "own-bucket", "object_name": "input/own.pdf.configured.json", "generation": "17",
+                   "sha256": hashlib.sha256(data).hexdigest()}
+        event_blob = types.SimpleNamespace(name="input/own.pdf", bucket=types.SimpleNamespace(name="own-bucket"),
+                                          metadata={"configured_input_receipt": json.dumps(receipt)})
+        source = mock.Mock()
+        source.download_as_bytes.return_value = data
+        bucket = mock.Mock()
+        bucket.blob.return_value = source
+        with mock.patch.object(pipeline_main.gcs, "bucket", return_value=bucket):
+            result, digest = pipeline_main._load_configured_input(event_blob)
+            self.assertEqual(result, configured)
+            self.assertEqual(digest, receipt["sha256"])
+            bucket.blob.assert_called_once_with(receipt["object_name"], generation=17)
+            source.download_as_bytes.assert_called_once_with(if_generation_match=17, timeout=30, retry=None)
+            source.download_as_bytes.return_value = b"different-config"
+            with self.assertRaisesRegex(ValueError, "captured_template_receipt_mismatch"):
+                pipeline_main._load_configured_input(event_blob)
+
+    def test_noop_producer_receipt_is_consumed_by_reparse_without_correction_fallback(self):
+        import hashlib
+        import tempfile
+        sys.path.insert(0, str(ROOT.parent / "backend"))
+        from src.services import order_service
+        from src.services.workflow_attempt_guard_service import nonworkflow_execution_context
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "own.pdf"
+            original = b"own-original-zero"
+            path.write_bytes(original)
+            source = {"storage_uri": str(path), "generation": None, "sha256": hashlib.sha256(original).hexdigest()}
+            declaration = pipeline_main._recognition_input_receipt(original, original, source, None)
+            with nonworkflow_execution_context({"selected_pdf_receipt": source}):
+                result, meta = order_service._resolve_reparse_llm_pdf_bytes(
+                    document_uri=str(path), payload={"page_correction_artifacts": {"recognition_input": declaration}},
+                )
+            self.assertEqual(result, original)
+            self.assertEqual(result.selected_pdf_receipt, source)
+            self.assertEqual(meta["used"], "raw")
+            self.assertIsNone(meta["fallback_reason"])
+
+    def test_recognition_input_declares_noop_original_and_real_corrected(self):
+        import hashlib
+        source = {"storage_uri": "gs://own/source.pdf", "sha256": hashlib.sha256(b"original0").hexdigest()}
+        original = pipeline_main._recognition_input_receipt(b"original0", b"original0", source, None)
+        self.assertEqual(original, {"representation": "original_identity", "receipt": source})
+        child = {"storage_uri": "gs://own/corrected.pdf?generation=2", "generation": "2",
+                 "source_sha256": source["sha256"], "sha256": hashlib.sha256(b"corrected0").hexdigest()}
+        self.assertEqual(pipeline_main._recognition_input_receipt(b"original0", b"corrected0", source, child),
+                         {"representation": "corrected", "receipt": child})
+        with self.assertRaisesRegex(ValueError, "recognition_input_receipt_required"):
+            pipeline_main._recognition_input_receipt(b"original0", b"changed", source, None)
+
+    def test_input_generation_is_pinned_and_never_metageneration(self):
+        self.assertEqual(pipeline_main.parse_gcs_event({"bucket": "bucket", "name": "input/pdf", "generation": "42"}),
+                         ("bucket", "input/pdf", "42"))
+        with self.assertRaises(ValueError):
+            pipeline_main.parse_gcs_event({"bucket": "bucket", "name": "input/pdf", "metageneration": "42"})
+        blob = mock.Mock()
+        blob.download_as_bytes.return_value = b"own-pdf"
+        blob.metadata = {"selected_pdf_receipt": json.dumps({
+            "storage_uri": "local-authoritative-upload.pdf", "generation": None,
+            "sha256": pipeline_main.hashlib.sha256(b"own-pdf").hexdigest(),
+        })}
+        bucket = mock.Mock()
+        bucket.blob.return_value = blob
+        gcs = mock.Mock()
+        gcs.bucket.return_value = bucket
+        with mock.patch.object(pipeline_main, "gcs", gcs):
+            _, data = pipeline_main._download_generation_input("bucket", "input/pdf", "42")
+            self.assertEqual(data, b"own-pdf")
+            bucket.blob.assert_called_once_with("input/pdf", generation=42)
+            blob.download_as_bytes.assert_called_once_with(if_generation_match=42)
+            blob.download_as_bytes.side_effect = ValueError("generation changed")
+            with self.assertRaises(ValueError):
+                pipeline_main._download_generation_input("bucket", "input/pdf", "42")
+
     def test_handler_writes_failed_payload_when_run_yomitoku_aborts(self):
         class _FakeJobRef:
             id = "job-doc"
@@ -143,19 +276,24 @@ class MainArtifactTests(unittest.TestCase):
 
         class _FakeBlob:
             def __init__(self):
-                self.metadata = {}
+                self.metadata = {"selected_pdf_receipt": json.dumps({
+                    "storage_uri": "local-authoritative-upload.pdf", "generation": None,
+                    "sha256": pipeline_main.hashlib.sha256(b"%PDF-1.4\n%EOF\n").hexdigest(),
+                })}
 
             def reload(self):
                 return None
 
-            def download_as_bytes(self):
+            def download_as_bytes(self, *, if_generation_match):
+                self_outer.assertEqual(if_generation_match, 1)
                 return b"%PDF-1.4\n%EOF\n"
 
         class _FakeBucket:
             def __init__(self, blob):
                 self._blob = blob
 
-            def blob(self, _name):
+            def blob(self, _name, *, generation):
+                self_outer.assertEqual(generation, 1)
                 return self._blob
 
         class _FakeGCS:
@@ -166,6 +304,7 @@ class MainArtifactTests(unittest.TestCase):
                 return _FakeBucket(self._blob)
 
         job_ref = _FakeJobRef()
+        self_outer = self
         partial_calls = []
 
         with mock.patch.object(
@@ -215,27 +354,48 @@ class MainArtifactTests(unittest.TestCase):
         self.assertEqual(job_ref.updates[-1]["error_type"], "SystemExit")
 
     def test_upload_corrected_pdf_artifact_returns_uri_when_correction_applied(self):
-        with mock.patch.object(
-            pipeline_main,
-            "_upload_bytes",
-            return_value="gs://bucket/output/doc_corrected.pdf",
-        ) as upload_mock:
+        blob = mock.Mock(generation=42)
+        gcs = mock.Mock()
+        gcs.bucket.return_value.blob.return_value = blob
+        summary = {"applied": True, "corrected_pdf_generated": True}
+        with mock.patch.object(pipeline_main, "gcs", gcs):
             uri = pipeline_main._upload_corrected_pdf_artifact(
                 bucket="bucket",
                 artifact_prefix="output/doc/",
                 base="doc",
                 original_pdf_bytes=b"%PDF-raw\n%EOF\n",
                 corrected_pdf_bytes=b"%PDF-corrected\n%EOF\n",
-                page_correction_summary={"applied": True, "corrected_pdf_generated": True},
+                page_correction_summary=summary,
             )
 
-        self.assertEqual(uri, "gs://bucket/output/doc_corrected.pdf")
-        upload_mock.assert_called_once_with(
-            "bucket",
-            "output/doc/doc_corrected.pdf",
+        self.assertEqual(uri, "gs://bucket/output/doc/doc_corrected.pdf?generation=42")
+        gcs.bucket.return_value.blob.assert_called_once_with("output/doc/doc_corrected.pdf")
+        blob.upload_from_string.assert_called_once_with(
             b"%PDF-corrected\n%EOF\n",
-            "application/pdf",
+            content_type="application/pdf",
         )
+        self.assertEqual(summary["corrected_pdf_receipt"]["generation"], "42")
+        self.assertEqual(summary["corrected_pdf_receipt"]["source_sha256"], pipeline_main.hashlib.sha256(b"%PDF-raw\n%EOF\n").hexdigest())
+
+    def test_selected_pdf_input_rejects_missing_changed_and_foreign_generation(self):
+        data = b"original"
+        receipt = {"storage_uri": "gs://canonical/selected.pdf?generation=7", "generation": "7",
+                   "sha256": pipeline_main.hashlib.sha256(data).hexdigest()}
+        original = mock.Mock(generation=7)
+        gcs = mock.Mock()
+        gcs.bucket.return_value.blob.return_value = original
+        blob = mock.Mock(metadata={"selected_pdf_receipt": json.dumps(receipt)})
+        with mock.patch.object(pipeline_main, "gcs", gcs):
+            pipeline_main._verify_selected_pdf_input(blob, data)
+            original.generation = 8
+            with self.assertRaisesRegex(ValueError, "selected_pdf_generation_changed"):
+                pipeline_main._verify_selected_pdf_input(blob, data)
+            original.generation = 7
+            with self.assertRaisesRegex(ValueError, "selected_pdf_bytes_changed"):
+                pipeline_main._verify_selected_pdf_input(blob, b"foreign")
+            blob.metadata = {}
+            with self.assertRaisesRegex(ValueError, "selected_pdf_start_receipt_required"):
+                pipeline_main._verify_selected_pdf_input(blob, data)
 
     def test_upload_corrected_pdf_artifact_skips_when_not_applied(self):
         with mock.patch.object(pipeline_main, "_upload_bytes") as upload_mock:

@@ -194,6 +194,13 @@ def build_hakodate_preprocessing_for_manifest_item(
 ) -> tuple[HakodatePreprocessingResult, Image.Image]:
     facility_code = str(item["facility_code"])
     order_id = str(item["order_id"])
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    fax_template = batch._fax_template_for_manifest_item(item, facility_code)
+    if type(page) is not int or page != fax_template["page"]:
+        raise ValueError("geometry_template_page_mismatch")
+    draft_sheet = item.get("original_physical_draft")
+    if not isinstance(draft_sheet, dict):
+        raise ValueError("hakodate_original_draft_required")
     existing_step2 = cv2.imread(item["step2_png"])
     if existing_step2 is None:
         raise ValueError(f"step2 canvas not found: {item['step2_png']}")
@@ -210,7 +217,7 @@ def build_hakodate_preprocessing_for_manifest_item(
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
     )
-    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width)
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width, page=page)
     registration, _step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,
@@ -225,8 +232,9 @@ def build_hakodate_preprocessing_for_manifest_item(
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        page=page,
     )
-    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
+    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width, page=page)
     table_bbox = registration.template_outer_grid_bbox_used
     raw_rectified = rectify_fax_to_template_grid(
         original,
@@ -257,8 +265,13 @@ def build_hakodate_preprocessing_for_manifest_item(
         column_edges=[float(value) for value in aligned_xs],
         row_edges=[float(value) for value in aligned_ys],
         horizontal_line_mask=horizontal_line_mask,
+        fax_template=fax_template,
+        draft_sheet=draft_sheet,
+        menu_body_row_indexes=batch._validate_menu_day_boundaries(draft_sheet, axis_evidence["row_intersection_y_match"]),
     )
+    batch.validate_original_target_plan(item, target_regions)
     snapped_regions, snap_evidence = snap_target_region_x_boundaries(raw_rectified, target_regions)
+    batch.validate_original_target_plan(item, snapped_regions)
     target_cells = target_cell_map_from_regions(snapped_regions)
     rectified_quad_points = _bbox_quad_points(table_bbox)
     overlay = draw_target_cell_map_overlay(
@@ -272,7 +285,7 @@ def build_hakodate_preprocessing_for_manifest_item(
         order_id=order_id,
         image=overlay,
         details=[
-            f"source_template={_source_template_name(facility_code)}",
+            f"source_template={_source_template_name(facility_code, configured_input=item['configured_input'])}",
             f"target_cells={len(target_cells)}",
             f"x_snap_applied={snap_evidence.get('applied')}",
         ],
@@ -322,7 +335,7 @@ def build_hakodate_preprocessing_for_manifest_item(
         order_id=order_id,
         fax_pdf=str(item["fax_pdf"]),
         template_pdf=str(item["template_pdf"]),
-        source_template=str(_source_template_name(facility_code)),
+        source_template=str(_source_template_name(facility_code, configured_input=item["configured_input"])),
         target_cell_count=len(target_cells),
         quality_gate=quality_gate,
         alignment_evidence=evidence,
@@ -344,7 +357,9 @@ def build_all_facility_hakodate_preprocessing_pdf(
     output_dir.mkdir(parents=True, exist_ok=True)
     pages: list[Image.Image] = []
     results: list[dict[str, Any]] = []
-    for page, item in enumerate(items, start=1):
+    for item in items:
+        from src.services import hakodate_cell_ocr_batch_service as batch
+        page = batch._fax_template_for_manifest_item(item, str(item["facility_code"]))["page"]
         result, review_page = build_hakodate_preprocessing_for_manifest_item(
             item=item,
             page=page,

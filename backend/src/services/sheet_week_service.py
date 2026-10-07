@@ -25,6 +25,10 @@ def parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date
     month_id = to_sheet_month_id(text)
     if not month_id:
         return None, None, None
+    try:
+        date.fromisoformat(month_id + "-01")
+    except ValueError:
+        return None, None, None
     if re.fullmatch(r"\d{4}-\d{2}", text):
         return month_id, None, None
     try:

@@ -93,6 +93,7 @@ def _adopt_current_sheet_via_workflow_v2(
         week_start=week_start.isoformat(),
         week_end=week_end.isoformat(),
         template_id=str(facility_config.get("fax_template_id") or ""),
+        expected_revision=0,
     )
     assert workflow_error is None
     assert workflow is not None
@@ -131,7 +132,7 @@ def _adopt_current_sheet_via_workflow_v2(
         refresh_workflow=False,
     )
     assert evidence is not None
-    selected, selected_error = order_workflow_v2_service.select_ocr_result(order_id, str(evidence["id"]))
+    selected, selected_error = order_workflow_v2_service.select_ocr_result(order_id, str(evidence["id"]), expected_revision=workflow["revision"])
     assert selected_error is None
     assert selected is not None
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
@@ -149,6 +150,7 @@ def _adopt_current_sheet_via_workflow_v2(
             "source": "workflow_v2_manual_saved_sheet",
         },
         edited_by="integration-current-sheet-fixture",
+        expected_revision=selected["revision"],
     )
     assert saved_error is None
     assert saved is not None

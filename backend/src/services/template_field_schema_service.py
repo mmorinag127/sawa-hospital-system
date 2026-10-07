@@ -152,9 +152,9 @@ def canonical_field_name_from_template_column(
         return "date_mmdd"
     if role == "daypart":
         return "daypart"
-    if role == "menu_name":
+    if role in {"menu", "menu_name"}:
         return "menu"
-    if role == "note":
+    if role in {"note", "remarks"}:
         return "remarks"
     if role == "aux":
         return canonical_aux_field_name(column, fallback_index=fallback_index)

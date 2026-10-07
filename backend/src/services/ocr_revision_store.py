@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import nullcontext
 from typing import Any
 
 from sqlalchemy import func, select
 
 from src.db import session_scope
 from src.models.order_ocr_revision import OrderOcrRevision
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.services.workflow_attempt_guard_service import lock_actual_write_ownership, lock_current_synchronous_cache_write, current_nonworkflow_execution
 
 def _revision_to_dict(row: OrderOcrRevision) -> dict[str, Any]:
     payload = {
@@ -32,14 +35,59 @@ def _revision_to_dict(row: OrderOcrRevision) -> dict[str, Any]:
     return payload
 
 
-def append_revision(order_id: str, revision: dict[str, Any]) -> dict[str, Any]:
+def append_revision(
+    order_id: str, revision: dict[str, Any], *, session: Any = None,
+    synchronous_write_input: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     revision_id = str(revision.get("revision_id") or "").strip()
     if not revision_id:
         raise ValueError("revision_id is required")
-    with session_scope() as session:
+    if session is None:
+        raise ValueError("revision_write_session_required")
+    with (nullcontext(session) if session is not None else session_scope()) as session:
+        job_id = revision.get("workflow_job_id")
+        if job_id:
+            allowed = lock_actual_write_ownership(
+                session, job_id=job_id, order_id=order_id,
+                workflow_attempt_id=revision.get("workflow_attempt_id"),
+                expected_workflow_revision=revision.get("workflow_revision"),
+            )
+            evidence_id = revision.get("base_evidence_run_id")
+            evidence = session.get(OrderOcrEvidenceRun, evidence_id) if evidence_id else None
+            execution = (evidence.payload_json or {}).get("_ocr_execution") if evidence is not None else None
+            allowed = allowed and bool(
+                evidence is not None and evidence.order_id == order_id
+                and isinstance(execution, dict)
+                and execution.get("evidence_run_id") == evidence_id
+                and execution.get("job_id") == job_id
+                and execution.get("workflow_attempt_id") == revision.get("workflow_attempt_id")
+                and execution.get("workflow_revision") == revision.get("workflow_revision")
+                and (
+                    current_nonworkflow_execution() is None
+                    or execution.get("nonworkflow_execution_id") == current_nonworkflow_execution().get("execution_id")
+                )
+                and revision.get("execution_lineage") == execution
+            )
+        elif isinstance(synchronous_write_input, dict):
+            captured = synchronous_write_input
+            allowed = revision.get("base_evidence_run_id") == captured.get("evidence_run_id") and lock_current_synchronous_cache_write(
+                session, order_id=order_id,
+                expected_order_lines_updated_at=captured.get("order_lines_updated_at"),
+                expected_workflow_revision=captured.get("workflow_revision"),
+                expected_evidence_run_id=captured.get("evidence_run_id"),
+                expected_draft_id=captured.get("draft_id"),
+                expected_draft_base_evidence_run_id=captured.get("draft_base_evidence_run_id"),
+                expected_cache_exists=captured.get("cache_exists") is True,
+                expected_cache_updated_at=captured.get("cache_updated_at"),
+                expected_input_versions=captured.get("input_versions"),
+            )
+        else:
+            allowed = False
+        if not allowed:
+            raise ValueError("revision_write_ownership_conflict")
         existing = session.get(OrderOcrRevision, revision_id)
         if existing:
-            return _revision_to_dict(existing)
+            raise ValueError("revision_id_already_exists")
         metadata = dict(revision)
         for key in (
             "revision_id",
@@ -105,6 +153,14 @@ def list_revisions(order_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
             .all()
         )
         return [_revision_to_dict(row) for row in rows]
+
+
+def get_revision(order_id: str, revision_id: str, *, session: Any = None) -> dict[str, Any] | None:
+    with (nullcontext(session) if session is not None else session_scope()) as session:
+        row = session.get(OrderOcrRevision, revision_id)
+        if row is None or row.order_id != order_id:
+            return None
+        return _revision_to_dict(row)
 
 
 def get_latest_revision(order_id: str, *, exact_only: bool = False) -> dict[str, Any] | None:

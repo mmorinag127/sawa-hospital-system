@@ -123,18 +123,24 @@ def select_edited_sheet_revision(
     revisions = edited.get("revisions")
     if isinstance(revisions, list):
         candidates.extend(item for item in revisions if isinstance(item, dict))
-    latest = edited.get("latest")
-    if isinstance(latest, dict):
-        candidates.append(latest)
-    for revision in reversed(candidates):
+    selected_id = str(edited.get("selected_revision_id") or "").strip()
+    selected_evidence_id = str(edited.get("base_evidence_run_id") or "").strip()
+    if not selected_id or not selected_evidence_id:
+        return None
+    execution = payload.get("_ocr_execution")
+    if isinstance(execution, dict) and execution.get("evidence_run_id") != selected_evidence_id:
+        return None
+    for revision in candidates:
+        if revision.get("revision_id") != selected_id or revision.get("base_evidence_run_id") != selected_evidence_id:
+            continue
+        if revision.get("workflow_job_id") or revision.get("draft_from_reparse_reject") or revision.get("auto_apply_blocked"):
+            return None
         if str(revision.get("ui_mode") or "").strip().lower() != "sheet":
             continue
         if not isinstance(revision.get("rows"), list):
             continue
         if exact_only:
-            is_exact = bool(revision.get("sheet_save_only")) or (
-                str(revision.get("sheet_save_mode") or "").strip().lower() == "exact"
-            )
+            is_exact = str(revision.get("sheet_save_mode") or "").strip().lower() == "exact"
             if not is_exact:
                 continue
         return revision
@@ -228,6 +234,8 @@ def build_sheet_payload_from_revision(
     field_label: FieldLabeler,
     field_value_to_str: FieldValueFormatter,
 ) -> dict[str, Any] | None:
+    if revision.get("workflow_job_id") or revision.get("draft_from_reparse_reject") or revision.get("auto_apply_blocked"):
+        return None
     snapshot = normalize_sheet_revision_snapshot(
         fields=revision.get("fields"),
         header=revision.get("header"),

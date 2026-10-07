@@ -68,8 +68,14 @@ def choose_template_and_warp(
     img_alt_bgr=None,
     collection: str | None = None,
     template_ids: list[str] | None = None,
+    authored_templates: dict[str, dict] | None = None,
 ):
-    templates = _template_sources(db, collection or default_template_collection(), template_ids)
+    if authored_templates is not None:
+        if not template_ids or any(template_id not in authored_templates for template_id in template_ids):
+            raise ValueError("captured_template_selection_required")
+        templates = [(template_id, authored_templates[template_id]) for template_id in template_ids]
+    else:
+        templates = _template_sources(db, collection or default_template_collection(), template_ids)
     if not templates:
         raise RuntimeError("No templates registered")
 

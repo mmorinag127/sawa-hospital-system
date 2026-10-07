@@ -44,11 +44,13 @@ class FixedQuadTemplateRegistrationResult:
     outputs: dict[str, str | None]
 
 
-def render_pdf_page_to_rgb_at_dpi(pdf_path: str | Path, *, dpi: int = 220) -> Image.Image:
+def render_pdf_page_to_rgb_at_dpi(pdf_path: str | Path, *, dpi: int = 220, page: int = 1) -> Image.Image:
     doc = fitz.open(str(pdf_path))
     if doc.page_count < 1:
         raise ValueError(f"pdf has no pages: {pdf_path}")
-    page = doc.load_page(0)
+    if type(page) is not int or page <= 0 or page > doc.page_count:
+        raise ValueError("selected_pdf_page_invalid")
+    page = doc.load_page(page - 1)
     pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
@@ -337,13 +339,14 @@ def estimate_edge_locked_quad_from_pdf(
     *,
     dpi: int = 220,
     render_width: int | None = None,
+    page: int = 1,
 ) -> dict[str, Any]:
     if render_width is not None:
-        bgr = render_pdf_page_to_bgr(str(pdf_path), width=int(render_width))
+        bgr = render_pdf_page_to_bgr(str(pdf_path), width=int(render_width), page=page)
         image = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         coordinate_space = {"mode": "render_width", "width": int(render_width)}
     else:
-        image = render_pdf_page_to_rgb_at_dpi(pdf_path, dpi=dpi)
+        image = render_pdf_page_to_rgb_at_dpi(pdf_path, dpi=dpi, page=page)
         coordinate_space = {"mode": "dpi", "dpi": int(dpi)}
     arr = np.array(image)
     thresholded = _edge_locked_binarize(arr)
@@ -386,6 +389,7 @@ def resolve_fixed_quad_px_for_manifest_item(
     item: dict[str, Any],
     *,
     render_width: int | None = None,
+    page: int = 1,
 ) -> tuple[list[list[float]], str, dict[str, Any] | None]:
     quad = item.get("quad_px")
     quad_source = str(item.get("quad_source") or "manifest_quad_px")
@@ -396,7 +400,7 @@ def resolve_fixed_quad_px_for_manifest_item(
         if isinstance(quad, list) and len(quad) == 4:
             return quad, quad_source, None
         raise ValueError("quad_px missing and fax_pdf/local_pdf unavailable")
-    estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220, render_width=render_width)
+    estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220, render_width=render_width, page=page)
     if estimate["status"] != "ok":
         raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
     return estimate["refined_quad_px"], "edge_locked_v4_estimated_from_fax_pdf", estimate
@@ -416,11 +420,13 @@ def load_fixed_quad_manifest_item(
     raise ValueError(f"manifest item not found: facility={facility_code} order={order_id}")
 
 
-def render_pdf_page_to_bgr(pdf_path: str, *, width: int | None = None) -> np.ndarray:
+def render_pdf_page_to_bgr(pdf_path: str, *, width: int | None = None, page: int = 1) -> np.ndarray:
     doc = fitz.open(pdf_path)
     if doc.page_count < 1:
         raise ValueError(f"pdf has no pages: {pdf_path}")
-    page = doc[0]
+    if type(page) is not int or page <= 0 or page > doc.page_count:
+        raise ValueError("selected_pdf_page_invalid")
+    page = doc[page - 1]
     scale = (float(width) / page.rect.width) if width else 1.0
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
     rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
@@ -797,15 +803,16 @@ def build_fixed_quad_template_registration(
     output_dir: Path | None = None,
     template_axes_x: list[int] | None = None,
     template_axes_y: list[int] | None = None,
+    page: int = 1,
 ) -> tuple[FixedQuadTemplateRegistrationResult, dict[str, np.ndarray]]:
     if quad_px is None:
-        estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220, render_width=render_width)
+        estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220, render_width=render_width, page=page)
         if estimate["status"] != "ok":
             raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
         quad_px = estimate["refined_quad_px"]
         if quad_source is None:
             quad_source = "edge_locked_v4_estimated_from_fax_pdf"
-    original = render_pdf_page_to_bgr(fax_pdf, width=render_width)
+    original = render_pdf_page_to_bgr(fax_pdf, width=render_width, page=page)
     template = render_template_pdf_to_canvas(
         template_pdf,
         width=canvas_width,

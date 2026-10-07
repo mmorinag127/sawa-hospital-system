@@ -118,15 +118,17 @@ def _final_quantity(quantity_corrected: object, quantity_original: object, zero_
 
 
 def build_totals(date_from: date | None, date_to: date | None, include_order_refs: bool = False) -> list[dict]:
-    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
-    zero_as_empty = quantity_rules.get("zero_as_empty", True)
     grouped: dict[tuple, dict] = {}
     facility_name_cache: dict[str, str] = {}
     for order in _iter_confirmed_orders(date_from, date_to):
         order_payload = serialize_order(order)
+        accepted = output_builder._accepted_output_candidate(order_payload)
+        quantity_rules = accepted["configured_input"]["policy"].get("quantity_rules", {})
+        zero_as_empty = quantity_rules.get("zero_as_empty", True)
         order_lines = output_builder.build_order_lines_for_outputs(
             order_payload,
             include_expanded_copy=False,
+            accepted_candidate=accepted,
         )
         order_id = str(order_payload.get("id") or order.id or "").strip()
         facility_id = str(order_payload.get("facility") or "").strip()

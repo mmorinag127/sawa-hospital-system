@@ -6,12 +6,17 @@ import hashlib
 import json
 import os
 import tempfile
+from contextvars import ContextVar
+from contextlib import nullcontext
+from functools import wraps
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import or_
+from sqlalchemy.orm.exc import StaleDataError
+from sqlalchemy.exc import IntegrityError
 
 from src.db import session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
@@ -23,14 +28,26 @@ from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
-from src.services import config_service, facility_template_version_service, sheet_week_service, workflow_v2_sheet_review_service
-from src.services import order_output_artifact_service
+from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
+from src.services import order_output_artifact_service, ocr_evidence_service
 from src.services.order_serialization_service import menu_amount_resolution, candidate_menu_amount_resolution, MENU_AMOUNT_UNRESOLVED
 from src.services.menu_service import MenuReadUnresolved
 from src.services.pdf_render import render_pdf_to_png_bytes
-from src.services.storage_service import load_bytes_from_uri
+from src.services.workflow_attempt_guard_service import (
+    lock_current_workflow_attempt, lock_current_workflow_revision, lock_order_execution_input,
+    current_nonworkflow_execution, lock_actual_write_ownership,
+    advance_nonworkflow_order_input,
+    captured_evidence_source,
+    lock_selected_version_input,
+    capture_reparse_read_input,
+    capture_selected_pdf_receipt,
+    verify_selected_pdf_receipt,
+)
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
+WORKFLOW_REVISION_REQUIRED = "workflow_revision_required"
+WORKFLOW_REVISION_CONFLICT = "workflow_revision_conflict"
+WORKFLOW_REVISION_INVALID = "workflow_revision_invalid"
 SHEET_AUTO_EDIT_JOB_META_KEY = "sheet_auto_edit_job"
 HAKODATE_LIVE_RENDER_WIDTH = 1864
 EXPANDED_CELL_COPY_MODES = {"auto", "enabled", "disabled"}
@@ -60,6 +77,44 @@ _WORKFLOW_V2_CANONICAL_STATES = {
     "ocr_job_order_mismatch",
     "legacy_ocr_evidence_not_selectable",
 }
+_expected_workflow_revision: ContextVar[int | None] = ContextVar("expected_workflow_revision", default=None)
+
+
+class _WorkflowRevisionError(Exception):
+    def __init__(self, error: str):
+        self.error = error
+
+
+def workflow_command(func):
+    """Apply the API revision contract to every mutating workflow command."""
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        expected_revision = kwargs.pop("expected_revision", None)
+        order_id = str(kwargs.get("order_id") or (args[0] if args else ""))
+        if expected_revision is None:
+            return None, WORKFLOW_REVISION_REQUIRED
+        if type(expected_revision) is not int or expected_revision < 0:
+            return None, WORKFLOW_REVISION_INVALID
+        token = _expected_workflow_revision.set(expected_revision)
+        conflict_error = None
+        try:
+            result = func(*args, **kwargs)
+        except _WorkflowRevisionError as exc:
+            conflict_error = exc.error
+        except StaleDataError:
+            conflict_error = WORKFLOW_REVISION_CONFLICT
+        finally:
+            _expected_workflow_revision.reset(token)
+        if conflict_error:
+            if kwargs.get("write_session") is not None:
+                return None, conflict_error
+            current, _ = get_workflow_readonly(order_id)
+            return current or {}, conflict_error
+        payload, error = result
+        if error:
+            return payload, error
+        return payload, None
+    return wrapped
 _WORKFLOW_V2_LEGACY_STATES = {
     "apply_ready",
     "draft_ready",
@@ -490,34 +545,6 @@ def _workflow_state_needs_context_projection(row: OrderWorkflowState, meta: dict
     return _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state)
 
 
-def _recover_workflow_context_meta_from_order(
-    order: Order,
-    row: OrderWorkflowState,
-    meta: dict[str, Any],
-) -> tuple[dict[str, Any], bool]:
-    if _workflow_meta_has_confirmed_context(meta) or not _workflow_state_needs_context_projection(row, meta):
-        return meta, False
-    suggestion = _order_context_suggestion(order)
-    if not isinstance(suggestion, dict):
-        return meta, False
-    facility_id = _normalize_id(suggestion.get("facility_id"))
-    week_start = _normalize_id(suggestion.get("week_start"))
-    week_end = _normalize_id(suggestion.get("week_end"))
-    if not facility_id or not week_start or not week_end:
-        return meta, False
-    recovered = dict(meta)
-    recovered["facility_id"] = facility_id
-    recovered["week_start"] = week_start
-    recovered["week_end"] = week_end
-    recovered["week_code"] = (
-        sheet_week_service.normalize_sheet_week_value(suggestion.get("week_code"))
-        or _format_week_code_from_range(week_start, week_end)
-    )
-    recovered["context_recovered_from"] = "order_ingest_context"
-    recovered["context_suggestion"] = _normalize_context_suggestion(recovered.get("context_suggestion")) or suggestion
-    return recovered, True
-
-
 def _workflow_v2_projection_context_error(meta: dict[str, Any]) -> str | None:
     if not _workflow_meta_has_confirmed_context(meta):
         return "context_not_confirmed"
@@ -656,12 +683,14 @@ def _refresh_ocr_prerequisite_state(
         row.last_transition_at = _now()
 
 
+@workflow_command
 def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        row = _get_or_create_workflow(session, order.id)
+        existing_workflow = _get_workflow(session, order.id)
+        row = existing_workflow or _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(row)
         if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
@@ -669,6 +698,9 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
             _apply_template_lineage_blocker(row, "template_version_required")
             return _serialize_workflow(row), "template_version_required"
         _refresh_ocr_prerequisite_state(session, order, row)
+        revision_error = _finalize_workflow_mutation(session, row)
+        if revision_error:
+            return _serialize_workflow(row), revision_error
         blockers = [
             _normalize_id(item)
             for item in (row.blockers_json or [])
@@ -719,6 +751,8 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "elapsed_seconds": round(elapsed_seconds, 3) if elapsed_seconds is not None else None,
         "processing_stage": metrics.get("processing_stage"),
         "result_state": metrics.get("result_state"),
+        "workflow_attempt_id": metrics.get("workflow_attempt_id"),
+        "workflow_completion_revision": metrics.get("workflow_completion_revision"),
         "error_message": error_message,
         "error": error_code,
         "error_detail": error_detail,
@@ -837,8 +871,14 @@ def _ensure_ocr_job_lineage(
     return None
 
 
-def _evidence_is_legacy_cache_backfill(row: OrderOcrEvidenceRun) -> bool:
-    return _normalize_id(row.source) == "legacy-cache-backfill"
+def _evidence_selection_blocker(row: OrderOcrEvidenceRun) -> str | None:
+    if row.status == "diagnostic_only":
+        return "ocr_diagnostic_result_not_selectable"
+    if row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"} or row.producer_version == "legacy-cache-mirror/v1":
+        return "legacy_ocr_evidence_not_selectable"
+    if not ocr_evidence_service.evidence_run_is_selectable(row):
+        return "ocr_result_execution_lineage_mismatch"
+    return None
 
 
 def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | None) -> None:
@@ -885,6 +925,17 @@ def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | N
     workflow.last_transition_at = _now()
 
 
+def _finalize_workflow_blocker(
+    session: Any,
+    workflow: OrderWorkflowState,
+    blocker: str,
+) -> str | None:
+    """Persist a canonical blocker transition with its own CAS revision."""
+    _apply_template_lineage_blocker(workflow, blocker)
+    _write_workflow_meta(workflow, _workflow_meta(workflow))
+    return _finalize_workflow_mutation(session, workflow)
+
+
 def _serialize_workflow(
     row: OrderWorkflowState,
     *,
@@ -902,6 +953,7 @@ def _serialize_workflow(
     )
     return {
         "order_id": row.order_id,
+        "revision": _workflow_revision(row),
         "state": row.state,
         "headline": row.headline,
         "primary_action": row.primary_action,
@@ -1180,8 +1232,9 @@ def _workflow_lineage_error(
         evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
         if evidence is None or evidence.order_id != order.id:
             return "selected_ocr_missing"
-        if _evidence_is_legacy_cache_backfill(evidence) or _normalize_id(evidence.status) == "repair_blocked":
-            return "legacy_ocr_evidence_not_selectable"
+        selection_blocker = _evidence_selection_blocker(evidence)
+        if selection_blocker:
+            return selection_blocker
         _evidence_template_version_id, template_error = _resolve_evidence_template_version(
             evidence,
             workflow,
@@ -1245,6 +1298,15 @@ def _workflow_lineage_error(
             return "confirmed_snapshot_required"
         if template_version_id and _normalize_id(snapshot.template_version_id) != template_version_id:
             return "confirmed_snapshot_template_mismatch"
+        snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
+        snapshot_bagging = snapshot_json.get("bagging_result")
+        snapshot_output = snapshot_json.get("output_bundle")
+        if not isinstance(snapshot_bagging, dict) or not isinstance(snapshot_output, dict):
+            return "confirmed_snapshot_artifacts_missing"
+        if not _has_confirmed_output_lineage(meta):
+            return "confirmed_snapshot_lineage_missing"
+        if _normalize_id(meta.get("confirmed_snapshot_id")) not in {None, confirmed_snapshot_id}:
+            return "confirmed_snapshot_lineage_mismatch"
     return None
 
 
@@ -1256,8 +1318,6 @@ def _serialize_workflow_checked(
     ocr_job: OcrJob | None = None,
 ) -> dict[str, Any]:
     meta = _workflow_meta_with_step4_artifacts(session, workflow)
-    recovered_meta, recovered = _recover_workflow_context_meta_from_order(order, workflow, meta)
-    meta = recovered_meta if recovered else meta
     meta = _recover_confirmed_artifacts_from_snapshot(
         order=order,
         workflow=workflow,
@@ -1289,11 +1349,18 @@ def _get_order_or_error(session: Any, order_id: str) -> tuple[Order | None, str 
 
 
 def _get_or_create_workflow(session: Any, order_id: str) -> OrderWorkflowState:
+    if lock_order_execution_input(session, order_id) is None:
+        raise _WorkflowRevisionError(WORKFLOW_REVISION_CONFLICT)
     row = session.get(OrderWorkflowState, order_id)
     if row is not None:
+        _assert_command_revision(row)
         return row
+    expected_revision = _expected_workflow_revision.get()
+    if expected_revision is not None and expected_revision != 0:
+        raise _WorkflowRevisionError(WORKFLOW_REVISION_CONFLICT)
     row = OrderWorkflowState(
         order_id=order_id,
+        revision=1,
         state="uploaded",
         headline="PDFと施設・週次を確認してください",
         primary_action="confirm_context",
@@ -1304,17 +1371,116 @@ def _get_or_create_workflow(session: Any, order_id: str) -> OrderWorkflowState:
         last_transition_at=_now(),
     )
     session.add(row)
-    session.flush()
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        # Only the bootstrap primary-key race maps to command conflict.
+        session.rollback()
+        message = str(exc).lower()
+        sqlite_duplicate = "unique constraint failed: order_workflow_states.order_id" in message
+        postgres_duplicate = (
+            'unique constraint "order_workflow_states_pkey"' in message
+            and "key (order_id)=" in message
+        )
+        if sqlite_duplicate or postgres_duplicate:
+            raise _WorkflowRevisionError(WORKFLOW_REVISION_CONFLICT) from exc
+        raise
     return row
 
 
 def _get_workflow(session: Any, order_id: str) -> OrderWorkflowState | None:
+    if lock_order_execution_input(session, order_id) is None:
+        return None
+    row = session.get(OrderWorkflowState, order_id)
+    if row is not None:
+        _assert_command_revision(row)
+    return row
+
+
+def _get_workflow_readonly(session: Any, order_id: str) -> OrderWorkflowState | None:
     return session.get(OrderWorkflowState, order_id)
+
+
+def _assert_command_revision(workflow: OrderWorkflowState) -> None:
+    expected_revision = _expected_workflow_revision.get()
+    if expected_revision is None:
+        return
+    if expected_revision != _workflow_revision(workflow):
+        raise _WorkflowRevisionError(WORKFLOW_REVISION_CONFLICT)
+
+
+def _workflow_revision(workflow: OrderWorkflowState) -> int:
+    revision = getattr(workflow, "revision", None)
+    if not isinstance(revision, int) or revision < 1:
+        raise RuntimeError("workflow_revision_missing")
+    return revision
+
+
+def _require_workflow_revision(
+    session: Any,
+    workflow: OrderWorkflowState,
+    expected_revision: int | None,
+    *,
+    created: bool = False,
+) -> str | None:
+    if expected_revision is None:
+        return WORKFLOW_REVISION_REQUIRED
+    if type(expected_revision) is not int or expected_revision < 0:
+        return WORKFLOW_REVISION_INVALID
+    actual_revision = _workflow_revision(workflow)
+    if created and expected_revision == 0:
+        return None
+    if expected_revision != actual_revision:
+        return WORKFLOW_REVISION_CONFLICT
+    return None
+
+
+def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> str | None:
+    meta = _workflow_meta(workflow)
+    proof = meta.get("bagging_input_proof")
+    if isinstance(proof, dict) and proof.get("bagging_result_id") == meta.get("bagging_result_id"):
+        captured = _restore_bagging_write_input(proof, _workflow_revision(workflow))
+        pending_values = {column.key: copy.deepcopy(getattr(workflow, column.key)) for column in workflow.__table__.columns}
+        if captured is not None and (workflow.evidence_run_id != captured.get("evidence_run_id") or workflow.draft_id != captured.get("draft_id")):
+            session.rollback()
+            return "bagging_input_conflict"
+        with session.no_autoflush:
+            valid = captured is not None and _get_order_service_module()._synchronous_cache_write_fence(session, workflow.order_id, captured)
+        if not valid:
+            session.rollback()
+            return "bagging_input_conflict"
+        for key, value in pending_values.items():
+            setattr(workflow, key, value)
+        proof = copy.deepcopy(proof)
+        proof["owned_revision"] = _workflow_revision(workflow) + 1
+        meta["bagging_input_proof"] = proof
+        _write_workflow_meta(workflow, meta)
+    configured = session.info.get("materialization_configured_input")
+    if configured is not None:
+        facility_id, captured = configured
+        if captured != config_service.capture_authored_processing_config(facility_id):
+            session.rollback()
+            return "materialization_configured_input_changed"
+    menu_defaults = session.info.get("materialization_menu_defaults")
+    if menu_defaults is not None:
+        from src.services import menu_service
+        facility_id, names, captured_defaults = menu_defaults
+        if captured_defaults != menu_service.resolve_menu_defaults(names, facility_id):
+            session.rollback()
+            return "materialization_menu_defaults_changed"
+    workflow.revision = _workflow_revision(workflow) + 1
+    try:
+        session.flush()
+    except StaleDataError:
+        session.rollback()
+        return WORKFLOW_REVISION_CONFLICT
+    return None
 
 
 def _serialize_uninitialized_workflow(order: Order) -> dict[str, Any]:
     return {
         "order_id": order.id,
+        "revision": 0,
         "state": "not_initialized",
         "headline": "Step1で施設・週次を確定してください",
         "primary_action": "confirm_context",
@@ -1374,7 +1540,7 @@ def _workflow_menu_amount_resolution(session, order, workflow):
         if version and _normalize_id(draft.template_version_id) != version:
             error = "saved_sheet_template_mismatch"
     if error is None:
-        candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft)
         if not isinstance(candidate, dict):
             error = "saved_sheet_materialization_failed"
         else:
@@ -1386,12 +1552,12 @@ def _workflow_menu_amount_resolution(session, order, workflow):
     return {"status": "unresolved", "blocker": error, "message": error, "affected_lines": []}
 
 
-def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def get_workflow_readonly(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        row = _get_workflow(session, order.id)
+        row = _get_workflow_readonly(session, order.id)
         if row is None:
             serialized = _serialize_uninitialized_workflow(order)
             resolution = _workflow_menu_amount_resolution(session, order, row)
@@ -1412,12 +1578,16 @@ def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         return serialized, None
 
 
-def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    return get_workflow_readonly(order_id)
+
+
+def get_quad_review(order_id: str, *, document_id: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
         if workflow is None:
             return None, "workflow_not_initialized"
         meta = _workflow_meta(workflow)
@@ -1426,11 +1596,29 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
         serialized_ocr_job = _serialize_ocr_job(ocr_job)
         saved_override = meta.get("quad_override") if isinstance(meta.get("quad_override"), dict) else None
+        saved_override_error = None
+        try:
+            document_uri, selection = _get_order_service_module()._resolve_order_document_selection(session, order, document_id)
+            if selection.get("error"):
+                return None, selection["error"]
+            selected_version = selection.get("selected_version_input")
+            pdf_receipt = capture_selected_pdf_receipt(session, order, selected_version)
+            start_input = capture_reparse_read_input(session, order)
+            geometry_digest = _get_order_service_module().geometry_source_digest(pdf_receipt, start_input["configured_input"], {key: start_input["order"].get(key) for key in ("facility_code", "week_code")}, physical_entries=start_input["physical_menu_entries"])
+            if saved_override is not None:
+                try:
+                    _get_order_service_module()._normalize_operator_quad_override(saved_override, selected_pdf_receipt=pdf_receipt, configured_input=start_input["configured_input"], order_input_identity={key: start_input["order"].get(key) for key in ("facility_code", "week_code")})
+                except ValueError:
+                    saved_override = None
+                    saved_override_error = "quad_source_input_changed"
+        except ValueError as exc:
+            return None, str(exc)
     if not document_uri:
         return None, "document_missing"
 
     try:
-        pdf_bytes = load_bytes_from_uri(document_uri)
+        from src.services.storage_service import load_selected_pdf_bytes
+        pdf_bytes = load_selected_pdf_bytes(document_uri, pdf_receipt)
     except Exception as exc:  # noqa: BLE001
         return {
             "order_id": order_id,
@@ -1447,8 +1635,9 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with tempfile.TemporaryDirectory(prefix="sawa_quad_review_") as tmp_dir:
         pdf_path = Path(tmp_dir) / f"{order_id}.pdf"
         pdf_path.write_bytes(pdf_bytes)
-        estimate = estimate_edge_locked_quad_from_pdf(pdf_path, render_width=render_width)
-        image_bgr = render_pdf_page_to_bgr(str(pdf_path), width=render_width)
+        selected_page = _get_order_service_module()._authored_geometry_page(start_input["configured_input"])
+        estimate = estimate_edge_locked_quad_from_pdf(pdf_path, render_width=render_width, page=selected_page)
+        image_bgr = render_pdf_page_to_bgr(str(pdf_path), width=render_width, page=selected_page)
     try:
         import cv2  # type: ignore
 
@@ -1464,11 +1653,23 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     return {
         "order_id": order_id,
         "status": "ready",
+        "source_receipt": {
+            "geometry_source_digest": geometry_digest,
+            "physical_menu_entries": copy.deepcopy(start_input["physical_menu_entries"]),
+            "selected_pdf_receipt": pdf_receipt,
+            "selected_version_input": json.loads(json.dumps(selected_version, default=lambda value: value.isoformat())),
+            "input_digest": _stable_json_hash(start_input),
+            "configured_input_digest": _stable_json_hash(start_input["configured_input"]),
+            "order_input_identity": {key: start_input["order"].get(key) for key in ("facility_code", "week_code")},
+            "workflow_revision": start_input["workflow_revision"],
+            "suggested_quad_px": _normalize_quad_px(estimate.get("refined_quad_px")),
+        },
         "image_png_base64": image_png_base64,
         "image_size": estimate.get("image_size"),
         "estimate": estimate,
         "suggested_quad_px": _normalize_quad_px(estimate.get("refined_quad_px")),
         "saved_override": saved_override,
+        "saved_override_error": saved_override_error,
         "ocr_job": serialized_ocr_job,
         "tolerance_policy": {
             "hit_rate_min": 0.78,
@@ -1482,11 +1683,13 @@ def get_quad_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     }, None
 
 
+@workflow_command
 def save_quad_review_decision(
     order_id: str,
     *,
     decision: str,
     quad_px: object,
+    source_receipt: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_decision = _normalize_id(decision).lower()
     if normalized_decision not in {"approved_estimate", "manual_override"}:
@@ -1494,11 +1697,37 @@ def save_quad_review_decision(
     normalized_quad = _normalize_quad_px(quad_px)
     if normalized_quad is None:
         return None, "quad_px_invalid"
+    if not isinstance(source_receipt, dict):
+        return None, "quad_source_receipt_required"
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
+        if source_receipt.get("workflow_revision") != _workflow_revision(workflow):
+            return None, WORKFLOW_REVISION_CONFLICT
+        try:
+            current_input = capture_reparse_read_input(session, order)
+            if source_receipt.get("input_digest") != _stable_json_hash(current_input):
+                return None, "quad_source_input_changed"
+            if source_receipt.get("configured_input_digest") != _stable_json_hash(current_input["configured_input"]):
+                return None, "quad_source_input_changed"
+            if source_receipt.get("order_input_identity") != {key: current_input["order"].get(key) for key in ("facility_code", "week_code")}:
+                return None, "quad_source_input_changed"
+            selected = source_receipt.get("selected_version_input")
+            if selected is not None and not lock_selected_version_input(session, order.id, selected):
+                return None, "quad_source_input_changed"
+            if source_receipt.get("selected_pdf_receipt") != capture_selected_pdf_receipt(session, order, selected):
+                return None, "quad_source_input_changed"
+            if not verify_selected_pdf_receipt(session, source_receipt.get("selected_pdf_receipt")):
+                return None, "quad_source_input_changed"
+            _get_order_service_module()._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], current_input["configured_input"], source_receipt["order_input_identity"])
+        except ValueError as exc:
+            return None, str(exc)
+        if normalized_decision == "approved_estimate" and normalized_quad != source_receipt.get("suggested_quad_px"):
+            return None, "quad_estimate_mismatch"
         meta = _workflow_meta(workflow)
         source = "operator_approved_estimate" if normalized_decision == "approved_estimate" else "operator_manual"
         meta["quad_override"] = {
@@ -1507,6 +1736,7 @@ def save_quad_review_decision(
             "decision": normalized_decision,
             "coordinate_space": {"mode": "render_width", "width": HAKODATE_LIVE_RENDER_WIDTH},
             "created_at": _now().isoformat(),
+            "source_receipt": copy.deepcopy(source_receipt),
         }
         meta["latest_ocr_error"] = None
         _write_workflow_meta(workflow, meta)
@@ -1519,18 +1749,61 @@ def save_quad_review_decision(
             workflow.last_transition_at = _now()
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
-def get_header_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def _axis_source_receipt(session, order, workflow, document_id=None):
+    service = _get_order_service_module()
+    uri, selection = service._resolve_order_document_selection(session, order, document_id)
+    if selection.get("error"):
+        raise ValueError(selection["error"])
+    selected = selection.get("selected_version_input")
+    captured = capture_reparse_read_input(session, order)
+    receipt = {"selected_pdf_receipt": capture_selected_pdf_receipt(session, order, selected), "selected_version_input": json.loads(json.dumps(selected, default=lambda value: value.isoformat())), "input_digest": _stable_json_hash(captured), "configured_input_digest": _stable_json_hash(captured["configured_input"]), "order_input_identity": {key: captured["order"].get(key) for key in ("facility_code", "week_code")}, "workflow_revision": _workflow_revision(workflow)}
+    receipt["physical_menu_entries"] = copy.deepcopy(captured["physical_menu_entries"])
+    receipt["geometry_source_digest"] = service.geometry_source_digest(receipt["selected_pdf_receipt"], captured["configured_input"], receipt["order_input_identity"], physical_entries=captured["physical_menu_entries"])
+    return receipt, captured
+
+
+def _validate_axis_receipt(session, order, workflow, source_receipt):
+    if not isinstance(source_receipt, dict):
+        return "axis_source_receipt_required"
+    if source_receipt.get("workflow_revision") != _workflow_revision(workflow):
+        return WORKFLOW_REVISION_CONFLICT
+    current = capture_reparse_read_input(session, order)
+    if source_receipt.get("input_digest") != _stable_json_hash(current) or source_receipt.get("configured_input_digest") != _stable_json_hash(current["configured_input"]):
+        return "axis_source_input_changed"
+    selected = source_receipt.get("selected_version_input")
+    if selected is not None and not lock_selected_version_input(session, order.id, selected):
+        return "axis_source_input_changed"
+    if source_receipt.get("order_input_identity") != {key: current["order"].get(key) for key in ("facility_code", "week_code")} or source_receipt.get("selected_pdf_receipt") != capture_selected_pdf_receipt(session, order, selected) or not verify_selected_pdf_receipt(session, source_receipt.get("selected_pdf_receipt")):
+        return "axis_source_input_changed"
+    try:
+        _get_order_service_module()._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], current["configured_input"], source_receipt["order_input_identity"])
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def get_header_axis_review(order_id: str, *, document_id: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        if _get_workflow(session, order.id) is None:
+        workflow = _get_workflow_readonly(session, order.id)
+        if workflow is None:
             return None, "workflow_not_initialized"
+        try:
+            receipt, captured = _axis_source_receipt(session, order, workflow, document_id)
+        except ValueError as exc:
+            return None, str(exc)
     try:
-        return _get_order_service_module().build_hakodate_header_axis_review(order_id), None
+        result = _get_order_service_module().build_hakodate_header_axis_review(order_id, source_receipt=receipt, start_input=captured)
+        result["source_receipt"] = receipt
+        return result, None
     except ValueError as exc:
         return None, str(exc)
     except Exception as exc:  # noqa: BLE001
@@ -1542,12 +1815,16 @@ def get_header_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | 
         }, None
 
 
+@workflow_command
 def save_header_axis_review_decision(
     order_id: str,
     *,
     corrected_xs: object,
     coordinate_space: object,
+    source_receipt: dict | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(source_receipt, dict):
+        return None, "axis_source_receipt_required"
     if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
         return None, "header_axis_xs_invalid"
     if not isinstance(coordinate_space, dict):
@@ -1573,8 +1850,12 @@ def save_header_axis_review_decision(
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
+        receipt_error = _validate_axis_receipt(session, order, workflow, source_receipt)
+        if receipt_error:
+            return None, receipt_error
         meta = _workflow_meta(workflow)
         meta["header_axis_override"] = {
+            "source_receipt": copy.deepcopy(source_receipt),
             "corrected_xs": normalized_xs,
             "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
             "source": "operator_header_axis_override",
@@ -1590,18 +1871,28 @@ def save_header_axis_review_decision(
         workflow.last_transition_at = _now()
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
-def get_row_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def get_row_axis_review(order_id: str, *, document_id: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        if _get_workflow(session, order.id) is None:
+        workflow = _get_workflow_readonly(session, order.id)
+        if workflow is None:
             return None, "workflow_not_initialized"
+        try:
+            receipt, captured = _axis_source_receipt(session, order, workflow, document_id)
+        except ValueError as exc:
+            return None, str(exc)
     try:
-        return _get_order_service_module().build_hakodate_row_axis_review(order_id), None
+        result = _get_order_service_module().build_hakodate_row_axis_review(order_id, source_receipt=receipt, start_input=captured)
+        result["source_receipt"] = receipt
+        return result, None
     except ValueError as exc:
         return None, str(exc)
     except Exception as exc:  # noqa: BLE001
@@ -1613,12 +1904,16 @@ def get_row_axis_review(order_id: str) -> tuple[dict[str, Any] | None, str | Non
         }, None
 
 
+@workflow_command
 def save_row_axis_review_decision(
     order_id: str,
     *,
     corrected_ys: object,
     coordinate_space: object,
+    source_receipt: dict | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(source_receipt, dict):
+        return None, "axis_source_receipt_required"
     if not isinstance(corrected_ys, list) or len(corrected_ys) < 2:
         return None, "row_axis_ys_invalid"
     if not isinstance(coordinate_space, dict):
@@ -1644,8 +1939,12 @@ def save_row_axis_review_decision(
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
+        receipt_error = _validate_axis_receipt(session, order, workflow, source_receipt)
+        if receipt_error:
+            return None, receipt_error
         meta = _workflow_meta(workflow)
         meta["row_axis_override"] = {
+            "source_receipt": copy.deepcopy(source_receipt),
             "corrected_ys": normalized_ys,
             "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
             "source": "operator_row_axis_override",
@@ -1661,9 +1960,13 @@ def save_row_axis_review_decision(
         workflow.last_transition_at = _now()
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
+@workflow_command
 def record_context_suggestion(
     *,
     order_id: str,
@@ -1676,6 +1979,12 @@ def record_context_suggestion(
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
+        execution = current_nonworkflow_execution()
+        if execution is not None and not lock_actual_write_ownership(
+            session, job_id=execution.get("job_id"), order_id=order.id,
+            workflow_attempt_id=None, expected_workflow_revision=None,
+        ):
+            return None, "ocr_execution_owner_changed"
         row = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(row)
         meta["context_suggestion"] = normalized
@@ -1687,9 +1996,15 @@ def record_context_suggestion(
             row.last_transition_at = _now()
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        revision_error = _finalize_workflow_mutation(session, row)
+        if revision_error:
+            return _serialize_workflow(row, ocr_job=ocr_job), revision_error
+        if execution is not None:
+            advance_nonworkflow_order_input(session, execution, order)
         return _serialize_workflow(row, ocr_job=ocr_job), None
 
 
+@workflow_command
 def confirm_context(
     *,
     order_id: str,
@@ -1717,12 +2032,10 @@ def confirm_context(
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        order.facility_code = normalized_facility_id
-        order.week_code = normalized_week_code
         existing_workflow = _get_workflow(session, order.id)
         row = existing_workflow or _get_or_create_workflow(session, order.id)
-        if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
-            _delete_all_ocr_and_downstream_after_template_change(session, order.id)
+        order.facility_code = normalized_facility_id
+        order.week_code = normalized_week_code
         current_meta = _workflow_meta(row)
         expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
         active_before, active_before_error = facility_template_version_service.resolve_single_active_template_version(
@@ -1813,6 +2126,9 @@ def confirm_context(
             )
             return None, "template_version_mismatch"
 
+        if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
+            _delete_all_ocr_and_downstream_after_template_change(session, order.id)
+
         row.state = "context_confirmed"
         row.headline = "施設・週次・テンプレートが確定しました"
         row.primary_action = "run_ocr"
@@ -1841,10 +2157,23 @@ def confirm_context(
                 "output_bundle_id": None,
             },
         )
+        revision_error = _finalize_workflow_mutation(session, row)
+        if revision_error:
+            return _serialize_workflow(row), revision_error
         return _serialize_workflow(row), None
 
 
-def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | None, str | None]:
+@workflow_command
+def mark_ocr_run_queued(
+    order_id: str,
+    job_id: str,
+    *,
+    input_reference: str | None = None,
+    request_mode: str | None = None,
+    job_metrics: dict[str, Any] | None = None,
+    stale_action: str = "retry",
+    force: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
     normalized_job_id = _normalize_id(job_id)
     if not normalized_job_id:
         return None, "ocr_job_id_required"
@@ -1854,12 +2183,35 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
+        if not lock_current_workflow_revision(
+            session,
+            order_id=order.id,
+            expected_workflow_revision=_expected_workflow_revision.get(),
+        ):
+            return _serialize_workflow(workflow), WORKFLOW_REVISION_CONFLICT
         meta = _workflow_meta(workflow)
+
+        def finalize_queue_blocker(blocker: str, job: OcrJob | None = None) -> tuple[dict[str, Any], str | None]:
+            _apply_template_lineage_blocker(workflow, blocker)
+            _write_workflow_meta(workflow, meta)
+            revision_error = _finalize_workflow_mutation(session, workflow)
+            if revision_error:
+                return _serialize_workflow(workflow, ocr_job=job), revision_error
+            if job is not None:
+                terminal_metrics = dict(job.metrics or {})
+                terminal_metrics["workflow_completion_revision"] = _workflow_revision(workflow)
+                terminal_metrics["workflow_result_revision"] = _workflow_revision(workflow)
+                terminal_metrics["workflow_blocker"] = blocker
+                job.metrics = terminal_metrics
+                job.status = "failed"
+                job.error_message = blocker
+                session.flush()
+            return _serialize_workflow(workflow, ocr_job=job), blocker
+
         if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
         if not _workflow_meta_has_resolved_template(meta):
-            _apply_template_lineage_blocker(workflow, "template_version_required")
-            return _serialize_workflow(workflow), "template_version_required"
+            return finalize_queue_blocker("template_version_required")
         template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
@@ -1867,12 +2219,10 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
             meta=meta,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
-            return _serialize_workflow(workflow), template_error
+            return finalize_queue_blocker(template_error)
         template_version = session.get(FacilityTemplateVersion, template_version_id) if template_version_id else None
         if template_version is None:
-            _apply_template_lineage_blocker(workflow, "facility_template_unresolved")
-            return _serialize_workflow(workflow), "facility_template_unresolved"
+            return finalize_queue_blocker("facility_template_unresolved")
         _refresh_ocr_prerequisite_state(session, order, workflow)
         blockers = [
             _normalize_id(item)
@@ -1884,16 +2234,55 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
             None,
         )
         if prerequisite_blocker:
-            return _serialize_workflow(workflow), prerequisite_blocker
+            return finalize_queue_blocker(prerequisite_blocker)
         ocr_job = session.get(OcrJob, normalized_job_id)
+        workflow_attempt_id = _new_id("OCA") if input_reference is not None else None
+        if input_reference is not None:
+            reservation_metrics = dict(job_metrics or {})
+            try:
+                reservation_metrics["reparse_read_input"] = capture_reparse_read_input(session, order)
+            except ValueError as exc:
+                return finalize_queue_blocker(str(exc))
+            selected_input = reservation_metrics.get("selected_version_input")
+            if reservation_metrics.get("selected_document_id") and selected_input is None:
+                return finalize_queue_blocker("selected_document_input_missing")
+            if selected_input is not None and (
+                selected_input.get("storage_uri") != input_reference
+                or not lock_selected_version_input(session, order.id, selected_input)
+            ):
+                return finalize_queue_blocker("selected_document_input_changed")
+            try:
+                reservation_metrics["selected_pdf_receipt"] = capture_selected_pdf_receipt(session, order, selected_input, input_reference)
+            except ValueError as exc:
+                return finalize_queue_blocker(str(exc))
+            reservation_metrics["job_id"] = normalized_job_id
+            reservation_metrics["request_mode"] = _normalize_id(request_mode) or "ocr_rerun"
+            reservation_metrics["status"] = "running"
+            reservation_metrics["workflow_attempt_id"] = workflow_attempt_id
+            selected_evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id) if workflow.evidence_run_id else None
+            reservation_metrics["first_pass_source"] = (
+                captured_evidence_source(order.id, {column.key: getattr(selected_evidence, column.key) for column in selected_evidence.__table__.columns})
+                if selected_evidence is not None else None
+            )
+            ocr_job, reservation_error = ocr_job_service.reserve_workflow_reparse_job(
+                session,
+                job_id=normalized_job_id,
+                order_id=order.id,
+                input_reference=input_reference,
+                template_version_id=template_version.id,
+                metrics=reservation_metrics,
+                stale_action=stale_action,
+                force=force,
+            )
+            if reservation_error:
+                return _serialize_workflow(workflow, ocr_job=ocr_job), reservation_error
         lineage_error = _ensure_ocr_job_lineage(
             ocr_job,
             order_id=order.id,
             template_version_id=template_version.id,
         )
         if lineage_error:
-            _apply_template_lineage_blocker(workflow, lineage_error)
-            return _serialize_workflow(workflow, ocr_job=ocr_job), lineage_error
+            return finalize_queue_blocker(lineage_error, ocr_job)
         workflow.evidence_run_id = None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
@@ -1908,20 +2297,38 @@ def mark_ocr_run_queued(order_id: str, job_id: str) -> tuple[dict[str, Any] | No
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         meta["ocr_job_id"] = normalized_job_id
+        if workflow_attempt_id is not None:
+            meta["ocr_job_attempt_id"] = workflow_attempt_id
         meta["template_version_id"] = template_version.id
         meta["template_version_digest"] = template_version.template_digest
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
-        return _serialize_workflow(workflow, ocr_job=ocr_job), None
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
+        if input_reference is not None and ocr_job is not None:
+            # The workflow may have flushed while clearing old evidence/drafts.
+            # Persist the actual final CAS revision without touching workflow again.
+            queued_metrics = dict(ocr_job.metrics or {})
+            queued_metrics["workflow_completion_revision"] = _workflow_revision(workflow)
+            ocr_job.metrics = queued_metrics
+            session.flush()
+        return {
+            "workflow": _serialize_workflow(workflow, ocr_job=ocr_job),
+            "ocr_job": _serialize_ocr_job(ocr_job),
+        }, None
 
 
+@workflow_command
 def mark_ocr_run_completed(
     order_id: str,
     *,
     job_id: str,
     evidence_run_id: str | None = None,
     error: str | None = None,
+    workflow_attempt_id: str | None = None,
+    write_session: Any = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     normalized_job_id = _normalize_id(job_id)
     if not normalized_job_id:
@@ -1929,17 +2336,47 @@ def mark_ocr_run_completed(
     normalized_evidence_run_id = _normalize_id(evidence_run_id)
     normalized_error = _normalize_id(error)
 
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         order, order_error = _get_order_or_error(session, order_id)
         if order_error:
             return None, order_error
         workflow = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(workflow)
+        if not workflow_attempt_id or meta.get("ocr_job_attempt_id") != workflow_attempt_id:
+            return _serialize_workflow(workflow), WORKFLOW_REVISION_CONFLICT
+        ocr_job = session.get(OcrJob, normalized_job_id)
+        if ocr_job is None:
+            return _serialize_workflow(workflow), "ocr_job_not_found"
+        if not lock_current_workflow_attempt(
+            session,
+            job_id=normalized_job_id,
+            workflow_attempt_id=workflow_attempt_id,
+            order_id=order.id,
+            expected_workflow_revision=_expected_workflow_revision.get(),
+            source_failure=normalized_error,
+        ):
+            return _serialize_workflow(workflow, ocr_job=ocr_job), WORKFLOW_REVISION_CONFLICT
+
+        def stop_with_blocker(blocker: str) -> tuple[dict[str, Any], str | None]:
+            _apply_template_lineage_blocker(workflow, blocker)
+            _write_workflow_meta(workflow, meta)
+            revision_error = _finalize_workflow_mutation(session, workflow)
+            if revision_error:
+                return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
+            completion_metrics = dict(ocr_job.metrics or {})
+            completion_metrics["workflow_completion_revision"] = _workflow_revision(workflow)
+            completion_metrics["workflow_result_revision"] = _workflow_revision(workflow)
+            completion_metrics["workflow_blocker"] = blocker
+            ocr_job.metrics = completion_metrics
+            ocr_job.status = "failed"
+            ocr_job.error_message = blocker
+            session.flush()
+            return _serialize_workflow(workflow, ocr_job=ocr_job), blocker
+
         if not _workflow_meta_has_confirmed_context(meta):
-            return None, "context_not_confirmed"
+            return stop_with_blocker("context_not_confirmed")
         if not _workflow_meta_has_resolved_template(meta):
-            _apply_template_lineage_blocker(workflow, "template_version_required")
-            return _serialize_workflow(workflow), "template_version_required"
+            return stop_with_blocker("template_version_required")
         workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
@@ -1947,25 +2384,34 @@ def mark_ocr_run_completed(
             meta=meta,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
-            return _serialize_workflow(workflow), template_error
-        ocr_job = session.get(OcrJob, normalized_job_id)
+            return stop_with_blocker(template_error)
+        if not isinstance(ocr_job.metrics, dict) or ocr_job.metrics.get("workflow_attempt_id") != workflow_attempt_id:
+            return _serialize_workflow(workflow), WORKFLOW_REVISION_CONFLICT
         lineage_error = _ensure_ocr_job_lineage(
             ocr_job,
             order_id=order.id,
             template_version_id=workflow_template_version_id or "",
         )
         if lineage_error:
-            _apply_template_lineage_blocker(workflow, lineage_error)
-            return _serialize_workflow(workflow, ocr_job=ocr_job), lineage_error
-        if normalized_evidence_run_id and not normalized_error:
+            return stop_with_blocker(lineage_error)
+        if not normalized_error and not normalized_evidence_run_id:
+            return stop_with_blocker("ocr_result_required")
+        if normalized_evidence_run_id:
             evidence = session.get(OrderOcrEvidenceRun, normalized_evidence_run_id)
             if evidence is None or evidence.order_id != order.id:
-                _apply_template_lineage_blocker(workflow, "template_version_mismatch")
-                return _serialize_workflow(workflow), "template_version_mismatch"
-            if _evidence_is_legacy_cache_backfill(evidence) or _normalize_id(evidence.status) == "repair_blocked":
-                _apply_template_lineage_blocker(workflow, "legacy_ocr_evidence_not_selectable")
-                return _serialize_workflow(workflow), "legacy_ocr_evidence_not_selectable"
+                return stop_with_blocker("template_version_mismatch")
+            execution = (evidence.payload_json or {}).get("_ocr_execution")
+            if (
+                not isinstance(execution, dict)
+                or execution.get("job_id") != normalized_job_id
+                or execution.get("workflow_attempt_id") != workflow_attempt_id
+                or execution.get("workflow_revision") != _expected_workflow_revision.get()
+                or execution.get("evidence_run_id") != evidence.id
+            ):
+                return stop_with_blocker("ocr_result_execution_lineage_mismatch")
+            selection_blocker = _evidence_selection_blocker(evidence)
+            if not normalized_error and selection_blocker:
+                return stop_with_blocker(selection_blocker)
             _evidence_template_version_id, template_error = _resolve_evidence_template_version(
                 evidence,
                 workflow,
@@ -1973,8 +2419,7 @@ def mark_ocr_run_completed(
                 required_template_version_id=workflow_template_version_id,
             )
             if template_error:
-                _apply_template_lineage_blocker(workflow, template_error)
-                return _serialize_workflow(workflow), template_error
+                return stop_with_blocker(template_error)
         if normalized_error:
             workflow.state = "ocr_failed"
             workflow.headline = "OCR処理に失敗しました。Step1から再実行してください"
@@ -1998,6 +2443,16 @@ def mark_ocr_run_completed(
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow, ocr_job=ocr_job), revision_error
+        completion_metrics = dict(ocr_job.metrics or {})
+        completion_metrics["workflow_completion_revision"] = _workflow_revision(workflow)
+        completion_metrics["workflow_result_revision"] = _workflow_revision(workflow)
+        ocr_job.metrics = completion_metrics
+        ocr_job.status = "failed" if normalized_error else "done"
+        ocr_job.error_message = normalized_error or None
+        session.flush()
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
@@ -2025,6 +2480,9 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "source": row.source,
         "status": row.status,
         "selected": selected,
+        "execution_lineage": copy.deepcopy(payload.get("_ocr_execution")),
+        "result_disposition": payload["_ocr_execution"].get("disposition") if isinstance(payload.get("_ocr_execution"), dict) else None,
+        "selectable": ocr_evidence_service.evidence_run_is_selectable(row),
         "artifact_manifest": manifest,
         "artifact_digest": row.artifact_digest,
         "pipeline_version": payload.get("pipeline_version") or row.producer_version,
@@ -2113,7 +2571,7 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
         workflow_meta = _workflow_meta(workflow) if workflow is not None else {}
         workflow_template_version_id = (
             _effective_workflow_template_version_id(workflow, workflow_meta)
@@ -2241,6 +2699,7 @@ def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id:
     return int(deleted or 0)
 
 
+@workflow_command
 def set_expanded_cell_copy_mode(order_id: str, mode: str) -> tuple[dict[str, Any] | None, str | None]:
     normalized_mode = _normalize_expanded_cell_copy_mode(mode)
     if normalized_mode != str(mode or "").strip().lower():
@@ -2279,10 +2738,16 @@ def set_expanded_cell_copy_mode(order_id: str, mode: str) -> tuple[dict[str, Any
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow), revision_error
         return _serialize_workflow(workflow), None
 
 
-def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any] | None, str | None]:
+@workflow_command
+def select_ocr_result(
+    order_id: str, ocr_result_id: str
+) -> tuple[dict[str, Any] | None, str | None]:
     normalized_ocr_result_id = _normalize_id(ocr_result_id)
     if not normalized_ocr_result_id:
         return None, "ocr_result_id_required"
@@ -2294,10 +2759,11 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         ocr_result = session.get(OrderOcrEvidenceRun, normalized_ocr_result_id)
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
-        if _evidence_is_legacy_cache_backfill(ocr_result) or _normalize_id(ocr_result.status) == "repair_blocked":
+        selection_blocker = _evidence_selection_blocker(ocr_result)
+        if selection_blocker:
             workflow = _get_or_create_workflow(session, order.id)
-            _apply_template_lineage_blocker(workflow, "legacy_ocr_evidence_not_selectable")
-            return _serialize_workflow(workflow), "legacy_ocr_evidence_not_selectable"
+            revision_error = _finalize_workflow_blocker(session, workflow, selection_blocker)
+            return _serialize_workflow(workflow), revision_error or selection_blocker
         workflow = _get_or_create_workflow(session, order.id)
         context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
         if context_error:
@@ -2310,8 +2776,8 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
             meta=meta,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
-            return None, template_error
+            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
+            return _serialize_workflow(workflow), revision_error or template_error
         evidence_template_version_id, template_error = _resolve_evidence_template_version(
             ocr_result,
             workflow,
@@ -2319,8 +2785,8 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
-            return _serialize_workflow(workflow), "template_version_mismatch"
+            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
+            return _serialize_workflow(workflow), revision_error or template_error
         if workflow.evidence_run_id != normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
@@ -2341,9 +2807,13 @@ def select_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         meta["bagging_result_id"] = None
         meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow), revision_error
         return _serialize_workflow(workflow), None
 
 
+@workflow_command
 def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any] | None, str | None]:
     normalized_ocr_result_id = _normalize_id(ocr_result_id)
     if not normalized_ocr_result_id:
@@ -2380,9 +2850,13 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
             _write_workflow_meta(workflow, meta)
         session.delete(ocr_result)
         workflow.last_transition_at = _now()
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow), revision_error
         return _serialize_workflow(workflow), None
 
 
+@workflow_command
 def save_facility_template_columns(
     order_id: str,
     columns: list[dict[str, Any]] | None,
@@ -2434,6 +2908,9 @@ def save_facility_template_columns(
         _write_workflow_meta(workflow, meta)
         resolved_config = result.get("resolved_config") if isinstance(result, dict) else None
         validation = result.get("validation") if isinstance(result, dict) else None
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "updated": True,
             "workflow": _serialize_workflow(workflow),
@@ -2444,6 +2921,7 @@ def save_facility_template_columns(
         }, None
 
 
+@workflow_command
 def save_sheet(
     *,
     order_id: str,
@@ -2470,8 +2948,8 @@ def save_sheet(
             return None, "sheet_pre_save_checks_required"
         context_error = _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
-            _apply_template_lineage_blocker(workflow, context_error)
-            return None, context_error
+            revision_error = _finalize_workflow_blocker(session, workflow, context_error)
+            return _serialize_workflow(workflow), revision_error or context_error
         workflow_template_version_id, template_error = _require_workflow_template_version_from_context(
             session,
             order=order,
@@ -2479,8 +2957,8 @@ def save_sheet(
             meta=workflow_meta,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
-            return None, template_error
+            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
+            return _serialize_workflow(workflow), revision_error or template_error
         evidence_template_version_id, template_error = _resolve_evidence_template_version(
             evidence,
             workflow,
@@ -2488,8 +2966,8 @@ def save_sheet(
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            _apply_template_lineage_blocker(workflow, template_error)
-            return None, template_error
+            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
+            return _serialize_workflow(workflow), revision_error or template_error
         resolved_template_version_id = evidence_template_version_id or workflow_template_version_id or None
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
@@ -2527,6 +3005,9 @@ def save_sheet(
         meta["output_bundle_id"] = None
         _clear_pre_save_checks(meta)
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow), revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "saved_sheet": _serialize_saved_sheet(draft),
@@ -2534,6 +3015,7 @@ def save_sheet(
         }, None
 
 
+@workflow_command
 def confirm_sheet_review(
     *,
     order_id: str,
@@ -2552,6 +3034,9 @@ def confirm_sheet_review(
         meta = _workflow_meta(workflow)
         _set_pre_save_check(meta, "sheet_review", sheet_hash=sheet_hash)
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "pre_save_checks": _workflow_pre_save_checks(meta),
@@ -2571,7 +3056,13 @@ def get_sheet_pre_save_status(
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_or_create_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
+        if workflow is None:
+            return {
+                "workflow": _serialize_uninitialized_workflow(order),
+                "pre_save_checks": {},
+                "pre_save_status": _pre_save_status_for_sheet({}, sheet_hash),
+            }, None
         meta = _workflow_meta(workflow)
         return {
             "workflow": _serialize_workflow(workflow),
@@ -2586,8 +3077,30 @@ def propose_sheet_auto_edit(
     sheet: dict[str, Any] | None = None,
     model: str | None = None,
     use_llm: bool = True,
+    expected_revision: int | None = None,
+    start_input: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    if type(expected_revision) is not int or expected_revision < 0:
+        return None, WORKFLOW_REVISION_REQUIRED
     with session_scope() as session:
+        workflow = _get_workflow_readonly(session, order_id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
+        if _workflow_revision(workflow) != expected_revision:
+            return None, WORKFLOW_REVISION_CONFLICT
+    service = _get_order_service_module()
+    if start_input is None:
+        try:
+            start_input = service._capture_synchronous_cache_write_input(order_id)
+        except ValueError as exc:
+            return None, str(exc)
+    if not isinstance(start_input, dict):
+        return None, "sheet_auto_edit_start_input_missing"
+    if start_input.get("workflow_revision") != expected_revision:
+        return None, WORKFLOW_REVISION_CONFLICT
+    with session_scope() as session:
+        if not service._synchronous_cache_write_fence(session, order_id, start_input):
+            return None, WORKFLOW_REVISION_CONFLICT
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -2600,7 +3113,11 @@ def propose_sheet_auto_edit(
         if review_sheet is None:
             return None, "sheet_required"
         document_uri = str(order.document_uri or "").strip()
-    fax_image_png_base64, fax_image_meta = _render_order_fax_page_for_ai(document_uri)
+    fax_image_png_base64, fax_image_meta = _render_order_fax_page_for_ai(
+        document_uri, selected_pdf_receipt=start_input["selected_pdf_receipt"],
+    )
+    if fax_image_meta.get("status") != "attached":
+        return None, str(fax_image_meta.get("error") or "document_render_failed")
     result = workflow_v2_sheet_review_service.propose_auto_sheet_edits(
         sheet=review_sheet,
         evidence_payload=None,
@@ -2609,9 +3126,13 @@ def propose_sheet_auto_edit(
         fax_image_png_base64=fax_image_png_base64,
         fax_image_meta=fax_image_meta,
     )
+    with session_scope() as session:
+        if not service._synchronous_cache_write_fence(session, order_id, start_input):
+            return None, WORKFLOW_REVISION_CONFLICT
     return result, None
 
 
+@workflow_command
 def start_sheet_auto_edit_job(
     *,
     order_id: str,
@@ -2621,6 +3142,19 @@ def start_sheet_auto_edit_job(
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(sheet, dict):
         return None, "sheet_required"
+    with session_scope() as session:
+        workflow = _get_workflow_readonly(session, order_id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
+        if _workflow_revision(workflow) != _expected_workflow_revision.get():
+            return None, WORKFLOW_REVISION_CONFLICT
+    service = _get_order_service_module()
+    try:
+        start_input = service._capture_synchronous_cache_write_input(order_id)
+    except ValueError as exc:
+        return None, str(exc)
+    if not isinstance(start_input, dict):
+        return None, "sheet_auto_edit_start_input_missing"
     job_id = _new_id("SAE")
     now = _now().isoformat()
     sheet_hash = _stable_json_hash(sheet)
@@ -2640,6 +3174,8 @@ def start_sheet_auto_edit_job(
         "result": None,
     }
     with session_scope() as session:
+        if not service._synchronous_cache_write_fence(session, order_id, start_input):
+            return None, WORKFLOW_REVISION_CONFLICT
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -2647,9 +3183,21 @@ def start_sheet_auto_edit_job(
         if workflow is None:
             return None, "workflow_not_found"
         meta = _workflow_meta(workflow)
+        job["workflow_completion_revision"] = _workflow_revision(workflow) + 1
+        start_input["workflow_revision"] = job["workflow_completion_revision"]
+        job["start_input"] = json.loads(json.dumps({
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in start_input.items() if key not in {"evidence", "draft"}
+        }, default=lambda value: value.isoformat()))
         meta[SHEET_AUTO_EDIT_JOB_META_KEY] = job
         _write_workflow_meta(workflow, meta)
-        return {"job": _serialize_sheet_auto_edit_job(job)}, None
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
+        return {
+            "workflow": _serialize_workflow(workflow),
+            "job": _serialize_sheet_auto_edit_job(job),
+        }, None
 
 
 def run_sheet_auto_edit_job(
@@ -2659,14 +3207,35 @@ def run_sheet_auto_edit_job(
     sheet: dict[str, Any] | None = None,
     model: str | None = None,
     use_llm: bool = True,
+    expected_revision: int | None,
 ) -> None:
+    with session_scope() as session:
+        workflow = _get_workflow(session, order_id)
+        existing = _workflow_meta(workflow).get(SHEET_AUTO_EDIT_JOB_META_KEY) if workflow else None
+        if not isinstance(existing, dict) or existing.get("job_id") != job_id:
+            return
+        start_input = copy.deepcopy(existing.get("start_input"))
+        request = existing.get("request")
+        if not isinstance(request, dict) or request.get("sheet_hash") != _stable_json_hash(sheet) or request.get("model") != model or request.get("use_llm") != bool(use_llm):
+            return
+    if not isinstance(start_input, dict) or start_input.get("workflow_revision") != expected_revision:
+        return
+    for key in ("order_lines_updated_at", "cache_updated_at"):
+        if isinstance(start_input.get(key), str):
+            start_input[key] = datetime.fromisoformat(start_input[key])
     def _write_job_patch(patch: dict[str, Any]) -> None:
         with session_scope() as session:
+            source_failure = patch.get("error") if patch.get("status") == "failed" and patch.get("result") is None else None
+            if not _get_order_service_module()._synchronous_cache_write_fence(session, order_id, start_input, source_failure=source_failure):
+                return
             order, error = _get_order_or_error(session, order_id)
             if error:
                 return
             workflow = _get_workflow(session, order.id)
             if workflow is None:
+                return
+            revision_error = _require_workflow_revision(session, workflow, expected_revision)
+            if revision_error:
                 return
             meta = _workflow_meta(workflow)
             existing = meta.get(SHEET_AUTO_EDIT_JOB_META_KEY)
@@ -2675,8 +3244,10 @@ def run_sheet_auto_edit_job(
             next_job = dict(existing)
             next_job.update(patch)
             next_job["updated_at"] = _now().isoformat()
+            next_job["workflow_result_revision"] = _workflow_revision(workflow) + 1
             meta[SHEET_AUTO_EDIT_JOB_META_KEY] = next_job
             _write_workflow_meta(workflow, meta)
+            _finalize_workflow_mutation(session, workflow)
 
     try:
         result, error = propose_sheet_auto_edit(
@@ -2684,6 +3255,8 @@ def run_sheet_auto_edit_job(
             sheet=sheet,
             model=model,
             use_llm=use_llm,
+            expected_revision=expected_revision,
+            start_input=start_input,
         )
         if error:
             _write_job_patch(
@@ -2723,7 +3296,7 @@ def get_sheet_auto_edit_job(
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
         if workflow is None:
             return None, "workflow_not_found"
         meta = _workflow_meta(workflow)
@@ -2732,6 +3305,15 @@ def get_sheet_auto_edit_job(
             return None, "sheet_auto_edit_job_not_found"
         if job_id and job.get("job_id") != job_id:
             return None, "sheet_auto_edit_job_not_found"
+        terminal = job.get("status") in {"done", "failed"}
+        expected_revision = (
+            job.get("workflow_result_revision") if terminal else job.get("workflow_completion_revision")
+        )
+        if not isinstance(expected_revision, int) or expected_revision != _workflow_revision(workflow):
+            return {
+                "job": _serialize_sheet_auto_edit_job(job),
+                "diagnostic": {"error": WORKFLOW_REVISION_CONFLICT},
+            }, None
         return {
             "job": _serialize_sheet_auto_edit_job(job),
             "result": job.get("result") if isinstance(job.get("result"), dict) else None,
@@ -2747,11 +3329,13 @@ def _serialize_sheet_auto_edit_job(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job.get("updated_at"),
         "finished_at": job.get("finished_at"),
         "error": job.get("error"),
+        "workflow_completion_revision": job.get("workflow_completion_revision"),
+        "workflow_result_revision": job.get("workflow_result_revision"),
         "request": job.get("request") if isinstance(job.get("request"), dict) else {},
     }
 
 
-def _render_order_fax_page_for_ai(document_uri: str) -> tuple[str | None, dict[str, Any]]:
+def _render_order_fax_page_for_ai(document_uri: str, *, selected_pdf_receipt: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     document_uri = str(document_uri or "").strip()
     if not document_uri:
         return None, {"status": "missing_document_uri"}
@@ -2764,7 +3348,8 @@ def _render_order_fax_page_for_ai(document_uri: str) -> tuple[str | None, dict[s
     except ValueError:
         max_pixels = 4_500_000
     try:
-        pdf_bytes = load_bytes_from_uri(document_uri)
+        from src.services.storage_service import load_selected_pdf_bytes
+        pdf_bytes = load_selected_pdf_bytes(document_uri, selected_pdf_receipt)
         png_bytes = render_pdf_to_png_bytes(pdf_bytes=pdf_bytes, dpi=dpi, page=1, max_pixels=max_pixels)
     except Exception as exc:  # noqa: BLE001
         return None, {
@@ -2830,14 +3415,24 @@ def _saved_sheet_with_target_cell_map(
     if not facility_id:
         return serialized
 
+    source_input = sheet.get("synchronous_write_input")
+    if not isinstance(source_input, dict) or not isinstance(source_input.get("configured_input"), dict):
+        serialized["projection_error"] = "saved_sheet_source_receipt_missing"
+        return serialized
+    if source_input.get("evidence_run_id") != saved_sheet.base_evidence_run_id or (source_input.get("evidence") or {}).get("payload_json") != evidence_payload:
+        serialized["projection_error"] = "saved_sheet_evidence_lineage_mismatch"
+        return serialized
     try:
+        _get_order_service_module()._validate_selected_hakodate_artifacts(source_input["evidence"], source_input)
         assignment = _get_order_service_module()._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
             order_id=order.id,
             facility_id=facility_id,
             template_id=template_id or None,
             payload=evidence_payload,
+            facility_config=source_input["configured_input"]["facility"],
         )
-    except Exception:
+    except (ValueError, KeyError, TypeError) as exc:
+        serialized["projection_error"] = str(exc)
         return serialized
     if not isinstance(assignment, dict):
         return serialized
@@ -2924,17 +3519,42 @@ def _draft_record_from_saved_sheet(saved_sheet: OrderSheetDraft) -> dict[str, An
 
 def _build_materialization_candidate_for_saved_sheet(
     *,
+    session: Any,
     order: Order,
     saved_sheet: OrderSheetDraft,
 ) -> dict[str, Any]:
     order_service_module = _get_order_service_module()
+    captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session)
+    if not isinstance(captured, dict) or captured.get("draft_id") != saved_sheet.id:
+        return {"error": "synchronous_input_conflict", "lines": []}
+    configured = copy.deepcopy(captured["configured_input"])
+    session.info["materialization_configured_input"] = (order.facility_code, copy.deepcopy(configured))
+    from src.services import output_builder, menu_service
+    original_meta = output_builder._build_ocr_menu_meta(_build_order_payload_for_outputs(order=order, lines=captured["input_versions"]["order_lines"]), configured["facility"], parsed_input=captured["evidence"]["payload_json"])
+    names = list(dict.fromkeys(str(entry.get("menu_name") or "").strip() for entry in original_meta.get("entries", [])))
+    captured["output_ocr_menu_entries"] = copy.deepcopy(original_meta.get("entries", []))
+    captured["output_ocr_menu_defaults"] = menu_service.resolve_menu_defaults(names, order.facility_code) if names else {}
+    session.info["materialization_menu_defaults"] = (order.facility_code, names, copy.deepcopy(captured["output_ocr_menu_defaults"]))
     return order_service_module._build_materialization_candidate_from_draft_record(  # noqa: SLF001
         order.id,
         draft_record=_draft_record_from_saved_sheet(saved_sheet),
+        configured_input=configured,
+        synchronous_write_input=captured,
         facility_id=order.facility_code,
         existing_week_code=order.week_code,
         received_at=order.received_at,
     )
+
+
+def _restore_bagging_write_input(proof: object, revision: int) -> dict[str, Any] | None:
+    if not isinstance(proof, dict) or proof.get("owned_revision") != revision or not isinstance(proof.get("start_input"), dict):
+        return None
+    captured = copy.deepcopy(proof["start_input"])
+    captured["workflow_revision"] = revision
+    for key in ("order_lines_updated_at", "cache_updated_at"):
+        if isinstance(captured.get(key), str):
+            captured[key] = datetime.fromisoformat(captured[key])
+    return captured
 
 
 def _canonical_payload_digest(payload: object) -> str:
@@ -2958,13 +3578,16 @@ class BaggingOutputUnresolved(ValueError):
     pass
 
 
-def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]], materialization_candidate: dict[str, Any]) -> list[dict[str, Any]]:
     order_payload = _build_order_payload_for_outputs(order=order, lines=lines)
     try:
         from src.services import output_builder  # noqa: PLC0415
 
-        enriched_lines = output_builder.build_order_lines_for_outputs(order_payload)
-        bag_rows = output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines)
+        producer_input = {**materialization_candidate, "lines": copy.deepcopy(lines)}
+        enriched_lines = output_builder.build_order_lines_for_outputs(order_payload, producer_candidate=producer_input)
+        materialization_candidate["output_lines"] = copy.deepcopy(enriched_lines)
+        materialization_candidate["output_menu_entries"] = copy.deepcopy(producer_input["output_menu_entries"])
+        bag_rows = output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines, configured_input=materialization_candidate["configured_input"])
         if not isinstance(bag_rows, list):
             raise BaggingOutputUnresolved("bagging_output_invalid")
         return bag_rows
@@ -2980,7 +3603,14 @@ def _build_bagging_result_payload(
     order: Order,
     saved_sheet: OrderSheetDraft,
     materialization_candidate: dict[str, Any],
+    processing_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if not isinstance(processing_input, dict) or not isinstance(processing_input.get("evidence", {}).get("payload_json"), dict):
+        raise BaggingOutputUnresolved("bagging_original_evidence_required")
+    if not isinstance(processing_input.get("output_ocr_menu_entries"), list) or not isinstance(processing_input.get("output_ocr_menu_defaults"), dict):
+        raise BaggingOutputUnresolved("bagging_original_menu_receipt_required")
+    materialization_candidate["output_ocr_menu_entries"] = copy.deepcopy(processing_input["output_ocr_menu_entries"])
+    materialization_candidate["output_ocr_menu_defaults"] = copy.deepcopy(processing_input["output_ocr_menu_defaults"])
     lines = [
         line
         for line in (materialization_candidate.get("lines") or [])
@@ -3007,7 +3637,7 @@ def _build_bagging_result_payload(
                 "quantity": numeric,
             }
         )
-    bag_rows = _build_bag_rows_for_candidate(order=order, lines=lines)
+    bag_rows = _build_bag_rows_for_candidate(order=order, lines=lines, materialization_candidate=materialization_candidate)
     materialization_digest = _canonical_payload_digest(materialization_candidate)
     return {
         "bagging_result_id": _new_id("OBG"),
@@ -3139,40 +3769,6 @@ def _recover_confirmed_artifacts_from_snapshot(
     if isinstance(next_meta.get("bagging_result"), dict) and isinstance(next_meta.get("output_bundle"), dict):
         return next_meta
 
-    draft = saved_sheet
-    if draft is None and workflow.draft_id:
-        draft = session.get(OrderSheetDraft, workflow.draft_id)
-    materialization_candidate = (
-        snapshot_json.get("materialization_candidate")
-        if isinstance(snapshot_json.get("materialization_candidate"), dict)
-        else None
-    )
-    if draft is None or draft.order_id != order.id:
-        return next_meta
-    if not isinstance(materialization_candidate, dict):
-        materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
-    if not isinstance(materialization_candidate, dict):
-        return next_meta
-    materialization_error = _normalize_id(materialization_candidate.get("error"))
-    if materialization_error:
-        return next_meta
-
-    bagging_result = _build_bagging_result_payload(
-        order=order,
-        saved_sheet=draft,
-        materialization_candidate=materialization_candidate,
-    )
-    bagging_result["bagging_result_id"] = _derived_id("OBG", snapshot.id, draft.id, "recovered")
-    bagging_result["source"] = "confirmed_snapshot_recovered"
-    output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
-    output_bundle["output_bundle_id"] = _derived_id("OOB", snapshot.id, bagging_result["bagging_result_id"], "recovered")
-    output_bundle["source_bagging_result_id"] = bagging_result["bagging_result_id"]
-    output_bundle["confirmed_snapshot_id"] = snapshot.id
-    output_bundle["source"] = "confirmed_snapshot_recovered"
-    next_meta["bagging_result_id"] = bagging_result["bagging_result_id"]
-    next_meta["bagging_result"] = bagging_result
-    next_meta["output_bundle_id"] = output_bundle["output_bundle_id"]
-    next_meta["output_bundle"] = output_bundle
     return next_meta
 
 
@@ -3181,7 +3777,7 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
         if workflow is None:
             return None, "workflow_not_initialized"
         if not workflow.draft_id:
@@ -3203,7 +3799,7 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
         if workflow is None:
             return None, "workflow_not_initialized"
         if not workflow.evidence_run_id:
@@ -3235,21 +3831,29 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         facility_id = _normalize_id(meta.get("facility_id"))
         template_id = _normalize_id(meta.get("template_id"))
         selected_ocr_result_id = evidence.id
+        captured = _get_order_service_module()._capture_synchronous_cache_write_input(order.id, write_session=session)
+        if not isinstance(captured, dict) or captured.get("evidence_run_id") != evidence.id:
+            return None, "synchronous_input_missing"
     if not isinstance(payload, dict):
         return None, "selected_ocr_payload_missing"
     if not facility_id:
         return None, "facility_id_required"
 
     order_service_module = _get_order_service_module()
+    try:
+        order_service_module._validate_selected_hakodate_artifacts(captured["evidence"], captured)
+    except ValueError as exc:
+        return None, str(exc)
     assignment = order_service_module._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
         order_id=order_id,
         facility_id=facility_id,
         template_id=template_id or None,
         payload=payload,
+        facility_config=captured["configured_input"]["facility"],
     )
     if not isinstance(assignment, dict):
         return None, "assignment_unavailable"
-    base_sheet, sheet_error = order_service_module._build_hakodate_weekly_menu_base_sheet(order_id)  # noqa: SLF001
+    base_sheet, sheet_error = order_service_module._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=captured)  # noqa: SLF001
     if sheet_error:
         return None, sheet_error
     if not isinstance(base_sheet, dict):
@@ -3264,7 +3868,7 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
         base_sheet=base_sheet,
         assignment=assignment,
         facility_config=_facility_config_with_expanded_cell_mode(
-            config_service.get_facility_config(facility_id),
+            captured["configured_input"]["facility"],
             meta.get("expanded_cell_copy_mode"),
         ),
         week_sheet_name=None,
@@ -3293,6 +3897,7 @@ def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None,
     }, None
 
 
+@workflow_command
 def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -3308,7 +3913,7 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
             return None, "saved_sheet_template_mismatch"
-        materialization_candidate = _build_materialization_candidate_for_saved_sheet(order=order, saved_sheet=draft)
+        materialization_candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft)
         if not isinstance(materialization_candidate, dict):
             return None, "saved_sheet_materialization_failed"
         materialization_error = _normalize_id(materialization_candidate.get("error"))
@@ -3318,11 +3923,13 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             return None, "draft_lines_empty"
         if candidate_menu_amount_resolution(order, materialization_candidate)["status"] == "unresolved":
             return None, MENU_AMOUNT_UNRESOLVED
+        bagging_start_input = materialization_candidate.pop("synchronous_write_input")
         try:
             bagging_result = _build_bagging_result_payload(
                 order=order,
                 saved_sheet=draft,
                 materialization_candidate=materialization_candidate,
+                processing_input=bagging_start_input,
             )
         except BaggingOutputUnresolved as exc:
             return None, str(exc)
@@ -3330,6 +3937,12 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order_output_artifact_service.save_bagging_result_artifact(session, payload=bagging_result)
         order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
         meta = _workflow_meta(workflow)
+        meta["bagging_input_proof"] = {
+            "bagging_result_id": bagging_result["bagging_result_id"],
+            "materialization_digest": bagging_result["materialization_digest"],
+            "owned_revision": _workflow_revision(workflow),
+            "start_input": json.loads(json.dumps({key: value for key, value in bagging_start_input.items() if key not in {"evidence", "draft"}}, default=lambda value: value.isoformat())),
+        }
         meta["bagging_result_id"] = bagging_result["bagging_result_id"]
         meta["bagging_result"] = None
         meta["anomaly_review_id"] = None
@@ -3343,6 +3956,9 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         workflow.blockers_json = []
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "bagging_result": bagging_result,
@@ -3350,6 +3966,7 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         }, None
 
 
+@workflow_command
 def run_sheet_anomaly_review(
     order_id: str,
     *,
@@ -3403,6 +4020,9 @@ def run_sheet_anomaly_review(
             payload={"anomaly_review_id": anomaly_review_id},
         )
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": anomaly_review,
@@ -3411,6 +4031,7 @@ def run_sheet_anomaly_review(
         }, None
 
 
+@workflow_command
 def dismiss_sheet_anomaly_warning(
     *,
     order_id: str,
@@ -3467,6 +4088,9 @@ def dismiss_sheet_anomaly_warning(
             payload={"anomaly_review_id": anomaly_review_id},
         )
         _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "anomaly_review": next_review,
@@ -3475,6 +4099,7 @@ def dismiss_sheet_anomaly_warning(
         }, None
 
 
+@workflow_command
 def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -3502,6 +4127,9 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         workflow.blockers_json = []
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "bagging_result": bagging_result,
@@ -3509,6 +4137,7 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         }, None
 
 
+@workflow_command
 def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -3536,6 +4165,9 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         workflow.blockers_json = []
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return {"workflow": _serialize_workflow(workflow)}, revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "bagging_result": bagging_result,
@@ -3543,7 +4175,10 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
         }, None
 
 
-def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+@workflow_command
+def final_confirm(
+    order_id: str, *, confirmed_by: str | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -3599,6 +4234,12 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         if candidate_menu_amount_resolution(order, materialization_candidate)["status"] == "unresolved":
             return None, MENU_AMOUNT_UNRESOLVED
         order_service_module = _get_order_service_module()
+        proof = meta.get("bagging_input_proof")
+        captured = _restore_bagging_write_input(proof, _workflow_revision(workflow))
+        if captured is None or proof.get("bagging_result_id") != bagging_result_id or proof.get("materialization_digest") != _canonical_payload_digest(materialization_candidate):
+            return None, "bagging_input_proof_missing"
+        materialization_candidate = copy.deepcopy(materialization_candidate)
+        materialization_candidate["synchronous_write_input"] = captured
         try:
             order_service_module._materialize_confirmed_lines_from_candidate(  # noqa: SLF001
                 session,
@@ -3660,6 +4301,7 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
             artifact_id=_normalize_id(output_bundle.get("output_bundle_id")) or "",
             payload=output_bundle,
         )
+        meta.pop("bagging_input_proof", None)
         meta["output_bundle"] = None
         _write_workflow_meta(workflow, meta)
         workflow.confirmed_snapshot_id = snapshot.id
@@ -3669,6 +4311,9 @@ def final_confirm(order_id: str, *, confirmed_by: str | None = None) -> tuple[di
         workflow.blockers_json = []
         workflow.warnings_json = []
         workflow.last_transition_at = _now()
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        if revision_error:
+            return _serialize_workflow(workflow), revision_error
         return {
             "workflow": _serialize_workflow(workflow),
             "confirmed_snapshot_id": snapshot.id,
@@ -3681,7 +4326,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        workflow = _get_workflow(session, order.id)
+        workflow = _get_workflow_readonly(session, order.id)
         ocr_results = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
@@ -3694,7 +4339,7 @@ def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is not None and draft.order_id == order.id:
                 evidence_payload = None
-                evidence_id = _normalize_id(draft.base_evidence_run_id or workflow.evidence_run_id)
+                evidence_id = _normalize_id(draft.base_evidence_run_id)
                 if evidence_id:
                     evidence = session.get(OrderOcrEvidenceRun, evidence_id)
                     if evidence is not None and evidence.order_id == order.id and isinstance(evidence.payload_json, dict):

@@ -641,37 +641,8 @@ def _resolved_config_from_parts(
     columns: list[dict[str, Any]],
     version: FacilityTemplateVersion,
 ) -> dict[str, Any]:
-    effective_config = deepcopy(version.config_json) if isinstance(version.config_json, dict) else deepcopy(config)
-    facility_payload = {"facility_id": facility_id, "facility_name": facility_name, **effective_config}
-    try:
-        resolved = config_service._build_facility_config(  # noqa: SLF001
-            facility_id=facility_id,
-            facility=facility_payload,
-            selected_template_id=template_id,
-        )
-    except Exception:
-        resolved = deepcopy(effective_config)
+    resolved = config_service._validate_authored_facility_config(deepcopy(config), template_id)
     resolved["facility_id"] = facility_id
-    if facility_name and not str(resolved.get("facility_name") or "").strip():
-        resolved["facility_name"] = facility_name
-    facility_template_id = str(resolved.get("facility_name") or facility_name or facility_id or "").strip()
-    if facility_template_id:
-        resolved["facility_template_id"] = facility_template_id
-        resolved["facility_template_name"] = facility_template_id
-    if template_id:
-        resolved["fax_template_id"] = template_id
-        resolved.setdefault("fax_template_ids", [template_id])
-    fax_template = deepcopy(resolved.get("fax_template") or {})
-    fax_template["template_id"] = template_id or fax_template.get("template_id")
-    fax_template["columns"] = deepcopy(columns)
-    fax_template["columns_authoritative"] = True
-    fax_template["main_ocr_row_fields"] = derive_row_fields_from_columns(columns)
-    fax_template["facility_template_version_id"] = version.id
-    fax_template["facility_template_version_digest"] = version.template_digest
-    if facility_template_id:
-        fax_template["facility_template_id"] = facility_template_id
-        fax_template["facility_template_name"] = facility_template_id
-    resolved["fax_template"] = fax_template
     resolved["facility_template_version_id"] = version.id
     resolved["facility_template_version"] = serialize_template_version(version)
     return resolved
@@ -689,7 +660,7 @@ def ensure_active_template_version_from_resolved_config(
         return None
     if session.get(Facility, normalized_facility_id) is None:
         return None
-    config = facility_config if isinstance(facility_config, dict) else config_service.get_facility_config(normalized_facility_id)
+    config = config_service.get_facility_config(normalized_facility_id)
     if not isinstance(config, dict):
         return None
     template = config.get("fax_template") if isinstance(config.get("fax_template"), dict) else {}
@@ -749,10 +720,8 @@ def resolve_facility_config_for_date(
     facility = session.get(Facility, normalized_facility_id)
     if facility is None:
         return None, None, "facility_not_found"
-    base_config = (
-        deepcopy(facility.config.config_json)
-        if facility.config and isinstance(facility.config.config_json, dict)
-        else {}
+    base_config = config_service.get_facility_config_for_template(
+        normalized_facility_id, str(version.template_id or "").strip() or None,
     )
     resolved = _resolved_config_from_parts(
         facility_id=normalized_facility_id,
@@ -792,9 +761,7 @@ def save_columns_for_order(
     current_config = facility.config.config_json if facility.config and isinstance(facility.config.config_json, dict) else {}
     resolved_current_config = config_service.get_facility_config(facility_id) or {}
     canonical_template_id = (
-        str(current_config.get("fax_template_id") or "").strip()
-        or str(resolved_current_config.get("fax_template_id") or "").strip()
-        or str(
+        str(
             (
                 (resolved_current_config.get("fax_template") or {}).get("template_id")
                 if isinstance(resolved_current_config.get("fax_template"), dict)
@@ -807,9 +774,7 @@ def save_columns_for_order(
     canonical_template_ids = [
         str(item or "").strip()
         for item in (
-            current_config.get("fax_template_ids")
-            if isinstance(current_config.get("fax_template_ids"), list)
-            else resolved_current_config.get("fax_template_ids")
+            resolved_current_config.get("fax_template_ids")
             if isinstance(resolved_current_config.get("fax_template_ids"), list)
             else []
         )
@@ -869,12 +834,7 @@ def save_columns_for_order(
         active.status = "archived"
         active.archived_at = now
 
-    template_id = (
-        str(sanitized.get("fax_template_id") or "").strip()
-        or str((sanitized.get("fax_template_ids") or [None])[0] or "").strip()
-        or str(canonical_template_id or "").strip()
-        or None
-    )
+    template_id = canonical_template_id
     digest = template_digest(template_id=template_id, columns=normalized_columns)
     version = FacilityTemplateVersion(
         id=_new_template_version_id(),
@@ -903,7 +863,7 @@ def save_columns_for_order(
     resolved_config = _resolved_config_from_parts(
         facility_id=facility_id,
         facility_name=getattr(facility, "name", None),
-        config=sanitized,
+        config=resolved_current_config,
         template_id=template_id,
         columns=normalized_columns,
         version=version,
@@ -949,23 +909,14 @@ def save_template_registration_for_facility(
         current_config=current_config,
         allow_authoritative_column_changes=False,
     )
-    session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == normalized_facility_id))
-    session.add(FacilityConfig(facility_id=normalized_facility_id, config_json=sanitized))
-
-    facility_payload = {
-        "facility_id": normalized_facility_id,
-        "facility_name": getattr(facility, "name", None),
-        **deepcopy(sanitized),
-    }
-    resolved_candidate = config_service._build_facility_config(  # noqa: SLF001
-        facility_id=normalized_facility_id,
-        facility=facility_payload,
-        selected_template_id=primary_template_id,
-    )
+    resolved_candidate = config_service.get_facility_config_for_template(normalized_facility_id, primary_template_id)
     fax_template = resolved_candidate.get("fax_template") if isinstance(resolved_candidate, dict) else {}
     columns = normalize_template_columns((fax_template or {}).get("columns"))
     if not columns:
         return {"validation": {"errors": ["facility_template_columns_missing"], "warnings": []}}, "validation_error"
+
+    session.execute(delete(FacilityConfig).where(FacilityConfig.facility_id == normalized_facility_id))
+    session.add(FacilityConfig(facility_id=normalized_facility_id, config_json=sanitized))
 
     active_versions = (
         session.query(FacilityTemplateVersion)
@@ -1002,7 +953,7 @@ def save_template_registration_for_facility(
     resolved_config = _resolved_config_from_parts(
         facility_id=normalized_facility_id,
         facility_name=getattr(facility, "name", None),
-        config=sanitized,
+        config=resolved_candidate,
         template_id=primary_template_id,
         columns=columns,
         version=version,

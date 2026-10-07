@@ -120,6 +120,12 @@ def _normalize_required_upload_context(
                 "missing": missing,
             },
         )
+    from src.services.ingest_policy import require_explicit_ingest_week
+
+    try:
+        normalized_week = require_explicit_ingest_week(normalized_week)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "missing": ["week_hint"]}) from exc
     return normalized_facility, normalized_week
 
 

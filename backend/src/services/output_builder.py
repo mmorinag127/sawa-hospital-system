@@ -5,6 +5,8 @@ import calendar
 import re
 import time
 import zipfile
+from contextlib import nullcontext
+from copy import deepcopy
 from copy import copy
 from datetime import date as dt_date, datetime, timedelta
 from functools import lru_cache
@@ -14,6 +16,7 @@ from typing import Dict, Any
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 from uuid import uuid4
+from sqlalchemy import select
 
 import pandas as pd
 from loguru import logger
@@ -23,10 +26,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from src.db import session_scope
+from src.models.order import Order
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.models.order_output_artifact import OrderBaggingResult
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.services.order_service import get_order_by_id, get_order_menu_snapshot
 from src.services import (
@@ -160,20 +165,6 @@ LEGACY_LABEL_FIELDS = {
 
 _GARNISH_SPLIT_RE = re.compile(r"\s*(?:添え|添[)）:：])\s*")
 
-_DAILY_LABEL_MENU_DEFAULTS = {
-    "ごぼうと竹輪の煮物": ("朝", "副菜①", "温菜", 70, "g"),
-    "竹輪の煮物": ("朝", "副菜①", "温菜", 70, "g"),
-    "いんげんの味噌和え": ("朝", "副菜②", "冷菜", 40, "g"),
-    "豚肉と白菜のすき煮": ("昼", "主菜", "温菜", 100, "g"),
-    "さつま芋の天ぷら": ("昼", "副菜①", "温菜", 2, "個"),
-    "さつまいもレモン煮": ("昼", "副菜①", "温菜", 40, "g"),
-    "ﾌﾞﾛｯｺﾘｰのちりめん和え": ("昼", "副菜②", "冷菜", 40, "g"),
-    "煮込みハンバーグ": ("夕", "主菜", "温菜", 100, "g"),
-    "ジャーマンポテト": ("夕", "副菜①", "温菜", 40, "g"),
-    "ほうれん草の和え物": ("夕", "副菜②", "冷菜", 40, "g"),
-    "ソース": ("夕", "ソース", "冷菜", 5, "g"),
-}
-
 DAILY_LABEL_SHEET_MAX_ROWS = {
     "メニュー": 603,
     "藍TERRACE": 627,
@@ -291,34 +282,7 @@ def _effective_facility_config_date_from_order(order: dict | None) -> dt_date | 
 def _resolve_facility_config_for_order(order: dict | None) -> dict | None:
     if not isinstance(order, dict):
         return None
-    facility_id = str(order.get("facility") or "").strip()
-    if not facility_id:
-        return None
-    template_version_id = str(order.get("template_version_id") or "").strip()
-    if template_version_id:
-        effective_date = _effective_facility_config_date_from_order(order)
-        if effective_date is None:
-            raise ValueError("facility_template_effective_date_missing")
-        with session_scope() as session:
-            version = session.get(FacilityTemplateVersion, template_version_id)
-            if version is None or str(version.facility_id or "").strip() != facility_id:
-                raise ValueError("facility_template_version_unresolved")
-            if not facility_template_version_service.template_version_applies_on(
-                version,
-                effective_date,
-            ):
-                raise ValueError("facility_template_version_date_mismatch")
-            resolved_config, _version, error = facility_template_version_service.resolve_facility_config_for_date(
-                session,
-                facility_id=facility_id,
-                effective_date=effective_date,
-            )
-            if error or not isinstance(resolved_config, dict):
-                raise ValueError(error or "facility_template_config_unresolved")
-            if str((resolved_config.get("facility_template_version") or {}).get("id") or "").strip() != template_version_id:
-                raise ValueError("facility_template_version_selection_mismatch")
-            return resolved_config
-    return config_service.get_facility_config(facility_id)
+    return _accepted_output_candidate(order)["configured_input"]["facility"]
 
 
 def _add_months(base_date: dt_date, months: int) -> dt_date:
@@ -389,7 +353,7 @@ _AREA_TRANSLATION = str.maketrans("０１２３４５６７８９ｆＦ", "01234
 
 
 def _normalize_diet_key(value: str | None) -> str | None:
-    if not value:
+    if value is None:
         return None
     raw = str(value).strip()
     if not raw:
@@ -432,7 +396,7 @@ def _normalize_diet_key(value: str | None) -> str | None:
 
 
 def _normalize_delivery_diet_key(value: str | None) -> str | None:
-    if not value:
+    if value is None:
         return None
     raw = str(value).strip()
     lowered = raw.lower()
@@ -447,23 +411,22 @@ def _normalize_delivery_diet_key(value: str | None) -> str | None:
     return _normalize_diet_key(raw)
 
 
-def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str, str], str]:
+def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str, str | None], str]:
     if not isinstance(facility_config, dict):
         return {}
-    override = facility_config.get("fax_template_override")
+    override = facility_config.get("fax_template")
     if not isinstance(override, dict):
         return {}
     columns = override.get("columns")
     if not isinstance(columns, list):
         return {}
-    result: dict[tuple[str, str], str] = {}
+    result: dict[tuple[str, str | None], str] = {}
     for column in columns:
         if not isinstance(column, dict):
             continue
         if str(column.get("role") or "").strip() != "quantity":
             continue
         source_diet = _normalize_diet_key(column.get("diet_type"))
-        source_area = str(column.get("area_id") or "X").strip().upper() or "X"
         output_diet = _normalize_diet_key(
             column.get("output_diet_type")
             or column.get("aggregation_diet_type")
@@ -471,6 +434,9 @@ def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str,
         )
         if not source_diet or not output_diet or output_diet == source_diet:
             continue
+        source_diet, source_area = _authored_quantity_signature(column, _build_area_alias_map(facility_config))
+        if (source_diet, source_area) in result and result[(source_diet, source_area)] != output_diet:
+            raise ValueError("delivery_quantity_mapping_ambiguous")
         result[(source_diet, source_area)] = output_diet
     return result
 
@@ -485,8 +451,9 @@ def _apply_output_diet_type_overrides(
     updated_lines: list[dict] = []
     for line in lines:
         diet_key = _normalize_diet_key(line.get("diet_type"))
-        area_key = str(line.get("area_id") or "X").strip().upper() or "X"
-        output_diet = overrides.get((diet_key or "", area_key)) or overrides.get((diet_key or "", "X"))
+        area_key = _resolve_area_key(line.get("area_id"), _build_area_alias_map(facility_config))
+        exact = (diet_key or "", area_key)
+        output_diet = overrides[exact] if exact in overrides else overrides.get((diet_key or "", None))
         if not output_diet:
             updated_lines.append(line)
             continue
@@ -498,7 +465,7 @@ def _apply_output_diet_type_overrides(
 
 
 def _normalize_area_id(value: str | None) -> str | None:
-    if not value:
+    if value is None:
         return None
     text = str(value).strip()
     if not text:
@@ -522,14 +489,18 @@ def _build_area_alias_map(facility_config: dict | None) -> dict[str, str]:
     for area in areas:
         if not isinstance(area, dict):
             continue
-        area_id = area.get("area_id") or area.get("id") or ""
+        area_id = area["area_id"] if "area_id" in area else area.get("id")
         name = area.get("name") or ""
-        canonical = _normalize_area_id(area_id) or _normalize_area_id(name)
-        if not canonical:
+        if area_id is None and ("area_id" in area or "id" in area):
             continue
+        canonical = _normalize_area_id(area_id)
+        if not canonical:
+            raise ValueError("delivery_area_identity_required")
         for candidate in (area_id, name):
             norm = _normalize_area_id(candidate)
             if norm:
+                if norm in aliases and aliases[norm] != canonical:
+                    raise ValueError("delivery_area_mapping_ambiguous")
                 aliases[norm] = canonical
     return aliases
 
@@ -541,30 +512,16 @@ def _resolve_area_key(value: str | None, aliases: dict[str, str]) -> str | None:
     return aliases.get(norm, norm)
 
 
-def _infer_delivery_column_meta(name: str | None) -> tuple[str | None, str | None]:
-    if not name:
-        return None, None
-    raw = str(name)
-    if "揚げ物" in raw or "揚物" in raw:
-        diet = "no_fried"
-    elif "肉禁" in raw:
-        diet = "no_meat"
-    elif "魚禁" in raw:
-        diet = "no_fish"
-    elif "その他" in raw:
-        diet = "forbidden_other"
-    elif "禁食" in raw:
-        diet = "禁食"
-    else:
-        diet = _normalize_delivery_diet_key(raw)
-    area = None
-    match = re.search(r"(\\d)\\s*(?:f|ｆ|Ｆ|階)", raw, re.IGNORECASE)
-    if match:
-        area = f"{match.group(1)}F"
-    elif "月" in raw:
-        area = "3F"
-    elif "花" in raw:
-        area = "2F"
+def _authored_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple[str, str | None]:
+    if not isinstance(column.get("diet_type"), str):
+        raise ValueError("delivery_quantity_diet_required")
+    diet = _normalize_delivery_diet_key(column["diet_type"])
+    if not diet:
+        raise ValueError("delivery_quantity_diet_required")
+    raw_area = column.get("area_id")
+    if raw_area is not None and not isinstance(raw_area, str):
+        raise ValueError("delivery_quantity_area_invalid")
+    area = _resolve_area_key(raw_area, area_aliases)
     return diet, area
 
 
@@ -618,14 +575,6 @@ def _label_area_suffix(area_id: Any, facility_id: Any = None) -> str:
     if normalized == "3F":
         return "月"
     return ""
-
-
-def _label_menu_defaults(menu_name: Any) -> tuple[str | None, str | None, str | None, float | None, str | None]:
-    name = str(menu_name or "").strip()
-    if name in _DAILY_LABEL_MENU_DEFAULTS:
-        daypart, category, temp, qty, unit = _DAILY_LABEL_MENU_DEFAULTS[name]
-        return daypart, category, temp, float(qty), unit
-    return None, None, None, None, None
 
 
 def _daily_label_display_diet_key(bag: dict) -> str:
@@ -683,7 +632,7 @@ def _daily_label_comparable_diet_types_for_facility(facility_config: dict | None
         configured = facility_config.get("daily_label_comparable_diet_types")
         if isinstance(configured, list):
             return [str(item).strip() for item in configured if str(item).strip()]
-        override = facility_config.get("fax_template_override")
+        override = facility_config.get("fax_template")
         columns = override.get("columns") if isinstance(override, dict) else None
         if isinstance(columns, list):
             derived: set[str] = set()
@@ -751,13 +700,8 @@ def _is_daily_label_garnish_category(category: object) -> bool:
 
 
 def _label_category_for_bag(bag: dict, product_name: str, diet_type: str) -> str:
-    _daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(product_name)
-    category = str(bag.get("menu_category") or default_category or "").strip()
+    category = str(bag.get("menu_category") or "").strip()
     category = _normalize_daily_label_category_text(category)
-    if category == "副菜":
-        category = default_category or category
-    if not category:
-        category = default_category or ""
     suffix = _daily_label_category_suffix_for_bag(bag)
     if category in {"添え", "付属品"}:
         parent_category = _normalize_daily_label_category_text(
@@ -1958,7 +1902,19 @@ def build_order_lines_for_outputs(
     *,
     include_expanded_copy: bool = True,
     timings: dict[str, float] | None = None,
+    producer_candidate: dict | None = None,
+    accepted_candidate: dict | None = None,
 ) -> list[dict]:
+    from copy import deepcopy
+    if producer_candidate is None:
+        accepted = accepted_candidate if accepted_candidate is not None else _accepted_output_candidate(order)
+        lines = accepted.get("output_lines")
+        if not isinstance(lines, list):
+            raise ValueError("accepted output-lines receipt missing")
+        return deepcopy(lines)
+    configured = producer_candidate.get("configured_input")
+    if not isinstance(configured, dict) or not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
+        raise ValueError("bagging captured configuration required")
     total_started = time.perf_counter()
     facility_id = order.get("facility")
     week_value = (
@@ -1969,76 +1925,15 @@ def build_order_lines_for_outputs(
         or str(order.get("week_code") or "").strip()
     )
     facility_config_started = time.perf_counter()
-    facility_config = _resolve_facility_config_for_order(order)
+    facility_config = deepcopy(configured["facility"])
     if timings is not None:
         timings["build_order_lines_facility_config_ms"] = round(
             (time.perf_counter() - facility_config_started) * 1000,
             1,
         )
-    raw_lines = order.get("lines", [])
-    order_id = order.get("id")
-    workflow_state = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else {}
-    workflow_warnings = {
-        str(item).strip()
-        for item in (workflow_state.get("warnings_json") or workflow_state.get("warnings") or [])
-        if str(item).strip()
-    }
-    workflow_blockers = {
-        str(item).strip()
-        for item in (workflow_state.get("blockers_json") or workflow_state.get("blockers") or [])
-        if str(item).strip()
-    }
-    draft_newer_than_lines = bool(
-        workflow_state.get("ocr_draft_newer_than_lines")
-        or workflow_state.get("draft_newer_than_lines")
-        or "draft_newer_than_lines" in workflow_warnings
-        or "draft_newer_than_lines" in workflow_blockers
-    )
-    workflow_started = time.perf_counter()
-    workflow_v2_lines = _workflow_v2_lines_for_outputs(
-        order,
-        raw_lines,
-        require_saved_sheet=(
-            draft_newer_than_lines
-            or _workflow_v2_output_state_requires_saved_sheet(workflow_state.get("state"))
-        ),
-    )
-    if timings is not None:
-        timings["build_order_lines_workflow_v2_ms"] = round(
-            (time.perf_counter() - workflow_started) * 1000,
-            1,
-        )
-    if workflow_v2_lines is not None:
-        raw_lines = workflow_v2_lines
-    week_sheet_name = order_service._week_sheet_name_from_week_value(week_value)  # noqa: SLF001
-    facility_cache_key = (str(facility_id or ""), str(week_sheet_name or ""))
-    expanded_copy_enabled = False
-    if include_expanded_copy:
-        if facility_cache_key in _EXPANDED_CELL_COPY_ENABLED_CACHE:
-            expanded_copy_enabled = _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key]
-        else:
-            expanded_copy_enabled = order_service._expanded_cell_same_daypart_copy_enabled(  # noqa: SLF001
-                facility_config,
-                week_sheet_name=week_sheet_name,
-            )
-            _EXPANDED_CELL_COPY_ENABLED_CACHE[facility_cache_key] = expanded_copy_enabled
-    if expanded_copy_enabled:
-        if order_id:
-            expanded_started = time.perf_counter()
-            materialization_candidate = order_service.build_confirm_materialization_candidate(order_id)
-            if timings is not None:
-                timings["build_order_lines_expanded_copy_ms"] = round(
-                    (time.perf_counter() - expanded_started) * 1000,
-                    1,
-                )
-            candidate_lines = (
-                materialization_candidate.get("lines")
-                if isinstance(materialization_candidate, dict)
-                and not materialization_candidate.get("error")
-                else None
-            )
-            if isinstance(candidate_lines, list) and candidate_lines:
-                raw_lines = candidate_lines
+    raw_lines = deepcopy(producer_candidate.get("lines"))
+    if not isinstance(raw_lines, list):
+        raise ValueError("bagging captured lines missing")
     enrich_started = time.perf_counter()
     raw_lines = order_service._apply_change_override_priority_to_lines(raw_lines)  # noqa: SLF001
     raw_lines = _apply_garnish_lines(raw_lines)
@@ -2056,6 +1951,7 @@ def build_order_lines_for_outputs(
         )
     menu_entries_started = time.perf_counter()
     menu_entries = _collect_cached_menu_entries_for_week(week_value, facility_id)
+    producer_candidate["output_menu_entries"] = deepcopy(menu_entries)
     if timings is not None:
         timings["build_order_lines_menu_entries_ms"] = round(
             (time.perf_counter() - menu_entries_started) * 1000,
@@ -2084,14 +1980,12 @@ def build_order_lines_for_outputs(
     order_lines = _apply_menu_rules(order_lines, facility_id)
     order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id)
-    order_lines = _apply_builtin_menu_defaults(order_lines)
     order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
     order_lines = _apply_garnish_defaults(order_lines)
     order_lines = _apply_menu_master_defaults(order_lines, facility_id)
-    order_lines = _apply_builtin_menu_defaults(order_lines)
     order_lines = _apply_label_meal_slot_categories(order_lines)
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
@@ -2105,6 +1999,109 @@ def build_order_lines_for_outputs(
             1,
         )
     return order_lines
+
+
+def _accepted_output_candidate(order: dict, *, write_session=None) -> dict:
+    order_id = str(order.get("id") or "").strip()
+    if not order_id:
+        raise ValueError("accepted output order missing")
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        if workflow is None or not workflow.draft_id:
+            raise ValueError("accepted saved sheet missing")
+        draft = session.get(OrderSheetDraft, workflow.draft_id)
+        if draft is None or draft.order_id != order_id:
+            raise ValueError("accepted saved sheet mismatch")
+        if not draft.template_version_id or workflow.template_version_id != draft.template_version_id:
+            raise ValueError("accepted template identity missing or mismatched")
+        return _workflow_v2_materialization_candidate(session, order, workflow, draft)
+
+
+def _capture_output_adoption(order_id: str, session) -> dict:
+    original = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
+    if original is None:
+        raise ValueError("output original ownership input missing")
+    order = get_order_by_id(order_id, read_session=session)
+    if not order:
+        raise ValueError("order not found")
+    candidate = _accepted_output_candidate(order, write_session=session)
+    origin = _accepted_output_origin(session, order_id, original, candidate)
+    receipts = session.execute(select(OrderBaggingResult).where(OrderBaggingResult.order_id == order_id).order_by(OrderBaggingResult.id)).scalars().all()
+    return {"order": deepcopy(order), "write_input": deepcopy(original), "candidate": candidate, "accepted_origin": origin, "bagging_receipts": _bagging_receipt_snapshot(receipts)}
+
+
+def _accepted_output_origin(session, order_id, current_input, candidate, *, lock=False):
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    from src.services.order_workflow_v2_service import _canonical_payload_digest, _serialize_materialized_order_line
+    workflow = session.get(OrderWorkflowState, order_id)
+    meta = (workflow.secondary_actions_json or {}).get("workflow_v2", {})
+    if workflow.confirmed_snapshot_id:
+        query = select(OrderConfirmedSnapshot).where(OrderConfirmedSnapshot.id == workflow.confirmed_snapshot_id)
+        if lock and session.bind.dialect.name != "sqlite":
+            query = query.with_for_update()
+        snapshot = session.execute(query.execution_options(populate_existing=True)).scalar_one_or_none()
+        if snapshot is None or snapshot.order_id != order_id or snapshot.saved_sheet_id != current_input["draft_id"]:
+            raise ValueError("output original confirmed receipt missing")
+        payload = snapshot.snapshot_json
+        if not isinstance(payload, dict) or snapshot.snapshot_digest != _canonical_payload_digest(payload):
+            raise ValueError("output original confirmed receipt mismatch")
+        if not snapshots_equal(payload.get("saved_sheet"), current_input["draft"]["draft_sheet_json"]) or payload.get("selected_ocr_result_id") != current_input["evidence_run_id"] or snapshot.template_version_id != current_input["draft"]["template_version_id"]:
+            raise ValueError("output original confirmed sheet mismatch")
+        bagging = payload.get("bagging_result", {})
+        if snapshot.bagging_result_id != meta.get("bagging_result_id") or not snapshots_equal(bagging.get("materialization_candidate"), candidate):
+            raise ValueError("output original confirmed candidate mismatch")
+        order = session.get(Order, order_id)
+        current_lines = [_serialize_materialized_order_line(line) for line in sorted(order.lines, key=lambda line: line.id)]
+        saved_lines = payload.get("order_lines")
+        if not isinstance(saved_lines, list) or not snapshots_equal(current_lines, sorted(saved_lines, key=lambda line: line["id"])):
+            raise ValueError("output original confirmed lines mismatch")
+        return order_service._json_snapshot({column.key: getattr(snapshot, column.key) for column in snapshot.__table__.columns})
+    proof = meta.get("bagging_input_proof")
+    if not isinstance(proof, dict) or type(proof.get("owned_revision")) is not int or proof["owned_revision"] != current_input["workflow_revision"]:
+        raise ValueError("output original bagging proof missing")
+    start = proof.get("start_input")
+    if proof.get("bagging_result_id") != meta.get("bagging_result_id") or proof.get("materialization_digest") != _canonical_payload_digest(candidate) or not isinstance(start, dict):
+        raise ValueError("output original bagging proof mismatch")
+    for key in ("order_id", "input_versions", "selected_pdf_receipt", "configured_input", "physical_menu_entries", "draft_id", "evidence_run_id"):
+        if key not in start or not snapshots_equal(start[key], current_input.get(key)):
+            raise ValueError("output original bagging input mismatch")
+    if not snapshots_equal(candidate.get("configured_input"), start["configured_input"]):
+        raise ValueError("output original bagging configuration mismatch")
+    return deepcopy(proof)
+
+
+def _bagging_receipt_snapshot(receipts) -> list[dict]:
+    return order_service._json_snapshot([{key: getattr(receipt, key) for key in ("id", "order_id", "source_saved_sheet_id", "source_ocr_result_id", "template_version_id", "payload_json", "payload_digest", "created_by", "created_at")} for receipt in receipts])
+
+
+def _require_output_adoption(session, original: dict) -> None:
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    order = original["order"]
+    order_id = order["id"]
+    if not order_service._synchronous_cache_write_fence(session, order_id, original["write_input"]):
+        raise ValueError("output original ownership input conflict")
+    workflow = session.execute(select(OrderWorkflowState).where(OrderWorkflowState.order_id == order_id).execution_options(populate_existing=True)).scalar_one()
+    if not snapshots_equal(workflow.secondary_actions_json or {}, original["write_input"]["workflow_meta"]):
+        raise ValueError("output original acceptance receipt conflict")
+    # Revision is claimed first; related artifact reads are locked and refreshed
+    # in this same adoption transaction, never substituted as calculation input.
+    artifacts = select(OrderBaggingResult).where(OrderBaggingResult.order_id == order_id).order_by(OrderBaggingResult.id)
+    if session.bind.dialect.name != "sqlite":
+        artifacts = artifacts.with_for_update()
+    receipts = session.execute(artifacts.execution_options(populate_existing=True)).scalars().all()
+    if not snapshots_equal(_bagging_receipt_snapshot(receipts), original.get("bagging_receipts")):
+        raise ValueError("output original bagging receipt conflict")
+    candidate = _accepted_output_candidate(order, write_session=session)
+    if not snapshots_equal(candidate, original["candidate"]):
+        raise ValueError("output original accepted candidate conflict")
+    if not snapshots_equal(_accepted_output_origin(session, order_id, original["write_input"], candidate, lock=True), original.get("accepted_origin")):
+        raise ValueError("output original acceptance lineage conflict")
+
+
+def _owned_output_paths(order_id: str) -> tuple[Path, Path, Path]:
+    directory = OUTPUT_DIR / uuid4().hex
+    directory.mkdir(parents=True, exist_ok=False)
+    return (directory / f"{order_id}_labels.csv", directory / f"{order_id}_delivery.xlsx", directory / f"{order_id}_aggregate.csv")
 
 
 def _workflow_v2_lines_for_outputs(
@@ -2169,21 +2166,6 @@ def _workflow_v2_materialization_candidate(
     workflow: OrderWorkflowState,
     draft: OrderSheetDraft,
 ) -> dict | None:
-    rebuilt_candidate: dict | None = None
-
-    def rebuild_from_saved_sheet() -> dict | None:
-        nonlocal rebuilt_candidate
-        if rebuilt_candidate is not None:
-            return rebuilt_candidate
-        rebuilt_candidate = order_service._build_materialization_candidate_from_draft_record(  # noqa: SLF001
-            str(order.get("id") or ""),
-            draft_record=_workflow_v2_draft_record_for_outputs(draft),
-            facility_id=order.get("facility") or order.get("facility_code"),
-            existing_week_code=order.get("stored_week_value") or order.get("week_value") or order.get("week") or order.get("week_code"),
-            received_at=order.get("received_at"),
-        )
-        return rebuilt_candidate
-
     meta = workflow.secondary_actions_json if isinstance(workflow.secondary_actions_json, dict) else {}
     workflow_meta = meta.get("workflow_v2") if isinstance(meta.get("workflow_v2"), dict) else {}
     workflow_meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, workflow_meta)
@@ -2200,9 +2182,21 @@ def _workflow_v2_materialization_candidate(
         draft_template_version_id = str(draft.template_version_id or "").strip()
         if source_saved_sheet_id and source_saved_sheet_id != draft.id:
             raise ValueError("workflow-v2 bagging result source does not match saved sheet")
-        if template_version_id and draft_template_version_id and template_version_id != draft_template_version_id:
+        if not template_version_id or not draft_template_version_id or template_version_id != draft_template_version_id:
             raise ValueError("workflow-v2 bagging result template does not match saved sheet")
-    return rebuild_from_saved_sheet()
+    if not isinstance(bagging_result, dict) or bagging_result.get("source_saved_sheet_id") != draft.id:
+        raise ValueError("saved-sheet acceptance receipt missing")
+    candidate = bagging_result.get("materialization_candidate")
+    if not isinstance(candidate, dict) or not isinstance(candidate.get("configured_input"), dict):
+        raise ValueError("saved-sheet acceptance configuration missing")
+    from src.services.order_workflow_v2_service import _canonical_payload_digest
+    if bagging_result.get("materialization_digest") != _canonical_payload_digest(candidate):
+        raise ValueError("saved-sheet acceptance receipt mismatch")
+    configured = candidate["configured_input"]
+    if not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
+        raise ValueError("saved-sheet acceptance configuration incomplete")
+    from copy import deepcopy
+    return deepcopy(candidate)
 
 
 def _workflow_v2_draft_record_for_outputs(draft: OrderSheetDraft) -> dict:
@@ -2349,43 +2343,6 @@ def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
             updated["menu_unit_type"] = _normalize_unit_type(selected.get("unit_type")) or selected.get("unit_type")
         if selected.get("qty_per_serving") is not None:
             updated["menu_qty_per_serving"] = selected.get("qty_per_serving")
-        enriched.append(updated)
-    return enriched
-
-
-def _apply_builtin_menu_defaults(lines: list[dict]) -> list[dict]:
-    defaults = menu_rule_service.DEFAULT_GLOBAL_RULES
-    if not defaults:
-        return lines
-    enriched: list[dict] = []
-    for line in lines:
-        default_daypart, default_category, _default_temp, _default_qty, _default_unit = _label_menu_defaults(
-            line.get("menu_name")
-        )
-        updated = dict(line)
-        if default_daypart and not updated.get("daypart"):
-            updated["daypart"] = default_daypart
-        if default_category and not updated.get("_monthly_entry_override_applied"):
-            updated["menu_category"] = _normalize_delivery_category_label(default_category)
-        if updated.get("menu_qty_per_serving") is not None:
-            enriched.append(updated)
-            continue
-        line_daypart = _normalize_output_daypart(updated.get("daypart"))
-        line_category = _normalize_category_key(updated.get("menu_category"))
-        matched = next(
-            (
-                rule
-                for rule in defaults
-                if _normalize_output_daypart(rule.get("daypart")) == line_daypart
-                and _normalize_category_key(rule.get("category")) == line_category
-            ),
-            None,
-        )
-        if not matched:
-            enriched.append(updated)
-            continue
-        updated["menu_unit_type"] = matched.get("unit_type")
-        updated["menu_qty_per_serving"] = matched.get("qty_per_serving")
         enriched.append(updated)
     return enriched
 
@@ -2544,11 +2501,6 @@ def _build_final_label_bags(
     facility_config: dict | None,
 ) -> list[dict]:
     bags = _build_bags(order_for_outputs, packaging_policy, quantity_rules)
-    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
-    bags = _apply_menu_overrides(bags, menu_items, apply_category=False)
-    bags = _clear_stale_menu_qty_from_monthly_entry(bags)
-    bags = _apply_menu_master_defaults(bags, facility_id, apply_category=False)
-    bags = _apply_builtin_menu_defaults(bags)
     bag_types = _resolve_bag_types(facility_config or {})
     bags = _assign_bag_type_for_bags(bags, bag_types)
     bags = _split_bags_by_max(bags)
@@ -2588,19 +2540,34 @@ def build_bag_rows_for_outputs(
     *,
     order_lines: list[dict] | None = None,
     facility_config: dict | None = None,
+    configured_input: dict | None = None,
+    accepted_candidate: dict | None = None,
 ) -> list[dict]:
     facility_id = order.get("facility")
-    resolved_facility_config = facility_config
-    if not resolved_facility_config and facility_id:
-        resolved_facility_config = _resolve_facility_config_for_order(order)
-    if not resolved_facility_config:
-        logger.warning("Facility config missing", facility_id=facility_id)
-        resolved_facility_config = {}
+    accepted = accepted_candidate
+    if configured_input is None:
+        accepted = accepted if accepted is not None else _accepted_output_candidate(order)
+        configured = accepted["configured_input"]
+        frozen_lines = build_order_lines_for_outputs(order, accepted_candidate=accepted)
+        if order_lines is not None and order_lines != frozen_lines:
+            raise ValueError("accepted output lines mismatch")
+        order_lines = frozen_lines
+    else:
+        configured = configured_input
+        if accepted is not None and configured != accepted["configured_input"]:
+            raise ValueError("accepted output configuration mismatch")
+        if not isinstance(order_lines, list):
+            raise ValueError("producer output lines required")
+    if not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
+        raise ValueError("accepted bag configuration missing")
+    resolved_facility_config = configured["facility"]
+    if facility_config is not None and facility_config != resolved_facility_config:
+        raise ValueError("accepted bag configuration mismatch")
 
     packaging_policy = resolved_facility_config.get("packaging_policy", {})
-    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+    quantity_rules = configured["policy"].get("quantity_rules", {})
 
-    resolved_lines = order_lines if isinstance(order_lines, list) else build_order_lines_for_outputs(order)
+    resolved_lines = order_lines
     order_for_outputs = {**order, "lines": resolved_lines}
 
     week_value = (
@@ -2625,12 +2592,16 @@ def build_bag_payload_for_outputs(
     *,
     order_lines: list[dict] | None = None,
     facility_config: dict | None = None,
+    configured_input: dict | None = None,
+    accepted_candidate: dict | None = None,
 ) -> list[dict]:
     return _serialize_bag_payload_rows(
         build_bag_rows_for_outputs(
             order,
             order_lines=order_lines,
             facility_config=facility_config,
+            configured_input=configured_input,
+            accepted_candidate=accepted_candidate,
         )
     )
 
@@ -2649,7 +2620,7 @@ def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | N
         expiry_value = _resolve_label_expiry_date(expiry_date, label_profile)
     else:
         expiry_value = _resolve_label_expiry_date(expiry_date, label_profile)
-    menu_category = bag.get("menu_category") or bag.get("diet_type")
+    menu_category = bag.get("menu_category")
     return {
         "facility_name": facility_name,
         "expiry_date": expiry_value,
@@ -2666,13 +2637,14 @@ def _label_payload_legacy(bag: dict, label_profile: dict, facility_name: str | N
 def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     product_name = bag.get("menu_name") or ""
     expiry_value = _resolve_label_expiry_date(bag.get("date"), label_profile)
-    default_daypart, _default_category, default_temp, default_qty, default_unit = _label_menu_defaults(product_name)
     raw_per_qty = bag.get("menu_qty_per_serving")
     raw_unit = bag.get("menu_unit_type")
     per_qty, unit = _extract_qty_and_unit(
-        raw_per_qty if raw_per_qty is not None else default_qty,
-        raw_unit or default_unit,
+        raw_per_qty,
+        raw_unit,
     )
+    if per_qty is not None and unit is None:
+        raise ValueError("accepted_label_unit_required")
     servings = bag.get("quantity")
     total_qty = None
     if per_qty is not None and servings is not None:
@@ -2687,10 +2659,8 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     if menu_value and product_name and str(menu_value).strip() == str(product_name).strip():
         menu_value = ""
     total_amount = _daily_label_amount_cell(total_qty, unit)
-    if not total_amount and servings not in (None, ""):
-        total_amount = _format_number(servings)
     area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("facility"))
-    time_value = str(bag.get("daypart") or default_daypart or "").strip()
+    time_value = str(bag.get("daypart") or "").strip()
     if area_suffix:
         time_value = f"{time_value}{area_suffix}".strip()
     source_refs = bag.get("_source_refs") or bag.get("source_refs") or []
@@ -2709,7 +2679,7 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
         "賞味期限": _format_jp_date(expiry_value),
         "時間": time_value,
         "メニュー": menu_value,
-        "温・冷": _normalize_temp_label(bag.get("menu_temp_type") or default_temp),
+        "温・冷": _normalize_temp_label(bag.get("menu_temp_type")),
         "商品名１": display_product_name,
         "商品名２": "",
         "内容量": total_amount,
@@ -2958,20 +2928,27 @@ def _build_delivery_column_map(ws, header_row: int, columns: list[dict]) -> dict
     for col in columns:
         name = col.get("name")
         if not name:
+            if col.get("source") == "quantity":
+                raise ValueError("delivery_quantity_column_name_required")
             continue
         column_index = col.get("column_index")
-        if isinstance(column_index, int) and column_index > 0:
+        if type(column_index) is int and 0 < column_index <= ws.max_column:
             column_map[name] = column_index
             continue
+        if column_index is not None and col.get("source") == "quantity":
+            raise ValueError("delivery_quantity_column_index_invalid")
         header = col.get("header") or name
         normalized = _normalize_cell_text(header)
         if not normalized:
             continue
-        for cell in header_cells:
-            cell_text = _normalize_cell_text(cell.value)
-            if normalized and normalized in cell_text:
-                column_map[name] = cell.col_idx
-                break
+        matches = [cell.col_idx for cell in header_cells if _normalize_cell_text(cell.value) == normalized]
+        if len(matches) == 1:
+            column_map[name] = matches[0]
+        elif col.get("source") == "quantity":
+            raise ValueError("delivery_quantity_header_mapping_unresolved")
+    quantity_positions = [column_map[col["name"]] for col in columns if col.get("source") == "quantity" and col.get("name") in column_map]
+    if len(set(quantity_positions)) != len(quantity_positions):
+        raise ValueError("delivery_quantity_header_mapping_ambiguous")
     return column_map
 
 
@@ -3492,11 +3469,11 @@ def _lookup_ocr_entry_quantity(entry: dict[str, Any], diet_key: str | None, area
     return None
 
 
-def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None) -> dict[str, object]:
+def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None, *, parsed_input: dict | None = None) -> dict[str, object]:
     order_id = order.get("id")
     if not order_id:
         return {}
-    parsed = _load_order_ocr_payload(str(order_id))
+    parsed = parsed_input if parsed_input is not None else _load_order_ocr_payload(str(order_id))
     if not isinstance(parsed, dict):
         return {}
     year_hint = _resolve_ocr_year_hint(order)
@@ -3596,18 +3573,6 @@ def _delivery_category_sort_value(daypart: Any, category: Any) -> int:
     return 90
 
 
-def _delivery_category_from_menu_default(daypart: Any, menu_name: Any, current_category: Any) -> str:
-    normalized = _normalize_delivery_category_label(current_category)
-    if normalized in {"副菜1", "副菜2", "副菜3", "添え"}:
-        return normalized
-    default_daypart, default_category, _temp, _qty, _unit = _label_menu_defaults(menu_name)
-    if default_category and _normalize_delivery_daypart(default_daypart) == _normalize_delivery_daypart(daypart):
-        default_label = _normalize_delivery_category_label(default_category)
-        if default_label in {"副菜1", "副菜2", "副菜3", "主菜"}:
-            return default_label
-    return normalized
-
-
 def _delivery_display_category_label(daypart: Any, category: Any) -> str:
     label = _normalize_delivery_category_label(category)
     if label == "副菜1":
@@ -3619,47 +3584,6 @@ def _delivery_display_category_label(daypart: Any, category: Any) -> str:
     if label == "主菜":
         return "主Ａ" if _normalize_delivery_daypart(daypart) == "昼" else "主"
     return label
-
-
-def _delivery_reference_slot_sequence(daypart: Any, row_count: int | None = None) -> list[str]:
-    normalized_daypart = _normalize_delivery_daypart(daypart)
-    if normalized_daypart == "朝":
-        return ["副菜1", "副菜2"]
-    if normalized_daypart == "昼":
-        if row_count == 3:
-            return ["主菜", "副菜1", "副菜2"]
-        return ["主菜", "副菜1", "副菜2", "副菜3"]
-    if normalized_daypart == "夕":
-        if row_count == 3:
-            return ["主菜", "副菜1", "副菜2"]
-        return ["主菜", "副菜1", "副菜2", "副菜3"]
-    return []
-
-
-def _apply_delivery_reference_slot_categories(rows: list[dict]) -> None:
-    grouped: dict[tuple[Any, str], list[dict]] = {}
-    for row in rows:
-        if _normalize_delivery_category_label(row.get("menu_category")) == "添え":
-            continue
-        daypart = _normalize_delivery_daypart(row.get("daypart"))
-        if not daypart:
-            continue
-        grouped.setdefault((row.get("date"), daypart), []).append(row)
-
-    for (_date_value, daypart), daypart_rows in grouped.items():
-        if all(_is_specific_delivery_category(row.get("menu_category")) for row in daypart_rows):
-            continue
-        slot_sequence = _delivery_reference_slot_sequence(daypart, len(daypart_rows))
-        if len(daypart_rows) != len(slot_sequence):
-            continue
-        daypart_rows.sort(
-            key=lambda row: (
-                row.get("_order_index") if row.get("_order_index") is not None else 1_000_000,
-                row.get("menu_name") or "",
-            )
-        )
-        for row, category in zip(daypart_rows, slot_sequence, strict=True):
-            row["menu_category"] = category
 
 
 def _format_delivery_preview_value(value: Any) -> Any:
@@ -4008,7 +3932,7 @@ def _write_delivery_note(
         else:
             df = pd.DataFrame(
                 [
-                    {header or name: row.get(name) for name, header in export_columns}
+                    [row.get(name) for name, _header in export_columns]
                     for row in rows
                 ],
                 columns=export_headers,
@@ -4019,13 +3943,7 @@ def _write_delivery_note(
     try:
         template_bytes = load_bytes_from_uri(template_uri)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Delivery template load failed", template_uri=template_uri, error=str(exc))
-        if not rows:
-            df = pd.DataFrame(columns=[col["name"] for col in columns])
-        else:
-            df = pd.DataFrame(rows)
-        df.to_excel(path, index=False)
-        return
+        raise ValueError("delivery_template_load_failed") from exc
     workbook = load_workbook(BytesIO(template_bytes))
     if sheet_name and sheet_name in workbook.sheetnames:
         ws = workbook[sheet_name]
@@ -4219,39 +4137,28 @@ def _build_delivery_rows(
         if col.get("source") != "quantity":
             continue
         name = col.get("name")
-        if not name:
-            continue
-        diet_type = col.get("diet_type")
-        area_id = col.get("area_id")
-        if not diet_type or not area_id:
-            inferred_diet, inferred_area = _infer_delivery_column_meta(name)
-            diet_type = diet_type or inferred_diet
-            area_id = area_id or inferred_area
+        if not isinstance(name, str) or not name:
+            raise ValueError("delivery_quantity_column_name_required")
+        diet_key, area_key = _authored_quantity_signature(col, area_aliases)
+        if any(existing["name"] == name or (existing["diet_key"], existing["area_key"]) == (diet_key, area_key) for existing in quantity_columns):
+            raise ValueError("delivery_quantity_mapping_ambiguous")
         quantity_columns.append(
             {
                 "name": name,
-                "diet_key": _normalize_delivery_diet_key(diet_type),
-                "area_key": _resolve_area_key(area_id, area_aliases),
+                "diet_key": diet_key,
+                "area_key": area_key,
+                "scope": "aggregate" if area_key is None else "exact",
             }
         )
     if timings is not None:
         timings["build_rows_setup_ms"] = round((time.perf_counter() - setup_started) * 1000, 1)
-    if allow_ocr_menu_meta and not (isinstance(menu_meta, dict) and menu_meta.get("entries")):
-        ocr_started = time.perf_counter()
-        menu_meta = _build_ocr_menu_meta(order, facility_config)
-        if timings is not None:
-            timings["build_rows_ocr_menu_meta_ms"] = round((time.perf_counter() - ocr_started) * 1000, 1)
+    if allow_ocr_menu_meta and (not isinstance(menu_meta, dict) or not isinstance(menu_meta.get("entries"), list)):
+        raise ValueError("accepted OCR menu receipt missing")
     entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
-    entry_defaults = _resolve_cached_menu_defaults(
-        [
-            str(_delivery_menu_entry_name(entry) or "").strip()
-            for entry in entries
-            if isinstance(entry, dict) and str(_delivery_menu_entry_name(entry) or "").strip()
-        ],
-        facility_id,
-    ) if isinstance(entries, list) else {}
+    entry_defaults = menu_meta.get("entry_defaults") if isinstance(menu_meta, dict) else {}
+    if isinstance(entries, list) and not isinstance(entry_defaults, dict):
+        raise ValueError("accepted OCR menu defaults receipt missing")
     rows: dict[tuple, dict] = {}
-    menu_names = []
     aggregate_started = time.perf_counter()
     order_lines = order.get("lines", [])
     accessory_names_by_slot = _delivery_explicit_accessory_names_by_slot(order_lines)
@@ -4264,13 +4171,13 @@ def _build_delivery_rows(
         daypart_key = _normalize_delivery_daypart(daypart_value) or daypart_value
         if _normalize_menu_key(raw_menu_name) in accessory_names_by_slot.get((line_date, daypart_key), set()):
             continue
+        if not quantity_columns and _safe_qty(line, False) is not None:
+            raise ValueError("delivery_quantity_mapping_unresolved")
         qty = _safe_qty(line, zero_as_empty)
         if qty is None:
             continue
         menu_name, split_condiments = _delivery_split_menu_name(raw_menu_name)
         delivery_menu_display_name = str(raw_menu_name or menu_name or "").strip() if split_condiments else str(menu_name or "").strip()
-        if menu_name:
-            menu_names.append(menu_name)
         menu_key = _normalize_menu_key(menu_name)
         meta_map = menu_meta.get("by_menu") if isinstance(menu_meta, dict) else None
         meta = meta_map.get((line_date, menu_key)) if meta_map else None
@@ -4307,20 +4214,25 @@ def _build_delivery_rows(
         for condiment in line_condiments:
             if condiment not in row["_delivery_condiments"]:
                 row["_delivery_condiments"].append(condiment)
+        if not _normalize_delivery_diet_key(line.get("diet_type")):
+            raise ValueError("delivery_quantity_source_mapping_required")
         line_diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         line_area_key = _resolve_area_key(line.get("area_id"), area_aliases)
+        matched_columns = 0
         for col in quantity_columns:
             col_diet_key = col.get("diet_key")
-            if col_diet_key and col_diet_key != line_diet_key:
-                if not (line_diet_key == "no_fried" and col_diet_key == "forbidden_other"):
-                    continue
-            col_area_key = col.get("area_key")
-            if col_area_key and col_area_key != line_area_key:
+            if col_diet_key != line_diet_key and not (line_diet_key == "no_fried" and col_diet_key == "forbidden_other"):
                 continue
+            col_area_key = col.get("area_key")
+            if col["scope"] == "exact" and col_area_key != line_area_key:
+                continue
+            matched_columns += 1
             name = col.get("name")
             if not name:
                 continue
             row[name] = (row.get(name) or 0) + float(qty)
+        if matched_columns == 0:
+            raise ValueError("delivery_quantity_mapping_unresolved")
     if isinstance(entries, list) and entries:
         allowed_dates = {
             _ensure_date(line.get("date"))
@@ -4370,7 +4282,7 @@ def _build_delivery_rows(
     if timings is not None:
         timings["build_rows_aggregate_ms"] = round((time.perf_counter() - aggregate_started) * 1000, 1)
     finalize_started = time.perf_counter()
-    default_payloads = _resolve_cached_menu_defaults(menu_names, facility_id)
+    default_payloads = entry_defaults
     for row in rows.values():
         if row.get("_delivery_condiments"):
             continue
@@ -4380,12 +4292,7 @@ def _build_delivery_rows(
                 row["_delivery_condiments"].append(condiment)
     result = list(rows.values())
     for row in result:
-        row["menu_category"] = _delivery_category_from_menu_default(
-            row.get("daypart"),
-            row.get("menu_name"),
-            row.get("menu_category"),
-        )
-    _apply_delivery_reference_slot_categories(result)
+        row["menu_category"] = _normalize_delivery_category_label(row.get("menu_category"))
     result.sort(
         key=lambda row: (
             row.get("date") or "",
@@ -4422,19 +4329,14 @@ def _build_delivery_rows_for_bundle(
     *,
     allow_ocr_menu_meta: bool,
 ) -> list[dict]:
-    try:
-        return _build_delivery_rows(
-            order,
-            template,
-            quantity_rules,
-            facility_config,
-            menu_meta,
-            allow_ocr_menu_meta=allow_ocr_menu_meta,
-        )
-    except TypeError as exc:
-        if "allow_ocr_menu_meta" not in str(exc):
-            raise
-        return _build_delivery_rows(order, template, quantity_rules, facility_config, menu_meta)
+    return _build_delivery_rows(
+        order,
+        template,
+        quantity_rules,
+        facility_config,
+        menu_meta,
+        allow_ocr_menu_meta=allow_ocr_menu_meta,
+    )
 
 
 def _build_label_rows(
@@ -4583,7 +4485,9 @@ def _daily_delivery_header_text(ws, column: int) -> str:
     return "".join(parts)
 
 
-def _daily_delivery_column_meta(ws) -> list[dict]:
+def _daily_delivery_column_meta(ws, *, authored_columns: list[dict]) -> list[dict]:
+    from copy import deepcopy
+
     columns: list[dict] = [
         {"name": "日付", "source": "date", "column_index": 1},
         {"name": "区分", "source": "daypart", "column_index": 2},
@@ -4606,74 +4510,28 @@ def _daily_delivery_column_meta(ws) -> list[dict]:
             used_names.add(name)
             columns.append({"name": name, "source": "note", "column_index": col_idx})
             continue
-        diet_type = None
-        area_id = None
-        if "2F" in header:
-            area_id = "2F"
-        elif "3F" in header:
-            area_id = "3F"
-        elif "月" in header:
-            area_id = "3F"
-        elif "花" in header:
-            area_id = "2F"
-        if "肉禁" in header:
-            diet_type = "no_meat"
-        elif "魚禁" in header:
-            diet_type = "no_fish"
-        elif "揚げ物" in header:
-            diet_type = "no_fried"
-        elif "その他" in header:
-            diet_type = "forbidden_other"
-        elif "禁食" in header:
-            diet_type = "禁食"
-        elif "常食" in header:
-            diet_type = "regular"
-        elif "小口" in header:
-            diet_type = "小口"
-        elif "通所" in header:
-            diet_type = "daycare"
-        elif "職員" in header:
-            diet_type = "staff"
-        elif "糖尿" in header:
-            diet_type = "diabetes"
-        elif "軟菜" in header:
-            diet_type = "soft"
-        elif "ミキサ" in header or "ﾐｷｻ" in header:
-            diet_type = "mixer"
-        elif header == "袋分け":
-            diet_type = "regular_bag"
-        if not diet_type:
-            continue
-        name = header
-        suffix = 2
-        while name in used_names:
-            name = f"{header}_{suffix}"
-            suffix += 1
-        used_names.add(name)
-        columns.append(
-            {
-                "name": name,
-                "source": "quantity",
-                "diet_type": diet_type,
-                "area_id": area_id,
-                "column_index": col_idx,
-            }
-        )
+        matches = [col for col in authored_columns if col.get("source") == "quantity" and _normalize_cell_text(col.get("header") or col.get("name")) == _normalize_cell_text(header)]
+        if len(matches) != 1:
+            raise ValueError("delivery_quantity_header_mapping_unresolved")
+        column = deepcopy(matches[0])
+        _authored_quantity_signature(column, {})
+        if column["name"] in used_names:
+            raise ValueError("delivery_quantity_header_mapping_ambiguous")
+        used_names.add(column["name"])
+        column["column_index"] = col_idx
+        columns.append(column)
     return columns
 
 
 def _daily_delivery_table_max_column(ws) -> int:
-    columns = _daily_delivery_column_meta(ws)
-    if not columns:
-        return 4
-    return max(int(col.get("column_index") or 0) for col in columns)
+    populated = [col for col in range(5, ws.max_column + 1) if _daily_delivery_header_text(ws, col)]
+    return max([4, *populated])
 
 
 def _clear_daily_delivery_sheet_data(ws) -> None:
     note_columns = {
-        int(col.get("column_index"))
-        for col in _daily_delivery_column_meta(ws)
-        if col.get("source") == "note" and isinstance(col.get("column_index"), int)
+        col for col in range(5, ws.max_column + 1)
+        if "備考" in _daily_delivery_header_text(ws, col)
     }
     for row_idx in range(12, min(ws.max_row, 19) + 1):
         for col_idx in range(5, ws.max_column + 1):
@@ -5107,10 +4965,10 @@ def _write_reference_daily_delivery_sheet(
     *,
     rows: list[dict],
     target_date: dt_date,
+    columns: list[dict],
     display_ws=None,
 ) -> None:
     _materialize_daily_delivery_static_cells(ws, display_ws)
-    columns = _daily_delivery_column_meta(ws)
     column_map = {
         str(col.get("name")): int(col.get("column_index"))
         for col in columns
@@ -5211,7 +5069,6 @@ def _create_reference_daily_delivery_workbook(
     _remove_delivery_static_artifacts(workbook)
     template_ws.column_dimensions["D"].width = max(template_ws.column_dimensions["D"].width or 0, 36)
     _clear_daily_delivery_sheet_data(template_ws)
-    template_columns = _daily_delivery_column_meta(template_ws)
     used_titles: set[str] = set()
     for group in grouped_outputs.values():
         sheet_name = _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name"))
@@ -5222,7 +5079,7 @@ def _create_reference_daily_delivery_workbook(
         facility_name = group.get("facility_name") or (group.get("facility_config") or {}).get("facility_name")
         _apply_delivery_facility_name(ws, facility_name)
         sheet_template = {
-            "columns": template_columns,
+            "columns": _daily_delivery_column_meta(ws, authored_columns=(group.get("invoice_template") or {}).get("columns", [])),
             "prefer_ocr_raw_rows": bool((group.get("invoice_template") or {}).get("prefer_ocr_raw_rows", False)),
         }
         rows: list[dict] = []
@@ -5242,12 +5099,13 @@ def _create_reference_daily_delivery_workbook(
             ws,
             rows=merged_rows,
             target_date=target_date,
+            columns=sheet_template["columns"],
             display_ws=None,
         )
     workbook.remove(template_ws)
     if not workbook.worksheets:
         ws = workbook.create_sheet("納品書")
-        _write_reference_daily_delivery_sheet(ws, rows=[], target_date=target_date, display_ws=None)
+        _write_reference_daily_delivery_sheet(ws, rows=[], target_date=target_date, columns=[], display_ws=None)
     return workbook
 
 
@@ -5534,12 +5392,13 @@ def _create_daily_delivery_sheet(
     invoice_template: dict,
     facility_name: str | None,
     order_id: str,
+    output_dir: Path | None = None,
 ) -> str:
     if not rows:
         raise ValueError("delivery rows not found for target date")
     if invoice_template.get("template_uri"):
         raise ValueError("templated delivery notes cannot be embedded into a rebuilt daily bundle workbook")
-    temp_path = OUTPUT_DIR / f"{order_id}_daily_bundle_{uuid4().hex}.xlsx"
+    temp_path = (output_dir if output_dir is not None else OUTPUT_DIR) / f"{order_id}_daily_bundle_{uuid4().hex}.xlsx"
     try:
         _write_delivery_note(
             temp_path,
@@ -6051,17 +5910,7 @@ def _merge_delivery_bundle_rows(rows: list[dict], invoice_template: dict | None)
 def _invoice_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple[str | None, str | None] | None:
     if not isinstance(column, dict) or column.get("source") != "quantity":
         return None
-    diet_type = column.get("diet_type")
-    area_id = column.get("area_id")
-    if not diet_type or not area_id:
-        inferred_diet, inferred_area = _infer_delivery_column_meta(column.get("name") or column.get("header"))
-        diet_type = diet_type or inferred_diet
-        area_id = area_id or inferred_area
-    diet_key = _normalize_delivery_diet_key(diet_type)
-    area_key = _resolve_area_key(area_id, area_aliases) if area_id else None
-    if not diet_key:
-        return None
-    return diet_key, area_key
+    return _authored_quantity_signature(column, area_aliases)
 
 
 def _fax_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple[str | None, str | None] | None:
@@ -6069,13 +5918,7 @@ def _fax_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple
         return None
     if column.get("delivery_enabled") is False:
         return None
-    diet_key = _normalize_delivery_diet_key(column.get("diet_type"))
-    if diet_key == "placeholder" and str(column.get("header") or "").strip() in {"-", "－"}:
-        diet_key = "regular_bag"
-    area_key = _resolve_area_key(column.get("area_id"), area_aliases) if column.get("area_id") else None
-    if not diet_key:
-        return None
-    return diet_key, area_key
+    return _authored_quantity_signature(column, area_aliases)
 
 
 def _delivery_invoice_header(column: dict, signature: tuple[str | None, str | None]) -> str:
@@ -6142,20 +5985,23 @@ def _build_invoice_template_from_fax_columns(facility_config: dict | None) -> di
     seen: set[tuple[str | None, str | None]] = set()
     for column in fax_quantity_columns:
         signature = _fax_quantity_signature(column, area_aliases)
-        if not signature or signature in seen:
+        if not signature:
             continue
+        if signature in seen:
+            raise ValueError("delivery_quantity_mapping_ambiguous")
         seen.add(signature)
         diet_key, area_key = signature
         if diet_key in {"change_1", "change_2", "unknown"}:
             continue
-        name = f"qty.{diet_key}_{str(area_key or 'x').lower()}"
+        scope_key = "aggregate" if area_key is None else "exact." + json.dumps(area_key, ensure_ascii=False, separators=(",", ":"))
+        name = f"qty.{diet_key}.{scope_key}"
         derived_columns.append(
             {
                 "name": name,
                 "header": _delivery_invoice_header(column, signature),
                 "source": "quantity",
                 "diet_type": diet_key,
-                "area_id": area_key or "X",
+                "area_id": area_key,
             }
         )
     for column in list(fax_columns) + list(extra_columns):
@@ -6190,6 +6036,16 @@ def _daily_bundle_status_counts(manifest_items: list[dict]) -> dict[str, int]:
     }
 
 
+class DailyBundleSettingsMismatch(ValueError):
+    pass
+
+
+def _daily_bundle_settings(ctx: dict) -> dict:
+    return {key: ctx[key] for key in (
+        "facility_config", "invoice_template", "label_profile", "quantity_rules",
+    )}
+
+
 def build_daily_output_bundle(
     target_date: dt_date,
     *,
@@ -6203,7 +6059,8 @@ def build_daily_output_bundle(
     orders = order_service.list_orders_by_line_date(target_date, status=status)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     bundle_name = f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.xlsx"
-    bundle_path = OUTPUT_DIR / bundle_name
+    request_dir = OUTPUT_DIR / uuid4().hex
+    bundle_path = request_dir / bundle_name
 
     manifest_items: list[dict] = []
     grouped_outputs: dict[str, dict[str, Any]] = {}
@@ -6217,12 +6074,6 @@ def build_daily_output_bundle(
             continue
         facility_code = str(order_summary.get("facility") or "").strip()
         facility_name = ""
-        if facility_code:
-            try:
-                facility_config = config_service.get_facility_config(facility_code) or {}
-                facility_name = str(facility_config.get("facility_name") or "").strip()
-            except Exception:
-                facility_name = ""
         try:
             ctx = _prepare_output_context_for_bundle(
                 order_id,
@@ -6236,8 +6087,15 @@ def build_daily_output_bundle(
             group_key = facility_code or facility_name or order_id
             sheet_seed = facility_name or facility_code or order_id
             group = grouped_outputs.get(group_key)
+            if group is not None:
+                from src.services.workflow_attempt_guard_service import snapshots_equal
+                if not snapshots_equal(group["accepted_settings"], _daily_bundle_settings(ctx)):
+                    raise DailyBundleSettingsMismatch(
+                        f"daily_bundle_accepted_settings_mismatch: {group['order_ids']} / {order_id}"
+                    )
             if not group:
                 group = {
+                    "accepted_settings": _daily_bundle_settings(ctx),
                     "facility_code": facility_code or None,
                     "facility_name": facility_name or None,
                     "sheet_seed": sheet_seed,
@@ -6275,6 +6133,8 @@ def build_daily_output_bundle(
                     row for row in delivery_rows if _ensure_date(row.get("date")) == target_date
                 ]
                 group["delivery_rows"].extend(filtered_delivery_rows)
+        except (DailyBundleSettingsMismatch, TypeError):
+            raise
         except Exception as exc:  # noqa: BLE001
             manifest_items.append(
                 {
@@ -6287,6 +6147,7 @@ def build_daily_output_bundle(
                 }
             )
 
+    request_dir.mkdir(parents=True, exist_ok=False)
     use_reference_daily_delivery = False
     if use_reference_daily_delivery:
         workbook = _create_reference_daily_delivery_workbook(
@@ -6341,7 +6202,7 @@ def build_daily_output_bundle(
         return bundle_path, summary
 
     if normalized_type in {"labels", "labels_csv"}:
-        zip_path = OUTPUT_DIR / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.zip"
+        zip_path = request_dir / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.zip"
         success_count = 0
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for group in sorted(grouped_outputs.values(), key=_daily_label_group_sort_key):
@@ -6464,6 +6325,7 @@ def build_daily_output_bundle(
                     invoice_template=group["invoice_template"],
                     facility_name=group["facility_config"].get("facility_name"),
                     order_id=str(group["order_ids"][0]),
+                    output_dir=request_dir,
                 )
                 item_payload["files"].append(sheet_name)
             success_count += 1
@@ -6500,9 +6362,10 @@ def _prepare_output_context(
     include_ocr_menu_meta: bool = True,
     include_expanded_copy: bool = True,
     timings: dict[str, float] | None = None,
+    original_adoption: dict | None = None,
 ) -> dict:
     order_started = time.perf_counter()
-    order = get_order_by_id(order_id)
+    order = original_adoption["order"] if original_adoption is not None else get_order_by_id(order_id)
     if timings is not None:
         timings["prepare_get_order_ms"] = round((time.perf_counter() - order_started) * 1000, 1)
     if not order:
@@ -6510,18 +6373,18 @@ def _prepare_output_context(
 
     facility_id = order.get("facility")
     facility_started = time.perf_counter()
-    facility_config = _resolve_facility_config_for_order(order)
+    accepted_candidate = original_adoption["candidate"] if original_adoption is not None else _accepted_output_candidate(order)
+    facility_config = accepted_candidate["configured_input"]["facility"]
     if timings is not None:
         timings["prepare_facility_config_ms"] = round((time.perf_counter() - facility_started) * 1000, 1)
     if not facility_config:
-        logger.warning("Facility config missing", facility_id=facility_id)
-        facility_config = {}
+        raise ValueError("accepted output facility configuration missing")
 
     packaging_policy = facility_config.get("packaging_policy", {})
     label_profile = facility_config.get("label_profile", {})
     invoice_template = _build_invoice_template_from_fax_columns(facility_config)
     policy_started = time.perf_counter()
-    quantity_rules = config_service.load_ingest_policy().get("quantity_rules", {})
+    quantity_rules = accepted_candidate["configured_input"]["policy"].get("quantity_rules", {})
     if timings is not None:
         timings["prepare_ingest_policy_ms"] = round((time.perf_counter() - policy_started) * 1000, 1)
 
@@ -6530,6 +6393,7 @@ def _prepare_output_context(
         order,
         include_expanded_copy=include_expanded_copy,
         timings=timings,
+        accepted_candidate=accepted_candidate,
     )
     if timings is not None:
         timings["prepare_order_lines_ms"] = round((time.perf_counter() - order_lines_started) * 1000, 1)
@@ -6544,9 +6408,18 @@ def _prepare_output_context(
     ocr_started = time.perf_counter()
     has_structural_slots = _delivery_lines_have_structural_slots(order_lines, quantity_rules)
     if include_ocr_menu_meta and not has_structural_slots:
-        ocr_menu_meta = _build_ocr_menu_meta(order, facility_config)
+        entries = accepted_candidate.get("output_ocr_menu_entries")
+        if not isinstance(entries, list):
+            raise ValueError("accepted OCR menu receipt missing")
+        defaults = accepted_candidate.get("output_ocr_menu_defaults")
+        if not isinstance(defaults, dict):
+            raise ValueError("accepted OCR menu defaults receipt missing")
+        by_menu = {}
+        for entry in entries:
+            by_menu.setdefault((_ensure_date(entry.get("date")), _normalize_menu_key(entry.get("menu_name"))), entry)
+        ocr_menu_meta = {"entries": entries, "by_menu": by_menu, "entry_defaults": defaults, "issues": [issue for entry in entries for issue in entry.get("ocr_issues", [])], "review_required_count": sum(bool(entry.get("needs_review")) for entry in entries)}
     else:
-        ocr_menu_meta = {}
+        ocr_menu_meta = {"entries": [], "by_menu": {}, "entry_defaults": {}}
     if timings is not None:
         timings["prepare_ocr_menu_meta_ms"] = round((time.perf_counter() - ocr_started) * 1000, 1)
         timings["prepare_ocr_menu_meta_skipped"] = 1.0 if has_structural_slots else 0.0
@@ -6566,6 +6439,7 @@ def _prepare_output_context(
             timings["prepare_bags_ms"] = round((time.perf_counter() - bags_started) * 1000, 1)
     return {
         "order": order,
+        "accepted_candidate": accepted_candidate,
         "facility_config": facility_config,
         "label_profile": label_profile,
         "invoice_template": invoice_template,
@@ -6584,22 +6458,13 @@ def _prepare_output_context_for_bundle(
     include_ocr_menu_meta: bool,
     include_expanded_copy: bool,
 ) -> dict:
-    try:
-        return _prepare_output_context(
-            order_id,
-            include_bags=include_bags,
-            include_ocr_menu_meta=include_ocr_menu_meta,
-            include_expanded_copy=include_expanded_copy,
-            timings=None,
-        )
-    except TypeError as exc:
-        if (
-            "include_bags" not in str(exc)
-            and "include_ocr_menu_meta" not in str(exc)
-            and "include_expanded_copy" not in str(exc)
-        ):
-            raise
-        return _prepare_output_context(order_id)
+    return _prepare_output_context(
+        order_id,
+        include_bags=include_bags,
+        include_ocr_menu_meta=include_ocr_menu_meta,
+        include_expanded_copy=include_expanded_copy,
+        timings=None,
+    )
 
 
 def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
@@ -6610,9 +6475,7 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
     facility_name = ctx["facility_config"].get("facility_name")
     bags = ctx["bags"]
 
-    label_path = OUTPUT_DIR / f"{order_id}_labels.csv"
-    delivery_path = OUTPUT_DIR / f"{order_id}_delivery.xlsx"
-    agg_path = OUTPUT_DIR / f"{order_id}_aggregate.csv"
+    label_path, delivery_path, agg_path = _owned_output_paths(order_id)
 
     if output_type == "labels":
         labels, label_fields, _ = _build_label_rows(bags, label_profile, facility_name)
@@ -6680,7 +6543,7 @@ def build_delivery_preview(
         )
         menu_entries = [
             entry
-            for entry in _collect_cached_menu_entries_for_week(week_value, order.get("facility"))
+            for entry in ctx["accepted_candidate"]["output_menu_entries"]
             if _delivery_menu_entry_date(entry) == target_date
         ]
         if menu_entries:
@@ -6744,8 +6607,14 @@ def build_delivery_preview(
     }
 
 
-def build_outputs(order_id: str) -> Dict[str, Any]:
-    ctx = _prepare_output_context(order_id)
+def build_outputs(order_id: str, *, write_session=None, original_adoption: dict | None = None) -> Dict[str, Any]:
+    if write_session is None:
+        with session_scope() as session:
+            original = original_adoption if original_adoption is not None else _capture_output_adoption(order_id, session)
+            return build_outputs(order_id, write_session=session, original_adoption=original)
+    if original_adoption is None or original_adoption["order"]["id"] != order_id:
+        raise ValueError("output original ownership input missing")
+    ctx = _prepare_output_context(order_id, original_adoption=original_adoption)
     order = ctx["order"]
     label_profile = ctx["label_profile"]
     invoice_template = ctx["invoice_template"]
@@ -6757,11 +6626,7 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
         bags, label_profile, ctx["facility_config"].get("facility_name")
     )
 
-    label_path = OUTPUT_DIR / f"{order_id}_labels.csv"
-    delivery_path = OUTPUT_DIR / f"{order_id}_delivery.xlsx"
-    agg_path = OUTPUT_DIR / f"{order_id}_aggregate.csv"
-
-    _write_label_csv(label_path, labels, label_fields)
+    label_path, delivery_path, agg_path = _owned_output_paths(order_id)
 
     delivery_rows = _build_delivery_rows(
         order_for_outputs,
@@ -6770,6 +6635,7 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
         ctx["facility_config"],
         ctx.get("ocr_menu_meta"),
     )
+    _write_label_csv(label_path, labels, label_fields)
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
     _write_delivery_note(
         delivery_path,
@@ -6786,7 +6652,8 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     )
     _write_aggregate_csv(agg_path, total_rows, total_fields)
 
-    with session_scope() as session:
+    with nullcontext(write_session) as session:
+        _require_output_adoption(session, original_adoption)
         session.query(Bag).filter(Bag.order_id == order_id).delete()
         session.query(LabelRow).filter(LabelRow.order_id == order_id).delete()
         session.query(DeliveryNote).filter(DeliveryNote.order_id == order_id).delete()
@@ -6840,6 +6707,7 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
                     quantity=row.get("quantity") or 0,
                 )
             )
+        session.flush()
 
     return {
         "order_id": order_id,
@@ -6849,21 +6717,26 @@ def build_outputs(order_id: str) -> Dict[str, Any]:
     }
 
 
-def rebuild_bags(order_id: str) -> Dict[str, Any]:
-    order = get_order_by_id(order_id)
+def rebuild_bags(order_id: str, *, write_session=None, original_adoption: dict | None = None) -> Dict[str, Any]:
+    if write_session is None or original_adoption is None:
+        raise ValueError("output original ownership input missing")
+    order = original_adoption["order"]
+    if order.get("id") != order_id:
+        raise ValueError("output original ownership input mismatch")
     if not order:
         raise ValueError("order not found")
 
     facility_id = order.get("facility")
-    facility_config = _resolve_facility_config_for_order(order)
+    accepted_candidate = original_adoption["candidate"]
+    facility_config = accepted_candidate["configured_input"]["facility"]
     if not facility_config:
-        logger.warning("Facility config missing", facility_id=facility_id)
-        facility_config = {}
-    order_lines = build_order_lines_for_outputs(order)
-    bags = build_bag_rows_for_outputs(order, order_lines=order_lines, facility_config=facility_config)
+        raise ValueError("accepted output facility configuration missing")
+    order_lines = build_order_lines_for_outputs(order, accepted_candidate=accepted_candidate)
+    bags = build_bag_rows_for_outputs(order, order_lines=order_lines, facility_config=facility_config, accepted_candidate=accepted_candidate)
     payload = []
 
-    with session_scope() as session:
+    with nullcontext(write_session) as session:
+        _require_output_adoption(session, original_adoption)
         session.query(Bag).filter(Bag.order_id == order_id).delete()
         for bag in bags:
             bag_id = f"BAG{uuid4().hex[:8]}"
@@ -6881,4 +6754,5 @@ def rebuild_bags(order_id: str) -> Dict[str, Any]:
                 )
             )
             payload.append({"id": bag_id, **_serialize_bag_payload_rows([bag])[0]})
+        session.flush()
     return {"order_id": order_id, "generated": bool(payload), "bags": payload}

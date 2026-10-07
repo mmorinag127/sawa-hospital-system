@@ -55,7 +55,7 @@ class AssignedOcrResult:
 
 
 def normalize_ocr_value(value: object) -> str:
-    text = str(value or "").strip().translate(_FULLWIDTH_DIGIT_TRANS)
+    text = str(value if value is not None else "").strip().translate(_FULLWIDTH_DIGIT_TRANS)
     text = re.sub(r"[^0-9,.]", "", text)
     return text.strip(".,")
 
@@ -101,11 +101,15 @@ def evidence_from_records(
     source_scope: str,
     candidate_type: str = "numeric",
     raw_payload_ref: str | None = None,
+    retain_empty_records: bool = False,
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for index, record in enumerate(records):
-        raw_text = str(record.get("raw_text") or record.get("text") or "").strip()
-        if not raw_text:
+        raw_text_value = record.get("raw_text")
+        if raw_text_value is None or str(raw_text_value).strip() == "":
+            raw_text_value = record.get("text")
+        raw_text = str(raw_text_value if raw_text_value is not None else "").strip()
+        if not raw_text and not retain_empty_records:
             continue
         source_bbox = _as_float_box(record.get("source_bbox") or record.get("bbox"))
         center = _as_center(record.get("center"), fallback_box=source_bbox)
@@ -126,7 +130,7 @@ def evidence_from_records(
                     engine=engine,
                     source_scope=source_scope,
                     raw_text=raw_text,
-                    normalized_value=str(record.get("normalized_value") or normalize_ocr_value(raw_text)),
+                    normalized_value=str(record["normalized_value"] if record.get("normalized_value") is not None else normalize_ocr_value(raw_text)),
                     confidence=confidence_value,
                     source_bbox=source_bbox,
                     center=center,
@@ -396,4 +400,3 @@ def sheet_output_from_assigned_results(
             "conflict_cell_count": sum(1 for cell in cells.values() if cell["assignment_state"] == "conflict"),
         },
     }
-

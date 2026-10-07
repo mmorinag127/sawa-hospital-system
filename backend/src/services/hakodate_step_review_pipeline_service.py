@@ -47,12 +47,13 @@ class HakodateStepReviewResult:
     outputs: dict[str, str]
 
 
-def _source_template_name(facility_id: str) -> str:
-    facility = config_service.get_facility_config(facility_id)
-    if not facility:
-        return ""
-    template = facility.get("fax_template") if isinstance(facility.get("fax_template"), dict) else {}
-    return str(facility.get("fax_template_id") or template.get("template_id") or "").strip()
+def _source_template_name(facility_id: str, *, configured_input: dict) -> str:
+    facility = configured_input.get("facility") if isinstance(configured_input, dict) else None
+    if not isinstance(facility, dict) or facility.get("facility_id") != facility_id:
+        raise ValueError("hakodate_captured_config_required")
+    template = facility.get("fax_template")
+    config_service._validate_authored_facility_config(facility, None)
+    return template["template_id"]
 
 
 def _bgr_to_rgb_image(image: np.ndarray) -> Image.Image:
@@ -3085,11 +3086,9 @@ def _post_menu_boundary_preserving_xs(
     col_count = min(int(getattr(worksheet, "max_column", 0) or 0), len(matched_xs) - 1)
     if col_count < 2:
         return matched_xs, {"used": False, "reason": "not_enough_columns"}
-    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
-        worksheet,
-        col_count=col_count,
-        template=fax_template,
-    )
+    if col_count != worksheet.max_column:
+        raise ValueError("hakodate_original_target_inputs_required")
+    slots = hakodate_assignment_service.canonical_generated_column_slots(fax_template, col_count=col_count)
     menu_col = _menu_column_from_slots(slots, worksheet)
     post_start_edge_index = int(menu_col)
     if post_start_edge_index <= 0 or post_start_edge_index >= len(matched_xs) - 1:
@@ -3384,14 +3383,62 @@ def _draw_merge_aware_grid(
 
 
 def _menu_column_from_slots(slots: list[dict[str, Any]], worksheet: Any) -> int:
-    for slot in slots:
-        if slot.get("role") == "menu_name":
-            return int(slot.get("worksheet_col_index") or 4)
-    for row in (7, 8, 9):
-        for col in range(1, int(worksheet.max_column or 0) + 1):
-            if "献立" in str(worksheet.cell(row=row, column=col).value or ""):
-                return col
-    return 4
+    matches = [slot.get("worksheet_col_index") for slot in slots if slot.get("role") == "menu_name" and slot.get("canonical_source") == "facility_fax_template"]
+    if len(matches) != 1 or type(matches[0]) is not int or not 0 < matches[0] <= worksheet.max_column:
+        raise ValueError("hakodate_authored_menu_role_unresolved")
+    return matches[0]
+
+
+def canonical_target_semantics(regions: list[dict]) -> list[dict]:
+    """Retain logical authority while excluding observed geometry and grid offsets."""
+    keys = ("region_id", "sheet_cell", "worksheet_row", "worksheet_col", "role", "field", "field_label", "date", "daypart", "menu_name", "covered_sheet_cells")
+    logical_keys = ("sheet_cell", "worksheet_row", "worksheet_col", "role", "field", "field_label", "date", "daypart", "menu_name")
+    result = []
+    for region in regions:
+        if not isinstance(region, dict) or not isinstance(region.get("logical_targets"), list) or not region["logical_targets"]:
+            raise ValueError("hakodate_logical_targets_required")
+        if any(not isinstance(target, dict) for target in region["logical_targets"]):
+            raise ValueError("hakodate_logical_targets_invalid")
+        result.append({**{key: region.get(key) for key in keys}, "logical_targets": [{key: target.get(key) for key in logical_keys} for target in region["logical_targets"]]})
+    return result
+
+
+def canonical_logical_target_plan(*, worksheet: Any, fax_template: dict, draft_sheet: dict) -> list[dict[str, Any]]:
+    """Select original logical cells once; geometry only attaches their observed bounds."""
+    from src.services import master_order_form_template_service as master
+
+    slots = hakodate_assignment_service.canonical_generated_column_slots(fax_template, col_count=worksheet.max_column)
+    menu_col = _menu_column_from_slots(slots, worksheet)
+    by_col = {slot["worksheet_col_index"]: slot for slot in slots}
+    fields, rows = draft_sheet.get("fields"), draft_sheet.get("rows")
+    if not isinstance(fields, list) or not isinstance(rows, list) or not rows or len(rows) > master.BODY_END_ROW - master.BODY_START_ROW + 1:
+        raise ValueError("hakodate_draft_sheet_row_map_unresolved")
+    roles = {}
+    for role, names in (("date", {"date", "date_mmdd"}), ("daypart", {"daypart"}), ("menu", {"menu", "menu_name"})):
+        matches = [i for i, field in enumerate(fields) if field in names]
+        if len(matches) != 1:
+            raise ValueError("hakodate_draft_sheet_row_map_unresolved")
+        roles[role] = matches[0]
+    merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)
+    regions = {}
+    for offset, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) <= max(roles.values()) or not isinstance(row[roles["menu"]], str) or not row[roles["menu"]].strip():
+            raise ValueError("hakodate_physical_row_unresolved")
+        worksheet_row = master.BODY_START_ROW + offset
+        if hakodate_assignment_service._normalize_menu_key(worksheet.cell(worksheet_row, menu_col).value) != hakodate_assignment_service._normalize_menu_key(row[roles["menu"]]):
+            raise ValueError("hakodate_physical_row_changed")
+        for worksheet_col in range(menu_col + 1, worksheet.max_column + 1):
+            slot = by_col.get(worksheet_col)
+            if slot is None:
+                raise ValueError("hakodate_authored_column_role_unresolved")
+            sheet_cell = f"{get_column_letter(worksheet_col)}{worksheet_row}"
+            merged = merged_cells.get((worksheet_row, worksheet_col))
+            region_id = merged["range"] if merged else sheet_cell
+            logical = {"sheet_cell": sheet_cell, "worksheet_row": worksheet_row, "worksheet_col": worksheet_col, "role": slot["role"], "field": slot["slot_name"], "field_label": slot["label"], "date": row[roles["date"]], "daypart": row[roles["daypart"]], "menu_name": row[roles["menu"]]}
+            region = regions.setdefault(region_id, {**logical, "region_id": region_id, "merged_cell": merged, "physical_split_from_excel_merge": None, "logical_targets": [], "covered_sheet_cells": []})
+            region["logical_targets"].append(logical)
+            region["covered_sheet_cells"].append(sheet_cell)
+    return list(regions.values())
 
 
 def _post_menu_target_regions(
@@ -3405,11 +3452,10 @@ def _post_menu_target_regions(
     menu_body_row_indexes: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     col_count = min(int(worksheet.max_column or 0), len(column_edges) - 1)
-    slots = hakodate_assignment_service._column_slots_from_worksheet(  # noqa: SLF001
-        worksheet,
-        col_count=col_count,
-        template=fax_template,
-    )
+    if col_count != worksheet.max_column or draft_sheet is None:
+        raise ValueError("hakodate_original_target_inputs_required")
+    plan = canonical_logical_target_plan(worksheet=worksheet, fax_template=fax_template, draft_sheet=draft_sheet)
+    slots = hakodate_assignment_service.canonical_generated_column_slots(fax_template, col_count=col_count)
     slot_by_col = {int(slot.get("worksheet_col_index") or 0): slot for slot in slots if isinstance(slot, dict)}
     menu_col = _menu_column_from_slots(slots, worksheet)
     canonical_target_cols = [
@@ -3431,33 +3477,23 @@ def _post_menu_target_regions(
     )
     if draft_sheet is not None and not draft_row_map:
         raise ValueError("hakodate_draft_sheet_row_map_unresolved")
-    physical_row_map = draft_row_map if draft_sheet is not None else _step_review_physical_row_map(worksheet, row_count=len(row_edges) - 1)
     worksheet_grid_rows = (
         {int(meta["worksheet_row"]): index for index, meta in draft_row_map.items()}
         if draft_sheet is not None else None
     )
     merged_cells = hakodate_assignment_service._worksheet_merged_cell_map(worksheet)  # noqa: SLF001
     by_region_id: dict[str, dict[str, Any]] = {}
-    blank_menu_row_count = 0
-    for row_index, row_meta in sorted(physical_row_map.items()):
-        worksheet_row = int(row_meta.get("worksheet_row") or 0)
-        if worksheet_row <= 0 or int(row_index) >= len(row_edges) - 1:
-            continue
-        if not str(row_meta.get("menu_key") or "").strip():
-            blank_menu_row_count += 1
-            continue
-        for worksheet_col in target_cols:
+    for planned_region in plan:
+        for logical_target in planned_region["logical_targets"]:
+            worksheet_row = logical_target["worksheet_row"]
+            worksheet_col = logical_target["worksheet_col"]
+            row_index = worksheet_grid_rows.get(worksheet_row)
+            if row_index is None:
+                raise ValueError("hakodate_draft_sheet_row_map_unresolved")
             col_index = worksheet_col - 1
-            if col_index >= len(column_edges) - 1:
-                continue
-            slot = slot_by_col.get(worksheet_col) or {}
-            label = str(slot.get("label") or "").strip()
-            role = str(slot.get("role") or "post_menu").strip()
-            field = str(slot.get("slot_name") or "").strip()
-            if not label or label == "spacer":
-                label = f"空白列({get_column_letter(worksheet_col)})"
-            if not field or field == "spacer":
-                field = f"post_menu.{get_column_letter(worksheet_col)}"
+            label = logical_target["field_label"]
+            role = logical_target["role"]
+            field = logical_target["field"]
             bbox, merged = _step_review_merged_or_single_cell_bbox(
                 row_index=int(row_index),
                 col_index=col_index,
@@ -3472,17 +3508,9 @@ def _post_menu_target_regions(
             physical_split_from_excel_merge: dict[str, Any] | None = None
             region_id = str(merged.get("range") if merged else sheet_cell)
             logical_target = {
-                "sheet_cell": sheet_cell,
-                "worksheet_row": worksheet_row,
-                "worksheet_col": worksheet_col,
+                **logical_target,
                 "grid_row_index": int(row_index),
                 "grid_col_index": col_index,
-                "role": role,
-                "field": field,
-                "field_label": label,
-                "date": row_meta.get("effective_date") or row_meta.get("date"),
-                "daypart": row_meta.get("daypart"),
-                "menu_name": row_meta.get("menu_name"),
             }
             if region_id not in by_region_id:
                 by_region_id[region_id] = {
@@ -3495,6 +3523,9 @@ def _post_menu_target_regions(
                     "role": role,
                     "field": field,
                     "field_label": label,
+                    "date": logical_target["date"],
+                    "daypart": logical_target["daypart"],
+                    "menu_name": logical_target["menu_name"],
                     "bbox": bbox,
                     "merged_cell": merged,
                     "physical_split_from_excel_merge": physical_split_from_excel_merge,
@@ -3518,7 +3549,7 @@ def _post_menu_target_regions(
         "template_column_restricted": False,
         "target_selection_mode": "all_physical_columns_right_of_menu",
         "row_source": "draft_sheet" if draft_row_map else "worksheet",
-        "blank_menu_row_count": blank_menu_row_count,
+        "blank_menu_row_count": 0,
         "region_count": len(regions),
         "logical_target_count": sum(len(region.get("logical_targets") or []) for region in regions),
         "label_counts": label_counts,
@@ -3593,27 +3624,19 @@ def build_hakodate_step_review_for_manifest_item(
         manifest_template_bbox=item["template_bbox"],
     )
     week_sheet_name = str(item.get("week_sheet_name") or WEEK_SHEET_NAME).strip() or WEEK_SHEET_NAME
-    selected_template_id = str(
-        item.get("template_id")
-        or item.get("fax_template_id")
-        or item.get("resolved_template_id")
-        or ""
-    ).strip() or None
-    facility_config = config_service.get_facility_config_for_template(
-        facility_code,
-        selected_template_id,
-    )
-    fax_template = (
-        facility_config.get("fax_template")
-        if isinstance(facility_config, dict) and isinstance(facility_config.get("fax_template"), dict)
-        else None
-    )
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    fax_template = batch._fax_template_for_manifest_item(item, facility_code)
+    if type(page) is not int or page != fax_template["page"]:
+        raise ValueError("geometry_template_page_mismatch")
+    draft_sheet = item.get("original_physical_draft")
+    if not isinstance(draft_sheet, dict):
+        raise ValueError("hakodate_original_draft_required")
     worksheet = hakodate_assignment_service._worksheet_for_manifest_structure_template(  # noqa: SLF001
         item=item,
         facility_id=facility_code,
         week_sheet_name=week_sheet_name,
     )
-    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width)
+    quad_px, quad_source, quad_estimate = resolve_fixed_quad_px_for_manifest_item(item, render_width=render_width, page=page)
     registration, step_images_np = build_fixed_quad_template_registration(
         facility_code=facility_code,
         order_id=order_id,
@@ -3628,8 +3651,9 @@ def build_hakodate_step_review_for_manifest_item(
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        page=page,
     )
-    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width)
+    original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width, page=page)
     # step2 image contains the red bbox annotation. Rebuild the raw rectified FAX
     # by using the accepted registration service's output dimensions and quad.
     table_bbox = registration.template_outer_grid_bbox_used
@@ -3666,13 +3690,16 @@ def build_hakodate_step_review_for_manifest_item(
         row_edges=[float(value) for value in aligned_ys],
         fax_template=fax_template,
         horizontal_line_mask=horizontal_line_mask,
+        draft_sheet=draft_sheet,
+        menu_body_row_indexes=batch._validate_menu_day_boundaries(draft_sheet, axis_evidence["row_intersection_y_match"]),
     )
+    batch.validate_original_target_plan(item, target_regions)
     target_overlay = _draw_target_regions(
         grid_overlay=grid_overlay,
         regions=target_regions,
     )
     target_overlay = _draw_row_intersections_overlay(image=target_overlay, axis_evidence=axis_evidence)
-    source_template = _source_template_name(facility_code)
+    source_template = _source_template_name(facility_code, configured_input=item["configured_input"])
     axis_evidence = {
         **axis_evidence,
         "line_extraction": line_evidence,
@@ -3773,7 +3800,9 @@ def build_all_facility_hakodate_step_review_pdfs(
     output_dir.mkdir(parents=True, exist_ok=True)
     pages_by_step: dict[str, list[Image.Image]] = {f"step{idx}": [] for idx in range(1, 7)}
     results: list[dict[str, Any]] = []
-    for page, item in enumerate(items, start=1):
+    for item in items:
+        from src.services import hakodate_cell_ocr_batch_service as batch
+        page = batch._fax_template_for_manifest_item(item, str(item["facility_code"]))["page"]
         result, images = build_hakodate_step_review_for_manifest_item(
             item=item,
             page=page,

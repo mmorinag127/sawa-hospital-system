@@ -2,8 +2,6 @@ import sys
 import pathlib
 import json
 from datetime import datetime, timedelta
-from io import BytesIO
-from urllib.error import HTTPError
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -1819,7 +1817,7 @@ def test_daily_bags_merges_forbidden_diets():
     )
 
 
-def test_download_document_falls_back_to_signed_url_when_direct_gcs_read_fails(monkeypatch):
+def test_download_document_does_not_fetch_signed_substitute_when_own_read_fails(monkeypatch):
     client = TestClient(app)
     order_id = "ORD-document-fallback-001"
     pdf_bytes = b"%PDF-1.4 fallback"
@@ -1830,36 +1828,30 @@ def test_download_document_falls_back_to_signed_url_when_direct_gcs_read_fails(m
         lambda _order_id: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
     )
 
-    def _raise(_uri: str):
+    from hashlib import sha256
+    from src.services import storage_service, workflow_attempt_guard_service
+    monkeypatch.setattr(workflow_attempt_guard_service, "capture_selected_pdf_receipt", lambda *args: {
+        "storage_uri": "gs://bucket/path/document.pdf", "generation": None,
+        "sha256": sha256(pdf_bytes).hexdigest(),
+    })
+    def _raise(_uri: str, **kwargs):
         raise RuntimeError("direct read failed")
 
-    monkeypatch.setattr(orders_api, "load_bytes_from_uri", _raise)
+    monkeypatch.setattr(storage_service, "load_bytes_from_uri", _raise)
     monkeypatch.setattr(
         orders_api.order_service,
         "_signed_url_from_uri",
-        lambda _uri: "https://signed.example/document.pdf",
+        lambda _uri: (_ for _ in ()).throw(AssertionError("signed source substitution")),
     )
-
-    class _Response(BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            self.close()
-            return False
-
-    monkeypatch.setattr(orders_api, "urlopen", lambda *_args, **_kwargs: _Response(pdf_bytes))
 
     res = client.get(f"/orders/{order_id}/document")
 
-    assert res.status_code == 200
-    assert res.content == pdf_bytes
-    assert res.headers["content-type"].startswith("application/pdf")
-    assert res.headers["x-sawa-document-source"] == "original"
-    assert res.headers["x-sawa-document-variant"] == "signed_url"
+    assert res.status_code == 409
+    assert res.json()["detail"] == "selected_pdf_verification_failed"
+    assert res.content != pdf_bytes
 
 
-def test_download_document_falls_back_to_archived_ocr_input_when_canonical_uri_is_missing(monkeypatch):
+def test_download_document_never_borrows_archived_ocr_input_when_selected_source_missing(monkeypatch):
     client = TestClient(app)
     order_id = "ORD-document-fallback-ocr-001"
     archived_pdf = b"%PDF-archived-original"
@@ -1870,56 +1862,35 @@ def test_download_document_falls_back_to_archived_ocr_input_when_canonical_uri_i
         lambda _order_id: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
     )
 
-    def _raise(_uri: str):
+    from hashlib import sha256
+    from src.services import storage_service, workflow_attempt_guard_service
+    monkeypatch.setattr(workflow_attempt_guard_service, "capture_selected_pdf_receipt", lambda *args: {
+        "storage_uri": "gs://bucket/path/document.pdf", "generation": None,
+        "sha256": sha256(b"own-selected-pdf").hexdigest(),
+    })
+    def _raise(_uri: str, **kwargs):
         raise FileNotFoundError("missing object")
 
-    monkeypatch.setattr(orders_api, "load_bytes_from_uri", _raise)
+    monkeypatch.setattr(storage_service, "load_bytes_from_uri", _raise)
     monkeypatch.setattr(
         orders_api.order_service,
         "_signed_url_from_uri",
         lambda _uri: "https://signed.example/document.pdf",
     )
 
-    def _urlopen(uri, *_args, **_kwargs):
-        if uri == "https://signed.example/document.pdf":
-            raise HTTPError(uri, 404, "Not Found", None, None)
-        raise AssertionError(f"unexpected urlopen uri: {uri}")
-
-    monkeypatch.setattr(orders_api, "urlopen", _urlopen)
     def _get_ocr_output(_order_id, *, persist_cache):
-        assert _order_id == order_id
-        assert persist_cache is False
-        return (
-            {
-                "input_reference": "gs://bucket/input/ocr-input.pdf",
-                "combined": {
-                    "ocr_pdf": "gs://bucket/output/ocr.pdf",
-                    "layout_pdf": "gs://bucket/output/layout.pdf",
-                },
-            },
-            None,
-        )
+        raise AssertionError("latest/archive evidence substitution")
 
     monkeypatch.setattr(orders_api.order_service, "get_ocr_output", _get_ocr_output)
 
-    def _load(uri: str):
-        if uri == "gs://bucket/path/document.pdf":
-            raise FileNotFoundError("missing object")
-        if uri == "gs://bucket/input/ocr-input.pdf":
-            return archived_pdf
-        raise AssertionError(f"unexpected load uri: {uri}")
-
-    monkeypatch.setattr(orders_api, "load_bytes_from_uri", _load)
-
     res = client.get(f"/orders/{order_id}/document")
 
-    assert res.status_code == 200
-    assert res.content == archived_pdf
-    assert res.headers["x-sawa-document-source"] == "original_archive"
-    assert res.headers["x-sawa-document-variant"] == "ocr_input_reference"
+    assert res.status_code == 409
+    assert res.json()["detail"] == "selected_pdf_verification_failed"
+    assert res.content != archived_pdf
 
 
-def test_download_document_returns_404_when_source_and_ocr_artifacts_missing(monkeypatch):
+def test_download_document_requires_authoritative_proof_before_source_read(monkeypatch):
     client = TestClient(app)
     order_id = "ORD-document-missing-001"
 
@@ -1929,31 +1900,25 @@ def test_download_document_returns_404_when_source_and_ocr_artifacts_missing(mon
         lambda _order_id: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
     )
 
-    def _raise(_uri: str):
-        raise FileNotFoundError("missing object")
-
-    monkeypatch.setattr(orders_api, "load_bytes_from_uri", _raise)
+    from src.services import storage_service, workflow_attempt_guard_service
+    def missing_proof(*args):
+        raise ValueError("selected_pdf_digest_required")
+    monkeypatch.setattr(workflow_attempt_guard_service, "capture_selected_pdf_receipt", missing_proof)
+    monkeypatch.setattr(storage_service, "load_bytes_from_uri", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read before digest proof")))
     monkeypatch.setattr(
         orders_api.order_service,
         "_signed_url_from_uri",
         lambda _uri: "https://signed.example/document.pdf",
     )
-    monkeypatch.setattr(
-        orders_api,
-        "urlopen",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(HTTPError("https://signed.example/document.pdf", 404, "Not Found", None, None)),
-    )
     def _get_ocr_output(_order_id, *, persist_cache):
-        assert _order_id == order_id
-        assert persist_cache is False
-        return ({"combined": {}}, None)
+        raise AssertionError("old evidence must not fill proof")
 
     monkeypatch.setattr(orders_api.order_service, "get_ocr_output", _get_ocr_output)
 
     res = client.get(f"/orders/{order_id}/document")
 
-    assert res.status_code == 404
-    assert res.json()["detail"] == "document not found"
+    assert res.status_code == 409
+    assert res.json()["detail"] == "selected_pdf_digest_required"
 
 
 def test_daily_bag_audit_gemini_retries_truncated_json(monkeypatch):

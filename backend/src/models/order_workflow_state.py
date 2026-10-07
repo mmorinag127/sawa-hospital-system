@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, JSON, String
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String
 
 from src.db import Base
 
@@ -9,6 +9,8 @@ class OrderWorkflowState(Base):
     __tablename__ = "order_workflow_states"
 
     order_id = Column(String, ForeignKey("orders.id"), primary_key=True)
+    # This is a technical concurrency revision. It is not an order quantity or source revision.
+    revision = Column(Integer, nullable=False, default=1)
     template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     evidence_run_id = Column(String, ForeignKey("order_ocr_evidence_runs.id"), nullable=True)
     draft_id = Column(String, ForeignKey("order_sheet_drafts.id"), nullable=True)
@@ -21,3 +23,5 @@ class OrderWorkflowState(Base):
     warnings_json = Column(JSON, nullable=True)
     confidence_band = Column(String, nullable=True)
     last_transition_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __mapper_args__ = {"version_id_col": revision}

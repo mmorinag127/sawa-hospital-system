@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
 import sys
 import threading
 import time
+from contextvars import ContextVar
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -21,10 +24,202 @@ from app.postprocess import postprocess_and_retry
 from app.preprocess import build_images_for_match_and_ocr
 from app.quantity_subgrid import build_quantity_subgrid_second_passes
 from app.evidence_manifest import ensure_evidence_manifest
-from app.rois import crop_rois, load_template_config
+from app.rois import crop_rois, load_template_config, validate_captured_config
 from app.template_match import choose_template_and_warp
 from app.template_resolution import build_template_resolution
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, prewarm_analyzer, run_yomitoku
+
+
+class MandatoryOcrStageFailed(RuntimeError):
+    pass
+
+
+class TerminalPersistenceIncomplete(RuntimeError):
+    pass
+
+
+class TerminalReceiptConflict(TerminalPersistenceIncomplete):
+    pass
+
+
+_ACTIVE_PRODUCER_JOBS: set[str] = set()
+_ACTIVE_PRODUCER_LOCK = threading.Lock()
+_OUTPUT_OWNER = ContextVar("pipeline_output_owner", default=None)
+
+
+def _owned_output_name(output_prefix, source):
+    identity = {key: value for key, value in source.items() if key != "output_reference"}
+    return f"{output_prefix}{_terminal_digest(identity)}/{Path(urlparse(source['input_reference']).path).name}.g{source['input_generation']}.json"
+
+
+def _owned_output_context():
+    context = _OUTPUT_OWNER.get()
+    if context is None:
+        raise TerminalReceiptConflict("output_original_owner_required")
+    return context
+
+
+def _assert_output_owner(job_ref, source):
+    snapshot = job_ref.get()
+    job = snapshot.to_dict() or {}
+    if job.get("execution_claim") != {"job_id": source["job_id"], "output_reference": source["output_reference"]}:
+        raise TerminalReceiptConflict("output_execution_claim_changed")
+    return snapshot, job
+
+
+def _terminal_digest(payload):
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _same_original_source(payload, source):
+    return isinstance(payload, dict) and all(key in payload for key in source) and _terminal_digest({key: payload[key] for key in source}) == _terminal_digest(source)
+
+
+def _terminal_source(bucket, name, generation, output_name, *, blob=None, data=None):
+    if blob is None or data is None:
+        blob, data = _download_generation_input(bucket, name, generation)
+    _verify_selected_pdf_input(blob, data)
+    _, configured_digest = _load_configured_input(blob)
+    owner = json.loads((blob.metadata or {}).get("execution_owner", "null"))
+    if not isinstance(owner, dict) or not owner.get("job_id") or not owner.get("order_id") or (owner.get("workflow_attempt_id") is None) != (owner.get("workflow_revision") is None):
+        raise TerminalReceiptConflict("terminal_execution_owner_missing")
+    return {
+        "job_id": f"{bucket}:{name}:{generation}",
+        "input_reference": f"gs://{bucket}/{name}", "input_generation": str(generation),
+        "input_sha256": hashlib.sha256(data).hexdigest(),
+        "configured_input_sha256": configured_digest,
+        "configured_input_receipt": json.loads(blob.metadata["configured_input_receipt"]),
+        "execution_owner": owner,
+        "selected_pdf_receipt": json.loads(blob.metadata["selected_pdf_receipt"]),
+        "output_reference": f"gs://{bucket}/{output_name}",
+    }
+
+
+def _update_owned_terminal_job(job_ref, patch, receipt):
+    snapshot = job_ref.get()
+    existing = snapshot.to_dict() or {}
+    source = receipt["source"]
+    if existing.get("execution_claim") != {"job_id": source["job_id"], "output_reference": source["output_reference"]} or (existing.get("terminal_receipt") is not None and existing["terminal_receipt"] != receipt):
+        raise TerminalReceiptConflict("terminal_store_owner_mismatch")
+    job_ref.update(patch, option=db.write_option(last_update_time=snapshot.update_time))
+
+
+def _persist_terminal_intent(job_ref, bucket, output_name, intent):
+    """Repair stores only from immutable own intent; never recompute recognition."""
+    from google.api_core.exceptions import PreconditionFailed, NotFound
+    from urllib.parse import urlparse
+    intent_blob = gcs.bucket(bucket).blob(output_name + ".terminal-intent.json")
+    try:
+        intent_blob.upload_from_string(json.dumps(intent, ensure_ascii=False, sort_keys=True), content_type="application/json", if_generation_match=0)
+    except PreconditionFailed:
+        stored = json.loads(intent_blob.download_as_bytes(timeout=30, retry=None))
+        if stored != intent:
+            raise TerminalReceiptConflict("terminal_intent_conflict")
+    payload = intent["result"]
+    receipt = {"source": intent["source"], "result_digest": intent["result_digest"],
+               "status": payload["status"], "intent_object": output_name + ".terminal-intent.json"}
+    existing = job_ref.get().to_dict() or {}
+    if existing.get("execution_claim") != {"job_id": intent["source"]["job_id"], "output_reference": intent["source"]["output_reference"]} or (existing.get("terminal_receipt") is not None and existing["terminal_receipt"] != receipt):
+        raise TerminalReceiptConflict("terminal_store_owner_mismatch")
+    patch = {"status": payload["status"], "terminal_receipt": receipt, "updated_at": firestore.SERVER_TIMESTAMP}
+    patch.update({key: payload[key] for key in ("metrics", "template_id", "error", "error_type") if key in payload})
+    output = gcs.bucket(bucket).blob(output_name)
+    try:
+        output.reload()
+        output_generation = int(output.generation)
+        previous_output = json.loads(output.download_as_bytes(timeout=30, retry=None, if_generation_match=output_generation))
+    except NotFound:
+        previous_output = None
+        output_generation = 0
+    if previous_output is not None:
+        source = intent["source"]
+        if not _same_original_source(previous_output, source):
+            raise TerminalReceiptConflict("terminal_output_owner_mismatch")
+        if previous_output.get("status") in {"done", "failed"} and _terminal_digest(previous_output) != intent["result_digest"]:
+            raise TerminalReceiptConflict("terminal_output_result_conflict")
+    complete = previous_output is not None and _terminal_digest(previous_output) == intent["result_digest"] and existing.get("terminal_receipt") == receipt and existing.get("status") == payload["status"]
+    if not complete:
+        _update_owned_terminal_job(job_ref, {"status": "terminal_persisting", "terminal_receipt": receipt,
+                                            "updated_at": firestore.SERVER_TIMESTAMP}, receipt)
+        _update_owned_terminal_job(job_ref, patch, receipt)
+        output.upload_from_string(json.dumps(payload, ensure_ascii=False), content_type="application/json; charset=utf-8", if_generation_match=output_generation)
+        output_generation = int(output.generation)
+    persisted = json.loads(output.download_as_bytes(timeout=30, retry=None, if_generation_match=output_generation))
+    job = job_ref.get().to_dict()
+    if job.get("execution_claim") != existing["execution_claim"]:
+        raise TerminalReceiptConflict("terminal_claim_changed_before_ack")
+    if _terminal_digest(persisted) != intent["result_digest"] or job.get("terminal_receipt") != receipt or job.get("status") != payload["status"]:
+        raise TerminalPersistenceIncomplete("terminal_dual_store_incomplete")
+    source = intent["source"]
+    parsed = urlparse(source["input_reference"])
+    try:
+        current_source = _terminal_source(bucket, parsed.path.lstrip("/"), source["input_generation"], output_name)
+    except ValueError as exc:
+        raise TerminalReceiptConflict("terminal_source_changed_before_ack") from exc
+    if parsed.netloc != bucket or source != current_source:
+        raise TerminalReceiptConflict("terminal_source_changed_before_ack")
+    return payload
+
+
+def _complete_terminal(job_ref, bucket, name, generation, output_name, source, payload):
+    try:
+        current_source = _terminal_source(bucket, name, generation, output_name)
+    except ValueError as exc:
+        raise TerminalReceiptConflict("terminal_source_changed") from exc
+    if source != current_source:
+        raise TerminalReceiptConflict("terminal_source_changed")
+    if any(payload.get(key) != value for key, value in source.items()):
+        raise TerminalReceiptConflict("terminal_result_identity_mismatch")
+    intent = {"source": source, "result": payload, "result_digest": _terminal_digest(payload)}
+    try:
+        return _persist_terminal_intent(job_ref, bucket, output_name, intent)
+    except TerminalReceiptConflict:
+        raise
+    except Exception as exc:
+        raise TerminalPersistenceIncomplete("terminal_transport_repair_required") from exc
+
+
+def _replay_terminal(job_ref, bucket, name, generation, output_name):
+    from google.api_core.exceptions import NotFound
+    try:
+        intent = json.loads(gcs.bucket(bucket).blob(output_name + ".terminal-intent.json").download_as_bytes(timeout=30, retry=None))
+    except NotFound:
+        job = job_ref.get().to_dict() or {}
+        expected = {"job_id": f"{bucket}:{name}:{generation}", "output_reference": f"gs://{bucket}/{output_name}"}
+        with _ACTIVE_PRODUCER_LOCK:
+            active = expected["job_id"] in _ACTIVE_PRODUCER_JOBS
+        if active and job.get("status") == "running" and job.get("execution_claim") == expected:
+            return {"status": "running", **expected}, 202
+        return {"status": "needs_inspection", "error": "terminal_intent_missing"}, 409
+    if not isinstance(intent, dict) or intent.get("source") != _terminal_source(bucket, name, generation, output_name) or not isinstance(intent.get("result"), dict) or intent.get("result_digest") != _terminal_digest(intent["result"]) or intent["result"].get("status") not in {"done", "failed"}:
+        raise TerminalReceiptConflict("terminal_replay_receipt_mismatch")
+    result = intent["result"]
+    if any(result.get(key) != value for key, value in intent["source"].items()):
+        raise TerminalReceiptConflict("terminal_replay_identity_mismatch")
+    stored = job_ref.get().to_dict() or {}
+    if stored.get("execution_claim") != {"job_id": intent["source"]["job_id"], "output_reference": intent["source"]["output_reference"]}:
+        raise TerminalReceiptConflict("terminal_replay_owner_mismatch")
+    return _persist_terminal_intent(job_ref, bucket, output_name, intent), 200
+
+
+def _duplicate_outcome(job_ref, bucket, name, generation, output_name):
+    from google.api_core.exceptions import NotFound, PreconditionFailed
+    try:
+        result, status = _replay_terminal(job_ref, bucket, name, generation, output_name)
+        return (_terminal_ack(result) if status == 200 else result), status
+    except (TerminalReceiptConflict, ValueError, NotFound, PreconditionFailed) as exc:
+        return {"status": "needs_inspection", "error": str(exc)}, 409
+
+
+def _terminal_ack(payload):
+    source = {key: payload[key] for key in (
+        "job_id", "input_reference", "input_generation", "input_sha256", "configured_input_sha256",
+        "execution_owner", "selected_pdf_receipt", "configured_input_receipt", "output_reference",
+    )}
+    return {
+        **{key: payload[key] for key in ("status", "job_id", "template_id", "input_reference", "input_generation", "input_sha256", "output_reference", "error") if key in payload},
+        "terminal_receipt": {"source": source, "status": payload["status"], "result_digest": _terminal_digest(payload)},
+    }
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,20 +294,27 @@ def parse_gcs_event(payload: dict) -> Tuple[str, str, str]:
     data = payload.get("data") or payload
     bucket = data.get("bucket") or data.get("bucketId")
     name = data.get("name") or data.get("object") or data.get("objectId")
-    generation = str(data.get("generation") or data.get("metageneration") or "")
-    if not bucket or not name:
+    generation = str(data.get("generation") or "")
+    if not bucket or not name or not generation.isdigit():
         raise ValueError(f"Invalid event payload keys={list((data or {}).keys())}")
     return bucket, name, generation
 
 
-def _safe_job_id(job_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", job_id)
+def _safe_job_id(source: dict) -> str:
+    identity = {key: value for key, value in source.items() if key != "output_reference"}
+    return "ocr-" + _terminal_digest(identity)
 
 
 def _update_job_stage(job_ref, stage: str, **extra) -> None:
+    source, owner_ref = _owned_output_context()
+    if owner_ref is not job_ref:
+        raise TerminalReceiptConflict("output_execution_claim_changed")
+    snapshot, job = _assert_output_owner(job_ref, source)
+    if job.get("terminal_receipt") is not None:
+        raise TerminalReceiptConflict("output_terminal_replay_required")
     payload = {"stage": stage, "updated_at": firestore.SERVER_TIMESTAMP}
     payload.update(extra)
-    job_ref.update(payload)
+    job_ref.update(payload, option=db.write_option(last_update_time=snapshot.update_time))
     app.logger.info("OCR pipeline stage: %s job=%s", stage, getattr(job_ref, "id", "unknown"))
 
 
@@ -124,8 +326,90 @@ def _encode_png(image_bgr) -> bytes:
 
 
 def _upload_bytes(bucket: str, object_name: str, data: bytes, content_type: str) -> str:
-    gcs.bucket(bucket).blob(object_name).upload_from_string(data, content_type=content_type)
-    return f"gs://{bucket}/{object_name}"
+    from google.api_core.exceptions import PreconditionFailed
+    source, job_ref = _owned_output_context()
+    _assert_output_owner(job_ref, source)
+    output = urlparse(source["output_reference"])
+    prefix = output.path.lstrip("/").rsplit("/", 1)[0] + "/assets/"
+    if output.netloc != bucket or not object_name.startswith(prefix):
+        raise TerminalReceiptConflict("artifact_owner_namespace_mismatch")
+    blob = gcs.bucket(bucket).blob(object_name)
+    metadata = {"original_source": json.dumps(source, ensure_ascii=False, sort_keys=True), "sha256": hashlib.sha256(data).hexdigest()}
+    blob.metadata = metadata
+    try:
+        blob.upload_from_string(data, content_type=content_type, if_generation_match=0)
+    except PreconditionFailed:
+        blob.reload()
+        existing = blob.download_as_bytes(if_generation_match=int(blob.generation), timeout=30, retry=None)
+        if blob.metadata != metadata or existing != data:
+            raise TerminalReceiptConflict("immutable_artifact_conflict")
+    if not str(blob.generation or "").isdigit():
+        raise TerminalReceiptConflict("artifact_generation_required")
+    _assert_output_owner(job_ref, source)
+    return f"gs://{bucket}/{object_name}?generation={blob.generation}"
+
+
+def _download_generation_input(bucket, name, generation):
+    if not str(generation).isdigit():
+        raise ValueError("input_generation_required")
+    blob = gcs.bucket(bucket).blob(name, generation=int(generation))
+    blob.reload()
+    data = blob.download_as_bytes(if_generation_match=int(generation))
+    _verify_selected_pdf_input(blob, data)
+    return blob, data
+
+
+def _verify_selected_pdf_input(blob, data):
+    from urllib.parse import urlparse, parse_qs
+
+    raw = (blob.metadata or {}).get("selected_pdf_receipt")
+    if not raw:
+        raise ValueError("selected_pdf_start_receipt_required")
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("sha256") or "")):
+        raise ValueError("selected_pdf_digest_required")
+    if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+        raise ValueError("selected_pdf_bytes_changed")
+    selected = urlparse(receipt["storage_uri"])
+    if selected.scheme == "gs":
+        generation = receipt.get("generation")
+        values = parse_qs(selected.query).get("generation", [])
+        if generation is None and not values:
+            original = gcs.bucket(selected.netloc).blob(selected.path.lstrip("/"))
+            if hashlib.sha256(original.download_as_bytes(timeout=30, retry=None)).hexdigest() != receipt["sha256"]:
+                raise ValueError("selected_pdf_bytes_changed")
+            return
+        if not str(generation or "").isdigit() or values != [str(generation)]:
+            raise ValueError("selected_pdf_generation_required")
+        original = gcs.bucket(selected.netloc).blob(selected.path.lstrip("/"))
+        original.reload(timeout=30, retry=None)
+        if str(original.generation) != str(generation):
+            raise ValueError("selected_pdf_generation_changed")
+
+
+def _load_configured_input(blob):
+    receipt = json.loads((blob.metadata or {}).get("configured_input_receipt", "null"))
+    if not isinstance(receipt, dict) or receipt.get("bucket") != blob.bucket.name or receipt.get("object_name") != blob.name + ".configured.json" or not str(receipt.get("generation", "")).isdigit():
+        raise ValueError("captured_template_receipt_required")
+    source = gcs.bucket(receipt["bucket"]).blob(receipt["object_name"], generation=int(receipt["generation"]))
+    data = source.download_as_bytes(if_generation_match=int(receipt["generation"]), timeout=30, retry=None)
+    if hashlib.sha256(data).hexdigest() != receipt.get("sha256"):
+        raise ValueError("captured_template_receipt_mismatch")
+    configured = json.loads(data)
+    validate_captured_config(configured, receipt["sha256"])
+    return configured, receipt["sha256"]
+
+
+def _recognition_input_receipt(original_pdf_bytes, recognition_pdf_bytes, source_receipt, corrected_receipt):
+    if not isinstance(source_receipt, dict) or source_receipt.get("sha256") != hashlib.sha256(original_pdf_bytes).hexdigest():
+        raise ValueError("recognition_input_source_mismatch")
+    if recognition_pdf_bytes == original_pdf_bytes:
+        return {"representation": "original_identity", "receipt": dict(source_receipt)}
+    if not isinstance(corrected_receipt, dict):
+        raise ValueError("recognition_input_receipt_required")
+    if corrected_receipt.get("source_sha256") != source_receipt["sha256"] or corrected_receipt.get("sha256") != hashlib.sha256(recognition_pdf_bytes).hexdigest():
+        raise ValueError("recognition_input_source_mismatch")
+    return {"representation": "corrected", "receipt": dict(corrected_receipt)}
 
 
 def _upload_corrected_pdf_artifact(
@@ -146,17 +430,21 @@ def _upload_corrected_pdf_artifact(
     if not corrected_pdf_bytes or corrected_pdf_bytes == original_pdf_bytes:
         return None
     corrected_object_name = f"{artifact_prefix}{base}_corrected.pdf"
-    return _upload_bytes(
-        bucket,
-        corrected_object_name,
-        corrected_pdf_bytes,
-        "application/pdf",
-    )
+    uri = _upload_bytes(bucket, corrected_object_name, corrected_pdf_bytes, "application/pdf")
+    from urllib.parse import parse_qs
+    generation = parse_qs(urlparse(uri).query)["generation"][0]
+    if not generation.isdigit():
+        raise ValueError("corrected_pdf_generation_missing")
+    page_correction_summary["corrected_pdf_receipt"] = {
+        "storage_uri": uri, "generation": generation,
+        "sha256": hashlib.sha256(corrected_pdf_bytes).hexdigest(),
+        "source_sha256": hashlib.sha256(original_pdf_bytes).hexdigest(),
+    }
+    return uri
 
 
 def _upload_text(bucket: str, object_name: str, text: str, content_type: str) -> str:
-    gcs.bucket(bucket).blob(object_name).upload_from_string(text, content_type=content_type)
-    return f"gs://{bucket}/{object_name}"
+    return _upload_bytes(bucket, object_name, text.encode("utf-8"), content_type)
 
 
 def _write_output_partial(
@@ -170,19 +458,44 @@ def _write_output_partial(
     output_reference: str,
     payload: dict | None = None,
 ) -> None:
+    from google.api_core.exceptions import NotFound
+    source, job_ref = _owned_output_context()
+    _assert_output_owner(job_ref, source)
+    if any(source[key] != value for key, value in {"job_id": job_id, "input_reference": input_reference, "output_reference": output_reference}.items()) or output_reference != f"gs://{bucket}/{object_name}":
+        raise TerminalReceiptConflict("partial_output_identity_mismatch")
     body = {
-        "job_id": job_id,
+        **source,
         "status": status,
         "stage": stage,
         "input_reference": input_reference,
+        "input_generation": job_id.rsplit(":", 1)[1],
         "output_reference": output_reference,
     }
     if payload:
         body.update(payload)
-    gcs.bucket(bucket).blob(object_name).upload_from_string(
+    if not _same_original_source(body, source):
+        raise TerminalReceiptConflict("partial_output_identity_mismatch")
+    blob = gcs.bucket(bucket).blob(object_name)
+    try:
+        blob.reload()
+        expected_generation = int(blob.generation)
+        previous = json.loads(blob.download_as_bytes(if_generation_match=expected_generation, timeout=30, retry=None))
+        if not _same_original_source(previous, source):
+            raise TerminalReceiptConflict("partial_output_owner_mismatch")
+        if previous.get("status") in {"done", "failed"}:
+            raise TerminalReceiptConflict("output_terminal_replay_required")
+    except NotFound:
+        expected_generation = 0
+    snapshot, job = _assert_output_owner(job_ref, source)
+    if job.get("terminal_receipt") is not None:
+        raise TerminalReceiptConflict("output_terminal_replay_required")
+    job_ref.update({"stage": stage}, option=db.write_option(last_update_time=snapshot.update_time))
+    blob.upload_from_string(
         json.dumps(body, ensure_ascii=False),
         content_type="application/json; charset=utf-8",
+        if_generation_match=expected_generation,
     )
+    _assert_output_owner(job_ref, source)
 
 
 def _extract_metadata(blob: storage.Blob) -> tuple[str | None, str | None, list[str]]:
@@ -450,7 +763,13 @@ def _run_template_classification(
     pdf_bytes: bytes,
     requested_template_id: str | None,
     requested_template_ids: list[str] | None = None,
+    captured_config: dict | None = None,
+    configured_digest: str | None = None,
 ) -> tuple[dict | None, dict | None]:
+    authored_templates = None
+    if captured_config is not None or configured_digest is not None:
+        authored = load_template_config(db, requested_template_id, captured_config=captured_config, expected_digest=configured_digest)
+        authored_templates = {requested_template_id: authored}
     candidate_template_ids = [
         str(template_id).strip()
         for template_id in (requested_template_ids or [])
@@ -479,6 +798,7 @@ def _run_template_classification(
             img_ocr_bgr,
             img_alt_bgr=img_alt_bgr,
             template_ids=[preferred_id],
+            authored_templates=authored_templates,
         )
         if preferred_match_id == preferred_id:
             matched_template_id = preferred_match_id
@@ -496,6 +816,7 @@ def _run_template_classification(
             img_ocr_bgr,
             img_alt_bgr=img_alt_bgr,
             template_ids=template_ids,
+            authored_templates=authored_templates,
         )
     confidence = _classification_score(diagnostics, matched_template_id)
     classification = {
@@ -508,7 +829,7 @@ def _run_template_classification(
     }
     context = None
     if isinstance(matched_template_id, str) and matched_template_id.strip():
-        tpl_cfg = load_template_config(db, matched_template_id.strip())
+        tpl_cfg = load_template_config(db, matched_template_id.strip(), captured_config=captured_config, expected_digest=configured_digest)
         context = {
             "template_id": matched_template_id.strip(),
             "template": tpl_cfg,
@@ -587,36 +908,60 @@ def handler():
         return jsonify({"status": "ignored", "reason": "prefix_mismatch", "name": name}), 200
 
     job_id = f"{bucket}:{name}:{generation}"
-    safe_job_id = _safe_job_id(job_id)
-    output_name = f"{output_prefix}{os.path.basename(name)}.json"
+    try:
+        blob, pdf_bytes = _download_generation_input(bucket, name, generation)
+        terminal_source = _terminal_source(bucket, name, generation, "", blob=blob, data=pdf_bytes)
+        output_name = _owned_output_name(output_prefix, terminal_source)
+        terminal_source["output_reference"] = f"gs://{bucket}/{output_name}"
+    except (ValueError, TerminalReceiptConflict) as exc:
+        return jsonify({"status": "needs_inspection", "error": str(exc)}), 409
     input_reference = f"gs://{bucket}/{name}"
     output_reference = f"gs://{bucket}/{output_name}"
+    safe_job_id = _safe_job_id(terminal_source)
     job_ref = db.collection(JOB_COLLECTION).document(safe_job_id)
     if job_ref.get().exists:
         app.logger.info("OCR pipeline duplicate job=%s", safe_job_id)
-        return jsonify({"status": "duplicate", "job_id": job_id}), 200
+        result, status = _duplicate_outcome(job_ref, bucket, name, generation, output_name)
+        return jsonify(result), status
 
-    job_ref.set(
-        {
-            "status": "running",
-            "input": {"bucket": bucket, "name": name, "generation": generation},
-            "job_id": job_id,
-            "safe_job_id": safe_job_id,
-            "output": {"bucket": bucket, "name": output_name},
-        }
-    )
+    from google.api_core.exceptions import AlreadyExists, NotFound
+    original_intent_present = False
+    try:
+        gcs.bucket(bucket).blob(output_name + ".terminal-intent.json").reload()
+        original_intent_present = True
+    except NotFound:
+        try:
+            gcs.bucket(bucket).blob(output_name).reload()
+        except NotFound:
+            pass
+        else:
+            if job_ref.get().exists:
+                result, status = _duplicate_outcome(job_ref, bucket, name, generation, output_name)
+                return jsonify(result), status
+            return jsonify({"status": "needs_inspection", "error": "output_original_claim_missing"}), 409
+    try:
+        job_ref.create(
+            {
+                "status": "running",
+                "input": {"bucket": bucket, "name": name, "generation": generation},
+                "job_id": job_id,
+                "safe_job_id": safe_job_id,
+                "execution_claim": {"job_id": job_id, "output_reference": output_reference},
+                "output": {"bucket": bucket, "name": output_name},
+            }
+        )
+    except AlreadyExists:
+        result, status = _duplicate_outcome(job_ref, bucket, name, generation, output_name)
+        return jsonify(result), status
+    if original_intent_present:
+        result, status = _duplicate_outcome(job_ref, bucket, name, generation, output_name)
+        return jsonify(result), status
     app.logger.info("OCR pipeline job created job=%s", safe_job_id)
-    _write_output_partial(
-        bucket=bucket,
-        object_name=output_name,
-        job_id=job_id,
-        status="running",
-        stage="received",
-        input_reference=input_reference,
-        output_reference=output_reference,
-    )
+    with _ACTIVE_PRODUCER_LOCK:
+        _ACTIVE_PRODUCER_JOBS.add(job_id)
 
     start_time = time.time()
+    owner_token = _OUTPUT_OWNER.set((terminal_source, job_ref))
     try:
         _update_job_stage(job_ref, "download")
         _write_output_partial(
@@ -628,10 +973,11 @@ def handler():
             input_reference=input_reference,
             output_reference=output_reference,
         )
-        blob = gcs.bucket(bucket).blob(name)
-        blob.reload()
-        pdf_bytes = blob.download_as_bytes()
         facility_id, template_id, template_ids = _extract_metadata(blob)
+        configured_input, configured_digest = _load_configured_input(blob)
+        authored_template = validate_captured_config(configured_input, configured_digest)
+        if configured_input["facility"].get("facility_id") != facility_id or authored_template.get("template_id") != template_id:
+            raise ValueError("captured_template_id_mismatch")
         resolved_template_id = template_id
         app.logger.info(
             "OCR pipeline input downloaded job=%s bytes=%s facility_id=%s template_id=%s template_ids=%s",
@@ -676,20 +1022,21 @@ def handler():
             "pages": [],
         }
         classification_warnings: list[str] = []
+        canonical_stages = {
+            "classification": "required" if OCR_ENABLE_TEMPLATE_MATCH else "disabled",
+            "roi": "required" if OCR_ENABLE_TEMPLATE_ROI else "disabled",
+            "correction": "required" if OCR_ENABLE_PAGE_CORRECTION else "disabled",
+        }
         try:
             classification, template_context = _run_template_classification(
                 pdf_bytes=pdf_bytes,
                 requested_template_id=template_id,
                 requested_template_ids=template_ids,
+                captured_config=configured_input,
+                configured_digest=configured_digest,
             )
         except Exception as exc:  # noqa: BLE001
-            classification_warnings.append("template_match_error")
-            app.logger.warning(
-                "OCR pipeline template match failed job=%s requested_template_id=%s error=%s",
-                safe_job_id,
-                template_id,
-                str(exc),
-            )
+            raise MandatoryOcrStageFailed("template_match_error") from exc
         if isinstance(classification, dict):
             matched_template_id = classification.get("matched_template_id")
             if not resolved_template_id and isinstance(matched_template_id, str) and matched_template_id.strip():
@@ -697,18 +1044,21 @@ def handler():
             if template_id and matched_template_id and template_id != matched_template_id:
                 classification_warnings.append("template_match_mismatch")
             if template_id and not matched_template_id:
-                classification_warnings.append("template_match_unresolved")
+                raise MandatoryOcrStageFailed("template_match_unresolved")
+        if OCR_ENABLE_TEMPLATE_MATCH:
+            if not isinstance(template_context, dict):
+                raise MandatoryOcrStageFailed("template_match_unresolved")
+            canonical_stages["classification"] = "passed"
+        if OCR_ENABLE_TEMPLATE_ROI and not isinstance(template_context, dict):
+            raise MandatoryOcrStageFailed("roi_template_context_missing")
         if OCR_ENABLE_TEMPLATE_ROI and isinstance(template_context, dict):
             try:
                 roi_extraction = _run_template_roi_extraction(template_context=template_context)
+                if not isinstance(roi_extraction, dict):
+                    raise MandatoryOcrStageFailed("roi_extraction_missing")
+                canonical_stages["roi"] = "passed"
             except Exception as exc:  # noqa: BLE001
-                classification_warnings.append("roi_extraction_error")
-                app.logger.warning(
-                    "OCR pipeline roi extraction failed job=%s template_id=%s error=%s",
-                    safe_job_id,
-                    resolved_template_id,
-                    str(exc),
-                )
+                raise MandatoryOcrStageFailed("roi_extraction_error") from exc
 
         yomitoku_pdf_bytes = pdf_bytes
         yomitoku_page_images = None
@@ -720,16 +1070,13 @@ def handler():
                     db=db,
                     preferred_template_id=resolved_template_id,
                     preferred_template_ids=template_ids,
+                    authored_templates={template_id: authored_template},
                 )
+                if not yomitoku_pdf_bytes or not isinstance(page_correction_summary, dict):
+                    raise MandatoryOcrStageFailed("page_correction_result_missing")
+                canonical_stages["correction"] = "passed"
             except Exception as exc:  # noqa: BLE001
-                classification_warnings.append("page_correction_error")
-                app.logger.warning(
-                    "OCR pipeline page correction failed job=%s template_id=%s error=%s",
-                    safe_job_id,
-                    resolved_template_id,
-                    str(exc),
-                )
-                yomitoku_pdf_bytes = pdf_bytes
+                raise MandatoryOcrStageFailed("page_correction_error") from exc
 
         _update_job_stage(job_ref, "ocr", facility_id=facility_id, template_id=resolved_template_id)
         _write_output_partial(
@@ -747,6 +1094,7 @@ def handler():
             },
         )
 
+        _verify_selected_pdf_input(blob, pdf_bytes)
         page_results, ocr_pdf, layout_pdf = run_yomitoku(
             pdf_bytes=yomitoku_pdf_bytes,
             dpi=YOMITOKU_DPI,
@@ -776,7 +1124,7 @@ def handler():
         )
 
         base = os.path.splitext(os.path.basename(name))[0]
-        artifact_prefix = f"{output_prefix}{base}/"
+        artifact_prefix = output_name.rsplit("/", 1)[0] + "/assets/"
         figure_prefix = f"{artifact_prefix}{YOMITOKU_FIGURE_DIR}/"
         corrected_pdf_uri = _upload_corrected_pdf_artifact(
             bucket=bucket,
@@ -789,9 +1137,15 @@ def handler():
         page_correction_summary["corrected_pdf_uploaded"] = bool(corrected_pdf_uri)
         page_correction_summary["corrected_pdf_uri"] = corrected_pdf_uri or None
         page_correction_artifacts = {
+            "corrected_pdf_receipt": page_correction_summary.get("corrected_pdf_receipt"),
             "corrected_pdf_uri": corrected_pdf_uri,
             "corrected_pdf_uploaded": bool(corrected_pdf_uri),
         }
+        page_correction_artifacts["recognition_input"] = _recognition_input_receipt(
+            pdf_bytes, yomitoku_pdf_bytes,
+            json.loads((blob.metadata or {})["selected_pdf_receipt"]),
+            page_correction_summary.get("corrected_pdf_receipt"),
+        )
 
         uploaded_figures: dict[str, str] = {}
         pages: list[dict] = []
@@ -809,7 +1163,7 @@ def handler():
             markdown_text = page_result.markdown_text
             replacements: dict[str, str] = {}
             for ref in _extract_markdown_images(markdown_text):
-                ref_name = Path(ref).name
+                ref_name = Path(urlparse(ref).path).name
                 if ref_name in uploaded_figures:
                     replacements[ref] = uploaded_figures[ref_name]
                     continue
@@ -855,7 +1209,7 @@ def handler():
 
             figure_uris = []
             for ref in _extract_markdown_images(markdown_text):
-                ref_name = Path(ref).name
+                ref_name = Path(urlparse(ref).path).name
                 if ref_name in uploaded_figures:
                     figure_uris.append(uploaded_figures[ref_name])
             markdown_pages.append(markdown_text)
@@ -874,6 +1228,7 @@ def handler():
 
         if OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS and structured_tables:
             try:
+                _verify_selected_pdf_input(blob, pdf_bytes)
                 quantity_source_pages = yomitoku_page_images or render_pdf_to_page_images(
                     yomitoku_pdf_bytes,
                     YOMITOKU_DPI,
@@ -1057,6 +1412,11 @@ def handler():
             "template_id": resolved_template_id,
             "facility_id": facility_id,
             "input_reference": input_reference,
+            "input_generation": generation,
+            "input_sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+            "configured_input_sha256": configured_digest,
+            "canonical_stages": canonical_stages,
+            "canonical_adoption_allowed": True,
             "output_reference": output_reference,
             "metrics": metrics,
             "pages": pages,
@@ -1091,57 +1451,25 @@ def handler():
             page_correction_summary=page_correction_summary,
         )
         output_payload = ensure_evidence_manifest(output_payload) or output_payload
-        gcs.bucket(bucket).blob(output_name).upload_from_string(
-            json.dumps(output_payload, ensure_ascii=False),
-            content_type="application/json; charset=utf-8",
-        )
-
-        job_ref.update(
-            {
-                "status": "done",
-                "template_id": resolved_template_id,
-                "metrics": metrics,
-                "output": {"bucket": bucket, "name": output_name},
-                "updated_at": firestore.SERVER_TIMESTAMP,
-            }
-        )
+        _verify_selected_pdf_input(blob, pdf_bytes)
+        output_payload.update({key: terminal_source[key] for key in ("execution_owner", "configured_input_receipt", "selected_pdf_receipt")})
+        _complete_terminal(job_ref, bucket, name, generation, output_name, terminal_source, output_payload)
         app.logger.info("OCR pipeline stage: done job=%s", safe_job_id)
-        return (
-            jsonify(
-                {
-                    "status": "done",
-                    "job_id": job_id,
-                    "template_id": resolved_template_id,
-                    "input_reference": input_reference,
-                    "output_reference": output_reference,
-                }
-            ),
-            200,
-        )
+        return jsonify(_terminal_ack(output_payload)), 200
     except BaseException as exc:  # noqa: BLE001
-        try:
-            job_ref.update(
-                {
-                    "status": "failed",
-                    "error": repr(exc),
-                    "error_type": type(exc).__name__,
-                    "updated_at": firestore.SERVER_TIMESTAMP,
-                }
-            )
-        except Exception:  # noqa: BLE001
-            app.logger.exception("OCR pipeline failed to update job failure state job=%s", safe_job_id)
-        try:
-            _write_output_partial(
-                bucket=bucket,
-                object_name=output_name,
-                job_id=job_id,
-                status="failed",
-                stage="error",
-                input_reference=input_reference,
-                output_reference=output_reference,
-                payload={"error": repr(exc), "error_type": type(exc).__name__},
-            )
-        except Exception:  # noqa: BLE001
-            app.logger.exception("OCR pipeline failed to persist terminal error payload job=%s", safe_job_id)
+        if isinstance(exc, TerminalReceiptConflict):
+            return jsonify({"status": "needs_inspection", "error": str(exc)}), 409
+        if isinstance(exc, TerminalPersistenceIncomplete):
+            raise
+        if "terminal_source" not in locals():
+            job_ref.update({"status": "needs_inspection", "error": repr(exc)})
+            return jsonify({"status": "needs_inspection", "error": "terminal_source_unresolved"}), 409
+        failed_payload = {**terminal_source, "status": "failed", "stage": "error",
+                          "error": repr(exc), "error_type": type(exc).__name__, "canonical_adoption_allowed": False}
+        _complete_terminal(job_ref, bucket, name, generation, output_name, terminal_source, failed_payload)
         app.logger.exception("OCR pipeline failed job=%s", safe_job_id)
-        raise
+        return jsonify(_terminal_ack(failed_payload)), 200
+    finally:
+        _OUTPUT_OWNER.reset(owner_token)
+        with _ACTIVE_PRODUCER_LOCK:
+            _ACTIVE_PRODUCER_JOBS.discard(job_id)
