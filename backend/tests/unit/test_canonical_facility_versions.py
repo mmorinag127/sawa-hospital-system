@@ -112,6 +112,107 @@ def snapshot(versions):
         "fixed-revision", "explicit-test-source")
 
 
+@pytest.mark.parametrize("field", ["source_index", "index"])
+@pytest.mark.parametrize("raw", [True, False, -1, 0.5, 1.0, float("nan"),
+                                float("inf"), "0", "bad", [], {}])
+def test_exact_column_positions_stop_encode_and_dated_config(field, raw, monkeypatch):
+    from src.services import config_service, facility_master_service
+    record = version()
+    record["facility"]["fax_template"]["columns"][0][field] = raw
+    read = snapshot([record])
+    monkeypatch.setattr(facility_master_service, "get_snapshot", lambda: read)
+    for action in (lambda: store._encode(read.master),
+                   lambda: store.resolve_facility_version(read, "F", "2026-01-15"),
+                   lambda: config_service.get_facility_config_for_date("F", "2026-01-15")):
+        with pytest.raises(store.CanonicalStoreError, match="snapshot_incomplete"):
+            action()
+    assert type(read.master["facilities"][0]["versions"][0]["facility"]
+                ["fax_template"]["columns"][0][field]) is type(raw)
+
+
+@pytest.mark.parametrize("field", ["source_index", "index"])
+@pytest.mark.parametrize("failure", ["missing", "null", "duplicate"])
+def test_missing_null_duplicate_explicit_positions_stop(field, failure):
+    record = version()
+    columns = record["facility"]["fax_template"]["columns"]
+    if failure == "missing":
+        del columns[0][field]
+    elif failure == "null":
+        columns[0][field] = None
+    else:
+        columns[1][field] = columns[0][field]
+    read = snapshot([record])
+    before = deepcopy(read.master)
+    for action in (lambda: store._encode(read.master),
+                   lambda: store.resolve_facility_version(read, "F", "2026-01-15")):
+        with pytest.raises(store.CanonicalStoreError, match="snapshot_incomplete"):
+            action()
+        assert read.master == before
+
+
+def test_zero_distinct_source_and_column_positions_preserve_raw_snapshot(monkeypatch):
+    from src.services import config_service, facility_master_service
+    record = version()
+    columns = record["facility"]["fax_template"]["columns"]
+    columns[2]["source_index"] = 8
+    columns[0]["unknown"] = {"zero": 0, "null": None, "bool": False}
+    read = snapshot([record])
+    before = deepcopy(read.master)
+    decoded = store._decode(store._encode(read.master))
+    persisted = store.MasterSnapshot(decoded, read.revision, read.source)
+    monkeypatch.setattr(facility_master_service, "get_snapshot", lambda: persisted)
+    result = config_service.get_facility_config_for_date("F", "2026-01-15")
+    assert decoded == before
+    assert result["config"] == record["facility"]
+    assert result["config"]["fax_template"]["columns"][0]["source_index"] == 0
+    assert result["config"]["fax_template"]["columns"][2]["index"] == 2
+    assert result["config"]["fax_template"]["columns"][2]["source_index"] == 8
+
+
+def test_optional_source_index_is_not_fabricated_or_newly_required():
+    from src.services.facility_template_version_service import validate_template_columns
+    columns = [{"index": 0, "source_index": 0, "role": "quantity"},
+               {"index": 1, "role": "quantity_change"}]
+    before = deepcopy(columns)
+    assert validate_template_columns(columns)["errors"] == []
+    assert columns == before
+
+
+@pytest.mark.parametrize("columns", [None, {}, [None], [0]])
+def test_malformed_column_container_is_explicit_validation_error(columns):
+    from src.services.facility_template_version_service import validate_template_columns
+    assert validate_template_columns(columns)["errors"] == ["template_columns_invalid"]
+
+
+@pytest.mark.parametrize("raw", [True, 0.5, "0", None])
+def test_actual_dated_save_rejects_before_replacing_original_json(tmp_path, monkeypatch, raw):
+    from src.services import facility_service
+    master = snapshot([version()]).master
+    path = tmp_path / "master.json"
+    original = store._encode(master)
+    path.write_bytes(original)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(path))
+    captured = store.read_snapshot()
+    changed = version()
+    changed["facility"]["fax_template"]["columns"][0]["source_index"] = raw
+    with pytest.raises(store.CanonicalStoreError, match="snapshot_incomplete"):
+        facility_service.save_facility_version(
+            "F", changed["version_id"], changed,
+            expected_revision=captured.revision, create=False)
+    assert path.read_bytes() == original
+    assert store.read_snapshot().revision == captured.revision
+
+
+@pytest.mark.parametrize("literal", ["true", "0.5", '"0"', "null", "NaN"])
+def test_literal_json_source_index_cannot_be_selected(literal):
+    data = json.dumps(snapshot([version()]).master).replace('"source_index": 0', '"source_index": ' + literal, 1)
+    with pytest.raises(store.CanonicalStoreError):
+        read = store.MasterSnapshot(store._decode(data.encode()), "literal-revision", "literal-source")
+        store.resolve_facility_version(read, "F", "2026-01-15")
+
+
 @pytest.mark.parametrize("template", [
     {"template_id": "X"}, {"columns": []}, {"columns": [{"index": 0, "role": "date", "source_index": 0}]},
     {"columns": [{"index": 0, "role": "quantity", "diet_type": "regular", "area_id": "X"}]},

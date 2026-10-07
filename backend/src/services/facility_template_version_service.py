@@ -61,11 +61,7 @@ _SOURCE_INDEX_REQUIRED_ROLES = {"date", "daypart", "menu_name", "aux", "quantity
 
 def _parse_source_index(column: dict[str, Any]) -> int | None:
     raw = column.get("source_index")
-    try:
-        parsed = int(raw) if raw is not None else None
-    except Exception:
-        return None
-    return parsed if parsed is not None and parsed >= 0 else None
+    return raw if type(raw) is int and raw >= 0 else None
 
 
 
@@ -101,6 +97,8 @@ def normalize_template_columns(columns: Any) -> list[dict[str, Any]]:
 def validate_template_columns(columns: list[dict[str, Any]]) -> dict[str, list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
+    if not isinstance(columns, list) or any(not isinstance(column, dict) for column in columns):
+        return {"errors": ["template_columns_invalid"], "warnings": []}
     if not columns:
         errors.append("template_columns_missing")
     column_ids = [str(column.get("column_id") or "").strip() for column in columns]
@@ -110,10 +108,17 @@ def validate_template_columns(columns: list[dict[str, Any]]) -> dict[str, list[s
     if not any(_normalize_token(column.get("role")) == "quantity" for column in columns):
         errors.append("template_quantity_columns_missing")
     source_indexes: list[int] = []
+    column_indexes: list[int] = []
     source_index_missing = False
     source_index_invalid = False
     excluded_quantity_warning_added = False
     for column in columns:
+        if "index" not in column:
+            errors.append("template_column_index_missing")
+        elif type(column["index"]) is not int or column["index"] < 0:
+            errors.append("template_column_index_invalid")
+        else:
+            column_indexes.append(column["index"])
         raw_source_index = column.get("source_index")
         parsed_source_index = _parse_source_index(column)
         if raw_source_index is not None and parsed_source_index is None:
@@ -125,7 +130,8 @@ def validate_template_columns(columns: list[dict[str, Any]]) -> dict[str, list[s
         if (
             not excluded_quantity_warning_added
             and _normalize_token(column.get("role")) == "quantity"
-            and (column.get("semantic") or {}).get("aggregation_role") == "exclude"
+            and isinstance(column.get("semantic"), dict)
+            and column["semantic"].get("aggregation_role") == "exclude"
         ):
             warnings.append("template_quantity_column_excluded_from_aggregation")
             excluded_quantity_warning_added = True
@@ -136,6 +142,8 @@ def validate_template_columns(columns: list[dict[str, Any]]) -> dict[str, list[s
     duplicate_source_indexes = sorted({value for value in source_indexes if source_indexes.count(value) > 1})
     if duplicate_source_indexes:
         errors.append("template_source_index_duplicate")
+    if len(column_indexes) != len(set(column_indexes)):
+        errors.append("template_column_index_duplicate")
     return {"errors": errors, "warnings": warnings}
 
 
