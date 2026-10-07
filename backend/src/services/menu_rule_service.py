@@ -198,7 +198,7 @@ def list_active_rules() -> list[dict]:
             return [_serialize_rule(rule) for rule in rules]
     except Exception as exc:  # noqa: BLE001
         logger.warning("Menu rule query failed", error=str(exc))
-        return []
+        raise ValueError("menu_rules_source_unresolved") from exc
 
 
 def ensure_default_rules() -> bool:

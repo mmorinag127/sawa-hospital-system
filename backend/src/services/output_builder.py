@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from copy import deepcopy
 from copy import copy
 from datetime import date as dt_date, datetime, timedelta
-from functools import lru_cache
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, Any
@@ -48,7 +47,6 @@ from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path("/tmp/orders-outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-_OUTPUT_LOOKUP_CACHE_SECONDS = 300
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"
@@ -816,94 +814,69 @@ def _build_menu_name_aliases(value: object) -> list[str]:
     return aliases
 
 
-def _output_lookup_cache_bucket() -> int:
-    return int(time.time() // _OUTPUT_LOOKUP_CACHE_SECONDS)
+def _source_snapshot(value):
+    from src.services.order_workflow_v2_service import _canonical_payload_json
+    return json.loads(_canonical_payload_json(value))
 
 
-@lru_cache(maxsize=512)
-def _cached_menu_items_for_week(
-    week_value: str,
-    facility_id: str,
-    cache_bucket: int,
-) -> tuple[tuple[tuple[str, Any], ...], ...]:
-    del cache_bucket
-    items = order_service._collect_menu_items_for_week(week_value, facility_id or None)  # noqa: SLF001
-    return tuple(tuple(sorted(dict(item).items())) for item in items if isinstance(item, dict))
+def _capture_output_sources(week_value, facility_id):
+    return _source_snapshot({
+        "week": week_value,
+        "facility": facility_id,
+        "items": _collect_current_menu_items_for_week(week_value, facility_id),
+        "entries": _collect_current_menu_entries_for_week(week_value, facility_id),
+        "rules": menu_rule_service.list_active_rules(),
+        "defaults": [],
+    })
 
 
-@lru_cache(maxsize=512)
-def _cached_menu_entries_for_week(
-    week_value: str,
-    facility_id: str,
-    cache_bucket: int,
-) -> tuple[tuple[tuple[str, Any], ...], ...]:
-    del cache_bucket
-    entries = order_service._collect_menu_entries_for_week(week_value, facility_id or None)  # noqa: SLF001
-    return tuple(tuple(sorted(dict(entry).items())) for entry in entries if isinstance(entry, dict))
+def _read_captured_menu_defaults(names, facility_id, sources=None):
+    names = list(dict.fromkeys(names))
+    if sources is not None:
+        with session_scope() as session:
+            values, revisions = menu_service.resolve_menu_defaults_in_session(session, names, facility_id)
+        current = _source_snapshot(values)
+    else:
+        current = _source_snapshot(_resolve_current_menu_defaults(names, facility_id))
+        revisions = []
+    if sources is not None:
+        for read in sources["defaults"]:
+            for name in set(names).intersection(read["names"]):
+                if read["values"].get(name) != current.get(name):
+                    raise ValueError("bagging_source_changed")
+            old_revisions = dict(read["revisions"])
+            if any(identity in old_revisions and old_revisions[identity] != revision for identity, revision in revisions):
+                raise ValueError("bagging_source_changed")
+            if read["names"] == names:
+                if read["values"] != current:
+                    raise ValueError("bagging_source_changed")
+                return deepcopy(read["values"])
+        sources["defaults"].append({"names": names, "values": current, "revisions": _source_snapshot(revisions)})
+    return current
 
 
-@lru_cache(maxsize=512)
-def _cached_menu_defaults(
-    names: tuple[str, ...],
-    facility_id: str,
-    cache_bucket: int,
-) -> tuple[tuple[str, tuple[tuple[str, Any], ...]], ...]:
-    del cache_bucket
-    defaults = menu_service.resolve_menu_defaults(list(names), facility_id or None)
-    return tuple(
-        (name, tuple(sorted(dict(defaults.get(name, {})).items())))
-        for name in names
-    )
+def _validate_output_sources(sources):
+    current = _capture_output_sources(sources["week"], sources["facility"])
+    for key in ("items", "entries", "rules"):
+        if current[key] != sources[key]:
+            raise ValueError("bagging_source_changed")
+    for read in sources["defaults"]:
+        with session_scope() as session:
+            values, revisions = menu_service.resolve_menu_defaults_in_session(session, read["names"], sources["facility"])
+        if _source_snapshot(values) != read["values"] or _source_snapshot(revisions) != read["revisions"]:
+            raise ValueError("bagging_source_changed")
 
 
-@lru_cache(maxsize=32)
-def _cached_active_menu_rules(cache_bucket: int) -> tuple[tuple[tuple[str, Any], ...], ...]:
-    del cache_bucket
-    rules = menu_rule_service.list_active_rules()
-    return tuple(tuple(sorted(dict(rule).items())) for rule in rules if isinstance(rule, dict))
+def _collect_current_menu_items_for_week(week, facility):
+    return order_service._collect_menu_items_for_week(week, facility)
 
 
-def _cached_tuple_rows_to_dicts(rows: tuple[tuple[tuple[str, Any], ...], ...]) -> list[dict]:
-    return [dict(row) for row in rows]
+def _collect_current_menu_entries_for_week(week, facility):
+    return order_service._collect_menu_entries_for_week(week, facility)
 
 
-def _collect_cached_menu_items_for_week(week_value: str | None, facility_id: str | None) -> list[dict]:
-    if not week_value:
-        return []
-    rows = _cached_menu_items_for_week(
-        str(week_value),
-        str(facility_id or ""),
-        _output_lookup_cache_bucket(),
-    )
-    return _cached_tuple_rows_to_dicts(rows)
-
-
-def _collect_cached_menu_entries_for_week(week_value: str | None, facility_id: str | None) -> list[dict]:
-    if not week_value:
-        return []
-    rows = _cached_menu_entries_for_week(
-        str(week_value),
-        str(facility_id or ""),
-        _output_lookup_cache_bucket(),
-    )
-    return _cached_tuple_rows_to_dicts(rows)
-
-
-def _resolve_cached_menu_defaults(names: list[str], facility_id: str | None) -> dict[str, dict]:
-    unique_names = tuple(dict.fromkeys(str(name or "").strip() for name in names if str(name or "").strip()))
-    if not unique_names:
-        return {}
-    rows = _cached_menu_defaults(
-        unique_names,
-        str(facility_id or ""),
-        _output_lookup_cache_bucket(),
-    )
-    return {name: dict(payload) for name, payload in rows}
-
-
-def _list_cached_active_menu_rules() -> list[dict]:
-    rows = _cached_active_menu_rules(_output_lookup_cache_bucket())
-    return _cached_tuple_rows_to_dicts(rows)
+def _resolve_current_menu_defaults(names, facility):
+    return menu_service.resolve_menu_defaults(names, facility)
 
 
 def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int, str] | None:
@@ -1049,45 +1022,6 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
     return enriched
 
 
-def _build_menu_entry_indexes(menu_entries: list[dict]) -> tuple[dict[tuple[str, str, str], dict], dict[tuple[str, str], list[dict]]]:
-    exact: dict[tuple[str, str, str], dict] = {}
-    by_date_name: dict[tuple[str, str], list[dict]] = {}
-    for entry in menu_entries:
-        line_date = _ensure_date(entry.get("menu_date"))
-        if not line_date:
-            continue
-        name_key = _normalize_menu_key(entry.get("name"))
-        if not name_key:
-            continue
-        date_key = line_date.isoformat()
-        by_date_name.setdefault((date_key, name_key), []).append(entry)
-        daypart_key = _normalize_delivery_daypart(entry.get("daypart"))
-        if daypart_key:
-            exact[(date_key, daypart_key, name_key)] = entry
-    return exact, by_date_name
-
-
-def _resolve_menu_entry_override(
-    line: dict,
-    exact_index: dict[tuple[str, str, str], dict],
-    date_name_index: dict[tuple[str, str], list[dict]],
-) -> dict | None:
-    line_date = _ensure_date(line.get("date"))
-    if not line_date:
-        return None
-    name_key = _normalize_menu_key(line.get("menu_name"))
-    if not name_key:
-        return None
-    date_key = line_date.isoformat()
-    daypart_key = _normalize_delivery_daypart(line.get("daypart"))
-    if daypart_key:
-        matched = exact_index.get((date_key, daypart_key, name_key))
-        if matched:
-            return matched
-    candidates = date_name_index.get((date_key, name_key)) or []
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
 
 
 def _captured_monthly_categories(menu_entries: list[dict]) -> dict:
@@ -1122,28 +1056,6 @@ def _captured_monthly_categories(menu_entries: list[dict]) -> dict:
                 raise ValueError("delivery_monthly_slot_ambiguous")
             slots[key] = resolved
     return slots
-
-
-def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> list[dict]:
-    if not menu_entries:
-        return lines
-    exact_index, date_name_index = _build_menu_entry_indexes(menu_entries)
-    if not exact_index and not date_name_index:
-        return lines
-    enriched: list[dict] = []
-    for line in lines:
-        entry = _resolve_menu_entry_override(line, exact_index, date_name_index)
-        if not entry:
-            enriched.append(line)
-            continue
-        updated = dict(line)
-        entry_daypart = _normalize_delivery_daypart(entry.get("daypart"))
-        if entry_daypart:
-            updated["daypart"] = entry_daypart
-        if entry.get("category"):
-            updated["menu_category"] = entry.get("category")
-        enriched.append(updated)
-    return enriched
 
 
 def _normalize_output_daypart(value: object) -> str:
@@ -1487,9 +1399,10 @@ def _apply_menu_master_defaults(
     facility_id: str | None,
     *,
     apply_category: bool = True,
+    sources: dict | None = None,
 ) -> list[dict]:
     menu_names = [str(line.get("menu_name") or "").strip() for line in lines if str(line.get("menu_name") or "").strip()]
-    defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
+    defaults = _read_captured_menu_defaults(menu_names, facility_id, sources)
     if not defaults:
         return lines
     enriched: list[dict] = []
@@ -1566,7 +1479,7 @@ def _apply_condiment_lines(lines: list[dict]) -> list[dict]:
 def _build_condiment_map(menu_names: list[str], facility_id: str | None) -> dict[str, list[str]]:
     if not menu_names:
         return {}
-    defaults = _resolve_cached_menu_defaults(menu_names, facility_id)
+    defaults = _read_captured_menu_defaults(menu_names, facility_id)
     condiment_map: dict[str, list[str]] = {}
     for name in menu_names:
         payload = defaults.get(name, {})
@@ -1841,14 +1754,16 @@ def build_order_lines_for_outputs(
             1,
         )
     menu_items_started = time.perf_counter()
-    menu_items = _collect_cached_menu_items_for_week(week_value, facility_id)
+    sources = _capture_output_sources(week_value, facility_id)
+    producer_candidate["output_source_snapshot"] = sources
+    menu_items = deepcopy(sources["items"])
     if timings is not None:
         timings["build_order_lines_menu_items_ms"] = round(
             (time.perf_counter() - menu_items_started) * 1000,
             1,
         )
     menu_entries_started = time.perf_counter()
-    menu_entries = _collect_cached_menu_entries_for_week(week_value, facility_id)
+    menu_entries = deepcopy(sources["entries"])
     producer_candidate["output_menu_entries"] = deepcopy(menu_entries)
     if timings is not None:
         timings["build_order_lines_menu_entries_ms"] = round(
@@ -1875,15 +1790,15 @@ def build_order_lines_for_outputs(
     order_lines = _apply_menu_entry_overrides(order_lines, menu_entries)
     order_lines = _apply_menu_overrides(order_lines, menu_items)
     order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
-    order_lines = _apply_menu_rules(order_lines, facility_id)
+    order_lines = _apply_menu_rules(order_lines, facility_id, rules=sources["rules"])
     order_lines = _apply_garnish_defaults(order_lines)
-    order_lines = _apply_menu_master_defaults(order_lines, facility_id)
+    order_lines = _apply_menu_master_defaults(order_lines, facility_id, sources=sources)
     order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
     order_lines = _apply_garnish_defaults(order_lines)
-    order_lines = _apply_menu_master_defaults(order_lines, facility_id)
+    order_lines = _apply_menu_master_defaults(order_lines, facility_id, sources=sources)
     order_lines = _apply_label_meal_slot_categories(order_lines)
     bag_types = _resolve_bag_types(facility_config)
     order_lines = _apply_bag_size_defaults(order_lines, bag_types)
@@ -2214,8 +2129,8 @@ def _rule_applies(rule: dict, line: dict, facility_id: str | None) -> bool:
     return True
 
 
-def _apply_menu_rules(lines: list[dict], facility_id: str | None) -> list[dict]:
-    rules = _list_cached_active_menu_rules()
+def _apply_menu_rules(lines: list[dict], facility_id: str | None, *, rules: list[dict] | None = None) -> list[dict]:
+    rules = menu_rule_service.list_active_rules() if rules is None else rules
     if not rules:
         return lines
     type_weight = {"global": 100, "menu": 200, "facility": 300}

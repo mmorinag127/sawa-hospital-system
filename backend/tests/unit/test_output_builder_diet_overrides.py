@@ -78,7 +78,7 @@ def test_daily_labels_derive_comparable_soft_from_facility_quantity_columns():
             }
         ],
         {
-            "fax_template_override": {
+            "fax_template": {
                 "columns": [
                     {"role": "quantity", "diet_type": "soft", "area_id": "X"},
                     {"role": "quantity", "diet_type": "regular_bag", "area_id": "X"},
@@ -252,7 +252,7 @@ def test_daily_labels_show_master_condiment_as_main_side_label(monkeypatch):
     }
     monkeypatch.setattr(
         output_builder,
-        "_resolve_cached_menu_defaults",
+        "_resolve_current_menu_defaults",
         lambda names, facility_id: {name: defaults[name] for name in names if name in defaults},
     )
 
@@ -711,7 +711,7 @@ def test_label_meal_slots_are_applied_after_menu_master_defaults(monkeypatch):
 
     monkeypatch.setattr(
         output_builder,
-        "_resolve_cached_menu_defaults",
+        "_resolve_current_menu_defaults",
         lambda _names, _facility_id: {
             "竹輪の卵炒め": {"category": "主菜"},
             "ブロッコリーのおかか和え": {"category": "副菜2"},
@@ -966,11 +966,11 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
 
 
 def test_bag_level_monthly_menu_item_qty_overrides_stale_materialized_amounts(monkeypatch):
-    monkeypatch.setattr(output_builder, "_collect_cached_menu_entries_for_week", lambda _week_value, _facility_id: [])
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "_collect_current_menu_entries_for_week", lambda _week_value, _facility_id: [])
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
     monkeypatch.setattr(
         output_builder,
-        "_collect_cached_menu_items_for_week",
+        "_collect_current_menu_items_for_week",
         lambda _week_value, _facility_id: [
             {
                 "id": "MMI-tofu",
@@ -1169,7 +1169,7 @@ def test_output_diet_type_override_maps_diabetes_to_regular(monkeypatch):
     monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
     monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
     monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
     monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
 
@@ -1202,7 +1202,7 @@ def test_output_diet_type_is_unchanged_without_facility_override(monkeypatch):
     monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
     monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
     monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
     monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
 
@@ -1254,7 +1254,7 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
     monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
     monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
     monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
     monkeypatch.setattr(
@@ -1456,13 +1456,13 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
     monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
     monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
     monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
-    monkeypatch.setattr(output_builder, "_collect_cached_menu_items_for_week", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(output_builder, "_collect_current_menu_items_for_week", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         output_builder,
-        "_collect_cached_menu_entries_for_week",
+        "_collect_current_menu_entries_for_week",
         lambda *_args, **_kwargs: [
             {
                 "menu_date": "2026-07-13",
@@ -1757,13 +1757,13 @@ def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypat
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
     monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda _names, _facility_id: {})
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
     monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
     monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
-    monkeypatch.setattr(output_builder, "_collect_cached_menu_items_for_week", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(output_builder, "_collect_current_menu_items_for_week", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         output_builder,
-        "_collect_cached_menu_entries_for_week",
+        "_collect_current_menu_entries_for_week",
         lambda *_args, **_kwargs: [
             {
                 "menu_date": "2026-07-13",

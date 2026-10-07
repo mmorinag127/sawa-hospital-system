@@ -3628,6 +3628,7 @@ def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]], 
         enriched_lines = output_builder.build_order_lines_for_outputs(order_payload, producer_candidate=producer_input)
         materialization_candidate["output_lines"] = copy.deepcopy(enriched_lines)
         materialization_candidate["output_menu_entries"] = copy.deepcopy(producer_input["output_menu_entries"])
+        materialization_candidate["output_source_snapshot"] = copy.deepcopy(producer_input["output_source_snapshot"])
         bag_rows = output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines, configured_input=materialization_candidate["configured_input"])
         if not isinstance(bag_rows, list):
             raise BaggingOutputUnresolved("bagging_output_invalid")
@@ -3975,6 +3976,11 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         except BaggingOutputUnresolved as exc:
             return None, str(exc)
         output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+        from src.services import output_builder
+        try:
+            output_builder._validate_output_sources(materialization_candidate["output_source_snapshot"])
+        except ValueError as exc:
+            return None, str(exc)
         order_output_artifact_service.save_bagging_result_artifact(session, payload=bagging_result)
         order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
         meta = _workflow_meta(workflow)

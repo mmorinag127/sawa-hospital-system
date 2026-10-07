@@ -31,7 +31,7 @@ def test_first_bagging_producer_then_consumer_uses_same_captured_output(isolated
     expected_bags = output_builder.build_bag_rows_for_outputs({"id": order.id, "facility": "fixture", "week": "2026-10"}, accepted_candidate=accepted)
     with patch.object(output_builder, "_accepted_output_candidate", return_value=accepted), patch("src.services.config_service.get_facility_config", side_effect=AssertionError("changed master read")):
         assert output_builder.build_order_lines_for_outputs({"id": order.id}) == candidate["output_lines"]
-        with patch.object(output_builder, "_collect_cached_menu_items_for_week", side_effect=AssertionError("late monthly read")), patch.object(output_builder, "_resolve_cached_menu_defaults", side_effect=AssertionError("late master read")):
+        with patch.object(output_builder, "_collect_current_menu_items_for_week", side_effect=AssertionError("late monthly read")), patch.object(output_builder, "_resolve_current_menu_defaults", side_effect=AssertionError("late master read")):
             assert output_builder.build_bag_rows_for_outputs({"id": order.id, "facility": "fixture", "week": "2026-10"}) == expected_bags
     foreign_lines = [{**candidate["output_lines"][0], "quantity_original": 99}]
     with pytest.raises(ValueError, match="accepted output lines mismatch"):
@@ -75,7 +75,7 @@ def test_output_missing_or_inconsistent_acceptance_receipt_stops(change):
 
 def test_actual_delivery_authoritative_empty_does_not_read_current(monkeypatch):
     monkeypatch.setattr(output_builder, "_build_ocr_menu_meta", lambda *args, **kwargs: pytest.fail("empty receipt replaced by current OCR"))
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda *args: pytest.fail("current menu defaults"))
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda *args: pytest.fail("current menu defaults"))
     rows = output_builder._build_delivery_rows({"id": "own", "facility": "fixture", "lines": []}, {"columns": []}, {"zero_as_empty": False}, {}, {"entries": [], "by_menu": {}, "entry_defaults": {}})
     assert rows == []
 
@@ -295,7 +295,7 @@ def test_actual_delivery_context_duplicate_preserves_producer_first(monkeypatch)
         return output_builder._workflow_v2_materialization_candidate(None, order, state, sheet)
     monkeypatch.setattr(output_builder, "_accepted_output_candidate", accepted)
     monkeypatch.setattr(output_builder, "get_order_by_id", lambda oid: {"id": oid, "facility": "fixture", "week": "2026-10"})
-    monkeypatch.setattr(output_builder, "_resolve_cached_menu_defaults", lambda *args: pytest.fail("consumer current master"))
+    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda *args: pytest.fail("consumer current master"))
     context = output_builder._prepare_output_context("own", include_bags=False)
     assert list(context["ocr_menu_meta"]["by_menu"].values())[0] == entries[0]
     delivery = output_builder._build_delivery_rows(context["order_for_outputs"], context["invoice_template"], context["quantity_rules"], context["facility_config"], context["ocr_menu_meta"])
