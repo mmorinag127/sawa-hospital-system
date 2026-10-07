@@ -64,7 +64,7 @@ function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
 
       <section className="panel">
         <p className="subtle">{message}</p>
-        <TextField type="month" label="対象月" value={month} onChange={(event) => { owner.changed(); setMonth(event.target.value); }} InputLabelProps={{ shrink: true }} />
+        <TextField type="month" label="対象月" value={month} onChange={(event) => { owner.changed(); setMonth(event.target.value); }} slotProps={{ inputLabel: { shrink: true } }} />
         <Button disabled={!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)} onClick={() => void router.push(`/menus/${month}`)}>対象月を開く</Button>
       </section>
 

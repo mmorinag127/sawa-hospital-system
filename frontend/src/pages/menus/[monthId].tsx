@@ -633,6 +633,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const [savedImports, setSavedImports] = useState<SavedMenuImport[]>([]);
   const [menu, setMenu] = useState<MonthlyMenu | null>(null);
   const [items, setItems] = useState<MenuItem[]>([]);
+  const [itemPage, setItemPage] = useState(0);
+  const [itemRowsPerPage, setItemRowsPerPage] = useState(25);
   const [entries, setEntries] = useState<MenuEntry[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [sheetName, setSheetName] = useState<string>("");
@@ -832,6 +834,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     validateSnapshot(data);
     setMenu(data.menu);
     setItems(data.items);
+    setItemPage(0);
     setEntries(data.entries);
     setRevision(data.revision);
     if (command === "item" || (!itemFormDirty && !command)) itemRevision.current = data.revision;
@@ -2807,7 +2810,9 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       <section className="panel">
         <details className="menu-list-details">
           <summary>メニュー一覧</summary>
-          <DataTable label="月次メニュー一覧" rows={items} columns={itemColumns} rowKey={(item) => item.id} />
+          <DataTable label="月次メニュー一覧" rows={items.slice(itemPage * itemRowsPerPage, (itemPage + 1) * itemRowsPerPage)} columns={itemColumns} rowKey={(item) => item.id}
+            total={items.length} page={itemPage} rowsPerPage={itemRowsPerPage} onPageChange={setItemPage}
+            onRowsPerPageChange={(size) => { setItemRowsPerPage(size); setItemPage(0); }} />
         </details>
         <datalist id="daypart-options">
           {daypartOptions.map((value) => (

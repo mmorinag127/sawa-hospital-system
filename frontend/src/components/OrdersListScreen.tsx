@@ -4,10 +4,10 @@ import { Box, Button, MenuItem, Stack, Typography } from "@mui/material";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { DataTable, FormTextField, RequestState, SawaProvider, type TableColumn } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
-import TopNav from "../../../components/TopNav";
-import { apiClient } from "../../../services/apiClient";
-import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
-import { fetchFacilityNameMap, fetchOrderFacilityCandidates, type FacilityCandidate } from "../../../services/facilityData";
+import TopNav from "./TopNav";
+import { apiClient } from "../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
+import { fetchFacilityNameMap, fetchOrderFacilityCandidates, type FacilityCandidate } from "../services/facilityData";
 
 type OrderSummary = {
   id: string;

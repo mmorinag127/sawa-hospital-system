@@ -5,6 +5,28 @@ const vm = require('node:vm');
 const test = require('node:test');
 const ts = require('typescript');
 const root = path.join(__dirname, '../src');
+test('actual menu-rule classifier preserves any strict 409 and original error input', () => {
+  const source = ts.createSourceFile('menu-rules.tsx', fs.readFileSync(path.join(root, 'pages/menu-rules.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let callback;
+  const visit = node => {
+    if (ts.isJsxAttribute(node) && node.name.getText(source) === 'classifyError') callback = node.initializer.expression;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(callback);
+  let received;
+  const context = { exports: {}, errorText: error => { received = error; return 'original raw message'; } };
+  vm.runInNewContext(ts.transpileModule('exports.fn=' + callback.getText(source), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, context);
+  const { AxiosError } = require('axios');
+  const axios409 = new AxiosError('conflict');
+  axios409.response = { status: 409 };
+  for (const [error, kind] of [[axios409, 'conflict'], [{ response: { status: 409 } }, 'conflict'], [null, 'error'], [{ response: { status: 500 } }, 'error']]) {
+    const result = context.exports.fn(error);
+    assert.equal(result.kind, kind);
+    assert.equal(result.message, 'original raw message');
+    assert.equal(received, error);
+  }
+});
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return {promise,resolve,reject}; };
 function ownerHarness() {
   const state = {auth:'session-A', route:'/base-menus', active:true};
@@ -80,7 +102,7 @@ test('actual selected EditForm save adopts own A response and retains zero value
 });
 
 function sharedSubmit(context) {
-  const sharedPath=process.env.H1_SHARED_FORM_SOURCE || '/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/platform-main/packages/ui/src/form.tsx';
+  const sharedPath=path.join(__dirname,'../node_modules/@sawa/ui/dist/form.js');
   const source=ts.createSourceFile(sharedPath,fs.readFileSync(sharedPath,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let node;
   const visit=n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(source)==='submit')node=n.initializer;ts.forEachChild(n,visit);};visit(source);
   assert.ok(node);context.exports={};vm.runInNewContext(ts.transpileModule('exports.fn='+node.getText(source),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,context);
@@ -157,7 +179,9 @@ test('actual menu rule delete B cannot clear selected dirty A',async()=>{
 
 for(const protectedKind of ['item','master'])test(`actual monthly command-after load preserves dirty ${protectedKind} when target disappears`,async()=>{
   const pending=deferred();let adopted=0,message='';
-  const context={monthId:'2026-10',menuLoadGeneration:{current:0},protectedEditor:{current:{item:false,master:false}},
+  const hook={exports:{},require:name=>name==='react'?{useRef:value=>({current:value}),useEffect:fn=>fn()}:name.includes('browserSession')?{browserSessionKey:()=> 'auth-A'}:{hasActiveSessionAuthHeader:()=>true}};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root,'hooks/useMenuInputOwner.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,hook);
+  const context={monthId:'2026-10',owner:hook.exports.useMenuInputOwner('/menus/2026-10'),menuLoadGeneration:{current:0},protectedEditor:{current:{item:false,master:false}},
     apiClient:{get:()=>pending.promise},setMessage:value=>{message=value;},setMenu:()=>{adopted++;},setItems:()=>{adopted++;},setEntries:()=>{adopted++;}};
   const command=actual('menus/[monthId].tsx','loadMenu',context)();context.protectedEditor.current[protectedKind]=true;
   pending.resolve({data:{menu:{id:'2026-10'},items:[],entries:[],master_checks:{issues:[]}}});await command;

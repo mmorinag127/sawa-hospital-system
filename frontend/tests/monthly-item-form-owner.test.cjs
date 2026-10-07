@@ -11,10 +11,22 @@ function evaluate(node,source,context){context.exports={};vm.runInNewContext(ts.
 function actual(name,context){let node;const visit=n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(pageSource)===name)node=n.initializer;ts.forEachChild(n,visit);};visit(pageSource);assert.ok(node,name);return evaluate(node,pageSource,context);}
 function attribute(name,context){let node;const visit=n=>{if(ts.isJsxAttribute(n)&&n.name.getText(pageSource)===name)node=n.initializer.expression;ts.forEachChild(n,visit);};visit(pageSource);assert.ok(node,name);return evaluate(node,pageSource,context);}
 function shared(name,context){
-  const filename=process.env.H1_SHARED_FORM_SOURCE||'/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/platform-main/packages/ui/src/form.tsx';
+  const filename=path.join(__dirname,'../node_modules/@sawa/ui/dist/form.js');
   const source=ts.createSourceFile(filename,fs.readFileSync(filename,'utf8'),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let node;
   const visit=n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(source)===name)node=n.initializer;ts.forEachChild(n,visit);};visit(source);assert.ok(node,name);return evaluate(node,source,context);
 }
+
+test('monthly public DataTable paging retains every item and resets size without editing values',()=>{
+  let table;const visit=node=>{if(ts.isJsxSelfClosingElement(node)&&node.tagName.getText(pageSource)==='DataTable')table=node;ts.forEachChild(node,visit);};visit(pageSource);assert.ok(table);
+  const props=new Map(table.attributes.properties.filter(ts.isJsxAttribute).map(node=>[node.name.getText(pageSource),node.initializer]));
+  const items=Array.from({length:61},(_,id)=>({id,qty:id===0?0:null,raw:' 0 '}));
+  const context={items,itemPage:0,itemRowsPerPage:25,setItemPage:value=>{context.itemPage=value;},setItemRowsPerPage:value=>{context.itemRowsPerPage=value;}};
+  const value=name=>evaluate(props.get(name).expression,pageSource,context);
+  const collected=[];for(let page=0;page<3;page++){context.itemPage=page;collected.push(...value('rows'));assert.equal(value('total'),61);}
+  assert.deepEqual(collected,items);value('onPageChange')(2);assert.equal(context.itemPage,2);
+  value('onRowsPerPageChange')(50);assert.equal(context.itemRowsPerPage,50);assert.equal(context.itemPage,0);
+  assert.equal(value('rows').length,50);assert.equal(items[0].qty,0);assert.equal(items[1].qty,null);assert.equal(items[0].raw,' 0 ');
+});
 function harness(reload=false){
   const session={key:'auth-A',valid:true};const refs=[],cleanups=[];
   const hook={exports:{},require:name=>name==='react'?{useRef:value=>{const ref={current:value};refs.push(ref);return ref;},useEffect:fn=>{cleanups.push(fn());}}:
@@ -27,7 +39,7 @@ function harness(reload=false){
     itemFormOperation:{current:null},selectedEntryRef:{current:'entry-A'},menuLoadGeneration:{current:0},itemSaveGeneration:{current:0},itemRevision:{current:'read-7'},
     exceptionRevision:{current:'read-7'},masterRevisions:{current:{}},itemFormDirty:true,exceptionDirty:false,selectedItem:item,
     mergeItemDraft:(saved,values)=>({...saved,...values}),itemDraft:saved=>({...saved}),setItemFormDirty:value=>{state.dirty=value;},
-    setMenu:()=>{},setItems:()=>{},setEntries:()=>{},setRevision:value=>{state.revision=value;},
+    setMenu:()=>{},setItems:()=>{},setItemPage:value=>{state.itemPage=value;},setEntries:()=>{},setRevision:value=>{state.revision=value;},
     setMasterCheckState:fn=>fn({issues:[],resolutions:{}}),setMessage:value=>{state.message=value;},window:{confirm:()=>true},
     apiClient:{put:(url,body,config)=>{state.sent={url,body,config};return request.promise;},get:()=>request.promise}};
   for(const name of ['beginItemFormOperation','takeItemFormOperation','validateSnapshot','adoptSnapshot','saveItem'])context[name]=(...args)=>actual(name,context)(...args);
