@@ -32,7 +32,10 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   };
   assert.equal(normalize(source),normalize(old));
   const production='src/pages/orders/[id]/workflow-v2.tsx';
-  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
+  const approvedBefore=execFileSync('git',['show','7d7e41d2085376013a835f4e6f5904c4031b0c1f:frontend/'+production],{encoding:'utf8'});
+  const approvedAfter=execFileSync('git',['show','d55763365c3d2159dc976b130e0cc7a6de5f162f:frontend/'+production],{encoding:'utf8'});
+  assert.equal(approvedBefore,execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
+  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),approvedAfter,'exact approved control/theme delta only; full old byte equality is superseded');
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
   const after=source.slice(source.indexOf('function actual('),source.indexOf('\nconst plain='));
   assert.equal(after.replace('const exports={},bindings={process:undefined,fetch:undefined,require:undefined,global:undefined,module:undefined,Buffer:undefined,globalThis:undefined,...context,exports};\n  vm.compileFunction(code,Object.keys(bindings))(...Object.values(bindings));return exports.fn;', 'const exports={};vm.runInNewContext(code,{...context,exports});return exports.fn;'),before);

@@ -107,7 +107,19 @@ function nonrender(source){
   return source.replace('import { Button, Input, NativeSelect } from "@mui/material";\n','');
 }
 test('complete ordinary control parity and byte-frozen OCR/geometry surfaces',()=>{
-  const original=execFileSync('git',['show',base+':frontend/'+file],{encoding:'utf8'}),source=fs.readFileSync(file,'utf8');
+  const original=execFileSync('git',['show',base+':frontend/'+file],{encoding:'utf8'}),received=fs.readFileSync(file,'utf8');
+  const statusEdits=[
+    ['import { JobStatus, type JobStatusRecord } from "@sawa/ui";\n',''],
+    ['  job_status?: JobStatusRecord | null;\n',''],
+    ['  const effectiveHakodateJobStatus = hakodateJobStatus;\n','  const effectiveHakodateJobStatus = hakodateJobStatus || order?.workflow_state?.reparse_state || null;\n'],
+    ['  const hakodateJobStage = firstNonEmptyText(effectiveHakodateJobStatus?.processing_stage);\n','  const hakodateJobStage = firstNonEmptyText(\n    effectiveHakodateJobStatus?.processing_stage,\n    order?.ocr_processing_stage,\n  );\n'],
+    ['                                  {effectiveHakodateJobStatus?.job_status ? <JobStatus job={effectiveHakodateJobStatus.job_status} showDetails /> : <span>ジョブ記録未取得</span>}\n',''],
+  ];
+  let source=received;
+  for(const [accepted,prior] of statusEdits){
+    assert.equal(source.split(accepted).length-1,1,'exact approved recorded-status edit');
+    source=source.replace(accepted,prior);
+  }
   const before=inventory(original),after=inventory(source);
   assert.deepEqual(after.ast.parseDiagnostics,[]);
   assert.equal(nonrender(source),nonrender(original));

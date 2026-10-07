@@ -10,23 +10,38 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
 
-function page({ system = "shift", role = "operator", systems = [system], authOk = true, sessionOk = true } = {}) {
-  const state = [];
-  const calls = [];
-  let index = 0;
+async function page({ system = "shift", role = "operator", systems = [system], authOk = true, sessionOk = true } = {}) {
+  const { JSDOM } = require("jsdom");
+  const dom = new JSDOM("<div id='root'></div>", { url: "http://localhost/", pretendToBeVisual: true });
+  const saved = new Map();
+  let root, act;
+  async function cleanup() {
+    try { if (root) await act(async () => root.unmount()); }
+    finally {
+      dom.window.close();
+      for (const [key, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else delete globalThis[key];
+      }
+    }
+  }
+  try {
+  for (const key of ["window", "document", "navigator", "HTMLElement", "Element", "Node", "Event"]) {
+    saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key], writable: true });
+  }
+  saved.set("IS_REACT_ACT_ENVIRONMENT", Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT"));
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const React = require("react");
+  act = React.act;
+  const { createRoot } = require("react-dom/client");
+  const calls = [], state = [];
   const exports = {};
   vm.runInNewContext(compiled, {
     exports,
     require(name) {
-      if (name === "react") return { useState(initial) {
-        const i = index++;
-        if (!(i in state)) state[i] = initial;
-        return [state[i], (value) => { state[i] = value; }];
-      } };
-      if (name === "react/jsx-runtime") {
-        const jsx = (type, props) => ({ type, props });
-        return { jsx, jsxs: jsx };
-      }
+      if (name === "react") return React;
+      if (name === "react/jsx-runtime" || name === "@mui/material") return require(name);
       if (name.endsWith("apiClient")) return {
         clearAuth() { calls.push(["clear"]); },
         setBearerToken(token) { calls.push(["store", token]); },
@@ -42,27 +57,40 @@ function page({ system = "shift", role = "operator", systems = [system], authOk 
     },
     window: { location: { replace(url) { calls.push(["navigate", url]); } } },
   });
-  function render() { index = 0; return exports.default(); }
-  function find(node, type) {
-    if (!node || typeof node !== "object") return null;
-    if (node.type === type) return node;
-    return [node.props?.children].flat().map((child) => find(child, type)).find(Boolean);
-  }
-  const initial = render();
-  const select = find(initial, "select");
-  assert.equal(select.props.value, "shift");
-  assert.deepEqual(Array.from(select.props.children, (option) => option.props.value), ["shift", "school-lunch"]);
-  select.props.onChange({ target: { value: system } });
-  find(initial, "input").props.onChange({ target: { value: " signed-token " } });
+  root = createRoot(document.getElementById("root"));
+  await act(async () => root.render(React.createElement(exports.default)));
+  const select = document.querySelector("select"), input = document.querySelector("input");
+  assert.equal(select.value, "shift");
+  assert.deepEqual(Array.from(select.options, option => option.value), ["shift", "school-lunch"]);
+  assert.ok(select.closest(".MuiInput-root"));
+  assert.ok(input.closest(".MuiInput-root"));
+  await act(async () => { select.value = system; select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set.call(input, " signed-token ");
+    input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  });
   return {
     calls, state,
-    async submit() { await find(render(), "form").props.onSubmit({ preventDefault() {} }); },
+    async submit() {
+      try {
+        await act(async () => document.querySelector("form").dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
+        state[0] = input.value;
+        state[2] = document.querySelector("select").disabled;
+        state[3] = document.querySelector('[role="alert"]')?.textContent || "";
+      } finally {
+        await cleanup();
+      }
+    },
   };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 }
 
 for (const system of ["shift", "school-lunch"]) {
   test(`${system} authenticates with explicit target and canonical navigation`, async () => {
-    const scenario = page({ system });
+    const scenario = await page({ system });
     await scenario.submit();
     const { calls } = scenario;
     assert.equal(calls[0][0], "clear");
@@ -90,7 +118,7 @@ for (const invalid of [
   { systems: ["school-lunch", "shift"] }, { systems: [] }, { sessionOk: false },
 ]) {
   test(`school lunch fails closed: ${JSON.stringify(invalid)}`, async () => {
-    const scenario = page({ system: "school-lunch", ...invalid });
+    const scenario = await page({ system: "school-lunch", ...invalid });
     await scenario.submit();
     assert.equal(scenario.calls.some(([name]) => name === "store" || name === "navigate"), false);
     assert.equal(scenario.state[0], "");
