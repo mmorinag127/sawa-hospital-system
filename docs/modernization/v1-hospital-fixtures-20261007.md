@@ -1,5 +1,53 @@
 # Hospital Original-Input Fixtures: Component Technical Preparation
 
+## Projection Metadata Continuation (Current)
+
+Generating base: `29323324ba28007c1ad11d134096e66ef042f579`, same named
+fixture branch, dirty source. Earlier preparation hashes/results below are
+historical, not this continuation's source proof. No commit/integration performed.
+
+Root: physical projection represents version_id/valid_from/valid_to/facility,
+not every raw authored-version metadata key. `verify_projection` now compares
+those four matching authored keys using strict snapshots_equal. It does not
+strip or rewrite the full authored receipt: full digest and exact receipt checks
+still include unknown metadata. Missing represented keys still stop. Existing
+unknown_version=None positives remain unchanged and pass.
+
+Added eight cases: physical bool/int/float/null mutation rejection, unknown
+version metadata alter/remove/add rejection against full receipt and digest,
+and preserved raw bool/int/float/null metadata with semantic key-order equality.
+Only canonical_facility_lineage.py and its unit definitions changed as source.
+
+Focused unit: **43 passed, 6 warnings, exit 0**, no formal DB operation; existing
+fake Session models read/owned materialization statements without guard mocks.
+Owned explicit SQLite URI was supplied; no provider/install/network/broad rerun.
+Exact command, from backend (P is the absolute dedicated WT path above):
+
+```sh
+env -i PATH=/usr/bin:/bin HOME=$P/tmp/projection-metadata-proof/home TMPDIR=$P/tmp/projection-metadata-proof/temp XDG_CACHE_HOME=$P/tmp/projection-metadata-proof/cache PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. DB_URI=sqlite:///$P/tmp/projection-metadata-proof/unit.sqlite3 NO_GCE_CHECK=true GOOGLE_CLOUD_DISABLE_GRPC=true /Users/mmorinag/Sawa/2025.12/workspace/backend/.venv/bin/python -m pytest tests/unit/test_canonical_facility_lineage.py -q -p no:cacheprovider --junitxml=../tmp/projection-metadata-proof/results.xml > ../tmp/projection-metadata-proof/pytest.log 2>&1
+```
+
+Source SHA256: canonical lineage
+`6c7f9cc5ef62d012db3eabcc137390b6f54ff0a6c15bd284bb12c497f47a34a5`;
+unit `044bf4750a2929aafe6952ca2b0d1f9b6066b17f8ba8daf069dd59d725ac3b0c`.
+Log `tmp/projection-metadata-proof/pytest.log` SHA256
+`245ca99d3fadc4f71cc1a5a16a41ac113cc6518302d6e75456f0180cf401edb8`;
+unit XML SHA256 `5013743ed4f46a375b9f10731d34dbc0cc4a318055687344a4c8749f59a73ba3`.
+
+Actual parent XML read, not rerun:
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main/tmp/v1-parent-hospital-jobs-20261007/results.xml`,
+SHA256 `df18da91a09acf0f8482a2d413b84985bd0ea17024bb996a7cd7c91083e2a6b5`.
+87 recorded failures grouped by actual exception/assertion: lineage projection
+25; missing google.cloud.tasks_v2 23; receipt_owner_lost 4; delivery configuration
+required 25; original missing 2; workflow revision contract 8 (missing mock
+secondary_actions_json 1, missing checks 1, stale source-string assertions 2,
+reparse persisted result missing 3, terminal persist refused 1). Those other
+classes remain unmodified, not established production bugs merely from XML.
+Full per-case traces/grouping are preserved in owned tmp/record.json. Parent
+reported 128 passed and KeyboardInterrupt exit 2; not a complete neighbor run.
+Whole fixture/date/fresh producer/integrated acceptance remain parent gates.
+No owned PG server or needed running session remains. Stage freeze only.
+
 ## Status
 
 Not complete. The original selected-lineage root and literal guards now have

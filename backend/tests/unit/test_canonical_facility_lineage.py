@@ -276,3 +276,53 @@ def test_changed_selection_or_missing_source_proof_stops_before_write(monkeypatc
     with pytest.raises(store.CanonicalStoreError):
         service.materialize_facility_version_lineage(session, selection)
     assert session.statements == [] and not session.rows
+
+
+@pytest.mark.parametrize("value", [True, 0.0, None])
+def test_projected_literal_mutation_remains_rejected(monkeypatch, value):
+    selection, _ = selected(monkeypatch)
+    session = Session()
+    _, row = service.materialize_facility_version_lineage(session, selection)
+    row.config_json["quantity_setting"] = value
+    with pytest.raises(store.CanonicalStoreError, match="snapshot_mismatch"):
+        verify_projection(row)
+
+
+def test_projected_bool_to_int_mutation_remains_rejected(monkeypatch):
+    record = authored()
+    record["facility"]["raw_bool"] = True
+    selection, _ = selected(monkeypatch, record=record)
+    _, row = service.materialize_facility_version_lineage(Session(), selection)
+    row.config_json["raw_bool"] = 1
+    with pytest.raises(store.CanonicalStoreError, match="snapshot_mismatch"):
+        verify_projection(row)
+
+
+@pytest.mark.parametrize("change", ["alter", "remove", "add"])
+def test_full_unknown_version_receipt_remains_authoritative(monkeypatch, change):
+    selection, _ = selected(monkeypatch)
+    _, row = service.materialize_facility_version_lineage(Session(), selection)
+    original = deepcopy(row.validation_json["canonical_lineage"])
+    version = row.validation_json["canonical_lineage"]["authored_version"]
+    if change == "alter":
+        version["unknown_version"] = 0
+    elif change == "remove":
+        del version["unknown_version"]
+    else:
+        version["extra_raw"] = None
+    with pytest.raises(store.CanonicalStoreError, match="receipt_mismatch"):
+        verify_projection(row, original)
+    with pytest.raises(store.CanonicalStoreError, match="digest_mismatch"):
+        verify_projection(row)
+
+
+def test_full_unknown_version_metadata_and_key_order_preserved(monkeypatch):
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    record = authored()
+    record["unknown_version"] = {"bool": True, "int": 1, "float": 1.0, "null": None}
+    selection, _ = selected(monkeypatch, record=record)
+    _, row = service.materialize_facility_version_lineage(Session(), selection)
+    receipt = deepcopy(row.validation_json["canonical_lineage"])
+    row.validation_json["canonical_lineage"]["authored_version"] = dict(reversed(list(record.items())))
+    assert snapshots_equal(verify_projection(row, receipt)["authored_version"], record)
+    assert snapshots_equal(row.validation_json["creation_source_proof"], selection["canonical_source_proof"])

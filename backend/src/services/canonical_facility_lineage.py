@@ -44,7 +44,8 @@ def verify_projection(row, receipt=None):
                    "valid_from": row.valid_from.isoformat() if row.valid_from is not None else None,
                    "valid_to": row.valid_to.isoformat() if row.valid_to is not None else None,
                    "facility": row.config_json}
-        if not isinstance(authored, dict) or not snapshots_equal(payload, authored):
+        if not isinstance(authored, dict) or not snapshots_equal(
+                payload, {key: authored[key] for key in payload}):
             raise CanonicalStoreError("canonical_lineage_snapshot_mismatch", status_code=409)
         semantic = identity(recorded)
         if not all(isinstance(value, str) and value for value in semantic.values()) or \
