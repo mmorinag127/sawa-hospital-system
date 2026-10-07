@@ -43,9 +43,9 @@ class OwnedIntermediateAssetTests(TerminalPersistenceTests):
         sources = []
         with self.environment(storage), mock.patch.object(producer, "db", firestore), mock.patch.object(producer, "parse_gcs_event", original_parser):
             for index, name in enumerate(names):
-                source = producer._terminal_source("own-bucket", name, "19", "")
+                source = producer._original_pipeline_source("own-bucket", name, "19")
                 output = producer._owned_output_name("output/", source)
-                source["output_reference"] = f"gs://own-bucket/{output}"
+                source["output_reference"] = producer.format_gcs_uri("own-bucket", output)
                 reference = firestore.document(producer._safe_job_id(source))
                 reference.create({"status": "running", "execution_claim": {"job_id": source["job_id"], "output_reference": source["output_reference"]}})
                 result = {**source, "status": "done", "stage": "done", "quantity": 0, "unknown": None, "canonical_adoption_allowed": True}

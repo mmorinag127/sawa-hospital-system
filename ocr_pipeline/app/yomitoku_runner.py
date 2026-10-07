@@ -17,12 +17,20 @@ from app.pdf_render import render_pdf_to_page_images
 logger = logging.getLogger(__name__)
 
 @dataclass
+class FigureData:
+    name: str
+    content: bytes
+    mime_type: str
+    reference: str
+
+
+@dataclass
 class PageResult:
     page_index: int
     markdown_text: str
     ocr_vis: np.ndarray | None
     layout_vis: np.ndarray | None
-    figure_paths: list[Path]
+    figures: list[FigureData]
     tables: list[dict[str, Any]]
 
 
@@ -383,6 +391,8 @@ def run_yomitoku(
     figure_dir: str,
     page_images: Iterable[tuple[int, np.ndarray]] | None = None,
 ) -> tuple[list[PageResult], bytes | None, bytes | None]:
+    if not no_figure and (Path(figure_dir).is_absolute() or ".." in Path(figure_dir).parts):
+        raise ValueError("figure_dir must remain inside the owned page export directory")
     if page_images is None:
         if pdf_bytes is None:
             raise ValueError("pdf_bytes is required when page_images is not provided")
@@ -393,11 +403,16 @@ def run_yomitoku(
     page_results: list[PageResult] = []
     ocr_pdf_images: list[np.ndarray] = []
     layout_pdf_images: list[np.ndarray] = []
-    seen_figures: set[str] = set()
+    seen_pages: set[int] = set()
 
     with tempfile.TemporaryDirectory() as workdir:
         workdir_path = Path(workdir)
         for page_idx, img in page_iter:
+            if page_idx in seen_pages:
+                raise ValueError(f"duplicate figure page identity: {page_idx}")
+            seen_pages.add(page_idx)
+            page_workdir = workdir_path / f"page_{page_idx}"
+            page_workdir.mkdir()
             results, ocr_vis, layout_vis = analyzer(img)
             analysis = _serialize_results(results)
             height, width = img.shape[:2]
@@ -407,7 +422,7 @@ def run_yomitoku(
                 width=width,
                 height=height,
             )
-            md_path = workdir_path / f"page_{page_idx}.md"
+            md_path = page_workdir / f"page_{page_idx}.md"
             results.to_markdown(
                 str(md_path),
                 ignore_line_break=ignore_line_break,
@@ -419,19 +434,21 @@ def run_yomitoku(
             markdown_text = md_path.read_text(encoding="utf-8")
             figure_paths: list[Path] = []
             if not no_figure:
-                fig_dir = workdir_path / figure_dir
+                fig_dir = page_workdir / figure_dir
+                if not fig_dir.resolve().is_relative_to(page_workdir.resolve()):
+                    raise ValueError("figure export directory escapes the owned page directory")
                 if fig_dir.exists():
-                    all_figures = sorted(fig_dir.glob("*.png"))
-                    figure_paths = [path for path in all_figures if path.name not in seen_figures]
+                    figure_paths = sorted(fig_dir.rglob("*.png"))
                     for path in figure_paths:
-                        seen_figures.add(path.name)
+                        if not path.resolve().is_relative_to(page_workdir.resolve()):
+                            raise ValueError("exported figure escapes the owned page directory")
             page_results.append(
                 PageResult(
                     page_index=page_idx,
                     markdown_text=markdown_text,
                     ocr_vis=ocr_vis,
                     layout_vis=layout_vis,
-                    figure_paths=figure_paths,
+                    figures=[FigureData(path.name, path.read_bytes(), "image/png", path.relative_to(page_workdir).as_posix()) for path in figure_paths],
                     tables=tables,
                 )
             )

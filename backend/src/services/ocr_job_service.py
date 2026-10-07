@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import json
 from hashlib import sha256
-from urllib.parse import urlparse
+from src.services.storage_uri import parse_gcs_uri
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -135,6 +135,7 @@ def record_own_pipeline_delivery(job_id, *, selected_input_reference, input_refe
         if not isinstance(configured_input, dict):
             return False
         configured_digest = sha256(json.dumps(configured_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        input_source = parse_gcs_uri(input_reference)
         receipt = {
             "job_id": job_id, "order_id": owner["order_id"],
             "workflow_attempt_id": workflow.get("attempt"),
@@ -147,7 +148,7 @@ def record_own_pipeline_delivery(job_id, *, selected_input_reference, input_refe
             "configured_input_sha256": configured_digest,
             "selected_pdf_receipt": selected_pdf,
             "wait_timeout_seconds": wait_timeout_seconds,
-            "pipeline_job_id": f"{urlparse(input_reference).netloc}:{urlparse(input_reference).path.lstrip('/')}:{generation}",
+            "pipeline_job_id": f"{input_source.bucket}:{input_source.object_name}:{generation}",
         }
         job.metrics = {**(job.metrics or {}), "pipeline_delivery_receipt": receipt}
         return True

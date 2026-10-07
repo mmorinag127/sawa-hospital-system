@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from loguru import logger
 
 from src.services.storage_service import get_default_output_bucket
+from src.services.storage_uri import format_gcs_uri, parse_gcs_uri
 
 try:
     from google.cloud import storage  # type: ignore
@@ -22,7 +23,7 @@ def _default_state_uri() -> str | None:
     if not bucket:
         return None
     object_name = os.getenv("OCR_PIPELINE_STATE_OBJECT", "ocr/pipeline_state.json")
-    return f"gs://{bucket}/{object_name}"
+    return format_gcs_uri(bucket, object_name)
 
 
 def _state_uri() -> str | None:
@@ -70,11 +71,10 @@ def load_pipeline_state() -> dict | None:
         path = parsed.path if parsed.scheme else uri
         return _load_file(path)
     if parsed.scheme == "gs":
-        bucket = parsed.netloc
-        object_name = parsed.path.lstrip("/")
-        if not bucket or not object_name:
-            raise OCRPipelineStateConfigError(f"invalid pipeline state uri: {uri}")
-        return _load_gs(bucket, object_name)
+        source = parse_gcs_uri(uri)
+        if source.generation is not None or source.query or source.fragment:
+            raise OCRPipelineStateConfigError("pipeline state URI must identify a writable object")
+        return _load_gs(source.bucket, source.object_name)
     raise OCRPipelineStateConfigError(f"unsupported pipeline state uri: {uri}")
 
 
@@ -89,11 +89,10 @@ def _save_state(payload: dict) -> None:
         logger.info("OCR pipeline state saved", uri=uri)
         return
     if parsed.scheme == "gs":
-        bucket = parsed.netloc
-        object_name = parsed.path.lstrip("/")
-        if not bucket or not object_name:
-            raise OCRPipelineStateConfigError(f"invalid pipeline state uri: {uri}")
-        _save_gs(bucket, object_name, payload)
+        source = parse_gcs_uri(uri)
+        if source.generation is not None or source.query or source.fragment:
+            raise OCRPipelineStateConfigError("pipeline state URI must identify a writable object")
+        _save_gs(source.bucket, source.object_name, payload)
         logger.info("OCR pipeline state saved", uri=uri)
         return
     raise OCRPipelineStateConfigError(f"unsupported pipeline state uri: {uri}")

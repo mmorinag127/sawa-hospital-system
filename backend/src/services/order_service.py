@@ -98,7 +98,7 @@ from src.services.template_field_schema_service import (
     normalize_aux_semantic_display_value,
 )
 from src.services.storage_service import load_bytes_from_uri, get_default_output_bucket, save_artifact_bytes_to_gcs
-from src.services.storage_service import generate_signed_url
+from src.services.storage_service import generate_signed_url_from_uri, sign_published_figure_references
 from src.services.grid_detector import GridDetectionResult, detect_table_grid, detect_table_grid_image
 from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf
@@ -20694,19 +20694,11 @@ def _signed_url_from_uri(uri: str | None) -> str | None:
     parsed = urlparse(uri)
     if parsed.scheme != "gs":
         return uri
-    bucket = parsed.netloc
-    object_path = parsed.path.lstrip("/")
-    if not bucket or not object_path:
-        return uri
     try:
-        from urllib.parse import parse_qs
-        values = parse_qs(parsed.query).get("generation", [])
-        if values and (len(values) != 1 or not values[0].isdigit()):
-            raise ValueError("storage_generation_invalid")
-        return generate_signed_url(bucket, object_path, generation=values[0] if values else None)
+        return generate_signed_url_from_uri(uri)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Signed URL generation failed", uri=uri, error=str(exc))
-        return uri
+        raise ValueError("storage_signed_url_failed") from exc
 
 
 def _load_job_output(
@@ -21479,10 +21471,8 @@ def get_ocr_pages(
                 else _signed_url_from_uri(layout_overlay_uri)
             )
             figure_urls = [] if preview_only else [_signed_url_from_uri(uri) for uri in figure_uris]
-            if markdown_text and figure_uris:
-                for uri, signed in zip(figure_uris, figure_urls):
-                    if uri and signed:
-                        markdown_text = markdown_text.replace(uri, signed)
+            if markdown_text and not preview_only:
+                markdown_text = sign_published_figure_references(markdown_text, dict(zip(figure_uris, figure_urls)))
             pages.append(
                 {
                     "page_index": page.get("page_index"),

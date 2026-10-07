@@ -59,9 +59,9 @@ class TerminalPersistenceTests(unittest.TestCase):
         return stack
 
     def owned_result(self, stores, status):
-        source = producer._terminal_source("own-bucket", stores.name, "19", "")
+        source = producer._original_pipeline_source("own-bucket", stores.name, "19")
         stores.output = producer._owned_output_name("output/", source)
-        source["output_reference"] = f"gs://own-bucket/{stores.output}"
+        source["output_reference"] = producer.format_gcs_uri("own-bucket", stores.output)
         stores.create({"status": "running", "execution_claim": {"job_id": source["job_id"], "output_reference": source["output_reference"]}})
         return source, {**source, "status": status, "quantity": 0, "unknown": None,
                         "canonical_adoption_allowed": status == "done", "stage": "done" if status == "done" else "error"}

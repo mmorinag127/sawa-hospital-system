@@ -28,6 +28,8 @@ from app.rois import crop_rois, load_template_config, validate_captured_config
 from app.template_match import choose_template_and_warp
 from app.template_resolution import build_template_resolution
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, prewarm_analyzer, run_yomitoku
+from app.storage_uri import decorate_gcs_uri, format_gcs_uri, parse_gcs_uri, validate_generation, validate_source_query
+from app import figure_markup
 
 
 class MandatoryOcrStageFailed(RuntimeError):
@@ -49,7 +51,7 @@ _OUTPUT_OWNER = ContextVar("pipeline_output_owner", default=None)
 
 def _owned_output_name(output_prefix, source):
     identity = {key: value for key, value in source.items() if key != "output_reference"}
-    return f"{output_prefix}{_terminal_digest(identity)}/{Path(urlparse(source['input_reference']).path).name}.g{source['input_generation']}.json"
+    return f"{output_prefix}{_terminal_digest(identity)}/{Path(parse_gcs_uri(source['input_reference']).object_name).name}.g{source['input_generation']}.json"
 
 
 def _owned_output_context():
@@ -75,7 +77,7 @@ def _same_original_source(payload, source):
     return isinstance(payload, dict) and all(key in payload for key in source) and _terminal_digest({key: payload[key] for key in source}) == _terminal_digest(source)
 
 
-def _terminal_source(bucket, name, generation, output_name, *, blob=None, data=None):
+def _original_pipeline_source(bucket, name, generation, *, blob=None, data=None):
     if blob is None or data is None:
         blob, data = _download_generation_input(bucket, name, generation)
     _verify_selected_pdf_input(blob, data)
@@ -85,14 +87,19 @@ def _terminal_source(bucket, name, generation, output_name, *, blob=None, data=N
         raise TerminalReceiptConflict("terminal_execution_owner_missing")
     return {
         "job_id": f"{bucket}:{name}:{generation}",
-        "input_reference": f"gs://{bucket}/{name}", "input_generation": str(generation),
+        "input_reference": format_gcs_uri(bucket, name), "input_generation": str(generation),
         "input_sha256": hashlib.sha256(data).hexdigest(),
         "configured_input_sha256": configured_digest,
         "configured_input_receipt": json.loads(blob.metadata["configured_input_receipt"]),
         "execution_owner": owner,
         "selected_pdf_receipt": json.loads(blob.metadata["selected_pdf_receipt"]),
-        "output_reference": f"gs://{bucket}/{output_name}",
     }
+
+
+def _terminal_source(bucket, name, generation, output_name, *, blob=None, data=None):
+    source = _original_pipeline_source(bucket, name, generation, blob=blob, data=data)
+    source["output_reference"] = format_gcs_uri(bucket, output_name)
+    return source
 
 
 def _update_owned_terminal_job(job_ref, patch, receipt):
@@ -151,12 +158,12 @@ def _persist_terminal_intent(job_ref, bucket, output_name, intent):
     if _terminal_digest(persisted) != intent["result_digest"] or job.get("terminal_receipt") != receipt or job.get("status") != payload["status"]:
         raise TerminalPersistenceIncomplete("terminal_dual_store_incomplete")
     source = intent["source"]
-    parsed = urlparse(source["input_reference"])
+    parsed = parse_gcs_uri(source["input_reference"])
     try:
-        current_source = _terminal_source(bucket, parsed.path.lstrip("/"), source["input_generation"], output_name)
+        current_source = _terminal_source(bucket, parsed.object_name, source["input_generation"], output_name)
     except ValueError as exc:
         raise TerminalReceiptConflict("terminal_source_changed_before_ack") from exc
-    if parsed.netloc != bucket or source != current_source:
+    if parsed.bucket != bucket or source != current_source:
         raise TerminalReceiptConflict("terminal_source_changed_before_ack")
     return payload
 
@@ -185,7 +192,7 @@ def _replay_terminal(job_ref, bucket, name, generation, output_name):
         intent = json.loads(gcs.bucket(bucket).blob(output_name + ".terminal-intent.json").download_as_bytes(timeout=30, retry=None))
     except NotFound:
         job = job_ref.get().to_dict() or {}
-        expected = {"job_id": f"{bucket}:{name}:{generation}", "output_reference": f"gs://{bucket}/{output_name}"}
+        expected = {"job_id": f"{bucket}:{name}:{generation}", "output_reference": format_gcs_uri(bucket, output_name)}
         with _ACTIVE_PRODUCER_LOCK:
             active = expected["job_id"] in _ACTIVE_PRODUCER_JOBS
         if active and job.get("status") == "running" and job.get("execution_claim") == expected:
@@ -279,7 +286,6 @@ app.logger.info(
 db = firestore.Client(project=PROJECT_ID or None)
 gcs = storage.Client(project=PROJECT_ID or None)
 
-FIGURE_REGEX = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
 _PREWARM_STARTED = False
 _PREWARM_LOCK = threading.Lock()
 
@@ -329,9 +335,9 @@ def _upload_bytes(bucket: str, object_name: str, data: bytes, content_type: str)
     from google.api_core.exceptions import PreconditionFailed
     source, job_ref = _owned_output_context()
     _assert_output_owner(job_ref, source)
-    output = urlparse(source["output_reference"])
-    prefix = output.path.lstrip("/").rsplit("/", 1)[0] + "/assets/"
-    if output.netloc != bucket or not object_name.startswith(prefix):
+    output = parse_gcs_uri(source["output_reference"])
+    prefix = output.object_name.rsplit("/", 1)[0] + "/assets/"
+    if output.bucket != bucket or not object_name.startswith(prefix):
         raise TerminalReceiptConflict("artifact_owner_namespace_mismatch")
     blob = gcs.bucket(bucket).blob(object_name)
     metadata = {"original_source": json.dumps(source, ensure_ascii=False, sort_keys=True), "sha256": hashlib.sha256(data).hexdigest()}
@@ -346,7 +352,7 @@ def _upload_bytes(bucket: str, object_name: str, data: bytes, content_type: str)
     if not str(blob.generation or "").isdigit():
         raise TerminalReceiptConflict("artifact_generation_required")
     _assert_output_owner(job_ref, source)
-    return f"gs://{bucket}/{object_name}?generation={blob.generation}"
+    return format_gcs_uri(bucket, object_name, blob.generation)
 
 
 def _download_generation_input(bucket, name, generation):
@@ -360,7 +366,9 @@ def _download_generation_input(bucket, name, generation):
 
 
 def _verify_selected_pdf_input(blob, data):
-    from urllib.parse import urlparse, parse_qs
+    """URI correction for pending H2's selected-input fence (not a new receipt)."""
+    import hashlib
+    from urllib.parse import urlsplit
 
     raw = (blob.metadata or {}).get("selected_pdf_receipt")
     if not raw:
@@ -370,20 +378,20 @@ def _verify_selected_pdf_input(blob, data):
         raise ValueError("selected_pdf_digest_required")
     if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
         raise ValueError("selected_pdf_bytes_changed")
-    selected = urlparse(receipt["storage_uri"])
-    if selected.scheme == "gs":
+    if urlsplit(receipt["storage_uri"]).scheme == "gs":
+        source = parse_gcs_uri(receipt["storage_uri"])
         generation = receipt.get("generation")
-        values = parse_qs(selected.query).get("generation", [])
-        if generation is None and not values:
-            original = gcs.bucket(selected.netloc).blob(selected.path.lstrip("/"))
+        if generation is None and source.generation is None:
+            original = gcs.bucket(source.bucket).blob(source.object_name)
             if hashlib.sha256(original.download_as_bytes(timeout=30, retry=None)).hexdigest() != receipt["sha256"]:
                 raise ValueError("selected_pdf_bytes_changed")
             return
-        if not str(generation or "").isdigit() or values != [str(generation)]:
+        generation = validate_generation(generation)
+        if source.generation != generation:
             raise ValueError("selected_pdf_generation_required")
-        original = gcs.bucket(selected.netloc).blob(selected.path.lstrip("/"))
+        original = gcs.bucket(source.bucket).blob(source.object_name)
         original.reload(timeout=30, retry=None)
-        if str(original.generation) != str(generation):
+        if str(original.generation) != generation:
             raise ValueError("selected_pdf_generation_changed")
 
 
@@ -412,6 +420,69 @@ def _recognition_input_receipt(original_pdf_bytes, recognition_pdf_bytes, source
     return {"representation": "corrected", "receipt": dict(corrected_receipt)}
 
 
+def _upload_figure_artifact(bucket: str, object_name: str, figure) -> str:
+    return _upload_bytes(bucket, object_name, figure.content, figure.mime_type)
+
+
+def _publish_page_figures(bucket: str, figure_prefix: str, page_result) -> tuple[str, int, dict[str, str]]:
+    from pathlib import PurePosixPath
+    from urllib.parse import urlsplit, unquote
+
+    def local_reference(ref, decode=True):
+        if decode:
+            parsed = urlsplit(ref)
+            if parsed.scheme or parsed.netloc:
+                return None
+            if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
+                raise ValueError("figure_reference_encoding_invalid")
+            decoded = unquote(parsed.path, encoding="utf-8", errors="strict")
+        else:
+            # FigureData.reference is the actual page-relative filesystem path,
+            # not a URI. '?' / '#' / '%' here are literal key characters.
+            decoded = ref
+        path = PurePosixPath(decoded)
+        if not decoded or path.is_absolute() or ".." in path.parts or "\\" in decoded or path.as_posix() != decoded:
+            raise ValueError(f"invalid local figure reference on page {page_result.page_index}: {ref}")
+        return decoded
+
+    figure_map = {}
+    for figure in page_result.figures:
+        key = local_reference(figure.reference, False)
+        if key is None:
+            raise ValueError("exported figure requires an owned local reference")
+        existing = figure_map.get(key)
+        if existing is not None and (existing.content != figure.content or existing.mime_type != figure.mime_type):
+            raise ValueError(f"ambiguous figure identity on page {page_result.page_index}: {figure.name}")
+        figure_map[key] = figure
+    refs = _extract_markdown_images(page_result.markdown_text)
+    for ref in refs:
+        key = local_reference(ref)
+        if key is not None and key not in figure_map:
+            raise ValueError(f"figure missing on page {page_result.page_index}: {ref}")
+        if key is not None:
+            validate_source_query(urlsplit(ref).query)
+    uploaded = {}
+    replacements = {}
+    for ref in refs:
+        key = local_reference(ref)
+        if key is None:
+            continue
+        if key not in uploaded:
+            uploaded[key] = _upload_figure_artifact(
+                bucket, f"{figure_prefix}p{page_result.page_index}/{key}", figure_map[key]
+            )
+        replacements[ref] = decorate_gcs_uri(uploaded[key], ref)
+    return _replace_markdown_images(page_result.markdown_text, replacements), len(uploaded), replacements
+
+
+def _validate_figure_pages(page_results) -> None:
+    seen = set()
+    for page in page_results:
+        if not isinstance(page.page_index, int) or isinstance(page.page_index, bool) or page.page_index < 1 or page.page_index in seen:
+            raise ValueError(f"invalid or duplicate figure page identity: {page.page_index}")
+        seen.add(page.page_index)
+
+
 def _upload_corrected_pdf_artifact(
     *,
     bucket: str,
@@ -432,7 +503,7 @@ def _upload_corrected_pdf_artifact(
     corrected_object_name = f"{artifact_prefix}{base}_corrected.pdf"
     uri = _upload_bytes(bucket, corrected_object_name, corrected_pdf_bytes, "application/pdf")
     from urllib.parse import parse_qs
-    generation = parse_qs(urlparse(uri).query)["generation"][0]
+    generation = validate_generation(parse_gcs_uri(uri).generation)
     if not generation.isdigit():
         raise ValueError("corrected_pdf_generation_missing")
     page_correction_summary["corrected_pdf_receipt"] = {
@@ -461,7 +532,7 @@ def _write_output_partial(
     from google.api_core.exceptions import NotFound
     source, job_ref = _owned_output_context()
     _assert_output_owner(job_ref, source)
-    if any(source[key] != value for key, value in {"job_id": job_id, "input_reference": input_reference, "output_reference": output_reference}.items()) or output_reference != f"gs://{bucket}/{object_name}":
+    if any(source[key] != value for key, value in {"job_id": job_id, "input_reference": input_reference, "output_reference": output_reference}.items()) or output_reference != format_gcs_uri(bucket, object_name):
         raise TerminalReceiptConflict("partial_output_identity_mismatch")
     body = {
         **source,
@@ -527,16 +598,15 @@ def _extract_metadata(blob: storage.Blob) -> tuple[str | None, str | None, list[
 
 
 def _replace_markdown_images(markdown_text: str, replacements: dict[str, str]) -> str:
-    if not replacements:
-        return markdown_text
-    updated = markdown_text
-    for old_path, new_path in replacements.items():
-        updated = updated.replace(old_path, new_path)
-    return updated
+    return figure_markup._replace_markdown_images(markdown_text, replacements)
 
 
 def _extract_markdown_images(markdown_text: str) -> list[str]:
-    return [match.group(1) for match in FIGURE_REGEX.finditer(markdown_text or "")]
+    return figure_markup._extract_markdown_images(markdown_text)
+
+
+def _image_reference_spans(text: str):
+    return figure_markup._image_reference_spans(text)
 
 
 def _start_analyzer_prewarm() -> None:
@@ -910,13 +980,13 @@ def handler():
     job_id = f"{bucket}:{name}:{generation}"
     try:
         blob, pdf_bytes = _download_generation_input(bucket, name, generation)
-        terminal_source = _terminal_source(bucket, name, generation, "", blob=blob, data=pdf_bytes)
+        terminal_source = _original_pipeline_source(bucket, name, generation, blob=blob, data=pdf_bytes)
         output_name = _owned_output_name(output_prefix, terminal_source)
-        terminal_source["output_reference"] = f"gs://{bucket}/{output_name}"
+        terminal_source["output_reference"] = format_gcs_uri(bucket, output_name)
     except (ValueError, TerminalReceiptConflict) as exc:
         return jsonify({"status": "needs_inspection", "error": str(exc)}), 409
-    input_reference = f"gs://{bucket}/{name}"
-    output_reference = f"gs://{bucket}/{output_name}"
+    input_reference = format_gcs_uri(bucket, name)
+    output_reference = format_gcs_uri(bucket, output_name)
     safe_job_id = _safe_job_id(terminal_source)
     job_ref = db.collection(JOB_COLLECTION).document(safe_job_id)
     if job_ref.get().exists:
@@ -1106,6 +1176,7 @@ def handler():
             figure_dir=YOMITOKU_FIGURE_DIR,
             page_images=yomitoku_page_images,
         )
+        _validate_figure_pages(page_results)
 
         _update_job_stage(job_ref, "upload")
         _write_output_partial(
@@ -1147,7 +1218,6 @@ def handler():
             page_correction_summary.get("corrected_pdf_receipt"),
         )
 
-        uploaded_figures: dict[str, str] = {}
         pages: list[dict] = []
         structured_tables: list[dict] = []
         quantity_subgrid_passes: list[dict[str, Any]] = []
@@ -1159,24 +1229,8 @@ def handler():
 
         for page_result in page_results:
             page_index = page_result.page_index
-            figure_map = {path.name: path for path in page_result.figure_paths}
-            markdown_text = page_result.markdown_text
-            replacements: dict[str, str] = {}
-            for ref in _extract_markdown_images(markdown_text):
-                ref_name = Path(urlparse(ref).path).name
-                if ref_name in uploaded_figures:
-                    replacements[ref] = uploaded_figures[ref_name]
-                    continue
-                figure_path = figure_map.get(ref_name)
-                if figure_path is None:
-                    continue
-                figure_bytes = figure_path.read_bytes()
-                figure_obj = f"{figure_prefix}{ref_name}"
-                figure_uri = _upload_bytes(bucket, figure_obj, figure_bytes, "image/png")
-                uploaded_figures[ref_name] = figure_uri
-                replacements[ref] = figure_uri
-                figure_count += 1
-            markdown_text = _replace_markdown_images(markdown_text, replacements)
+            markdown_text, page_figure_count, page_assets = _publish_page_figures(bucket, figure_prefix, page_result)
+            figure_count += page_figure_count
             markdown_obj = f"{artifact_prefix}{base}_p{page_index}.md"
             markdown_uri = _upload_text(
                 bucket,
@@ -1207,11 +1261,7 @@ def handler():
                     "image/png",
                 )
 
-            figure_uris = []
-            for ref in _extract_markdown_images(markdown_text):
-                ref_name = Path(urlparse(ref).path).name
-                if ref_name in uploaded_figures:
-                    figure_uris.append(uploaded_figures[ref_name])
+            figure_uris = list(page_assets.values())
             markdown_pages.append(markdown_text)
             page_tables = [dict(table) for table in page_result.tables if isinstance(table, dict)]
             structured_tables.extend(page_tables)

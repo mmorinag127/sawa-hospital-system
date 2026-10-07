@@ -7,6 +7,7 @@ from typing import Union
 from urllib.parse import urlparse, parse_qs
 import json
 import re
+from src.services.storage_uri import format_gcs_uri, parse_gcs_uri, signing_query, validate_generation, image_references, replace_image_references
 
 StoragePath = Union[str, Path]
 _GCS_CLIENT_LOCAL = threading.local()
@@ -39,29 +40,25 @@ def load_bytes_from_uri(uri: str, *, generation: str | None = None, verification
 
     uri = _ENV_REF_PATTERN.sub(_replace_env_ref, uri)
     parsed = urlparse(uri)
-    pinned = parse_qs(parsed.query).get("generation", [])
-    if pinned:
-        if len(pinned) != 1 or not pinned[0].isdigit() or (generation is not None and str(generation) != pinned[0]):
-            raise ValueError("storage_generation_invalid")
-        generation = pinned[0]
     if parsed.scheme in ("", "file"):
         if generation is not None:
             raise ValueError("storage_generation_requires_gcs")
         path = Path(parsed.path if parsed.scheme else uri)
         return path.read_bytes()
     if parsed.scheme == "gs":
-        bucket_name = parsed.netloc
-        blob_name = parsed.path.lstrip("/")
-        if not bucket_name or not blob_name:
-            raise ValueError(f"invalid gs uri: {uri}")
-        client = _get_thread_gcs_client()
+        source = parse_gcs_uri(uri)
         if generation is not None:
-            if not str(generation).isdigit():
-                raise ValueError("storage_generation_invalid")
-            blob = client.bucket(bucket_name).blob(blob_name, generation=int(generation))
-            return blob.download_as_bytes(if_generation_match=int(generation), **({"timeout": 30, "retry": None} if verification else {}))
-        blob = client.bucket(bucket_name).blob(blob_name)
-        return blob.download_as_bytes(**({"timeout": 30, "retry": None} if verification else {}))
+            generation = validate_generation(generation)
+            if source.generation is not None and source.generation != generation:
+                raise ValueError("storage_generation_mismatch")
+        else:
+            generation = source.generation
+        client = _get_thread_gcs_client()
+        options = {"timeout": 30, "retry": None} if verification else {}
+        if generation is not None:
+            blob = client.bucket(source.bucket).blob(source.object_name, generation=int(generation))
+            return blob.download_as_bytes(if_generation_match=int(generation), **options)
+        return client.bucket(source.bucket).blob(source.object_name).download_as_bytes(**options)
     raise ValueError(f"unsupported storage uri: {uri}")
 
 
@@ -75,32 +72,33 @@ def verify_selected_pdf_source(receipt):
 
 
 def _verify_selected_pdf_source(receipt):
+    """URI correction for the pending H2 receipt reader; retain its source fence."""
     import hashlib
 
     if not isinstance(receipt, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("sha256") or "")):
         raise ValueError("selected_pdf_digest_required")
     if receipt.get("parent") is not None:
         verify_selected_pdf_source(receipt["parent"])
-    parsed = urlparse(receipt["storage_uri"])
+    uri = receipt["storage_uri"]
+    parsed = urlparse(uri)
     if parsed.scheme == "gs":
+        source = parse_gcs_uri(uri)
         generation = receipt.get("generation")
         if generation is None:
-            if parse_qs(parsed.query).get("generation"):
+            if source.generation is not None:
                 raise ValueError("selected_pdf_generation_mismatch")
-            if hashlib.sha256(load_bytes_from_uri(receipt["storage_uri"], verification=True)).hexdigest() != receipt["sha256"]:
+            if hashlib.sha256(load_bytes_from_uri(uri, verification=True)).hexdigest() != receipt["sha256"]:
                 raise ValueError("selected_pdf_bytes_changed")
             return
-        if not str(generation or "").isdigit():
-            raise ValueError("selected_pdf_generation_required")
-        uri_generations = parse_qs(parsed.query).get("generation", [])
-        if len(uri_generations) != 1 or uri_generations[0] != str(generation):
+        generation = validate_generation(generation)
+        if source.generation != generation:
             raise ValueError("selected_pdf_generation_mismatch")
-        blob = _get_thread_gcs_client().bucket(parsed.netloc).blob(parsed.path.lstrip("/"))
+        blob = _get_thread_gcs_client().bucket(source.bucket).blob(source.object_name)
         blob.reload(timeout=30, retry=None)
         if str(blob.generation) != generation:
             raise ValueError("selected_pdf_generation_changed")
     elif parsed.scheme in {"", "file"}:
-        if hashlib.sha256(Path(parsed.path if parsed.scheme else receipt["storage_uri"]).read_bytes()).hexdigest() != receipt["sha256"]:
+        if hashlib.sha256(Path(parsed.path if parsed.scheme else uri).read_bytes()).hexdigest() != receipt["sha256"]:
             raise ValueError("selected_pdf_bytes_changed")
     else:
         raise ValueError("selected_pdf_source_unsupported")
@@ -259,19 +257,18 @@ def save_bytes_to_gcs(
 ) -> str:
     if not bucket or not object_path:
         raise ValueError("bucket and object_path are required")
+    format_gcs_uri(bucket, object_path)
     client = client or _get_thread_gcs_client()
     blob = client.bucket(bucket).blob(object_path)
     blob.upload_from_string(data, content_type=content_type)
-    uri = f"gs://{bucket}/{object_path}"
-    if pin_generation:
-        generation = str(blob.generation or "")
-        if not generation.isdigit():
-            raise ValueError("selected_pdf_upload_generation_missing")
-        uri += f"?generation={generation}"
-    return uri
+    generation = validate_generation(blob.generation) if pin_generation else None
+    return format_gcs_uri(bucket, object_path, generation)
 
 
-def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int = 3600, *, generation: str | None = None) -> str:
+def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int = 3600, *, generation: str | None = None, query_parameters: dict[str, str] | None = None) -> str:
+    if generation is not None:
+        generation = validate_generation(generation)
+    format_gcs_uri(bucket, object_path, generation)
     try:
         _import_google_cloud_storage()
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -281,12 +278,33 @@ def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int =
     credentials, service_account_email = _get_thread_gcs_signing_credentials()
     return blob.generate_signed_url(
         generation=generation,
+        query_parameters=query_parameters,
         version="v4",
         expiration=timedelta(seconds=expires_in_seconds),
         method="GET",
         service_account_email=service_account_email,
         access_token=credentials.token,
     )
+
+
+def generate_signed_url_from_uri(uri: str, expires_in_seconds: int = 3600) -> str:
+    source = parse_gcs_uri(uri)
+    url = generate_signed_url(source.bucket, source.object_name, expires_in_seconds,
+                              generation=source.generation, query_parameters=signing_query(source))
+    return url + ("#" + source.fragment if source.fragment else "")
+
+
+def sign_published_figure_references(markdown: str, signed_assets: dict[str, str]) -> str:
+    replacements = {}
+    for ref in image_references(markdown):
+        if urlparse(ref).scheme != "gs":
+            continue
+        parse_gcs_uri(ref)
+        signed = signed_assets.get(ref)
+        if not isinstance(signed, str) or urlparse(signed).scheme != "https":
+            raise ValueError("published_figure_signed_receipt_missing")
+        replacements[ref] = signed
+    return replace_image_references(markdown, replacements)
 
 
 def _sanitize_job_id(job_id: str) -> str:

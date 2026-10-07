@@ -10,6 +10,7 @@ import time
 import threading
 from loguru import logger
 from urllib.parse import urlparse
+from src.services.storage_uri import format_gcs_uri, parse_gcs_uri
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -239,17 +240,14 @@ def _parse_gs_uri(uri: str) -> tuple[str, str] | None:
     parsed = urlparse(uri)
     if parsed.scheme != "gs":
         return None
-    bucket = parsed.netloc
-    name = parsed.path.lstrip("/")
-    if not bucket or not name:
-        return None
-    return bucket, name
+    source = parse_gcs_uri(uri)
+    return source.bucket, source.object_name
 
 
 def _owned_pipeline_output_name(output_prefix: str, source: dict) -> str:
     identity = {key: value for key, value in source.items() if key != "output_reference"}
     digest = sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return f"{output_prefix}{digest}/{os.path.basename(urlparse(source['input_reference']).path)}.g{source['input_generation']}.json"
+    return f"{output_prefix}{digest}/{os.path.basename(parse_gcs_uri(source['input_reference']).object_name)}.g{source['input_generation']}.json"
 
 
 def _upload_configured_input(*, bucket, object_name, configured_input):
@@ -312,7 +310,7 @@ def _wait_for_output(
                 payload = json.loads(data.decode("utf-8"))
                 from src.services.ocr_job_service import validate_own_pipeline_result
 
-                validate_own_pipeline_result(payload, f"gs://{bucket}/{object_name}")
+                validate_own_pipeline_result(payload, format_gcs_uri(bucket, object_name))
                 status = str((payload or {}).get("status") or "").strip().lower()
                 stage = str((payload or {}).get("stage") or "").strip().lower()
                 if status == "done" or stage == "done":
@@ -508,7 +506,7 @@ def run_ocr_pipeline(
             raise ValueError("configured_input_changed")
         original_source = {
             "job_id": f"{bucket}:{input_name}:{generation}",
-            "input_reference": f"gs://{bucket}/{input_name}",
+            "input_reference": format_gcs_uri(bucket, input_name),
             "input_generation": str(generation),
             "input_sha256": sha256(pdf_bytes).hexdigest(),
             "configured_input_sha256": configured_digest,
@@ -533,8 +531,8 @@ def run_ocr_pipeline(
         if sha256(original_data).hexdigest() != original_source["input_sha256"]:
             raise ValueError("ocr_original_input_bytes_changed")
         output_name = _owned_pipeline_output_name(output_prefix, original_source)
-        output_reference = f"gs://{bucket}/{output_name}"
-        input_reference = f"gs://{bucket}/{input_name}"
+        output_reference = format_gcs_uri(bucket, output_name)
+        input_reference = format_gcs_uri(bucket, input_name)
         timeout_seconds = int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
 
         from src.services.ocr_job_service import record_own_pipeline_delivery
