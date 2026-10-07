@@ -1,3 +1,6 @@
+import { Button, Input } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useMemo, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -147,6 +150,7 @@ export default function OcrFacilitiesPage() {
   };
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page">
       <header className="hero">
         <div>
@@ -161,21 +165,21 @@ export default function OcrFacilitiesPage() {
         <header className="panel-header">
           <h2>Facilities</h2>
           <div className="actions">
-            <button className="btn ghost" onClick={loadFacilities} disabled={loading}>
+            <Button type="submit" className="btn ghost ocr-facilities-ordinary-control" onClick={loadFacilities} disabled={loading}>
               Refresh
-            </button>
-            <button className="btn" onClick={createNewFacility} disabled={loading}>
+            </Button>
+            <Button type="submit" className="btn ocr-facilities-ordinary-control" onClick={createNewFacility} disabled={loading}>
               New Facility
-            </button>
+            </Button>
           </div>
         </header>
         <div className="facility-grid">
           <div className="list">
             {facilities.length === 0 && <p className="subtle">No OCR facilities found.</p>}
             {facilities.map((entry) => (
-              <button
+              <Button type="submit"
                 key={entry.id}
-                className={`list-item ${entry.id === selectedId ? "active" : ""}`}
+                className={(`list-item ${entry.id === selectedId ? "active" : ""}`) + " ocr-facilities-ordinary-control"}
                 onClick={() => selectFacility(entry.id)}
               >
                 <div>
@@ -183,14 +187,14 @@ export default function OcrFacilitiesPage() {
                   <p className="list-meta">{String(entry.data.template_id || "-")}</p>
                 </div>
                 <span className="ghost-link">Edit</span>
-              </button>
+              </Button>
             ))}
           </div>
           <div className="editor">
             <label className="field">
               <span className="field-label">Facility ID</span>
-              <input
-                className="input"
+              <Input disableUnderline
+                className="input ocr-facilities-ordinary-control"
                 value={facilityId}
                 onChange={(e) => setFacilityId(e.target.value)}
                 placeholder="FAC000001"
@@ -198,20 +202,20 @@ export default function OcrFacilitiesPage() {
             </label>
             <label className="field">
               <span className="field-label">Facility JSON</span>
-              <textarea
-                className="textarea"
+              <Input disableUnderline multiline
+                className="textarea ocr-facilities-ordinary-control"
                 value={facilityText}
                 onChange={(e) => setFacilityText(e.target.value)}
                 rows={18}
               />
             </label>
             <div className="actions">
-              <button className="btn ghost" onClick={deleteFacility} disabled={loading}>
+              <Button type="submit" className="btn ghost ocr-facilities-ordinary-control" onClick={deleteFacility} disabled={loading}>
                 Delete
-              </button>
-              <button className="btn primary" onClick={saveFacility} disabled={loading}>
+              </Button>
+              <Button type="submit" className="btn primary ocr-facilities-ordinary-control" onClick={saveFacility} disabled={loading}>
                 Save
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -324,7 +328,8 @@ export default function OcrFacilitiesPage() {
           gap: 12px;
         }
 
-        .list-item {
+        .list-item,
+        :global(.ocr-facilities-ordinary-control.list-item) {
           background: #f7f7f4;
           border: 1px solid rgba(24, 32, 30, 0.08);
           border-radius: 14px;
@@ -336,7 +341,8 @@ export default function OcrFacilitiesPage() {
           cursor: pointer;
         }
 
-        .list-item.active {
+        .list-item.active,
+        :global(.ocr-facilities-ordinary-control.list-item.active) {
           border-color: rgba(55, 94, 86, 0.45);
           background: rgba(225, 236, 231, 0.65);
         }
@@ -376,7 +382,9 @@ export default function OcrFacilitiesPage() {
         }
 
         .textarea,
-        .input {
+        .input,
+        :global(.ocr-facilities-ordinary-control.textarea),
+        :global(.ocr-facilities-ordinary-control.input) {
           width: 100%;
           border-radius: 12px;
           border: 1px solid rgba(28, 33, 31, 0.14);
@@ -392,7 +400,8 @@ export default function OcrFacilitiesPage() {
           gap: 12px;
         }
 
-        .btn {
+        .btn,
+        :global(.ocr-facilities-ordinary-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 10px 18px;
@@ -402,12 +411,14 @@ export default function OcrFacilitiesPage() {
           cursor: pointer;
         }
 
-        .btn.primary {
+        .btn.primary,
+        :global(.ocr-facilities-ordinary-control.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn.ghost {
+        .btn.ghost,
+        :global(.ocr-facilities-ordinary-control.btn.ghost) {
           background: transparent;
           border: 1px solid rgba(24, 32, 30, 0.2);
         }
@@ -427,6 +438,28 @@ export default function OcrFacilitiesPage() {
           font-weight: 600;
         }
 
+        :global(.ocr-facilities-ordinary-control.MuiButton-root) {
+          min-width: 0;
+          font-family: inherit;
+          font-size: inherit;
+          line-height: inherit;
+          letter-spacing: inherit;
+          text-transform: none;
+        }
+
+        :global(.ocr-facilities-ordinary-control.list-item) {
+          font-weight: normal;
+        }
+
+        :global(.ocr-facilities-ordinary-control .MuiInput-input) {
+          border: 0;
+          border-radius: 0;
+          padding: 0;
+          font: inherit;
+          color: inherit;
+          background: transparent;
+        }
+
         @media (max-width: 900px) {
           .facility-grid {
             grid-template-columns: 1fr;
@@ -434,5 +467,6 @@ export default function OcrFacilitiesPage() {
         }
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }

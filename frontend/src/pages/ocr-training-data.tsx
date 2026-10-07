@@ -1,3 +1,6 @@
+import { Button, Input } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
@@ -167,6 +170,7 @@ export default function OcrTrainingDataPage() {
   };
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page">
       <header className="hero">
         <div>
@@ -187,33 +191,32 @@ export default function OcrTrainingDataPage() {
         <div className="filters">
           <label className="field">
             <span className="field-label">表示件数</span>
-            <input
-              className="input"
+            <Input disableUnderline
+              className="input ocr-training-data-ordinary-control"
               type="number"
-              min={1}
-              max={1000}
+              inputProps={{ min: 1, max: 1000 }}
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value || 300))}
             />
           </label>
-          <button className="btn primary" onClick={loadItems} disabled={loading}>
+          <Button type="submit" className="btn primary ocr-training-data-ordinary-control" onClick={loadItems} disabled={loading}>
             {loading ? "更新中..." : "一覧を更新"}
-          </button>
-          <button className="btn ghost" onClick={() => exportPdfs(false)} disabled={loading}>
+          </Button>
+          <Button type="submit" className="btn ghost ocr-training-data-ordinary-control" onClick={() => exportPdfs(false)} disabled={loading}>
             PDF一括ダウンロード
-          </button>
-          <button className="btn danger" onClick={() => exportPdfs(true)} disabled={loading}>
+          </Button>
+          <Button type="submit" className="btn danger ocr-training-data-ordinary-control" onClick={() => exportPdfs(true)} disabled={loading}>
             ダウンロードしてクリア
-          </button>
-          <button className="btn ghost" onClick={() => exportMetadata("jsonl")} disabled={loading}>
+          </Button>
+          <Button type="submit" className="btn ghost ocr-training-data-ordinary-control" onClick={() => exportMetadata("jsonl")} disabled={loading}>
             ラベルJSONL保存
-          </button>
-          <button className="btn ghost" onClick={() => exportMetadata("csv")} disabled={loading}>
+          </Button>
+          <Button type="submit" className="btn ghost ocr-training-data-ordinary-control" onClick={() => exportMetadata("csv")} disabled={loading}>
             ラベルCSV保存
-          </button>
-          <button className="btn danger" onClick={clearAllSamples} disabled={loading}>
+          </Button>
+          <Button type="submit" className="btn danger ocr-training-data-ordinary-control" onClick={clearAllSamples} disabled={loading}>
             全件クリア（管理者）
-          </button>
+          </Button>
         </div>
         {message ? <p className="message">{message}</p> : null}
       </section>
@@ -361,7 +364,8 @@ export default function OcrTrainingDataPage() {
           color: #5f7b74;
         }
 
-        .input {
+        .input,
+        :global(.ocr-training-data-ordinary-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.18);
           border-radius: 10px;
           padding: 10px 12px;
@@ -370,7 +374,8 @@ export default function OcrTrainingDataPage() {
           color: inherit;
         }
 
-        .btn {
+        .btn,
+        :global(.ocr-training-data-ordinary-control.btn) {
           border: 1px solid transparent;
           border-radius: 10px;
           padding: 10px 14px;
@@ -378,24 +383,28 @@ export default function OcrTrainingDataPage() {
           cursor: pointer;
         }
 
-        .btn.primary {
+        .btn.primary,
+        :global(.ocr-training-data-ordinary-control.btn.primary) {
           background: #1f2a2a;
           color: #fff;
         }
 
-        .btn.ghost {
+        .btn.ghost,
+        :global(.ocr-training-data-ordinary-control.btn.ghost) {
           background: #fff;
           border-color: rgba(25, 32, 30, 0.2);
           color: #1f2a2a;
         }
 
-        .btn.danger {
+        .btn.danger,
+        :global(.ocr-training-data-ordinary-control.btn.danger) {
           background: #fff2f0;
           border-color: rgba(199, 75, 58, 0.35);
           color: #9d2418;
         }
 
-        .btn:disabled {
+        .btn:disabled,
+        :global(.ocr-training-data-ordinary-control.btn:disabled) {
           opacity: 0.55;
           cursor: not-allowed;
         }
@@ -451,6 +460,31 @@ export default function OcrTrainingDataPage() {
           color: #245a9a;
         }
 
+        :global(.ocr-training-data-ordinary-control.MuiButton-root) {
+          min-width: 0;
+          font-family: inherit;
+          font-size: 14px;
+          font-weight: normal;
+          line-height: inherit;
+          letter-spacing: inherit;
+          text-transform: none;
+        }
+
+        :global(.ocr-training-data-ordinary-control.MuiInput-root) {
+          display: inline-flex;
+          line-height: inherit;
+          letter-spacing: inherit;
+        }
+
+        :global(.ocr-training-data-ordinary-control .MuiInput-input) {
+          border: 0;
+          border-radius: 0;
+          padding: 0;
+          font: inherit;
+          color: inherit;
+          background: transparent;
+        }
+
         @media (max-width: 720px) {
           .page {
             padding: 28px 14px 40px;
@@ -466,5 +500,6 @@ export default function OcrTrainingDataPage() {
         }
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }
