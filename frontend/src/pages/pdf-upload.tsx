@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import TopNav from "../components/TopNav";
-import { Button, MenuItem, Stack } from "@mui/material";
+import type { ChangeEvent } from "react";
+import { Button, Checkbox, Input, NativeSelect, MenuItem, Stack } from "@mui/material";
 import { FormTextField, SawaProvider } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
 import { apiClient } from "../services/apiClient";
@@ -474,7 +475,7 @@ function PdfUploadScreen() {
 
           <label className="field">
             <span className="field-label">対象月</span>
-            <input
+            <Input disableUnderline
               className="input"
               type="month"
               value={targetMonth}
@@ -489,13 +490,11 @@ function PdfUploadScreen() {
 
           <label className="field field-span">
             <span className="field-label">注文書PDF</span>
-            <input
-              ref={fileInputRef}
+            <Input disableUnderline inputProps={{ accept: "application/pdf", multiple: true }}
+              inputRef={fileInputRef}
               className="input"
               type="file"
-              accept="application/pdf"
-              multiple
-              onChange={(e) => setPdfFiles(Array.from(e.target.files || []))}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setPdfFiles(Array.from(e.target.files || []))}
             />
           </label>
         </div>
@@ -516,7 +515,7 @@ function PdfUploadScreen() {
             <div className="form-grid">
               <label className="field">
                 <span className="field-label">施設名メモ</span>
-                <input
+                <Input disableUnderline
                   className="input"
                   value={facilityName}
                   onChange={(e) => setFacilityName(e.target.value)}
@@ -526,7 +525,7 @@ function PdfUploadScreen() {
 
               <label className="field">
                 <span className="field-label">受信日時（通常は空欄）</span>
-                <input
+                <Input disableUnderline
                   className="input"
                   type="datetime-local"
                   value={receivedAt}
@@ -537,7 +536,7 @@ function PdfUploadScreen() {
 
             <div className="checks">
               <label>
-                <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />{" "}
+                <Checkbox checked={force} onChange={(e) => setForce(e.target.checked)} />{" "}
                 同じPDFでも再登録する
               </label>
             </div>
@@ -552,7 +551,7 @@ function PdfUploadScreen() {
             </p>
             <div className="checks">
               <label>
-                <input type="checkbox" checked={skipOcr} onChange={(e) => setSkipOcr(e.target.checked)} />{" "}
+                <Checkbox checked={skipOcr} onChange={(e) => setSkipOcr(e.target.checked)} />{" "}
                 OCRをあとで実行する
               </label>
             </div>
@@ -738,7 +737,7 @@ function PdfUploadScreen() {
           <div className="history-toolbar">
             <label className="field history-filter">
               <span className="field-label">状態</span>
-              <select
+              <NativeSelect
                 className="input"
                 value={uploadedStatusFilter}
                 onChange={(e) => setUploadedStatusFilter(e.target.value)}
@@ -749,11 +748,11 @@ function PdfUploadScreen() {
                 <option value="retry_wait">再試行待ち</option>
                 <option value="manual_review">要介入</option>
                 <option value="completed">完了</option>
-              </select>
+              </NativeSelect>
             </label>
-            <button className="btn secondary" type="button" onClick={() => void loadUploadedRows()} disabled={uploadsLoading}>
+            <Button className="btn secondary" type="button" onClick={() => void loadUploadedRows()} disabled={uploadsLoading}>
               {uploadsLoading ? "更新中..." : uploadedRows.length ? "最新に更新" : "取込済みPDFを表示"}
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -830,14 +829,14 @@ function PdfUploadScreen() {
                         注文一覧で探す
                       </Link>
                     ) : null}
-                    <button
+                    <Button
                       type="button"
                       className="btn primary"
                       onClick={() => void retryUploadedPdf(row)}
                       disabled={retryDisabled || retryBusyId === row.id}
                     >
                       {retryBusyId === row.id ? "再投入中..." : "再処理に戻す"}
-                    </button>
+                    </Button>
                   </div>
                 </article>
               );
@@ -953,7 +952,8 @@ function PdfUploadScreen() {
         .field-help-error {
           color: #8b2d1f;
         }
-        .input {
+        .input,
+        .page :global(.MuiInputBase-root.input) {
           width: 100%;
           border-radius: 12px;
           border: 1px solid rgba(25, 32, 30, 0.12);
@@ -1013,7 +1013,8 @@ function PdfUploadScreen() {
           flex-wrap: wrap;
           align-items: center;
         }
-        .btn {
+        .btn,
+        .page :global(.MuiButton-root.btn) {
           display: inline-flex;
           align-items: center;
           justify-content: center;

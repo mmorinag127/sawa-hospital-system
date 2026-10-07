@@ -1,3 +1,6 @@
+import { Button, Checkbox } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import TopNav from "../components/TopNav";
@@ -134,7 +137,7 @@ export default function OcrResultsPage() {
   }, [filtered]);
 
   return (
-    <main className="page">
+    <ThemeProvider theme={sawaTheme}><main className="page">
       <header className="hero">
         <div>
           <p className="eyebrow">OCR Monitor</p>
@@ -152,16 +155,15 @@ export default function OcrResultsPage() {
         <div className="filters">
           <label className="field checkbox">
             <span className="field-label">未確定</span>
-            <input
-              type="checkbox"
+            <Checkbox
               checked={showOnlyUnassigned}
               onChange={(e) => setShowOnlyUnassigned(e.target.checked)}
             />
             施設/週が未確定のみ
           </label>
-          <button className="btn primary" onClick={loadOrders} disabled={loading}>
+          <Button type="submit" className="btn primary" onClick={loadOrders} disabled={loading}>
             {loading ? "更新中..." : "更新"}
-          </button>
+          </Button>
         </div>
       </section>
 
@@ -313,7 +315,8 @@ export default function OcrResultsPage() {
           text-transform: uppercase;
         }
 
-        .btn {
+        .btn,
+        .page :global(.MuiButton-root.btn) {
           border: none;
           border-radius: 999px;
           padding: 8px 14px;
@@ -324,7 +327,8 @@ export default function OcrResultsPage() {
           justify-self: start;
         }
 
-        .btn.primary {
+        .btn.primary,
+        .page :global(.MuiButton-root.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
@@ -375,6 +379,6 @@ export default function OcrResultsPage() {
       <style jsx global>{`
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
-    </main>
+    </main></ThemeProvider>
   );
 }

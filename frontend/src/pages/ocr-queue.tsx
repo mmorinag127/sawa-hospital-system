@@ -1,3 +1,6 @@
+import { Button, Input, NativeSelect } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -157,7 +160,7 @@ export default function OcrQueuePage() {
   };
 
   return (
-    <main className="page">
+    <ThemeProvider theme={sawaTheme}><main className="page">
       <header className="hero">
         <div>
           <p className="eyebrow">OCR Operations</p>
@@ -203,7 +206,7 @@ export default function OcrQueuePage() {
           <div className="filters">
             <label className="field">
               <span className="field-label">Status</span>
-              <select
+              <NativeSelect
                 className="input"
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
@@ -211,16 +214,16 @@ export default function OcrQueuePage() {
                 <option value="">すべて</option>
                 <option value="pending">未処理</option>
                 <option value="resolved">解決済み</option>
-              </select>
+              </NativeSelect>
             </label>
           </div>
           <div className="panel-actions">
-            <button className="btn" onClick={recoverReadyQueue} disabled={loading || bulkRecoverPending}>
+            <Button type="submit" className="btn" onClick={recoverReadyQueue} disabled={loading || bulkRecoverPending}>
               {bulkRecoverPending ? "まとめて再試行中..." : "滞留をまとめて再試行"}
-            </button>
-            <button className="btn ghost" onClick={loadQueue} disabled={loading || bulkRecoverPending}>
+            </Button>
+            <Button type="submit" className="btn ghost" onClick={loadQueue} disabled={loading || bulkRecoverPending}>
               再取得
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -264,7 +267,7 @@ export default function OcrQueuePage() {
                   <pre className="code-block">{prettyJson(diagnostics)}</pre>
                 </details>
                 <div className="resolve">
-                  <input
+                  <Input disableUnderline
                     className="input"
                     placeholder="テンプレートID"
                     value={templateInputs[entry.id] || ""}
@@ -275,13 +278,13 @@ export default function OcrQueuePage() {
                       }))
                     }
                   />
-                  <button
+                  <Button type="submit"
                     className="btn primary"
                     onClick={() => resolveJob(entry.id, templateInputs[entry.id] || "")}
                     disabled={loading}
                   >
                     解決
-                  </button>
+                  </Button>
                 </div>
               </article>
             );
@@ -469,7 +472,8 @@ export default function OcrQueuePage() {
           color: #5f7b74;
         }
 
-        .input {
+        .input,
+        .page :global(.MuiInputBase-root.input) {
           font: inherit;
           border-radius: 12px;
           border: 1px solid rgba(28, 33, 31, 0.14);
@@ -477,7 +481,8 @@ export default function OcrQueuePage() {
           background: #fbfaf7;
         }
 
-        .btn {
+        .btn,
+        .page :global(.MuiButton-root.btn) {
           font: inherit;
           border: none;
           border-radius: 999px;
@@ -488,12 +493,14 @@ export default function OcrQueuePage() {
           cursor: pointer;
         }
 
-        .btn.primary {
+        .btn.primary,
+        .page :global(.MuiButton-root.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn.ghost {
+        .btn.ghost,
+        .page :global(.MuiButton-root.btn.ghost) {
           background: transparent;
           border: 1px solid rgba(24, 32, 30, 0.2);
         }
@@ -607,6 +614,6 @@ export default function OcrQueuePage() {
           }
         }
       `}</style>
-    </main>
+    </main></ThemeProvider>
   );
 }
