@@ -7,15 +7,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
+from src.services import canonical_facility_store
+from src.services.template_field_schema_service import derive_row_fields_from_columns
 
-def get_authored_facility_config(facility_id: str, selected_template_id: str | None = None) -> dict[str, Any]:
+
+def get_authored_facility_config(facility_id: str, selected_template_id: str | None = None, *, master: dict | None = None) -> dict[str, Any]:
     from src.services.workflow_attempt_guard_service import current_nonworkflow_execution, current_workflow_execution, processing_start_configured_input
     if current_nonworkflow_execution() is not None or current_workflow_execution() is not None:
         config = processing_start_configured_input()["facility"]
         if config.get("facility_id") != facility_id:
             raise ValueError("configured_execution_facility_mismatch")
         return _validate_authored_facility_config(config, selected_template_id)
-    matches = [item for item in load_facility_master().get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
+    source = load_facility_master() if master is None else master
+    matches = [item for item in source.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
     if len(matches) != 1:
         raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
     config = deepcopy(matches[0])
@@ -49,17 +53,13 @@ def _validate_authored_facility_config(config: dict[str, Any], selected_template
         raise ValueError("authored_fax_template_id_mismatch")
     return config
 
-
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-FACILITY_MASTER_PATH = Path(
-    os.getenv("FACILITY_MASTER_PATH", DATA_DIR / "facility_master.template.json")
-)
 INGEST_POLICY_PATH = Path(os.getenv("INGEST_POLICY_PATH", DATA_DIR / "ingest_policy.template.json"))
 
 
 def capture_authored_processing_config(facility_id: str) -> dict[str, Any]:
     try:
-        master = _load_json(FACILITY_MASTER_PATH)
+        master = load_facility_master()
         policy = _load_json(INGEST_POLICY_PATH)
     except (OSError, ValueError) as exc:
         raise ValueError("configured_source_unavailable") from exc
@@ -93,40 +93,6 @@ _CORP_TOKENS = [
 ]
 _PHONE_PATTERN = re.compile(r"(?:\+?81[-\s]?)?(?:0?\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4})")
 
-_DEFAULT_ORDER_FORM_PATTERNS: list[dict[str, Any]] = [
-    {
-        "pattern_id": "PATTERN_A",
-        "label": "標準A",
-        "description": "Placeholder pattern A (TBD)",
-        "marker_cells": ["A1", "L1", "A40", "L40"],
-    },
-    {
-        "pattern_id": "PATTERN_B",
-        "label": "標準B",
-        "description": "Placeholder pattern B (TBD)",
-        "marker_cells": ["A1", "M1", "A42", "M42"],
-    },
-    {
-        "pattern_id": "PATTERN_C",
-        "label": "標準C",
-        "description": "Placeholder pattern C (TBD)",
-        "marker_cells": ["A1", "K1", "A38", "K38"],
-    },
-    {
-        "pattern_id": "PATTERN_D",
-        "label": "標準D",
-        "description": "Placeholder pattern D (TBD)",
-        "marker_cells": ["A1", "N1", "A44", "N44"],
-    },
-    {
-        "pattern_id": "PATTERN_E",
-        "label": "標準E",
-        "description": "Placeholder pattern E (TBD)",
-        "marker_cells": ["A1", "J1", "A36", "J36"],
-    },
-]
-
-
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -146,9 +112,8 @@ def _normalize_fax_template_ids(value: Any) -> list[str]:
     return normalized
 
 
-@lru_cache(maxsize=1)
 def load_facility_master() -> dict:
-    return _load_json(FACILITY_MASTER_PATH)
+    return canonical_facility_store.read_snapshot().master
 
 
 def load_ingest_policy() -> dict:
@@ -164,7 +129,6 @@ def _load_cached_ingest_policy() -> dict:
 
 
 def reload_configs() -> None:
-    load_facility_master.cache_clear()
     _load_cached_ingest_policy.cache_clear()
 
 
@@ -609,42 +573,7 @@ def sanitize_facility_config_for_storage(
     current_config: dict[str, Any] | None = None,
     allow_authoritative_column_changes: bool = False,
 ) -> dict[str, Any]:
-    sanitized = _strip_facility_template_storage_keys(config)
-    master_override = None
-    master_template_id = None
-    master_template_ids: list[str] = []
-    master = load_facility_master()
-    for fac_master in master.get("facilities", []):
-        if fac_master.get("facility_id") == facility_id:
-            master_override = fac_master.get("fax_template_override")
-            master_template_id, master_template_ids = _master_facility_template_ids(fac_master)
-            break
-
-    current_override = None
-    if master_template_id:
-        sanitized["fax_template_id"] = master_template_id
-        sanitized["fax_template_ids"] = master_template_ids or [master_template_id]
-    fax_override = _preserve_authoritative_fax_override(
-        current_override,
-        sanitized.get("fax_template_override"),
-        master_override,
-        allow_authoritative_column_changes=allow_authoritative_column_changes,
-    )
-    if fax_override is None:
-        sanitized.pop("fax_template_override", None)
-        return sanitized
-
-    reconciled = _reconcile_fax_template_override(
-        fax_override,
-        master_override,
-        drop_redundant=True,
-        prefer_master=bool(master_override),
-    )
-    if reconciled is None:
-        sanitized.pop("fax_template_override", None)
-    else:
-        sanitized["fax_template_override"] = reconciled
-    return sanitized
+    raise canonical_facility_store.CanonicalStoreError("legacy_facility_config_sanitizer_disabled", status_code=410)
 
 
 def normalize_fax_template_columns(columns: Any) -> list[dict[str, Any]]:
@@ -792,10 +721,7 @@ def _normalize_order_form_patterns(raw: Any) -> list[dict[str, Any]]:
 
 def get_order_form_patterns() -> list[dict[str, Any]]:
     master = load_facility_master()
-    patterns = _normalize_order_form_patterns(master.get("order_form_patterns"))
-    if patterns:
-        return patterns
-    return [dict(item) for item in _DEFAULT_ORDER_FORM_PATTERNS]
+    return _normalize_order_form_patterns(master.get("order_form_patterns"))
 
 
 def get_order_form_pattern(pattern_id: str | None) -> Optional[dict[str, Any]]:
@@ -1003,16 +929,38 @@ def resolve_facility_id(facility_name: str) -> Optional[str]:
     return matches[0].get("facility_id") if len(matches) == 1 else None
 
 
-def get_facility_by_id(facility_id: str) -> dict[str, Any]:
-    return get_authored_facility_config(facility_id)
+def get_facility_by_id(facility_id: str, *, master: dict | None = None) -> Optional[dict[str, Any]]:
+    from src.services.workflow_attempt_guard_service import current_nonworkflow_execution, current_workflow_execution
+
+    if current_nonworkflow_execution() is not None or current_workflow_execution() is not None:
+        return get_authored_facility_config(facility_id)
+    source = load_facility_master() if master is None else master
+    matches = [item for item in source.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
+    if len(matches) > 1:
+        raise ValueError("facility_template_ambiguous")
+    return deepcopy(matches[0]) if matches else None
 
 
-def get_facility_config(facility_id: str) -> dict[str, Any]:
-    return get_authored_facility_config(facility_id)
+def get_facility_config(facility_id: str, *, master: dict | None = None) -> dict[str, Any]:
+    if master is not None:
+        facility = get_facility_by_id(facility_id, master=master)
+        if facility is None:
+            raise ValueError("facility_not_found")
+        return facility
+    return get_authored_facility_config(facility_id, master=master)
 
 
 def get_facility_config_for_template(facility_id: str, template_id: str | None) -> dict[str, Any]:
     return get_authored_facility_config(facility_id, template_id)
+
+
+def get_facility_config_for_date(facility_id: str, effective_date: object) -> dict:
+    from src.services import facility_master_service
+
+    resolved = facility_master_service.resolve_facility_for_date(facility_id, effective_date)
+    # A version is complete. No root template merge, normalization, DB or current-config substitution.
+    config = deepcopy(resolved["facility"])
+    return {**resolved, "config": config}
 
 
 def _effective_fax_template_signature(template: dict[str, Any] | None) -> tuple[Any, ...] | None:

@@ -29,8 +29,8 @@ def _validate_columns(columns: Any, path: str, errors: list[str], warnings: list
             continue
         if "index" not in column:
             errors.append(f"{path}[{idx}].index is required")
-        elif not isinstance(column.get("index"), int):
-            errors.append(f"{path}[{idx}].index must be an integer")
+        elif type(column.get("index")) is not int or column["index"] < 0:
+            errors.append(f"{path}[{idx}].index must be a nonnegative integer")
         if "role" not in column:
             errors.append(f"{path}[{idx}].role is required")
         if column.get("role") in {"quantity", "quantity_change"}:

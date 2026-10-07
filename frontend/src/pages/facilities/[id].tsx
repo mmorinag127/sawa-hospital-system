@@ -1,35 +1,24 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useFormContext, type FieldValues } from "react-hook-form";
 import { MenuItem } from "@mui/material";
 import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
 import TopNav from "../../components/TopNav";
 import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
 import { useH1LeaveGuard } from "../../hooks/useH1LeaveGuard";
+import { canonicalErrorText, canonicalSaveNotice, requireFacilitySnapshot, type CanonicalFacility, type CanonicalFacilityResponse } from "../../services/facilityData";
+import { requireFacilityVersions, requireDatedFacility, type CanonicalDatedFacility, type CanonicalFacilityVersions, type CanonicalFacilityVersion } from "../../services/facilityData";
 
-type FacilityArea = {
-  id: string;
-  name: string;
-};
-
-type Facility = {
-  id: string;
-  name: string;
-  areas: FacilityArea[];
-};
+type Facility = CanonicalFacility;
 
 type ValidationResult = {
   errors: string[];
   warnings: string[];
 };
 
-type FacilityResponse = {
-  facility: Facility;
-  config?: Record<string, unknown>;
-  resolved_config?: Record<string, unknown>;
-  validation?: ValidationResult;
-};
+type FacilityResponse = CanonicalFacilityResponse;
 
 type FacilityDraft = {
   name: string;
@@ -59,7 +48,17 @@ type OrderFormPattern = {
   description?: string;
 };
 
-const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
+function DraftBridge<T extends FieldValues>({ onValuesChange }: { onValuesChange: (values: T) => void }) {
+  const { watch, getValues } = useFormContext<T>();
+  useEffect(() => {
+    onValuesChange(getValues());
+    const subscription = watch((values) => onValuesChange(values as T));
+    return () => subscription.unsubscribe();
+  }, [watch, getValues, onValuesChange]);
+  return null;
+}
+
+const prettyJson = (value: unknown) => JSON.stringify(value === undefined ? {} : value, null, 2);
 
 const parseJson = (text: string) => {
   try {
@@ -71,13 +70,7 @@ const parseJson = (text: string) => {
 };
 
 const errorDetailText = (err: any, fallback: string) => {
-  const detail = err?.response?.data?.detail;
-  if (typeof detail === "string" && detail.trim()) return detail.trim();
-  if (detail && typeof detail === "object") {
-    const message = detail.message || detail.error;
-    if (typeof message === "string" && message.trim()) return message.trim();
-  }
-  return fallback;
+  return canonicalErrorText(err, fallback);
 };
 
 const parseStringList = (value: unknown): string[] => {
@@ -140,27 +133,27 @@ const setOptionalNumber = (target: Record<string, unknown>, key: string, value: 
   target[key] = parsed;
 };
 
-const mergeConfigDraft = (base: Record<string, unknown>, values: ConfigDraft) => {
+export const mergeConfigDraft = (base: Record<string, unknown>, values: ConfigDraft, original = configDraft(base)) => {
   const next = { ...base };
-  setOptionalString(next, "order_form_pattern_id", values.order_form_pattern_id);
-  setOptionalString(next, "main_ocr_provider", values.main_ocr_provider);
-  setOptionalString(next, "openai_ocr_model", values.openai_ocr_model);
-  setOptionalString(next, "openai_ocr_prompt", values.openai_ocr_prompt);
-  setOptionalString(next, "openai_ocr_fallback_provider", values.openai_ocr_fallback_provider);
-  setOptionalString(next, "gemini_ocr_model", values.gemini_ocr_model);
-  setOptionalString(next, "gemini_ocr_prompt", values.gemini_ocr_prompt);
-  setOptionalString(next, "gemini_ocr_fallback_provider", values.gemini_ocr_fallback_provider);
+  const changes = new Set((Object.keys(values) as (keyof ConfigDraft)[]).filter((key) => values[key] !== original[key]));
+  // Serialize only changed form fields; JSON edits and untouched null/zero keys remain exact.
+  const strings = ["order_form_pattern_id", "main_ocr_provider", "openai_ocr_model", "openai_ocr_prompt",
+    "openai_ocr_fallback_provider", "gemini_ocr_model", "gemini_ocr_prompt", "gemini_ocr_fallback_provider"] as const;
+  strings.forEach((key) => { if (changes.has(key)) setOptionalString(next, key, values[key]); });
   ["openai_ocr_enabled", "gemini_ocr_enabled", "large_cell_mode"].forEach((key) => {
     const value = values[key as "openai_ocr_enabled" | "gemini_ocr_enabled" | "large_cell_mode"];
+    if (!changes.has(key as keyof ConfigDraft)) return;
     if (value === "true" || value === "false") next[key] = value === "true";
     else delete next[key];
   });
-  setOptionalNumber(next, "hakodate_header_rows", values.hakodate_header_rows, 0);
-  setOptionalNumber(next, "hakodate_ocr_resolution", values.hakodate_ocr_resolution, Number.MIN_VALUE);
-  setOptionalNumber(next, "hakodate_min_edge_margin_ratio", values.hakodate_min_edge_margin_ratio, 0);
-  const tags = values.menu_override_tags.split(",").map((item) => item.trim()).filter(Boolean);
-  if (tags.length) next.menu_override_tags = tags;
-  else delete next.menu_override_tags;
+  if (changes.has("hakodate_header_rows")) setOptionalNumber(next, "hakodate_header_rows", values.hakodate_header_rows, 0);
+  if (changes.has("hakodate_ocr_resolution")) setOptionalNumber(next, "hakodate_ocr_resolution", values.hakodate_ocr_resolution, Number.MIN_VALUE);
+  if (changes.has("hakodate_min_edge_margin_ratio")) setOptionalNumber(next, "hakodate_min_edge_margin_ratio", values.hakodate_min_edge_margin_ratio, 0);
+  if (changes.has("menu_override_tags")) {
+    const tags = values.menu_override_tags.split(",").map((item) => item.trim()).filter(Boolean);
+    if (tags.length) next.menu_override_tags = tags;
+    else delete next.menu_override_tags;
+  }
   return next;
 };
 
@@ -191,44 +184,277 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
   const [sourceWorkbookUploading, setSourceWorkbookUploading] = useState<boolean>(false);
   const loadGeneration = useRef(0);
   const saveGeneration = useRef(0);
+  const commandGeneration = useRef(0);
+  const uploadGeneration = useRef(0);
+  const inputGeneration = useRef(0);
+  const baseRevision = useRef<string | null>(null);
+  const targetRef = useRef(id);
+  targetRef.current = id;
   const dirtyRef = useRef(false);
   const [facilityFormDirty, setFacilityFormDirty] = useState(false);
   const [configFormDirty, setConfigFormDirty] = useState(false);
   const [specialDirty, setSpecialDirty] = useState(false);
+  const [editorEpoch, setEditorEpoch] = useState(0);
+  const areaJsonDirty = useRef(false);
+  const configJsonDirty = useRef(false);
+  const workbookDirty = useRef(false);
+  const facilityDraftRef = useRef<FacilityDraft | null>(null);
   const [configRecord, setConfigRecord] = useState<Record<string, unknown>>({});
   const configDraftRef = useRef<ConfigDraft | null>(null);
-  const hasUnsavedChanges = facilityFormDirty || configFormDirty || specialDirty;
+  const [versionSnapshot, setVersionSnapshot] = useState<CanonicalFacilityVersions | null>(null);
+  const versionSnapshotRef = useRef<CanonicalFacilityVersions | null>(null);
+  const [versionId, setVersionId] = useState("");
+  const [versionFrom, setVersionFrom] = useState("");
+  const [versionTo, setVersionTo] = useState("");
+  const [versionOpenEnd, setVersionOpenEnd] = useState(false);
+  const [versionText, setVersionText] = useState("");
+  const [versionExisting, setVersionExisting] = useState(false);
+  const versionOriginal = useRef<CanonicalFacilityVersion | null>(null);
+  const [versionDirty, setVersionDirty] = useState(false);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [versionBlocked, setVersionBlocked] = useState(false);
+  const versionGeneration = useRef(0);
+  const previewGeneration = useRef(0);
+  const versionBusyOwner = useRef(0);
+  const [versionMessage, setVersionMessage] = useState("");
+  const [effectiveDate, setEffectiveDate] = useState("");
+  const [datedResult, setDatedResult] = useState("");
+  const clearVersionEditor = () => {
+    versionGeneration.current += 1;
+    previewGeneration.current += 1;
+    versionSnapshotRef.current = null;
+    setVersionSnapshot(null);
+    versionOriginal.current = null;
+    setVersionExisting(false);
+    setVersionId(""); setVersionFrom(""); setVersionTo(""); setVersionText("");
+    setVersionOpenEnd(false);
+    setVersionDirty(false); setVersionMessage(""); setDatedResult("");
+    setVersionBlocked(false); setVersionBusy(false); versionBusyOwner.current = 0;
+  };
+  const syncFacilityDraft = useCallback((values: FacilityDraft) => {
+    if (JSON.stringify(facilityDraftRef.current) !== JSON.stringify(values)) inputGeneration.current += 1;
+    facilityDraftRef.current = values;
+  }, []);
+  const syncConfigDraft = useCallback((values: ConfigDraft) => {
+    if (JSON.stringify(configDraftRef.current) !== JSON.stringify(values)) inputGeneration.current += 1;
+    configDraftRef.current = values;
+  }, []);
+  const hasUnsavedChanges = facilityFormDirty || configFormDirty || specialDirty || versionDirty;
   dirtyRef.current = hasUnsavedChanges;
   const facilityPath = !Array.isArray(id) && id ? `/facilities/${id}` : "/facilities";
   useH1LeaveGuard(hasUnsavedChanges, [facilityPath]);
+
+  const requireEditingRevision = () => {
+    if (!baseRevision.current) throw new Error("JSON 正本の編集 revision がありません。再読込してください。");
+    return baseRevision.current;
+  };
+
+  const markJsonDirty = (kind: "areas" | "config") => {
+    inputGeneration.current += 1;
+    if (kind === "areas") areaJsonDirty.current = true;
+    else configJsonDirty.current = true;
+    setSpecialDirty(true);
+  };
+
+  const captureCommand = (requireBase = true) => {
+    if (!facility || facility.id !== targetRef.current) throw new Error("施設の選択が変わっています。再読込してください。");
+    const generation = ++commandGeneration.current;
+    const target = targetRef.current;
+    const owner = saveGeneration.current;
+    const input = inputGeneration.current;
+    const expectedRevision = requireBase ? requireEditingRevision() : "";
+    const isCurrent = () => generation === commandGeneration.current && target === targetRef.current &&
+      owner === saveGeneration.current && input === inputGeneration.current;
+    return { generation, expectedRevision, isCurrent };
+  };
+
+  const editVersion = (setter: (value: string) => void, value: string) => {
+    versionGeneration.current += 1;
+    inputGeneration.current += 1;
+    setVersionDirty(true);
+    setter(value);
+  };
+  const captureVersionOwnership = () => {
+    const target = targetRef.current;
+    const generation = versionGeneration.current;
+    const input = inputGeneration.current;
+    const command = commandGeneration.current;
+    const owner = saveGeneration.current;
+    const session = browserSessionKey();
+    return () => target === targetRef.current && generation === versionGeneration.current &&
+      input === inputGeneration.current && command === commandGeneration.current &&
+      owner === saveGeneration.current && session === browserSessionKey() && hasActiveSessionAuthHeader();
+  };
+  const loadVersions = async () => {
+    if (!facility || versionBusyOwner.current !== 0 || versionBusy || facility.id !== targetRef.current || (versionDirty && !window.confirm("未保存の施設版入力を破棄し、版一覧を再読込しますか？"))) return;
+    const target = facility.id;
+    const generation = ++versionGeneration.current;
+    const owns = captureVersionOwnership();
+    const current = () => owns() && generation === versionGeneration.current && versionBusyOwner.current === 0;
+    try {
+      if (!current()) return;
+      const res = await apiClient.get<CanonicalFacilityVersions>(`/facilities/${target}/versions`);
+      if (!current()) return;
+      requireFacilityVersions(res.data, target);
+      clearVersionEditor();
+      versionSnapshotRef.current = res.data;
+      setVersionSnapshot(res.data);
+    } catch (error) {
+      if (current()) setVersionMessage(errorDetailText(error, "施設版を読み込めません。"));
+    }
+  };
+  const selectVersion = (selected: string) => {
+    if (versionDirty && !window.confirm("未保存の施設版入力を破棄し、選択を変更しますか？")) return;
+    const versions = versionSnapshotRef.current;
+    if (!versions || versions.facility_id !== targetRef.current) return;
+    const matches = versions.versions.filter((version) => version.version_id === selected);
+    if (selected && matches.length !== 1) { setVersionMessage("施設版の選択を一意に確認できません。"); return; }
+    versionGeneration.current += 1;
+    inputGeneration.current += 1;
+    const version = selected ? matches[0] : null;
+    versionOriginal.current = version;
+    setVersionExisting(Boolean(version));
+    setVersionId(version?.version_id ?? "");
+    setVersionFrom(version?.valid_from ?? "");
+    setVersionTo(version?.valid_to ?? "");
+    setVersionOpenEnd(Boolean(version && version.valid_to === null));
+    setVersionText(version ? prettyJson(version.facility) : "");
+    setVersionDirty(false);
+    setVersionMessage("");
+  };
+  const saveVersion = async () => {
+    if (!facility || facility.id !== targetRef.current || versionBusyOwner.current !== 0 || versionBusy || versionBlocked) return;
+    const target = facility.id;
+    const snapshot = versionSnapshotRef.current;
+    if (!snapshot) { setVersionMessage("編集開始時の施設版 snapshot がありません。明示的に再読込してください。"); return; }
+    const generation = versionGeneration.current;
+    const command = ++commandGeneration.current;
+    previewGeneration.current += 1;
+    const owns = captureVersionOwnership();
+    const current = () => owns() && generation === versionGeneration.current && command === commandGeneration.current &&
+      versionBusyOwner.current === command;
+    versionBusyOwner.current = command;
+    setVersionBusy(true);
+    let dispatched = false;
+    try {
+      const expectedRevision = requireFacilityVersions(snapshot, target);
+      const parsed = parseJson(versionText);
+      if (parsed.error || !parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) throw new Error("完全施設版をJSONオブジェクトで入力してください。");
+      const version = { ...versionOriginal.current, version_id: versionId, valid_from: versionFrom,
+        valid_to: versionOpenEnd ? null : versionTo, facility: parsed.value };
+      const url = `/facilities/${target}/versions`;
+      if (!current()) return;
+      dispatched = true;
+      const res = versionExisting
+        ? await apiClient.put<CanonicalFacilityVersions>(`${url}/${encodeURIComponent(versionId)}`, { version, expected_revision: expectedRevision })
+        : await apiClient.post<CanonicalFacilityVersions>(url, { version, expected_revision: expectedRevision });
+      if (!current()) return;
+      requireFacilityVersions(res.data, target);
+      const notice = canonicalSaveNotice(res.data);
+      const own = res.data.version;
+      if (!own || own.version_id !== versionId) throw new Error("保存済み施設版を確認できません。入力を保持して明示的に再読込してください。");
+      versionSnapshotRef.current = res.data;
+      setVersionSnapshot(res.data);
+      versionOriginal.current = own;
+      setVersionExisting(true);
+      setVersionFrom(own.valid_from); setVersionTo(own.valid_to ?? ""); setVersionText(prettyJson(own.facility));
+      setVersionOpenEnd(own.valid_to === null);
+      setVersionDirty(false);
+      setVersionMessage(`施設版を保存しました。${notice}`);
+    } catch (error) {
+      if (current()) {
+        const status = (error as any)?.response?.status;
+        if (dispatched && (status === 409 || status === 428 || !status || status >= 500)) setVersionBlocked(true);
+        setVersionMessage(errorDetailText(error, "施設版を保存できません。入力は保持しています。"));
+      }
+    } finally {
+      if (versionBusyOwner.current === command) {
+        versionBusyOwner.current = 0;
+        setVersionBusy(false);
+      }
+    }
+  };
+  const resolveVersionDate = async () => {
+    if (!facility || versionBusyOwner.current !== 0 || versionBusy) return;
+    const target = facility.id;
+    const generation = ++previewGeneration.current;
+    const owns = captureVersionOwnership();
+    const current = () => owns() && generation === previewGeneration.current && versionBusyOwner.current === 0;
+    try {
+      if (!current()) return;
+      const res = await apiClient.get<CanonicalDatedFacility>(`/facilities/${target}/resolved`, { params: { effective_date: effectiveDate } });
+      if (!current()) return;
+      requireDatedFacility(res.data, target, effectiveDate);
+      setDatedResult(prettyJson(res.data));
+    } catch (error) {
+      if (current()) { setDatedResult(""); setVersionMessage(errorDetailText(error, "指定日の施設版を解決できません。")); }
+    }
+  };
+
+  const ownResponse = (data: FacilityResponse, target: string) => {
+    const notice = canonicalSaveNotice(data);
+    baseRevision.current = requireFacilitySnapshot(data, target);
+    loadGeneration.current += 1;
+    return notice;
+  };
+
+  const reloadEditor = async (kind: "facility" | "config") => {
+    if (hasUnsavedChanges && !window.confirm("施設情報・設定・JSON の未保存変更を破棄して、施設全体を再読込しますか？")) {
+      throw new Error("未保存入力を保持し、再読込を中止しました。");
+    }
+    const command = captureCommand(false);
+    const res = await apiClient.get<FacilityResponse>(`/facilities/${facility!.id}`);
+    if (!command.isCurrent() || res.data.facility?.id !== facility!.id || !res.data.config || !res.data.resolved_config) {
+      throw new Error("再読込結果を適用できませんでした。");
+    }
+    baseRevision.current = requireFacilitySnapshot(res.data, facility!.id);
+    loadGeneration.current += 1;
+    setFacility(res.data.facility);
+    setAreasText(prettyJson(res.data.facility.areas));
+    setConfigRecord(res.data.config);
+    setConfigText(prettyJson(res.data.config));
+    setResolvedText(prettyJson(res.data.resolved_config));
+    setValidation(res.data.validation || null);
+    setOrderFormPatterns(res.data.order_form_patterns);
+    setOrderFormPatternsError(res.data.order_form_patterns.length ? "" : "JSON 正本に注文書パターン候補がありません。既存値は保持します。");
+    facilityDraftRef.current = { name: res.data.facility.name };
+    configDraftRef.current = configDraft(res.data.config);
+    setFacilityFormDirty(false);
+    setConfigFormDirty(false);
+    areaJsonDirty.current = false;
+    configJsonDirty.current = false;
+    workbookDirty.current = false;
+    setSpecialDirty(false);
+    setEditorEpoch((epoch) => epoch + 1);
+    clearVersionEditor();
+    setMessage(kind === "facility" ? "施設情報と設定を再読込しました。" : "設定と施設情報を再読込しました。");
+    return res.data;
+  };
 
   const loadFacility = async () => {
     if (!id || Array.isArray(id)) return;
     const generation = loadGeneration.current + 1;
     loadGeneration.current = generation;
+    const target = id;
+    const input = inputGeneration.current;
+    const command = commandGeneration.current;
     setLoadError("");
     try {
-      const [facilityRes, patternResult] = await Promise.all([
-        apiClient.get<FacilityResponse>(`/facilities/${id}`),
-        apiClient.get("/order-forms/patterns")
-          .then((res) => ({ data: res.data, error: "" }))
-          .catch(() => ({ data: null, error: "注文書パターン API の取得に失敗しました。既存値は変更していません。" })),
-      ]);
-      if (generation !== loadGeneration.current || dirtyRef.current) return;
+      const facilityRes = await apiClient.get<FacilityResponse>(`/facilities/${id}`);
+      if (generation !== loadGeneration.current || target !== targetRef.current || input !== inputGeneration.current || command !== commandGeneration.current || dirtyRef.current) return;
       const data = facilityRes.data;
       if (!data?.facility || typeof data.facility !== "object") throw new Error("施設設定の応答に facility がありません。");
+      baseRevision.current = requireFacilitySnapshot(data, target);
       setFacility(data.facility);
-      setAreasText(prettyJson(data.facility.areas || []));
-      setConfigText(prettyJson(data.config || {}));
-      setResolvedText(prettyJson(data.resolved_config || {}));
+      facilityDraftRef.current = { name: data.facility.name };
+      setAreasText(prettyJson(data.facility.areas));
+      setConfigText(prettyJson(data.config));
+      setResolvedText(prettyJson(data.resolved_config));
       setValidation(data.validation || null);
-      const configRecord =
-        data.config && typeof data.config === "object"
-          ? (data.config as Record<string, unknown>)
-          : {};
+      const configRecord = data.config;
       setConfigRecord(configRecord);
       configDraftRef.current = configDraft(configRecord);
-      const rawPatterns = patternResult.data?.patterns;
+      const rawPatterns = data.order_form_patterns;
       if (Array.isArray(rawPatterns)) {
         const normalized = rawPatterns
           .map((item: any) => ({
@@ -244,17 +470,20 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
           }))
           .filter((item: OrderFormPattern) => Boolean(item.pattern_id));
         setOrderFormPatterns(normalized);
-        setOrderFormPatternsError(patternResult.error || (normalized.length ? "" : "注文書パターン API に候補がありません。既存値は保持し、候補から自動設定しません。"));
+        setOrderFormPatternsError(normalized.length ? "" : "JSON 正本に注文書パターン候補がありません。既存値は保持し、候補から自動設定しません。");
       } else {
         setOrderFormPatterns([]);
-        setOrderFormPatternsError(patternResult.error || "注文書パターン API の応答が不正です。既存値は保持し、候補から自動設定しません。");
+        setOrderFormPatternsError("JSON 正本の注文書パターンが不正です。既存値は保持し、候補から自動設定しません。");
       }
       setMessage("");
       setFacilityFormDirty(false);
       setConfigFormDirty(false);
       setSpecialDirty(false);
+      areaJsonDirty.current = false;
+      configJsonDirty.current = false;
+      workbookDirty.current = false;
     } catch (err: any) {
-      if (generation !== loadGeneration.current) return;
+      if (generation !== loadGeneration.current || target !== targetRef.current || input !== inputGeneration.current || command !== commandGeneration.current) return;
       setOrderFormPatterns([]);
       setOrderFormPatternsError("注文書パターン API または施設設定の取得に失敗しました。既存値は変更していません。");
       const status = err?.response?.status;
@@ -268,6 +497,15 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
 
   useEffect(() => {
     saveGeneration.current += 1;
+    clearVersionEditor();
+    commandGeneration.current += 1;
+    uploadGeneration.current += 1;
+    setSourceWorkbookUploading(false);
+    setFacility(null);
+    baseRevision.current = null;
+    areaJsonDirty.current = false;
+    configJsonDirty.current = false;
+    workbookDirty.current = false;
     setFacilityFormDirty(false);
     setConfigFormDirty(false);
     setSpecialDirty(false);
@@ -277,37 +515,41 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
 
   const saveFacility = async (values: FacilityDraft) => {
     if (!facility) throw new Error("施設が読み込まれていません。");
-    const owner = saveGeneration.current;
+    const command = captureCommand();
     const parsed = parseJson(areasText);
-    if (parsed.error) {
+    if (areaJsonDirty.current && parsed.error) {
       setMessage(`Areas JSON error: ${parsed.error}`);
       throw new Error(`Areas JSON error: ${parsed.error}`);
     }
-    if (!Array.isArray(parsed.value)) {
+    if (areaJsonDirty.current && parsed.value !== null && !Array.isArray(parsed.value)) {
       setMessage("Areas JSON must be an array.");
       throw new Error("Areas JSON must be an array.");
     }
     try {
-      const res = await apiClient.put(`/facilities/${facility.id}`, {
+      const res = await apiClient.put<FacilityResponse>(`/facilities/${facility.id}`, {
         name: values.name,
-        areas: parsed.value,
+        ...(areaJsonDirty.current ? { areas: parsed.value } : {}),
+        expected_revision: command.expectedRevision,
       });
-      if (!res.data || typeof res.data !== "object" || typeof res.data.name !== "string") throw new Error("施設保存の応答を確認できませんでした。");
-      if (owner !== saveGeneration.current) throw new Error("施設の選択が変わったため保存応答を適用しませんでした。");
-      setFacility(res.data as Facility);
-      setAreasText(prettyJson(res.data.areas || []));
+      if (!command.isCurrent()) throw new Error("編集対象または入力が変わったため保存応答を適用しませんでした。");
+      const notice = ownResponse(res.data, facility.id);
+      setFacility(res.data.facility);
+      setAreasText(prettyJson(res.data.facility.areas));
       setFacilityFormDirty(false);
-      setMessage("Facility saved.");
-      return { name: res.data.name };
+      areaJsonDirty.current = false;
+      setSpecialDirty(configJsonDirty.current || workbookDirty.current);
+      setMessage(`Facility saved.${notice}`);
+      return { name: res.data.facility.name };
     } catch (err: any) {
-      setMessage(`Failed to save facility: ${errorDetailText(err, "Unknown error")}`);
+      if (!command.isCurrent()) throw err;
+      setMessage(errorDetailText(err, "施設保存に失敗しました。"));
       throw err;
     }
   };
 
   const saveConfig = async (values: ConfigDraft) => {
     if (!facility) throw new Error("施設が読み込まれていません。");
-    const owner = saveGeneration.current;
+    const command = captureCommand();
     const parsed = parseJson(configText);
     if (parsed.error) {
       setMessage(`Config JSON error: ${parsed.error}`);
@@ -320,38 +562,44 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
     try {
       const currentConfig = parsed.value as Record<string, unknown>;
       validateConfigSave(currentConfig, values);
-      const nextConfig = mergeConfigDraft(currentConfig, values);
-      const res = await apiClient.put(`/facilities/${facility.id}/config`, nextConfig);
-      if (res.data?.updated !== true) throw new Error("設定保存の応答を確認できませんでした。");
-      if (owner !== saveGeneration.current) throw new Error("施設の選択が変わったため保存応答を適用しませんでした。");
-      const fresh = await apiClient.get<FacilityResponse>(`/facilities/${facility.id}`);
-      if (owner !== saveGeneration.current || !fresh.data?.config || typeof fresh.data.config !== "object") {
-        throw new Error("保存後の設定正本を確認できませんでした。");
-      }
-      const savedConfig = fresh.data.config as Record<string, unknown>;
+      const nextConfig = mergeConfigDraft(currentConfig, values, configDraft(configRecord));
+      const res = await apiClient.put<FacilityResponse>(`/facilities/${facility.id}/config`, {
+        config: nextConfig, expected_revision: command.expectedRevision,
+      });
+      if (!command.isCurrent()) throw new Error("編集対象または入力が変わったため保存応答を適用しませんでした。");
+      const notice = ownResponse(res.data, facility.id);
+      const savedConfig = res.data.config;
       setConfigRecord(savedConfig);
       setConfigText(prettyJson(savedConfig));
-      setResolvedText(prettyJson(fresh.data.resolved_config || {}));
-      setValidation(fresh.data.validation || res.data.validation || null);
+      setResolvedText(prettyJson(res.data.resolved_config));
+      setValidation(res.data.validation || null);
+      configDraftRef.current = configDraft(savedConfig);
       setConfigFormDirty(false);
-      setMessage("Config saved.");
+      configJsonDirty.current = false;
+      setSpecialDirty(areaJsonDirty.current || workbookDirty.current);
+      setMessage(`Config saved.${notice}`);
       return configDraft(savedConfig);
     } catch (err: any) {
+      if (!command.isCurrent()) throw err;
       const detail = err?.response?.data?.detail;
       if (detail?.errors) {
         setValidation({ errors: detail.errors, warnings: [] });
         setMessage("Config validation failed.");
         throw err;
       }
-      setMessage("Failed to save config.");
+      setMessage(errorDetailText(err, "Failed to save config. 明示的に再読込してください。"));
       throw err;
     }
   };
 
   const handleConfigUpload = (file: File | null) => {
     if (!file) return;
+    const input = ++inputGeneration.current;
+    const owner = saveGeneration.current;
+    const target = targetRef.current;
     const reader = new FileReader();
     reader.onload = () => {
+      if (input !== inputGeneration.current || owner !== saveGeneration.current || target !== targetRef.current) return;
       const text = String(reader.result || "");
       const parsed = parseJson(text);
       if (parsed.error) {
@@ -359,41 +607,56 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
         return;
       }
       setConfigText(prettyJson(parsed.value));
-      setSpecialDirty(true);
+      markJsonDirty("config");
       setMessage("Config loaded from file.");
+    };
+    reader.onerror = () => {
+      if (input === inputGeneration.current && owner === saveGeneration.current && target === targetRef.current) {
+        setMessage("設定ファイルを読み込めませんでした。既存入力は変更していません。");
+      }
     };
     reader.readAsText(file);
   };
 
   const uploadSourceWorkbook = async (file: File | null) => {
     if (!facility || !file) return;
-    const owner = saveGeneration.current;
+    if (facilityFormDirty || configFormDirty || areaJsonDirty.current || configJsonDirty.current) {
+      setMessage("未保存の施設情報または設定があります。保存または取消後にExcelを登録してください。");
+      return;
+    }
+    let command: ReturnType<typeof captureCommand>;
+    try { command = captureCommand(); } catch (err) {
+      setMessage(err instanceof Error ? err.message : "JSON 正本を再読込してください。");
+      return;
+    }
     const form = new FormData();
+    const uploadOwner = ++uploadGeneration.current;
+    const uploadTarget = targetRef.current;
     form.append("file", file);
+    form.append("expected_revision", command.expectedRevision);
     if (sourceWorkbookMonthId.trim()) {
       form.append("month_id", sourceWorkbookMonthId.trim());
     }
     setSourceWorkbookUploading(true);
     setMessage("");
     try {
-      const res = await apiClient.post(`/facilities/${facility.id}/order-form-source-workbook`, form, {
+      const res = await apiClient.post<FacilityResponse>(`/facilities/${facility.id}/order-form-source-workbook`, form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      if (owner !== saveGeneration.current) throw new Error("施設の選択が変わったため upload 応答を適用しませんでした。");
-      if (res.data?.resolved_config) {
-        setResolvedText(prettyJson(res.data.resolved_config));
-      }
-      const nextConfig = res.data?.config || res.data?.resolved_config;
-      if (nextConfig) {
-        setConfigText(prettyJson(nextConfig));
-        if (res.data?.config && typeof res.data.config === "object") setConfigRecord(res.data.config as Record<string, unknown>);
-      }
-      setMessage("施設テンプレートExcelを登録しました。次回OCR再実行からこのExcelを使います。");
+      if (!command.isCurrent()) throw new Error("編集対象または入力が変わったため upload 応答を適用しませんでした。");
+      const notice = ownResponse(res.data, facility.id);
+      setResolvedText(prettyJson(res.data.resolved_config));
+      setConfigText(prettyJson(res.data.config));
+      setConfigRecord(res.data.config);
+      configDraftRef.current = configDraft(res.data.config);
+      workbookDirty.current = false;
+      setSpecialDirty(false);
+      setMessage(`施設テンプレートExcelを登録しました。次回OCR再実行からこのExcelを使います。${notice}`);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setMessage(typeof detail === "string" ? detail : "施設テンプレートExcelの登録に失敗しました。");
+      if (!command.isCurrent()) return;
+      setMessage(errorDetailText(err, "施設テンプレートExcelの登録に失敗しました。明示的に再読込してください。"));
     } finally {
-      setSourceWorkbookUploading(false);
+      if (uploadOwner === uploadGeneration.current && uploadTarget === targetRef.current) setSourceWorkbookUploading(false);
     }
   };
 
@@ -419,27 +682,38 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
       ) : (
         <>
           <section className="panel">
+            <header className="panel-header"><h2>施設情報の有効期間</h2><button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void loadVersions()}>版一覧を再読込</button></header>
+            <div className="form-grid">
+              <label className="field"><span className="field-label">編集対象</span><select className="input" value={versionExisting ? versionId : ""} onChange={(e) => selectVersion(e.target.value)} disabled={versionBusy || !versionSnapshot}><option value="">新規版</option>{versionSnapshot?.versions.map((version) => <option key={version.version_id} value={version.version_id}>{version.version_id} ({version.valid_from} - {version.valid_to ?? "終了日なし"})</option>)}</select></label>
+              <label className="field"><span className="field-label">版ID</span><input className="input" value={versionId} onChange={(e) => editVersion(setVersionId, e.target.value)} disabled={versionBusy || versionExisting} /></label>
+              <label className="field"><span className="field-label">開始日（含む）</span><input className="input" type="date" value={versionFrom} onChange={(e) => editVersion(setVersionFrom, e.target.value)} disabled={versionBusy} /></label>
+              <label className="field"><span className="field-label">終了日（含む）</span><input className="input" type="date" value={versionTo} onChange={(e) => editVersion(setVersionTo, e.target.value)} disabled={versionBusy || versionOpenEnd} /><span><input type="checkbox" checked={versionOpenEnd} disabled={versionBusy} onChange={(e) => { versionGeneration.current += 1; inputGeneration.current += 1; setVersionDirty(true); setVersionOpenEnd(e.target.checked); }} />終了日なし</span></label>
+              <label className="field"><span className="field-label">完全施設版（名称・区域・設定・テンプレート）</span><textarea className="textarea json-textarea" rows={12} value={versionText} onChange={(e) => editVersion(setVersionText, e.target.value)} disabled={versionBusy} /></label>
+            </div>
+            <button className="btn" type="button" onClick={() => void saveVersion()} disabled={versionBusy || versionBlocked || !versionSnapshot}>施設版を保存</button>
+            <div className="form-grid"><label className="field"><span className="field-label">参照日</span><input className="input" type="date" disabled={versionBusy} value={effectiveDate} onChange={(e) => { previewGeneration.current += 1; setEffectiveDate(e.target.value); setDatedResult(""); }} /></label></div>
+            <button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void resolveVersionDate()}>指定日の版を取得</button>
+            {versionMessage ? <p className="message">{versionMessage}</p> : null}
+            {datedResult ? <pre className="json-view">{datedResult}</pre> : null}
+          </section>
+          <section className="panel">
             <header className="panel-header">
               <h2>施設情報</h2>
               <span className="badge">{facility.id}</span>
             </header>
             <EditForm<FacilityDraft>
-              key={`${facility.id}-${saveGeneration.current}`}
+              key={`${facility.id}-${saveGeneration.current}-${editorEpoch}`}
               label="通常施設情報"
               defaultValues={{ name: facility.name || "" }}
               onDirtyChange={setFacilityFormDirty}
               classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: errorDetailText(error, "施設保存に失敗しました。") })}
               onSave={saveFacility}
               onReload={async () => {
-                if (specialDirty) throw new Error("JSON の未保存変更があるため再読込を中止しました。");
-                const owner = saveGeneration.current;
-                const res = await apiClient.get<FacilityResponse>(`/facilities/${facility.id}`);
-                if (owner !== saveGeneration.current || !res.data?.facility) throw new Error("再読込結果を適用できませんでした。");
-                setFacility(res.data.facility);
-                setAreasText(prettyJson(res.data.facility.areas || []));
-                return { name: res.data.facility.name || "" };
+                const data = await reloadEditor("facility");
+                return { name: data.facility.name };
               }}
             >
+              <DraftBridge<FacilityDraft> onValuesChange={syncFacilityDraft} />
               <FormTextField<FacilityDraft> name="name" label="施設名" rules={{ required: "施設名は必須です。" }} />
             </EditForm>
             <div className="form-grid">
@@ -448,7 +722,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
                 <textarea
                   className="textarea"
                   value={areasText}
-                  onChange={(e) => { setAreasText(e.target.value); setSpecialDirty(true); }}
+                  onChange={(e) => { setAreasText(e.target.value); markJsonDirty("areas"); }}
                   rows={6}
                 />
               </label>
@@ -471,27 +745,22 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
               </label>
               <label className="field">
                 <span className="field-label">月指定（任意: YYYY-MM）</span>
-                <input className="input" value={sourceWorkbookMonthId} onChange={(e) => { setSourceWorkbookMonthId(e.target.value); setSpecialDirty(true); }} disabled={sourceWorkbookUploading} />
+                <input className="input" value={sourceWorkbookMonthId} onChange={(e) => { inputGeneration.current += 1; workbookDirty.current = true; setSourceWorkbookMonthId(e.target.value); setSpecialDirty(true); }} disabled={sourceWorkbookUploading} />
               </label>
             </div>
             <EditForm<ConfigDraft>
-              key={`${facility.id}-${saveGeneration.current}-config`}
+              key={`${facility.id}-${saveGeneration.current}-${editorEpoch}-config`}
               label="通常施設設定"
               defaultValues={configDraft(configRecord)}
               onDirtyChange={setConfigFormDirty}
-              onValuesChange={(values) => { configDraftRef.current = values; }}
               classifyError={(error) => ({ kind: (error as any)?.response?.status === 409 ? "conflict" : "error", message: errorDetailText(error, "設定保存に失敗しました。") })}
               onSave={saveConfig}
               onReload={async () => {
-                if (specialDirty) throw new Error("JSON または workbook の未保存変更があるため再読込を中止しました。");
-                const owner = saveGeneration.current;
-                const res = await apiClient.get<FacilityResponse>(`/facilities/${facility.id}`);
-                if (owner !== saveGeneration.current || !res.data?.config || typeof res.data.config !== "object") throw new Error("再読込結果を適用できませんでした。");
-                const saved = res.data.config as Record<string, unknown>;
-                setConfigRecord(saved); setConfigText(prettyJson(saved)); setResolvedText(prettyJson(res.data.resolved_config || {}));
-                return configDraft(saved);
+                const data = await reloadEditor("config");
+                return configDraft(data.config);
               }}
             >
+              <DraftBridge<ConfigDraft> onValuesChange={syncConfigDraft} />
               <FormTextField<ConfigDraft> name="order_form_pattern_id" label="注文書パターン" select><MenuItem value="">未設定</MenuItem>{orderFormPatterns.length === 0 && configDraft(configRecord).order_form_pattern_id ? <MenuItem value={configDraft(configRecord).order_form_pattern_id}>{`現在値（API候補外）: ${configDraft(configRecord).order_form_pattern_id}`}</MenuItem> : null}{orderFormPatterns.map((pattern) => <MenuItem key={pattern.pattern_id} value={pattern.pattern_id}>{pattern.label ? `${pattern.label} (${pattern.pattern_id})` : pattern.pattern_id}</MenuItem>)}</FormTextField>
               {orderFormPatternsError ? <p className="message">{orderFormPatternsError}</p> : null}
               <FormTextField<ConfigDraft> name="menu_override_tags" label="メニュー上書きタグ" helperText="カンマ区切り" />
@@ -512,7 +781,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
               <textarea
                 className="textarea json-textarea"
                 value={configText}
-                onChange={(e) => { setConfigText(e.target.value); setSpecialDirty(true); }}
+                onChange={(e) => { setConfigText(e.target.value); markJsonDirty("config"); }}
                 rows={14}
                 wrap="soft"
               />
@@ -552,10 +821,10 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
 
           <section className="panel">
             <header className="panel-header">
-              <h2>Resolved Preview</h2>
+              <h2>日付未指定の参照資料</h2>
             </header>
             <details className="json-panel">
-              <summary>Resolved JSON (上級)</summary>
+              <summary>参照設定 JSON（適用版ではありません）</summary>
               <pre className="code-block">{resolvedText}</pre>
             </details>
           </section>
