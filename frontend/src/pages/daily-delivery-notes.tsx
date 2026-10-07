@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
-import { Button, MenuItem, Stack } from "@mui/material";
+import { Button, Checkbox, Input, MenuItem, NativeSelect, Stack } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { FormTextField, SawaProvider } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
@@ -1211,15 +1211,15 @@ function DailyDeliveryNotesScreen() {
           ) : null}
         </FormProvider>
         <div className="filters">
-          <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels_csv")} disabled={loading}>
+          <Button className="btn ghost delivery-ordinary-control" type="button" onClick={() => downloadDailyBundle("labels_csv")} disabled={loading}>
             当日ラベルCSV
-          </button>
-          <button className="btn ghost" type="button" onClick={() => downloadDailyBundle("labels")} disabled={loading}>
+          </Button>
+          <Button className="btn ghost delivery-ordinary-control" type="button" onClick={() => downloadDailyBundle("labels")} disabled={loading}>
             当日ラベルExcel
-          </button>
-          <button className="btn ghost" type="button" onClick={openDailyDeliveryHtml} disabled={loading}>
+          </Button>
+          <Button className="btn ghost delivery-ordinary-control" type="button" onClick={openDailyDeliveryHtml} disabled={loading}>
             当日納品書HTML
-          </button>
+          </Button>
           <Link className="btn ghost" href={`/weekly-weight-output?date=${encodeURIComponent(date)}${status ? `&status=${encodeURIComponent(status)}` : ""}`}>
             週別重量表
           </Link>
@@ -1261,34 +1261,34 @@ function DailyDeliveryNotesScreen() {
                     <td>{formatTimestamp(order.received_at)}</td>
                     <td>{order.line_count ?? "-"}</td>
                     <td className="actions">
-                      <button
-                        className="btn ghost"
+                      <Button
+                        className="btn ghost delivery-ordinary-control"
                         type="button"
                         onClick={() => openOutput(`/outputs/labels?order_id=${order.id}&date=${date}`, "ラベルCSV")}
                       >
                         ラベルCSV
-                      </button>
-                      <button
-                        className="btn ghost"
+                      </Button>
+                      <Button
+                        className="btn ghost delivery-ordinary-control"
                         type="button"
                         onClick={() => openOutput(`/outputs/labels.xlsx?order_id=${order.id}&date=${date}`, "ラベルExcel")}
                       >
                         ラベルExcel
-                      </button>
-                      <button
-                        className="btn ghost"
+                      </Button>
+                      <Button
+                        className="btn ghost delivery-ordinary-control"
                         type="button"
                         onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${order.id}`, "納品書HTML")}
                       >
                         納品書
-                      </button>
-                      <button
-                        className="btn ghost"
+                      </Button>
+                      <Button
+                        className="btn ghost delivery-ordinary-control"
                         type="button"
                         onClick={() => openOutput(`/outputs/manufacturing-aggregate?order_id=${order.id}`, "総量CSV")}
                       >
                         総量CSV
-                      </button>
+                      </Button>
                       <Link href={`/orders/${order.id}`} className="link">
                         詳細
                       </Link>
@@ -1387,13 +1387,13 @@ function DailyDeliveryNotesScreen() {
                       </summary>
                       <div className="menu-bag-body">
                         <div className="menu-bag-actions">
-                          <button
-                            className="btn ghost"
+                          <Button
+                            className="btn ghost delivery-ordinary-control"
                             type="button"
                             onClick={() => openOverrideEditor(menuGroup)}
                           >
                             施設別単位設定
-                          </button>
+                          </Button>
                         </div>
                         <table className="menu-bag-table">
                           <thead>
@@ -1489,9 +1489,9 @@ function DailyDeliveryNotesScreen() {
             <span className="badge">
               候補 {dailyBagAudit.rule_based?.finding_count ?? auditFindings.length} 件
             </span>
-            <button className="btn ghost" type="button" onClick={runAuditAi} disabled={loading || auditAiLoading || !auditFindings.length}>
+            <Button className="btn ghost delivery-ordinary-control" type="button" onClick={runAuditAi} disabled={loading || auditAiLoading || !auditFindings.length}>
               {auditAiLoading ? "Gemini実行中..." : "Gemini補助"}
-            </button>
+            </Button>
           </div>
         </header>
         {auditMessage ? <p className="subtle">{auditMessage}</p> : null}
@@ -1628,9 +1628,9 @@ function DailyDeliveryNotesScreen() {
                   {overrideEditor.menu_category || "-"}
                 </p>
               </div>
-              <button className="btn ghost" type="button" onClick={closeOverrideEditor}>
+              <Button className="btn ghost delivery-ordinary-control" type="button" onClick={closeOverrideEditor}>
                 閉じる
-              </button>
+              </Button>
             </div>
             <p className="subtle helper-text">
               ここで保存した値は、その日の袋分けと個別注文の出力に反映されます。曖昧な行は候補を確認してから保存してください。
@@ -1658,44 +1658,46 @@ function DailyDeliveryNotesScreen() {
                   <div className="override-form-grid">
                     <label className="field">
                       <span className="field-label">1単位量</span>
-                      <input
-                        className="input"
+                      <Input
+                        className="input delivery-ordinary-control"
                         type="number"
-                        step="0.1"
-                        min="0"
                         value={overrideEditorBulkDraft.qty_per_serving}
                         onChange={(event) => updateOverrideBulkDraft({ qty_per_serving: event.target.value })}
+                        disableUnderline
+                        inputProps={{ "step": "0.1", "min": "0" }}
                       />
                     </label>
                     <label className="field">
                       <span className="field-label">単位</span>
-                      <select
-                        className="input"
+                      <NativeSelect
+                        className="input delivery-ordinary-control"
                         value={overrideEditorBulkDraft.unit_type}
                         onChange={(event) => updateOverrideBulkDraft({ unit_type: event.target.value })}
+                        disableUnderline
                       >
                         {overrideUnitOptions.map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </label>
                     <label className="field override-note-field">
                       <span className="field-label">理由メモ</span>
-                      <input
-                        className="input"
+                      <Input
+                        className="input delivery-ordinary-control"
                         type="text"
                         value={overrideEditorBulkDraft.note}
                         onChange={(event) => updateOverrideBulkDraft({ note: event.target.value })}
                         placeholder={`例: 全施設 ${formatOverrideUnitLabel(overrideEditorBulkDraft.unit_type)}を統一`}
+                        disableUnderline
                       />
                     </label>
                   </div>
                   <div className="actions override-actions">
-                    <button className="btn primary" type="button" onClick={saveBulkOverride} disabled={overrideEditorBulkSaving}>
+                    <Button className="btn primary delivery-ordinary-control" type="button" onClick={saveBulkOverride} disabled={overrideEditorBulkSaving}>
                       {overrideEditorBulkSaving ? "保存中..." : "全施設に保存"}
-                    </button>
+                    </Button>
                   </div>
                 </section>
 
@@ -1703,10 +1705,11 @@ function DailyDeliveryNotesScreen() {
                   <div className="override-selector-grid">
                     <label className="field">
                       <span className="field-label">施設を選ぶ</span>
-                      <select
-                        className="input"
+                      <NativeSelect
+                        className="input delivery-ordinary-control"
                         value={overrideEditorSelectedFacilityId}
                         onChange={(event) => setOverrideEditorSelectedFacilityId(event.target.value)}
+                        disableUnderline
                       >
                         {overrideFacilityOptions.map((option) => (
                           <option key={option.facility_id} value={option.facility_id}>
@@ -1714,22 +1717,23 @@ function DailyDeliveryNotesScreen() {
                             {option.override_count > 0 ? " / override有" : ""}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </label>
                     {selectedFacilityRows.length > 1 ? (
                       <label className="field">
                         <span className="field-label">区分を選ぶ</span>
-                        <select
-                          className="input"
+                        <NativeSelect
+                          className="input delivery-ordinary-control"
                           value={overrideEditorSelectedDietType}
                           onChange={(event) => setOverrideEditorSelectedDietType(event.target.value)}
+                          disableUnderline
                         >
                           {selectedFacilityRows.map((row) => (
                             <option key={buildDailyOutputOverrideRowKey(row)} value={normalizeDietType(row.diet_type)}>
                               {formatDietType(row.diet_type)}
                             </option>
                           ))}
-                        </select>
+                        </NativeSelect>
                       </label>
                     ) : null}
                   </div>
@@ -1773,12 +1777,12 @@ function DailyDeliveryNotesScreen() {
                               ))}
                             </div>
                             <label className="checkbox-row">
-                              <input
-                                type="checkbox"
+                              <Checkbox
                                 checked={draft.acknowledge_ambiguous}
                                 onChange={(event) =>
                                   updateOverrideDraft(rowKey, { acknowledge_ambiguous: event.target.checked })
                                 }
+                                className="delivery-ordinary-control"
                               />
                               <span>候補を確認し、この値で上書きすることを理解した</span>
                             </label>
@@ -1787,48 +1791,50 @@ function DailyDeliveryNotesScreen() {
                         <div className="override-form-grid">
                           <label className="field">
                             <span className="field-label">1単位量</span>
-                            <input
-                              className="input"
+                            <Input
+                              className="input delivery-ordinary-control"
                               type="number"
-                              step="0.1"
-                              min="0"
                               value={draft.qty_per_serving}
                               onChange={(event) => updateOverrideDraft(rowKey, { qty_per_serving: event.target.value })}
+                              disableUnderline
+                              inputProps={{ "step": "0.1", "min": "0" }}
                             />
                           </label>
                           <label className="field">
                             <span className="field-label">単位</span>
-                            <select
-                              className="input"
+                            <NativeSelect
+                              className="input delivery-ordinary-control"
                               value={draft.unit_type}
                               onChange={(event) => updateOverrideDraft(rowKey, { unit_type: event.target.value })}
+                              disableUnderline
                             >
                               {overrideUnitOptions.map((option) => (
                                 <option key={option.value} value={option.value}>
                                   {option.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label className="field override-note-field">
                             <span className="field-label">理由メモ</span>
-                            <input
-                              className="input"
+                            <Input
+                              className="input delivery-ordinary-control"
                               type="text"
                               value={draft.note}
                               onChange={(event) => updateOverrideDraft(rowKey, { note: event.target.value })}
                               placeholder={`例: この施設のみ${formatOverrideUnitLabel(draft.unit_type)}を調整`}
+                              disableUnderline
                             />
                           </label>
                         </div>
                         <div className="actions override-actions">
-                          <button className="btn primary" type="button" onClick={() => saveOverrideRow(row)} disabled={saving}>
+                          <Button className="btn primary delivery-ordinary-control" type="button" onClick={() => saveOverrideRow(row)} disabled={saving}>
                             {saving ? "保存中..." : "保存"}
-                          </button>
+                          </Button>
                           {row.override?.id ? (
-                            <button className="btn ghost" type="button" onClick={() => deleteOverrideRow(row)} disabled={saving}>
+                            <Button className="btn ghost delivery-ordinary-control" type="button" onClick={() => deleteOverrideRow(row)} disabled={saving}>
                               解除
-                            </button>
+                            </Button>
                           ) : null}
                         </div>
                       </>
@@ -1844,6 +1850,19 @@ function DailyDeliveryNotesScreen() {
       ) : null}
 
       <style jsx>{`
+        :global(.delivery-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          min-width: 0;
+        }
+        :global(.delivery-ordinary-control .MuiInputBase-input) {
+          padding: 0;
+          min-width: 0;
+        }
+        :global(.delivery-ordinary-control.MuiCheckbox-root) {
+          padding: 0;
+          margin-top: 2px;
+        }
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
@@ -1972,14 +1991,16 @@ function DailyDeliveryNotesScreen() {
           text-transform: uppercase;
         }
 
-        .input {
+        .input,
+        :global(.delivery-ordinary-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
           background: #fbfbf9;
         }
 
-        .btn {
+        .btn,
+        :global(.delivery-ordinary-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 8px 14px;
@@ -1990,18 +2011,21 @@ function DailyDeliveryNotesScreen() {
           justify-self: start;
         }
 
-        .btn.primary {
+        .btn.primary,
+        :global(.delivery-ordinary-control.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn.ghost {
+        .btn.ghost,
+        :global(.delivery-ordinary-control.btn.ghost) {
           background: #eef2f0;
           color: #1f2a2a;
           border: 1px solid rgba(25, 32, 30, 0.12);
         }
 
-        .btn:disabled {
+        .btn:disabled,
+        :global(.delivery-ordinary-control.btn:disabled) {
           opacity: 0.6;
           cursor: not-allowed;
         }
@@ -2503,7 +2527,8 @@ function DailyDeliveryNotesScreen() {
             justify-content: stretch;
           }
 
-          .override-actions .btn {
+          .override-actions .btn,
+          :global(.override-actions .delivery-ordinary-control.btn) {
             flex: 1 1 0;
             text-align: center;
           }

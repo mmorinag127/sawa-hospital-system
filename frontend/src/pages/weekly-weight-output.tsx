@@ -317,15 +317,15 @@ function WeeklyWeightOutputScreen() {
             <p className="subtle">履歴なし</p>
           ) : (
             weekHistory.map((item) => (
-              <button
-                className={`week-chip${item.week === week ? " active" : ""}`}
+              <Button
+                className={`week-chip${item.week === week ? " active" : ""} delivery-ordinary-control`}
                 key={item.week}
                 type="button"
                 onClick={() => conditionForm.setValue("week", item.week, { shouldDirty: true })}
               >
                 <span>{item.label}</span>
                 <small>{item.orderCount}件</small>
-              </button>
+              </Button>
             ))
           )}
         </div>
@@ -377,6 +377,11 @@ function WeeklyWeightOutputScreen() {
       </section>
 
       <style jsx>{`
+        :global(.delivery-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          min-width: 0;
+        }
         .page {
           min-height: 100vh;
           padding: 48px 6vw 80px;
@@ -511,7 +516,8 @@ function WeeklyWeightOutputScreen() {
           grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
           gap: 10px;
         }
-        .week-chip {
+        .week-chip,
+        :global(.delivery-ordinary-control.week-chip) {
           min-height: 58px;
           border: 1px solid rgba(25, 32, 30, 0.1);
           border-radius: 12px;
@@ -525,16 +531,19 @@ function WeeklyWeightOutputScreen() {
           padding: 10px 12px;
           text-align: left;
         }
-        .week-chip.active {
+        .week-chip.active,
+        :global(.delivery-ordinary-control.week-chip.active) {
           background: #1f2a2a;
           border-color: #1f2a2a;
           color: #f7f2e7;
         }
-        .week-chip span {
+        .week-chip span,
+        :global(.delivery-ordinary-control.week-chip span) {
           font-size: 13px;
           font-weight: 800;
         }
-        .week-chip small {
+        .week-chip small,
+        :global(.delivery-ordinary-control.week-chip small) {
           color: inherit;
           font-size: 12px;
           opacity: 0.75;
