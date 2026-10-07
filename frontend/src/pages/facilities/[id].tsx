@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { ChangeEvent } from "react";
 import { useFormContext, type FieldValues } from "react-hook-form";
-import { MenuItem } from "@mui/material";
+import { Button, Checkbox, Input, MenuItem, NativeSelect } from "@mui/material";
 import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
 import TopNav from "../../components/TopNav";
 import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
@@ -682,17 +683,17 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
       ) : (
         <>
           <section className="panel">
-            <header className="panel-header"><h2>施設情報の有効期間</h2><button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void loadVersions()}>版一覧を再読込</button></header>
+            <header className="panel-header"><h2>施設情報の有効期間</h2><Button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void loadVersions()}>版一覧を再読込</Button></header>
             <div className="form-grid">
-              <label className="field"><span className="field-label">編集対象</span><select className="input" value={versionExisting ? versionId : ""} onChange={(e) => selectVersion(e.target.value)} disabled={versionBusy || !versionSnapshot}><option value="">新規版</option>{versionSnapshot?.versions.map((version) => <option key={version.version_id} value={version.version_id}>{version.version_id} ({version.valid_from} - {version.valid_to ?? "終了日なし"})</option>)}</select></label>
-              <label className="field"><span className="field-label">版ID</span><input className="input" value={versionId} onChange={(e) => editVersion(setVersionId, e.target.value)} disabled={versionBusy || versionExisting} /></label>
-              <label className="field"><span className="field-label">開始日（含む）</span><input className="input" type="date" value={versionFrom} onChange={(e) => editVersion(setVersionFrom, e.target.value)} disabled={versionBusy} /></label>
-              <label className="field"><span className="field-label">終了日（含む）</span><input className="input" type="date" value={versionTo} onChange={(e) => editVersion(setVersionTo, e.target.value)} disabled={versionBusy || versionOpenEnd} /><span><input type="checkbox" checked={versionOpenEnd} disabled={versionBusy} onChange={(e) => { versionGeneration.current += 1; inputGeneration.current += 1; setVersionDirty(true); setVersionOpenEnd(e.target.checked); }} />終了日なし</span></label>
-              <label className="field"><span className="field-label">完全施設版（名称・区域・設定・テンプレート）</span><textarea className="textarea json-textarea" rows={12} value={versionText} onChange={(e) => editVersion(setVersionText, e.target.value)} disabled={versionBusy} /></label>
+              <label className="field"><span className="field-label">編集対象</span><NativeSelect className="input" value={versionExisting ? versionId : ""} onChange={(e) => selectVersion(e.target.value)} disabled={versionBusy || !versionSnapshot}><option value="">新規版</option>{versionSnapshot?.versions.map((version) => <option key={version.version_id} value={version.version_id}>{version.version_id} ({version.valid_from} - {version.valid_to ?? "終了日なし"})</option>)}</NativeSelect></label>
+              <label className="field"><span className="field-label">版ID</span><Input disableUnderline className="input" value={versionId} onChange={(e) => editVersion(setVersionId, e.target.value)} disabled={versionBusy || versionExisting} /></label>
+              <label className="field"><span className="field-label">開始日（含む）</span><Input disableUnderline className="input" type="date" value={versionFrom} onChange={(e) => editVersion(setVersionFrom, e.target.value)} disabled={versionBusy} /></label>
+              <label className="field"><span className="field-label">終了日（含む）</span><Input disableUnderline className="input" type="date" value={versionTo} onChange={(e) => editVersion(setVersionTo, e.target.value)} disabled={versionBusy || versionOpenEnd} /><span><Checkbox checked={versionOpenEnd} disabled={versionBusy} onChange={(e) => { versionGeneration.current += 1; inputGeneration.current += 1; setVersionDirty(true); setVersionOpenEnd(e.target.checked); }} />終了日なし</span></label>
+              <label className="field"><span className="field-label">完全施設版（名称・区域・設定・テンプレート）</span><Input disableUnderline multiline className="textarea json-textarea" rows={12} value={versionText} onChange={(e) => editVersion(setVersionText, e.target.value)} disabled={versionBusy} /></label>
             </div>
-            <button className="btn" type="button" onClick={() => void saveVersion()} disabled={versionBusy || versionBlocked || !versionSnapshot}>施設版を保存</button>
-            <div className="form-grid"><label className="field"><span className="field-label">参照日</span><input className="input" type="date" disabled={versionBusy} value={effectiveDate} onChange={(e) => { previewGeneration.current += 1; setEffectiveDate(e.target.value); setDatedResult(""); }} /></label></div>
-            <button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void resolveVersionDate()}>指定日の版を取得</button>
+            <Button className="btn" type="button" onClick={() => void saveVersion()} disabled={versionBusy || versionBlocked || !versionSnapshot}>施設版を保存</Button>
+            <div className="form-grid"><label className="field"><span className="field-label">参照日</span><Input disableUnderline className="input" type="date" disabled={versionBusy} value={effectiveDate} onChange={(e) => { previewGeneration.current += 1; setEffectiveDate(e.target.value); setDatedResult(""); }} /></label></div>
+            <Button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void resolveVersionDate()}>指定日の版を取得</Button>
             {versionMessage ? <p className="message">{versionMessage}</p> : null}
             {datedResult ? <pre className="json-view">{datedResult}</pre> : null}
           </section>
@@ -719,7 +720,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
             <div className="form-grid">
               <label className="field">
                 <span className="field-label">配達エリア（JSON配列）</span>
-                <textarea
+                <Input disableUnderline multiline
                   className="textarea"
                   value={areasText}
                   onChange={(e) => { setAreasText(e.target.value); markJsonDirty("areas"); }}
@@ -732,20 +733,20 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
           <section className="panel">
             <header className="panel-header">
               <h2>施設設定</h2>
-              <input
+              <Input disableUnderline
                 type="file"
-                accept="application/json"
-                onChange={(e) => handleConfigUpload(e.target.files?.[0] || null)}
+                inputProps={{ accept: "application/json" }}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => handleConfigUpload(e.target.files?.[0] || null)}
               />
             </header>
             <div className="form-grid">
               <label className="field">
                 <span className="field-label">施設テンプレートExcel</span>
-                <input className="input" type="file" accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onChange={(e) => void uploadSourceWorkbook(e.target.files?.[0] || null)} disabled={sourceWorkbookUploading} />
+                <Input disableUnderline className="input" type="file" inputProps={{ accept: ".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" }} onChange={(e: ChangeEvent<HTMLInputElement>) => void uploadSourceWorkbook(e.target.files?.[0] || null)} disabled={sourceWorkbookUploading} />
               </label>
               <label className="field">
                 <span className="field-label">月指定（任意: YYYY-MM）</span>
-                <input className="input" value={sourceWorkbookMonthId} onChange={(e) => { inputGeneration.current += 1; workbookDirty.current = true; setSourceWorkbookMonthId(e.target.value); setSpecialDirty(true); }} disabled={sourceWorkbookUploading} />
+                <Input disableUnderline className="input" value={sourceWorkbookMonthId} onChange={(e) => { inputGeneration.current += 1; workbookDirty.current = true; setSourceWorkbookMonthId(e.target.value); setSpecialDirty(true); }} disabled={sourceWorkbookUploading} />
               </label>
             </div>
             <EditForm<ConfigDraft>
@@ -778,16 +779,16 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
             </EditForm>
             <details className="json-panel">
               <summary>Config JSON (上級)</summary>
-              <textarea
+              <Input disableUnderline multiline
                 className="textarea json-textarea"
                 value={configText}
                 onChange={(e) => { setConfigText(e.target.value); markJsonDirty("config"); }}
                 rows={14}
-                wrap="soft"
+                inputProps={{ wrap: "soft" }}
               />
             </details>
             <div className="actions">
-              <button className="btn primary" onClick={() => {
+              <Button type="submit" className="btn primary" onClick={() => {
                 if (!configDraftRef.current) {
                   setMessage("通常施設設定を読み込めていないため、JSON設定を保存できません。");
                   return;
@@ -795,7 +796,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
                 void saveConfig(configDraftRef.current).catch(() => undefined);
               }}>
                 JSON設定を保存
-              </button>
+              </Button>
             </div>
           </section>
 
@@ -947,14 +948,20 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
         }
 
         .input,
-        .textarea {
+        .textarea,
+        .page :global(.MuiInputBase-root.input),
+        .page :global(.MuiInputBase-root.textarea) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
           background: #fbfbf9;
         }
 
-        .btn {
+        .field :global(.MuiInputBase-root) { width: 100%; min-width: 0; }
+        .field :global(.MuiInputBase-input) { padding: 0; font: inherit; }
+
+        .btn,
+        .page :global(.MuiButton-root.btn) {
           border: none;
           border-radius: 999px;
           padding: 10px 18px;
