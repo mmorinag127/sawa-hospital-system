@@ -2178,13 +2178,18 @@ def _apply_menu_rules(lines: list[dict], facility_id: str | None, *, rules: list
         if not matches:
             enriched.append(line)
             continue
-        selected = max(
-            matches,
-            key=lambda rule: type_weight.get(rule.get("rule_type"), 0) + int(rule.get("priority") or 0),
-        )
-        if selected.get("rule_type") == "global" and line.get("menu_qty_per_serving") is not None:
+        best_rank = max(type_weight.get(rule.get("rule_type"), 0) + int(rule.get("priority") or 0) for rule in matches)
+        best: list[dict] = []
+        for rule in matches:
+            rank = type_weight.get(rule.get("rule_type"), 0) + int(rule.get("priority") or 0)
+            if rank == best_rank and rule not in best:
+                best.append(rule)
+        if line.get("menu_qty_per_serving") is not None and all(rule.get("rule_type") == "global" for rule in best):
             enriched.append(line)
             continue
+        if len(best) != 1:
+            raise ValueError("menu_rule_source_ambiguous")
+        selected = best[0]
         updated = dict(line)
         if selected.get("unit_type"):
             updated["menu_unit_type"] = _normalize_unit_type(selected.get("unit_type")) or selected.get("unit_type")
