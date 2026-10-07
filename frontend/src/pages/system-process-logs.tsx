@@ -1,3 +1,6 @@
+import { Button } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useEffect, useMemo, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
@@ -94,6 +97,7 @@ export default function SystemProcessLogsPage() {
   }, []);
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="page">
       <header className="hero">
         <div>
@@ -109,9 +113,9 @@ export default function SystemProcessLogsPage() {
           <p className="toolbar-count">{loading ? "読込中" : `${items.length.toLocaleString("ja-JP")} 件`}</p>
           <p className="subtle">取込、OCR、アップロード、配送、監査ログを時系列で表示します。</p>
         </div>
-        <button className="btn" type="button" onClick={loadLogs} disabled={loading}>
+        <Button className="btn admin-ordinary-control" type="button" onClick={loadLogs} disabled={loading}>
           再取得
-        </button>
+        </Button>
       </section>
 
       {error ? <p className="error">{error}</p> : null}
@@ -127,10 +131,10 @@ export default function SystemProcessLogsPage() {
           </div>
           {items.length > 0 ? (
             items.map((item) => (
-              <button
+              <Button
                 key={item.id}
                 type="button"
-                className={`log-row${selected?.id === item.id ? " active" : ""}`}
+                className={`log-row${selected?.id === item.id ? " active" : ""} admin-ordinary-control`}
                 onClick={() => setSelectedId(item.id)}
               >
                 <span className="time">{formatDate(item.occurred_at)}</span>
@@ -138,7 +142,7 @@ export default function SystemProcessLogsPage() {
                 <span className={`status ${statusTone(item.status)}`}>{statusLabel(item.status)}</span>
                 <span className="title">{item.title || "-"}</span>
                 <span className="target">{item.target || item.summary || "-"}</span>
-              </button>
+              </Button>
             ))
           ) : (
             <div className="empty">{loading ? "読み込んでいます。" : "処理ログがありません。"}</div>
@@ -184,6 +188,11 @@ export default function SystemProcessLogsPage() {
       </section>
 
       <style jsx>{`
+        :global(.admin-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          min-width: 0;
+        }
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
@@ -252,7 +261,8 @@ export default function SystemProcessLogsPage() {
           font-size: 22px;
           font-weight: 800;
         }
-        .btn {
+        .btn,
+        :global(.admin-ordinary-control.btn) {
           background: #1f2a2a;
           border: 0;
           border-radius: 999px;
@@ -263,7 +273,8 @@ export default function SystemProcessLogsPage() {
           min-height: 40px;
           padding: 0 16px;
         }
-        .btn:disabled {
+        .btn:disabled,
+        :global(.admin-ordinary-control.btn:disabled) {
           cursor: not-allowed;
           opacity: 0.55;
         }
@@ -290,7 +301,8 @@ export default function SystemProcessLogsPage() {
           overflow: hidden;
         }
         .log-header,
-        .log-row {
+        .log-row,
+        :global(.admin-ordinary-control.log-row) {
           display: grid;
           grid-template-columns: 190px 72px 82px minmax(140px, 0.85fr) minmax(180px, 1.15fr);
           gap: 10px;
@@ -302,7 +314,8 @@ export default function SystemProcessLogsPage() {
           font-weight: 800;
           padding: 11px 14px;
         }
-        .log-row {
+        .log-row,
+        :global(.admin-ordinary-control.log-row) {
           align-items: center;
           background: #fff;
           border: 0;
@@ -316,10 +329,13 @@ export default function SystemProcessLogsPage() {
           width: 100%;
         }
         .log-row:hover,
-        .log-row.active {
+        :global(.admin-ordinary-control.log-row:hover),
+        .log-row.active,
+        :global(.admin-ordinary-control.log-row.active) {
           background: #f4f7f6;
         }
         .log-row span,
+        :global(.admin-ordinary-control.log-row span),
         .log-header span {
           min-width: 0;
           overflow: hidden;
@@ -425,12 +441,14 @@ export default function SystemProcessLogsPage() {
             overflow-x: auto;
           }
           .log-header,
-          .log-row {
+          .log-row,
+          :global(.admin-ordinary-control.log-row) {
             grid-template-columns: 170px 64px 76px 150px 220px;
             min-width: 720px;
           }
         }
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }

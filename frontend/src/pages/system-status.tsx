@@ -1,3 +1,6 @@
+import { Button, Input } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import TopNav from "../components/TopNav";
@@ -296,6 +299,7 @@ export default function SystemStatusPage() {
     ocrBacklogSeverity === "error" ? "要介入" : ocrBacklogSeverity === "warn" ? "滞留あり" : "正常";
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="system-page">
       <header className="hero">
         <div>
@@ -489,20 +493,20 @@ export default function SystemStatusPage() {
           DBダウンロードと全権クリアは管理者のみ実行できます。誤操作防止のため、クリア時は確認文字列が必要です。
         </p>
         <div className="admin-actions">
-          <button className="btn ghost" type="button" onClick={() => loadStatus()} disabled={maintenanceBusy}>
+          <Button className="btn ghost admin-ordinary-control" type="button" onClick={() => loadStatus()} disabled={maintenanceBusy}>
             状態を再取得
-          </button>
+          </Button>
           <Link className="btn ghost link-btn" href="/system-process-logs">
             処理ログを確認
           </Link>
           {isAdmin ? (
             <>
-              <button className="btn ghost" type="button" onClick={() => downloadDb(false)} disabled={maintenanceBusy}>
+              <Button className="btn ghost admin-ordinary-control" type="button" onClick={() => downloadDb(false)} disabled={maintenanceBusy}>
                 DBをダウンロード
-              </button>
-              <button className="btn ghost" type="button" onClick={() => downloadDb(true)} disabled={maintenanceBusy}>
+              </Button>
+              <Button className="btn ghost admin-ordinary-control" type="button" onClick={() => downloadDb(true)} disabled={maintenanceBusy}>
                 スナップショットZIP
-              </button>
+              </Button>
             </>
           ) : null}
         </div>
@@ -511,17 +515,17 @@ export default function SystemStatusPage() {
             <label className="clear-label" htmlFor="clear-confirm">
               確認文字列
             </label>
-            <input
+            <Input disableUnderline
               id="clear-confirm"
-              className="input"
+              className="input admin-ordinary-control"
               value={clearConfirm}
               onChange={(event) => setClearConfirm(event.target.value)}
               placeholder="CLEAR_ALL"
               autoComplete="off"
             />
-            <button className="btn danger" type="button" onClick={clearAll} disabled={maintenanceBusy}>
+            <Button className="btn danger admin-ordinary-control" type="button" onClick={clearAll} disabled={maintenanceBusy}>
               {maintenanceBusy ? "実行中..." : "全権クリアを実行"}
-            </button>
+            </Button>
           </div>
         ) : (
           <p className="meta">管理者アカウントでログインすると、DBダウンロードと全権クリアが表示されます。</p>
@@ -553,6 +557,15 @@ export default function SystemStatusPage() {
       </section>
 
       <style jsx>{`
+        :global(.admin-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          min-width: 0;
+        }
+        :global(.admin-ordinary-control .MuiInputBase-input) {
+          padding: 0;
+          min-width: 0;
+        }
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;
@@ -745,14 +758,16 @@ export default function SystemStatusPage() {
           letter-spacing: 0.06em;
           text-transform: uppercase;
         }
-        .input {
+        .input,
+        :global(.admin-ordinary-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
           background: #fbfbf9;
           min-width: 180px;
         }
-        .btn {
+        .btn,
+        :global(.admin-ordinary-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 10px 16px;
@@ -761,7 +776,8 @@ export default function SystemStatusPage() {
           background: #1f2a2a;
           color: #f7f2e7;
         }
-        .btn.ghost {
+        .btn.ghost,
+        :global(.admin-ordinary-control.btn.ghost) {
           background: #eef2f0;
           color: #1f2a2a;
         }
@@ -769,11 +785,13 @@ export default function SystemStatusPage() {
           display: inline-flex;
           text-decoration: none;
         }
-        .btn.danger {
+        .btn.danger,
+        :global(.admin-ordinary-control.btn.danger) {
           background: #b94014;
           color: #fff7f2;
         }
-        .btn:disabled {
+        .btn:disabled,
+        :global(.admin-ordinary-control.btn:disabled) {
           cursor: not-allowed;
           opacity: 0.65;
         }
@@ -806,5 +824,6 @@ export default function SystemStatusPage() {
         }
       `}</style>
     </main>
+    </ThemeProvider>
   );
 }

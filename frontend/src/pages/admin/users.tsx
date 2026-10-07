@@ -1,3 +1,6 @@
+import { Button, Input, NativeSelect, Checkbox } from "@mui/material";
+import { ThemeProvider } from "@mui/material/styles";
+import { sawaTheme } from "@sawa/ui";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
@@ -140,6 +143,7 @@ export default function CommonUsersPage() {
   }
 
   return (
+    <ThemeProvider theme={sawaTheme}>
     <main className="sawa-page admin-users-page">
       <Link className="sawa-page__back" href="/">← システム選択へ戻る</Link>
       <header className="sawa-page__header">
@@ -150,8 +154,8 @@ export default function CommonUsersPage() {
             利用者の権限・状態と、アクセスできるシステムを一か所で管理します。
           </p>
         </div>
-        <button
-          className="sawa-button sawa-button--primary"
+        <Button
+          className="sawa-button sawa-button--primary admin-ordinary-control"
           type="button"
           onClick={() => {
             setEditing(emptyUser());
@@ -159,7 +163,7 @@ export default function CommonUsersPage() {
           }}
         >
           ユーザーを追加
-        </button>
+        </Button>
       </header>
 
       <div aria-live="polite" aria-atomic="true">
@@ -181,7 +185,7 @@ export default function CommonUsersPage() {
           <form className="sawa-card__body sawa-form-grid" onSubmit={save}>
             <label className="sawa-field sawa-field--wide">
               メールアドレス
-              <input
+              <Input className="admin-ordinary-control" disableUnderline
                 type="email"
                 required
                 autoComplete="email"
@@ -192,31 +196,30 @@ export default function CommonUsersPage() {
             </label>
             <label className="sawa-field">
               権限
-              <select
+              <NativeSelect className="admin-ordinary-control" disableUnderline
                 value={editing.role}
                 onChange={(event) => setEditing({ ...editing, role: event.target.value as UserRole })}
               >
                 <option value="operator">一般利用者</option>
                 <option value="admin">管理者</option>
-              </select>
+              </NativeSelect>
             </label>
             <label className="sawa-field">
               アカウント状態
-              <select
+              <NativeSelect className="admin-ordinary-control" disableUnderline
                 value={editing.status}
                 onChange={(event) => setEditing({ ...editing, status: event.target.value as UserStatus })}
               >
                 <option value="active">有効</option>
                 <option value="inactive">停止</option>
-              </select>
+              </NativeSelect>
             </label>
             <fieldset className="admin-system-access sawa-field--wide">
               <legend>利用できるシステム</legend>
               <div className="admin-system-access__options">
                 {(Object.keys(systemLabels) as SystemKey[]).map((key) => (
                   <label key={key}>
-                    <input
-                      type="checkbox"
+                    <Checkbox className="admin-ordinary-control"
                       checked={editing.systems.includes(key)}
                       onChange={() => toggle(key)}
                     />
@@ -226,17 +229,17 @@ export default function CommonUsersPage() {
               </div>
             </fieldset>
             <div className="sawa-actions sawa-field--wide">
-              <button
-                className="sawa-button"
+              <Button
+                className="sawa-button admin-ordinary-control"
                 type="button"
                 disabled={saving}
                 onClick={() => setEditing(null)}
               >
                 キャンセル
-              </button>
-              <button className="sawa-button sawa-button--primary" type="submit" disabled={saving}>
+              </Button>
+              <Button className="sawa-button sawa-button--primary admin-ordinary-control" type="submit" disabled={saving}>
                 {saving ? "保存中…" : "保存"}
-              </button>
+              </Button>
             </div>
           </form>
         </section>
@@ -248,9 +251,9 @@ export default function CommonUsersPage() {
             <h2 id="user-list-title">ユーザー一覧</h2>
             <p>{listLoading ? "読み込み中です。" : `${items.length}件のユーザー`}</p>
           </div>
-          <button className="sawa-button" type="button" disabled={listLoading} onClick={() => void loadUsers()}>
+          <Button className="sawa-button admin-ordinary-control" type="button" disabled={listLoading} onClick={() => void loadUsers()}>
             {listLoading ? "更新中…" : "一覧を更新"}
-          </button>
+          </Button>
         </div>
         {listLoading && items.length === 0 ? <div className="sawa-empty">ユーザー一覧を読み込んでいます。</div> : null}
         {!listLoading && items.length === 0 ? <div className="sawa-empty">登録されているユーザーはいません。</div> : null}
@@ -267,7 +270,7 @@ export default function CommonUsersPage() {
                     <td><span className={`sawa-badge${user.role === "admin" ? " sawa-badge--admin" : ""}`}>{user.role === "admin" ? "管理者" : "一般利用者"}</span></td>
                     <td><span className={`sawa-badge${user.status === "active" ? " sawa-badge--active" : ""}`}>{user.status === "active" ? "有効" : "停止"}</span></td>
                     <td>{user.systems.map((system) => systemLabels[system]).join(" / ") || "なし"}</td>
-                    <td><button className="sawa-button" type="button" onClick={() => { setEditing({ ...user }); setNotice(null); }}>編集</button></td>
+                    <td><Button className="sawa-button admin-ordinary-control" type="button" onClick={() => { setEditing({ ...user }); setNotice(null); }}>編集</Button></td>
                   </tr>
                 ))}
               </tbody>
@@ -276,6 +279,76 @@ export default function CommonUsersPage() {
         ) : null}
       </section>
 
+      <style jsx>{`
+        :global(.admin-ordinary-control.MuiButton-root) {
+          text-transform: none;
+          letter-spacing: inherit;
+          min-width: 0;
+        }
+        :global(.admin-ordinary-control.sawa-button) {
+          min-height: 42px;
+          padding: 0 16px;
+          border: 1px solid var(--sawa-border-strong);
+          border-radius: var(--sawa-radius-sm);
+          color: #344642;
+          background: #fff;
+          font-weight: 850;
+          cursor: pointer;
+        }
+        :global(.admin-ordinary-control.sawa-button:hover:not(:disabled)) {
+          border-color: var(--sawa-accent);
+          color: var(--sawa-accent);
+        }
+        :global(.admin-ordinary-control.sawa-button--primary) {
+          border-color: var(--sawa-accent);
+          color: #fff;
+          background: var(--sawa-accent);
+        }
+        :global(.admin-ordinary-control.sawa-button--primary:hover:not(:disabled)) {
+          border-color: var(--sawa-accent-hover);
+          color: #fff;
+          background: var(--sawa-accent-hover);
+        }
+        :global(.admin-ordinary-control.sawa-button:disabled) {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+        :global(.admin-users-page .sawa-field .admin-ordinary-control.MuiInputBase-root) {
+          width: 100%;
+          min-height: 44px;
+          padding: 10px 12px;
+          border: 1px solid var(--sawa-border-strong);
+          border-radius: var(--sawa-radius-sm);
+          color: var(--sawa-ink);
+          background: #fff;
+          font: inherit;
+        }
+        :global(.admin-users-page .sawa-field .admin-ordinary-control.MuiInputBase-root:focus-within) {
+          border-color: var(--sawa-accent);
+          box-shadow: 0 0 0 3px rgba(23, 107, 94, 0.12);
+        }
+        :global(.admin-users-page .sawa-field .admin-ordinary-control .MuiInputBase-input) {
+          width: 100%;
+          min-height: 0;
+          padding: 0;
+          border: 0;
+          border-radius: 0;
+          color: inherit;
+          background: transparent;
+          box-shadow: none;
+        }
+        :global(.admin-ordinary-control.MuiCheckbox-root) {
+          padding: 0;
+        }
+        :global(.admin-ordinary-control.MuiCheckbox-root .MuiSvgIcon-root) {
+          font-size: 18px;
+        }
+        :global(.admin-system-access__options .admin-ordinary-control.MuiCheckbox-root input) {
+          width: 100%;
+          height: 100%;
+        }
+      `}</style>
     </main>
+    </ThemeProvider>
   );
 }
