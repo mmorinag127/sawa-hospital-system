@@ -25,6 +25,8 @@ from app.rois import crop_rois, load_template_config
 from app.template_match import choose_template_and_warp
 from app.template_resolution import build_template_resolution
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, prewarm_analyzer, run_yomitoku
+from app.storage_uri import decorate_gcs_uri, format_gcs_uri, parse_gcs_uri, validate_generation, validate_source_query
+from app import figure_markup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -123,25 +125,64 @@ def _encode_png(image_bgr) -> bytes:
 
 
 def _upload_bytes(bucket: str, object_name: str, data: bytes, content_type: str) -> str:
-    gcs.bucket(bucket).blob(object_name).upload_from_string(data, content_type=content_type)
-    return f"gs://{bucket}/{object_name}"
+    format_gcs_uri(bucket, object_name)
+    blob = gcs.bucket(bucket).blob(object_name)
+    blob.upload_from_string(data, content_type=content_type)
+    return format_gcs_uri(bucket, object_name, validate_generation(blob.generation))
 
 
 def _upload_figure_artifact(bucket: str, object_name: str, figure) -> str:
     return _upload_bytes(bucket, object_name, figure.content, figure.mime_type)
 
 
+def _verify_selected_pdf_input(blob, data):
+    """URI correction for pending H2's selected-input fence (not a new receipt)."""
+    import hashlib
+    from urllib.parse import urlsplit
+
+    raw = (blob.metadata or {}).get("selected_pdf_receipt")
+    if not raw:
+        raise ValueError("selected_pdf_start_receipt_required")
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("sha256") or "")):
+        raise ValueError("selected_pdf_digest_required")
+    if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+        raise ValueError("selected_pdf_bytes_changed")
+    if urlsplit(receipt["storage_uri"]).scheme == "gs":
+        source = parse_gcs_uri(receipt["storage_uri"])
+        generation = receipt.get("generation")
+        if generation is None and source.generation is None:
+            original = gcs.bucket(source.bucket).blob(source.object_name)
+            if hashlib.sha256(original.download_as_bytes(timeout=30, retry=None)).hexdigest() != receipt["sha256"]:
+                raise ValueError("selected_pdf_bytes_changed")
+            return
+        generation = validate_generation(generation)
+        if source.generation != generation:
+            raise ValueError("selected_pdf_generation_required")
+        original = gcs.bucket(source.bucket).blob(source.object_name)
+        original.reload(timeout=30, retry=None)
+        if str(original.generation) != generation:
+            raise ValueError("selected_pdf_generation_changed")
+
+
 def _publish_page_figures(bucket: str, figure_prefix: str, page_result) -> tuple[str, int, dict[str, str]]:
     from pathlib import PurePosixPath
-    from urllib.parse import urlsplit, unquote, quote
+    from urllib.parse import urlsplit, unquote
 
     def local_reference(ref, decode=True):
-        parsed = urlsplit(ref)
-        if parsed.scheme or parsed.netloc:
-            return None
-        decoded = unquote(parsed.path) if decode else parsed.path
+        if decode:
+            parsed = urlsplit(ref)
+            if parsed.scheme or parsed.netloc:
+                return None
+            if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
+                raise ValueError("figure_reference_encoding_invalid")
+            decoded = unquote(parsed.path, encoding="utf-8", errors="strict")
+        else:
+            # FigureData.reference is the actual page-relative filesystem path,
+            # not a URI. '?' / '#' / '%' here are literal key characters.
+            decoded = ref
         path = PurePosixPath(decoded)
-        if not decoded or path.is_absolute() or ".." in path.parts or "\\" in decoded or path.as_posix() != decoded or (not decode and (parsed.query or parsed.fragment)):
+        if not decoded or path.is_absolute() or ".." in path.parts or "\\" in decoded or path.as_posix() != decoded:
             raise ValueError(f"invalid local figure reference on page {page_result.page_index}: {ref}")
         return decoded
 
@@ -159,6 +200,8 @@ def _publish_page_figures(bucket: str, figure_prefix: str, page_result) -> tuple
         key = local_reference(ref)
         if key is not None and key not in figure_map:
             raise ValueError(f"figure missing on page {page_result.page_index}: {ref}")
+        if key is not None:
+            validate_source_query(urlsplit(ref).query)
     uploaded = {}
     replacements = {}
     for ref in refs:
@@ -169,8 +212,7 @@ def _publish_page_figures(bucket: str, figure_prefix: str, page_result) -> tuple
             uploaded[key] = _upload_figure_artifact(
                 bucket, f"{figure_prefix}p{page_result.page_index}/{key}", figure_map[key]
             )
-        parsed = urlsplit(ref)
-        replacements[ref] = quote(uploaded[key], safe="/:") + ("?" + parsed.query if parsed.query else "") + ("#" + parsed.fragment if parsed.fragment else "")
+        replacements[ref] = decorate_gcs_uri(uploaded[key], ref)
     return _replace_markdown_images(page_result.markdown_text, replacements), len(uploaded), replacements
 
 
@@ -209,8 +251,7 @@ def _upload_corrected_pdf_artifact(
 
 
 def _upload_text(bucket: str, object_name: str, text: str, content_type: str) -> str:
-    gcs.bucket(bucket).blob(object_name).upload_from_string(text, content_type=content_type)
-    return f"gs://{bucket}/{object_name}"
+    return _upload_bytes(bucket, object_name, text.encode("utf-8"), content_type)
 
 
 def _write_output_partial(
@@ -268,163 +309,15 @@ def _extract_metadata(blob: storage.Blob) -> tuple[str | None, str | None, list[
 
 
 def _replace_markdown_images(markdown_text: str, replacements: dict[str, str]) -> str:
-    if not replacements:
-        return markdown_text
-    from html import escape
-    updated = markdown_text
-    for start, end, ref, html_attribute in reversed(_image_reference_spans(markdown_text)):
-        if ref in replacements:
-            if isinstance(html_attribute, tuple):
-                action, title = html_attribute
-                title_suffix = ' "' + title.replace("\\", "\\\\").replace('"', '\\"') + '"' if title else ""
-                value = "(<" + replacements[ref] + ">" + title_suffix + ")" if action == "reference_insert" else ""
-            else:
-                value = escape(replacements[ref], quote=True) if html_attribute else replacements[ref]
-            updated = updated[:start] + value + updated[end:]
-    return updated
+    return figure_markup._replace_markdown_images(markdown_text, replacements)
 
 
 def _extract_markdown_images(markdown_text: str) -> list[str]:
-    return [ref for _, _, ref, _ in _image_reference_spans(markdown_text or "")]
+    return figure_markup._extract_markdown_images(markdown_text)
 
 
 def _image_reference_spans(text: str):
-    from html import unescape
-    from html.parser import HTMLParser
-    from markdown_it import MarkdownIt
-    from markdown_it.rules_inline.image import image
-    from markdown_it.rules_inline.html_inline import html_inline
-    from markdown_it.common.utils import isStrSpace
-
-    spans = []
-    raw_lines = text.splitlines(keepends=True)
-    offsets = [0]
-    for line in raw_lines:
-        offsets.append(offsets[-1] + len(line))
-    active = None
-    active_source = None
-
-    def source_positions(token):
-        # Token line maps constrain alignment; no Markdown grammar is inferred here.
-        positions = []
-        cursor = token.map[0]
-        for line in token.content.splitlines(keepends=True):
-            value = line.rstrip("\n")
-            found = False
-            while cursor < token.map[1]:
-                raw = raw_lines[cursor].rstrip("\r\n")
-                start = raw.find(value)
-                virtual_indent = 0
-                if start < 0:
-                    content = value.lstrip(" ")
-                    virtual_indent = len(value) - len(content)
-                    start = raw.find(content) if content else -1
-                    value = content
-                if start >= 0:
-                    if start != raw.rfind(value) and value:
-                        raise ValueError("ambiguous parser source position")
-                    positions.extend([None] * virtual_indent)
-                    positions.extend(range(offsets[cursor] + start, offsets[cursor] + start + len(value)))
-                    if line.endswith("\n"):
-                        positions.append(offsets[cursor] + len(raw))
-                    cursor += 1
-                    found = True
-                    break
-                cursor += 1
-            if not found:
-                raise ValueError("parser source position unavailable")
-        return positions
-
-    def record(start, end, ref, html_attribute):
-        if not active or end <= start:
-            return
-        positions = active[start:end]
-        if len(positions) != end - start or None in positions or any(b != a + 1 for a, b in zip(positions, positions[1:])):
-            raise ValueError("noncontiguous asset source position")
-        spans.append((positions[0], positions[-1] + 1, ref, html_attribute))
-
-    def record_reference(label_end, consumed_end, ref, title):
-        closing = active[label_end]
-        if closing is None or text[closing] != "]":
-            raise ValueError("reference image closing position unavailable")
-        spans.append((closing + 1, closing + 1, ref, ("reference_insert", title)))
-        # Remove only parser-consumed reference syntax; retain raw line endings
-        # and container prefixes that are absent from the normalized inline source.
-        for index in range(label_end + 1, consumed_end):
-            if active_source[index] == "\n":
-                continue
-            position = active[index]
-            if position is None or text[position] != active_source[index]:
-                raise ValueError("reference suffix source position unavailable")
-            spans.append((position, position + 1, ref, ("reference_delete", "")))
-
-    def html_refs(raw, base):
-        class Images(HTMLParser):
-            def handle_starttag(self, tag, attrs):
-                if tag != "img":
-                    return
-                if sum(name == "src" for name, _ in attrs) > 1:
-                    raise ValueError("ambiguous HTML image src")
-                line, column = self.getpos()
-                tag_start = sum(len(part) for part in raw.splitlines(keepends=True)[:line-1]) + column
-                for match in re.finditer(r"""\s+([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?""", self.get_starttag_text()):
-                    if match.group(1).lower() != "src":
-                        continue
-                    group = next((i for i in (2, 3, 4) if match.group(i) is not None), None)
-                    if group is None:
-                        raise ValueError("HTML image src requires a value")
-                    record(base + tag_start + match.start(group), base + tag_start + match.end(group), unescape(match.group(group)), True)
-        Images(convert_charrefs=False).feed(raw)
-
-    def owned_image(state, silent):
-        start = state.pos
-        before = len(state.tokens)
-        accepted = image(state, silent)
-        if accepted and not silent and state.src is active_source:
-            label_end = state.md.helpers.parseLinkLabel(state, start + 1, False)
-            pos = label_end + 1
-            if pos >= state.posMax or state.src[pos] != "(":
-                token = next(token for token in state.tokens[before:] if token.type == "image")
-                record_reference(label_end, state.pos, token.attrGet("src"), token.attrGet("title") or "")
-                return accepted
-            pos += 1
-            while pos < state.posMax and (isStrSpace(state.src[pos]) or state.src[pos] == "\n"):
-                pos += 1
-            destination = state.md.helpers.parseLinkDestination(state.src, pos, state.posMax)
-            if not destination.ok:
-                raise ValueError("accepted image destination position unavailable")
-            angled = state.src[pos] == "<"
-            record(pos + int(angled), destination.pos - int(angled), destination.str, False)
-        return accepted
-
-    def owned_html(state, silent):
-        start = state.pos
-        accepted = html_inline(state, silent)
-        if accepted and not silent and state.src is active_source:
-            html_refs(state.src[start:state.pos], start)
-        return accepted
-
-    def parse_inlines(state):
-        nonlocal active, active_source
-        for token in state.tokens:
-            if token.type not in ("inline", "html_block"):
-                continue
-            active = source_positions(token)
-            active_source = token.content
-            if token.type == "html_block":
-                html_refs(token.content, 0)
-            else:
-                token.children = []
-                state.md.inline.parse(token.content, state.md, state.env, token.children)
-        active = None
-        active_source = None
-
-    parser = MarkdownIt("commonmark", {"html": True, "store_labels": True})
-    parser.inline.ruler.at("image", owned_image)
-    parser.inline.ruler.at("html_inline", owned_html)
-    parser.core.ruler.at("inline", parse_inlines)
-    parser.parse(text)
-    return sorted(set(spans))
+    return figure_markup._image_reference_spans(text)
 
 
 def _start_analyzer_prewarm() -> None:
@@ -790,8 +683,8 @@ def handler():
     job_id = f"{bucket}:{name}:{generation}"
     safe_job_id = _safe_job_id(job_id)
     output_name = f"{output_prefix}{os.path.basename(name)}.json"
-    input_reference = f"gs://{bucket}/{name}"
-    output_reference = f"gs://{bucket}/{output_name}"
+    input_reference = format_gcs_uri(bucket, name)
+    output_reference = format_gcs_uri(bucket, output_name)
     job_ref = db.collection(JOB_COLLECTION).document(safe_job_id)
     if job_ref.get().exists:
         app.logger.info("OCR pipeline duplicate job=%s", safe_job_id)

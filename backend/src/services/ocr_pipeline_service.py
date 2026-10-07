@@ -9,6 +9,7 @@ import time
 import threading
 from loguru import logger
 from urllib.parse import urlparse
+from src.services.storage_uri import format_gcs_uri, parse_gcs_uri
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -238,11 +239,8 @@ def _parse_gs_uri(uri: str) -> tuple[str, str] | None:
     parsed = urlparse(uri)
     if parsed.scheme != "gs":
         return None
-    bucket = parsed.netloc
-    name = parsed.path.lstrip("/")
-    if not bucket or not name:
-        return None
-    return bucket, name
+    source = parse_gcs_uri(uri)
+    return source.bucket, source.object_name
 
 
 def _upload_pdf_bytes(
@@ -385,6 +383,7 @@ def run_ocr_pipeline(
             and parsed_input[1].startswith(input_prefix)
         ):
             input_name = parsed_input[1]
+            generation = parse_gcs_uri(input_reference).generation or ""
             logger.info(
                 "OCR pipeline input reuse bucket=%s name=%s",
                 bucket,
@@ -429,8 +428,8 @@ def run_ocr_pipeline(
             )
 
         output_name = f"{output_prefix}{os.path.basename(input_name)}.json"
-        output_reference = f"gs://{bucket}/{output_name}"
-        input_reference = f"gs://{bucket}/{input_name}"
+        output_reference = format_gcs_uri(bucket, output_name)
+        input_reference = format_gcs_uri(bucket, input_name)
 
         payload = {"bucket": bucket, "name": input_name}
         if generation:

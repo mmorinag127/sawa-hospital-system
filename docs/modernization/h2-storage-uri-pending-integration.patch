@@ -1,0 +1,57 @@
+diff --git a/ocr_pipeline/app/main.py b/ocr_pipeline/app/main.py
+--- a/ocr_pipeline/app/main.py
++++ b/ocr_pipeline/app/main.py
+@@ -52,1 +52,1 @@
+-    return f"{output_prefix}{_terminal_digest(identity)}/{Path(urlparse(source['input_reference']).path).name}.g{source['input_generation']}.json"
++    return f"{output_prefix}{_terminal_digest(identity)}/{Path(parse_gcs_uri(source['input_reference']).object_name).name}.g{source['input_generation']}.json"
+@@ -88,1 +88,1 @@
+-        "input_reference": f"gs://{bucket}/{name}", "input_generation": str(generation),
++        "input_reference": format_gcs_uri(bucket, name), "input_generation": str(generation),
+@@ -94,1 +94,1 @@
+-        "output_reference": f"gs://{bucket}/{output_name}",
++        "output_reference": format_gcs_uri(bucket, output_name),
+@@ -154,1 +154,1 @@
+-    parsed = urlparse(source["input_reference"])
++    parsed = parse_gcs_uri(source["input_reference"])
+@@ -156,1 +156,1 @@
+-        current_source = _terminal_source(bucket, parsed.path.lstrip("/"), source["input_generation"], output_name)
++        current_source = _terminal_source(bucket, parsed.object_name, source["input_generation"], output_name)
+@@ -159,1 +159,1 @@
+-    if parsed.netloc != bucket or source != current_source:
++    if parsed.bucket != bucket or source != current_source:
+@@ -188,1 +188,1 @@
+-        expected = {"job_id": f"{bucket}:{name}:{generation}", "output_reference": f"gs://{bucket}/{output_name}"}
++        expected = {"job_id": f"{bucket}:{name}:{generation}", "output_reference": format_gcs_uri(bucket, output_name)}
+@@ -331,1 +331,1 @@
+-    output = urlparse(source["output_reference"])
++    output = parse_gcs_uri(source["output_reference"])
+@@ -332,1 +332,1 @@
+-    prefix = output.path.lstrip("/").rsplit("/", 1)[0] + "/assets/"
++    prefix = output.object_name.rsplit("/", 1)[0] + "/assets/"
+@@ -333,1 +333,1 @@
+-    if output.netloc != bucket or not object_name.startswith(prefix):
++    if output.bucket != bucket or not object_name.startswith(prefix):
+@@ -348,1 +348,1 @@
+-    return f"gs://{bucket}/{object_name}?generation={blob.generation}"
++    return format_gcs_uri(bucket, object_name, blob.generation)
+@@ -494,1 +494,1 @@
+-    generation = parse_qs(urlparse(uri).query)["generation"][0]
++    generation = validate_generation(parse_gcs_uri(uri).generation)
+@@ -523,1 +523,1 @@
+-    if any(source[key] != value for key, value in {"job_id": job_id, "input_reference": input_reference, "output_reference": output_reference}.items()) or output_reference != f"gs://{bucket}/{object_name}":
++    if any(source[key] != value for key, value in {"job_id": job_id, "input_reference": input_reference, "output_reference": output_reference}.items()) or output_reference != format_gcs_uri(bucket, object_name):
+@@ -1121,1 +1121,1 @@
+-        terminal_source["output_reference"] = f"gs://{bucket}/{output_name}"
++        terminal_source["output_reference"] = format_gcs_uri(bucket, output_name)
+diff --git a/backend/src/services/ocr_pipeline_service.py b/backend/src/services/ocr_pipeline_service.py
+--- a/backend/src/services/ocr_pipeline_service.py
++++ b/backend/src/services/ocr_pipeline_service.py
+@@ -252,1 +252,1 @@
+-    return f"{output_prefix}{digest}/{os.path.basename(urlparse(source['input_reference']).path)}.g{source['input_generation']}.json"
++    return f"{output_prefix}{digest}/{os.path.basename(parse_gcs_uri(source['input_reference']).object_name)}.g{source['input_generation']}.json"
+@@ -315,1 +315,1 @@
+-                validate_own_pipeline_result(payload, f"gs://{bucket}/{object_name}")
++                validate_own_pipeline_result(payload, format_gcs_uri(bucket, object_name))
+@@ -511,1 +511,1 @@
+-            "input_reference": f"gs://{bucket}/{input_name}",
++            "input_reference": format_gcs_uri(bucket, input_name),

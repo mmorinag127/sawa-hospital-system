@@ -9,6 +9,7 @@ import json
 import os
 import time
 import logging
+from importlib.util import module_from_spec, spec_from_file_location
 from types import SimpleNamespace
 from typing import Any, Iterable, Optional, Tuple
 from unittest.mock import patch
@@ -22,6 +23,15 @@ GRID = ROOT / "backend/src/services/grid_detector.py"
 HAKODATE = ROOT / "backend/src/services/hakodate_assignment_service.py"
 RUNNER = ROOT / "ocr_pipeline/app/yomitoku_runner.py"
 MAIN = ROOT / "ocr_pipeline/app/main.py"
+URI = ROOT / "ocr_pipeline/app/storage_uri.py"
+_uri_spec = spec_from_file_location("source_case_storage_uri", URI)
+_uri_codec = module_from_spec(_uri_spec)
+_uri_spec.loader.exec_module(_uri_codec)
+_markup_spec = spec_from_file_location("source_case_figure_markup", ROOT / "ocr_pipeline/app/figure_markup.py")
+_figure_markup = module_from_spec(_markup_spec)
+_markup_spec.loader.exec_module(_figure_markup)
+URI_BINDINGS = {name: getattr(_uri_codec, name) for name in (
+    "format_gcs_uri", "parse_gcs_uri", "decorate_gcs_uri", "validate_generation", "validate_source_query", "signing_query")}
 
 
 def definitions(path, names, bindings):
@@ -30,7 +40,8 @@ def definitions(path, names, bindings):
     assert {node.name for node in nodes} == set(names)
     namespace = {"__name__": "h2_source_case", "dataclass": dataclass, "BytesIO": BytesIO,
                  "Path": Path, "Any": Any, "Iterable": Iterable, "Optional": Optional,
-                 "Tuple": Tuple, "np": np, "Image": Image, "tempfile": tempfile, **bindings}
+                 "Tuple": Tuple, "np": np, "Image": Image, "tempfile": tempfile,
+                 "figure_markup": _figure_markup, **URI_BINDINGS, **bindings}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
 
@@ -118,7 +129,7 @@ def page_publisher(uploaded):
     return definitions(MAIN, ["_publish_page_figures", "_upload_figure_artifact",
                                "_extract_markdown_images", "_replace_markdown_images", "_image_reference_spans"], {
         "re": re,
-        "_upload_bytes": lambda bucket, name, content, mime: uploaded.append((name, content, mime)) or f"gs://{bucket}/{name}"
+        "_upload_bytes": lambda bucket, name, content, mime: uploaded.append((name, content, mime)) or _uri_codec.format_gcs_uri(bucket, name)
     })["_publish_page_figures"]
 
 
@@ -283,6 +294,7 @@ def test_actual_full_handler_html_page_loop_metadata_tables_and_normal_return():
     job_updates = []
     class Blob:
         metadata = {"facility_id": "facility", "template_id": "template"}
+        generation = "73"
         def __init__(self, name): self.name = name
         def reload(self): pass
         def download_as_bytes(self): return b"provider PDF fixture"
@@ -335,9 +347,9 @@ def test_actual_full_handler_html_page_loop_metadata_tables_and_normal_return():
     for index, page in enumerate(payload["pages"], 1):
         asset = f"output/sample/figures/p{index}/figures/page_1_figure_0.png"
         assert uploads[asset] == (contents[index-1], "image/png")
-        assert page["figure_uris"] == [f"gs://bucket/{asset}"]
+        assert page["figure_uris"] == [f"gs://bucket/{asset}?generation=73"]
         assert page["tables"] == [payload["tables"][index-1]]
-        assert uploads[f"output/sample/sample_p{index}.md"][0] == f'<img src="gs://bucket/{asset}" width="200px"><br>\nraw 0/null'
+        assert uploads[f"output/sample/sample_p{index}.md"][0] == f'<img src="gs://bucket/{asset}?generation=73" width="200px"><br>\nraw 0/null'.encode("utf-8")
     assert job_updates[-1]["status"] == "done"
 
 
