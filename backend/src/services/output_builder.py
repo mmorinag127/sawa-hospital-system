@@ -1194,6 +1194,12 @@ def _resolve_monthly_entry_by_source_row(line: dict, physical_rows: list[list[di
     selected = [entry for entry in candidates if _monthly_entry_diet_priority(entry, line_diet) == best_priority]
     if len(selected) != 1:
         raise ValueError("monthly_entry_source_row_unresolved")
+    line_date = _ensure_date(line.get("date"))
+    if line_date is None or line_date != _ensure_date(selected[0].get("menu_date")):
+        raise ValueError("monthly_entry_source_row_unresolved")
+    line_daypart = _normalize_output_daypart(line.get("daypart"))
+    if line_daypart not in {"朝", "昼", "夕"} or line_daypart != _normalize_output_daypart(selected[0].get("daypart")):
+        raise ValueError("monthly_entry_source_row_unresolved")
     return selected[0]
 
 

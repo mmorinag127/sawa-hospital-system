@@ -1395,6 +1395,12 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
 
 
 def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
+    # Explicit producer component with source-read doubles, not an accepted receipt.
+    def produce(order):
+        return output_builder.build_order_lines_for_outputs(order, producer_candidate={
+            "lines": order["lines"], "configured_input": {
+                "facility": {"fax_template": {"columns": []}}, "policy": {}},
+        })
     monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
     monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
@@ -1425,7 +1431,7 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
     }
 
     with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
-        output_builder.build_order_lines_for_outputs(
+        produce(
             {
                 **base_order,
                 "lines": [
@@ -1443,7 +1449,7 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
             }
         )
     with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
-        output_builder.build_order_lines_for_outputs(
+        produce(
             {
                 **base_order,
                 "lines": [
