@@ -1,7 +1,11 @@
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import TopNav from "../components/TopNav";
+import { Button, MenuItem, Stack } from "@mui/material";
+import { FormTextField, SawaProvider } from "@sawa/ui";
+import { FormProvider, useForm } from "react-hook-form";
 import { apiClient } from "../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
 
 type UploadResponse = {
   accepted?: boolean;
@@ -52,6 +56,15 @@ type UploadResponse = {
 type UploadItemResult = UploadResponse & {
   file_name: string;
   error?: string;
+};
+
+type UploadConditions = {
+  facility_hint: string;
+  week_hint: string;
+  facility_name: string;
+  received_at: string;
+  force: boolean;
+  skip_ocr: boolean;
 };
 
 type UploadedPdfRow = {
@@ -207,7 +220,7 @@ const uploadedPdfCanRetry = (row: UploadedPdfRow) => {
   return true;
 };
 
-export default function PdfUploadPage() {
+function PdfUploadScreen() {
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [facilityHint, setFacilityHint] = useState("");
   const [weekHint, setWeekHint] = useState("");
@@ -230,9 +243,12 @@ export default function PdfUploadPage() {
   const [uploadsNotice, setUploadsNotice] = useState("");
   const [retryBusyId, setRetryBusyId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadForm = useForm<UploadConditions>({
+    defaultValues: { facility_hint: "", week_hint: "", facility_name: "", received_at: "", force: false, skip_ocr: false },
+  });
 
-  const selectedFacility = facilityOptions.find((option) => option.id === facilityHint);
-  const selectedWeek = weekOptions.find((option) => option.week_id === weekHint);
+  const selectedFacility = facilityOptions.find((option) => option.id === uploadForm.watch("facility_hint"));
+  const selectedWeek = weekOptions.find((option) => option.week_id === uploadForm.watch("week_hint"));
 
   const loadFacilityOptions = async () => {
     setFacilityOptionsLoading(true);
@@ -321,16 +337,16 @@ export default function PdfUploadPage() {
     }
   };
 
-  const submit = async () => {
+  const submit = async (conditions: UploadConditions) => {
     if (pdfFiles.length === 0) {
       setMessage("PDFを1件以上選択してください。");
       return;
     }
-    if (!facilityHint.trim()) {
+    if (!conditions.facility_hint.trim()) {
       setMessage("施設を選択してください。");
       return;
     }
-    if (!weekHint.trim()) {
+    if (!conditions.week_hint.trim()) {
       setMessage("対象週を選択してください。");
       return;
     }
@@ -345,12 +361,12 @@ export default function PdfUploadPage() {
         formData.append("pdf_files", pdfFile);
       }
     }
-    formData.append("facility_hint", facilityHint.trim());
-    formData.append("week_hint", weekHint.trim());
-    if (facilityName.trim()) formData.append("facility_name", facilityName.trim());
-    if (receivedAt.trim()) formData.append("received_at", new Date(receivedAt).toISOString());
-    if (force) formData.append("force", "true");
-    if (skipOcr) formData.append("skip_ocr", "true");
+    formData.append("facility_hint", conditions.facility_hint.trim());
+    formData.append("week_hint", conditions.week_hint.trim());
+    if (conditions.facility_name.trim()) formData.append("facility_name", conditions.facility_name.trim());
+    if (conditions.received_at.trim()) formData.append("received_at", new Date(conditions.received_at).toISOString());
+    if (conditions.force) formData.append("force", "true");
+    if (conditions.skip_ocr) formData.append("skip_ocr", "true");
     let uploadedResults: UploadItemResult[] = [];
     try {
       const res = await apiClient.post("/ingest/upload", formData, {
@@ -447,29 +463,14 @@ export default function PdfUploadPage() {
           </p>
         </header>
 
+        <FormProvider {...uploadForm}>
+        <Stack component="form" spacing={2} onSubmit={uploadForm.handleSubmit((values) => void submit(values))}>
         <div className="form-grid">
-          <label className="field">
-            <span className="field-label">施設</span>
-            <select
-              className="input"
-              value={facilityHint}
-              onChange={(e) => {
-                const nextFacility = e.target.value;
-                setFacilityHint(nextFacility);
-                const nextOption = facilityOptions.find((option) => option.id === nextFacility);
-                setFacilityName(nextOption?.name || "");
-              }}
-              disabled={facilityOptionsLoading}
-            >
-              <option value="">施設を選択</option>
-              {facilityOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.name ? `${option.name} (${option.id})` : option.id}
-                </option>
-              ))}
-            </select>
-            {facilityOptionsError ? <span className="field-help field-help-error">{facilityOptionsError}</span> : null}
-          </label>
+          <FormTextField<UploadConditions> name="facility_hint" label="施設" select disabled={facilityOptionsLoading} rules={{ required: "施設を選択してください。" }}>
+            <MenuItem value="">施設を選択</MenuItem>
+            {facilityOptions.map((option) => <MenuItem key={option.id} value={option.id}>{option.name ? `${option.name} (${option.id})` : option.id}</MenuItem>)}
+          </FormTextField>
+          {facilityOptionsError ? <span className="field-help field-help-error">{facilityOptionsError}</span> : null}
 
           <label className="field">
             <span className="field-label">対象月</span>
@@ -481,22 +482,10 @@ export default function PdfUploadPage() {
             />
           </label>
 
-          <label className="field field-span">
-            <span className="field-label">対象週</span>
-            <select
-              className="input"
-              value={weekHint}
-              onChange={(e) => setWeekHint(e.target.value)}
-              disabled={!targetMonth.trim()}
-            >
-              <option value="">対象週を選択</option>
-              {weekOptions.map((option) => (
-                <option key={option.week_id} value={option.week_id}>
-                  {option.label || option.week_id}
-                </option>
-              ))}
-            </select>
-          </label>
+          <FormTextField<UploadConditions> name="week_hint" label="対象週" select disabled={!targetMonth.trim()} rules={{ required: "対象週を選択してください。" }}>
+            <MenuItem value="">対象週を選択</MenuItem>
+            {weekOptions.map((option) => <MenuItem key={option.week_id} value={option.week_id}>{option.label || option.week_id}</MenuItem>)}
+          </FormTextField>
 
           <label className="field field-span">
             <span className="field-label">注文書PDF</span>
@@ -571,14 +560,16 @@ export default function PdfUploadPage() {
         </details>
 
         <div className="actions">
-          <button className="btn primary" onClick={submit} disabled={loading}>
+          <Button type="submit" variant="contained" disabled={loading}>
             {loading ? "受付中..." : pdfFiles.length > 1 ? `${pdfFiles.length}件のPDFを登録` : "PDFを登録"}
-          </button>
+          </Button>
           <Link href="/orders" className="btn secondary">
             注文一覧を見る
           </Link>
         </div>
 
+        </Stack>
+        </FormProvider>
         {pdfFiles.length === 1 ? <p className="message">選択中: {pdfFiles[0]?.name}</p> : null}
         {pdfFiles.length > 1 ? (
           <div className="result">
@@ -1212,4 +1203,9 @@ export default function PdfUploadPage() {
       `}</style>
     </main>
   );
+}
+
+export default function PdfUploadPage() {
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  return <SawaProvider sessionKey={`hospital-pdf-upload:${sessionKey}`}><PdfUploadScreen /></SawaProvider>;
 }
