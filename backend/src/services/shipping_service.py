@@ -27,7 +27,7 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 SHIPPING_TEMPLATE_PATH = Path(
     os.getenv("SHIPPING_TEMPLATE_PATH", DATA_DIR / "shipping_template.xlsx")
 )
-OUTPUT_DIR = Path("/tmp/shipping-outputs")
+OUTPUT_DIR = Path(os.getenv("SHIPPING_OUTPUT_DIR", "/tmp/shipping-outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _TRACKING_PATTERN = re.compile(r"お問い合せ送り状№：([0-9\\-]+)")
