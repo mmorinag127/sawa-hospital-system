@@ -1704,7 +1704,15 @@ def _render_pdf_page_image(pdf_bytes: bytes, template: dict[str, Any]):
         logger.warning("Hakodate PDF rendering unavailable: {}", str(exc))
         raise HakodateOcrUnavailable(str(exc)) from exc
 
-    page_index = max(int(template.get("page", 1)) - 1, 0)
+    requested_page = template.get("page", 1)
+    try:
+        page_number = int(requested_page)
+        valid_page = not isinstance(requested_page, bool) and page_number >= 1 and float(requested_page) == page_number
+    except (TypeError, ValueError, OverflowError):
+        valid_page = False
+    if not valid_page:
+        raise ValueError("Hakodate page must be a positive integer")
+    page_index = page_number - 1
     resolution = int(
         template.get("hakodate_cell_ocr_resolution")
         or template.get("hakodate_ocr_resolution")
@@ -1712,9 +1720,9 @@ def _render_pdf_page_image(pdf_bytes: bytes, template: dict[str, Any]):
         or 300
     )
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        if not pdf.pages:
-            return None
-        page = pdf.pages[page_index] if page_index < len(pdf.pages) else pdf.pages[0]
+        if page_index >= len(pdf.pages):
+            raise ValueError(f"requested Hakodate page {page_number} does not exist")
+        page = pdf.pages[page_index]
         return page.to_image(resolution=resolution).original.convert("RGB")
 
 

@@ -280,14 +280,14 @@ def _auto_detect_grid(image, template: dict) -> Optional[Tuple[list[float], list
     height, width = binary.shape[:2]
 
     region = template.get("grid_table_search_region")
+    rx0 = ry0 = 0
+    binary_region = binary
     if isinstance(region, list) and len(region) >= 4:
         rx0, ry0, rx1, ry1 = _normalize_region(region, width, height)
         binary_region = binary[ry0:ry1, rx0:rx1]
         h_lines, v_lines, grid = _extract_open_lines(binary_region, rx1 - rx0, ry1 - ry0)
         table_bbox = _find_largest_table_bbox(grid, ry1 - ry0, rx1 - rx0)
         x0, y0, w, h = table_bbox
-        x0 += rx0
-        y0 += ry0
     else:
         h_lines, v_lines, grid = _extract_open_lines(binary, width, height)
         x0, y0, w, h = _find_largest_table_bbox(grid, height, width)
@@ -308,7 +308,7 @@ def _auto_detect_grid(image, template: dict) -> Optional[Tuple[list[float], list
     expected_rows = int(template.get("grid_expected_rows", 0) or 0)
     expected_columns = int(template.get("grid_expected_columns", 0) or 0)
     if (expected_rows and len(ys) - 1 < expected_rows) or (expected_columns and len(xs) - 1 < expected_columns):
-        projection_xs, projection_ys = _projection_grid_lines(binary)
+        projection_xs, projection_ys = _projection_grid_lines(binary_region)
         if expected_columns and len(projection_xs) - 1 >= expected_columns:
             xs = projection_xs
         if expected_rows and len(projection_ys) - 1 >= expected_rows:
@@ -361,9 +361,10 @@ def _auto_detect_grid(image, template: dict) -> Optional[Tuple[list[float], list
     ys = sorted({y for y in ys if y0 <= y <= y1})
     if len(xs) < 2 or len(ys) < 2:
         return None
-    table_box = [x0 / width, y0 / height, x1 / width, y1 / height]
-    col_edges = [x / width for x in xs]
-    row_edges = [y / height for y in ys]
+    # Masks, bbox and projections remain ROI-local until this single translation.
+    table_box = [(x0 + rx0) / width, (y0 + ry0) / height, (x1 + rx0) / width, (y1 + ry0) / height]
+    col_edges = [(x + rx0) / width for x in xs]
+    row_edges = [(y + ry0) / height for y in ys]
     return table_box, col_edges, row_edges
 
 
@@ -564,13 +565,21 @@ def detect_table_grid(pdf_bytes: bytes, template: dict) -> Optional[GridDetectio
     except Exception:
         return None
 
-    page_index = max(int(template.get("page", 1)) - 1, 0)
+    requested_page = template.get("page", 1)
+    try:
+        page_number = int(requested_page)
+        valid_page = not isinstance(requested_page, bool) and page_number >= 1 and float(requested_page) == page_number
+    except (TypeError, ValueError, OverflowError):
+        valid_page = False
+    if not valid_page:
+        raise ValueError("grid page must be a positive integer")
+    page_index = page_number - 1
     dpi = int(template.get("grid_dpi", 300))
 
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        if not pdf.pages:
-            return None
-        page = pdf.pages[page_index] if page_index < len(pdf.pages) else pdf.pages[0]
+        if page_index >= len(pdf.pages):
+            raise ValueError(f"requested grid page {page_number} does not exist")
+        page = pdf.pages[page_index]
         dpi = _cap_detection_dpi(
             dpi,
             page_width_points=float(getattr(page, "width", 0.0) or 0.0),
