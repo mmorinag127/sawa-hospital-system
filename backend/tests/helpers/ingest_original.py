@@ -88,13 +88,19 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date):
 
 def register_authored_original(uploaded_pdf_id, *, effective_date):
     """New authored fixture registration and canonical selection before execution."""
-    from src.services import canonical_facility_lineage, order_service, facility_service
-    from src.models.order import Order
     from src.workers.ingest_mail_adapter import parse_ingest_payload
     uploaded = uploads.get_uploaded_pdf(uploaded_pdf_id)
     payload = parse_ingest_payload(uploads.build_ingest_payload(uploaded))
+    return register_authored_payload(payload, effective_date=effective_date)
+
+
+def register_authored_payload(payload, *, effective_date, registration_job_id=None):
+    """Register explicit component inputs through actual registration/lineage APIs."""
+    from src.services import canonical_facility_lineage, order_service, facility_service
+    from src.models.order import Order
     registered = order_service.create_order_from_ingest(payload, lines=None,
-        ocr_attempts=0, document_status="processing", error_message="ocr_pending")
+        ocr_attempts=0, document_status="processing", error_message="ocr_pending",
+        registration_job_id=registration_job_id)
     with session_scope() as session:
         facility_service.ensure_facility_materialized(session, payload.facility_hint)
         selected, _ = canonical_facility_lineage.resolve(session, payload.facility_hint, effective_date)
