@@ -1,7 +1,8 @@
 import pathlib
 import sys
-from datetime import datetime
-from types import SimpleNamespace
+from datetime import date, datetime
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -11,10 +12,21 @@ from src.models.ingest_job import IngestJob  # noqa: E402
 from src.models.uploaded_pdf import UploadedPdf  # noqa: E402
 from src.services import ingest_job_service, order_service  # noqa: E402
 from src.services import workflow_state_service  # noqa: E402
-from src.services.ocr_job_service import create_job, get_job, update_job  # noqa: E402
+from src.services.ocr_job_service import get_job  # noqa: E402
 from src.services.uploaded_pdf_service import get_uploaded_pdf, list_ready_uploaded_pdf_ids  # noqa: E402
 from src.workers import ingest_worker  # noqa: E402
-from src.workers.ingest_mail_adapter import parse_ingest_payload  # noqa: E402
+from tests.helpers.ingest_original import (  # noqa: E402
+    configure_delivery, reserve_uploaded_original, process_uploaded_original, authored_sources,
+    authored_pipeline_provider,
+    register_authored_original,
+)
+
+pytestmark = pytest.mark.usefixtures("isolated_formal_schema", "delivery_configuration")
+
+
+@pytest.fixture
+def delivery_configuration(monkeypatch):
+    configure_delivery(monkeypatch)
 
 
 def _seed_uploaded_pdf(
@@ -55,47 +67,21 @@ def _seed_uploaded_pdf(
         )
 
 
-def test_process_uploaded_pdf_job_marks_completed_and_links_entities(monkeypatch):
+def test_owned_delivery_marks_completed_and_links_entities(monkeypatch, tmp_path):
     order_service.clear_all()
     message_id = "msg-uploaded-pdf-complete"
     uploaded_pdf_id = "UPLtestcomplete"
     _seed_uploaded_pdf(uploaded_pdf_id=uploaded_pdf_id, message_id=message_id)
-    payload = {
-        "message_id": message_id,
-        "pdf_uri": f"gs://bucket/{uploaded_pdf_id}.pdf",
-        "received_at": datetime.utcnow().isoformat(),
-        "facility_hint": "FAC001",
-        "week_hint": "2026-02@2026-02-15~2026-02-21",
-        "source_kind": "manual_upload",
-        "original_filename": f"{uploaded_pdf_id}.pdf",
-        "content_sha256": f"sha-{uploaded_pdf_id}",
-    }
-    ingest_job_service.create_ingest_job(payload, force=True)
-
-    def _fake_process_ingest_job(job_id: str) -> None:
-        job_payload = ingest_job_service.get_ingest_payload(job_id)
-        parsed = parse_ingest_payload(job_payload)
-        order_service.create_order_from_ingest(
-            parsed,
-            lines=[
-                {
-                    "date": "2026-02-20",
-                    "daypart": "昼",
-                    "menu_name": "Menu A",
-                    "diet_type": "regular",
-                    "area_id": "2F",
-                    "bag_type": "standard",
-                    "quantity_original": 2,
-                }
-            ],
-            ocr_attempts=1,
-            document_status="success",
-        )
-        ingest_job_service.complete_ingest_job(job_id)
-
-    monkeypatch.setattr(ingest_worker, "process_ingest_job", _fake_process_ingest_job)
-
-    ingest_worker.process_uploaded_pdf_job(uploaded_pdf_id)
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC001", menu_date=date(2026, 2, 20))
+    with session_scope() as session:
+        row = session.get(UploadedPdf, uploaded_pdf_id)
+        row.storage_uri, row.content_sha256 = uri, digest
+    receipt = reserve_uploaded_original(uploaded_pdf_id)
+    assert receipt["id"] == message_id
+    register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
+    authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
+    result = process_uploaded_original(uploaded_pdf_id)
+    assert result["result"] == "business_done"
 
     row = get_uploaded_pdf(uploaded_pdf_id)
     assert row is not None
@@ -103,33 +89,35 @@ def test_process_uploaded_pdf_job_marks_completed_and_links_entities(monkeypatch
     assert row["current_stage"] == "completed"
     assert row["current_order_id"]
     assert row["current_document_id"]
+    from src.models.order import OrderLine
+    with session_scope() as session:
+        line = session.query(OrderLine).filter_by(order_id=row["current_order_id"]).one()
+        assert line.quantity_original == 2
+        assert line.date == date(2026, 2, 20)
+        assert line.area_id == "2F"
+        assert line.menu_name == "Menu A"
 
 
-def test_process_uploaded_pdf_job_uses_canonical_order_ocr_job_id_for_placeholder_order(monkeypatch):
+def test_owned_runner_uses_canonical_order_ocr_job_id(monkeypatch, tmp_path):
     order_service.clear_all()
     message_id = "msg-uploaded-pdf-canonical-ocr-job"
     uploaded_pdf_id = "UPLtestcanonicaljob"
     _seed_uploaded_pdf(uploaded_pdf_id=uploaded_pdf_id, message_id=message_id)
-
-    captured: dict[str, str | None] = {"ocr_job_id": None}
-
-    def _fake_process_ingest_job(job_id: str) -> None:
-        job_payload = ingest_job_service.get_ingest_payload(job_id)
-        captured["ocr_job_id"] = str((job_payload or {}).get("ocr_job_id") or "").strip() or None
-        ingest_job_service.complete_ingest_job(job_id)
-
-    monkeypatch.setattr(ingest_worker, "process_ingest_job", _fake_process_ingest_job)
-
-    ingest_worker.process_uploaded_pdf_job(uploaded_pdf_id)
-
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC001", menu_date=date(2026, 2, 20))
+    with session_scope() as session:
+        row = session.get(UploadedPdf, uploaded_pdf_id)
+        row.storage_uri, row.content_sha256 = uri, digest
+    reserve_uploaded_original(uploaded_pdf_id)
+    registered = register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
+    authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
+    assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"
     row = get_uploaded_pdf(uploaded_pdf_id)
-    assert row is not None
     assert row["status"] == "completed"
-    assert row["current_order_id"]
-    assert captured["ocr_job_id"] == f"OCR-{row['current_order_id']}"
+    assert row["current_order_id"] == registered["id"]
+    assert get_job(f"OCR-{row['current_order_id']}")["order_id"] == row["current_order_id"]
 
 
-def test_process_uploaded_pdf_job_retries_and_reclaims_stale_leases(monkeypatch):
+def test_owned_delivery_business_failure_is_terminal_after_stale_lease(monkeypatch, tmp_path):
     order_service.clear_all()
     message_id = "msg-uploaded-pdf-retry"
     uploaded_pdf_id = "UPLtestretry"
@@ -143,323 +131,118 @@ def test_process_uploaded_pdf_job_retries_and_reclaims_stale_leases(monkeypatch)
         lease_owner="worker:stale",
         lease_expires_at=stale_lease,
     )
-    payload = {
-        "message_id": message_id,
-        "pdf_uri": f"gs://bucket/{uploaded_pdf_id}.pdf",
-        "received_at": datetime.utcnow().isoformat(),
-        "facility_hint": "FAC001",
-        "week_hint": "2026-02@2026-02-15~2026-02-21",
-        "source_kind": "manual_upload",
-        "original_filename": f"{uploaded_pdf_id}.pdf",
-        "content_sha256": f"sha-{uploaded_pdf_id}",
-    }
-    ingest_job_service.create_ingest_job(payload, force=True)
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC001", menu_date=date(2026, 2, 20))
+    with session_scope() as session:
+        row = session.get(UploadedPdf, uploaded_pdf_id)
+        row.storage_uri, row.content_sha256 = uri, digest
+    reserve_uploaded_original(uploaded_pdf_id)
+    register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
+    before = ingest_job_service.get_ingest_job_snapshot(message_id)
 
     ready_ids = list_ready_uploaded_pdf_ids(limit=10)
     assert uploaded_pdf_id in ready_ids
 
-    def _fake_process_ingest_job(job_id: str) -> None:
-        ingest_job_service.fail_ingest_job(job_id, "simulated_failure")
-
-    monkeypatch.setattr(ingest_worker, "process_ingest_job", _fake_process_ingest_job)
-
-    ingest_worker.process_uploaded_pdf_job(uploaded_pdf_id)
+    from src.services.ocr_job_service import OwnPipelineLineageError
+    calls = []
+    def provider_failure(**kwargs):
+        calls.append(kwargs)
+        raise OwnPipelineLineageError("simulated_failure")
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", provider_failure)
+    result = process_uploaded_original(uploaded_pdf_id)
 
     row = get_uploaded_pdf(uploaded_pdf_id)
     assert row is not None
-    assert row["status"] == "retry_wait"
-    assert row["current_stage"] == "retry_wait"
-    assert row["last_error_code"] == "ingest_error"
-    assert row["last_error_message"] == "simulated_failure"
+    assert calls, (result, row["last_error_message"])
+    assert row["status"] == "failed"
+    assert row["current_stage"] == "failed"
+    assert row["last_error_code"] == "ingest_failed"
+    assert row["last_error_message"] == "first_pass_output_rejected"
     assert row["attempt_count"] == 2
+    assert row["next_retry_at"] is None
+    assert row["alerted_at"] is not None
+    assert uploaded_pdf_id not in list_ready_uploaded_pdf_ids(limit=10)
+    after = ingest_job_service.get_ingest_job_snapshot(message_id)
+    assert after["generation"] == before["generation"]
+    assert after["input_digest"] == before["input_digest"]
+    assert after["generation_attempts"] == 1
+    assert after["status"] == "error"
+    assert process_uploaded_original(uploaded_pdf_id)["acknowledged"] is True
+    assert ingest_job_service.get_ingest_job_snapshot(message_id) == after
+    assert len(calls) == 1
 
 
-def test_reconcile_completed_ocr_job_finalizes_uploaded_pdf_and_workflow(monkeypatch):
+def test_owned_first_pass_finalizes_without_implicit_latest_evidence_adoption(monkeypatch, tmp_path):
     order_service.clear_all()
     message_id = "upload:sha256:reconcile-first-pass"
     uploaded_pdf_id = "UPLreconcile"
-    _seed_uploaded_pdf(
-        uploaded_pdf_id=uploaded_pdf_id,
-        message_id=message_id,
-        status="processing",
-        current_stage="ingest_running",
-        attempt_count=1,
-        lease_owner="worker:test",
-        lease_expires_at=datetime.utcnow(),
-    )
-    payload = {
-        "message_id": message_id,
-        "pdf_uri": f"gs://bucket/{uploaded_pdf_id}.pdf",
-        "received_at": datetime.utcnow().isoformat(),
-        "facility_hint": None,
-        "week_hint": "2026-02@2026-02-15~2026-02-21",
-        "source_kind": "manual_upload",
-        "original_filename": f"{uploaded_pdf_id}.pdf",
-        "content_sha256": f"sha-{uploaded_pdf_id}",
-    }
-    ingest_job_service.create_ingest_job(payload, force=True)
+    _seed_uploaded_pdf(uploaded_pdf_id=uploaded_pdf_id, message_id=message_id)
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC001", menu_date=date(2026, 2, 20))
     with session_scope() as session:
-        job = session.get(IngestJob, message_id)
-        assert job is not None
-        job.status = "processing"
-        job.started_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
-
-    order = order_service.create_order_from_ingest(
-        parse_ingest_payload(payload),
-        lines=[],
-        ocr_attempts=1,
-        document_status="processing",
-        error_message="ocr_pending",
-    )
-    job_id = f"OCR-{message_id}"
-    create_job(job_id, input_reference=payload["pdf_uri"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        output_reference="gs://bucket/output.json",
-        metrics={"request_mode": "ingest_first_pass", "order_id": order["id"]},
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_load_pipeline_output_with_retry",
-        lambda *_args, **_kwargs: {
-            "status": "done",
-            "input_reference": payload["pdf_uri"],
-            "output_reference": "gs://bucket/output.json",
-            "table_raw": "| 02/20 | 昼 | Menu A |",
-            "pages": [{"page_index": 1, "tables": [{"rows": [["02/20", "昼", "Menu A"]]}]}],
-        },
-    )
-
-    assert order_service.reconcile_completed_ocr_job(job_id) is True
-
+        row = session.get(UploadedPdf, uploaded_pdf_id)
+        row.storage_uri, row.content_sha256 = uri, digest
+    reserve_uploaded_original(uploaded_pdf_id)
+    registered = register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
+    authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
+    assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"
     row = get_uploaded_pdf(uploaded_pdf_id)
-    assert row is not None
     assert row["status"] == "completed"
     assert row["current_stage"] == "completed"
-
-    ingest_snapshot = ingest_job_service.get_ingest_job_snapshot(message_id)
-    assert ingest_snapshot is not None
-    assert ingest_snapshot["status"] == "done"
-
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    assert latest_evidence is not None
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    assert ingest_job_service.get_ingest_job_snapshot(message_id)["status"] == "done"
+    evidence = order_service.get_latest_ocr_evidence_run(registered["id"], backfill_from_cache=False)
+    assert evidence is not None
+    workflow = workflow_state_service.refresh_workflow_state(registered["id"])
     assert workflow is not None
-    assert workflow.get("evidence_run_id")
-    assert workflow.get("state") != "uploaded"
+    assert workflow.get("evidence_run_id") is None
+    assert workflow.get("active_evidence_run_id") is None
+    assert workflow["apply_gate"]["can_apply"] is False
+    assert order_service.ocr_evidence_service.get_selected_evidence_run(registered["id"]) is None
 
 
-def test_reconcile_completed_ocr_job_is_idempotent_once_job_metrics_carry_evidence(monkeypatch):
+def test_owned_first_pass_duplicate_keeps_evidence_and_original_receipt(monkeypatch, tmp_path):
     order_service.clear_all()
     message_id = "upload:sha256:reconcile-idempotent"
     uploaded_pdf_id = "UPLreconcileidempotent"
-    _seed_uploaded_pdf(
-        uploaded_pdf_id=uploaded_pdf_id,
-        message_id=message_id,
-        status="processing",
-        current_stage="ingest_running",
-        attempt_count=1,
-        lease_owner="worker:test",
-        lease_expires_at=datetime.utcnow(),
-    )
-    payload = {
-        "message_id": message_id,
-        "pdf_uri": f"gs://bucket/{uploaded_pdf_id}.pdf",
-        "received_at": datetime.utcnow().isoformat(),
-        "facility_hint": None,
-        "week_hint": "2026-02@2026-02-15~2026-02-21",
-        "source_kind": "manual_upload",
-        "original_filename": f"{uploaded_pdf_id}.pdf",
-        "content_sha256": f"sha-{uploaded_pdf_id}",
-    }
-    ingest_job_service.create_ingest_job(payload, force=True)
+    _seed_uploaded_pdf(uploaded_pdf_id=uploaded_pdf_id, message_id=message_id)
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC001", menu_date=date(2026, 2, 20))
     with session_scope() as session:
-        job = session.get(IngestJob, message_id)
-        assert job is not None
-        job.status = "processing"
-        job.started_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
-
-    order = order_service.create_order_from_ingest(
-        parse_ingest_payload(payload),
-        lines=[],
-        ocr_attempts=1,
-        document_status="processing",
-        error_message="ocr_pending",
-    )
-    job_id = f"OCR-{message_id}"
-    create_job(job_id, input_reference=payload["pdf_uri"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference="gs://bucket/output-idempotent.json",
-        metrics={"request_mode": "ingest_first_pass", "order_id": order["id"]},
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_load_pipeline_output_with_retry",
-        lambda *_args, **_kwargs: {
-            "status": "done",
-            "input_reference": payload["pdf_uri"],
-            "output_reference": "gs://bucket/output-idempotent.json",
-            "table_raw": "| 02/20 | 昼 | Menu A |",
-            "pages": [{"page_index": 1, "tables": [{"rows": [["02/20", "昼", "Menu A"]]}]}],
-        },
-    )
-
-    assert order_service.reconcile_completed_ocr_job(job_id) is True
-    first_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    assert first_evidence is not None
-    first_evidence_id = first_evidence["id"]
-
-    monkeypatch.setattr(
-        order_service,
-        "_load_pipeline_output_with_retry",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not reload first-pass output after reconcile")),
-    )
-
-    assert order_service.reconcile_completed_ocr_job(job_id) is True
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    assert latest_evidence is not None
-    assert latest_evidence["id"] == first_evidence_id
-    job = get_job(job_id)
-    assert job is not None
-    metrics = job.get("metrics") or {}
-    assert metrics.get("evidence_run_id") == first_evidence_id
+        row = session.get(UploadedPdf, uploaded_pdf_id)
+        row.storage_uri, row.content_sha256 = uri, digest
+    reserve_uploaded_original(uploaded_pdf_id)
+    registered = register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
+    authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
+    assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"
+    evidence = order_service.get_latest_ocr_evidence_run(registered["id"], backfill_from_cache=False)
+    assert evidence is not None
+    job_id = f"OCR-{registered['id']}"
+    before = get_job(job_id)
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", lambda **kwargs: pytest.fail("duplicate provider execution"))
+    assert process_uploaded_original(uploaded_pdf_id)["acknowledged"] is True
+    latest = order_service.get_latest_ocr_evidence_run(registered["id"], backfill_from_cache=False)
+    assert latest["id"] == evidence["id"]
+    assert get_job(job_id) == before
+    assert before["metrics"]["evidence_run_id"] == evidence["id"]
+    captured = before["metrics"]["nonworkflow_execution"]["start_orders"][registered["id"]]["processing_start_input"]
+    assert captured["order"]["template_version_id"] == captured["original_template_projection"]["id"]
+    assert captured["original_template_lineage"]["authored_version"]["facility"] == captured["configured_input"]["facility"]
 
 
-def test_process_ingest_inline_finalizes_first_pass_side_effects(monkeypatch):
+@pytest.mark.parametrize("message_id,ocr_job_id", [
+    ("upload:sha256:inline-first-pass", None),
+    ("upload:sha256:inline-canonical", "OCR-ORDinlinecanonical"),
+])
+def test_unowned_inline_cannot_finalize_or_create_payload_job(monkeypatch, message_id, ocr_job_id):
     order_service.clear_all()
-    seen: list[dict[str, str | None]] = []
-
-    monkeypatch.setattr(
-        ingest_worker.config_service,
-        "load_ingest_policy",
-        lambda: {"ocr_retry_limit": 1, "quantity_rules": {}},
-    )
-    monkeypatch.setattr(
-        ingest_worker.config_service,
-        "load_facility_master",
-        lambda: {"fax_template_base": {}, "facilities": []},
-    )
-    monkeypatch.setattr(ingest_worker, "load_bytes_from_uri", lambda _uri: b"%PDF-test")
-    monkeypatch.setattr(
-        ingest_worker,
-        "run_ocr_pipeline",
-        lambda **_kwargs: {
-            "status": "done",
-            "input_reference": "gs://bucket/input.pdf",
-            "output_reference": "gs://bucket/output.json",
-            "table_raw": "|02/15|朝|Menu A|",
-            "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}],
-        },
-    )
-    monkeypatch.setattr(ingest_worker, "get_default_output_bucket", lambda: None)
-    monkeypatch.setattr(ingest_worker, "save_output_json", lambda *_args, **_kwargs: "file://ocr-output.json")
-    monkeypatch.setattr(
-        ingest_worker,
-        "extract_fax_data",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            facility_name=None,
-            date_strings=[],
-            tokens=[],
-            table_rows=[],
-        ),
-    )
-    monkeypatch.setattr(ingest_worker, "_enqueue_auto_llm_reparse", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        ingest_worker.ocr_evidence_service,
-        "persist_evidence_run",
-        lambda **_kwargs: {"id": "OEVinline"},
-    )
-    monkeypatch.setattr(
-        ingest_worker,
-        "create_order_from_ingest",
-        lambda *_args, **_kwargs: {"id": "ORDinline"},
-    )
-    monkeypatch.setattr(
-        ingest_worker,
-        "finalize_first_pass_side_effects",
-        lambda **kwargs: seen.append(
-            {
-                "job_id": kwargs.get("job_id"),
-                "order_id": kwargs.get("order_id"),
-                "message_id": kwargs.get("message_id"),
-            }
-        ),
-    )
-
-    ingest_worker._process_ingest_inline(
-        message_id="upload:sha256:inline-first-pass",
-        pdf_uri="gs://bucket/input.pdf",
-        received_at=datetime.utcnow().isoformat(),
-        facility_hint=None,
-        week_hint="2026-02@2026-02-15~2026-02-21",
-        facility_name=None,
-        date_hints=[],
-        skip_ocr=False,
-        source_kind="manual_upload",
-        original_filename="inline.pdf",
-        content_sha256="sha-inline",
-    )
-
-    assert seen == [
-        {
-            "job_id": "OCR-upload:sha256:inline-first-pass",
-            "order_id": "ORDinline",
-            "message_id": "upload:sha256:inline-first-pass",
-        }
-    ]
-    job = get_job("OCR-upload:sha256:inline-first-pass")
-    assert job is not None
-    metrics = job.get("metrics") or {}
-    assert metrics.get("request_mode") == "ingest_first_pass"
-
-
-def test_process_ingest_inline_prefers_payload_ocr_job_id(monkeypatch):
-    order_service.clear_all()
-    seen: list[dict[str, str | None]] = []
-
-    monkeypatch.setattr(
-        ingest_worker.config_service,
-        "load_ingest_policy",
-        lambda: {"ocr_retry_limit": 0, "quantity_rules": {}},
-    )
-    monkeypatch.setattr(ingest_worker.config_service, "load_facility_master", lambda: {"fax_template_base": {}, "facilities": []})
-    monkeypatch.setattr(ingest_worker, "_enqueue_auto_llm_reparse", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        ingest_worker,
-        "create_order_from_ingest",
-        lambda *_args, **_kwargs: {"id": "ORDinlinecanonical"},
-    )
-    def _create_job(job_id, input_reference, status="running", *, order_id, uploaded_pdf_id, order_document_id, input_artifact_digest):
-        assert status == "running"
-        assert order_id is None
-        assert uploaded_pdf_id is None
-        assert order_document_id is None
-        assert input_artifact_digest == "sha-inline"
-        return seen.append({"job_id": job_id, "input_reference": input_reference}) or ({}, True)
-
-    monkeypatch.setattr(ingest_worker, "create_job", _create_job)
-
-    ingest_worker._process_ingest_inline(
-        message_id="upload:sha256:inline-canonical",
-        pdf_uri="gs://bucket/input.pdf",
-        received_at=datetime.utcnow().isoformat(),
-        facility_hint=None,
-        week_hint="2026-02@2026-02-15~2026-02-21",
-        facility_name=None,
-        date_hints=[],
-        skip_ocr=False,
-        source_kind="manual_upload",
-        original_filename="inline.pdf",
-        content_sha256="sha-inline",
-        ocr_job_id="OCR-ORDinlinecanonical",
-    )
-
-    assert seen == [{"job_id": "OCR-ORDinlinecanonical", "input_reference": "gs://bucket/input.pdf"}]
+    with session_scope() as session:
+        from src.models.order import Order
+        from src.models.document import OrderDocument
+        from src.models.ocr_job import OcrJob
+        before = [session.query(model).count() for model in (Order, OrderDocument, OcrJob)]
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", lambda **kwargs: pytest.fail("unowned provider"))
+    with pytest.raises(ValueError, match="^ingest_execution_lease_required$"):
+        ingest_worker._process_ingest_inline(message_id=message_id, pdf_uri="gs://bucket/input.pdf",
+            received_at=datetime.utcnow().isoformat(), facility_hint=None,
+            week_hint="2026-02@2026-02-15~2026-02-21", facility_name=None, date_hints=[],
+            skip_ocr=False, source_kind="manual_upload", original_filename="inline.pdf",
+            content_sha256="sha-inline", ocr_job_id=ocr_job_id)
+    with session_scope() as session:
+        assert [session.query(model).count() for model in (Order, OrderDocument, OcrJob)] == before

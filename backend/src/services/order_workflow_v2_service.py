@@ -1459,7 +1459,7 @@ def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> s
     configured = session.info.get("materialization_configured_input")
     if configured is not None:
         facility_id, captured = configured
-        if captured != config_service.capture_authored_processing_config(facility_id):
+        if not config_service.captured_processing_config_matches(facility_id, captured):
             session.rollback()
             return "materialization_configured_input_changed"
     menu_defaults = session.info.get("materialization_menu_defaults")

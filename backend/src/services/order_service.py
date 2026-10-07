@@ -162,6 +162,12 @@ def _workflow_attempt_write_fence(session: Any, job_id: str, order_id: str, *, s
     )
 
 
+def _capture_selected_order_config(session: Any, order: Order) -> dict[str, Any]:
+    from src.services.workflow_attempt_guard_service import _order_execution_input
+
+    return _order_execution_input(session, order, lock=True)["configured_input"]
+
+
 def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None) -> dict[str, Any] | None:
     """Capture the exact operator-read inputs required for a later cache CAS."""
     with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
@@ -215,7 +221,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
             "evidence": deepcopy(ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True)),
             "draft": deepcopy(draft_sheet_service._serialize_draft(draft)) if draft is not None else None,
             "selected_pdf_receipt": pdf_receipt,
-            "configured_input": config_service.capture_authored_processing_config(order.facility_code),
+            "configured_input": _capture_selected_order_config(session, order),
             "physical_menu_entries": _json_snapshot(_build_position_menu_entries_safe(order.week_code, order.facility_code)),
         }
 
@@ -229,7 +235,7 @@ def _synchronous_cache_write_fence(
     if not isinstance(write_input, dict) or write_input.get("order_id") != order_id:
         return False
     order = session.get(Order, order_id)
-    if order is None or not snapshots_equal(write_input.get("configured_input"), config_service.capture_authored_processing_config(order.facility_code)):
+    if order is None or not config_service.captured_processing_config_matches(order.facility_code, write_input.get("configured_input")):
         return False
     if not snapshots_equal(write_input.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code)):
         return False
@@ -6820,7 +6826,7 @@ def _materialize_confirmed_lines_from_candidate(
             f"latest draft cannot be confirmed: {candidate_error}",
         )
     configured = candidate.get("configured_input")
-    if configured != config_service.capture_authored_processing_config(order.facility_code):
+    if not config_service.captured_processing_config_matches(order.facility_code, configured):
         raise ConfirmMaterializationError("materialization_configured_input_changed", "captured authored configuration changed before adoption")
     write_input = candidate.get("synchronous_write_input")
     if not isinstance(write_input, dict) or not _synchronous_cache_write_fence(session, order.id, write_input):
@@ -6860,7 +6866,7 @@ def _materialize_confirmed_lines_from_candidate(
         )
 
     normalized_lines = _ensure_unique_line_ids(materialized_lines, exclude_order_id=order.id)
-    if configured != config_service.capture_authored_processing_config(order.facility_code) or not _synchronous_cache_write_fence(session, order.id, write_input):
+    if not config_service.captured_processing_config_matches(order.facility_code, configured) or not _synchronous_cache_write_fence(session, order.id, write_input):
         raise ConfirmMaterializationError("synchronous_input_conflict", "captured materialization input changed before adoption")
     session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
     for line in normalized_lines:
@@ -10537,23 +10543,15 @@ def persist_ocr_evidence_run(
             _validate_hakodate_owned_artifacts(payload, _hakodate_owned_source(captured_config, processing_start_pdf_receipt()))
         order = session.get(Order, order_id)
         facility_id = str(getattr(order, "facility_code", "") or "").strip() if order is not None else ""
-        if order is not None and facility_id and captured_config is not None and not str(order.template_version_id or "").strip():
-            from src.services import facility_service, facility_template_version_service
+        from src.services.workflow_attempt_guard_service import processing_start_read_input
 
-            facility_service.ensure_facility_materialized(session, facility_id)
-            facility_config = captured_config["facility"] if captured_config is not None else None
-            version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-                session,
-                facility_id=facility_id,
-                facility_config=facility_config if isinstance(facility_config, dict) else None,
-                created_by="ocr-evidence-template-lineage",
-            )
-            if version is not None:
-                order.template_version_id = version.id
-                execution_input = current_nonworkflow_execution()
-                if execution_input is not None:
-                    advance_nonworkflow_order_input(session, execution_input, order)
-        captured_template_version_id = str(getattr(order, "template_version_id", "") or "").strip() or None
+        original_order = processing_start_read_input().get("order") or {}
+        captured_template_version_id = str(original_order.get("template_version_id") or "").strip()
+        if (not captured_template_version_id or order is None
+                or original_order.get("id") != order.id
+                or original_order.get("facility_code") != facility_id
+                or order.template_version_id != captured_template_version_id):
+            raise ValueError("original_template_capture_missing_or_mismatched")
     prepared_payload = dict(payload) if isinstance(payload, dict) else payload
     template = captured_config["facility"]["fax_template"] if captured_config is not None else None
     if isinstance(prepared_payload, dict):
@@ -31010,7 +31008,7 @@ def detect_order_grid(
             return None, "facility_unresolved", None
         try:
             selected_pdf_receipt = capture_selected_pdf_receipt(session, order)
-            configured_input = config_service.capture_authored_processing_config(facility_id)
+            configured_input = _capture_selected_order_config(session, order)
         except ValueError as exc:
             return None, str(exc), {"reason": str(exc)}
     if not document_uri:

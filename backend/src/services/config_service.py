@@ -57,7 +57,7 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 INGEST_POLICY_PATH = Path(os.getenv("INGEST_POLICY_PATH", DATA_DIR / "ingest_policy.template.json"))
 
 
-def capture_authored_processing_config(facility_id: str) -> dict[str, Any]:
+def capture_authored_processing_config(facility_id: str, *, selected_authored_version: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         master = load_facility_master()
         policy = _load_json(INGEST_POLICY_PATH)
@@ -66,10 +66,53 @@ def capture_authored_processing_config(facility_id: str) -> dict[str, Any]:
     matches = [item for item in master.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
     if len(matches) != 1:
         raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
-    facility = _validate_authored_facility_config(deepcopy(matches[0]), None)
+    if selected_authored_version is not None:
+        from src.services.workflow_attempt_guard_service import snapshots_equal
+
+        versions = matches[0].get("versions")
+        matching = [item for item in versions if isinstance(item, dict) and item.get("version_id") == selected_authored_version.get("version_id")] if isinstance(versions, list) else []
+        if len(matching) != 1 or not snapshots_equal(matching[0], selected_authored_version):
+            raise ValueError("original_template_configured_source_mismatch")
+        facility = _validate_authored_facility_config(deepcopy(selected_authored_version["facility"]), None)
+        if facility.get("facility_id") != facility_id:
+            raise ValueError("original_template_configured_source_mismatch")
+    else:
+        facility = _validate_authored_facility_config(deepcopy(matches[0]), None)
     if not isinstance(policy, dict):
         raise ValueError("ingest_policy_invalid")
-    return {"facility": facility, "policy": policy}
+    captured = {"facility": facility, "policy": policy}
+    if selected_authored_version is not None:
+        captured["authored_source_envelope"] = deepcopy(matches[0])
+        captured["selected_authored_version"] = deepcopy(selected_authored_version)
+    return captured
+
+
+def captured_processing_config_matches(facility_id: str, captured: Any) -> bool:
+    """Validate the saved selected source; the unversioned root is not authority."""
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+
+    if (not isinstance(captured, dict)
+            or set(captured) != {"facility", "policy", "authored_source_envelope", "selected_authored_version"}
+            or not isinstance(captured.get("selected_authored_version"), dict)
+            or not isinstance(captured.get("authored_source_envelope"), dict)):
+        return False
+    authored = captured["selected_authored_version"]
+    envelope = captured["authored_source_envelope"]
+    original_versions = envelope.get("versions")
+    original_matches = [item for item in original_versions if isinstance(item, dict) and item.get("version_id") == authored.get("version_id")] if isinstance(original_versions, list) else []
+    if (envelope.get("facility_id") != facility_id or len(original_matches) != 1
+            or not snapshots_equal(original_matches[0], authored)):
+        return False
+    master = load_facility_master()
+    matches = [item for item in master.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
+    if len(matches) != 1 or not isinstance(matches[0].get("versions"), list):
+        return False
+    versions = [item for item in matches[0]["versions"] if isinstance(item, dict) and item.get("version_id") == authored.get("version_id")]
+    return (len(versions) == 1 and snapshots_equal(versions[0], authored)
+            and isinstance(authored.get("facility"), dict)
+            and authored["facility"].get("facility_id") == facility_id
+            and snapshots_equal(captured.get("facility"), authored["facility"])
+            and snapshots_equal(captured.get("policy"), _load_json(INGEST_POLICY_PATH)))
 
 _NAME_TRANSLATION = str.maketrans(
     "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ",
