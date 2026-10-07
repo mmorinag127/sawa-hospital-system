@@ -73,6 +73,8 @@ def inspect_task(client, contract):
     expected = contract["http_request"]
     if (task.name != contract["name"] or request.url != expected["url"]
             or request.http_method != tasks_v2.HttpMethod.POST
+            or bool(request.body)
+            or tasks_v2.HttpRequest.pb(request).HasField("oauth_token")
             or request.oidc_token.service_account_email != expected["oidc_token"]["service_account_email"]
             or request.oidc_token.audience != expected["oidc_token"]["audience"]
             or task.dispatch_deadline.seconds != contract["dispatch_deadline"]["seconds"]):

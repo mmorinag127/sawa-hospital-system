@@ -4830,6 +4830,8 @@ def _complete_first_pass_job_in_session(session, order, document, execution_inpu
         "status": job.status, "result_state": job.metrics["result_state"],
     }
     job.metrics = {**job.metrics, "first_pass_terminal_receipt": deepcopy(receipt)}
+    from src.services.ingest_delivery_successor_service import accept
+    accept(session, job, execution_input, evidence, receipt, order)
     return receipt
 
 
@@ -16019,7 +16021,12 @@ def _resolve_own_resume_first_pass(order_id, job_id, payload, template, *, outpu
             if selected_job is None or selected_job.input_reference != selected_input_reference:
                 return None, "own_first_pass_document_conflict"
         execution = payload.get("_ocr_execution")
-        if isinstance(execution, dict):
+        boundary = current_nonworkflow_execution()
+        if isinstance(boundary, dict) and boundary.get("ingest_successor_id"):
+            from src.services.ingest_delivery_successor_service import validate_resume
+            if not validate_resume(session, boundary, payload, output_reference=output_reference):
+                return None, "own_first_pass_successor_lineage_mismatch"
+        elif isinstance(execution, dict):
             boundary = current_nonworkflow_execution()
             if (
                 execution.get("job_id") != job_id

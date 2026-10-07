@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from hashlib import sha256
@@ -61,6 +61,10 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
         job = session.get(OcrJob, job_id, populate_existing=True, with_for_update=True)
         if job is not None and (job.metrics or {}).get("workflow_attempt_id") is not None:
             raise ValueError("ocr_execution_owner_changed")
+        if job is not None and isinstance((job.metrics or {}).get("nonworkflow_execution"), dict):
+            recorded = job.metrics["nonworkflow_execution"]
+            if payload_digest(recorded.get("ingest_lease")) == payload_digest(lease):
+                return _job_to_dict(job)
         if lease.get("recovery_claim_id") is not None and job is not None:
             recorded = (job.metrics or {}).get("nonworkflow_execution")
             prior = recorded.get("ingest_lease") if isinstance(recorded, dict) else None
@@ -94,6 +98,8 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
 
 
 def fail_ingest_ocr_capture(lease, job_id, error):
+    if not isinstance(error, ValueError):
+        return False
     with session_scope() as session:
         if not lock_ingest_lease(session, lease):
             return False
@@ -104,11 +110,24 @@ def fail_ingest_ocr_capture(lease, job_id, error):
         job.status = "failed"
         job.error_message = str(error)
         job.updated_at = datetime.utcnow()
+        from src.services.ingest_delivery_service import persist_uncaptured_failure
+        receipt = persist_uncaptured_failure(lease, error, write_session=session)
+        if receipt is None:
+            raise ValueError("ingest_delivery_source_failure_persister_refused")
+        job.metrics = {**job.metrics, "source_failure_receipt": receipt}
         return True
 
 
 def lock_ingest_lease(session, lease, *, terminal=False):
+    from src.services.workflow_attempt_guard_service import current_nonworkflow_execution
+    boundary = current_nonworkflow_execution()
+    if isinstance(boundary, dict) and boundary.get("ingest_successor_id"):
+        from src.services.ingest_delivery_successor_service import fence
+        return fence(session, boundary, lease)
     if not isinstance(lease, dict) or type(lease.get("attempts")) is not int or lease["attempts"] < 1 or any(not lease.get(key) for key in ("id", "generation", "claim_id", "input_digest")):
+        return False
+    from src.services.ingest_delivery_service import fence_original_write
+    if not fence_original_write(session, lease):
         return False
     uploaded = lease.get("uploaded_lease")
     if uploaded is not None:
@@ -137,12 +156,15 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def create_ingest_receipt(payload: dict[str, Any], force: bool = False) -> dict[str, Any]:
+def create_ingest_receipt(payload: dict[str, Any], force: bool = False, *, write_session=None) -> dict[str, Any]:
+    from src.services.ingest_delivery_dispatch_service import required_config
+    from src.services.ingest_delivery_service import transaction, create_intent
+    config = required_config()
     normalized = _normalize_payload(payload)
     job_id = normalized["message_id"]
     now = datetime.utcnow()
     should_enqueue = True
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else transaction()) as session:
         if session.bind.dialect.name == "postgresql":
             session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended("ingest-job:" + job_id, 0))))
         session.execute(update(IngestJob).where(IngestJob.id == job_id).values(status=IngestJob.status))
@@ -179,6 +201,9 @@ def create_ingest_receipt(payload: dict[str, Any], force: bool = False) -> dict[
                 )
             session.add(job)
         session.flush()
+        if should_enqueue:
+            create_intent(session, job, config)
+            session.flush()
         return {"id": job.id, "generation": job.generation, "input_digest": job.input_digest, "enqueued": should_enqueue}
 
 
@@ -187,9 +212,12 @@ def create_ingest_job(payload: dict[str, Any], force: bool = False) -> tuple[str
     return receipt["id"], receipt["enqueued"]
 
 
-def restart_ingest_job(job_id: str) -> bool:
+def restart_ingest_job(job_id: str, *, write_session=None) -> bool:
+    from src.services.ingest_delivery_dispatch_service import required_config
+    from src.services.ingest_delivery_service import transaction, create_intent
+    config = required_config()
     now = datetime.utcnow()
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else transaction()) as session:
         session.execute(update(IngestJob).where(IngestJob.id == job_id).values(status=IngestJob.status))
         job = session.get(IngestJob, job_id, populate_existing=True, with_for_update=True)
         if job is None:
@@ -213,7 +241,12 @@ def restart_ingest_job(job_id: str) -> bool:
                 input_digest=digest,
             )
         )
-        return result.rowcount > 0
+        if result.rowcount > 0:
+            job = session.get(IngestJob, job_id, populate_existing=True)
+            create_intent(session, job, config)
+            session.flush()
+            return True
+        return False
 
 
 def get_ingest_job(job_id: str) -> IngestJob | None:
@@ -317,12 +350,12 @@ def _eligible_ingest_job_condition(stale_before: datetime, recovery_cutoff: date
     ))
 
 
-def claim_ingest_job(job_id: str, *, generation: str, input_digest: str, uploaded_lease=None):
+def claim_ingest_job(job_id: str, *, generation: str, input_digest: str, uploaded_lease=None, write_session=None):
     if not generation or not input_digest:
         return None
     now = datetime.utcnow()
     stale_before = _stale_threshold()
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         if uploaded_lease is not None:
             from src.services.uploaded_pdf_service import lock_uploaded_pdf_lease
             if not lock_uploaded_pdf_lease(session, uploaded_lease):
@@ -408,9 +441,9 @@ def complete_ingest_job(job_id: str, *, lease) -> bool:
         return True
 
 
-def fail_ingest_job(job_id: str, error_message: str, *, lease) -> bool:
+def fail_ingest_job(job_id: str, error_message: str, *, lease, write_session=None) -> bool:
     now = datetime.utcnow()
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         if not isinstance(lease, dict) or job_id != lease.get("id") or not lock_ingest_lease(session, lease):
             return False
         session.execute(
@@ -422,16 +455,21 @@ def fail_ingest_job(job_id: str, error_message: str, *, lease) -> bool:
 
 
 def fail_ingest_attempt(lease, error):
-    accepted = fail_ingest_job(lease["id"], str(error), lease=lease)
-    uploaded = lease.get("uploaded_lease")
-    if accepted and uploaded is not None:
-        from src.services.uploaded_pdf_service import schedule_uploaded_pdf_retry
-        schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
-            error_code="ingest_failed", error_message=str(error), terminal=True)
-    return accepted
+    from src.services.ingest_delivery_service import transaction
+    with transaction() as session:
+        accepted = fail_ingest_job(lease["id"], str(error), lease=lease, write_session=session)
+        uploaded = lease.get("uploaded_lease")
+        if accepted and uploaded is not None:
+            from src.services.uploaded_pdf_service import schedule_uploaded_pdf_retry
+            if schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
+                error_code="ingest_failed", error_message=str(error), terminal=True, write_session=session) is None:
+                raise ValueError("ingest_delivery_failed_upload_warning_refused")
+        return accepted
 
 
 def settle_ingest_ocr_terminal(execution):
+    if isinstance(execution, dict) and execution.get("ingest_successor_id"):
+        return None
     lease = execution.get("ingest_lease") if isinstance(execution, dict) else None
     if lease is None:
         return None
@@ -597,10 +635,10 @@ def reset_stale_processing(minutes: int | None = None, limit: int = 100) -> list
                 OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["id"].as_string() == job_id,
                 OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["claim_id"].as_string() == claim_id).limit(1)).first() is not None:
                 continue
-            result = session.execute(update(IngestJob).where(IngestJob.id == job_id, IngestJob.generation == generation,
-                IngestJob.claim_id == claim_id, IngestJob.status == "processing", IngestJob.started_at == started_at)
-                .values(status="pending", updated_at=now, claim_id=None, recovery_claim_id=claim_id, generation=uuid4().hex))
-            if result.rowcount == 1:
+            from src.models.ingest_delivery import IngestDelivery
+            intent = session.execute(select(IngestDelivery.id).where(IngestDelivery.job_id == job_id,
+                IngestDelivery.business_generation == generation, IngestDelivery.state != "ACKNOWLEDGED")).first()
+            if intent is not None:
                 reset.append(job_id)
         return reset
 

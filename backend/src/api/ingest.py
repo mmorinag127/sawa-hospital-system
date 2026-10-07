@@ -206,7 +206,8 @@ def _handle_uploaded_pdf_bytes(
             page_count=saved.total_pages or saved.page_number or 1,
         )
         payload["uploaded_pdf_id"] = uploaded_pdf["id"]
-        job_id, enqueued = create_ingest_job(payload, force=force_value)
+        receipt = uploaded_pdf["ingest_receipt"]
+        job_id, enqueued = receipt["id"], receipt["enqueued"]
         if not duplicate_blocked:
             enqueue_uploaded_pdf_async(uploaded_pdf["id"])
             order_service.invalidate_orders_cache()
@@ -405,9 +406,7 @@ def retry_uploaded_pdf(uploaded_pdf_id: str):
         raise HTTPException(status_code=409, detail="uploaded_pdf_already_completed")
     message_id = str(row.get("message_id") or "").strip()
     updated = requeue_uploaded_pdf(uploaded_pdf_id)
-    if message_id:
-        restart_ingest_job(message_id)
-    process_uploaded_pdf_job(uploaded_pdf_id)
+    enqueue_uploaded_pdf_async(uploaded_pdf_id)
     refreshed = get_uploaded_pdf(uploaded_pdf_id)
     return {"accepted": True, "item": refreshed or updated}
 

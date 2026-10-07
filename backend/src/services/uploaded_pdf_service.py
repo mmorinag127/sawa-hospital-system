@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -341,10 +342,14 @@ def create_uploaded_pdf_from_upload(
     page_count: int | None = None,
     force: bool = False,
 ) -> tuple[dict[str, Any], bool]:
+    from src.services.ingest_delivery_dispatch_service import required_config
+    from src.services.ingest_delivery_service import transaction
+    from src.services.ingest_job_service import create_ingest_receipt
+    required_config()
     week_hint = require_explicit_ingest_week(week_hint)
     now = _now()
     duplicate_blocked = False
-    with session_scope() as session:
+    with transaction() as session:
         if session.bind.dialect.name == "postgresql":
             session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended("uploaded-pdf:" + saved.message_id, 0))))
         session.execute(update(UploadedPdf).where(UploadedPdf.message_id == saved.message_id).values(status=UploadedPdf.status))
@@ -406,6 +411,11 @@ def create_uploaded_pdf_from_upload(
             row.updated_at = now
         session.flush()
         serialized = _serialize_uploaded_pdf(row)
+        if not duplicate_blocked:
+            serialized["ingest_receipt"] = create_ingest_receipt(build_ingest_payload(serialized),
+                force=force, write_session=session)
+        else:
+            serialized["ingest_receipt"] = {"id": row.message_id, "enqueued": False}
     return serialized, duplicate_blocked
 
 
@@ -535,10 +545,10 @@ def _write_attempt(
     attempt.updated_at = now
 
 
-def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str) -> dict[str, Any] | None:
+def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str, write_session=None) -> dict[str, Any] | None:
     now = _now()
     lease_until = now + timedelta(seconds=_lease_seconds())
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         session.execute(update(UploadedPdf).where(UploadedPdf.id == uploaded_pdf_id).values(status=UploadedPdf.status))
         row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True, with_for_update=True)
         if row is None:
@@ -779,9 +789,10 @@ def schedule_uploaded_pdf_retry(
     worker_instance: str | None = None,
     lease,
     terminal: bool = False,
+    write_session=None,
 ) -> dict[str, Any] | None:
     now = _now()
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         if not lock_uploaded_pdf_lease(session, lease) or uploaded_pdf_id != lease.get("id") or worker_instance != lease.get("lease_owner"):
             return None
         row = session.get(UploadedPdf, uploaded_pdf_id)
@@ -820,8 +831,12 @@ def schedule_uploaded_pdf_retry(
 
 
 def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
+    from src.services.ingest_delivery_dispatch_service import required_config
+    from src.services.ingest_delivery_service import transaction
+    from src.services.ingest_job_service import restart_ingest_job
+    required_config()
     now = _now()
-    with session_scope() as session:
+    with transaction() as session:
         session.execute(update(UploadedPdf).where(UploadedPdf.id == uploaded_pdf_id).values(status=UploadedPdf.status))
         row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True, with_for_update=True)
         if row is None:
@@ -836,6 +851,8 @@ def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
         row.last_error_message = None
         row.updated_at = now
         session.flush()
+        if not restart_ingest_job(row.message_id, write_session=session):
+            raise ValueError("ingest_delivery_restart_original_missing")
         return _serialize_uploaded_pdf(row)
 
 
