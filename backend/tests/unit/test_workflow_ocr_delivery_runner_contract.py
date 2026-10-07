@@ -287,7 +287,7 @@ def test_exact_lookup_notfound_is_distinct_from_unknown():
         dispatch.inspect_task(client, contract)
 
 
-@pytest.mark.parametrize("conflict", ["body", "oauth_token"])
+@pytest.mark.parametrize("conflict", ["body", "oauth_token", "deadline_nanos", "exact"])
 def test_bodyless_workflow_contract_rejects_foreign_request_content(conflict):
     from google.cloud import tasks_v2
     contract = {"name": "projects/fixture/locations/fixture/queues/fixture/tasks/original",
@@ -298,12 +298,17 @@ def test_bodyless_workflow_contract_rejects_foreign_request_content(conflict):
     request["http_method"] = tasks_v2.HttpMethod.POST
     if conflict == "body":
         request["body"] = b'{"foreign":true}'
-    else:
+    elif conflict == "oauth_token":
         request["oauth_token"] = {"service_account_email": "foreign@fixture.iam.gserviceaccount.com", "scope": "foreign"}
     task = tasks_v2.Task(name=contract["name"], http_request=request, dispatch_deadline=contract["dispatch_deadline"])
+    if conflict == "deadline_nanos":
+        tasks_v2.Task.pb(task).dispatch_deadline.nanos = 1
     class Client:
         def get_task(self, **kwargs):
             assert kwargs["request"]["response_view"] == tasks_v2.Task.View.FULL
             return task
+    if conflict == "exact":
+        assert dispatch.inspect_task(Client(), contract) == "exists"
+        return
     with pytest.raises(RuntimeError, match="task_contract_mismatch"):
         dispatch.inspect_task(Client(), contract)

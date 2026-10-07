@@ -71,13 +71,15 @@ def inspect_task(client, contract):
         raise RuntimeError("workflow_ocr_delivery_lookup_unknown") from exc
     request = task.http_request
     expected = contract["http_request"]
+    deadline = tasks_v2.Task.pb(task).dispatch_deadline
     if (task.name != contract["name"] or request.url != expected["url"]
             or request.http_method != tasks_v2.HttpMethod.POST
             or bool(request.body)
             or tasks_v2.HttpRequest.pb(request).HasField("oauth_token")
             or request.oidc_token.service_account_email != expected["oidc_token"]["service_account_email"]
             or request.oidc_token.audience != expected["oidc_token"]["audience"]
-            or task.dispatch_deadline.seconds != contract["dispatch_deadline"]["seconds"]):
+            or deadline.seconds != contract["dispatch_deadline"]["seconds"]
+            or deadline.nanos != contract["dispatch_deadline"].get("nanos", 0)):
         raise RuntimeError("workflow_ocr_delivery_task_contract_mismatch")
     return "exists"
 

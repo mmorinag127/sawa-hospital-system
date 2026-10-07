@@ -1,5 +1,51 @@
 # Hospital Original-Input Fixtures: Component Technical Preparation
 
+## Actual SDK Duration Continuation (Current)
+
+Base/generating HEAD `3b0cecdda1f95a35f49b31f13504d05b6aedbca8`, dirty source.
+Earlier sections are historical. Both ingest and workflow dispatch inspectors
+now use official `tasks_v2.Task.pb(task).dispatch_deadline` integer seconds/nanos.
+They compare both exact raw fields against the saved contract (omitted nanos is
+protobuf zero), without timedelta float conversion, rounding, or tolerance.
+Ingest's real typed SDK mutation now edits underlying protobuf nanos; workflow
+adds exact positive and one-nanosecond negative neighbors. Headers/provider extras
+and other existing exact checks remain intact.
+
+Four permanent-successor refusal failures arose while fixtures injected parent
+metrics/status corruption after terminal ACK using ORM flush. The before_flush
+owner fence correctly rejected this unowned write before refusal was exercised.
+Those two injection branches now use explicit physical Core UPDATE; production
+ownership checks are unchanged. Real original intent/claim/terminal producer is
+retained; configured snapshot adapter remains a labelled component isolation,
+not actual original-capture/operator/provider proof. All original refusal, no
+redispatch, parent receipt/order immutability and duplicate assertions remain.
+No actual Session retention root defect was established.
+
+Actual isolated SDK 2.26.0 target read only:
+`/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main/tmp/v1-hospital-task-sdk-20261007`.
+No install or shared venv write in this continuation. Focused two files:
+**105 passed, 11 warnings, 5.84s, exit 0** (103 prior + two new workflow cases).
+No lifecycle configuration cases were changed or broadly rerun.
+
+Exact command from dedicated WT/backend, P denotes its absolute WT path:
+
+```sh
+env -i PATH=/usr/bin:/bin HOME=$P/tmp/sdk-duration-proof/home TMPDIR=$P/tmp/sdk-duration-proof/temp XDG_CACHE_HOME=$P/tmp/sdk-duration-proof/cache PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main/tmp/v1-hospital-task-sdk-20261007:. DB_URI=sqlite:///$P/tmp/sdk-duration-proof/bootstrap.sqlite3 NO_GCE_CHECK=true GOOGLE_CLOUD_DISABLE_GRPC=true /Users/mmorinag/Sawa/2025.12/workspace/backend/.venv/bin/python -m pytest tests/unit/test_ingest_delivery_contract.py tests/unit/test_workflow_ocr_delivery_runner_contract.py -q -p no:cacheprovider --basetemp=../tmp/sdk-duration-proof/cases --junitxml=../tmp/sdk-duration-proof/results.xml > ../tmp/sdk-duration-proof/pytest.log 2>&1
+```
+
+SHA256 source, relative to backend:
+- services/ingest_delivery_dispatch_service.py: `9920e9d289b51c9659fe92ff1eb5909e1f8b8b807cfdcd6d077bb6662b9228f4`
+- services/workflow_ocr_delivery_dispatch_service.py: `2cbf8775a9933f4ca6aa9e15def716e0ac841df64eafe682d20f77ca4f7c7310`
+- tests/unit/test_ingest_delivery_contract.py: `9a71cbba567e16d76badba18ffba6c94c252019f668403cd5500c878a1885cc1`
+- tests/unit/test_workflow_ocr_delivery_runner_contract.py: `3b0853aa294c610b9ace39c703dc0c62fad2e815541ea130f1b38f127e4009ab`
+
+Owned raw artifacts under `$P/tmp/sdk-duration-proof`:
+pytest.log SHA256 `66a57ca6302b42b545c70fe1b975c137dfd7541b415a291ee74218d04f9b7585`;
+results.xml SHA256 `30fbc663b73f8d0901abcf7ae647bbc9de05e3a7f0bc8316d6fb5b268fd0dbb0`.
+Parent 96-pass/7-failure XML remains untouched in main/tmp/v1-parent-hospital-sdk-20261007.
+Stage freeze only, no commit/merge/push/deploy, no running needed session or PG.
+Parent monitor/commit/integrated actual test remain required; not whole acceptance.
+
 ## Projection Metadata Continuation (Current)
 
 Generating base: `29323324ba28007c1ad11d134096e66ef042f579`, same named

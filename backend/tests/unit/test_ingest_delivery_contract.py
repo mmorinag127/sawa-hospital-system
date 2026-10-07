@@ -276,7 +276,7 @@ def test_full_task_lookup_refuses_decision_bearing_mismatch(store, payload, muta
     elif mutation in {"authorization", "proxy-authorization", "cookie", "x-serverless-authorization"}:
         task.http_request.headers[mutation.upper()] = "foreign-credential"
     else:
-        task.dispatch_deadline.nanos = 1
+        tasks_v2.Task.pb(task).dispatch_deadline.nanos = 1
     client = SimpleNamespace(get_task=lambda **kwargs: task)
     with pytest.raises(ValueError, match="contract_mismatch"):
         dispatch.inspect_task(client, contract)
@@ -749,12 +749,16 @@ def test_owned_permanent_successor_refusal_is_saved_and_not_redispatched(store, 
             elif conflict == "evidence":
                 session.get(OrderOcrEvidenceRun, "producer-evidence").artifact_digest = "authored-other-digest"
             elif conflict == "predecessor_state":
-                session.get(OcrJob, "producer-parent-job").status = "failed"
+                # Physical corruption after terminal ownership ended, not an owned write.
+                from sqlalchemy import update
+                session.execute(update(OcrJob.__table__).where(OcrJob.id == "producer-parent-job").values(status="failed"))
             else:
                 job = session.get(OcrJob, "producer-parent-job")
                 capture = deepcopy(job.metrics["nonworkflow_execution"])
                 capture["orders"] = {"producer-order": {"authored_observed_difference": True}}
-                job.metrics = {**job.metrics, "nonworkflow_execution": capture}
+                from sqlalchemy import update
+                session.execute(update(OcrJob.__table__).where(OcrJob.id == job.id).values(
+                    metrics={**job.metrics, "nonworkflow_execution": capture}))
     def forbidden(*args, **kwargs):
         raise AssertionError("Refused original must not compute or submit transport")
     monkeypatch.setattr(ingest_worker, "_run_auto_llm_reparse", forbidden)

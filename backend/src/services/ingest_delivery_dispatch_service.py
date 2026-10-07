@@ -76,14 +76,15 @@ def inspect_task(client, contract):
     except Exception as exc:
         raise RuntimeError("ingest_delivery_lookup_unknown") from exc
     actual, expected = task.http_request, contract["http_request"]
+    deadline = tasks_v2.Task.pb(task).dispatch_deadline
     if (task.name != contract["name"] or actual.url != expected["url"]
         or actual.http_method != tasks_v2.HttpMethod.POST or actual.body != base64.b64decode(expected["body"])
         or tasks_v2.HttpRequest.pb(actual).HasField("oauth_token")
         or not _headers_match(actual.headers, expected["headers"])
         or actual.oidc_token.service_account_email != expected["oidc_token"]["service_account_email"]
         or actual.oidc_token.audience != expected["oidc_token"]["audience"]
-        or task.dispatch_deadline.seconds != contract["dispatch_deadline"]["seconds"]
-        or task.dispatch_deadline.nanos != 0):
+        or deadline.seconds != contract["dispatch_deadline"]["seconds"]
+        or deadline.nanos != contract["dispatch_deadline"].get("nanos", 0)):
         raise ValueError("ingest_delivery_task_contract_mismatch")
     return "exists"
 
