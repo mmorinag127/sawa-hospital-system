@@ -15,6 +15,7 @@ from src.services import (
     total_service,
 )
 from src.services import order_workflow_v2_service
+from src.services import workflow_ocr_delivery_dispatch_service
 from src.services import ocr_job_service
 from src.services import shipping_status_store
 from src.services.ocr_job_service import (
@@ -573,7 +574,6 @@ def _heal_active_order_reparse_job_from_workflow(order_id: str, job: dict | None
 
 def _enqueue_order_reparse_job(
     order_id: str,
-    background_tasks: BackgroundTasks,
     *,
     ocr_prompt: str | None = None,
     prompt_preset: str | None = None,
@@ -582,7 +582,7 @@ def _enqueue_order_reparse_job(
     llm_assist: bool = True,
     force: bool = False,
     stale_action: str = "retry",
-    request_mode: str | None = None,
+    request_mode: str,
     selected_document_id: str | None = None,
     expected_revision: int,
 ) -> dict:
@@ -600,8 +600,8 @@ def _enqueue_order_reparse_job(
             order_id,
             ocr_job_id,
             input_reference=input_reference,
-            request_mode=str(request_mode or ("llm_reparse" if llm_assist else "ocr_reparse")).strip()
-            or ("llm_reparse" if llm_assist else "ocr_reparse"),
+            delivery_selected_document_id=selected_document_id,
+            request_mode=request_mode,
             job_metrics={
                 "processing_stage": "queued",
                 "result_state": "processing",
@@ -618,25 +618,7 @@ def _enqueue_order_reparse_job(
         )
     )
     queued_workflow = queued["workflow"]
-    queued_job = queued["ocr_job"]
-    _dispatch_workflow_ocr_task(
-        background_tasks,
-        _run_reparse_background,
-        order_id,
-        ocr_prompt,
-        prompt_preset,
-        ocr_provider,
-        ocr_model,
-        llm_assist,
-        selected_document_id,
-        queued_workflow["revision"],
-        queued_job["workflow_attempt_id"],
-        ocr_job_id,
-        order_id=order_id,
-        job_id=ocr_job_id,
-        expected_revision=queued_workflow["revision"],
-        workflow_attempt_id=queued_job["workflow_attempt_id"],
-    )
+    _dispatch_workflow_ocr_delivery(queued.get("delivery"))
     return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow": queued_workflow}
 
 
@@ -651,74 +633,38 @@ def _run_reparse_background(
     expected_revision: int | None = None,
     workflow_attempt_id: str | None = None,
     ocr_job_id: str | None = None,
-) -> None:
-    evidence_run_id = None
-    result = None
-    def _owns_committed_reparse_receipt() -> bool:
-        receipt = (result or {}).get("terminal_receipt")
-        return (
-            isinstance(receipt, dict) and receipt.get("job_id") == ocr_job_id
-            and receipt.get("order_id") == order_id
-            and receipt.get("workflow_attempt_id") == workflow_attempt_id
-            and receipt.get("workflow_revision") == expected_revision
-            and receipt.get("evidence_run_id") == (result or {}).get("reparse_evidence_run_id")
-            and receipt.get("status") in {"done", "failed"}
-        )
-    try:
-        result, error = order_service.reparse_order(
-            order_id,
-            ocr_prompt=ocr_prompt,
-            prompt_preset=prompt_preset,
-            ocr_provider=ocr_provider,
-            ocr_model=ocr_model,
-            llm_assist=llm_assist,
-            selected_document_id=selected_document_id,
-            workflow_attempt_id=workflow_attempt_id,
-            expected_workflow_revision=expected_revision,
-            ocr_job_id=ocr_job_id,
-        )
-        if error is None and order_service.is_own_pending_ocr_result(
-            result, order_id=order_id, job_id=ocr_job_id,
-            workflow_attempt_id=workflow_attempt_id, workflow_revision=expected_revision,
-        ):
-            return
-        evidence_run_id = (
-            str(result.get("reparse_evidence_run_id") or "").strip()
-            if isinstance(result, dict)
-            else ""
-        )
-        completion_error = error or (None if evidence_run_id else "reparse_evidence_missing")
-        if _owns_committed_reparse_receipt():
-            return
-        if isinstance((result or {}).get("terminal_receipt"), dict):
+) -> dict:
+    result, error = order_service.reparse_order(
+        order_id, ocr_prompt=ocr_prompt, prompt_preset=prompt_preset,
+        ocr_provider=ocr_provider, ocr_model=ocr_model, llm_assist=llm_assist,
+        selected_document_id=selected_document_id,
+        workflow_attempt_id=workflow_attempt_id,
+        expected_workflow_revision=expected_revision, ocr_job_id=ocr_job_id,
+    )
+    if error is None and order_service.is_own_pending_ocr_result(
+        result, order_id=order_id, job_id=ocr_job_id,
+        workflow_attempt_id=workflow_attempt_id, workflow_revision=expected_revision,
+    ):
+        return result
+    receipt = (result or {}).get("terminal_receipt")
+    if isinstance(receipt, dict):
+        if (receipt.get("job_id") != ocr_job_id or receipt.get("order_id") != order_id
+                or receipt.get("workflow_attempt_id") != workflow_attempt_id
+                or receipt.get("workflow_revision") != expected_revision
+                or receipt.get("status") not in {"done", "failed"}):
             raise ValueError("reparse_terminal_receipt_mismatch")
-        _completed, completion_error = _complete_workflow_ocr_run(
-            order_id,
-            str(ocr_job_id or "").strip(),
-            evidence_run_id=evidence_run_id or None,
-            error=completion_error,
-            expected_revision=expected_revision,
-            workflow_attempt_id=workflow_attempt_id,
-        )
-        if completion_error:
-            logger.warning("Reparse background failed", order_id=order_id, error=completion_error)
-    except BaseException as exc:  # noqa: BLE001
-        if _owns_committed_reparse_receipt():
-            return
-        try:
-            receipt, completion_error = _complete_workflow_ocr_run(
-                order_id,
-                str(ocr_job_id or "").strip(),
-                evidence_run_id=evidence_run_id or None,
-                error=f"reparse_crashed:{exc}",
-                expected_revision=expected_revision,
-                workflow_attempt_id=workflow_attempt_id,
-            )
-            if receipt is None:
-                logger.warning("Reparse crash completion rejected", order_id=order_id, error=completion_error)
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to complete OCR job after reparse crash", order_id=order_id)
-        logger.exception("Reparse background crashed", order_id=order_id, error=str(exc))
+        return {"terminal_receipt": receipt}
+    if not error:
+        raise ValueError("reparse_persisted_result_missing")
+    receipt, completion_error = _complete_workflow_ocr_run(
+        order_id, ocr_job_id,
+        evidence_run_id=(result or {}).get("reparse_evidence_run_id"),
+        error=error, expected_revision=expected_revision,
+        workflow_attempt_id=workflow_attempt_id,
+    )
+    if receipt is None:
+        raise ValueError(completion_error or "reparse_terminal_persist_refused")
+    return {"terminal_receipt": receipt}
 
 
 def _run_ocr_rerun_background(
@@ -727,100 +673,55 @@ def _run_ocr_rerun_background(
     selected_document_id: str | None = None,
     expected_revision: int | None = None,
     workflow_attempt_id: str | None = None,
-) -> None:
-    evidence = None
-    def _owns_committed_receipt() -> bool:
-        receipt = (evidence or {}).get("terminal_receipt")
-        return (
-            isinstance(receipt, dict) and receipt.get("job_id") == ocr_job_id
-            and receipt.get("order_id") == order_id
-            and receipt.get("workflow_attempt_id") == workflow_attempt_id
-            and receipt.get("workflow_revision") == expected_revision
-            and receipt.get("evidence_run_id") == (evidence or {}).get("id")
-            and receipt.get("status") in {"done", "failed"}
-        )
-    def _patch_job_metrics(patch: dict) -> None:
-        metrics = {**patch, "stage_updated_at": datetime.utcnow().isoformat()}
-        ocr_job_service.update_job_for_workflow_attempt(
-            ocr_job_id,
-            workflow_attempt_id or "",
-            order_id=order_id,
-            expected_workflow_revision=expected_revision,
-            metrics=metrics,
-        )
-
+) -> dict:
     started_at = datetime.utcnow()
-    try:
-        _patch_job_metrics(
-            {
-                "processing_stage": "waiting_for_ocr_slot",
-                "result_state": "processing",
-                "request_mode": "ocr_rerun",
-                "ocr_started_at": started_at.isoformat(),
-                "ocr_slot_wait_started_at": started_at.isoformat(),
-            }
+    def patch_metrics(patch):
+        _job, accepted = ocr_job_service.update_job_for_workflow_attempt(
+            ocr_job_id, workflow_attempt_id, order_id=order_id,
+            expected_workflow_revision=expected_revision,
+            metrics={**patch, "stage_updated_at": datetime.utcnow().isoformat()},
         )
+        if not accepted:
+            raise ValueError("workflow_ocr_delivery_progress_write_refused")
+    try:
+        patch_metrics({"processing_stage": "waiting_for_ocr_slot", "result_state": "processing",
+            "request_mode": "ocr_rerun", "ocr_started_at": started_at.isoformat(),
+            "ocr_slot_wait_started_at": started_at.isoformat()})
         with acquire_ocr_execution_slot(order_id=order_id, job_id=ocr_job_id) as slot:
-            slot_acquired_at = datetime.utcnow()
-            _patch_job_metrics(
-                {
-                    "processing_stage": "ocr_slot_acquired",
-                    "result_state": "processing",
-                    "request_mode": "ocr_rerun",
-                    "ocr_slot_acquired_at": slot_acquired_at.isoformat(),
-                    "ocr_slot_wait_seconds": round((slot_acquired_at - started_at).total_seconds(), 3),
-                    "ocr_execution_slot": slot,
-                }
-            )
+            acquired_at = datetime.utcnow()
+            patch_metrics({"processing_stage": "ocr_slot_acquired", "result_state": "processing",
+                "request_mode": "ocr_rerun", "ocr_slot_acquired_at": acquired_at.isoformat(),
+                "ocr_slot_wait_seconds": round((acquired_at - started_at).total_seconds(), 3),
+                "ocr_execution_slot": slot})
             with order_service.workflow_ocr_write_context(workflow_attempt_id, expected_revision, ocr_job_id, order_id):
                 evidence, error = order_service.rerun_ocr_evidence_only(
-                    order_id,
-                    job_id=ocr_job_id,
-                    project_sheet=False,
-                    refresh_workflow=False,
-                    selected_document_id=selected_document_id,
+                    order_id, job_id=ocr_job_id, project_sheet=False,
+                    refresh_workflow=False, selected_document_id=selected_document_id,
                 )
         if error is None and order_service.is_own_pending_ocr_result(
             evidence, order_id=order_id, job_id=ocr_job_id,
             workflow_attempt_id=workflow_attempt_id, workflow_revision=expected_revision,
         ):
-            return
+            return evidence
         receipt = (evidence or {}).get("terminal_receipt")
-        if (
-            not isinstance(receipt, dict) or receipt.get("job_id") != ocr_job_id
-            or receipt.get("order_id") != order_id
-            or receipt.get("workflow_attempt_id") != workflow_attempt_id
-            or receipt.get("workflow_revision") != expected_revision
-            or receipt.get("evidence_run_id") != (evidence or {}).get("id")
-            or receipt.get("status") not in {"done", "failed"}
-        ):
+        if (not isinstance(receipt, dict) or receipt.get("job_id") != ocr_job_id
+                or receipt.get("order_id") != order_id
+                or receipt.get("workflow_attempt_id") != workflow_attempt_id
+                or receipt.get("workflow_revision") != expected_revision
+                or receipt.get("status") not in {"done", "failed"}):
             raise ValueError("ocr_rerun_terminal_receipt_missing")
-        return
+        return {"terminal_receipt": receipt}
     except OcrExecutionSlotTimeout as exc:
-        if _owns_committed_receipt():
-            return
         receipt, completion_error = _complete_workflow_ocr_run(
             order_id, ocr_job_id, error="ocr_execution_slot_timeout",
             expected_revision=expected_revision, workflow_attempt_id=workflow_attempt_id,
             metrics_patch={"error_detail": str(exc), "request_mode": "ocr_rerun",
-                           "processing_stage": "ocr_execution_slot_timeout"},
+                "processing_stage": "ocr_execution_slot_timeout",
+                "ocr_slot_wait_started_at": started_at.isoformat()},
         )
         if receipt is None:
-            logger.warning("OCR timeout completion rejected", order_id=order_id, error=completion_error)
-        logger.exception("OCR evidence-only rerun could not acquire execution slot", order_id=order_id)
-    except BaseException as exc:  # noqa: BLE001
-        if _owns_committed_receipt():
-            return
-        receipt, completion_error = _complete_workflow_ocr_run(
-            order_id, ocr_job_id, error=f"ocr_rerun_crashed:{exc}",
-            evidence_run_id=(evidence or {}).get("id"),
-            expected_revision=expected_revision, workflow_attempt_id=workflow_attempt_id,
-            metrics_patch={"error_detail": str(exc), "request_mode": "ocr_rerun",
-                           "processing_stage": "crashed"},
-        )
-        if receipt is None:
-            logger.warning("OCR crash completion rejected", order_id=order_id, error=completion_error)
-        logger.exception("OCR evidence-only rerun crashed", order_id=order_id, error=str(exc))
+            raise ValueError(completion_error or "ocr_rerun_terminal_persist_refused") from exc
+        return {"terminal_receipt": receipt}
 
 
 @router.get("", dependencies=[Depends(require_role("operator"))])
@@ -1413,31 +1314,18 @@ def _complete_workflow_ocr_run(
         return None, str(exc)
 
 
-def _dispatch_workflow_ocr_task(
-    background_tasks: BackgroundTasks,
-    callback,
-    *args,
-    order_id: str,
-    job_id: str,
-    expected_revision: int | None = None,
-    workflow_attempt_id: str | None = None,
-) -> None:
-    """A task is dispatched only after the queue transaction has committed."""
+def _dispatch_workflow_ocr_delivery(delivery: dict | None) -> None:
+    """Transport an already committed intent; transport acknowledgement is not OCR success."""
+    delivery_id = str((delivery or {}).get("id") or "").strip()
+    generation = (delivery or {}).get("generation")
+    if not delivery_id or type(generation) is not int:
+        raise HTTPException(status_code=500, detail={"error": "workflow_ocr_delivery_missing"})
     try:
-        background_tasks.add_task(callback, *args)
+        workflow_ocr_delivery_dispatch_service.dispatch(delivery_id, generation)
     except Exception as exc:  # noqa: BLE001
-        receipt, completion_error = _complete_workflow_ocr_run(
-            order_id,
-            job_id,
-            error="ocr_dispatch_failed",
-            expected_revision=expected_revision,
-            workflow_attempt_id=workflow_attempt_id,
-        )
-        if receipt is None:
-            logger.warning("Dispatch failure completion rejected", order_id=order_id, error=completion_error)
         raise HTTPException(
             status_code=503,
-            detail={"error": "ocr_dispatch_failed", "ocr_job_id": job_id},
+            detail={"error": "workflow_ocr_delivery_dispatch_failed", "delivery_id": delivery_id},
         ) from exc
 
 
@@ -1521,7 +1409,6 @@ def _document_selection_metrics(version: dict) -> dict:
 
 def _enqueue_workflow_v2_evidence_rerun(
     order_id: str,
-    background_tasks: BackgroundTasks,
     *,
     stale_action: str = "retry",
     force: bool = False,
@@ -1547,6 +1434,7 @@ def _enqueue_workflow_v2_evidence_rerun(
             ocr_job_id,
             input_reference=input_reference,
             request_mode="ocr_rerun",
+            delivery_selected_document_id=selected_document_id,
             job_metrics={
                 "workflow_version": "v2",
                 "processing_stage": "queued",
@@ -1563,20 +1451,7 @@ def _enqueue_workflow_v2_evidence_rerun(
         )
     )
     queued_workflow = queued["workflow"]
-    queued_job = queued["ocr_job"]
-    _dispatch_workflow_ocr_task(
-        background_tasks,
-        _run_ocr_rerun_background,
-        order_id,
-        ocr_job_id,
-        selected_document_id,
-        queued_workflow["revision"],
-        queued_job["workflow_attempt_id"],
-        order_id=order_id,
-        job_id=ocr_job_id,
-        expected_revision=queued_workflow["revision"],
-        workflow_attempt_id=queued_job["workflow_attempt_id"],
-    )
+    _dispatch_workflow_ocr_delivery(queued.get("delivery"))
     return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow": queued_workflow}
 
 
@@ -1608,7 +1483,6 @@ def confirm_order_workflow_v2_context(
 )
 def run_order_workflow_v2_ocr(
     order_id: str,
-    background_tasks: BackgroundTasks,
     body: WorkflowV2OcrRunBody | None = None,
     expected_revision: int = Depends(_require_workflow_if_match),
 ):
@@ -1623,7 +1497,6 @@ def run_order_workflow_v2_ocr(
     if mode == "llm":
         result = _enqueue_order_reparse_job(
             order_id,
-            background_tasks,
             ocr_prompt=(body.ocr_prompt.strip() if body and isinstance(body.ocr_prompt, str) and body.ocr_prompt.strip() else None),
             prompt_preset=(body.prompt_preset.strip().lower() if body and isinstance(body.prompt_preset, str) and body.prompt_preset.strip() else None),
             ocr_provider=(body.ocr_provider.strip().lower() if body and isinstance(body.ocr_provider, str) and body.ocr_provider.strip() else None),
@@ -1639,7 +1512,6 @@ def run_order_workflow_v2_ocr(
         return result
     return _enqueue_workflow_v2_evidence_rerun(
         order_id,
-        background_tasks,
         stale_action=stale_action,
         force=force,
         selected_document_id=(body.document_id if body else None),

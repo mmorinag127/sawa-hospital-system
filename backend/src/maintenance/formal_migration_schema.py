@@ -251,6 +251,6 @@ def require_formal_head(connection):
     if "alembic_version" not in inspector.get_table_names():
         raise RuntimeError("runtime blocked: formal migration head is required; automatic adoption is disabled")
     revisions = list(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalars())
-    if revisions != ["0028"]:
-        raise RuntimeError("runtime blocked: formal migration head 0028 is required")
-    require_revision_catalog(connection, "0028")
+    if revisions != ["0033"]:
+        raise RuntimeError("runtime blocked: formal migration head 0033 is required")
+    require_revision_catalog(connection, "0033")

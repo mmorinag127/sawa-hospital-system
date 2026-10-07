@@ -30,6 +30,59 @@ _nonworkflow_execution: ContextVar[dict[str, Any] | None] = ContextVar("nonworkf
 _workflow_execution: ContextVar[dict[str, Any] | None] = ContextVar("workflow_execution", default=None)
 
 
+@event.listens_for(Session, "before_flush")
+def _bind_workflow_delivery_pending_handoff(session, flush_context, instances):
+    from src.services.workflow_ocr_delivery_service import bind_pending_handoff_in_session
+    for row in list(session.dirty):
+        if isinstance(row, OcrJob) and (row.metrics or {}).get("workflow_ocr_delivery_id"):
+            bind_pending_handoff_in_session(session, row)
+
+
+@event.listens_for(Session, "before_commit")
+def _require_workflow_delivery_terminal_receipts(session):
+    if not session.info.get("workflow_delivery_terminal_jobs") and not any(
+        isinstance(row, OcrJob) and (row.metrics or {}).get("workflow_ocr_delivery_id")
+        for row in session.dirty
+    ):
+        return
+    from src.services.workflow_ocr_delivery_service import require_terminal_receipts_before_commit
+    session.flush()
+    require_terminal_receipts_before_commit(session)
+
+
+@event.listens_for(Session, "after_commit")
+def _commit_workflow_delivery_terminal_tracking(session):
+    tracked = session.info.get("workflow_delivery_terminal_jobs")
+    if not tracked:
+        return
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    jobs = tracked.pop(transaction, set())
+    if transaction is not None and transaction.nested:
+        tracked.setdefault(transaction.parent, set()).update(jobs)
+    else:
+        session.info.pop("workflow_delivery_terminal_jobs", None)
+
+
+@event.listens_for(Session, "after_rollback")
+def _rollback_workflow_delivery_terminal_tracking(session):
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    tracked = session.info.get("workflow_delivery_terminal_jobs")
+    if tracked is not None:
+        tracked.pop(transaction, None)
+    if transaction is None or not transaction.nested:
+        session.info.pop("workflow_delivery_terminal_jobs", None)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _end_workflow_delivery_terminal_tracking(session, transaction):
+    # Flush subtransactions are not tracking scopes; savepoints and roots are.
+    tracked = session.info.get("workflow_delivery_terminal_jobs")
+    if tracked is not None:
+        tracked.pop(transaction, None)
+    if transaction.parent is None or not tracked:
+        session.info.pop("workflow_delivery_terminal_jobs", None)
+
+
 def is_selected_pdf_failure(error: Any) -> bool:
     return any(code in str(error or "") for code in (
         "selected_pdf_digest_required", "selected_pdf_document_required", "selected_pdf_input_mismatch",
@@ -520,6 +573,12 @@ def lock_current_workflow_attempt(
     elif session.execute(select(OcrJob.id).where(*job_conditions).with_for_update()).scalar_one_or_none() is None:
         return False
     job = session.get(OcrJob, job_id, populate_existing=True)
+    from src.services.workflow_ocr_delivery_service import lock_claim_write
+    if not lock_claim_write(
+        session, job_id=job_id, order_id=order_id,
+        attempt=workflow_attempt_id, revision=expected_workflow_revision,
+    ):
+        return False
     captured = (job.metrics or {}).get("reparse_read_input")
     from src.services.config_service import capture_authored_processing_config
     order = session.get(Order, order_id, populate_existing=True)
