@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import { Button, Checkbox, Input, NativeSelect } from "@mui/material";
 import { EditForm, FormTextField, SawaProvider } from "@sawa/ui";
 import { useFormContext } from "react-hook-form";
 import TopNav from "../components/TopNav";
@@ -1108,12 +1109,12 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
           </div>
           <div className="actions">
             {selectedFacility && readString(selectedFacility.facility_id) ? <Link className="btn ghost" href={`/facilities/${encodeURIComponent(readString(selectedFacility.facility_id))}`}>施設版の日時管理</Link> : null}
-            <button className="btn ghost" onClick={duplicateSelectedFacility} disabled={!master || !selectedFacility || isEditing}>
+            <Button type="submit" className="btn ghost" onClick={duplicateSelectedFacility} disabled={!master || !selectedFacility || isEditing}>
               選択施設を複製
-            </button>
-            <button className="btn" onClick={addFacility} disabled={!master || isEditing}>
+            </Button>
+            <Button type="submit" className="btn" onClick={addFacility} disabled={!master || isEditing}>
               新規施設を追加
-            </button>
+            </Button>
           </div>
         </header>
         {facilities.length === 0 ? (
@@ -1123,7 +1124,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
             <div className="list">
               <label className="field search-field">
                 <span className="field-label">検索</span>
-                <input
+                <Input
                   className="input"
                   value={searchText}
                   disabled={isEditing}
@@ -1140,7 +1141,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                 const hasColumns = readFaxOverride(facility).columns.length > 0;
                 const isActive = index === selectedIndex;
                 return (
-                  <button
+                  <Button type="submit"
                     key={`${id}-${index}`}
                     className={`list-item ${isActive ? "active" : ""}`}
                     onClick={() => selectFacility(index)}
@@ -1151,7 +1152,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                       {deliveryName ? <p className="list-meta">納品書: {deliveryName}</p> : null}
                     </div>
                     <span className="ghost-link">{isActive ? "選択中" : "選択"}</span>
-                  </button>
+                  </Button>
                 );
               })}
             </div>
@@ -1168,17 +1169,17 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                   </div>
                   {isEditing ? (
                     <div className="actions compact-actions">
-                      <button className="btn ghost compact" onClick={cancelEdit} disabled={saving}>
+                      <Button type="submit" className="btn ghost compact" onClick={cancelEdit} disabled={saving}>
                         キャンセル
-                      </button>
-                      <button className="btn primary compact" onClick={saveMaster} disabled={saving || formDirty}>
+                      </Button>
+                      <Button type="submit" className="btn primary compact" onClick={saveMaster} disabled={saving || formDirty}>
                         {saving ? "保存中..." : "FAX等の専用編集を保存"}
-                      </button>
+                      </Button>
                     </div>
                   ) : (
-                    <button className="btn primary edit-start-button" onClick={beginEdit} disabled={!selectedFacility}>
+                    <Button type="submit" className="btn primary edit-start-button" onClick={beginEdit} disabled={!selectedFacility}>
                       この施設の編集を開始
-                    </button>
+                    </Button>
                   )}
                 </div>
                 <div className="detail-grid overview-grid">
@@ -1312,14 +1313,14 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                               return (
                                 <th key={`${col.index}-${col.role}-${idx}`} className={isQuantity ? "quantity-preview-col editable-column" : ""}>
                                   {isQuantity ? (
-                                    <button
+                                    <Button
                                       className={`cell-edit-button ${sourceIndex === selectedFaxColumnIndex ? "active" : ""}`}
                                       type="button"
                                       onClick={() => setSelectedFaxColumnIndex(sourceIndex)}
                                     >
                                       <span>{orderHeaderLabel(col)}</span>
                                       <small>{dietLabel(col.dietType)} / {areaLabel(col.areaId)}</small>
-                                    </button>
+                                    </Button>
                                   ) : (
                                     <>
                                       <span>{orderHeaderLabel(col)}</span>
@@ -1344,7 +1345,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                           </div>
                           <label className="field">
                             <span className="field-label">発注書の見出し</span>
-                            <input
+                            <Input
                               className="input"
                               value={selectedFaxColumn.header || ""}
                               disabled={!isEditing}
@@ -1354,7 +1355,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                           </label>
                           <label className="field">
                             <span className="field-label">拡大ヘッダー</span>
-                            <input
+                            <Input
                               className="input"
                               value={selectedFaxColumn.headerSuperGroup || ""}
                               disabled={!isEditing}
@@ -1364,7 +1365,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                           </label>
                           <label className="field">
                             <span className="field-label">上段ヘッダー</span>
-                            <input
+                            <Input
                               className="input"
                               value={selectedFaxColumn.headerGroup || ""}
                               disabled={!isEditing}
@@ -1374,7 +1375,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                           </label>
                           <label className="field">
                             <span className="field-label">食種</span>
-                            <select
+                            <NativeSelect
                               className="input"
                               value={selectedFaxColumn.dietType || ""}
                               disabled={!isEditing}
@@ -1389,11 +1390,11 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                                   {option.label}
                                 </option>
                               ))}
-                            </select>
+                            </NativeSelect>
                           </label>
                           <label className="field">
                             <span className="field-label">施設区分</span>
-                            <input
+                            <Input
                               className="input"
                               value={areaLabel(selectedFaxColumn.areaId)}
                               disabled={!isEditing}
@@ -1421,9 +1422,9 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                 ) : (
                   <div className="empty-guide">
                     <p className="subtle">発注書の列設定が未設定です。既存施設を複製するか、上級設定から列を追加してください。</p>
-                    <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
+                    <Button type="submit" className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
                       数量列を追加
-                    </button>
+                    </Button>
                   </div>
                 )}
               </div>
@@ -1480,14 +1481,14 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                           const sourceIndex = faxColumns.findIndex((candidate) => candidate === col);
                           return (
                             <th key={`${col.index}-${sourceIndex}`} className="editable-column">
-                              <button
+                              <Button
                                 className={`cell-edit-button ${sourceIndex === selectedFaxColumnIndex ? "active" : ""}`}
                                 type="button"
                                 onClick={() => setSelectedFaxColumnIndex(sourceIndex)}
                               >
                                 <span>{deliveryHeaderLabel(col)}</span>
                                 <small>{dietLabel(col.dietType)} / {areaLabel(col.areaId)}</small>
-                              </button>
+                              </Button>
                             </th>
                           );
                         })}
@@ -1505,7 +1506,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                     <>
                       <label className="field">
                         <span className="field-label">納品書での列名</span>
-                        <input
+                        <Input
                           className="input"
                           value={selectedFaxColumn.deliveryName || ""}
                           disabled={!isEditing}
@@ -1515,7 +1516,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                       </label>
                       <label className="field">
                         <span className="field-label">納品書で表示</span>
-                        <select
+                        <NativeSelect
                           className="input"
                           value={selectedFaxColumn.deliveryEnabled === false ? "false" : "true"}
                           disabled={!isEditing}
@@ -1523,7 +1524,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                         >
                           <option value="true">表示する</option>
                           <option value="false">表示しない</option>
-                        </select>
+                        </NativeSelect>
                       </label>
                     </>
                   ) : (
@@ -1544,27 +1545,28 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                         <div className="legacy-list-block">
                           <div className="section-title-row">
                             <h4>読み取り名</h4>
-                            <button className="btn compact" onClick={() => addStringListItem("aliases")} disabled={!isEditing}>
+                            <Button type="submit" className="btn compact" onClick={() => addStringListItem("aliases")} disabled={!isEditing}>
                               追加
-                            </button>
+                            </Button>
                           </div>
                           {facilityInfo?.aliases.length ? (
                             <div className="row-list">
                               {facilityInfo.aliases.map((alias, index) => (
                                 <div className="row-editor" key={`${alias}-${index}`}>
-                                  <input
+                                  <Input
                                     className="input"
+                                    inputProps={{ "aria-label": "読み取り名" }}
                                     value={alias}
                                     disabled={!isEditing}
                                     onChange={(e) => updateStringListItem("aliases", index, e.target.value)}
                                   />
-                                  <button
+                                  <Button type="submit"
                                     className="btn danger compact"
                                     onClick={() => removeStringListItem("aliases", index)}
                                     disabled={!isEditing}
                                   >
                                     削除
-                                  </button>
+                                  </Button>
                                 </div>
                               ))}
                             </div>
@@ -1573,27 +1575,28 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                           )}
                           <div className="section-title-row">
                             <h4>旧FAXテンプレート候補</h4>
-                            <button className="btn compact" onClick={() => addStringListItem("fax_template_ids")} disabled={!isEditing}>
+                            <Button type="submit" className="btn compact" onClick={() => addStringListItem("fax_template_ids")} disabled={!isEditing}>
                               追加
-                            </button>
+                            </Button>
                           </div>
                           {facilityInfo?.faxTemplateIds.length ? (
                             <div className="row-list">
                               {facilityInfo.faxTemplateIds.map((templateId, index) => (
                                 <div className="row-editor" key={`${templateId}-${index}`}>
-                                  <input
+                                  <Input
                                     className="input"
+                                    inputProps={{ "aria-label": "旧テンプレート候補" }}
                                     value={templateId}
                                     disabled={!isEditing}
                                     onChange={(e) => updateStringListItem("fax_template_ids", index, e.target.value)}
                                   />
-                                  <button
+                                  <Button type="submit"
                                     className="btn danger compact"
                                     onClick={() => removeStringListItem("fax_template_ids", index)}
                                     disabled={!isEditing}
                                   >
                                     削除
-                                  </button>
+                                  </Button>
                                 </div>
                               ))}
                             </div>
@@ -1604,9 +1607,9 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                       </details>
                       <div className="section-title-row advanced-title-row">
                         <p className="mode-text">列番号・role・内部名など、システム向けの詳細設定です。</p>
-                        <button className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
+                        <Button type="submit" className="btn compact" onClick={addFaxColumn} disabled={!isEditing}>
                           列を追加
-                        </button>
+                        </Button>
                       </div>
                       <div className="table-wrap">
                         <table className="invoice-table">
@@ -1628,85 +1631,94 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                         {facilityInfo.faxOverride.columns.map((col, idx) => (
                           <tr key={`${col.index}-${col.role}-${idx}`}>
                             <td>
-                              <input
+                              <Input
                                 className="table-input numeric"
+                                inputProps={{ "aria-label": "列番号" }}
                                 value={col.index}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { index: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input numeric"
+                                inputProps={{ "aria-label": "読取元" }}
                                 value={col.sourceIndex}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { sourceIndex: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "役割" }}
                                 value={col.role}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { role: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "見出し" }}
                                 value={col.header}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { header: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "内部名" }}
                                 value={col.name}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { name: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "形式" }}
                                 value={col.format}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { format: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "食種" }}
                                 value={col.dietType}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { dietType: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "施設区分" }}
                                 value={col.areaId}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { areaId: e.target.value })}
                               />
                             </td>
                             <td>
-                              <input
+                              <Input
                                 className="table-input"
+                                inputProps={{ "aria-label": "袋種" }}
                                 value={col.bagType}
                                 disabled={!isEditing}
                                 onChange={(e) => updateFaxColumn(idx, { bagType: e.target.value })}
                               />
                             </td>
                             <td>
-                              <button
+                              <Button type="submit"
                                 className="btn danger compact"
                                 onClick={() => removeFaxColumn(idx)}
                                 disabled={!isEditing}
                               >
                                 削除
-                              </button>
+                              </Button>
                             </td>
                           </tr>
                         ))}
@@ -1723,9 +1735,9 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
               <div className="form-section">
                 <div className="section-title-row">
                   <h3>施設区分</h3>
-                  <button className="btn compact" onClick={addArea} disabled={!isEditing}>
+                  <Button type="submit" className="btn compact" onClick={addArea} disabled={!isEditing}>
                     追加
-                  </button>
+                  </Button>
                 </div>
                 {facilityInfo?.areas.length ? (
                   <div className="area-list">
@@ -1733,7 +1745,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                       <div className="area-row" key={`${area.id}-${area.name}-${index}`}>
                         <label className="field">
                           <span className="field-label">区分キー</span>
-                          <input
+                          <Input
                             className="input"
                             value={area.id}
                             disabled={!isEditing}
@@ -1743,16 +1755,16 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                         </label>
                         <label className="field">
                           <span className="field-label">区分名</span>
-                          <input
+                          <Input
                             className="input"
                             value={area.name}
                             disabled={!isEditing}
                             onChange={(e) => updateArea(index, { name: e.target.value })}
                           />
                         </label>
-                        <button className="btn danger compact" onClick={() => removeArea(index)} disabled={!isEditing}>
+                        <Button type="submit" className="btn danger compact" onClick={() => removeArea(index)} disabled={!isEditing}>
                           削除
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -1775,8 +1787,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                         const checked = Boolean(facilityInfo?.dailyLabelDietTypes.includes(option.value));
                         return (
                           <label key={option.value} className={`toggle-item ${checked ? "checked" : ""}`}>
-                            <input
-                              type="checkbox"
+                            <Checkbox
                               checked={checked}
                               onChange={() => toggleDailyLabelDietType(option.value)}
                               disabled={!isEditing}
@@ -1814,12 +1825,12 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
 
               {isEditing && (
                 <div className="actions save-actions">
-                  <button className="btn ghost" onClick={cancelEdit} disabled={saving}>
+                  <Button type="submit" className="btn ghost" onClick={cancelEdit} disabled={saving}>
                     キャンセル
-                  </button>
-                  <button className="btn primary" onClick={saveMaster} disabled={saving || formDirty}>
+                  </Button>
+                  <Button type="submit" className="btn primary" onClick={saveMaster} disabled={saving || formDirty}>
                     {saving ? "保存中..." : "FAX等の専用編集を保存"}
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
@@ -1831,11 +1842,11 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
         <details className="json-panel">
           <summary>システム担当者向け: Master JSON</summary>
           <div className="actions">
-            <button className="btn ghost" onClick={applyMasterJson} disabled={!isEditing}>
+            <Button type="submit" className="btn ghost" onClick={applyMasterJson} disabled={!isEditing}>
               JSON を反映
-            </button>
+            </Button>
           </div>
-          <textarea
+          <Input multiline
             className="textarea json-textarea"
             value={masterText}
             disabled={!isEditing}
@@ -1844,7 +1855,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
               markSpecialDirty();
             }}
             rows={16}
-            wrap="soft"
+            inputProps={{ wrap: "soft", "aria-label": "Master JSON" }}
           />
         </details>
       </section>
@@ -2030,6 +2041,15 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
           display: grid;
           grid-template-columns: minmax(200px, 1fr) minmax(320px, 2fr);
           gap: 18px;
+        }
+
+        .facility-grid > div {
+          min-width: 0;
+        }
+
+        .textarea {
+          width: 100%;
+          max-width: 100%;
         }
 
         .list {
@@ -2649,6 +2669,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
 
         .input {
           width: 100%;
+          min-width: 0;
         }
 
         .input:disabled,
@@ -2851,6 +2872,14 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
         }
 
         @media (max-width: 560px) {
+          .section-title-row {
+            flex-wrap: wrap;
+          }
+
+          .section-title-row > div {
+            width: 100%;
+          }
+
           .guide-steps,
           .overview-grid {
             grid-template-columns: 1fr;
