@@ -1,3 +1,4 @@
+import { Button, Input, NativeSelect } from "@mui/material";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MouseEvent } from "react";
@@ -10356,16 +10357,16 @@ export default function OrderDetailPage() {
                         ? `${Math.round(candidate.score * 100)}%`
                         : "";
                     return (
-                      <button
+                      <Button
                         key={`${decisionType}-${candidateValue}`}
                         type="button"
-                        className={`facility-chip${decision.selected_value === candidateValue ? " auto" : ""}`}
+                        className={(`facility-chip${decision.selected_value === candidateValue ? " auto" : ""}`) + " hospital-detail-control"}
                         onClick={() => void chooseCriticalDecision(decisionType, candidateValue)}
                         disabled={!candidateValue || criticalDecisionSaving === decisionType}
                       >
                         <span className="facility-chip-name">{candidateLabel}</span>
                         {scoreLabel ? <span className="facility-chip-score">{scoreLabel}</span> : null}
-                      </button>
+                      </Button>
                     );
                   })}
                 </div>
@@ -10397,9 +10398,9 @@ export default function OrderDetailPage() {
             <div className="stack">
               <p className="error-text">{orderDetailError}</p>
               {id ? (
-                <button className="btn ghost" type="button" onClick={() => void loadOrderDetail(String(id))}>
+                <Button className="btn ghost hospital-detail-control" type="button" onClick={() => void loadOrderDetail(String(id))}>
                   再読み込み
-                </button>
+                </Button>
               ) : null}
             </div>
           ) : (
@@ -10419,23 +10420,23 @@ export default function OrderDetailPage() {
               <div className="panel-actions">
                 <span className="status-pill">{order.status}</span>
                 {order.is_archived ? (
-                  <button
-                    className="btn ghost"
+                  <Button
+                    className="btn ghost hospital-detail-control"
                     type="button"
                     onClick={() => toggleCurrentOrderArchive(false)}
                     disabled={archiveOrderBusy}
                   >
                     {archiveOrderBusy ? "処理中..." : "アーカイブ解除"}
-                  </button>
+                  </Button>
                 ) : (
-                  <button
-                    className="btn ghost"
+                  <Button
+                    className="btn ghost hospital-detail-control"
                     type="button"
                     onClick={() => toggleCurrentOrderArchive(true)}
                     disabled={archiveOrderBusy}
                   >
                     {archiveOrderBusy ? "処理中..." : "この注文をアーカイブ"}
-                  </button>
+                  </Button>
                 )}
               </div>
             </header>
@@ -10468,14 +10469,14 @@ export default function OrderDetailPage() {
                 </div>
                 <div className="workflow-summary-actions">
                   {workflowSummaryAction ? (
-                    <button
-                      className="btn primary workflow-summary-action-btn"
+                    <Button
+                      className="btn primary workflow-summary-action-btn hospital-detail-control"
                       type="button"
                       onClick={workflowSummaryAction.onClick}
                       disabled={workflowSummaryAction.disabled}
                     >
                       {workflowSummaryAction.label}
-                    </button>
+                    </Button>
                   ) : null}
                   {order?.workflow_state?.primary_action ? (
                     <span className="ocr-review-pill ocr-review-pill--state">
@@ -10526,9 +10527,9 @@ export default function OrderDetailPage() {
                 <details className="prompt-panel">
                   <summary>生OCR（最新）</summary>
                   <div className="raw-actions">
-                    <button className="btn ghost" type="button" onClick={loadOcrRaw} disabled={ocrRawLoading}>
+                    <Button className="btn ghost hospital-detail-control" type="button" onClick={loadOcrRaw} disabled={ocrRawLoading}>
                       {ocrRawLoading ? "取得中..." : "生OCRを取得"}
-                    </button>
+                    </Button>
                     {ocrRawMessage ? <span className="raw-message">{ocrRawMessage}</span> : null}
                   </div>
                   {ocrRawText ? <pre className="raw-output">{ocrRawText}</pre> : null}
@@ -10677,14 +10678,14 @@ export default function OrderDetailPage() {
                 <details className="prompt-panel">
                   <summary>注文操作履歴</summary>
                   <div className="raw-actions">
-                    <button
-                      className="btn ghost"
+                    <Button
+                      className="btn ghost hospital-detail-control"
                       type="button"
                       onClick={() => loadOrderHistory()}
                       disabled={orderHistoryLoading}
                     >
                       {orderHistoryLoading ? "取得中..." : "履歴を更新"}
-                    </button>
+                    </Button>
                     {orderHistoryMessage ? <span className="raw-message">{orderHistoryMessage}</span> : null}
                   </div>
                   {orderHistoryRows.length ? (
@@ -10740,30 +10741,30 @@ export default function OrderDetailPage() {
                   骨格は新しい施設/週の週次メニューへ切り替えます。選べるのは、数量を引き継ぐか空白へ戻すかだけです。
                 </p>
                 <div className="sheet-context-dialog-actions">
-                  <button
-                    className="btn primary"
+                  <Button
+                    className="btn primary hospital-detail-control"
                     type="button"
                     onClick={() => void applySavedSheetContextChange("keep")}
                     disabled={Boolean(savedSheetContextChangeApplying)}
                   >
                     {savedSheetContextChangeApplying === "keep" ? "切替中..." : "数字を保持して切替"}
-                  </button>
-                  <button
-                    className="btn ghost"
+                  </Button>
+                  <Button
+                    className="btn ghost hospital-detail-control"
                     type="button"
                     onClick={() => void applySavedSheetContextChange("clear")}
                     disabled={Boolean(savedSheetContextChangeApplying)}
                   >
                     {savedSheetContextChangeApplying === "clear" ? "切替中..." : "数字をクリアして切替"}
-                  </button>
-                  <button
-                    className="btn secondary"
+                  </Button>
+                  <Button
+                    className="btn secondary hospital-detail-control"
                     type="button"
                     onClick={() => setPendingSavedSheetContextChange(null)}
                     disabled={Boolean(savedSheetContextChangeApplying)}
                   >
                     キャンセル
-                  </button>
+                  </Button>
                 </div>
               </div>
             </div>
@@ -10781,12 +10782,12 @@ export default function OrderDetailPage() {
             </header>
             <div className="step-tabs">
               {orderSteps.map((step, idx) => (
-                <button
+                <Button
                   key={step.id}
                   type="button"
-                  className={`step-tab${idx === activeStepIndex ? " active" : ""}${
+                  className={(`step-tab${idx === activeStepIndex ? " active" : ""}${
                     idx < activeStepIndex ? " done" : ""
-                  }`}
+                  }`) + " hospital-detail-control"}
                   disabled={idx > 0 && stepInteractionLocked}
                   onClick={() => void goStep(idx)}
                   title={getStepBlockedReason(idx) || undefined}
@@ -10796,7 +10797,7 @@ export default function OrderDetailPage() {
                   {getStepBlockedReason(idx) ? (
                     <span className="step-note">{getStepBlockedReason(idx)}</span>
                   ) : null}
-                </button>
+                </Button>
               ))}
             </div>
             <div className="step-meta">
@@ -10805,17 +10806,17 @@ export default function OrderDetailPage() {
                 <p className="subtle">{activeStepMeta.description}</p>
               </div>
               <div className="step-actions">
-                <button className="btn ghost" type="button" onClick={goPrevStep} disabled={!canStepPrev}>
+                <Button className="btn ghost hospital-detail-control" type="button" onClick={goPrevStep} disabled={!canStepPrev}>
                   {canStepPrev ? `戻る: ${prevStepLabel}` : "戻る"}
-                </button>
-                <button
-                  className="btn primary"
+                </Button>
+                <Button
+                  className="btn primary hospital-detail-control"
                   type="button"
                   onClick={() => void goNextStep()}
                   disabled={!isLastStep && (activeStepIndex >= stepCount - 1 || stepInteractionLocked)}
                 >
                   {nextStepButtonLabel}
-                </button>
+                </Button>
               </div>
             </div>
           </section>
@@ -10843,8 +10844,8 @@ export default function OrderDetailPage() {
                 <div className="summary-actions">
                   <label className="field">
                     <span className="field-label">施設 (Step1 必須)</span>
-                      <select
-                        className="input"
+                      <NativeSelect disableUnderline
+                        className="input hospital-detail-control"
                         value={facility}
                         onChange={(e) => setFacility(e.target.value)}
                         disabled={facilityOptionsLoading || step1Saving}
@@ -10858,7 +10859,7 @@ export default function OrderDetailPage() {
                           {formatFacilityLabel(option)}
                         </option>
                       ))}
-                    </select>
+                    </NativeSelect>
                     {facilityOptionsError ? (
                       <span className="subtle">{facilityOptionsError}</span>
                     ) : facilityOptionsLoading ? (
@@ -10867,8 +10868,8 @@ export default function OrderDetailPage() {
                   </label>
                   <label className="field">
                     <span className="field-label">週 (Step1 必須)</span>
-                    <select
-                      className="input"
+                    <NativeSelect disableUnderline
+                      className="input hospital-detail-control"
                       value={weekDraft}
                       onChange={(e) => setWeekDraft(e.target.value)}
                       disabled={weekOptionsLoading || step1Saving}
@@ -10882,7 +10883,7 @@ export default function OrderDetailPage() {
                           {option.label}
                         </option>
                       ))}
-                    </select>
+                    </NativeSelect>
                     {weekOptionsError ? (
                       <span className="subtle">{weekOptionsError}</span>
                     ) : weekOptionsLoading ? (
@@ -10893,23 +10894,23 @@ export default function OrderDetailPage() {
                     <div className="step1-week-range">
                       <span className="subtle">例外時だけ範囲指定します。</span>
                       <div className="summary-actions">
-                        <input
-                          className="input"
+                        <Input disableUnderline
+                          className="input hospital-detail-control"
                           type="date"
                           value={customWeekRangeStart}
                           onChange={(e) => setCustomWeekRangeStart(e.target.value)}
                           disabled={step1Saving}
                         />
-                        <input
-                          className="input"
+                        <Input disableUnderline
+                          className="input hospital-detail-control"
                           type="date"
                           value={customWeekRangeEnd}
                           onChange={(e) => setCustomWeekRangeEnd(e.target.value)}
                           disabled={step1Saving}
                         />
-                        <button type="button" className="btn secondary" onClick={applyCustomWeekRange} disabled={step1Saving}>
+                        <Button type="button" className="btn secondary hospital-detail-control" onClick={applyCustomWeekRange} disabled={step1Saving}>
                           例外範囲を設定
-                        </button>
+                        </Button>
                       </div>
                       {getPendingStep1WeekSelection(weekDraft, customWeekRangeStart, customWeekRangeEnd) ? (
                         <span className="subtle">
@@ -10923,13 +10924,13 @@ export default function OrderDetailPage() {
                       ) : null}
                     </div>
                   </label>
-                  <button className="btn" onClick={updateStep1} disabled={!canSaveStep1 || step1Saving}>
+                  <Button type="submit" className="btn hospital-detail-control" onClick={updateStep1} disabled={!canSaveStep1 || step1Saving}>
                     {step1Saving
                       ? "設定中..."
                       : facilitySelectionPending || weekSelectionPending || step1Incomplete
                         ? "設定を保存"
                         : "設定済み"}
-                  </button>
+                  </Button>
                 </div>
                 {step1Incomplete ? (
                   <div className="warning-banner">
@@ -10959,10 +10960,10 @@ export default function OrderDetailPage() {
                     <span className="field-label">推定施設</span>
                     <div className="facility-suggestion-list">
                       {facilityCandidates.map((candidate) => (
-                        <button
+                        <Button
                           key={`${candidate.facility_id}-${candidate.reason || "auto"}`}
                           type="button"
-                          className={`facility-chip${candidate.auto ? " auto" : ""}`}
+                          className={(`facility-chip${candidate.auto ? " auto" : ""}`) + " hospital-detail-control"}
                           onClick={() => setFacility(candidate.facility_id)}
                         >
                           <span className="facility-chip-name">
@@ -10978,7 +10979,7 @@ export default function OrderDetailPage() {
                               {formatFacilityReason(candidate.reason)}
                             </span>
                           ) : null}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                     <span className="facility-suggestion-note">
@@ -11007,13 +11008,13 @@ export default function OrderDetailPage() {
                       <p className="subtle">OCRオーバーレイとシートを左右で比較しながら、そのままシートを修正します。</p>
                     </div>
                     <div className="panel-actions">
-                      <button
-                        className="btn ghost"
+                      <Button
+                        className="btn ghost hospital-detail-control"
                         type="button"
                         onClick={() => void loadOcrPages({ force: true })}
                       >
                         {ocrPagesLoading ? "再取得中..." : "OCRページを更新"}
-                      </button>
+                      </Button>
                     </div>
                   </header>
                   {step1Incomplete ? (
@@ -11021,8 +11022,8 @@ export default function OrderDetailPage() {
                       <p>Step1 の施設または週が未設定、または未保存のため、OCR修正はまだ開始できません。</p>
                       <p>Step1（注文書）で施設と週を設定して保存してから、このステップを再読込してください。</p>
                       <div className="panel-actions">
-                        <button
-                          className="btn"
+                        <Button
+                          className="btn hospital-detail-control"
                           type="button"
                           onClick={() => {
                             goStep(0);
@@ -11032,7 +11033,7 @@ export default function OrderDetailPage() {
                           }}
                         >
                           施設設定へ戻る
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   ) : null}
@@ -11058,51 +11059,51 @@ export default function OrderDetailPage() {
                       {!step1Incomplete ? (
                         <div className="ocr-flow-branch-actions">
                           {showNewEvidenceChoice ? (
-                            <button
-                              className="btn primary"
+                            <Button
+                              className="btn primary hospital-detail-control"
                               type="button"
                               onClick={() => void switchDraftToLatestEvidence()}
                               disabled={switchEvidencePending || keepCurrentPending || reparsePending || rerunInProgressState || ocrRecoverPending}
                             >
                               {switchEvidencePending ? "切替中..." : "新しいOCR候補に切り替える"}
-                            </button>
+                            </Button>
                           ) : null}
                           {showNewEvidenceChoice ? (
-                            <button
-                              className="btn ghost"
+                            <Button
+                              className="btn ghost hospital-detail-control"
                               type="button"
                               onClick={() => void keepCurrentDraft()}
                               disabled={switchEvidencePending || keepCurrentPending}
                             >
                               {keepCurrentPending ? "維持を記録中..." : "現状を維持"}
-                            </button>
+                            </Button>
                           ) : null}
                           {(ocrPagesUnavailable || overlayUnavailableMode || (!hasUsableOverlayPreview && !ocrPagesLoading)) ? (
-                            <button
-                              className="btn ghost"
+                            <Button
+                              className="btn ghost hospital-detail-control"
                               type="button"
                               onClick={() => void loadOcrPages({ force: true })}
                             >
                               OCR表示を再取得
-                            </button>
+                            </Button>
                           ) : null}
-                          <button
-                            className="btn primary"
+                          <Button
+                            className="btn primary hospital-detail-control"
                             type="button"
                             onClick={() => void rerunOcrPipeline()}
                             disabled={reparsePending || rerunInProgressState || ocrRecoverPending}
                           >
                             {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
-                          </button>
+                          </Button>
                           {(showOcrRecoveryAction || ocrHardRecoveryMode) ? (
-                            <button
-                              className="btn"
+                            <Button
+                              className="btn hospital-detail-control"
                               type="button"
                               onClick={() => void recoverOcrFoundation()}
                               disabled={ocrRecoverPending || ocrProcessingNow}
                             >
                               {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
-                            </button>
+                            </Button>
                           ) : null}
                         </div>
                       ) : null}
@@ -11112,14 +11113,14 @@ export default function OrderDetailPage() {
                   {ocrPages.length > 1 ? (
                     <div className="page-tabs">
                       {ocrPages.map((page, pageIdx) => (
-                        <button
+                        <Button
                           key={`ocr-page-${page.page_index ?? pageIdx}`}
                           type="button"
-                          className={`page-tab ${pageIdx === activeOcrPageIndex ? "active" : ""}`}
+                          className={(`page-tab ${pageIdx === activeOcrPageIndex ? "active" : ""}`) + " hospital-detail-control"}
                           onClick={() => selectOcrPage(pageIdx)}
                         >
                           Page {page.page_index ?? pageIdx + 1}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                   ) : null}
@@ -11159,22 +11160,22 @@ export default function OrderDetailPage() {
                           <div className="ocr-editor-mode-switch">
                             <span className="subtle">表示配置</span>
                             <div className="preview-mode-toggle" role="tablist" aria-label="ocr workspace layout">
-                              <button
-                                className={`btn ghost ${ocrWorkspaceLayoutMode === "horizontal" ? "active" : ""}`}
+                              <Button
+                                className={(`btn ghost ${ocrWorkspaceLayoutMode === "horizontal" ? "active" : ""}`) + " hospital-detail-control"}
                                 type="button"
                                 onClick={() => setOcrWorkspaceLayoutMode("horizontal")}
                                 aria-pressed={ocrWorkspaceLayoutMode === "horizontal"}
                               >
                                 左右
-                              </button>
-                              <button
-                                className={`btn ghost ${ocrWorkspaceLayoutMode === "vertical" ? "active" : ""}`}
+                              </Button>
+                              <Button
+                                className={(`btn ghost ${ocrWorkspaceLayoutMode === "vertical" ? "active" : ""}`) + " hospital-detail-control"}
                                 type="button"
                                 onClick={() => setOcrWorkspaceLayoutMode("vertical")}
                                 aria-pressed={ocrWorkspaceLayoutMode === "vertical"}
                               >
                                 上下
-                              </button>
+                              </Button>
                             </div>
                           </div>
                           <div className="ocr-editor-mode-switch">
@@ -11231,8 +11232,8 @@ export default function OrderDetailPage() {
                                     </p>
                                   </div>
                                   <div className="ocr-flow-choice-grid ocr-flow-choice-grid--compact">
-                                    <button
-                                      className={`ocr-flow-choice-button ${step2WizardChoice === "yes" ? "active" : ""}`}
+                                    <Button
+                                      className={(`ocr-flow-choice-button ${step2WizardChoice === "yes" ? "active" : ""}`) + " hospital-detail-control"}
                                       type="button"
                                       onClick={() => {
                                         if (workflowCandidateEvidenceRunId) {
@@ -11247,9 +11248,9 @@ export default function OrderDetailPage() {
                                       <span className="ocr-flow-choice-note">
                                         {workflowCandidateEvidenceRunId ? "今のシートを維持して進む" : "そのまま明細へ反映する"}
                                       </span>
-                                    </button>
-                                    <button
-                                      className={`ocr-flow-choice-button ${step2WizardChoice === "no" ? "active" : ""}`}
+                                    </Button>
+                                    <Button
+                                      className={(`ocr-flow-choice-button ${step2WizardChoice === "no" ? "active" : ""}`) + " hospital-detail-control"}
                                       type="button"
                                       onClick={() => {
                                         setStep2WizardChoice("no");
@@ -11258,14 +11259,14 @@ export default function OrderDetailPage() {
                                     >
                                       <span className="ocr-flow-choice-title">いいえ / 迷う</span>
                                       <span className="ocr-flow-choice-note">次の手段を選んで整える</span>
-                                    </button>
+                                    </Button>
                                     <div className="ocr-flow-choice-select-card">
                                       <label htmlFor="expanded-cell-copy-mode" className="ocr-flow-choice-title">
                                         拡大セル
                                       </label>
-                                      <select
+                                      <NativeSelect disableUnderline
                                         id="expanded-cell-copy-mode"
-                                        className="input"
+                                        className="input hospital-detail-control"
                                         value={expandedCellCopyMode}
                                         onChange={(event) => void handleExpandedCellCopyModeChange(event.target.value as ExpandedCellCopyMode)}
                                         disabled={expandedCellCopySaving || !facility.trim()}
@@ -11273,7 +11274,7 @@ export default function OrderDetailPage() {
                                         <option value="disabled">無効</option>
                                         <option value="enabled">有効にする</option>
                                         <option value="persisted">この施設で永続化して有効化する</option>
-                                      </select>
+                                      </NativeSelect>
                                       <p className="ocr-flow-choice-note">
                                         同じ日付・区分で数字が1つだけあるとき、同じ区分の空欄へコピーします。
                                       </p>
@@ -11289,21 +11290,21 @@ export default function OrderDetailPage() {
                                     <p className="subtle">{step2FinishActionNote}</p>
                                   </div>
                                   <div className="ocr-flow-branch-actions">
-                                    <button
-                                      className={applySheetButtonClassName}
+                                    <Button
+                                      className={(applySheetButtonClassName) + " hospital-detail-control"}
                                       type="button"
                                       onClick={() => void completeStep2AndMoveToDetails()}
                                       disabled={!canAttemptApplyOcrSheet || !ocrHasEditableSheet || ocrProcessingNow}
                                     >
                                       {ocrTableSaving ? "保存中..." : STEP2_APPLY_NEXT_LABEL}
-                                    </button>
-                                    <button
-                                      className="btn ghost"
+                                    </Button>
+                                    <Button
+                                      className="btn ghost hospital-detail-control"
                                       type="button"
                                       onClick={() => setStep2WizardChoice("")}
                                     >
                                       選び直す
-                                    </button>
+                                    </Button>
                                   </div>
                                 </section>
                               ) : null}
@@ -11323,8 +11324,8 @@ export default function OrderDetailPage() {
                                         : "必要な手段だけを1つずつ選んで進めます。"}
                                     </p>
                                   </div>
-                                  <button
-                                    className="btn ghost"
+                                  <Button
+                                    className="btn ghost hospital-detail-control"
                                     type="button"
                                     onClick={() => {
                                       setStep2WizardChoice("");
@@ -11332,7 +11333,7 @@ export default function OrderDetailPage() {
                                     }}
                                   >
                                     戻る
-                                  </button>
+                                  </Button>
                                 </div>
                                 {ocrProcessingNow ? (
                                   <div className="ocr-processing-banner">
@@ -11341,36 +11342,36 @@ export default function OrderDetailPage() {
                                   </div>
                                 ) : null}
                                 <div className="ocr-flow-subchoices">
-                                  <button
-                                    className={`ocr-flow-subchoice ${activeStep2RepairStage === "foundation" ? "active" : ""}`}
+                                  <Button
+                                    className={(`ocr-flow-subchoice ${activeStep2RepairStage === "foundation" ? "active" : ""}`) + " hospital-detail-control"}
                                     type="button"
                                     onClick={() => activateStep2RepairStage("foundation")}
                                   >
                                     OCRを立て直す
-                                  </button>
-                                  <button
-                                    className={`ocr-flow-subchoice ${activeStep2RepairStage === "candidate" ? "active" : ""}`}
+                                  </Button>
+                                  <Button
+                                    className={(`ocr-flow-subchoice ${activeStep2RepairStage === "candidate" ? "active" : ""}`) + " hospital-detail-control"}
                                     type="button"
                                     onClick={() => activateStep2RepairStage("candidate")}
                                   >
                                     新しい結果を選ぶ
-                                  </button>
+                                  </Button>
                                   {mergedCellLlmRecommended && ocrHasEditableSheet ? (
-                                    <button
-                                      className={`ocr-flow-subchoice ${activeStep2RepairStage === "merged" ? "active" : ""}`}
+                                    <Button
+                                      className={(`ocr-flow-subchoice ${activeStep2RepairStage === "merged" ? "active" : ""}`) + " hospital-detail-control"}
                                       type="button"
                                       onClick={() => activateStep2RepairStage("merged")}
                                     >
                                       結合セルをAIで読む
-                                    </button>
+                                    </Button>
                                   ) : null}
-                                  <button
-                                    className={`ocr-flow-subchoice ${activeStep2RepairStage === "llm" ? "active" : ""}`}
+                                  <Button
+                                    className={(`ocr-flow-subchoice ${activeStep2RepairStage === "llm" ? "active" : ""}`) + " hospital-detail-control"}
                                     type="button"
                                     onClick={() => activateStep2RepairStage("llm")}
                                   >
                                     AIに任せる
-                                  </button>
+                                  </Button>
                                 </div>
                                 {activeStep2RepairStage === "foundation" ? (
                                   <section className="ocr-remediation-group">
@@ -11382,36 +11383,36 @@ export default function OrderDetailPage() {
                                         : "数量が怪しい時は、まず現在のシートを残しつつ OCR を立て直します。"}
                                     </p>
                                     <div className="ocr-flow-branch-actions">
-                                      <button
-                                        className={saveSheetButtonClassName}
+                                      <Button
+                                        className={(saveSheetButtonClassName) + " hospital-detail-control"}
                                         type="button"
                                         onClick={() => void saveOcrSheetExact()}
                                         disabled={ocrTableSaving || !canSaveDraftSheet}
                                       >
                                         {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
-                                      </button>
+                                      </Button>
                                       {showOcrPipelineRerunAction ? (
-                                        <button
-                                          className={semanticShellOnly || showNewEvidenceChoice ? "btn primary" : "btn ghost"}
+                                        <Button
+                                          className={(semanticShellOnly || showNewEvidenceChoice ? "btn primary" : "btn ghost") + " hospital-detail-control"}
                                           type="button"
                                           onClick={() => void rerunOcrPipeline()}
                                           disabled={reparsePending || rerunInProgressState || step1Incomplete || ocrRecoverPending}
                                         >
                                           {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
-                                        </button>
+                                        </Button>
                                       ) : null}
                                       {showOcrRecoveryAction || ocrHardRecoveryMode || semanticShellOnly ? (
-                                        <button
-                                          className="btn"
+                                        <Button
+                                          className="btn hospital-detail-control"
                                           type="button"
                                           onClick={() => void recoverOcrFoundation()}
                                           disabled={ocrRecoverPending || step1Incomplete || ocrProcessingNow}
                                         >
                                           {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
-                                        </button>
+                                        </Button>
                                       ) : null}
-                                      <button
-                                        className="btn ghost"
+                                      <Button
+                                        className="btn ghost hospital-detail-control"
                                         type="button"
                                         onClick={() => void forceWeeklyMenuOverwrite()}
                                         disabled={
@@ -11426,9 +11427,9 @@ export default function OrderDetailPage() {
                                         {forcedSheetRecoveryPending === "weekly"
                                           ? "週次で復元中..."
                                           : "週次メニューで日付・区分・メニューを強制復元"}
-                                      </button>
-                                      <button
-                                        className="btn ghost"
+                                      </Button>
+                                      <Button
+                                        className="btn ghost hospital-detail-control"
                                         type="button"
                                         onClick={() => void forceFacilitySchemaOverwrite()}
                                         disabled={
@@ -11443,7 +11444,7 @@ export default function OrderDetailPage() {
                                         {forcedSheetRecoveryPending === "facility"
                                           ? "施設設定で復元中..."
                                           : "施設設定の列構成で強制復元（数量は空白）"}
-                                      </button>
+                                      </Button>
                                     </div>
                                   </section>
                                 ) : null}
@@ -11463,22 +11464,22 @@ export default function OrderDetailPage() {
                                           現在のシートは維持したままです。切り替えると、最新の OCR 結果から下書きを作り直します。
                                         </p>
                                         <div className="ocr-flow-branch-actions">
-                                          <button
-                                            className="btn primary"
+                                          <Button
+                                            className="btn primary hospital-detail-control"
                                             type="button"
                                             onClick={() => void switchDraftToLatestEvidence()}
                                             disabled={switchEvidencePending || reparsePending || rerunInProgressState || ocrRecoverPending}
                                           >
                                             {switchEvidencePending ? "切替中..." : "新しいOCR候補に切り替える"}
-                                          </button>
-                                          <button
-                                            className="btn ghost"
+                                          </Button>
+                                          <Button
+                                            className="btn ghost hospital-detail-control"
                                             type="button"
                                             onClick={() => void keepCurrentDraft()}
                                             disabled={switchEvidencePending || keepCurrentPending}
                                           >
                                             {keepCurrentPending ? "維持を記録中..." : "今のシートを維持"}
-                                          </button>
+                                          </Button>
                                         </div>
                                         {candidateSheetPreviewLoading ? (
                                           <p className="subtle ocr-remediation-empty">候補シートを取得中...</p>
@@ -11524,8 +11525,8 @@ export default function OrderDetailPage() {
                                       {activeStep2RepairStage === "merged" ? (
                                         <span className="ocr-review-pill">方針: 結合セルまたがり数量</span>
                                       ) : (
-                                        <select
-                                          className="input llm-model-select"
+                                        <NativeSelect disableUnderline
+                                          className="input llm-model-select hospital-detail-control"
                                           value={llmReparsePromptPreset}
                                           onChange={(event) =>
                                             setLlmReparsePromptPreset(event.target.value as LlmPromptPreset)
@@ -11538,10 +11539,10 @@ export default function OrderDetailPage() {
                                           <option value="special_diet_semantics">特殊食・禁食優先</option>
                                           <option value="merged_cell_quantity_spans">結合セルまたがり数量</option>
                                           <option value="freeform">自由入力中心</option>
-                                        </select>
+                                        </NativeSelect>
                                       )}
-                                      <select
-                                        className="input llm-provider-select"
+                                      <NativeSelect disableUnderline
+                                        className="input llm-provider-select hospital-detail-control"
                                         value={llmReparseProvider}
                                         onChange={(event) => {
                                           const nextProvider = event.target.value;
@@ -11555,10 +11556,10 @@ export default function OrderDetailPage() {
                                       >
                                         <option value="openai">OpenAI</option>
                                         <option value="gemini">Gemini</option>
-                                      </select>
+                                      </NativeSelect>
                                       {llmReparseProvider === "gemini" ? (
-                                        <select
-                                          className="input llm-model-select"
+                                        <NativeSelect disableUnderline
+                                          className="input llm-model-select hospital-detail-control"
                                           value={llmReparseModelMode}
                                           onChange={(event) =>
                                             setLlmReparseModelMode(event.target.value as "flash" | "pro" | "other")
@@ -11568,11 +11569,11 @@ export default function OrderDetailPage() {
                                           <option value="flash">Flash</option>
                                           <option value="pro">Pro</option>
                                           <option value="other">Other</option>
-                                        </select>
+                                        </NativeSelect>
                                       ) : null}
                                       {llmReparseProvider === "gemini" && llmReparseModelMode === "other" ? (
-                                        <input
-                                          className="input llm-model-input"
+                                        <Input disableUnderline
+                                          className="input llm-model-input hospital-detail-control"
                                           type="text"
                                           placeholder="例: gemini-1.5-flash"
                                           value={llmReparseCustomModel}
@@ -11586,16 +11587,16 @@ export default function OrderDetailPage() {
                                           }
                                         />
                                       ) : null}
-                                      <button
-                                        className="btn ghost"
+                                      <Button
+                                        className="btn ghost hospital-detail-control"
                                         type="button"
                                         onClick={() => loadOcrSheet()}
                                         disabled={ocrSheetLoading || step1Incomplete || ocrHardRecoveryMode}
                                       >
                                         {ocrSheetLoading ? "再読込中..." : "シート再読込"}
-                                      </button>
-                                      <button
-                                        className="btn ghost"
+                                      </Button>
+                                      <Button type="submit"
+                                        className="btn ghost hospital-detail-control"
                                         onClick={() => void reparse({ ocrProvider: llmReparseProvider, llmAssist: true })}
                                         disabled={
                                           reparsePending ||
@@ -11609,7 +11610,7 @@ export default function OrderDetailPage() {
                                         }
                                       >
                                         {reparsePending ? "再解析中..." : "LLM補完再解析"}
-                                      </button>
+                                      </Button>
                                     </div>
                                     {order.ocr_prompt_enabled === false ? null : llmReparsePromptPreset === "freeform" ? (
                                       <div className="ocr-inline-prompt">
@@ -11619,9 +11620,9 @@ export default function OrderDetailPage() {
                                         <p className="subtle">
                                           自由入力中心を選んでいるため、この内容を追加指示としてそのまま渡します。
                                         </p>
-                                        <textarea
+                                        <Input disableUnderline multiline
                                           id="llm-freeform-prompt"
-                                          className="input ocr-llm-prompt-textarea"
+                                          className="input ocr-llm-prompt-textarea hospital-detail-control"
                                           rows={12}
                                           value={ocrPrompt}
                                           onChange={(e) => setOcrPrompt(e.target.value)}
@@ -11634,8 +11635,8 @@ export default function OrderDetailPage() {
                                         <p className="subtle">
                                           選んだプリセットに加えて、ここに書いた内容だけを追加指示として渡します。
                                         </p>
-                                        <textarea
-                                          className="input ocr-llm-prompt-textarea"
+                                        <Input disableUnderline multiline
+                                          className="input ocr-llm-prompt-textarea hospital-detail-control"
                                           rows={10}
                                           value={ocrPrompt}
                                           onChange={(e) => setOcrPrompt(e.target.value)}
@@ -11662,23 +11663,23 @@ export default function OrderDetailPage() {
                               </ul>
                               {!step1Incomplete ? (
                                 <div className="ocr-flow-branch-actions">
-                                  <button
-                                    className="btn primary"
+                                  <Button
+                                    className="btn primary hospital-detail-control"
                                     type="button"
                                     onClick={() => void rerunOcrPipeline()}
                                     disabled={reparsePending || rerunInProgressState || ocrRecoverPending}
                                   >
                                     {reparsePending || rerunInProgressState ? "再実行中..." : "OCRパイプラインを再実行"}
-                                  </button>
+                                  </Button>
                                   {(showOcrRecoveryAction || ocrHardRecoveryMode) ? (
-                                    <button
-                                      className="btn"
+                                    <Button
+                                      className="btn hospital-detail-control"
                                       type="button"
                                       onClick={() => void recoverOcrFoundation()}
                                       disabled={ocrRecoverPending || ocrProcessingNow}
                                     >
                                       {ocrRecoverPending ? "復旧中..." : "OCR基盤を復旧"}
-                                    </button>
+                                    </Button>
                                   ) : null}
                                 </div>
                               ) : null}
@@ -11689,23 +11690,23 @@ export default function OrderDetailPage() {
                           <summary>補助操作と内部情報</summary>
                           <div className="ocr-secondary-tools-body">
                             <div className="ocr-edit-actions">
-                              <button
-                                className="btn ghost"
+                              <Button
+                                className="btn ghost hospital-detail-control"
                                 type="button"
                                 onClick={() => loadOcrHistory()}
                                 disabled={ocrHistoryLoading || ocrHardRecoveryMode}
                               >
                                 {ocrHistoryLoading ? "履歴取得中..." : "履歴更新"}
-                              </button>
+                              </Button>
                               {!ocrHardRecoveryMode ? (
-                                <button
-                                  className="btn ghost"
+                                <Button
+                                  className="btn ghost hospital-detail-control"
                                   type="button"
                                   onClick={addOcrTableRow}
                                   disabled={ocrTableSaving || !ocrHasEditableSheet}
                                 >
                                   行を追加
-                                </button>
+                                </Button>
                               ) : null}
                             </div>
                             {!ocrHardRecoveryMode ? (
@@ -11713,9 +11714,9 @@ export default function OrderDetailPage() {
                                 <span className="ocr-shift-label">数量列の範囲シフト</span>
                                 <label className="ocr-shift-field">
                                   <span>開始行</span>
-                                  <input
-                                    className="input"
-                                    inputMode="numeric"
+<Input disableUnderline inputProps={{ "inputMode": "numeric" }}
+                                    className="input hospital-detail-control hospital-detail-shift-input"
+
                                     value={ocrShiftStartRow}
                                     onChange={(e) => setOcrShiftStartRow(e.target.value.replace(/[^\d]/g, ""))}
                                     placeholder="1"
@@ -11723,30 +11724,30 @@ export default function OrderDetailPage() {
                                 </label>
                                 <label className="ocr-shift-field">
                                   <span>終了行</span>
-                                  <input
-                                    className="input"
-                                    inputMode="numeric"
+<Input disableUnderline inputProps={{ "inputMode": "numeric" }}
+                                    className="input hospital-detail-control hospital-detail-shift-input"
+
                                     value={ocrShiftEndRow}
                                     onChange={(e) => setOcrShiftEndRow(e.target.value.replace(/[^\d]/g, ""))}
                                     placeholder={String(Math.max(ocrSheetRows.length, 1))}
                                   />
                                 </label>
-                                <button
-                                  className="btn ghost"
+                                <Button
+                                  className="btn ghost hospital-detail-control"
                                   type="button"
                                   onClick={() => shiftOcrTableRange(-1)}
                                   disabled={!ocrSheetRows.length || ocrTableSaving}
                                 >
                                   1行上へ
-                                </button>
-                                <button
-                                  className="btn ghost"
+                                </Button>
+                                <Button
+                                  className="btn ghost hospital-detail-control"
                                   type="button"
                                   onClick={() => shiftOcrTableRange(1)}
                                   disabled={!ocrSheetRows.length || ocrTableSaving}
                                 >
                                   1行下へ
-                                </button>
+                                </Button>
                                 <span className="subtle">数量列の入替は上のシートツールから操作してください。</span>
                               </div>
                             ) : (
@@ -11843,8 +11844,8 @@ export default function OrderDetailPage() {
                           <div className="preview-header-tools">
                             {canSwitchPreviewMode ? (
                               <div className="preview-mode-toggle" role="tablist" aria-label="preview source">
-                                <button
-                                  className={`btn ghost ${ocrPreviewMode === "overlay" ? "active" : ""}`}
+                                <Button
+                                  className={(`btn ghost ${ocrPreviewMode === "overlay" ? "active" : ""}`) + " hospital-detail-control"}
                                   type="button"
                                   onClick={() => {
                                     ocrPreviewForcedFallbackRef.current = false;
@@ -11853,9 +11854,9 @@ export default function OrderDetailPage() {
                                   aria-pressed={ocrPreviewMode === "overlay"}
                                 >
                                   OCR
-                                </button>
-                                <button
-                                  className={`btn ghost ${ocrPreviewMode === "original" ? "active" : ""}`}
+                                </Button>
+                                <Button
+                                  className={(`btn ghost ${ocrPreviewMode === "original" ? "active" : ""}`) + " hospital-detail-control"}
                                   type="button"
                                   onClick={() => {
                                     ocrPreviewForcedFallbackRef.current = false;
@@ -11864,7 +11865,7 @@ export default function OrderDetailPage() {
                                   aria-pressed={ocrPreviewMode === "original"}
                                 >
                                   原本PDF
-                                </button>
+                                </Button>
                               </div>
                             ) : null}
                             {primaryPreviewOpenUrl ? (
@@ -11967,27 +11968,27 @@ export default function OrderDetailPage() {
                                     </p>
                                   </div>
                                   <div className="hakodate-frame-editor-actions">
-                                    <button className="btn ghost" type="button" onClick={toggleTableBoxEditor}>
+                                    <Button className="btn ghost hospital-detail-control" type="button" onClick={toggleTableBoxEditor}>
                                       {showTableBoxEditor ? "枠編集を閉じる" : "枠を編集"}
-                                    </button>
-                                    <button
-                                      className="btn ghost"
+                                    </Button>
+                                    <Button
+                                      className="btn ghost hospital-detail-control"
                                       type="button"
                                       onClick={() => void detectGridEdges()}
                                       disabled={gridDetecting}
                                     >
                                       {gridDetecting ? "自動検出中..." : "自動検出"}
-                                    </button>
-                                    <button
-                                      className="btn primary"
+                                    </Button>
+                                    <Button
+                                      className="btn primary hospital-detail-control"
                                       type="button"
                                       onClick={() => void saveTableBox()}
                                       disabled={!showTableBoxEditor || tableBoxSaving || !tableBoxReady}
                                     >
                                       {tableBoxSaving ? "保存中..." : "施設テンプレートに保存"}
-                                    </button>
-                                    <button
-                                      className="btn ghost"
+                                    </Button>
+                                    <Button
+                                      className="btn ghost hospital-detail-control"
                                       type="button"
                                       onClick={() => {
                                         void (async () => {
@@ -11998,7 +11999,7 @@ export default function OrderDetailPage() {
                                       disabled={ocrSheetLoading || ocrPagesLoading || hakodateOverlayLoading}
                                     >
                                       再計算して表示
-                                    </button>
+                                    </Button>
                                   </div>
                                 </div>
                                 {showTableBoxEditor ? (
@@ -12007,9 +12008,9 @@ export default function OrderDetailPage() {
                                       {["x0", "y0", "x1", "y1"].map((label, idx) => (
                                         <label className="input-label" key={`hakodate-frame-${label}`}>
                                           <span>{label}</span>
-                                          <input
-                                            className="input"
-                                            inputMode="decimal"
+                                          <Input disableUnderline inputProps={{ "inputMode": "decimal" }}
+                                            className="input hospital-detail-control"
+
                                             value={tableBoxDraft?.[idx]?.toFixed(tableBoxDecimals) ?? ""}
                                             onChange={(event) => updateTableBoxIndex(idx, event.target.value)}
                                           />
@@ -12017,9 +12018,9 @@ export default function OrderDetailPage() {
                                       ))}
                                       <label className="input-label">
                                         <span>移動量</span>
-                                        <input
-                                          className="input"
-                                          inputMode="decimal"
+                                        <Input disableUnderline inputProps={{ "inputMode": "decimal" }}
+                                          className="input hospital-detail-control"
+
                                           value={tableBoxStep}
                                           onChange={(event) => {
                                             const parsed = Number(event.target.value);
@@ -12031,51 +12032,51 @@ export default function OrderDetailPage() {
                                       </label>
                                     </div>
                                     <div className="hakodate-frame-editor-actions hakodate-frame-editor-actions--wrap">
-                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(-tableBoxNudge, 0)} disabled={!tableBoxReady}>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={() => nudgeTableBox(-tableBoxNudge, 0)} disabled={!tableBoxReady}>
                                         左へ
-                                      </button>
-                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(tableBoxNudge, 0)} disabled={!tableBoxReady}>
+                                      </Button>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={() => nudgeTableBox(tableBoxNudge, 0)} disabled={!tableBoxReady}>
                                         右へ
-                                      </button>
-                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(0, -tableBoxNudge)} disabled={!tableBoxReady}>
+                                      </Button>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={() => nudgeTableBox(0, -tableBoxNudge)} disabled={!tableBoxReady}>
                                         上へ
-                                      </button>
-                                      <button className="btn ghost" type="button" onClick={() => nudgeTableBox(0, tableBoxNudge)} disabled={!tableBoxReady}>
+                                      </Button>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={() => nudgeTableBox(0, tableBoxNudge)} disabled={!tableBoxReady}>
                                         下へ
-                                      </button>
-                                      <button className="btn ghost" type="button" onClick={() => expandTableBox(tableBoxNudge)} disabled={!tableBoxReady}>
+                                      </Button>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={() => expandTableBox(tableBoxNudge)} disabled={!tableBoxReady}>
                                         外へ広げる
-                                      </button>
-                                      <button className="btn ghost" type="button" onClick={() => expandTableBox(-tableBoxNudge)} disabled={!tableBoxReady}>
+                                      </Button>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={() => expandTableBox(-tableBoxNudge)} disabled={!tableBoxReady}>
                                         内へ縮める
-                                      </button>
-                                      <button className="btn ghost" type="button" onClick={resetTableBoxDraft}>
+                                      </Button>
+                                      <Button className="btn ghost hospital-detail-control" type="button" onClick={resetTableBoxDraft}>
                                         取得値に戻す
-                                      </button>
+                                      </Button>
                                     </div>
                                     <div className="hakodate-frame-grid hakodate-frame-grid--wide">
                                       <label className="input-label">
                                         <span>列数</span>
-                                        <input
-                                          className="input"
-                                          inputMode="numeric"
+                                        <Input disableUnderline inputProps={{ "inputMode": "numeric" }}
+                                          className="input hospital-detail-control"
+
                                           placeholder={String(Math.max(overlayColumnCount, 1))}
                                           onChange={(event) => setColumnCount(Number(event.target.value))}
                                         />
                                       </label>
                                       <label className="input-label">
                                         <span>行数</span>
-                                        <input
-                                          className="input"
-                                          inputMode="numeric"
+                                        <Input disableUnderline inputProps={{ "inputMode": "numeric" }}
+                                          className="input hospital-detail-control"
+
                                           placeholder={String(Math.max(overlayRowCount, 1))}
                                           onChange={(event) => setRowCount(Number(event.target.value))}
                                         />
                                       </label>
                                       <label className="input-label hakodate-frame-wide-field">
                                         <span>列線(%)</span>
-                                        <input
-                                          className="input"
+                                        <Input disableUnderline
+                                          className="input hospital-detail-control"
                                           value={columnEdgesText}
                                           onChange={(event) => {
                                             setColumnEdgesText(event.target.value);
@@ -12086,8 +12087,8 @@ export default function OrderDetailPage() {
                                       </label>
                                       <label className="input-label hakodate-frame-wide-field">
                                         <span>行線(%)</span>
-                                        <input
-                                          className="input"
+                                        <Input disableUnderline
+                                          className="input hospital-detail-control"
                                           value={rowEdgesText}
                                           onChange={(event) => {
                                             setRowEdgesText(event.target.value);
@@ -12211,13 +12212,13 @@ export default function OrderDetailPage() {
                           ) : (
                             <div className="preview-placeholder">
                               <div>{ocrPagesLoading ? "OCRページを取得中..." : ocrOverlayPlaceholder}</div>
-                              <button
-                                className="btn ghost"
+                              <Button
+                                className="btn ghost hospital-detail-control"
                                 type="button"
                                 onClick={() => void loadOcrPages({ force: true })}
                               >
                                 OCR表示を再取得
-                              </button>
+                              </Button>
                             </div>
                           )}
                         </div>
@@ -12228,14 +12229,14 @@ export default function OrderDetailPage() {
                         ) : null}
                         {!isHakodateOverlayMode && !shouldShowOriginalPdfPreview ? (
                           <div className="layout-toggle">
-                            <button
-                              className="btn ghost"
+                            <Button
+                              className="btn ghost hospital-detail-control"
                               type="button"
                               onClick={() => setShowLayoutOverlay((prev) => !prev)}
                               disabled={!canToggleLayoutOverlay}
                             >
                               {showLayoutOverlay ? "レイアウトを閉じる" : "レイアウトを表示"}
-                            </button>
+                            </Button>
                             <span className="subtle">
                               {canToggleLayoutOverlay ? "レイアウトオーバーレイ" : layoutOverlayPlaceholder}
                             </span>
@@ -12275,75 +12276,75 @@ export default function OrderDetailPage() {
                               分岐の選択に関係なく、修正した内容をこの場で下書き保存できます。
                             </p>
                           </div>
-                          <button
-                            className="btn primary"
+                          <Button
+                            className="btn primary hospital-detail-control"
                             type="button"
                             onClick={() => void saveOcrSheetExact()}
                             disabled={ocrTableSaving || !canSaveDraftSheet}
                           >
                             {ocrTableSaving ? "保存中..." : "シートを保存（暫定）"}
-                          </button>
+                          </Button>
                         </div>
 	                        {activeEditorRows.length ? (
 	                          <>
 		                            <div className="ocr-sheet-toolbar">
 		                              <div className="ocr-sheet-toolbar-actions">
-		                                <button
-		                                  className="btn ghost"
+		                                <Button
+		                                  className="btn ghost hospital-detail-control"
 		                                  type="button"
 		                                  onClick={() => selectAllOcrSheetCells()}
 		                                  disabled={!activeEditorRows.length}
 		                                >
 		                                  全選択
-		                                </button>
-		                                <button
-		                                  className="btn ghost"
+		                                </Button>
+		                                <Button
+		                                  className="btn ghost hospital-detail-control"
 		                                  type="button"
 		                                  onClick={() => void copyOcrSheetSelection()}
 	                                  disabled={!ocrSheetSelectionBounds}
 	                                >
 	                                  コピー
-	                                </button>
-	                                <button
-	                                  className="btn ghost"
+	                                </Button>
+	                                <Button
+	                                  className="btn ghost hospital-detail-control"
 	                                  type="button"
 	                                  onClick={() => void cutOcrSheetSelection()}
 	                                  disabled={!ocrSheetSelectionBounds}
 	                                >
 	                                  切り取り
-	                                </button>
-	                                <button
-	                                  className="btn ghost"
+	                                </Button>
+	                                <Button
+	                                  className="btn ghost hospital-detail-control"
 	                                  type="button"
 	                                  onClick={() => void pasteOcrSheetSelection()}
 	                                  disabled={!focusedSheetCell || !ocrSheetClipboardReady}
 	                                >
 	                                  貼り付け
-	                                </button>
-		                                <button
-		                                  className="btn ghost"
+	                                </Button>
+		                                <Button
+		                                  className="btn ghost hospital-detail-control"
 		                                  type="button"
 		                                  onClick={() => fillOcrSheetSelectionDown()}
 		                                  disabled={!ocrSheetSelectionBounds || ocrSheetSelectionBounds.rowCount < 2}
 		                                >
 		                                  下へコピー
-		                                </button>
-		                                <button
-		                                  className="btn ghost"
+		                                </Button>
+		                                <Button
+		                                  className="btn ghost hospital-detail-control"
 		                                  type="button"
 		                                  onClick={() => fillOcrSheetSelectionRight()}
 		                                  disabled={!ocrSheetSelectionBounds || ocrSheetSelectionBounds.cellCount < 2}
 		                                >
 		                                  右へコピー
-		                                </button>
-		                                <button
-		                                  className="btn ghost"
+		                                </Button>
+		                                <Button
+		                                  className="btn ghost hospital-detail-control"
 		                                  type="button"
 		                                  onClick={() => clearOcrSheetSelectionContents()}
 		                                  disabled={!ocrSheetSelectionBounds}
 		                                >
 		                                  クリア
-		                                </button>
+		                                </Button>
 		                              </div>
 		                              <p className="subtle">
 		                                Tab/Shift+Tab: 上下移動 / Enter: 上下移動 / Shift+矢印: 範囲選択 / Ctrl/Cmd+A: 全選択 / Ctrl/Cmd+D: 下へコピー / Ctrl/Cmd+R: 右へコピー / Delete: クリア
@@ -12354,10 +12355,10 @@ export default function OrderDetailPage() {
                                     <span className="ocr-shift-label">数量列の入替</span>
                                     <label className="ocr-shift-field">
                                       <span>入替元数量列</span>
-                                      <select
-                                        aria-label="入替元数量列"
-                                        className="input"
-                                        ref={ocrSwapLeftColumnRef}
+<NativeSelect disableUnderline inputProps={{ "aria-label": "入替元数量列" }}
+
+                                        className="input hospital-detail-control hospital-detail-shift-select"
+                                        inputRef={ocrSwapLeftColumnRef}
                                         value={ocrSwapLeftColumn}
                                         onChange={(e) => setOcrSwapLeftColumn(e.target.value)}
                                         disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
@@ -12368,14 +12369,14 @@ export default function OrderDetailPage() {
                                             {option.label}
                                           </option>
                                         ))}
-                                      </select>
+                                      </NativeSelect>
                                     </label>
                                     <label className="ocr-shift-field">
                                       <span>入替先数量列</span>
-                                      <select
-                                        aria-label="入替先数量列"
-                                        className="input"
-                                        ref={ocrSwapRightColumnRef}
+<NativeSelect disableUnderline inputProps={{ "aria-label": "入替先数量列" }}
+
+                                        className="input hospital-detail-control hospital-detail-shift-select"
+                                        inputRef={ocrSwapRightColumnRef}
                                         value={ocrSwapRightColumn}
                                         onChange={(e) => setOcrSwapRightColumn(e.target.value)}
                                         disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
@@ -12386,16 +12387,16 @@ export default function OrderDetailPage() {
                                             {option.label}
                                           </option>
                                         ))}
-                                      </select>
+                                      </NativeSelect>
                                     </label>
-                                    <button
-                                      className="btn ghost"
+                                    <Button
+                                      className="btn ghost hospital-detail-control"
                                       type="button"
                                       onClick={applySelectedOcrSheetColumnSwap}
                                       disabled={ocrSheetQuantityColumnOptions.length < 2 || ocrTableSaving}
                                     >
                                       数量列を入替
-                                    </button>
+                                    </Button>
                                     <span className="subtle">
                                       {ocrSheetQuantityColumnOptions.length >= 2
                                         ? "数量列の数字だけを入れ替えます。列名と列意味は固定です。"
@@ -12407,9 +12408,9 @@ export default function OrderDetailPage() {
                                   <span className="ocr-shift-label">数量列一括入力</span>
                                   <label className="ocr-shift-field">
                                     <span>対象列</span>
-                                    <select
-                                      aria-label="数量列一括入力の対象列"
-                                      className="input"
+<NativeSelect disableUnderline inputProps={{ "aria-label": "数量列一括入力の対象列" }}
+
+                                      className="input hospital-detail-control hospital-detail-shift-select"
                                       value={ocrSheetColumnFillTarget}
                                       onChange={(e) => setOcrSheetColumnFillTarget(e.target.value)}
                                       disabled={!ocrSheetBulkFillColumnOptions.length || ocrTableSaving}
@@ -12420,27 +12421,27 @@ export default function OrderDetailPage() {
                                           {option.label}
                                         </option>
                                       ))}
-                                    </select>
+                                    </NativeSelect>
                                   </label>
                                   <label className="ocr-shift-field">
                                     <span>入力値</span>
-                                    <input
-                                      aria-label="数量列一括入力の値"
-                                      className="input"
-                                      inputMode="numeric"
-                                      value={ocrSheetColumnFillValue}
-                                      onChange={(e) => setOcrSheetColumnFillValue(e.target.value)}
-                                      onKeyDown={(event) => {
+<Input disableUnderline inputProps={{ "aria-label": "数量列一括入力の値", "inputMode": "numeric", "onKeyDown": (event) => {
                                         if (event.key !== "Enter") return;
                                         event.preventDefault();
                                         applySelectedOcrSheetColumnFill();
-                                      }}
+                                      } }}
+
+                                      className="input hospital-detail-control hospital-detail-shift-input"
+
+                                      value={ocrSheetColumnFillValue}
+                                      onChange={(e) => setOcrSheetColumnFillValue(e.target.value)}
+
                                       disabled={!ocrSheetBulkFillColumnOptions.length || ocrTableSaving}
                                       placeholder="数字"
                                     />
                                   </label>
-                                  <button
-                                    className="btn ghost"
+                                  <Button
+                                    className="btn ghost hospital-detail-control"
                                     type="button"
                                     onClick={applySelectedOcrSheetColumnFill}
                                     disabled={
@@ -12452,7 +12453,7 @@ export default function OrderDetailPage() {
                                     }
                                   >
                                     列全体へ入力
-                                  </button>
+                                  </Button>
                                   <span className="subtle">
                                     数量列の全行を同じ数字で上書きします。既存値が入っていてもそのまま更新します。
                                   </span>
@@ -12461,9 +12462,9 @@ export default function OrderDetailPage() {
                                   <span className="ocr-shift-label">OCR信頼度表示</span>
                                   <label className="ocr-shift-field">
                                     <span>表示閾値</span>
-                                    <select
-                                      aria-label="OCR信頼度表示閾値"
-                                      className="input"
+<NativeSelect disableUnderline inputProps={{ "aria-label": "OCR信頼度表示閾値" }}
+
+                                      className="input hospital-detail-control hospital-detail-shift-select"
                                       value={ocrConfidenceDisplayMode}
                                       onChange={(e) =>
                                         setOcrConfidenceDisplayMode(e.target.value as OcrConfidenceDisplayMode)}
@@ -12471,16 +12472,16 @@ export default function OrderDetailPage() {
                                       <option value="strict">厳格表示</option>
                                       <option value="assisted">補助表示</option>
                                       <option value="suggestion">提案表示</option>
-                                    </select>
+                                    </NativeSelect>
                                   </label>
-                                  <button
-                                    className="btn ghost"
+                                  <Button
+                                    className="btn ghost hospital-detail-control"
                                     type="button"
                                     onClick={applyVisibleOcrOverlaySuggestions}
                                     disabled={ocrHardRecoveryMode || ocrTableSaving || ocrSheetVisibleOverlayCount < 1}
                                   >
                                     表示中提案を採用
-                                  </button>
+                                  </Button>
                                   <span
                                     className="subtle"
                                     data-testid="ocr-sheet-overlay-summary"
@@ -12722,8 +12723,8 @@ export default function OrderDetailPage() {
                   </div>
                   <div className="facility-template-editor">
                     <div className="table-box-header">
-                      <button
-                        className="facility-template-toggle"
+                      <Button
+                        className="facility-template-toggle hospital-detail-control"
                         type="button"
                         onClick={() => setShowFacilityTemplateEditor((prev) => !prev)}
                         aria-expanded={showFacilityTemplateEditor}
@@ -12732,7 +12733,7 @@ export default function OrderDetailPage() {
                         <span className="facility-template-toggle-meta">
                           {showFacilityTemplateEditor ? "閉じる" : "開く"}
                         </span>
-                      </button>
+                      </Button>
                     </div>
                     <p className="subtle">
                       この注文だけ数値を直す時は、上のシートだけ編集して保存してください。
@@ -12751,8 +12752,8 @@ export default function OrderDetailPage() {
                         <div className="table-box-header">
                           <span className="field-label">施設区分列</span>
                           <div className="facility-template-actions">
-                            <select
-                              className="input"
+                            <NativeSelect disableUnderline
+                              className="input hospital-detail-control"
                               value={facilityTemplateSwapLeft}
                               onChange={(event) => setFacilityTemplateSwapLeft(event.target.value)}
                               disabled={!facilityTemplateColumnDraft.length}
@@ -12763,9 +12764,9 @@ export default function OrderDetailPage() {
                                   {column.index + 1}: {column.header || column.name || column.role}
                                 </option>
                               ))}
-                            </select>
-                            <select
-                              className="input"
+                            </NativeSelect>
+                            <NativeSelect disableUnderline
+                              className="input hospital-detail-control"
                               value={facilityTemplateSwapRight}
                               onChange={(event) => setFacilityTemplateSwapRight(event.target.value)}
                               disabled={!facilityTemplateColumnDraft.length}
@@ -12776,31 +12777,31 @@ export default function OrderDetailPage() {
                                   {column.index + 1}: {column.header || column.name || column.role}
                                 </option>
                               ))}
-                            </select>
-                            <button
-                              className="btn ghost"
+                            </NativeSelect>
+                            <Button
+                              className="btn ghost hospital-detail-control"
                               type="button"
                               onClick={applySelectedFacilityTemplateColumnSwap}
                               disabled={!facilityTemplateColumnDraft.length}
                             >
                               列を入れ替える
-                            </button>
-                            <button
-                              className="btn ghost"
+                            </Button>
+                            <Button
+                              className="btn ghost hospital-detail-control"
                               type="button"
                               onClick={appendFacilityTemplateColumn}
                               disabled={facilityTemplateSaving || !facility || step1Incomplete}
                             >
                               列を追加
-                            </button>
-                            <button
-                              className="btn primary"
+                            </Button>
+                            <Button
+                              className="btn primary hospital-detail-control"
                               type="button"
                               onClick={saveFacilityTemplateColumns}
                               disabled={!facilityTemplateDirty || facilityTemplateSaving || !facility || step1Incomplete}
                             >
                               {facilityTemplateSaving ? "保存中..." : "施設テンプレに保存"}
-                            </button>
+                            </Button>
                           </div>
                         </div>
                         <p className="subtle">
@@ -13068,8 +13069,8 @@ export default function OrderDetailPage() {
                   const isOpen = openPivotGroupKey === groupKey;
                   return (
                   <div key={`pivot-${group.date}-${group.categoryKey}`} className="date-group">
-                    <button
-                      className="date-group-header date-group-toggle"
+                    <Button
+                      className="date-group-header date-group-toggle hospital-detail-control"
                       type="button"
                       onClick={() => setOpenPivotGroupKey((prev) => (prev === groupKey ? null : groupKey))}
                     >
@@ -13078,7 +13079,7 @@ export default function OrderDetailPage() {
                       <span className="group-tag">{group.categoryLabel}</span>
                       <span className="group-count">{group.rows.length}件</span>
                       <span className="group-toggle-label">{isOpen ? "閉じる" : "開く"}</span>
-                    </button>
+                    </Button>
                     {isOpen ? (
                     <div className="table-wrap">
                       <table>
@@ -13131,8 +13132,8 @@ export default function OrderDetailPage() {
                   const isOpen = openLineGroupKey === groupKey;
                   return (
                   <div key={`line-${group.date}-${group.categoryKey}`} className="date-group">
-                    <button
-                      className="date-group-header date-group-toggle"
+                    <Button
+                      className="date-group-header date-group-toggle hospital-detail-control"
                       type="button"
                       onClick={() => setOpenLineGroupKey((prev) => (prev === groupKey ? null : groupKey))}
                     >
@@ -13141,7 +13142,7 @@ export default function OrderDetailPage() {
                       <span className="group-tag">{group.categoryLabel}</span>
                       <span className="group-count">{group.rows.length}件</span>
                       <span className="group-toggle-label">{isOpen ? "閉じる" : "開く"}</span>
-                    </button>
+                    </Button>
                     {isOpen ? (
                     <div className="table-wrap">
                       <table>
@@ -13174,8 +13175,8 @@ export default function OrderDetailPage() {
                                 <>
                                   <td>{line.quantity_original ?? "-"}</td>
                                   <td>
-                                    <input
-                                      className="input"
+                                    <Input disableUnderline
+                                      className="input hospital-detail-control"
                                       type="number"
                                       value={line.quantity_corrected ?? ""}
                                       onChange={(e) => updateLineQuantity(idx, Number(e.target.value))}
@@ -13212,9 +13213,9 @@ export default function OrderDetailPage() {
               </p>
             </header>
             <div className="actions">
-              <button className="btn ghost" onClick={saveLines} disabled={detailUsesDraftPreview}>
+              <Button type="submit" className="btn ghost hospital-detail-control" onClick={saveLines} disabled={detailUsesDraftPreview}>
                 明細を保存して作業続行
-              </button>
+              </Button>
             </div>
           </section>
             </>
@@ -13228,12 +13229,12 @@ export default function OrderDetailPage() {
                 <p className="subtle">OCR反映後に自動更新します。必要に応じて再計算できます。</p>
               </div>
               <div className="panel-actions">
-                <button className="btn ghost" type="button" onClick={loadBags} disabled={bagLoading}>
+                <Button className="btn ghost hospital-detail-control" type="button" onClick={loadBags} disabled={bagLoading}>
                   {bagLoading ? "取得中..." : "更新"}
-                </button>
-                <button className="btn ghost" type="button" onClick={rebuildBags} disabled={bagLoading}>
+                </Button>
+                <Button className="btn ghost hospital-detail-control" type="button" onClick={rebuildBags} disabled={bagLoading}>
                   {bagLoading ? "再計算中..." : "再計算"}
-                </button>
+                </Button>
               </div>
             </header>
             {bagMessage ? <p className="subtle">{bagMessage}</p> : null}
@@ -13352,8 +13353,8 @@ export default function OrderDetailPage() {
                 <p className="subtle">出力を確認して確定します。</p>
               </div>
               <div className="panel-actions">
-                <button
-                  className="btn ghost"
+                <Button
+                  className="btn ghost hospital-detail-control"
                   type="button"
                   onClick={() => {
                     void registerTrainingSample();
@@ -13361,9 +13362,9 @@ export default function OrderDetailPage() {
                   disabled={trainingSampleSaving || confirmSaving}
                 >
                   {trainingSampleSaving ? "登録中..." : "学習データ登録"}
-                </button>
-                <button
-                  className="btn primary"
+                </Button>
+                <Button
+                  className="btn primary hospital-detail-control"
                   type="button"
                   onClick={() => {
                     void confirm();
@@ -13371,7 +13372,7 @@ export default function OrderDetailPage() {
                   disabled={orderAlreadyConfirmed || confirmSaving || !effectiveCanConfirm}
                 >
                   {orderAlreadyConfirmed ? "確定済み" : confirmSaving ? "確定中..." : "確定"}
-                </button>
+                </Button>
               </div>
             </header>
             {sheetWeeklyMenuMissing ? (
@@ -13408,15 +13409,15 @@ export default function OrderDetailPage() {
             <div className="outputs">
               <div className="output-card">
                 <span className="output-link">ラベルCSV</span>
-                <button
-                  className="btn primary"
+                <Button
+                  className="btn primary hospital-detail-control"
                   type="button"
                   onClick={() => openOutput(`/outputs/labels?order_id=${order.id}`, "ラベルCSV")}
                 >
                   ダウンロード
-                </button>
-                <button
-                  className="btn ghost"
+                </Button>
+                <Button
+                  className="btn ghost hospital-detail-control"
                   type="button"
                   onClick={(e) => {
                     loadOutputPreview("labels");
@@ -13429,19 +13430,19 @@ export default function OrderDetailPage() {
                   disabled={outputPreviewLoading}
                 >
                   プレビュー
-                </button>
+                </Button>
               </div>
               <div className="output-card">
                 <span className="output-link">納品書HTML</span>
-                <button
-                  className="btn primary"
+                <Button
+                  className="btn primary hospital-detail-control"
                   type="button"
                   onClick={() => openHtmlOutput(`/outputs/delivery-notes/html?order_id=${order.id}`, "納品書HTML")}
                 >
                   開く
-                </button>
-                <button
-                  className="btn ghost"
+                </Button>
+                <Button
+                  className="btn ghost hospital-detail-control"
                   type="button"
                   onClick={(e) => {
                     loadOutputPreview("delivery");
@@ -13454,31 +13455,31 @@ export default function OrderDetailPage() {
                   disabled={outputPreviewLoading}
                 >
                   プレビュー
-                </button>
+                </Button>
               </div>
               <div className="output-card">
                 <span className="output-link">発注書Excel</span>
-                <button
-                  className="btn primary"
+                <Button
+                  className="btn primary hospital-detail-control"
                   type="button"
                   onClick={() => openOutput(`/outputs/order-form-saved-sheet?order_id=${order.id}`, "発注書Excel")}
                 >
                   ダウンロード
-                </button>
+                </Button>
               </div>
               <div className="output-card">
                 <span className="output-link">総量CSV</span>
-                <button
-                  className="btn primary"
+                <Button
+                  className="btn primary hospital-detail-control"
                   type="button"
                   onClick={() =>
                     openOutput(`/outputs/manufacturing-aggregate?order_id=${order.id}`, "総量CSV")
                   }
                 >
                   ダウンロード
-                </button>
-                <button
-                  className="btn ghost"
+                </Button>
+                <Button
+                  className="btn ghost hospital-detail-control"
                   type="button"
                   onClick={(e) => {
                     loadOutputPreview("aggregate");
@@ -13491,7 +13492,7 @@ export default function OrderDetailPage() {
                   disabled={outputPreviewLoading}
                 >
                   プレビュー
-                </button>
+                </Button>
               </div>
             </div>
             <div className="shipping-panel">
@@ -13504,9 +13505,9 @@ export default function OrderDetailPage() {
                   <Link href="/shipping" className="btn ghost">
                     送り状ページ
                   </Link>
-                  <button className="btn ghost" type="button" onClick={() => void loadShippingStatuses()} disabled={shippingLoading}>
+                  <Button className="btn ghost hospital-detail-control" type="button" onClick={() => void loadShippingStatuses()} disabled={shippingLoading}>
                     {shippingLoading ? "取得中..." : "追跡更新"}
-                  </button>
+                  </Button>
                 </div>
               </div>
               {shippingMessage ? <p className="subtle">{shippingMessage}</p> : null}
@@ -13582,11 +13583,11 @@ export default function OrderDetailPage() {
           ) : null}
 
           <div className="step-footer">
-            <button className="btn ghost" type="button" onClick={goPrevStep} disabled={!canStepPrev}>
+            <Button className="btn ghost hospital-detail-control" type="button" onClick={goPrevStep} disabled={!canStepPrev}>
               {canStepPrev ? `戻る: ${prevStepLabel}` : "戻る"}
-            </button>
-            <button
-              className="btn primary"
+            </Button>
+            <Button
+              className="btn primary hospital-detail-control"
               type="button"
               onClick={() => void goNextStep()}
               disabled={
@@ -13598,7 +13599,7 @@ export default function OrderDetailPage() {
               }
             >
               {nextStepButtonLabel}
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -13695,7 +13696,8 @@ export default function OrderDetailPage() {
           margin-bottom: 12px;
         }
 
-        .step-tab {
+        .step-tab,
+        :global(.hospital-detail-control.step-tab) {
           display: inline-flex;
           align-items: center;
           gap: 10px;
@@ -13708,18 +13710,21 @@ export default function OrderDetailPage() {
           font-size: 13px;
         }
 
-        .step-tab:disabled {
+        .step-tab:disabled,
+        :global(.hospital-detail-control.step-tab:disabled) {
           cursor: not-allowed;
           opacity: 0.7;
           background: #f5f3ee;
         }
 
-        .step-tab.done {
+        .step-tab.done,
+        :global(.hospital-detail-control.step-tab.done) {
           border-color: rgba(36, 110, 87, 0.35);
           background: rgba(36, 110, 87, 0.08);
         }
 
-        .step-tab.active {
+        .step-tab.active,
+        :global(.hospital-detail-control.step-tab.active) {
           background: #1f2a2a;
           color: #f7f2e7;
           border-color: #1f2a2a;
@@ -13869,17 +13874,20 @@ export default function OrderDetailPage() {
           justify-content: flex-end;
         }
 
-        .llm-provider-select {
+        .llm-provider-select,
+        :global(.hospital-detail-control.llm-provider-select) {
           min-width: 130px;
           flex: 0 0 auto;
         }
 
-        .llm-model-select {
+        .llm-model-select,
+        :global(.hospital-detail-control.llm-model-select) {
           min-width: 130px;
           flex: 0 0 auto;
         }
 
-        .llm-model-input {
+        .llm-model-input,
+        :global(.hospital-detail-control.llm-model-input) {
           min-width: 220px;
           flex: 0 0 auto;
         }
@@ -13910,7 +13918,8 @@ export default function OrderDetailPage() {
           gap: 8px;
         }
 
-        .facility-chip {
+        .facility-chip,
+        :global(.hospital-detail-control.facility-chip) {
           display: inline-flex;
           align-items: center;
           gap: 6px;
@@ -13922,7 +13931,8 @@ export default function OrderDetailPage() {
           cursor: pointer;
         }
 
-        .facility-chip.auto {
+        .facility-chip.auto,
+        :global(.hospital-detail-control.facility-chip.auto) {
           border-color: rgba(36, 110, 87, 0.5);
           background: rgba(36, 110, 87, 0.08);
         }
@@ -13989,7 +13999,8 @@ export default function OrderDetailPage() {
           gap: 8px;
         }
 
-        .workflow-summary-action-btn {
+        .workflow-summary-action-btn,
+        :global(.hospital-detail-control.workflow-summary-action-btn) {
           white-space: nowrap;
         }
 
@@ -14031,7 +14042,8 @@ export default function OrderDetailPage() {
           gap: 8px;
         }
 
-        .input {
+        .input,
+        :global(.hospital-detail-control.input) {
           border: 1px solid rgba(25, 32, 30, 0.14);
           border-radius: 10px;
           padding: 8px 10px;
@@ -14159,7 +14171,8 @@ export default function OrderDetailPage() {
           display: none;
         }
 
-        .prompt-panel textarea {
+        .prompt-panel textarea,
+        .prompt-panel :global(.hospital-detail-control.MuiInput-root) {
           margin-top: 10px;
           width: 100%;
           min-height: 120px;
@@ -14472,7 +14485,8 @@ export default function OrderDetailPage() {
           margin-bottom: 12px;
         }
 
-        .page-tab {
+        .page-tab,
+        :global(.hospital-detail-control.page-tab) {
           border: 1px solid rgba(25, 32, 30, 0.12);
           background: #fbfbf9;
           border-radius: 999px;
@@ -14481,7 +14495,8 @@ export default function OrderDetailPage() {
           cursor: pointer;
         }
 
-        .page-tab.active {
+        .page-tab.active,
+        :global(.hospital-detail-control.page-tab.active) {
           background: #1f2a2a;
           color: #f7f2e7;
           border-color: #1f2a2a;
@@ -14718,7 +14733,8 @@ export default function OrderDetailPage() {
           gap: 10px;
         }
 
-        .facility-template-toggle {
+        .facility-template-toggle,
+        :global(.hospital-detail-control.facility-template-toggle) {
           width: 100%;
           display: flex;
           align-items: center;
@@ -15160,7 +15176,9 @@ export default function OrderDetailPage() {
 
         .ocr-flow-choice-button,
         .ocr-flow-subchoice,
-        .ocr-flow-choice-select-card {
+        .ocr-flow-choice-select-card,
+        :global(.hospital-detail-control.ocr-flow-choice-button),
+        :global(.hospital-detail-control.ocr-flow-subchoice) {
           border: 1px solid rgba(24, 42, 40, 0.12);
           background: #f8fbfa;
           color: #243431;
@@ -15174,12 +15192,16 @@ export default function OrderDetailPage() {
         }
 
         .ocr-flow-choice-button,
-        .ocr-flow-subchoice {
+        .ocr-flow-subchoice,
+        :global(.hospital-detail-control.ocr-flow-choice-button),
+        :global(.hospital-detail-control.ocr-flow-subchoice) {
           cursor: pointer;
         }
 
         .ocr-flow-choice-button.active,
-        .ocr-flow-subchoice.active {
+        .ocr-flow-subchoice.active,
+        :global(.hospital-detail-control.ocr-flow-choice-button.active),
+        :global(.hospital-detail-control.ocr-flow-subchoice.active) {
           border-color: rgba(31, 42, 42, 0.28);
           background: #edf3f1;
           box-shadow: inset 0 0 0 1px rgba(31, 42, 42, 0.08);
@@ -15195,7 +15217,8 @@ export default function OrderDetailPage() {
           color: #556168;
         }
 
-        .ocr-flow-choice-select-card .input {
+        .ocr-flow-choice-select-card .input,
+        .ocr-flow-choice-select-card :global(.hospital-detail-control.input) {
           width: 100%;
           margin-top: 2px;
           margin-bottom: 2px;
@@ -15207,7 +15230,8 @@ export default function OrderDetailPage() {
           gap: 8px;
         }
 
-        .ocr-flow-subchoice {
+        .ocr-flow-subchoice,
+        :global(.hospital-detail-control.ocr-flow-subchoice) {
           min-width: 0;
         }
 
@@ -15321,7 +15345,8 @@ export default function OrderDetailPage() {
           padding-top: 10px;
         }
 
-        .ocr-inline-prompt textarea {
+        .ocr-inline-prompt textarea,
+        .ocr-inline-prompt :global(.hospital-detail-control.MuiInput-root) {
           margin-top: 8px;
           width: 100%;
           min-height: 120px;
@@ -15342,11 +15367,13 @@ export default function OrderDetailPage() {
           display: none;
         }
 
-        .ocr-inline-details textarea {
+        .ocr-inline-details textarea,
+        .ocr-inline-details :global(.hospital-detail-control.MuiInput-root) {
           margin-top: 8px;
         }
 
-        .ocr-llm-prompt-textarea {
+        .ocr-llm-prompt-textarea,
+        :global(.hospital-detail-control.ocr-llm-prompt-textarea) {
           width: 100%;
           min-height: 120px;
           font-size: 14px;
@@ -15486,13 +15513,15 @@ export default function OrderDetailPage() {
           color: #44524f;
         }
 
-        .ocr-shift-field input {
+        .ocr-shift-field input,
+        .ocr-shift-field :global(.hospital-detail-control.hospital-detail-shift-input.MuiInput-root) {
           width: 72px;
           padding: 6px 8px;
           font-size: 12px;
         }
 
-        .ocr-shift-field select {
+        .ocr-shift-field select,
+        .ocr-shift-field :global(.hospital-detail-control.hospital-detail-shift-select.MuiInput-root) {
           min-width: 128px;
           padding: 6px 8px;
           font-size: 12px;
@@ -15889,7 +15918,8 @@ export default function OrderDetailPage() {
           flex-wrap: wrap;
         }
 
-        .btn {
+        .btn,
+        :global(.hospital-detail-control.btn) {
           border: none;
           border-radius: 999px;
           padding: 10px 18px;
@@ -15899,12 +15929,14 @@ export default function OrderDetailPage() {
           cursor: pointer;
         }
 
-        .btn.primary {
+        .btn.primary,
+        :global(.hospital-detail-control.btn.primary) {
           background: #1f2a2a;
           color: #f7f2e7;
         }
 
-        .btn.ghost {
+        .btn.ghost,
+        :global(.hospital-detail-control.btn.ghost) {
           background: #f4f1ea;
         }
 
@@ -16052,7 +16084,8 @@ export default function OrderDetailPage() {
           background: #ffffff;
         }
 
-        .date-group-header {
+        .date-group-header,
+        :global(.hospital-detail-control.date-group-header) {
           display: flex;
           align-items: center;
           gap: 8px;
@@ -16062,7 +16095,8 @@ export default function OrderDetailPage() {
           margin-bottom: 10px;
         }
 
-        .date-group-toggle {
+        .date-group-toggle,
+        :global(.hospital-detail-control.date-group-toggle) {
           width: 100%;
           border: none;
           background: transparent;
@@ -16198,7 +16232,12 @@ export default function OrderDetailPage() {
             gap: 4px;
           }
         }
-      `}</style>
+
+        :global(.hospital-detail-control.MuiButton-root){text-transform:none;font-family:inherit;line-height:normal;min-width:0}
+        :global(.hospital-detail-control.MuiInput-root input),:global(.hospital-detail-control.MuiInput-root textarea),:global(.hospital-detail-control.MuiInput-root select){padding:0;border:0;background:transparent;font:inherit;color:inherit}
+        :global(.hospital-detail-control.MuiInput-root select){appearance:auto}
+        :global(.hospital-detail-control.MuiInput-root .MuiNativeSelect-icon){display:none}
+`}</style>
       <style jsx global>{`
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Noto+Sans+JP:wght@400;600&display=swap");
       `}</style>
