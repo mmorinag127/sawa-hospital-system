@@ -631,7 +631,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const menuLoadGeneration = useRef(0);
   const itemSaveGeneration = useRef(0);
   const selectedEntryRef = useRef<string | null>(null);
-  const hasUnsavedChanges = itemFormDirty || entryExceptionSaving;
+  const protectedEditor = useRef({ item: false, master: false });
+  const masterInputVersions = useRef(new Map<string, number>());
+  protectedEditor.current.item = itemFormDirty;
+  const hasUnsavedChanges = itemFormDirty || entryExceptionSaving || protectedEditor.current.master;
   useH1LeaveGuard(hasUnsavedChanges, ["/menus", "/hospital/menus"]);
 
   const formatScopeLabel = (scopeOverride?: string | null) => {
@@ -714,6 +717,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     try {
       const res = await apiClient.get(`/monthly-menus/${monthId}`);
       if (generation !== menuLoadGeneration.current) return;
+      if (protectedEditor.current.item || protectedEditor.current.master) {
+        setMessage("未保存の入力と編集対象を保持しています。再読込は入力の保存または明示破棄後に行ってください。");
+        return;
+      }
       if (!res.data?.menu || !Array.isArray(res.data.items) || !Array.isArray(res.data.entries)) {
         throw new Error("月次メニュー正本の応答形式を確認できませんでした。");
       }
@@ -770,6 +777,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   useEffect(() => {
+    if (protectedEditor.current.item) return;
     if (!entries.length) {
       setSelectedEntryId(null);
       return;
@@ -878,6 +886,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   const updateMasterCheckResolution = (issueKey: string, patch: Partial<MenuMasterReviewResolution>) => {
+    masterInputVersions.current.set(issueKey, (masterInputVersions.current.get(issueKey) || 0) + 1);
+    protectedEditor.current.master = true;
     setMasterCheckState((current) => {
       const existing = current.resolutions[issueKey];
       if (!existing) return current;
@@ -987,6 +997,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     if (!monthId || Array.isArray(monthId) || !issue.item_id) return;
     const issueKey = getReviewIssueKey(issue, index);
     const resolution = masterCheckState.resolutions[issueKey];
+    const inputVersion = masterInputVersions.current.get(issueKey);
     if (!isReviewResolutionComplete(issue, resolution)) {
       setMessage(`差分チェックの入力が不足しています: ${getReviewSourceName(issue)}`);
       return;
@@ -1033,6 +1044,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         }
       }
       await apiClient.post(`/monthly-menus/${monthId}/master-checks/${issue.item_id}/resolve`, body);
+      if (masterInputVersions.current.get(issueKey) !== inputVersion) {
+        setMessage("保存中に差分入力が変わったため、新しい入力を保持しています。");
+        return;
+      }
+      masterInputVersions.current.delete(issueKey);
+      protectedEditor.current.master = masterInputVersions.current.size > 0;
       const sourceName = getReviewSourceName(issue);
       const successMessage =
         resolution.action === "month_only"
@@ -1238,7 +1255,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       );
       const updatedEntries = Array.isArray(res.data?.entries) ? res.data.entries : [];
       await loadMenu();
-      if (updatedEntries.length === 1 && updatedEntries[0]?.id) {
+      if (!protectedEditor.current.item && updatedEntries.length === 1 && updatedEntries[0]?.id) {
         setSelectedEntryId(String(updatedEntries[0].id));
       }
       setMessage(`例外メニューを保存しました: ${entryExceptionDraft.name.trim()}`);
