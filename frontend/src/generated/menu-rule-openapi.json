@@ -1,0 +1,303 @@
+{
+  "components": {
+    "schemas": {
+      "MenuRuleDeleteResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deleted",
+          "revision"
+        ],
+        "title": "MenuRuleDeleteResponse",
+        "type": "object"
+      },
+      "MenuRuleListResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/MenuRuleResponse"
+            },
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules",
+          "revision"
+        ],
+        "title": "MenuRuleListResponse",
+        "type": "object"
+      },
+      "MenuRuleResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "daypart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daypart"
+          },
+          "diet_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diet Type"
+          },
+          "facility_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Facility Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "match_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match Type"
+          },
+          "menu_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Menu Pattern"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "qty_per_serving": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qty Per Serving"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "rule_type": {
+            "title": "Rule Type",
+            "type": "string"
+          },
+          "unit_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Type"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "rule_type",
+          "match_type",
+          "menu_pattern",
+          "facility_id",
+          "daypart",
+          "category",
+          "diet_type",
+          "unit_type",
+          "qty_per_serving",
+          "priority",
+          "active"
+        ],
+        "title": "MenuRuleResponse",
+        "type": "object"
+      },
+      "MenuRuleSaveResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "rule": {
+            "$ref": "#/components/schemas/MenuRuleResponse"
+          }
+        },
+        "required": [
+          "rule",
+          "revision"
+        ],
+        "title": "MenuRuleSaveResponse",
+        "type": "object"
+      },
+      "MenuRuleUpdateResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "rule": {
+            "$ref": "#/components/schemas/MenuRuleResponse"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rule",
+          "revision",
+          "updated"
+        ],
+        "title": "MenuRuleUpdateResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Registered Menu Rule Response Contract",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/menu-rules": {
+      "get": {
+        "operationId": "list_menu_rules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuRuleListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_menu_rule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuRuleSaveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/menu-rules/{rule_id}": {
+      "delete": {
+        "operationId": "delete_menu_rule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuRuleDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      },
+      "put": {
+        "operationId": "update_menu_rule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuRuleUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    }
+  }
+}

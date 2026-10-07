@@ -3,6 +3,8 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
+    "generate:menu-rule-api": "python3 ../scripts/export_menu_rule_openapi.py --output src/generated/menu-rule-openapi.json && openapi-typescript src/generated/menu-rule-openapi.json -o src/generated/menu-rule-api.ts",
+    "check:menu-rule-api": "python3 ../scripts/export_menu_rule_openapi.py --check --output src/generated/menu-rule-openapi.json && openapi-typescript src/generated/menu-rule-openapi.json -o src/generated/menu-rule-api.ts --check",
     "dev": "next dev",
     "build": "next build",
     "start": "next start -p $PORT -H 0.0.0.0",

@@ -1,17 +1,18 @@
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from src.api.auth import require_role
+from src.api.menu_rule_schemas import MenuRuleDeleteResponse, MenuRuleListResponse, MenuRuleSaveResponse, MenuRuleUpdateResponse
 from src.services import menu_edit_revision_service, menu_rule_service
 
 router = APIRouter()
 
 
-@router.get("", dependencies=[Depends(require_role("operator"))])
+@router.get("", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": MenuRuleListResponse}})
 def list_menu_rules(rule_type: str | None = None):
     return menu_rule_service.list_rules(rule_type)
 
 
-@router.post("", dependencies=[Depends(require_role("operator"))])
+@router.post("", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": MenuRuleSaveResponse}})
 def create_menu_rule(body: dict, if_match: str | None = Header(default=None, alias="If-Match")):
     try:
         rule = menu_rule_service.create_rule(body, if_match)
@@ -24,7 +25,7 @@ def create_menu_rule(body: dict, if_match: str | None = Header(default=None, ali
     return rule
 
 
-@router.put("/{rule_id}", dependencies=[Depends(require_role("operator"))])
+@router.put("/{rule_id}", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": MenuRuleUpdateResponse}})
 def update_menu_rule(rule_id: str, body: dict, if_match: str | None = Header(default=None, alias="If-Match")):
     try:
         updated = menu_rule_service.update_rule(rule_id, body, if_match)
@@ -37,7 +38,7 @@ def update_menu_rule(rule_id: str, body: dict, if_match: str | None = Header(def
     return {"updated": True, **updated}
 
 
-@router.delete("/{rule_id}", dependencies=[Depends(require_role("operator"))])
+@router.delete("/{rule_id}", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": MenuRuleDeleteResponse}})
 def delete_menu_rule(rule_id: str, if_match: str | None = Header(default=None, alias="If-Match")):
     try:
         deleted = menu_rule_service.delete_rule(rule_id, if_match)
