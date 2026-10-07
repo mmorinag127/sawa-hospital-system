@@ -1,19 +1,10 @@
 from __future__ import annotations
 
-import os
 import re
 import json
 import hashlib
 from copy import deepcopy
 from typing import Any
-
-
-def default_template_collection() -> str:
-    return (
-        os.getenv("OCR_TEMPLATE_COLLECTION", "").strip()
-        or os.getenv("TEMPLATE_COLLECTION", "").strip()
-        or "templates"
-    )
 
 
 def validate_captured_config(config: dict, expected_digest: str) -> dict:
@@ -27,18 +18,10 @@ def validate_captured_config(config: dict, expected_digest: str) -> dict:
 
 
 def load_template_config(db, template_id: str, collection: str | None = None, *, captured_config: dict | None = None, expected_digest: str | None = None) -> dict:
-    if captured_config is not None or expected_digest is not None:
-        template = validate_captured_config(captured_config, expected_digest)
-        if template.get("template_id") != template_id:
-            raise ValueError("captured_template_id_mismatch")
-        return template
-    target_collection = collection or default_template_collection()
-    doc = db.collection(target_collection).document(template_id).get()
-    if not doc.exists:
-        raise RuntimeError(f"Template not found: {template_id}")
-    cfg = doc.to_dict() or {}
-    cfg["id"] = template_id
-    return cfg
+    template = validate_captured_config(captured_config, expected_digest)
+    if not isinstance(template_id, str) or not template_id or template.get("template_id") != template_id:
+        raise ValueError("captured_template_id_mismatch")
+    return template
 
 
 def _coerce_box(box: Any):

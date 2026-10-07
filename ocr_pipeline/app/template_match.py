@@ -4,37 +4,9 @@ from urllib.parse import urlparse
 import cv2
 import numpy as np
 
-from app.rois import default_template_collection
-
 
 def _resolve_local_template_path(path: Path) -> Path:
     return path
-
-
-def _template_sources_from_registry(template_ids: list[str] | None) -> list[tuple[str, dict]]:
-    return []
-
-
-def _template_sources(db, collection: str, template_ids: list[str] | None) -> list[tuple[str, dict]]:
-    sources: list[tuple[str, dict]] = []
-    seen: set[str] = set()
-    if template_ids:
-        docs = [
-            db.collection(collection).document(template_id).get()
-            for template_id in template_ids
-        ]
-    else:
-        docs = list(db.collection(collection).stream())
-    for doc in docs:
-        if not getattr(doc, "exists", False):
-            continue
-        cfg = doc.to_dict() or {}
-        template_id = str(getattr(doc, "id", "") or cfg.get("id") or "").strip()
-        if not template_id or template_id in seen:
-            continue
-        sources.append((template_id, cfg))
-        seen.add(template_id)
-    return sources
 
 
 def _download_template_png(uri: str) -> np.ndarray:
@@ -70,14 +42,15 @@ def choose_template_and_warp(
     template_ids: list[str] | None = None,
     authored_templates: dict[str, dict] | None = None,
 ):
-    if authored_templates is not None:
-        if not template_ids or any(template_id not in authored_templates for template_id in template_ids):
-            raise ValueError("captured_template_selection_required")
-        templates = [(template_id, authored_templates[template_id]) for template_id in template_ids]
-    else:
-        templates = _template_sources(db, collection or default_template_collection(), template_ids)
-    if not templates:
-        raise RuntimeError("No templates registered")
+    if not isinstance(authored_templates, dict) or not isinstance(template_ids, list) or len(template_ids) != 1:
+        raise ValueError("captured_template_selection_required")
+    template_id = template_ids[0]
+    if not isinstance(template_id, str) or not template_id or set(authored_templates) != {template_id}:
+        raise ValueError("captured_template_selection_required")
+    cfg = authored_templates[template_id]
+    if not isinstance(cfg, dict) or cfg.get("template_id") != template_id:
+        raise ValueError("captured_template_id_mismatch")
+    templates = [(template_id, cfg)]
 
     best_id = None
     best_score = -1.0

@@ -261,9 +261,6 @@ YOMITOKU_FIGURE_WIDTH = int(os.environ.get("OCR_YOMITOKU_FIGURE_WIDTH", "200"))
 YOMITOKU_FIGURE_DIR = os.environ.get("OCR_YOMITOKU_FIGURE_DIR", "figures")
 OCR_PIPELINE_MODE = os.environ.get("OCR_PIPELINE_MODE", "structured_v2").strip().lower()
 OCR_ENABLE_TEMPLATE_MATCH = os.environ.get("OCR_ENABLE_TEMPLATE_MATCH", "true").lower() == "true"
-OCR_TEMPLATE_MATCH_ALLOW_DISCOVERY = (
-    os.environ.get("OCR_TEMPLATE_MATCH_ALLOW_DISCOVERY", "false").lower() == "true"
-)
 OCR_TEMPLATE_MATCH_DPI = int(os.environ.get("OCR_TEMPLATE_MATCH_DPI", "300"))
 OCR_ENABLE_TEMPLATE_ROI = os.environ.get("OCR_ENABLE_TEMPLATE_ROI", "true").lower() == "true"
 OCR_ENABLE_PAGE_CORRECTION = os.environ.get("OCR_ENABLE_PAGE_CORRECTION", "true").lower() == "true"
@@ -836,58 +833,32 @@ def _run_template_classification(
     captured_config: dict | None = None,
     configured_digest: str | None = None,
 ) -> tuple[dict | None, dict | None]:
-    authored_templates = None
-    if captured_config is not None or configured_digest is not None:
-        authored = load_template_config(db, requested_template_id, captured_config=captured_config, expected_digest=configured_digest)
-        authored_templates = {requested_template_id: authored}
-    candidate_template_ids = [
-        str(template_id).strip()
-        for template_id in (requested_template_ids or [])
-        if str(template_id).strip()
-    ]
-    if requested_template_id and requested_template_id not in candidate_template_ids:
-        candidate_template_ids.insert(0, requested_template_id)
-    should_discover = OCR_TEMPLATE_MATCH_ALLOW_DISCOVERY and not candidate_template_ids
-    if not OCR_ENABLE_TEMPLATE_MATCH or (not candidate_template_ids and not should_discover):
+    authored = load_template_config(db, requested_template_id, captured_config=captured_config, expected_digest=configured_digest)
+    authored_templates = {requested_template_id: authored}
+    if requested_template_ids is not None and requested_template_ids != [] and requested_template_ids != [requested_template_id]:
+        raise ValueError("captured_template_selection_required")
+    candidate_template_ids = [requested_template_id]
+    if not OCR_ENABLE_TEMPLATE_MATCH:
         return None, None
     png_bytes = render_pdf_to_png_bytes(pdf_bytes, dpi=OCR_TEMPLATE_MATCH_DPI)
     img_match_bgr, img_ocr_bgr, img_alt_bgr = build_images_for_match_and_ocr(png_bytes)
-    template_ids = candidate_template_ids or None
-    matched_template_id = None
-    warped_match = None
-    warped_ocr = None
-    warped_alt = None
-    diagnostics: dict[str, Any] | None = None
-    classification_mode = "preferred_only" if candidate_template_ids else "discovery"
-    prefer_requested = bool(requested_template_id and candidate_template_ids)
-    if prefer_requested:
-        preferred_id = str(requested_template_id).strip()
-        preferred_match_id, preferred_warped_match, preferred_warped_ocr, preferred_warped_alt, preferred_diagnostics = choose_template_and_warp(
-            db,
-            img_match_bgr,
-            img_ocr_bgr,
-            img_alt_bgr=img_alt_bgr,
-            template_ids=[preferred_id],
-            authored_templates=authored_templates,
-        )
-        if preferred_match_id == preferred_id:
-            matched_template_id = preferred_match_id
-            warped_match = preferred_warped_match
-            warped_ocr = preferred_warped_ocr
-            warped_alt = preferred_warped_alt
-            diagnostics = preferred_diagnostics
-            classification_mode = "preferred_primary"
-    if matched_template_id is None and prefer_requested:
+    preferred_id = str(requested_template_id).strip()
+    preferred_match_id, preferred_warped_match, preferred_warped_ocr, preferred_warped_alt, preferred_diagnostics = choose_template_and_warp(
+        db,
+        img_match_bgr,
+        img_ocr_bgr,
+        img_alt_bgr=img_alt_bgr,
+        template_ids=[preferred_id],
+        authored_templates=authored_templates,
+    )
+    if preferred_match_id != preferred_id:
         raise RuntimeError(f"requested template did not match: {requested_template_id}")
-    if matched_template_id is None:
-        matched_template_id, warped_match, warped_ocr, warped_alt, diagnostics = choose_template_and_warp(
-            db,
-            img_match_bgr,
-            img_ocr_bgr,
-            img_alt_bgr=img_alt_bgr,
-            template_ids=template_ids,
-            authored_templates=authored_templates,
-        )
+    matched_template_id = preferred_match_id
+    warped_match = preferred_warped_match
+    warped_ocr = preferred_warped_ocr
+    warped_alt = preferred_warped_alt
+    diagnostics = preferred_diagnostics
+    classification_mode = "preferred_primary"
     confidence = _classification_score(diagnostics, matched_template_id)
     classification = {
         "requested_template_id": requested_template_id,
