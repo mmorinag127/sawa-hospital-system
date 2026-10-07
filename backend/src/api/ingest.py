@@ -6,7 +6,6 @@ import os
 
 from fastapi import APIRouter, HTTPException, status, Depends, File, Form, UploadFile, Request
 import time
-from sqlalchemy import desc, select
 
 from src.workers.ingest_worker import (
     enqueue_ingest,
@@ -23,7 +22,7 @@ from src.services.manual_upload_service import (
     ManualUploadSavedFile,
     save_uploaded_pdf_pages,
 )
-from src.services.ingest_job_service import create_ingest_job
+from src.services.ingest_job_service import create_ingest_job, get_ingest_job_snapshot
 from src.services.uploaded_pdf_service import (
     build_ingest_payload,
     create_uploaded_pdf_from_upload,
@@ -33,8 +32,6 @@ from src.services.uploaded_pdf_service import (
     list_uploaded_pdfs,
     requeue_uploaded_pdf,
 )
-from src.db import session_scope
-from src.models.order import Order
 from src.workers.ingest_mail_adapter import IngestEmailPayload
 from src.services import order_service, week_candidate_service
 
@@ -129,16 +126,6 @@ def _normalize_required_upload_context(
     return normalized_facility, normalized_week
 
 
-def _find_latest_order_id_by_message_id(message_id: str) -> str | None:
-    with session_scope() as session:
-        rows = session.execute(
-            select(Order.id)
-            .where(Order.message_id == message_id)
-            .order_by(desc(Order.received_at), desc(Order.id))
-        ).scalars().all()
-        return rows[0] if rows else None
-
-
 def _build_upload_existing_order_preview(
     *,
     saved: ManualUploadSavedFile,
@@ -218,12 +205,13 @@ def _handle_uploaded_pdf_bytes(
             force=force_value,
             page_count=saved.total_pages or saved.page_number or 1,
         )
+        payload["uploaded_pdf_id"] = uploaded_pdf["id"]
         job_id, enqueued = create_ingest_job(payload, force=force_value)
         if not duplicate_blocked:
             enqueue_uploaded_pdf_async(uploaded_pdf["id"])
             order_service.invalidate_orders_cache()
-        order_id = _find_latest_order_id_by_message_id(saved.message_id) if enqueued and not duplicate_blocked else None
-        existing_order_id = _find_latest_order_id_by_message_id(saved.message_id) if duplicate_blocked else None
+        order_id = uploaded_pdf["current_order_id"] if enqueued and not duplicate_blocked else None
+        existing_order_id = uploaded_pdf["current_order_id"] if duplicate_blocked else None
         items.append(
             {
                 "accepted": True,
@@ -342,7 +330,12 @@ def list_upload_week_options(month_id: str, facility_id: str | None = None):
 def retry_pending_jobs(limit: int = 10):
     job_ids = list_pending_jobs(limit=limit)
     for job_id in job_ids:
-        enqueue_ingest_job_async(job_id)
+        captured = get_ingest_job_snapshot(job_id)
+        if captured is not None and captured["generation"] and captured["input_digest"]:
+            if captured.get("uploaded_pdf_id") is not None:
+                enqueue_uploaded_pdf_async(captured["uploaded_pdf_id"])
+            else:
+                enqueue_ingest_job_async(job_id, generation=captured["generation"], input_digest=captured["input_digest"])
     return {"accepted": len(job_ids)}
 
 
@@ -358,7 +351,12 @@ def recover_ready(limit: int = 20):
             continue
         seen_ingest.add(normalized)
         ingest_ids.append(normalized)
-        enqueue_ingest_job_async(normalized)
+        captured = get_ingest_job_snapshot(normalized)
+        if captured is not None and captured["generation"] and captured["input_digest"]:
+            if captured.get("uploaded_pdf_id") is not None:
+                enqueue_uploaded_pdf_async(captured["uploaded_pdf_id"])
+            else:
+                enqueue_ingest_job_async(normalized, generation=captured["generation"], input_digest=captured["input_digest"])
 
     uploaded_ids = [
         str(uploaded_pdf_id or "").strip()
@@ -418,5 +416,10 @@ def retry_uploaded_pdf(uploaded_pdf_id: str):
 def reset_stale(limit: int = 100, minutes: int | None = None):
     reset_ids = reset_stale_processing(minutes=minutes, limit=limit)
     for job_id in reset_ids:
-        enqueue_ingest_job_async(job_id)
+        captured = get_ingest_job_snapshot(job_id)
+        if captured is not None and captured["generation"] and captured["input_digest"]:
+            if captured.get("uploaded_pdf_id") is not None:
+                enqueue_uploaded_pdf_async(captured["uploaded_pdf_id"])
+            else:
+                enqueue_ingest_job_async(job_id, generation=captured["generation"], input_digest=captured["input_digest"])
     return {"reset": len(reset_ids)}
