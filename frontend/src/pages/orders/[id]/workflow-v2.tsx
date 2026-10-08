@@ -1346,6 +1346,7 @@ export default function OrderWorkflowV2Page() {
   const quadAliveRef = useRef(false), quadBusyOwnerRef = useRef<number | null>(null);
   const setBusy = (value:string) => { ++busyGenerationRef.current; setBusyState(value); };
   const setSelectedDocumentId = (value:string) => {
+    retireOutput("download"); retireOutput("preview");
     ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current;
     setSelectedDocumentIdState(value);
   };
@@ -1430,6 +1431,61 @@ export default function OrderWorkflowV2Page() {
     && own.context.route===quadContextRef.current.route;
   const ownsPageInput = (own:ReturnType<typeof capturePageOwner>) => ownsPageContext(own)
     && own.inputGeneration===workingInputGenerationRef.current;
+  const outputGenerationsRef = useRef({download:0, preview:0});
+  const outputEditorSignature = () => Object.fromEntries(
+    Object.entries(workflowEditorVersionsRef.current)
+      .filter(([,value]) => value.generation!==0)
+      .map(([key,value]) => [key,value.generation]),
+  );
+  const captureOutputInput = () => ({
+    page:capturePageOwner(),
+    revision:workflowRevisionRef.current ? {...workflowRevisionRef.current} : null,
+    sheetGeneration:sheetEditGenerationRef.current,
+    editors:outputEditorSignature(),
+  });
+  const outputOwnersRef = useRef<Partial<Record<"download"|"preview",ReturnType<typeof captureOutputInput>>>>({});
+  const ownsOutputInput = (own:ReturnType<typeof captureOutputInput>) => ownsPageInput(own.page)
+    && workflow?.order_id===own.page.context.orderId
+    && own.revision!==null && sameRecordedValue(own.revision,workflowRevisionRef.current)
+    && own.sheetGeneration===sheetEditGenerationRef.current
+    && sameRecordedValue(own.editors,outputEditorSignature());
+  const retireOutput = (group:"download"|"preview", updateState=true) => {
+    ++outputGenerationsRef.current[group]; delete outputOwnersRef.current[group];
+    if (!updateState) return;
+    if (group==="download") setDownloadMessage("");
+    else { setOutputPreviewLoading(false); setOutputPreviewMessage(""); setOutputPreview(null); }
+  };
+  const beginOutput = (group:"download"|"preview") => {
+    retireOutput(group);
+    const own=captureOutputInput(), operation=outputGenerationsRef.current[group];
+    if (!ownsOutputInput(own)) return null;
+    outputOwnersRef.current[group]=own;
+    return () => operation===outputGenerationsRef.current[group] && ownsOutputInput(own);
+  };
+  const ownsOutputPopup = (popup:Window|null, original:Document|null) => {
+    try { return !!popup && !popup.closed && original!==null && popup.document===original && popup.location.href==="about:blank"; }
+    catch { return false; }
+  };
+  const captureOutputPopup = (popup:Window|null) => {
+    const original=popup ? popup.document : null;
+    let retired=false;
+    const retire=() => { retired=true; };
+    const events=["beforeunload","pagehide","hashchange","popstate"] as const;
+    events.forEach(event => popup?.addEventListener(event,retire));
+    return {
+      current:() => !retired && ownsOutputPopup(popup,original),
+      release:() => {
+        try { events.forEach(event => popup?.removeEventListener(event,retire)); }
+        catch { /* A navigated popup is no longer ours. */ }
+      },
+    };
+  };
+  useEffect(() => {
+    for (const group of ["download","preview"] as const) {
+      const own=outputOwnersRef.current[group];
+      if (own && !ownsOutputInput(own)) retireOutput(group);
+    }
+  });
   const pdfSourceOwnerRef = useRef<ReturnType<typeof capturePageOwner> | null>(null);
   const pdfUrl = pdfSourceOwnerRef.current && ownsPageContext(pdfSourceOwnerRef.current) ? storedPdfUrl : "";
   const renderedInputGeneration=workingInputGenerationRef.current;
@@ -1462,6 +1518,7 @@ export default function OrderWorkflowV2Page() {
   useEffect(()=>{
     quadAliveRef.current=true;
     const retire = () => {
+      retireOutput("download"); retireOutput("preview");
       ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current;
       quadSourceRef.current=null; setQuadReview(null); setQuadReviewLoading(false);
       setHeaderAxisReview(null); setRowAxisReview(null);
@@ -1472,7 +1529,7 @@ export default function OrderWorkflowV2Page() {
     };
     const unsubscribe=subscribeBrowserSession(retire);
     router.events.on("routeChangeStart",retire);
-    return ()=>{quadAliveRef.current=false; ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current; unsubscribe(); router.events.off("routeChangeStart",retire);};
+    return ()=>{quadAliveRef.current=false; retireOutput("download",false); retireOutput("preview",false); ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current; unsubscribe(); router.events.off("routeChangeStart",retire);};
   },[router.events]);
   useEffect(()=>{
     quadSourceRef.current=null; setQuadReview(null); setQuadReviewMessage(""); setQuadReviewLoading(false);
@@ -1514,6 +1571,7 @@ export default function OrderWorkflowV2Page() {
   };
   const hasDirtyWorkflowEditor = () => Object.values(workflowEditorVersionsRef.current).some((entry) => entry.dirty);
   const beginWorkflowEditorEdit = (editor: string, command = false) => {
+    retireOutput("download"); retireOutput("preview");
     if (!command) ++workingInputGenerationRef.current;
     if (editor==="quad") { ++quadReadGenerationRef.current; setQuadReviewLoading(false); }
     const current = editorVersion(editor);
@@ -1535,6 +1593,9 @@ export default function OrderWorkflowV2Page() {
     workflowJobRef.current={orderId:next.order_id,jobId:next.ocr_job?.ocr_job_id ?? null,attemptId:next.ocr_job?.workflow_attempt_id ?? null,state:next.state};
     setWorkflow(next);
     const token = workflowRevisionTokenFromRead(next);
+    if (!sameRecordedValue(token,workflowRevisionRef.current)) {
+      retireOutput("download"); retireOutput("preview");
+    }
     if (token) {
       workflowRevisionRef.current = token;
       return;
@@ -3348,6 +3409,9 @@ export default function OrderWorkflowV2Page() {
             return;
           }
           sheetEditor.baseRevision = completionRevision;
+          if (!sameRecordedValue(workflowRevisionRef.current,{revision:completionRevision,bootstrap:false})) {
+            retireOutput("download"); retireOutput("preview");
+          }
           workflowRevisionRef.current = { revision: completionRevision, bootstrap: false };
         }
         if (job?.status === "done") {
@@ -3690,10 +3754,13 @@ export default function OrderWorkflowV2Page() {
   };
 
   const openOutput = async (path: string, label: string) => {
+    const current=beginOutput("download");
+    if (!current) return;
     const timestamp = new Date().toLocaleString("ja-JP");
     setDownloadMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
     try {
       const res = await apiClient.get(path, { responseType: "blob" });
+      if (!current()) return;
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
       const filename = extractFilename(contentDisposition) || "output";
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
@@ -3706,8 +3773,9 @@ export default function OrderWorkflowV2Page() {
       link.click();
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      setDownloadMessage(`${label}をダウンロードしました。 (${timestamp})`);
+      if (current()) setDownloadMessage(`${label}をダウンロードしました。 (${timestamp})`);
     } catch (err: any) {
+      if (!current()) return;
       const status = err?.response?.status;
       const suffix = status ? ` (${status})` : "";
       setDownloadMessage(`${label}のダウンロードに失敗しました。${suffix}`);
@@ -3715,23 +3783,32 @@ export default function OrderWorkflowV2Page() {
   };
 
   const openHtmlOutput = async (path: string, label: string) => {
+    const current=beginOutput("download");
+    if (!current) return;
     const timestamp = new Date().toLocaleString("ja-JP");
     setDownloadMessage(`${label}を開きます。 (${timestamp})`);
+    let win:Window|null=null, popupOwner:ReturnType<typeof captureOutputPopup>|null=null;
     try {
+      win=window.open("", "_blank");
+      popupOwner=captureOutputPopup(win);
       const res = await apiClient.get(path, { responseType: "text", timeout: 0 });
-      const win = window.open("", "_blank");
+      if (!current()) return;
       if (!win) {
         setDownloadMessage("ブラウザで新しいタブを許可してください。");
         return;
       }
+      if (!popupOwner.current()) return;
       win.document.open();
       win.document.write(String(res.data || ""));
       win.document.close();
-      setDownloadMessage(`${label}を別タブで開きました。`);
+      if (current()) setDownloadMessage(`${label}を別タブで開きました。`);
     } catch (err: any) {
+      if (!current()) return;
       const status = err?.response?.status;
       const suffix = status ? ` (${status})` : "";
       setDownloadMessage(`${label}を開けませんでした。${suffix}`);
+    } finally {
+      popupOwner?.release();
     }
   };
 
@@ -3744,10 +3821,13 @@ export default function OrderWorkflowV2Page() {
 
   const loadOutputPreview = async (type: OutputPreviewType) => {
     if (!orderId) return;
+    const current=beginOutput("preview");
+    if (!current) return;
     setOutputPreviewLoading(true);
     setOutputPreview(null);
     setOutputPreviewMessage("プレビューを開いています...");
     let popup: Window | null = null;
+    let popupOwner:ReturnType<typeof captureOutputPopup>|null=null;
     const escapeHtml = (value: string) => value
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
@@ -3755,7 +3835,7 @@ export default function OrderWorkflowV2Page() {
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
     const writePopupMessage = (title: string, message: string) => {
-      if (!popup) return;
+      if (!current() || !popupOwner?.current() || !popup) return;
       const safeTitle = escapeHtml(title);
       const safeMessage = escapeHtml(message);
       popup.document.open();
@@ -3779,11 +3859,12 @@ export default function OrderWorkflowV2Page() {
 </body>
 </html>`);
       popup.document.close();
-      popup.focus();
+      if (current() && popupOwner.current()) popup.focus();
     };
     try {
       popup = window.open("", "_blank", "popup=yes,width=1180,height=840");
-      if (popup) {
+      popupOwner=captureOutputPopup(popup);
+      if (popup && popupOwner.current()) {
         popup.document.title = `${outputPreviewLabels[type]} プレビュー`;
         popup.document.body.innerHTML = "<p>プレビューを読み込み中...</p>";
       }
@@ -3791,12 +3872,14 @@ export default function OrderWorkflowV2Page() {
         params: { order_id: orderId, type },
         responseType: "text",
       });
+      if (!current()) return;
       if (popup) {
+        if (!popupOwner.current()) return;
         popup.document.open();
         popup.document.write(String(res.data || ""));
         popup.document.close();
-        popup.focus();
-        setOutputPreviewMessage("");
+        if (current() && popupOwner.current()) popup.focus();
+        if (current()) setOutputPreviewMessage("");
       } else {
         const blob = new Blob([String(res.data || "")], { type: "text/html;charset=utf-8" });
         const url = URL.createObjectURL(blob);
@@ -3808,25 +3891,32 @@ export default function OrderWorkflowV2Page() {
         link.click();
         link.remove();
         window.setTimeout(() => URL.revokeObjectURL(url), 10000);
-        setOutputPreviewMessage("");
+        if (current()) setOutputPreviewMessage("");
       }
     } catch (err: any) {
+      if (!current()) return;
       const status = err?.response?.status;
-      let detail = err?.response?.data?.detail || "";
-      if (!detail && typeof err?.response?.data === "string") {
+      let data=err?.response?.data;
+      if (data instanceof Blob) {
+        try { data=await data.text(); } catch { data=""; }
+        if (!current()) return;
+      }
+      let detail = data?.detail || "";
+      if (!detail && typeof data === "string") {
         try {
-          detail = JSON.parse(err.response.data)?.detail || err.response.data;
+          detail = JSON.parse(data)?.detail || data;
         } catch {
-          detail = err.response.data;
+          detail = data;
         }
       }
       detail = detail || err?.message || "";
       const suffix = status ? ` (${status})` : "";
       const message = `${outputPreviewLabels[type]}のプレビュー取得に失敗しました。${suffix}${detail ? `\n${detail}` : ""}`;
       writePopupMessage(`${outputPreviewLabels[type]} プレビュー`, message);
-      setOutputPreviewMessage(message);
+      if (current()) setOutputPreviewMessage(message);
     } finally {
-      setOutputPreviewLoading(false);
+      popupOwner?.release();
+      if (current()) setOutputPreviewLoading(false);
     }
   };
 
