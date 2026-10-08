@@ -681,24 +681,6 @@ def persist_evidence_run(
     return created
 
 
-def backfill_evidence_run_from_cached_payload(
-    order_id: str,
-    payload: dict[str, Any],
-    *,
-    schema_version: str = "v1_legacy",
-    producer_version: str | None = None,
-    source: str | None = None,
-) -> dict[str, Any] | None:
-    return persist_evidence_run(
-        order_id,
-        payload,
-        schema_version=schema_version,
-        producer_version=producer_version or "legacy-cache-backfill/v1",
-        status=str(payload.get("status") or "ready").strip() or "ready",
-        source=source or "legacy-cache-backfill",
-    )
-
-
 def get_latest_evidence_run(order_id: str) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:

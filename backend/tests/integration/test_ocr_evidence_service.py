@@ -426,12 +426,18 @@ def test_legacy_cache_backfill_option_is_disabled(registration_only_order):
 
 
 def test_legacy_ocr_output_fallback_options_are_disabled(registration_only_order):
+    import inspect
+
+    parameters = inspect.signature(order_service.get_ocr_output).parameters
+    assert "allow_legacy_fallback" not in parameters
+    assert all(parameter.kind != inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
     order_service.clear_all()
     order = registration_only_order("msg-ocr-output-fallback-disabled")
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("6")))
 
-    with pytest.raises(order_service.LegacyOcrEvidenceFallbackDisabledError):
+    with pytest.raises(TypeError, match=r"^get_ocr_output\(\) got an unexpected keyword argument 'allow_legacy_fallback'$"):
         order_service.get_ocr_output(order["id"], allow_legacy_fallback=True)
     with pytest.raises(order_service.LegacyOcrEvidenceFallbackDisabledError):
         order_service.get_ocr_output(order["id"], allow_job_reconcile=True)
