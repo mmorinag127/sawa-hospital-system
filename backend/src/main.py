@@ -13,6 +13,7 @@ from src.api import (
     menu_rules,
     facilities,
     outputs,
+    output_history,
     worker,
     facility_master,
     ocr_registry,
@@ -61,6 +62,7 @@ app.include_router(menu_masters.router, prefix="")
 app.include_router(menu_rules.router, prefix="/menu-rules")
 app.include_router(facilities.router, prefix="/facilities")
 app.include_router(outputs.router, prefix="/outputs")
+app.include_router(output_history.router, prefix="/outputs")
 app.include_router(shipping.router, prefix="")
 app.include_router(order_forms.router, prefix="")
 app.include_router(totals.router, prefix="")

@@ -8,6 +8,7 @@ import Link from "next/link";
 import { apiClient, hasActiveSessionAuthHeader } from "../../../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
 import TopNav from "../../../components/TopNav";
+import OutputHistoryPanel from "../../../components/OutputHistoryPanel";
 import {
   deriveWeekValueFromCalendarRange,
   formatWeekLabel,
@@ -5786,6 +5787,14 @@ export default function OrderWorkflowV2Page() {
         </section>
         ) : null}
       </section>
+
+      {typeof workflow?.output_bundle_id === "string" && workflow.output_bundle_id.trim()
+        && workflow.output_bundle_id === workflow.output_bundle_id.trim()
+        && isPositiveWorkflowRevision(workflowRevisionRef.current?.revision) ? <OutputHistoryPanel orderId={orderId} documentId={effectiveSelectedDocumentId}
+        workflowRevision={workflowRevisionRef.current?.revision ?? null} route={router.asPath}
+        currentOutputBundleId={workflow?.output_bundle_id ?? null}
+        inputKey={[quadContextGenerationRef.current, workingInputGenerationRef.current, sheetEditGenerationRef.current, outputEditorSignature()]}
+        captureOwner={() => { const own=captureOutputInput(); return () => ownsOutputInput(own); }} /> : null}
 
       <section className="panel">
         <p className="step-tag">Read Only Inspection</p>

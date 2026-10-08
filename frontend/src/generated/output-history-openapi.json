@@ -1,0 +1,190 @@
+{
+  "components": {
+    "schemas": {
+      "OutputHistoryEntry": {
+        "properties": {
+          "blocked_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked Reasons",
+            "type": "array"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "order_id": {
+            "title": "Order Id",
+            "type": "string"
+          },
+          "output_bundle_id": {
+            "title": "Output Bundle Id",
+            "type": "string"
+          },
+          "source_bagging_result_id": {
+            "title": "Source Bagging Result Id",
+            "type": "string"
+          },
+          "source_saved_sheet_id": {
+            "title": "Source Saved Sheet Id",
+            "type": "string"
+          },
+          "template_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Version Id"
+          },
+          "validation": {
+            "enum": [
+              "validated",
+              "blocked"
+            ],
+            "title": "Validation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "output_bundle_id",
+          "order_id",
+          "source_saved_sheet_id",
+          "source_bagging_result_id",
+          "template_version_id",
+          "created_at",
+          "current",
+          "validation",
+          "blocked_reasons"
+        ],
+        "title": "OutputHistoryEntry",
+        "type": "object"
+      },
+      "OutputHistoryResponse": {
+        "properties": {
+          "current_output_bundle_id": {
+            "title": "Current Output Bundle Id",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/OutputHistoryEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "order_id": {
+            "title": "Order Id",
+            "type": "string"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "workflow_revision": {
+            "title": "Workflow Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "order_id",
+          "workflow_revision",
+          "current_output_bundle_id",
+          "page",
+          "limit",
+          "total",
+          "entries"
+        ],
+        "title": "OutputHistoryResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Registered Output Generation History",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/outputs/history": {
+      "get": {
+        "operationId": "get_output_history",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_workflow_revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": true,
+            "schema": {
+              "maximum": 100000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": true,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutputHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    }
+  }
+}

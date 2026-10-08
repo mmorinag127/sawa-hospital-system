@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
+    "generate:output-history-api": "python3 ../scripts/export_output_history_openapi.py --output src/generated/output-history-openapi.json && openapi-typescript src/generated/output-history-openapi.json -o src/generated/output-history-api.ts",
     "generate:facility-version-api": "python3 ../scripts/export_facility_version_openapi.py --output src/generated/facility-version-openapi.json && openapi-typescript src/generated/facility-version-openapi.json -o src/generated/facility-version-api.ts",
     "generate:base-menu-api": "python3 ../scripts/export_base_menu_openapi.py --output src/generated/base-menu-openapi.json && openapi-typescript src/generated/base-menu-openapi.json -o src/generated/base-menu-api.ts",
     "check:base-menu-api": "python3 ../scripts/export_base_menu_openapi.py --check --output src/generated/base-menu-openapi.json && openapi-typescript src/generated/base-menu-openapi.json -o src/generated/base-menu-api.ts --check",
