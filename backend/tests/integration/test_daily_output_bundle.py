@@ -1098,7 +1098,7 @@ def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_pat
     monkeypatch.setattr(
         output_builder,
         "_build_delivery_rows",
-        lambda order, template, quantity_rules, facility_config, menu_meta: [
+        lambda order, template, quantity_rules, facility_config, menu_meta, *, allow_ocr_menu_meta: [
             {
                 "date": TARGET_DATE,
                 "daypart": "朝",
@@ -1168,7 +1168,7 @@ def test_build_daily_output_bundle_empty_orders_are_not_errors(tmp_path, monkeyp
     monkeypatch.setattr(
         output_builder,
         "_build_delivery_rows",
-        lambda order, template, quantity_rules, facility_config, menu_meta: [
+        lambda order, template, quantity_rules, facility_config, menu_meta, *, allow_ocr_menu_meta: [
             {
                 "date": TARGET_DATE,
                 "daypart": "朝",
@@ -1312,7 +1312,7 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
     monkeypatch.setattr(
         output_builder,
         "_prepare_output_context",
-        lambda order_id: _make_context(order_id, "FAC001", "そよかぜ", "献立A"),
+        lambda order_id, *, include_bags, include_ocr_menu_meta, include_expanded_copy, timings, require_invoice: _make_context(order_id, "FAC001", "そよかぜ", "献立A"),
     )
     monkeypatch.setattr(
         output_builder,
@@ -1326,7 +1326,7 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
     monkeypatch.setattr(
         output_builder,
         "_build_delivery_rows",
-        lambda order, template, quantity_rules, facility_config, menu_meta: [
+        lambda order, template, quantity_rules, facility_config, menu_meta, *, allow_ocr_menu_meta: [
             {
                 "date": TARGET_DATE,
                 "daypart": "朝",
@@ -1640,7 +1640,7 @@ def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path,
     monkeypatch.setattr(
         output_builder,
         "_prepare_output_context",
-        lambda order_id: _make_context(order_id, "FAC001", "そよかぜ", "献立A"),
+        lambda order_id, *, include_bags, include_ocr_menu_meta, include_expanded_copy, timings, require_invoice: _make_context(order_id, "FAC001", "そよかぜ", "献立A"),
     )
     monkeypatch.setattr(
         output_builder,
