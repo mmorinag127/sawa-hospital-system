@@ -1,0 +1,476 @@
+{
+  "components": {
+    "schemas": {
+      "DatedFacilityResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "effective_date": {
+            "title": "Effective Date",
+            "type": "string"
+          },
+          "facility": {
+            "additionalProperties": true,
+            "title": "Facility",
+            "type": "object"
+          },
+          "facility_id": {
+            "title": "Facility Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "const": "canonical_json",
+            "title": "Source",
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/FacilityVersion"
+          }
+        },
+        "required": [
+          "facility_id",
+          "effective_date",
+          "version",
+          "facility",
+          "config",
+          "revision",
+          "source"
+        ],
+        "title": "DatedFacilityResponse",
+        "type": "object"
+      },
+      "FacilityVersion": {
+        "additionalProperties": true,
+        "properties": {
+          "facility": {
+            "additionalProperties": true,
+            "title": "Facility",
+            "type": "object"
+          },
+          "valid_from": {
+            "title": "Valid From",
+            "type": "string"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "valid_from",
+          "valid_to",
+          "facility"
+        ],
+        "title": "FacilityVersion",
+        "type": "object"
+      },
+      "FacilityVersionProjection": {
+        "additionalProperties": true,
+        "properties": {
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "scope": {
+            "const": "unversioned_reference_only",
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "synced",
+              "reconcile_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "revision",
+          "scope"
+        ],
+        "title": "FacilityVersionProjection",
+        "type": "object"
+      },
+      "FacilityVersionSaveResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "facility_id": {
+            "title": "Facility Id",
+            "type": "string"
+          },
+          "projection": {
+            "$ref": "#/components/schemas/FacilityVersionProjection"
+          },
+          "reference": {
+            "additionalProperties": true,
+            "title": "Reference",
+            "type": "object"
+          },
+          "reference_status": {
+            "const": "unversioned_reference_only",
+            "title": "Reference Status",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "const": "canonical_json",
+            "title": "Source",
+            "type": "string"
+          },
+          "updated": {
+            "const": true,
+            "title": "Updated",
+            "type": "boolean"
+          },
+          "version": {
+            "$ref": "#/components/schemas/FacilityVersion"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/FacilityVersion"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "facility_id",
+          "versions",
+          "reference",
+          "reference_status",
+          "revision",
+          "source",
+          "version",
+          "updated",
+          "projection"
+        ],
+        "title": "FacilityVersionSaveResponse",
+        "type": "object"
+      },
+      "FacilityVersionsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "facility_id": {
+            "title": "Facility Id",
+            "type": "string"
+          },
+          "reference": {
+            "additionalProperties": true,
+            "title": "Reference",
+            "type": "object"
+          },
+          "reference_status": {
+            "const": "unversioned_reference_only",
+            "title": "Reference Status",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "const": "canonical_json",
+            "title": "Source",
+            "type": "string"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/FacilityVersion"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "facility_id",
+          "versions",
+          "reference",
+          "reference_status",
+          "revision",
+          "source"
+        ],
+        "title": "FacilityVersionsResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Registered Facility Version API Contract",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/facilities/{facility_id}/resolved": {
+      "get": {
+        "operationId": "resolve_dated_facility",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "facility_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "effective_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatedFacilityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/facilities/{facility_id}/versions": {
+      "get": {
+        "operationId": "get_facility_versions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "facility_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FacilityVersionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_facility_version",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "facility_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "properties": {
+                  "expected_revision": {
+                    "title": "Expected Revision",
+                    "type": "string"
+                  },
+                  "version": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "facility": {
+                        "additionalProperties": true,
+                        "title": "Facility",
+                        "type": "object"
+                      },
+                      "valid_from": {
+                        "title": "Valid From",
+                        "type": "string"
+                      },
+                      "valid_to": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Valid To"
+                      },
+                      "version_id": {
+                        "title": "Version Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "version_id",
+                      "valid_from",
+                      "valid_to",
+                      "facility"
+                    ],
+                    "title": "FacilityVersion",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "version",
+                  "expected_revision"
+                ],
+                "title": "FacilityVersionWrite",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FacilityVersionSaveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/facilities/{facility_id}/versions/{version_id}": {
+      "put": {
+        "operationId": "update_facility_version",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "facility_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "properties": {
+                  "expected_revision": {
+                    "title": "Expected Revision",
+                    "type": "string"
+                  },
+                  "version": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "facility": {
+                        "additionalProperties": true,
+                        "title": "Facility",
+                        "type": "object"
+                      },
+                      "valid_from": {
+                        "title": "Valid From",
+                        "type": "string"
+                      },
+                      "valid_to": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Valid To"
+                      },
+                      "version_id": {
+                        "title": "Version Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "version_id",
+                      "valid_from",
+                      "valid_to",
+                      "facility"
+                    ],
+                    "title": "FacilityVersion",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "version",
+                  "expected_revision"
+                ],
+                "title": "FacilityVersionWrite",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FacilityVersionSaveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    }
+  }
+}

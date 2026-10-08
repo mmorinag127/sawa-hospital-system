@@ -1,36 +1,14 @@
 import { apiClient } from "./apiClient";
+import type { components } from "../generated/facility-version-api";
 
 export type FacilityNameMap = Record<string, string>;
 
-export type CanonicalFacilityVersion = {
-  [key: string]: unknown;
-  version_id: string;
-  valid_from: string;
-  valid_to: string | null;
-  facility: Record<string, unknown>;
-};
+export type CanonicalFacilityVersion = components["schemas"]["FacilityVersion"];
 
-export type CanonicalFacilityVersions = {
-  facility_id: string;
-  versions: CanonicalFacilityVersion[];
-  reference: Record<string, unknown>;
-  reference_status: "unversioned_reference_only";
-  revision: string;
-  source: "canonical_json";
-  version?: CanonicalFacilityVersion;
-  updated?: boolean;
-  projection?: { status: "synced" | "reconcile_required"; revision: string };
-};
+export type CanonicalFacilityVersions = components["schemas"]["FacilityVersionsResponse"]
+  & Partial<Pick<components["schemas"]["FacilityVersionSaveResponse"], "version" | "updated" | "projection">>;
 
-export type CanonicalDatedFacility = {
-  facility_id: string;
-  effective_date: string;
-  version: CanonicalFacilityVersion;
-  facility: Record<string, unknown>;
-  config: Record<string, unknown>;
-  revision: string;
-  source: "canonical_json";
-};
+export type CanonicalDatedFacility = components["schemas"]["DatedFacilityResponse"];
 
 export const requireDatedFacility = (data: CanonicalDatedFacility, target: string, effectiveDate: string): string => {
   const revision = requireCanonicalRevision(data);

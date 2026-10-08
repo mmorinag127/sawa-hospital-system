@@ -19,33 +19,39 @@ from src.api.auth import require_role
 from src.api.facility_master import canonical_errors
 from src.services.storage_service import get_default_output_bucket
 from src.services.canonical_facility_store import check_revision
+from src.api.facility_version_contract import (
+    DatedFacilityResponse,
+    FacilityVersionBody,
+    FacilityVersionSaveResponse,
+    FacilityVersionsResponse,
+)
 
 router = APIRouter()
 
 
-@router.get("/{facility_id}/resolved", dependencies=[Depends(require_role("operator"))])
+@router.get("/{facility_id}/resolved", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": DatedFacilityResponse}})
 def resolve_dated_facility(facility_id: str, effective_date: str | None = None):
     with canonical_errors():
         return config_service.get_facility_config_for_date(facility_id, effective_date)
 
 
-@router.get("/{facility_id}/versions", dependencies=[Depends(require_role("operator"))])
+@router.get("/{facility_id}/versions", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": FacilityVersionsResponse}})
 def get_facility_versions(facility_id: str):
     with canonical_errors():
         snapshot = facility_master_service.get_snapshot()
         return facility_service.versions_response(snapshot.master, facility_id, snapshot.revision)
 
 
-@router.post("/{facility_id}/versions", dependencies=[Depends(require_role("operator"))])
-def create_facility_version(facility_id: str, body: dict):
+@router.post("/{facility_id}/versions", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": FacilityVersionSaveResponse}})
+def create_facility_version(facility_id: str, body: FacilityVersionBody):
     with canonical_errors():
         version = body.get("version")
         return facility_service.save_facility_version(facility_id, version.get("version_id") if isinstance(version, dict) else None,
                                                      version, expected_revision=body.get("expected_revision"), create=True)
 
 
-@router.put("/{facility_id}/versions/{version_id}", dependencies=[Depends(require_role("operator"))])
-def update_facility_version(facility_id: str, version_id: str, body: dict):
+@router.put("/{facility_id}/versions/{version_id}", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": FacilityVersionSaveResponse}})
+def update_facility_version(facility_id: str, version_id: str, body: FacilityVersionBody):
     with canonical_errors():
         return facility_service.save_facility_version(facility_id, version_id, body.get("version"),
                                                      expected_revision=body.get("expected_revision"), create=False)
