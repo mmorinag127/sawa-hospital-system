@@ -4021,7 +4021,7 @@ def _build_delivery_rows(
         raise ValueError("accepted OCR menu receipt missing")
     entries = menu_meta.get("entries") if isinstance(menu_meta, dict) else None
     entry_defaults = menu_meta.get("entry_defaults") if isinstance(menu_meta, dict) else {}
-    if isinstance(entries, list) and not isinstance(entry_defaults, dict):
+    if isinstance(menu_meta, dict) and not isinstance(entry_defaults, dict):
         raise ValueError("accepted OCR menu defaults receipt missing")
     rows: dict[tuple, dict] = {}
     aggregate_started = time.perf_counter()
