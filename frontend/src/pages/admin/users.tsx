@@ -1,11 +1,14 @@
-import { Button, Input, NativeSelect, Checkbox } from "@mui/material";
-import { ThemeProvider } from "@mui/material/styles";
-import { sawaTheme } from "@sawa/ui";
-import { useCallback, useEffect, useState } from "react";
+import { Button, MenuItem, Checkbox } from "@mui/material";
+import { DataTable, EditForm, FormTextField, SawaProvider } from "@sawa/ui";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Controller, useFormContext } from "react-hook-form";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 
-import { useCurrentUserRole } from "../../hooks/useCurrentUserRole";
-import { apiClient } from "../../services/apiClient";
+import { refreshCurrentUserRole, useCurrentUserRole } from "../../hooks/useCurrentUserRole";
+import { useH1LeaveGuard } from "../../hooks/useH1LeaveGuard";
+import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
 
 type UserRole = "admin" | "operator";
 type UserStatus = "active" | "inactive";
@@ -16,7 +19,7 @@ type User = {
   account: string;
   role: UserRole;
   status: UserStatus;
-  systems: SystemKey[];
+  systems: string[];
 };
 
 type Notice = {
@@ -37,114 +40,167 @@ const systemLabels: Record<SystemKey, string> = {
   shift: "シフト管理",
   "school-lunch": "学校給食",
 };
+const isKnownSystem = (key: string): key is SystemKey => Object.prototype.hasOwnProperty.call(systemLabels, key);
 
 const errorMessage = (error: unknown, fallback: string) => {
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   return typeof detail === "string" && detail.trim() ? `${fallback}: ${detail}` : fallback;
 };
 
-export default function CommonUsersPage() {
+const identity = (value: unknown): value is string => typeof value === "string" && !!value.trim() && value === value.trim();
+const validUser = (value: unknown): value is User => {
+  const user = value as User | null;
+  return !!user && identity(user.id) && typeof user.account === "string" && !!user.account.trim()
+    && ["admin", "operator"].includes(user.role) && ["active", "inactive"].includes(user.status)
+    && Array.isArray(user.systems) && user.systems.every(identity) && new Set(user.systems).size === user.systems.length;
+};
+const editorPaths = ["/admin/users", "/hospital/admin/users"];
+class UsersReadError extends Error {
+  constructor(message: string, readonly current: () => boolean) { super(message); }
+}
+
+function UserFields() {
+  const emailField = useRef<HTMLDivElement | null>(null);
+  const { control } = useFormContext<User>();
+  return <>
+    <div ref={emailField}><FormTextField<User> name="account" label="メールアドレス" type="email" required autoComplete="email"
+      placeholder="user@example.com"
+      rules={{ validate: () => {
+        const input = emailField.current?.querySelector<HTMLInputElement>('input[name="account"]');
+        if (!input) return "メールアドレスの入力を確認できません。";
+        const valid = input.checkValidity();
+        if (!valid) input.reportValidity();
+        return valid || input.validationMessage;
+      } }} /></div>
+    <FormTextField<User> name="role" label="権限" select>
+      <MenuItem value="operator">一般利用者</MenuItem><MenuItem value="admin">管理者</MenuItem>
+    </FormTextField>
+    <FormTextField<User> name="status" label="アカウント状態" select>
+      <MenuItem value="active">有効</MenuItem><MenuItem value="inactive">停止</MenuItem>
+    </FormTextField>
+    <Controller name="systems" control={control} render={({ field }) => <fieldset className="admin-system-access sawa-field--wide">
+      <legend>利用できるシステム</legend><div className="admin-system-access__options">
+        {(Object.keys(systemLabels) as SystemKey[]).map(key => <label key={key}>
+          <Checkbox className="admin-ordinary-control" checked={field.value.includes(key)} onChange={() => field.onChange(
+            field.value.includes(key) ? field.value.filter(system => system !== key) : [...field.value, key])} />
+          <span>{systemLabels[key]}</span>
+        </label>)}
+        {field.value.filter(key => !isKnownSystem(key)).map(key => <span key={key}>現在の利用システム: {key}</span>)}
+      </div>
+    </fieldset>} />
+  </>;
+}
+
+function UsersContent({ session }: { session: string }) {
   const { isAdmin, loading: roleLoading } = useCurrentUserRole();
-  const [items, setItems] = useState<User[]>([]);
   const [editing, setEditing] = useState<User | null>(null);
-  const [listLoading, setListLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [editorEpoch, setEditorEpoch] = useState(0);
+  const [dirty, setDirty] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
-
-  const loadUsers = useCallback(async () => {
-    setListLoading(true);
-    try {
-      const response = await apiClient.get<{ items?: User[] }>("/portal/users");
-      setItems(Array.isArray(response.data.items) ? response.data.items : []);
-      return true;
-    } catch (error) {
-      setNotice({ kind: "error", text: errorMessage(error, "ユーザー一覧を取得できませんでした") });
-      return false;
-    } finally {
-      setListLoading(false);
-    }
-  }, []);
-
+  const [page, setPage] = useState(0), [pageSize, setPageSize] = useState(25);
+  const mounted = useRef(true), editorGeneration = useRef(0), inputGeneration = useRef(0), operation = useRef(0), readGeneration = useRef(0);
+  const admin = useRef(isAdmin), dirtyRef = useRef(dirty), snapshot = useRef("");
+  const sortAfterSave = useRef(false);
+  const formLease = useRef<(() => boolean) | null>(null);
+  if (admin.current !== isAdmin) { ++operation.current; ++readGeneration.current; }
+  admin.current = isAdmin; dirtyRef.current = dirty;
+  const client = useQueryClient();
+  const queryKey = ["portal-users", session];
+  const currentSession = () => mounted.current && admin.current && session === browserSessionKey() && hasActiveSessionAuthHeader();
+  useH1LeaveGuard(dirty, editorPaths);
   useEffect(() => {
-    if (roleLoading || !isAdmin) return;
-    void loadUsers();
-  }, [isAdmin, loadUsers, roleLoading]);
-
-  const save = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!editing || saving) return;
-
-    setSaving(true);
+    mounted.current = true;
+    return () => { mounted.current = false; ++editorGeneration.current; ++operation.current; ++readGeneration.current; };
+  }, []);
+  const users = useQuery({
+    queryKey, enabled: !roleLoading && isAdmin, retry: false, staleTime: 0, refetchOnWindowFocus: false,
+    queryFn: async ({ signal }) => {
+      const generation = ++readGeneration.current;
+      const editor = editorGeneration.current;
+      const current = () => currentSession() && !signal.aborted && generation === readGeneration.current;
+      try {
+        const response = await apiClient.get<{ items: unknown }>("/portal/users", { signal });
+        if (!current() || editor !== editorGeneration.current) throw new Error("ユーザー一覧の読み込みは取り消されました。");
+        if (!Array.isArray(response.data?.items) || !response.data.items.every(validUser)
+          || new Set(response.data.items.map(user => user.id)).size !== response.data.items.length) throw new Error("ユーザー一覧の取得値を確認できません。");
+        const items = sortAfterSave.current ? [...response.data.items].sort((left, right) => left.account.localeCompare(right.account, "ja")) : response.data.items;
+        // Previously adopted rows remain visible while a fresh read is pending.
+        return { items, current: currentSession };
+      } catch (error) {
+        throw new UsersReadError(errorMessage(error, "ユーザー一覧を取得できませんでした"), () => current() && editor === editorGeneration.current);
+      }
+    },
+  });
+  const items = users.data?.current() && isAdmin ? users.data.items : [];
+  const listLoading = users.isFetching;
+  const chooseEditor = (user: User | null) => {
+    if (dirtyRef.current && !window.confirm("未保存の変更を破棄しますか？")) return;
+    ++editorGeneration.current; ++operation.current; ++inputGeneration.current;
+    snapshot.current = ""; dirtyRef.current = false; setDirty(false);
+    setEditorEpoch(epoch => epoch + 1);
+    setEditing(user ? { ...user, systems: [...user.systems] } : null); setNotice(null);
+    void client.cancelQueries({ queryKey }).then(() => {
+      if (currentSession()) void client.invalidateQueries({ queryKey });
+    });
+  };
+  const beginOperation = () => {
+    const editor = editorGeneration.current, input = inputGeneration.current, id = ++operation.current;
+    return () => currentSession() && editor === editorGeneration.current && input === inputGeneration.current && id === operation.current;
+  };
+  const save = async (values: User) => {
+    const own = formLease.current;
+    if (!own?.() || !editing || values.id !== editing.id) throw new Error("編集対象を確認できません。");
+    if (values.systems.some(key => !isKnownSystem(key))) throw new Error("利用システムの現在値を確認してください。未対応の値は破棄せず保存を停止しました。");
+    ++readGeneration.current;
+    await client.cancelQueries({ queryKey });
+    if (!own()) throw new Error("ユーザー保存は取り消されました。");
     setNotice(null);
     const body = {
-      account: editing.account,
-      role: editing.role,
-      status: editing.status,
-      systems: editing.systems,
+      account: values.account, role: values.role, status: values.status, systems: values.systems,
     };
-
     try {
-      const response = editing.id
-        ? await apiClient.put<{ user: User }>(`/portal/users/${editing.id}`, body)
+      const response = values.id
+        ? await apiClient.put<{ user: User }>(`/portal/users/${values.id}`, body)
         : await apiClient.post<{ user: User }>("/portal/users", body);
+      // Every completed permission write refreshes actual authority, even if its editor was retired.
+      const refreshRole = () => session === browserSessionKey() ? refreshCurrentUserRole() : Promise.resolve();
+      if (!own()) { void refreshRole(); throw new Error("ユーザー保存の編集対象が変更されました。"); }
       const saved = response.data.user;
-      setItems((current) => {
-        const exists = current.some((item) => item.id === saved.id);
-        const next = exists
-          ? current.map((item) => (item.id === saved.id ? saved : item))
-          : [...current, saved];
-        return next.sort((left, right) => left.account.localeCompare(right.account, "ja"));
-      });
-      setEditing(null);
+      if (!validUser(saved) || (values.id && saved.id !== values.id)) { void refreshRole(); throw new Error("保存されたユーザーの対象・値を確認できません。"); }
+      sortAfterSave.current = true;
+      ++readGeneration.current;
+      const next = items.some(item => item.id === saved.id) ? items.map(item => item.id === saved.id ? saved : item) : [...items, saved];
+      client.setQueryData(queryKey, { items: next.sort((left, right) => left.account.localeCompare(right.account, "ja")),
+        current: currentSession });
+      dirtyRef.current = false; setDirty(false); setEditing(null); ++editorGeneration.current;
       setNotice({ kind: "success", text: `${saved.account} を保存しました。` });
+      void client.invalidateQueries({ queryKey });
+      void refreshRole();
+      return saved;
     } catch (error) {
-      setNotice({ kind: "error", text: errorMessage(error, "ユーザーを保存できませんでした") });
-    } finally {
-      setSaving(false);
+      if (own()) {
+        setNotice({ kind: "error", text: errorMessage(error, "ユーザーを保存できませんでした") });
+        void client.invalidateQueries({ queryKey });
+      }
+      throw error;
     }
   };
 
-  const toggle = (key: SystemKey) => {
-    setEditing((current) =>
-      current
-        ? {
-            ...current,
-            systems: current.systems.includes(key)
-              ? current.systems.filter((system) => system !== key)
-              : [...current.systems, key],
-          }
-        : current,
-    );
-  };
-
-  if (roleLoading) {
-    return (
-      <main className="sawa-page" aria-busy="true">
-        <div className="sawa-notice">管理者権限を確認しています。</div>
-      </main>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <main className="sawa-page">
-        <Link className="sawa-page__back" href="/">← システム選択へ戻る</Link>
-        <section className="sawa-card" aria-labelledby="access-denied-title">
-          <div className="sawa-card__body">
-            <p className="sawa-page__eyebrow">Administrator only</p>
-            <h1 className="sawa-page__title" id="access-denied-title">管理者権限が必要です</h1>
-            <p className="sawa-page__description">
-              ユーザー一覧と権限設定は管理者だけが確認できます。管理者アカウントでログインしてください。
-            </p>
-          </div>
-        </section>
-      </main>
-    );
-  }
-
   return (
-    <ThemeProvider theme={sawaTheme}>
     <main className="sawa-page admin-users-page">
+      {roleLoading ? <p className="sawa-notice" role="status">管理者権限を確認しています。</p> : null}
+      {!roleLoading && !isAdmin ? <section className="sawa-card" aria-labelledby="access-denied-title">
+        <Link className="sawa-page__back" href="/">← システム選択へ戻る</Link>
+        <div className="sawa-card__body">
+          <p className="sawa-page__eyebrow">Administrator only</p>
+          <h1 className="sawa-page__title" id="access-denied-title">管理者権限が必要です</h1>
+          <p className="sawa-page__description">ユーザー一覧と権限設定は管理者だけが確認できます。管理者アカウントでログインしてください。</p>
+          {editing ? <p>未保存の編集内容は保持しています。</p> : null}
+        </div>
+      </section> : null}
+      {/* Keep the same RHF instance and its entered values during authority rechecks. */}
+      <div hidden={!isAdmin}>
+      <fieldset disabled={roleLoading || !isAdmin} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <Link className="sawa-page__back" href="/">← システム選択へ戻る</Link>
       <header className="sawa-page__header">
         <div>
@@ -157,10 +213,7 @@ export default function CommonUsersPage() {
         <Button
           className="sawa-button sawa-button--primary admin-ordinary-control"
           type="button"
-          onClick={() => {
-            setEditing(emptyUser());
-            setNotice(null);
-          }}
+          onClick={() => chooseEditor(emptyUser())}
         >
           ユーザーを追加
         </Button>
@@ -182,66 +235,20 @@ export default function CommonUsersPage() {
               <p>メールアドレス、権限、利用システムを確認して保存してください。</p>
             </div>
           </div>
-          <form className="sawa-card__body sawa-form-grid" onSubmit={save}>
-            <label className="sawa-field sawa-field--wide">
-              メールアドレス
-              <Input className="admin-ordinary-control" disableUnderline
-                type="email"
-                required
-                autoComplete="email"
-                placeholder="user@example.com"
-                value={editing.account}
-                onChange={(event) => setEditing({ ...editing, account: event.target.value })}
-              />
-            </label>
-            <label className="sawa-field">
-              権限
-              <NativeSelect className="admin-ordinary-control" disableUnderline
-                value={editing.role}
-                onChange={(event) => setEditing({ ...editing, role: event.target.value as UserRole })}
-              >
-                <option value="operator">一般利用者</option>
-                <option value="admin">管理者</option>
-              </NativeSelect>
-            </label>
-            <label className="sawa-field">
-              アカウント状態
-              <NativeSelect className="admin-ordinary-control" disableUnderline
-                value={editing.status}
-                onChange={(event) => setEditing({ ...editing, status: event.target.value as UserStatus })}
-              >
-                <option value="active">有効</option>
-                <option value="inactive">停止</option>
-              </NativeSelect>
-            </label>
-            <fieldset className="admin-system-access sawa-field--wide">
-              <legend>利用できるシステム</legend>
-              <div className="admin-system-access__options">
-                {(Object.keys(systemLabels) as SystemKey[]).map((key) => (
-                  <label key={key}>
-                    <Checkbox className="admin-ordinary-control"
-                      checked={editing.systems.includes(key)}
-                      onChange={() => toggle(key)}
-                    />
-                    <span>{systemLabels[key]}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            <div className="sawa-actions sawa-field--wide">
-              <Button
-                className="sawa-button admin-ordinary-control"
-                type="button"
-                disabled={saving}
-                onClick={() => setEditing(null)}
-              >
-                キャンセル
-              </Button>
-              <Button className="sawa-button sawa-button--primary admin-ordinary-control" type="submit" disabled={saving}>
-                {saving ? "保存中…" : "保存"}
-              </Button>
-            </div>
-          </form>
+          <EditForm<User> key={editorEpoch} label={editing.id ? "ユーザーを編集" : "新しいユーザー"}
+            defaultValues={editing} onSave={save} beginOperation={() => {
+              const own = beginOperation();
+              formLease.current = own;
+              return own;
+            }} onDirtyChange={setDirty} onValuesChange={values => {
+              const value = JSON.stringify(values);
+              if (snapshot.current && snapshot.current !== value) ++inputGeneration.current;
+              snapshot.current = value;
+              dirtyRef.current = value !== JSON.stringify(editing);
+            }} classifyError={error => ({ kind: "error", message: errorMessage(error, "ユーザーを保存できませんでした") })}>
+            <UserFields />
+          </EditForm>
+          <Button className="sawa-button admin-ordinary-control" type="button" onClick={() => chooseEditor(null)}>キャンセル</Button>
         </section>
       ) : null}
 
@@ -251,33 +258,25 @@ export default function CommonUsersPage() {
             <h2 id="user-list-title">ユーザー一覧</h2>
             <p>{listLoading ? "読み込み中です。" : `${items.length}件のユーザー`}</p>
           </div>
-          <Button className="sawa-button admin-ordinary-control" type="button" disabled={listLoading} onClick={() => void loadUsers()}>
+          <Button className="sawa-button admin-ordinary-control" type="button" disabled={listLoading} onClick={() => { sortAfterSave.current = false; void users.refetch(); }}>
             {listLoading ? "更新中…" : "一覧を更新"}
           </Button>
         </div>
         {listLoading && items.length === 0 ? <div className="sawa-empty">ユーザー一覧を読み込んでいます。</div> : null}
-        {!listLoading && items.length === 0 ? <div className="sawa-empty">登録されているユーザーはいません。</div> : null}
-        {items.length > 0 ? (
-          <div className="sawa-table-wrap">
-            <table className="sawa-table">
-              <thead>
-                <tr><th>メールアドレス</th><th>権限</th><th>状態</th><th>利用システム</th><th>操作</th></tr>
-              </thead>
-              <tbody>
-                {items.map((user) => (
-                  <tr key={user.id}>
-                    <td><strong>{user.account}</strong></td>
-                    <td><span className={`sawa-badge${user.role === "admin" ? " sawa-badge--admin" : ""}`}>{user.role === "admin" ? "管理者" : "一般利用者"}</span></td>
-                    <td><span className={`sawa-badge${user.status === "active" ? " sawa-badge--active" : ""}`}>{user.status === "active" ? "有効" : "停止"}</span></td>
-                    <td>{user.systems.map((system) => systemLabels[system]).join(" / ") || "なし"}</td>
-                    <td><Button className="sawa-button admin-ordinary-control" type="button" onClick={() => { setEditing({ ...user }); setNotice(null); }}>編集</Button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+        <DataTable<User> label="ユーザー一覧" rows={items.slice(Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1)) * pageSize,
+          (Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1)) + 1) * pageSize)} columns={[
+          { id: "account", label: "メールアドレス", render: user => <strong>{user.account}</strong> },
+          { id: "role", label: "権限", render: user => user.role === "admin" ? "管理者" : "一般利用者" },
+          { id: "status", label: "状態", render: user => user.status === "active" ? "有効" : "停止" },
+          { id: "systems", label: "利用システム", render: user => user.systems.map(system => isKnownSystem(system) ? systemLabels[system] : system).join(" / ") || "なし" },
+          { id: "edit", label: "操作", render: user => <Button className="sawa-button admin-ordinary-control" onClick={() => chooseEditor(user)}>編集</Button> },
+        ]} rowKey={user => user.id} total={items.length} page={Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1))} rowsPerPage={pageSize}
+          onPageChange={setPage} onRowsPerPageChange={value => { setPageSize(value); setPage(0); }} pending={listLoading}
+          error={users.error instanceof UsersReadError && users.error.current() ? users.error.message : undefined}
+          onRetry={() => void users.refetch()} />
       </section>
+      </fieldset>
+      </div>
 
       <style jsx>{`
         :global(.admin-ordinary-control.MuiButton-root) {
@@ -349,6 +348,10 @@ export default function CommonUsersPage() {
         }
       `}</style>
     </main>
-    </ThemeProvider>
   );
+}
+
+export default function CommonUsersPage() {
+  const session = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  return <SawaProvider sessionKey={`hospital-admin-users:${session}`}><UsersContent key={session} session={session} /></SawaProvider>;
 }
