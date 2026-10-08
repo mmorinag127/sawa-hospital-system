@@ -353,6 +353,7 @@ function Screen({ authenticated }: { authenticated: boolean }) {
               onDirtyChange={changeDirty}
               onSave={async (values) => {
                 const owner = { ...editor.current };
+                const targetId = selected.id;
                 const saved = parseMenuMaster(
                   (
                     await apiClient.put<ItemResponse>(
@@ -360,6 +361,7 @@ function Screen({ authenticated }: { authenticated: boolean }) {
                       updateMenuMasterPayload(selected, values),
                     )
                   ).data.item,
+                  targetId,
                 );
                 if (owns(owner)) setSelected(saved);
                 if (editor.current.active) await refresh();
@@ -367,12 +369,14 @@ function Screen({ authenticated }: { authenticated: boolean }) {
               }}
               onReload={async () => {
                 const owner = { ...editor.current };
+                const targetId = selected.id;
                 const current = parseMenuMaster(
                   (
                     await apiClient.get<ItemResponse>(
                       `/menu-masters/${selected.id}`,
                     )
                   ).data.item,
+                  targetId,
                 );
                 if (owns(owner)) setSelected(current);
                 return draft(current);

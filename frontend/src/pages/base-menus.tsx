@@ -22,7 +22,14 @@ const baseMenuPaths = ["/base-menus", "/hospital/base-menus"];
 const keyFor = (item: Partial<BaseMenuItem>, index = 0) => item.id || `draft-${index}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const toItems = (items: unknown) => {
   if (!Array.isArray(items)) throw new Error("基準メニュー一覧の応答に items 配列がありません。");
-  return items.map((item, index) => ({ ...(item as Omit<BaseMenuItem, "clientKey">), clientKey: keyFor(item as Partial<BaseMenuItem>, index) }));
+  const ids = new Set<string>();
+  return items.map((value) => {
+    const item = value as BaseMenuItem;
+    if (!item || typeof item.id !== "string" || !item.id.trim() || ids.has(item.id))
+      throw new Error("基準メニュー一覧のIDを一意に確認できませんでした。");
+    ids.add(item.id);
+    return { ...item, clientKey: item.id };
+  });
 };
 const toSnapshot = (value: { items?: unknown; revision?: unknown }): BaseMenuSnapshot => {
   if (typeof value.revision !== "string" || !value.revision) throw new Error("基準メニュー一覧の読取版がありません。");
@@ -48,12 +55,23 @@ function Screen({ authenticated }: { authenticated: boolean }) {
   const ownership = useH1EditorOwner(generation.current);
   useH1LeaveGuard(dirty, baseMenuPaths);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const all = useQuery({ queryKey: ["base-menus", "all"], enabled: authenticated, queryFn: async ({ signal }) => { const response = await apiClient.get<BaseMenuListResponse>("/base-menus", { signal }); return toSnapshot(response.data || {}); } });
-  const update = useMutation({ mutationFn: async ({ item, revision, current }: { item: BaseMenuItem; revision: string; current: () => void }) => { validate(item); if (!item.id) throw new Error("新規項目は全件一括保存で登録してください。"); current(); const response = await apiClient.put<BaseMenuUpdateResponse>(`/base-menus/${item.id}`, serialize(item), { headers: { "If-Match": revision } }); if (response.data?.updated !== true) throw new Error("保存結果を確認できませんでした。"); return toSnapshot(response.data); } });
+  const reloadTargetRef = useRef<string | undefined>(undefined);
+  const all = useQuery({ queryKey: ["base-menus", "all"], enabled: authenticated, queryFn: async ({ signal }) => {
+    const targetId = reloadTargetRef.current;
+    const response = await apiClient.get<BaseMenuListResponse>("/base-menus", { signal });
+    const snapshot = toSnapshot(response.data || {});
+    if (targetId && !snapshot.items.some((item) => item.id === targetId)) throw new Error("再読込対象の基準メニューIDを確認できませんでした。");
+    return snapshot;
+  } });
+  const update = useMutation({ mutationFn: async ({ item, revision, current }: { item: BaseMenuItem; revision: string; current: () => void }) => { validate(item); if (!item.id) throw new Error("新規項目は全件一括保存で登録してください。"); current(); const response = await apiClient.put<BaseMenuUpdateResponse>(`/base-menus/${item.id}`, serialize(item), { headers: { "If-Match": revision } }); if (response.data?.updated !== true) throw new Error("保存結果を確認できませんでした。"); const snapshot = toSnapshot(response.data); if (!snapshot.items.some((saved) => saved.id === item.id)) throw new Error("更新対象の基準メニューIDを確認できませんでした。"); return snapshot; } });
   const replace = useMutation({ mutationFn: async ({ items, revision, current }: { items: BaseMenuItem[]; revision: string; current: () => void }) => { items.forEach(validate); current(); const response = await apiClient.post<BaseMenuReplaceResponse>("/base-menus", { items: items.map(serialize) }, { headers: { "If-Match": revision } }); if (typeof response.data?.created !== "number") throw new Error("一括保存結果を確認できませんでした。"); return { created: response.data.created as number, snapshot: toSnapshot(response.data) }; } });
   const rows = useMemo(() => (all.data?.items || []).filter((item) => !filter || String(item.cycle_day) === filter).sort((a, b) => Number(a.cycle_day || 0) - Number(b.cycle_day || 0) || String(a.daypart || "").localeCompare(String(b.daypart || "")) || Number(a.slot_index || 0) - Number(b.slot_index || 0)), [all.data, filter]);
   const visibleRows = rows.slice(page * rowsPerPage, (page + 1) * rowsPerPage); const choose = (item: BaseMenuItem | null, baseline = all.data) => { if (dirty && !window.confirm("未保存の変更を破棄して別の項目を開きますか？")) return; if (item && !baseline) { setNotice("全件正本を読み込めていないため、編集できません。"); return; } ownership.edit(); generation.current += 1; setDirty(false); setSelected(item && baseline ? { item, baseline } : null); };
-  const reload = async () => { const result = await all.refetch(); if (result.error) throw result.error; if (!result.data) throw new Error("基準メニュー一覧の再読込結果がありません。"); return result.data; };
+  const reload = async () => {
+    reloadTargetRef.current = selected?.item.id;
+    try { const result = await all.refetch(); if (result.error) throw result.error; if (!result.data) throw new Error("基準メニュー一覧の再読込結果がありません。"); return result.data; }
+    finally { reloadTargetRef.current = undefined; }
+  };
   const reloadList = async () => { const owner = ownership.start(); try { owner.requireCurrent(); await reload(); owner.requireCurrent(); } catch (error) { if (owner.current()) setNotice(messageFor(error)); } };
   const bulkSave = async (baseline: BaseMenuSnapshot, next: BaseMenuItem[], newItem?: BaseMenuItem, clearsEditor = false, owner = ownership.start()) => { const result = await replace.mutateAsync({ items: next, revision: baseline.revision, current: owner.requireCurrent }); verifyReplacement(next, result.snapshot.items); const saved = newItem ? result.snapshot.items.filter((item) => identity(item) === identity(newItem)) : []; if (newItem && saved.length !== 1) throw new Error("追加した項目を再読込結果から一意に確認できませんでした。操作を停止しました。"); owner.requireCurrent(); client.setQueryData(["base-menus", "all"], result.snapshot); if (newItem || clearsEditor) { setSelected(newItem && saved[0] ? { item: saved[0], baseline: result.snapshot } : null); setDirty(false); } setNotice(`全件一括保存を完了しました（${result.created}件）。`); return newItem ? saved[0] : null; };
   const deleteItem = (item: BaseMenuItem) => { const editingTarget = selected?.item.clientKey === item.clientKey; if (editingTarget && dirty && !window.confirm("未保存の変更を破棄して削除しますか？")) return; const baseline = editingTarget ? selected.baseline : all.data; if (!baseline) { setNotice("全件正本を読み込めていないため、削除できません。"); return; } if (!window.confirm(`全件一括保存で「${item.name || "この項目"}」を削除しますか？`)) return; const owner = ownership.start(); void bulkSave(baseline, baseline.items.filter((candidate) => candidate.clientKey !== item.clientKey), undefined, editingTarget, owner).catch((error) => { if (owner.current()) setNotice(messageFor(error)); }); };

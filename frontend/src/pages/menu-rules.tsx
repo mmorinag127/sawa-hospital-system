@@ -25,8 +25,17 @@ const title: Record<RuleType, string> = { global: "基本ルール", menu: "メ�
 const menuRulePaths = ["/menu-rules", "/hospital/menu-rules"];
 const blank = (rule_type: RuleType): MenuRule => ({ rule_type, match_type: rule_type === "global" ? null : "contains", menu_pattern: "", facility_id: "", daypart: "", category: "", diet_type: "", unit_type: "g", qty_per_serving: "", priority: "", active: true });
 const numberOrNull = (value: unknown) => value === "" || value == null ? null : Number.isFinite(Number(value)) ? Number(value) : null;
-const requireRules = (value: unknown) => { if (!Array.isArray(value)) throw new Error("メニュールール一覧の応答に rules 配列がありません。"); return value as MenuRule[]; };
-const toSnapshot = (value: { rules?: unknown; revision?: unknown }): RuleSnapshot => { if (typeof value.revision !== "string" || !value.revision) throw new Error("メニュールール一覧の読取版がありません。"); return { rules: requireRules(value.rules), revision: value.revision }; };
+const requireRules = (value: unknown, ruleType: RuleType) => {
+  if (!Array.isArray(value)) throw new Error("メニュールール一覧の応答に rules 配列がありません。");
+  const ids = new Set<string>();
+  for (const rule of value) {
+    if (!rule || typeof rule.id !== "string" || !rule.id.trim() || ids.has(rule.id) || rule.rule_type !== ruleType)
+      throw new Error("メニュールールのIDまたは種類を一意に確認できませんでした。");
+    ids.add(rule.id);
+  }
+  return value as MenuRule[];
+};
+const toSnapshot = (value: { rules?: unknown; revision?: unknown }, ruleType: RuleType): RuleSnapshot => { if (typeof value.revision !== "string" || !value.revision) throw new Error("メニュールール一覧の読取版がありません。"); return { rules: requireRules(value.rules, ruleType), revision: value.revision }; };
 const payload = (rule: MenuRule) => ({ ...rule, match_type: rule.match_type || null, menu_pattern: rule.menu_pattern || null, facility_id: rule.facility_id || null, daypart: rule.daypart || null, category: rule.category || null, diet_type: rule.diet_type || null, unit_type: rule.unit_type || null, qty_per_serving: numberOrNull(rule.qty_per_serving), priority: numberOrNull(rule.priority), active: rule.active ?? true });
 const errorText = (error: any) => error?.response?.status === 409 ? "他の編集が保存されています。入力値は保持されています。再読込して内容を確認してください。" : typeof error?.response?.data?.detail === "string" ? error.response.data.detail : error instanceof Error && error.message ? error.message : "保存に失敗しました。入力値を確認して再試行してください。";
 const validate = (values: MenuRule) => {
@@ -47,10 +56,20 @@ function RuleSection({ ruleType, authenticated }: { ruleType: RuleType; authenti
   const queryClient = useQueryClient(); const [selected, setSelected] = useState<SelectedRule | null>(null); const [dirty, setDirty] = useState(false); const [notice, setNotice] = useState(""); const [page, setPage] = useState(0); const [rowsPerPage, setRowsPerPage] = useState(25); const generation = useRef(0); const active = useRef(false); useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const ownership = useH1EditorOwner(generation.current);
   useH1LeaveGuard(dirty, menuRulePaths);
-  const list = useQuery({ queryKey: ["menu-rules", ruleType], enabled: authenticated, queryFn: async ({ signal }) => toSnapshot((await apiClient.get<RuleListResponse>("/menu-rules", { params: { rule_type: ruleType }, signal })).data || {}) });
-  const reloadRules = async () => { const result = await list.refetch(); if (result.error) throw result.error; if (!result.data) throw new Error("メニュールール一覧の再読込結果がありません。"); return result.data; };
+  const reloadTargetRef = useRef<string | undefined>(undefined);
+  const list = useQuery({ queryKey: ["menu-rules", ruleType], enabled: authenticated, queryFn: async ({ signal }) => {
+    const targetId = reloadTargetRef.current;
+    const snapshot = toSnapshot((await apiClient.get<RuleListResponse>("/menu-rules", { params: { rule_type: ruleType }, signal })).data || {}, ruleType);
+    if (targetId && !snapshot.rules.some((rule) => rule.id === targetId)) throw new Error("再読込対象のメニュールールIDを確認できませんでした。");
+    return snapshot;
+  } });
+  const reloadRules = async () => {
+    reloadTargetRef.current = selected?.item.id;
+    try { const result = await list.refetch(); if (result.error) throw result.error; if (!result.data) throw new Error("メニュールール一覧の再読込結果がありません。"); return result.data; }
+    finally { reloadTargetRef.current = undefined; }
+  };
   const reloadList = async () => { const owner = ownership.start(); try { owner.requireCurrent(); await reloadRules(); owner.requireCurrent(); } catch (error) { if (owner.current()) setNotice(errorText(error)); } };
-  const save = useMutation({ mutationFn: async ({ values, baseline, current }: { values: MenuRule; baseline: RuleSnapshot; current: () => void }) => { validate(values); const body = payload(values); const headers = { "If-Match": baseline.revision }; current(); const response = values.id ? await apiClient.put<RuleUpdateResponse>(`/menu-rules/${values.id}`, body, { headers }) : await apiClient.post<RuleSaveResponse>("/menu-rules", body, { headers }); if ((values.id && response.data?.updated !== true) || !response.data?.rule?.id || typeof response.data?.revision !== "string") throw new Error("保存結果を確認できませんでした。"); const saved = response.data.rule as MenuRule; return { saved, snapshot: { rules: values.id ? baseline.rules.map((rule) => rule.id === saved.id ? saved : rule) : [...baseline.rules, saved], revision: response.data.revision } }; } });
+  const save = useMutation({ mutationFn: async ({ values, baseline, current }: { values: MenuRule; baseline: RuleSnapshot; current: () => void }) => { validate(values); const body = payload(values); const headers = { "If-Match": baseline.revision }; current(); const response = values.id ? await apiClient.put<RuleUpdateResponse>(`/menu-rules/${values.id}`, body, { headers }) : await apiClient.post<RuleSaveResponse>("/menu-rules", body, { headers }); if ((values.id && response.data?.updated !== true) || !response.data?.rule?.id || typeof response.data?.revision !== "string") throw new Error("保存結果を確認できませんでした。"); const saved = response.data.rule as MenuRule; requireRules([saved], ruleType); if (values.id && saved.id !== values.id) throw new Error("保存結果のメニュールールIDが一致しません。"); const snapshot = toSnapshot({ rules: values.id ? baseline.rules.map((rule) => rule.id === saved.id ? saved : rule) : [...baseline.rules, saved], revision: response.data.revision }, ruleType); return { saved, snapshot }; } });
   const remove = useMutation({ mutationFn: async ({ item, baseline, current }: { item: MenuRule; baseline: RuleSnapshot; current: () => void }) => { if (!item.id) throw new Error("未保存のルールは保存前に削除してください。"); current(); const response = await apiClient.delete<RuleDeleteResponse>(`/menu-rules/${item.id}`, { headers: { "If-Match": baseline.revision } }); if (response.data?.deleted !== true) throw new Error("削除結果を確認できませんでした。"); return item.id; } });
   const choose = (item: MenuRule | null, baseline = list.data) => { if (dirty && !window.confirm("未保存の変更を破棄して別のルールを開きますか？")) return; if (item && !baseline) { setNotice("読取版がありません。"); return; } ownership.edit(); generation.current += 1; setDirty(false); setSelected(item && baseline ? { item, baseline } : null); };
   const rows = useMemo(() => list.data?.rules || [], [list.data]); const visibleRows = rows.slice(page * rowsPerPage, (page + 1) * rowsPerPage);

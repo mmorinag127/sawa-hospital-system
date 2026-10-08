@@ -172,15 +172,18 @@ export const parseMenuMasterList = (value: unknown): MenuMasterList => {
   ) {
     throw new Error("メニューマスター一覧の応答を確認できませんでした。");
   }
+  const items = source.items.map((item) => parseMenuMaster(item));
+  if (new Set(items.map((item) => item.id)).size !== items.length)
+    throw new Error("メニューマスター一覧のIDが重複しています。");
   return {
-    items: source.items.map(parseMenuMaster),
+    items,
     total: source.total,
     offset: source.offset,
     limit: source.limit,
   };
 };
 
-export const parseMenuMaster = (value: unknown): MenuMaster => {
+export const parseMenuMaster = (value: unknown, expectedId?: string): MenuMaster => {
   const item = value as Partial<MenuMaster>;
   const nullableTextFields = [
     item?.unit_type,
@@ -193,7 +196,8 @@ export const parseMenuMaster = (value: unknown): MenuMaster => {
   if (
     !item ||
     typeof item.id !== "string" ||
-    !item.id ||
+    !item.id.trim() ||
+    (expectedId !== undefined && item.id !== expectedId) ||
     typeof item.name !== "string" ||
     !Number.isInteger(item.revision) ||
     item.revision < 1 ||
