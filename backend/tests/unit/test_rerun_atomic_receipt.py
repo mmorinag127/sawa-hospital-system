@@ -42,7 +42,7 @@ def rerun_transaction(monkeypatch):
         return payload
 
     monkeypatch.setattr(order_service, "_ocr_result_transaction", transaction)
-    monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args: True)
+    monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args, source_failure=None: True)
     monkeypatch.setattr(order_service, "current_nonworkflow_execution", lambda: execution)
     monkeypatch.setattr(order_service, "persist_ocr_evidence_run", evidence)
     monkeypatch.setattr(order_service, "_save_order_ocr_cache", cache)
@@ -74,7 +74,7 @@ def test_own_result_and_terminal_share_transaction(rerun_transaction, quantity):
 def test_mid_failure_rolls_back_evidence_cache_and_terminal(monkeypatch, rerun_transaction, failure):
     job, state, _ = rerun_transaction
     if failure == "superseded":
-        monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args: False)
+        monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args, source_failure=None: False)
     elif failure == "cache_failure":
         monkeypatch.setattr(order_service, "_save_order_ocr_cache", lambda *args, **kwargs: None)
     else:

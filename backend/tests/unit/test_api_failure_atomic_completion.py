@@ -37,7 +37,7 @@ def completion_transaction(monkeypatch):
         return deepcopy(workflow), kwargs["error"]
 
     monkeypatch.setattr(order_service, "_ocr_result_transaction", transaction)
-    monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args: True)
+    monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args, source_failure=None: True)
     monkeypatch.setattr(order_service, "current_nonworkflow_execution", lambda: None)
     monkeypatch.setattr(order_workflow_v2_service, "mark_ocr_run_completed", mark)
     return job, workflow, session
@@ -62,7 +62,7 @@ def test_failure_receipt_commits_job_and_workflow_together(completion_transactio
 
 def test_superseded_failure_mutates_neither_job_nor_workflow(monkeypatch, completion_transaction):
     job, workflow, _ = completion_transaction
-    monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args: False)
+    monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args, source_failure=None: False)
     receipt, error = orders._complete_workflow_ocr_run(
         "order", "real-job", expected_revision=7,
         workflow_attempt_id="captured-attempt", error="crash",
