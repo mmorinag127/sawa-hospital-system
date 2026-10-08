@@ -5378,14 +5378,26 @@ def build_order_list_cursor(orders: list[dict]) -> dict[str, str] | None:
         return None
     last = orders[-1]
     received_at = last.get("received_at")
-    if isinstance(received_at, datetime):
-        received_at_value = received_at.isoformat()
-    else:
-        received_at_value = str(received_at or "").strip()
     order_id = str(last.get("id") or "").strip()
-    if not received_at_value or not order_id:
-        return None
-    return {"received_at": received_at_value, "id": order_id}
+    if not order_id:
+        raise ValueError("order_list_cursor_identity_required")
+    if not isinstance(received_at, datetime):
+        if received_at is None or isinstance(received_at, str) and not received_at.strip():
+            raise ValueError("order_list_cursor_datetime_required")
+        if not isinstance(received_at, str):
+            raise ValueError("order_list_cursor_datetime_invalid")
+        raw_received_at = received_at.strip()
+        try:
+            date.fromisoformat(raw_received_at)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("order_list_cursor_datetime_invalid")
+        try:
+            received_at = datetime.fromisoformat(raw_received_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("order_list_cursor_datetime_invalid") from exc
+    return {"received_at": received_at.isoformat(), "id": order_id}
 
 
 def _order_list_sort_key(item: dict[str, Any]) -> tuple[datetime, str]:
