@@ -13,6 +13,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from src.services import menu_service
 from src.services import menu_edit_revision_service as revisions
 from src.api.auth import require_role
+from src.api.menu_import_contract import SavedImportResponse, ImportListResponse, ImportApplyResponse, MonthlyCommandResponse
 from src.services.menu_upload_archive_service import save_monthly_menu_upload
 
 router = APIRouter()
@@ -87,7 +88,7 @@ def get_menu(month_id: str, facility_id: str | None = Query(default=None), edito
     return menu
 
 
-@router.post("", dependencies=[Depends(require_role("operator"))])
+@router.post("", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": SavedImportResponse}})
 async def upload_menu(
     month_id: str,
     file: UploadFile = File(...),
@@ -145,31 +146,31 @@ async def upload_menu(
         sheet_name=sheet_name, scope_override=scope_override, diet_types=selected_diets)
 
 
-@router.get("/{month_id}/imports", dependencies=[Depends(require_role("operator"))])
+@router.get("/{month_id}/imports", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": ImportListResponse}})
 def list_menu_imports(month_id: str):
     return {"items": _monthly_call(menu_service.list_menu_imports, month_id)}
 
 
-@router.get("/{month_id}/imports/{import_id}", dependencies=[Depends(require_role("operator"))])
+@router.get("/{month_id}/imports/{import_id}", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": SavedImportResponse}})
 def read_menu_import(month_id: str, import_id: str):
     return _monthly_call(menu_service.read_menu_import, month_id, import_id)
 
 
-@router.post("/{month_id}/imports/{import_id}/review", dependencies=[Depends(require_role("operator"))])
+@router.post("/{month_id}/imports/{import_id}/review", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": SavedImportResponse}})
 def review_menu_import(month_id: str, import_id: str, body: dict, if_match: str | None = Header(None)):
     if not isinstance(body.get("resolutions"), list):
         raise HTTPException(422, "explicit resolutions list is required")
     return _monthly_call(menu_service.review_menu_import, month_id, import_id, if_match, body["resolutions"], input_expected=body.get("input_revision"))
 
 
-@router.get("/{month_id}/imports/{import_id}/download", dependencies=[Depends(require_role("operator"))])
+@router.get("/{month_id}/imports/{import_id}/download", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}}})
 def download_menu_import(month_id: str, import_id: str):
     source = _monthly_call(menu_service.get_menu_import_download, month_id, import_id)
     return Response(content=source["bytes"], media_type=source["media_type"],
         headers={"Content-Disposition": _attachment_content_disposition(source["filename"])})
 
 
-@router.post("/{month_id}/imports/{import_id}/apply", dependencies=[Depends(require_role("operator"))])
+@router.post("/{month_id}/imports/{import_id}/apply", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": ImportApplyResponse}})
 def apply_menu_import(month_id: str, import_id: str, if_match: str | None = Header(None)):
     return _monthly_call(menu_service.review_menu_import, month_id, import_id, if_match, None, apply=True)
 
@@ -200,7 +201,7 @@ def update_menu_item(month_id: str, item_id: str, body: dict, if_match: str | No
     return _monthly_call(menu_service.monthly_editor_command, month_id, item_id, body, if_match, action="item")
 
 
-@router.post("/{month_id}/entries/{entry_id}/exceptions", dependencies=[Depends(require_role("operator"))])
+@router.post("/{month_id}/entries/{entry_id}/exceptions", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": MonthlyCommandResponse}})
 def upsert_menu_entry_exceptions(month_id: str, entry_id: str, body: dict, if_match: str | None = Header(None)):
     return _monthly_call(menu_service.monthly_editor_command, month_id, entry_id, body, if_match, action="exceptions")
 

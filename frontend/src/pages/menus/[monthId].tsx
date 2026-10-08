@@ -1,6 +1,7 @@
 import { useRouter } from "next/router";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ChangeEvent } from "react";
+import type { components as ImportComponents } from "../../generated/menu-import-api";
 import { Button, Checkbox, Input, NativeSelect, MenuItem as MuiMenuItem } from "@mui/material";
 import { DataTable, EditForm, FormTextField, SawaProvider, type TableColumn } from "@sawa/ui";
 import TopNav from "../../components/TopNav";
@@ -138,17 +139,32 @@ type PendingMenuMasterReview = {
   resolutions: Record<string, MenuMasterReviewResolution>;
 };
 
-type SavedMenuImport = {
-  id: string;
-  month_id: string;
-  state: string;
-  revision: string;
-  input_revision: string;
-  current_input_revision: string;
-  source: { filename: string; file_uri: string; content_sha256: string; sheet_name: string; media_type: string; scope_override: string | null; diet_types: string[] | null };
-  review: { issues: MenuMasterReviewIssue[]; resolutions: MenuMasterReviewResolution[]; item_count: number; master_diffs: MenuMasterReviewIssue[];
-    plans: Record<string, object>; items: object[]; entries: object[]; scope_override: string | null; input_snapshot: { revision: number; digest: string } };
-  current_review: SavedMenuImport["review"];
+type KnownImportFields<T> = { [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K] };
+type SavedMenuImportWire = ImportComponents["schemas"]["SavedImportResponse"];
+type MonthlySnapshotWire = ImportComponents["schemas"]["MonthlySnapshotResponse"];
+type ImportApplyWire = ImportComponents["schemas"]["ImportApplyResponse"];
+type MonthlyCommandWire = ImportComponents["schemas"]["MonthlyCommandResponse"];
+// Nested editor projections remain distinct from the raw transport dictionaries.
+type SavedImportReviewView = Omit<KnownImportFields<ImportComponents["schemas"]["ImportReview"]>, "issues" | "resolutions" | "master_diffs" | "plans" | "items" | "entries"> & {
+  issues: MenuMasterReviewIssue[]; resolutions: MenuMasterReviewResolution[]; master_diffs: MenuMasterReviewIssue[];
+  plans: Record<string, object>; items: object[]; entries: object[];
+};
+type SavedMenuImport = Omit<KnownImportFields<SavedMenuImportWire>, "review" | "current_review"> & {
+  review: SavedImportReviewView; current_review: SavedImportReviewView;
+};
+type ImportListView = Omit<KnownImportFields<ImportComponents["schemas"]["ImportListResponse"]>, "items"> & { items: SavedMenuImport[] };
+type MonthlySnapshotView = Omit<KnownImportFields<MonthlySnapshotWire>, "menu" | "items" | "entries" | "master_checks"> & {
+  menu: MonthlyMenu | null; items: MenuItem[]; entries: MenuEntry[];
+  master_checks: Omit<KnownImportFields<MonthlySnapshotWire["master_checks"]>, "issues"> & { issues: MenuMasterReviewIssue[] };
+};
+type ImportApplyView = Omit<KnownImportFields<ImportApplyWire>, "receipt" | "snapshot"> & {
+  receipt: SavedMenuImport; snapshot: MonthlySnapshotView;
+};
+type EntryExceptionResultView = {
+  updated: boolean; entry_id: string; facility_ids: string[]; entries: MenuEntry[]; items: MenuItem[];
+};
+type EntryExceptionCommandView = Omit<KnownImportFields<MonthlyCommandWire>, "result" | "snapshot"> & {
+  result: EntryExceptionResultView; snapshot: MonthlySnapshotView;
 };
 
 function hasSavedImportSource(source: SavedMenuImport["source"]) {
@@ -866,7 +882,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     if (!monthId || Array.isArray(monthId)) return;
     const current = owner.capture("imports", false);
     try {
-      const res = await apiClient.get(`/monthly-menus/${monthId}/imports`);
+      const res = await apiClient.get<ImportListView>(`/monthly-menus/${monthId}/imports`);
       if (!current()) return;
       if (!Array.isArray(res.data?.items)) throw new Error("保存importの応答を確認できませんでした。");
       if (res.data.items.some((receipt: SavedMenuImport) => receipt.month_id !== monthId || !hasSavedImportSource(receipt.source)
@@ -990,7 +1006,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     const formData = new FormData();
     formData.append("file", targetFile);
     try {
-      const res = await apiClient.post("/monthly-menus", formData, {
+      const res = await apiClient.post<SavedMenuImport>("/monthly-menus", formData, {
         params: {
           month_id: monthId,
           sheet_name: sheetName || undefined,
@@ -1050,7 +1066,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     itemFormEpoch.current += 1;
     const current = owner.capture("resume");
     try {
-      const res = await apiClient.get(`/monthly-menus/${monthId}/imports/${receiptId}`);
+      const res = await apiClient.get<SavedMenuImport>(`/monthly-menus/${monthId}/imports/${receiptId}`);
       if (!current()) return;
       adoptImport(res.data, receiptId);
     } catch (error: any) {
@@ -1066,7 +1082,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     if (receipt.month_id !== monthId) return;
     const current = owner.capture("import-download");
     try {
-      const res = await apiClient.get(`/monthly-menus/${receipt.month_id}/imports/${receipt.id}/download`, { responseType: "blob" });
+      const res = await apiClient.get<Blob>(`/monthly-menus/${receipt.month_id}/imports/${receipt.id}/download`, { responseType: "blob" });
       if (!current()) return;
       const url = URL.createObjectURL(res.data);
       try {
@@ -1185,14 +1201,17 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
       return;
     }
     try {
-      const res = await apiClient.post(`/monthly-menus/${monthId}/imports/${receipt.id}/${apply ? "apply" : "review"}`,
-        apply ? undefined : { resolutions: Object.values(pendingReview.resolutions), input_revision: receipt.current_input_revision },
-        { headers: { "If-Match": receipt.revision } });
-      if (!current()) return;
       if (!apply) {
+        const res = await apiClient.post<SavedMenuImport>(`/monthly-menus/${monthId}/imports/${receipt.id}/review`,
+          { resolutions: Object.values(pendingReview.resolutions), input_revision: receipt.current_input_revision },
+          { headers: { "If-Match": receipt.revision } });
+        if (!current()) return;
         adoptImport(res.data, receipt.id, "review");
         setMessage("差分設定を保存しました。対象と件数を確認して反映してください。");
       } else {
+        const res = await apiClient.post<ImportApplyView>(`/monthly-menus/${monthId}/imports/${receipt.id}/apply`,
+          undefined, { headers: { "If-Match": receipt.revision } });
+        if (!current()) return;
         validateImportReceipt(res.data?.receipt, receipt.id, "applied");
         validateSnapshot(res.data?.snapshot, receipt.month_id);
         adoptSnapshot(res.data.snapshot);
@@ -1499,7 +1518,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     itemFormEpoch.current += 1;
     const current = owner.capture("exceptions");
     try {
-      const res = await apiClient.post(
+      const res = await apiClient.post<EntryExceptionCommandView>(
         `/monthly-menus/${monthId}/entries/${selectedEntry.id}/exceptions`,
         {
           facility_ids: entryExceptionDraft.facilityIds,

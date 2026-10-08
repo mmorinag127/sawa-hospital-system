@@ -1,0 +1,775 @@
+{
+  "components": {
+    "schemas": {
+      "ImportApplyResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "item_count": {
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/SavedImportResponse"
+          },
+          "replaced": {
+            "title": "Replaced",
+            "type": "boolean"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/MonthlySnapshotResponse"
+          }
+        },
+        "required": [
+          "created",
+          "receipt",
+          "snapshot",
+          "replaced",
+          "item_count"
+        ],
+        "title": "ImportApplyResponse",
+        "type": "object"
+      },
+      "ImportInputSnapshot": {
+        "additionalProperties": true,
+        "properties": {
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "digest"
+        ],
+        "title": "ImportInputSnapshot",
+        "type": "object"
+      },
+      "ImportListResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SavedImportResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ImportListResponse",
+        "type": "object"
+      },
+      "ImportReview": {
+        "additionalProperties": true,
+        "properties": {
+          "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "input_snapshot": {
+            "$ref": "#/components/schemas/ImportInputSnapshot"
+          },
+          "issues": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "item_count": {
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "master_diffs": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Master Diffs",
+            "type": "array"
+          },
+          "plans": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Plans",
+            "type": "object"
+          },
+          "resolutions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Resolutions",
+            "type": "array"
+          },
+          "scope_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Override"
+          }
+        },
+        "required": [
+          "issues",
+          "resolutions",
+          "item_count",
+          "master_diffs",
+          "plans",
+          "items",
+          "entries",
+          "scope_override",
+          "input_snapshot"
+        ],
+        "title": "ImportReview",
+        "type": "object"
+      },
+      "ImportSource": {
+        "additionalProperties": true,
+        "properties": {
+          "content_sha256": {
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "diet_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diet Types"
+          },
+          "file_uri": {
+            "title": "File Uri",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "scope_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Override"
+          },
+          "sheet_name": {
+            "title": "Sheet Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_uri",
+          "filename",
+          "content_sha256",
+          "sheet_name",
+          "scope_override",
+          "diet_types",
+          "media_type"
+        ],
+        "title": "ImportSource",
+        "type": "object"
+      },
+      "MonthlyCommandResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "title": "Result"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/MonthlySnapshotResponse"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "updated",
+          "result",
+          "snapshot"
+        ],
+        "title": "MonthlyCommandResponse",
+        "type": "object"
+      },
+      "MonthlyMasterChecks": {
+        "additionalProperties": true,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "issues": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Issues",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "issues"
+        ],
+        "title": "MonthlyMasterChecks",
+        "type": "object"
+      },
+      "MonthlySnapshotResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "master_checks": {
+            "$ref": "#/components/schemas/MonthlyMasterChecks"
+          },
+          "menu": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Menu"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "source_month_id": {
+            "title": "Source Month Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "menu",
+          "items",
+          "entries",
+          "master_checks",
+          "source_month_id",
+          "revision"
+        ],
+        "title": "MonthlySnapshotResponse",
+        "type": "object"
+      },
+      "SavedImportResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "current_input_revision": {
+            "title": "Current Input Revision",
+            "type": "string"
+          },
+          "current_review": {
+            "$ref": "#/components/schemas/ImportReview"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_revision": {
+            "title": "Input Revision",
+            "type": "string"
+          },
+          "month_id": {
+            "title": "Month Id",
+            "type": "string"
+          },
+          "review": {
+            "$ref": "#/components/schemas/ImportReview"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ImportSource"
+          },
+          "state": {
+            "enum": [
+              "review",
+              "applied"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "month_id",
+          "state",
+          "source",
+          "review",
+          "revision",
+          "input_revision",
+          "current_input_revision",
+          "current_review"
+        ],
+        "title": "SavedImportResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Registered Monthly Menu Import API Contract",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/monthly-menus": {
+      "post": {
+        "operationId": "upload_menu",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sheet_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_value",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "diet_types",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "review_resolutions": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/monthly-menus/{month_id}/entries/{entry_id}/exceptions": {
+      "post": {
+        "operationId": "upsert_menu_entry_exceptions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonthlyCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/monthly-menus/{month_id}/imports": {
+      "get": {
+        "operationId": "list_menu_imports",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/monthly-menus/{month_id}/imports/{import_id}": {
+      "get": {
+        "operationId": "read_menu_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "import_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/monthly-menus/{month_id}/imports/{import_id}/apply": {
+      "post": {
+        "operationId": "apply_menu_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "import_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportApplyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/monthly-menus/{month_id}/imports/{import_id}/download": {
+      "get": {
+        "operationId": "download_menu_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "import_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Saved source with recorded media type"
+          }
+        }
+      }
+    },
+    "/monthly-menus/{month_id}/imports/{import_id}/review": {
+      "post": {
+        "operationId": "review_menu_import",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "month_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "import_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        }
+      }
+    }
+  }
+}
