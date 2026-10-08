@@ -24,7 +24,79 @@ from src.services import order_service, order_workflow_v2_service, output_builde
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OWNED = Path("/private/tmp/sawa-c2-hospital-menu-readonly-20261006")
+
+def _owned_root():
+    value = os.environ.get("C2_MENU_READONLY_OWNED_ROOT")
+    assert value and value == value.strip(), "explicit owned root required"
+    root = Path(value)
+    assert root.is_absolute(), "owned root must be absolute"
+    assert root.is_dir() and not root.is_symlink() and root.resolve() == root, "owned root must be physical"
+    owner = root / "OWNER"
+    assert owner.is_file() and not owner.is_symlink(), "owned root OWNER required"
+    assert owner.read_text().strip() == str(ROOT), "owned root source mismatch"
+    return root
+
+
+def test_owned_root_accepts_explicit_physical_source_root(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    (root / "OWNER").write_text(str(ROOT))
+    monkeypatch.setenv("C2_MENU_READONLY_OWNED_ROOT", str(root))
+    assert _owned_root() == root
+
+
+@pytest.mark.parametrize("kind", ["missing", "empty", "whitespace", "relative", "uri", "absent", "symlink", "wrong_owner", "missing_owner", "symlink_owner"])
+def test_owned_root_rejects_unregistered_source(tmp_path, monkeypatch, kind):
+    root = tmp_path.resolve()
+    owner = root / "OWNER"
+    owner.write_text(str(ROOT))
+    value = str(root)
+    if kind == "missing":
+        monkeypatch.delenv("C2_MENU_READONLY_OWNED_ROOT", raising=False)
+    else:
+        if kind == "empty":
+            value = ""
+        elif kind == "whitespace":
+            value += " "
+        elif kind == "relative":
+            value = "relative-root"
+        elif kind == "uri":
+            value = root.as_uri()
+        elif kind == "absent":
+            value = str(root / "absent")
+        elif kind == "symlink":
+            link = root / "link"
+            link.symlink_to(root, target_is_directory=True)
+            value = str(link)
+        elif kind == "wrong_owner":
+            owner.write_text(str(ROOT / "other-source"))
+        elif kind == "missing_owner":
+            owner.unlink()
+        elif kind == "symlink_owner":
+            owner.rename(root / "owner-target")
+            owner.symlink_to(root / "owner-target")
+        monkeypatch.setenv("C2_MENU_READONLY_OWNED_ROOT", value)
+    with pytest.raises(AssertionError):
+        _owned_root()
+
+
+def test_owned_root_does_not_allow_foreign_pg_uri(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    root = tmp_path.resolve()
+    (root / "OWNER").write_text(str(ROOT))
+    monkeypatch.setenv("C2_MENU_READONLY_OWNED_ROOT", str(root))
+    monkeypatch.setenv("C2_MENU_READONLY_PG_URI", sa.URL.create(
+        "postgresql+psycopg2", username="mmorinag", database="postgres",
+        query={"host": str(root / "foreign/socket"), "port": "55471"},
+    ).render_as_string(hide_password=False))
+
+    def forbidden_engine(*args, **kwargs):
+        pytest.fail("foreign URI reached database engine creation")
+
+    monkeypatch.setattr(sa, "create_engine", forbidden_engine)
+    fixture = readonly_database.__wrapped__(SimpleNamespace(param="postgresql"), tmp_path, monkeypatch)
+    with pytest.raises(AssertionError):
+        next(fixture)
 
 
 def seed_order(name="Dish"):
@@ -182,28 +254,30 @@ def readonly_database(request, tmp_path, monkeypatch):
     name = "c2_menu_readonly_" + uuid4().hex
     try:
         if request.param == "sqlite":
-            assert tmp_path.resolve().is_relative_to(OWNED)
+            owned = _owned_root()
+            assert tmp_path.resolve().is_relative_to(owned)
             url = sa.URL.create("sqlite", database=str(tmp_path / "menu.sqlite3"))
         else:
             uri = os.environ.get("C2_MENU_READONLY_PG_URI")
             if uri is None:
                 pytest.skip("owned PG55471 not provided; PostgreSQL proof not executed")
+            owned = _owned_root()
             assert uri and uri == uri.strip()
             url = make_url(uri)
             assert url.drivername == "postgresql+psycopg2"
             assert url.host is None and url.port is None
             assert url.database == "postgres" and url.username == "mmorinag" and url.password is None
-            assert dict(url.query) == {"host": str(OWNED / "pg/socket"), "port": "55471"}
-            assert (OWNED / "pg").resolve() == OWNED / "pg"
-            assert (OWNED / "pg/OWNER").read_text().strip() == str(ROOT)
-            pid = (OWNED / "pg/pgdata/postmaster.pid").read_text().splitlines()
-            assert Path(pid[1]).resolve() == OWNED / "pg/pgdata"
-            assert pid[3] == "55471" and pid[4] == str(OWNED / "pg/socket") and pid[5] == ""
+            assert dict(url.query) == {"host": str(owned / "pg/socket"), "port": "55471"}
+            assert (owned / "pg").resolve() == owned / "pg"
+            assert (owned / "pg/OWNER").read_text().strip() == str(ROOT)
+            pid = (owned / "pg/pgdata/postmaster.pid").read_text().splitlines()
+            assert Path(pid[1]).resolve() == owned / "pg/pgdata"
+            assert pid[3] == "55471" and pid[4] == str(owned / "pg/socket") and pid[5] == ""
             admin = sa.create_engine(url, isolation_level="AUTOCOMMIT")
             with admin.connect() as connection:
-                assert Path(connection.exec_driver_sql("SHOW data_directory").scalar_one()).resolve() == OWNED / "pg/pgdata"
+                assert Path(connection.exec_driver_sql("SHOW data_directory").scalar_one()).resolve() == owned / "pg/pgdata"
                 assert connection.exec_driver_sql("SHOW port").scalar_one() == "55471"
-                assert connection.exec_driver_sql("SHOW unix_socket_directories").scalar_one() == str(OWNED / "pg/socket")
+                assert connection.exec_driver_sql("SHOW unix_socket_directories").scalar_one() == str(owned / "pg/socket")
                 assert connection.exec_driver_sql("SHOW listen_addresses").scalar_one() == ""
                 assert int(connection.exec_driver_sql("SHOW server_version_num").scalar_one()) // 10000 == 16
                 assert connection.exec_driver_sql("SELECT current_user").scalar_one() == "mmorinag"
