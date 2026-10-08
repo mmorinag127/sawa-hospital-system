@@ -32,7 +32,9 @@ async function mount(api) {
     esModuleInterop: true,
   } }).outputText;
   const module = { exports: {} };
+  let sharedUi;
   function load(name) {
+    if (name === '@sawa/ui') return sharedUi;
     if (name === 'next/link') return { __esModule: true, default: ({ children, ...props }) => React.createElement('a', props, children) };
     if (name === '../components/TopNav') return { __esModule: true, default: () => null };
     if (name === '../services/apiClient') return { apiClient: api };
@@ -40,6 +42,7 @@ async function mount(api) {
     return require(name);
   }
   try {
+    sharedUi = await import('@sawa/ui');
     vm.compileFunction(code, ['require', 'module', 'exports'], { filename })(load, module, module.exports);
     await act(async () => root.render(React.createElement(module.exports.default)));
   } catch (error) {
