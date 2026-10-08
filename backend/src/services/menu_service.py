@@ -2865,6 +2865,8 @@ def update_item_status(month_id: str, item_id: str, body: dict, *, _session=None
         else:
             item.master_resolution_mode = None
             for field in _MASTER_FIELDS:
+                if field in ("daypart", "category"):
+                    continue
                 setattr(item, field, None)
         logger.info("Menu item updated", month_id=month_id, item_id=item_id)
         event_fields = list(body.keys())
@@ -3664,6 +3666,9 @@ def _readonly_monthly_items(session, month_id, items, entries, facility_id=None)
         })
     scope_ids = _resolve_override_scope_ids(session, facility_id) if facility_id else []
     for payload in payloads:
+        payload_scope_ids = scope_ids if facility_id else _resolve_override_scope_ids(
+            session, payload.get("facility_override")
+        )
         missing = []
         master_id = payload.get("menu_master_id")
         if master_id:
@@ -3673,12 +3678,12 @@ def _readonly_monthly_items(session, month_id, items, entries, facility_id=None)
             else:
                 overrides = session.query(MenuFacilityOverride).filter(
                     MenuFacilityOverride.menu_master_id == master_id,
-                    MenuFacilityOverride.facility_id.in_(scope_ids),
-                ).all() if scope_ids else []
+                    MenuFacilityOverride.facility_id.in_(payload_scope_ids),
+                ).all() if payload_scope_ids else []
                 candidates = []
                 if overrides:
-                    best = min(scope_ids.index(row.facility_id) for row in overrides)
-                    candidates = [row for row in overrides if scope_ids.index(row.facility_id) == best]
+                    best = min(payload_scope_ids.index(row.facility_id) for row in overrides)
+                    candidates = [row for row in overrides if payload_scope_ids.index(row.facility_id) == best]
                 if len(candidates) > 1:
                     missing.append("ambiguous_master_override")
                 else:
