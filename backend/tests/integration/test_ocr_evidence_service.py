@@ -497,18 +497,49 @@ def test_get_document_does_not_use_cache_only_ocr_artifact_as_current_source():
     assert rows == []
 
 
-def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence():
+def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence(monkeypatch, tmp_path):
+    from datetime import date
+    from src.models.order import OrderLine
+    from src.services.manual_upload_service import ManualUploadSavedFile
+    from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
+    from tests.helpers.ingest_original import (
+        authored_sources, configure_delivery, register_authored_original,
+        reserve_uploaded_original, process_uploaded_original, authored_pipeline_provider,
+    )
+
     order_service.clear_all()
     client = TestClient(app)
-    order = _seed_order("msg-draft-endpoint-build")
-    _attach_active_template_version(order["id"])
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("5"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test",
+    configure_delivery(monkeypatch)
+    uri, digest = authored_sources(
+        monkeypatch, tmp_path, facility_id="FAC00001",
+        menu_date=date(2026, 3, 22), daypart="breakfast",
     )
+    saved = ManualUploadSavedFile(
+        message_id="msg-draft-endpoint-build", pdf_uri=uri, content_sha256=digest,
+        original_filename="original.pdf", received_at=datetime(2026, 3, 22, 9, 0, 0),
+    )
+    uploaded, _ = create_uploaded_pdf_from_upload(
+        saved=saved, facility_hint="FAC00001",
+        week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
+        skip_ocr=False, source_kind="manual_upload",
+    )
+    receipt = reserve_uploaded_original(uploaded["id"])
+    assert receipt["id"] == saved.message_id
+    registered = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
+    authored_pipeline_provider(monkeypatch, table_rows=[["03/22", "朝", "Menu A", "5"]])
+    process_uploaded_original(uploaded["id"])
+
+    order = order_service.find_order_by_message_id("msg-draft-endpoint-build")
+    assert isinstance(order, dict)
+    assert order["id"] == registered["id"]
+    evidence = order_service.get_latest_ocr_evidence_run(order["id"])
+    assert isinstance(evidence, dict)
+    assert evidence["producer_version"] == "ocr_pipeline_ingest"
+    with session_scope() as session:
+        persisted = session.get(OrderOcrEvidenceRun, evidence["id"])
+        assert persisted is not None and persisted.order_id == order["id"]
+        line = session.query(OrderLine).filter_by(order_id=order["id"]).one()
+        assert line.quantity_original == 5
 
     res = client.get(f"/orders/{order['id']}/draft-sheet")
 
