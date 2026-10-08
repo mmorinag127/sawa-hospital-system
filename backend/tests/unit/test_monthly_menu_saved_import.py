@@ -240,6 +240,26 @@ def test_unresolved_master_is_saved_then_explicit_review_and_apply(store, tmp_pa
         assert all(master.qty_per_serving == 0 for master in session.query(MenuMaster))
 
 
+@pytest.mark.parametrize("month_id,delta,expected", [
+    ("2026-06", 1, "2026-07"),
+    ("2026-06", -1, "2026-05"),
+    ("2026-06", 0, "2026-06"),
+    ("2026-12", 1, "2027-01"),
+    ("2026-01", -1, "2025-12"),
+    ("2026-06", 18, "2027-12"),
+    ("2026-06", -18, "2024-12"),
+    (" 2026-06 ", 1, "2026-07"),
+])
+def test_shift_month_id_pure_calendar_arithmetic(month_id, delta, expected):
+    assert service._shift_month_id(month_id, delta) == expected
+
+
+@pytest.mark.parametrize("month_id", [None, "", "invalid", "2026", "2026-6"])
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_shift_month_id_invalid_input_returns_none(month_id, delta):
+    assert service._shift_month_id(month_id, delta) is None
+
+
 def test_adjacent_month_read_and_command_use_explicit_recorded_source(store, tmp_path, monkeypatch):
     scope, _ = store
     parsed(monkeypatch)

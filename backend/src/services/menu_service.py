@@ -3516,6 +3516,18 @@ def _normalize_month_id(value: object) -> str | None:
     return text
 
 
+def _shift_month_id(month_id: str, delta: int) -> str | None:
+    normalized = _normalize_month_id(month_id)
+    if not normalized:
+        return None
+    year = int(normalized[:4])
+    month = int(normalized[5:7])
+    index = year * 12 + (month - 1) + delta
+    shifted_year = index // 12
+    shifted_month = (index % 12) + 1
+    return f"{shifted_year:04d}-{shifted_month:02d}"
+
+
 
 
 @contextmanager
