@@ -373,44 +373,6 @@ def _fax_override_columns_are_authoritative(value: Any) -> bool:
     return bool(value.get("columns_authoritative"))
 
 
-_FACILITY_TEMPLATE_STORAGE_KEYS = {
-    "fax_template",
-    "fax_template_id",
-    "fax_template_ids",
-    "fax_template_override",
-    "facility_template_id",
-    "facility_template_name",
-    "facility_template_source",
-    "fax_template_source",
-}
-
-
-def _strip_facility_template_storage_keys(config: Any) -> dict[str, Any]:
-    if not isinstance(config, dict):
-        return {}
-    return {
-        key: deepcopy(value)
-        for key, value in config.items()
-        if key not in _FACILITY_TEMPLATE_STORAGE_KEYS
-    }
-
-
-def _master_facility_template_ids(facility_master: Any) -> tuple[str | None, list[str]]:
-    if not isinstance(facility_master, dict):
-        return None, []
-    primary = str(facility_master.get("fax_template_id") or "").strip() or None
-    template_ids: list[str] = []
-    raw_template_ids = facility_master.get("fax_template_ids")
-    if isinstance(raw_template_ids, list):
-        for item in raw_template_ids:
-            token = str(item or "").strip()
-            if token and token not in template_ids:
-                template_ids.append(token)
-    if primary and primary not in template_ids:
-        template_ids.insert(0, primary)
-    return primary, template_ids
-
-
 def _normalize_authoritative_fax_override(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
