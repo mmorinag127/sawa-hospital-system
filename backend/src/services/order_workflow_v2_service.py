@@ -387,7 +387,7 @@ def _workflow_meta_with_step4_artifacts(session: Any, row: OrderWorkflowState | 
     meta = _workflow_meta(row)
     if row is None:
         return meta
-    return order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, meta)
+    return order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, meta, expected_order_id=row.order_id)
 
 
 def _clear_step4_meta_references(meta: dict[str, Any]) -> None:
@@ -1284,17 +1284,11 @@ def _workflow_lineage_error(
         if not confirmed_snapshot_id:
             return "confirmed_snapshot_required"
         snapshot = session.get(OrderConfirmedSnapshot, confirmed_snapshot_id)
-        output_bundle = meta.get("output_bundle") if isinstance(meta.get("output_bundle"), dict) else None
-        if snapshot is None and output_bundle and _normalize_id(output_bundle.get("confirmed_snapshot_id")) == confirmed_snapshot_id:
-            return None
-        if snapshot is None and _has_confirmed_output_lineage(meta):
-            return None
         if snapshot is None or snapshot.order_id != order.id:
             return "confirmed_snapshot_required"
         if (
             workflow.draft_id
             and _normalize_id(snapshot.draft_id) != _normalize_id(workflow.draft_id)
-            and not _has_confirmed_output_lineage(meta)
         ):
             return "confirmed_snapshot_required"
         if template_version_id and _normalize_id(snapshot.template_version_id) != template_version_id:
@@ -1304,8 +1298,14 @@ def _workflow_lineage_error(
         snapshot_output = snapshot_json.get("output_bundle")
         if not isinstance(snapshot_bagging, dict) or not isinstance(snapshot_output, dict):
             return "confirmed_snapshot_artifacts_missing"
+        if order_output_artifact_service.confirmed_snapshot_artifact_payloads(
+            session, snapshot, expected_order_id=order.id,
+        ) is None:
+            return "confirmed_snapshot_lineage_mismatch"
         if not _has_confirmed_output_lineage(meta):
             return "confirmed_snapshot_lineage_missing"
+        if snapshot.bagging_result_id != _normalize_id(meta.get("bagging_result_id")) or snapshot.output_bundle_id != _normalize_id(meta.get("output_bundle_id")):
+            return "confirmed_snapshot_lineage_mismatch"
         if _normalize_id(meta.get("confirmed_snapshot_id")) not in {None, confirmed_snapshot_id}:
             return "confirmed_snapshot_lineage_mismatch"
     return None
@@ -3791,27 +3791,9 @@ def _recover_confirmed_artifacts_from_snapshot(
     session: Any,
     saved_sheet: OrderSheetDraft | None = None,
 ) -> dict[str, Any]:
-    if not workflow.confirmed_snapshot_id:
-        return meta
-    if isinstance(meta.get("bagging_result"), dict) and isinstance(meta.get("output_bundle"), dict):
-        return meta
-    snapshot = session.get(OrderConfirmedSnapshot, workflow.confirmed_snapshot_id)
-    if snapshot is None or snapshot.order_id != order.id:
-        return meta
-    snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
-    next_meta = dict(meta)
-    snapshot_bagging = snapshot_json.get("bagging_result") if isinstance(snapshot_json.get("bagging_result"), dict) else None
-    snapshot_output = snapshot_json.get("output_bundle") if isinstance(snapshot_json.get("output_bundle"), dict) else None
-    if snapshot_bagging:
-        next_meta["bagging_result"] = dict(snapshot_bagging)
-        next_meta["bagging_result_id"] = _normalize_id(snapshot_bagging.get("bagging_result_id"))
-    if snapshot_output:
-        next_meta["output_bundle"] = dict(snapshot_output)
-        next_meta["output_bundle_id"] = _normalize_id(snapshot_output.get("output_bundle_id"))
-    if isinstance(next_meta.get("bagging_result"), dict) and isinstance(next_meta.get("output_bundle"), dict):
-        return next_meta
-
-    return next_meta
+    return order_output_artifact_service.enrich_workflow_meta_with_artifacts(
+        session, meta, expected_order_id=order.id,
+    )
 
 
 def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -4347,6 +4329,7 @@ def final_confirm(
             session,
             artifact_id=_normalize_id(output_bundle.get("output_bundle_id")) or "",
             payload=output_bundle,
+            expected_order_id=order.id,
         )
         meta.pop("bagging_input_proof", None)
         meta["output_bundle"] = None

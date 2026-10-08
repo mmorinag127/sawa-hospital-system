@@ -158,18 +158,6 @@ def backfill_step4_output_artifacts(
                 bagging_result = _payload(meta.get("bagging_result"))
                 output_bundle = _payload(meta.get("output_bundle"))
                 if bagging_result is not None:
-                    order_output_artifact_service.save_bagging_result_artifact(
-                        session,
-                        payload=bagging_result,
-                        created_by=actor,
-                    )
-                if output_bundle is not None:
-                    order_output_artifact_service.save_output_bundle_artifact(
-                        session,
-                        payload=output_bundle,
-                        created_by=actor,
-                    )
-                if bagging_result is not None:
                     meta["bagging_result"] = None
                 if output_bundle is not None:
                     meta["output_bundle"] = None
@@ -259,26 +247,7 @@ def repair_confirmed_workflow_v2_lineage(
                 workflow.blockers_json = []
                 workflow.warnings_json = []
                 workflow.last_transition_at = datetime.utcnow()
-                bagging_payload = _payload(update_payload.get("bagging_result"))
-                output_payload = _payload(update_payload.get("output_bundle"))
-                if bagging_payload is not None:
-                    order_output_artifact_service.save_bagging_result_artifact(
-                        session,
-                        payload=bagging_payload,
-                        created_by=actor,
-                    )
-                if output_payload is not None:
-                    order_output_artifact_service.save_output_bundle_artifact(
-                        session,
-                        payload=output_payload,
-                        created_by=actor,
-                    )
                 draft.template_version_id = update_payload["template_version_id"]
-                snapshot.draft_id = update_payload["saved_sheet_id"]
-                snapshot.saved_sheet_id = update_payload["saved_sheet_id"]
-                snapshot.template_version_id = update_payload["template_version_id"]
-                snapshot.bagging_result_id = update_payload.get("bagging_result_id")
-                snapshot.output_bundle_id = update_payload.get("output_bundle_id")
                 record = _repair_record(
                     plan=plan,
                     actor=actor,
@@ -328,32 +297,29 @@ def _plan_confirmed_workflow_v2_lineage_repair(
     snapshot = session.get(OrderConfirmedSnapshot, confirmed_snapshot_id)
     if snapshot is None or snapshot.order_id != workflow.order_id:
         return RepairPlan(workflow.order_id, "blocked", "confirmed_snapshot_missing_or_mismatch", before_digest, None, []), None
-    snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
+    if not isinstance(snapshot.snapshot_json, dict):
+        return RepairPlan(workflow.order_id, "blocked", "confirmed_snapshot_payload_invalid", before_digest, None, []), None
+    snapshot_json = snapshot.snapshot_json
     if _normalize_id(snapshot_json.get("source")) != "workflow_v2":
         return RepairPlan(workflow.order_id, "no_op", None, before_digest, before_digest, []), None
-    saved_sheet_id = (
-        _normalize_id(snapshot.saved_sheet_id)
-        or _normalize_id(snapshot_json.get("saved_sheet_id"))
-        or _normalize_id(snapshot.draft_id)
-    )
-    template_version_id = (
-        _normalize_id(snapshot.template_version_id)
-        or _normalize_id(snapshot_json.get("template_version_id"))
-        or _normalize_id(workflow.template_version_id)
-    )
+    canonical = _snapshot_artifacts(session, snapshot, workflow.order_id)
+    if canonical is None:
+        return RepairPlan(workflow.order_id, "blocked", "confirmed_snapshot_artifact_mismatch", before_digest, None, []), None
+    bagging_payload, output_payload = canonical
+    saved_sheet_id = _normalize_id(snapshot.saved_sheet_id)
+    template_version_id = _normalize_id(snapshot.template_version_id)
     if not saved_sheet_id or not template_version_id:
         return RepairPlan(workflow.order_id, "blocked", "snapshot_saved_sheet_or_template_missing", before_digest, None, []), None
     draft = session.get(OrderSheetDraft, saved_sheet_id)
     if draft is None or draft.order_id != workflow.order_id:
         return RepairPlan(workflow.order_id, "blocked", "snapshot_saved_sheet_missing_or_mismatch", before_digest, None, []), None
-    bagging_payload = _payload(snapshot_json.get("bagging_result"))
-    output_payload = _payload(snapshot_json.get("output_bundle"))
-    bagging_result_id = _normalize_id(snapshot.bagging_result_id) or (
-        _normalize_id(bagging_payload.get("bagging_result_id")) if bagging_payload else None
-    )
-    output_bundle_id = _normalize_id(snapshot.output_bundle_id) or (
-        _normalize_id(output_payload.get("output_bundle_id")) if output_payload else None
-    )
+    bagging_result_id = snapshot.bagging_result_id
+    output_bundle_id = snapshot.output_bundle_id
+    current_meta = _workflow_meta_from_secondary(_secondary_actions(workflow))
+    for key, artifact_id in (("bagging_result_id", bagging_result_id), ("output_bundle_id", output_bundle_id)):
+        current_id = _normalize_id(current_meta.get(key))
+        if current_id is not None and current_id != artifact_id:
+            return RepairPlan(workflow.order_id, "blocked", "workflow_artifact_identity_mismatch", before_digest, None, []), None
     next_meta = {
         "template_version_id": template_version_id,
         "confirmed_snapshot_id": confirmed_snapshot_id,
@@ -361,10 +327,8 @@ def _plan_confirmed_workflow_v2_lineage_repair(
         "bagging_result_id": bagging_result_id,
         "output_bundle_id": output_bundle_id,
     }
-    if bagging_payload is not None:
-        next_meta["bagging_result"] = deepcopy(bagging_payload)
-    if output_payload is not None:
-        next_meta["output_bundle"] = deepcopy(output_payload)
+    next_meta["bagging_result"] = None
+    next_meta["output_bundle"] = None
     next_secondary = {WORKFLOW_V2_META_KEY: next_meta}
     update_payload = {
         "confirmed_snapshot_id": confirmed_snapshot_id,
@@ -373,8 +337,6 @@ def _plan_confirmed_workflow_v2_lineage_repair(
         "bagging_result_id": bagging_result_id,
         "output_bundle_id": output_bundle_id,
         "secondary_actions_json": next_secondary,
-        "bagging_result": deepcopy(bagging_payload) if bagging_payload is not None else None,
-        "output_bundle": deepcopy(output_payload) if output_payload is not None else None,
     }
     after = {
         "draft_id": saved_sheet_id,
@@ -391,26 +353,8 @@ def _plan_confirmed_workflow_v2_lineage_repair(
         actions.append(RepairAction("restore_saved_sheet_template_version_id", {"saved_sheet_id": saved_sheet_id, "template_version_id": template_version_id}))
     if not isinstance(workflow.secondary_actions_json, dict) or WORKFLOW_V2_META_KEY not in workflow.secondary_actions_json:
         actions.append(RepairAction("restore_workflow_v2_meta", {"confirmed_snapshot_id": confirmed_snapshot_id}))
-    if bagging_result_id and order_output_artifact_service.load_bagging_result_payload(session, bagging_result_id) is None:
-        if bagging_payload is None:
-            actions.append(RepairAction("manual_review_required", {"reason": "bagging_result_artifact_missing"}))
-        else:
-            actions.append(RepairAction("create_bagging_result_artifact", {"bagging_result_id": bagging_result_id}))
-    if output_bundle_id and order_output_artifact_service.load_output_bundle_payload(session, output_bundle_id) is None:
-        if output_payload is None:
-            actions.append(RepairAction("manual_review_required", {"reason": "output_bundle_artifact_missing"}))
-        else:
-            actions.append(RepairAction("create_output_bundle_artifact", {"output_bundle_id": output_bundle_id}))
-    if _normalize_id(snapshot.saved_sheet_id) != saved_sheet_id:
-        actions.append(RepairAction("restore_snapshot_saved_sheet_id", {"saved_sheet_id": saved_sheet_id}))
-    if _normalize_id(snapshot.bagging_result_id) != bagging_result_id and bagging_result_id:
-        actions.append(RepairAction("restore_snapshot_bagging_result_id", {"bagging_result_id": bagging_result_id}))
-    if _normalize_id(snapshot.output_bundle_id) != output_bundle_id and output_bundle_id:
-        actions.append(RepairAction("restore_snapshot_output_bundle_id", {"output_bundle_id": output_bundle_id}))
     if not actions:
         return RepairPlan(workflow.order_id, "no_op", None, before_digest, before_digest, []), None
-    if any(action.action_type == "manual_review_required" for action in actions):
-        return RepairPlan(workflow.order_id, "blocked", "output_artifact_payload_missing", before_digest, None, actions), None
     return RepairPlan(workflow.order_id, "repairable", None, before_digest, _digest(after), actions), update_payload
 
 
@@ -419,24 +363,33 @@ def _plan_step4_artifact_backfill(*, session: Session, workflow: OrderWorkflowSt
     before_digest = _digest(meta)
     actions: list[RepairAction] = []
     blocked_actions: list[RepairAction] = []
+    for payload_key, id_key, reader in (
+        ("bagging_result", "bagging_result_id", order_output_artifact_service.load_bagging_result_payload),
+        ("output_bundle", "output_bundle_id", order_output_artifact_service.load_output_bundle_payload),
+    ):
+        if meta.get(payload_key) is not None and not isinstance(meta[payload_key], dict):
+            blocked_actions.append(RepairAction("manual_review_required", {"reason": f"{payload_key}_payload_invalid"}))
+        if meta.get(id_key) is not None or meta.get(payload_key) is not None:
+            if reader(session, _normalize_id(meta.get(id_key)), expected_order_id=workflow.order_id) is None:
+                blocked_actions.append(RepairAction("manual_review_required", {"reason": f"{payload_key}_artifact_missing_or_invalid"}))
     bagging_result = _payload(meta.get("bagging_result"))
     if bagging_result is not None:
-        bagging_result_id = _normalize_id(bagging_result.get("bagging_result_id")) or _normalize_id(meta.get("bagging_result_id"))
+        bagging_result_id = _normalize_id(meta.get("bagging_result_id"))
         if not bagging_result_id:
             blocked_actions.append(RepairAction("manual_review_required", {"reason": "bagging_result_id_missing"}))
-        elif order_output_artifact_service.load_bagging_result_payload(session, bagging_result_id) is None:
-            actions.append(RepairAction("create_bagging_result_artifact", {"bagging_result_id": bagging_result_id}))
+        elif order_output_artifact_service.load_bagging_result_payload(session, bagging_result_id, expected_order_id=workflow.order_id) != bagging_result:
+            blocked_actions.append(RepairAction("manual_review_required", {"reason": "bagging_result_artifact_missing_or_mismatch"}))
         actions.append(RepairAction("clear_workflow_bagging_payload", {"bagging_result_id": bagging_result_id}))
     output_bundle = _payload(meta.get("output_bundle"))
     if output_bundle is not None:
-        output_bundle_id = _normalize_id(output_bundle.get("output_bundle_id")) or _normalize_id(meta.get("output_bundle_id"))
+        output_bundle_id = _normalize_id(meta.get("output_bundle_id"))
         if not output_bundle_id:
             blocked_actions.append(RepairAction("manual_review_required", {"reason": "output_bundle_id_missing"}))
-        elif order_output_artifact_service.load_output_bundle_payload(session, output_bundle_id) is None:
-            actions.append(RepairAction("create_output_bundle_artifact", {"output_bundle_id": output_bundle_id}))
+        elif order_output_artifact_service.load_output_bundle_payload(session, output_bundle_id, expected_order_id=workflow.order_id) != output_bundle:
+            blocked_actions.append(RepairAction("manual_review_required", {"reason": "output_bundle_artifact_missing_or_mismatch"}))
         actions.append(RepairAction("clear_workflow_output_payload", {"output_bundle_id": output_bundle_id}))
     if blocked_actions:
-        return RepairPlan(workflow.order_id, "blocked", "artifact_id_missing", before_digest, None, blocked_actions)
+        return RepairPlan(workflow.order_id, "blocked", "artifact_missing_or_mismatch", before_digest, None, blocked_actions)
     if not actions:
         return RepairPlan(workflow.order_id, "no_op", None, before_digest, before_digest, [])
     next_meta = deepcopy(meta)
@@ -492,13 +445,11 @@ def _plan_confirmed_snapshot_payload_repair(
             ],
         ), None
 
-    snapshot_json = snapshot.snapshot_json if isinstance(snapshot.snapshot_json, dict) else {}
-    snapshot_bagging = _payload(snapshot_json.get("bagging_result"))
-    snapshot_output = _payload(snapshot_json.get("output_bundle"))
-    if snapshot_bagging is None and snapshot_output is None:
+    canonical = _snapshot_artifacts(session, snapshot, order_id)
+    if canonical is None:
         return _blocked(
             order_id,
-            "confirmed_snapshot_payloads_missing",
+            "confirmed_snapshot_artifact_mismatch",
             before_digest=before_digest,
             actions=[
                 RepairAction(
@@ -508,22 +459,19 @@ def _plan_confirmed_snapshot_payload_repair(
             ],
         ), None
 
+    snapshot_bagging, snapshot_output = canonical
     next_meta = deepcopy(current_meta)
     actions: list[RepairAction] = []
-    _restore_payload(
-        actions=actions,
-        meta=next_meta,
-        payload_key="bagging_result",
-        id_key="bagging_result_id",
-        payload=snapshot_bagging,
-    )
-    _restore_payload(
-        actions=actions,
-        meta=next_meta,
-        payload_key="output_bundle",
-        id_key="output_bundle_id",
-        payload=snapshot_output,
-    )
+    for payload_key, id_key, payload in (("bagging_result", "bagging_result_id", snapshot_bagging), ("output_bundle", "output_bundle_id", snapshot_output)):
+        current_id = _normalize_id(next_meta.get(id_key))
+        if current_id is not None and current_id != payload[id_key]:
+            return _blocked(order_id, "workflow_artifact_identity_mismatch", before_digest=before_digest), None
+        if current_id is None:
+            next_meta[id_key] = payload[id_key]
+            actions.append(RepairAction(f"restore_{id_key}", {id_key: payload[id_key]}))
+        if next_meta.get(payload_key) is not None:
+            next_meta[payload_key] = None
+            actions.append(RepairAction(f"clear_workflow_{payload_key}", {id_key: payload[id_key]}))
     if snapshot_output is not None:
         output_confirmed_snapshot_id = _normalize_id(snapshot_output.get("confirmed_snapshot_id"))
         if output_confirmed_snapshot_id and not _normalize_id(next_meta.get("confirmed_snapshot_id")):
@@ -552,37 +500,8 @@ def _plan_confirmed_snapshot_payload_repair(
     )
 
 
-def _restore_payload(
-    *,
-    actions: list[RepairAction],
-    meta: dict[str, Any],
-    payload_key: str,
-    id_key: str,
-    payload: dict[str, Any] | None,
-) -> None:
-    if payload is None:
-        return
-    current_payload = _payload(meta.get(payload_key))
-    payload_id = _normalize_id(payload.get(id_key))
-    current_id = _normalize_id(meta.get(id_key)) or (
-        _normalize_id(current_payload.get(id_key)) if current_payload else None
-    )
-    if current_payload is None:
-        meta[payload_key] = deepcopy(payload)
-        actions.append(
-            RepairAction(
-                action_type=f"restore_{payload_key}",
-                details={id_key: payload_id},
-            )
-        )
-    if payload_id and current_id is None:
-        meta[id_key] = payload_id
-        actions.append(
-            RepairAction(
-                action_type=f"restore_{id_key}",
-                details={id_key: payload_id},
-            )
-        )
+def _snapshot_artifacts(session: Session, snapshot: OrderConfirmedSnapshot, order_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    return order_output_artifact_service.confirmed_snapshot_artifact_payloads(session, snapshot, expected_order_id=order_id)
 
 
 def _secondary_actions(workflow: OrderWorkflowState) -> dict[str, Any]:
@@ -595,11 +514,9 @@ def _workflow_meta_from_secondary(secondary_actions: dict[str, Any]) -> dict[str
 
 
 def _confirmed_snapshot_id(workflow: OrderWorkflowState, meta: dict[str, Any]) -> str | None:
-    output_bundle = _payload(meta.get("output_bundle"))
     return (
         _normalize_id(workflow.confirmed_snapshot_id)
         or _normalize_id(meta.get("confirmed_snapshot_id"))
-        or (_normalize_id(output_bundle.get("confirmed_snapshot_id")) if output_bundle else None)
     )
 
 

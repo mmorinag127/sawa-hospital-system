@@ -51,32 +51,31 @@ def _payload(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
-def _bagging_payload(session: Session, meta: dict[str, Any]) -> dict[str, Any] | None:
-    return _payload(meta.get("bagging_result")) or order_output_artifact_service.load_bagging_result_payload(
+def _bagging_payload(session: Session, meta: dict[str, Any], order_id: str) -> dict[str, Any] | None:
+    return order_output_artifact_service.load_bagging_result_payload(
         session,
         _normalize_id(meta.get("bagging_result_id")),
+        expected_order_id=order_id,
     )
 
 
-def _output_payload(session: Session, meta: dict[str, Any]) -> dict[str, Any] | None:
-    return _payload(meta.get("output_bundle")) or order_output_artifact_service.load_output_bundle_payload(
+def _output_payload(session: Session, meta: dict[str, Any], order_id: str) -> dict[str, Any] | None:
+    return order_output_artifact_service.load_output_bundle_payload(
         session,
         _normalize_id(meta.get("output_bundle_id")),
+        expected_order_id=order_id,
     )
 
 
 def _confirmed_snapshot_id(workflow: OrderWorkflowState | None, meta: dict[str, Any]) -> str | None:
-    output_bundle = _payload(meta.get("output_bundle"))
     return (
         _normalize_id(getattr(workflow, "confirmed_snapshot_id", None))
         or _normalize_id(meta.get("confirmed_snapshot_id"))
-        or (_normalize_id(output_bundle.get("confirmed_snapshot_id")) if output_bundle else None)
     )
 
 
 def _id_from_payload_or_meta(meta: dict[str, Any], *, payload_key: str, id_key: str) -> str | None:
-    payload = _payload(meta.get(payload_key))
-    return _normalize_id(meta.get(id_key)) or (_normalize_id(payload.get(id_key)) if payload else None)
+    return _normalize_id(meta.get(id_key))
 
 
 def _is_confirmed_like(order: Order, workflow: OrderWorkflowState | None, meta: dict[str, Any]) -> bool:
@@ -228,11 +227,13 @@ def _audit_confirmed_snapshot(
             _issue(
                 order_id=order.id,
                 issue_type="confirmed_snapshot_row_missing",
-                repair_safety="repair_candidate" if _has_repair_payload(meta) else "blocked",
+                repair_safety="blocked",
                 confirmed_snapshot_id=confirmed_snapshot_id,
             )
         ]
     issues: list[LineageIssue] = []
+    if order_output_artifact_service.confirmed_snapshot_artifact_payloads(session, snapshot, expected_order_id=order.id) is None:
+        issues.append(_issue(order_id=order.id, issue_type="confirmed_snapshot_artifact_mismatch", repair_safety="blocked", confirmed_snapshot_id=snapshot.id))
     if snapshot.order_id != order.id:
         issues.append(
             _issue(
@@ -284,8 +285,8 @@ def _audit_bagging_and_output(
 ) -> list[LineageIssue]:
     issues: list[LineageIssue] = []
     saved_sheet_id = _normalize_id(getattr(workflow, "draft_id", None))
-    bagging_result = _bagging_payload(session, meta)
-    output_bundle = _output_payload(session, meta)
+    bagging_result = _bagging_payload(session, meta, order.id)
+    output_bundle = _output_payload(session, meta, order.id)
     bagging_result_id = _id_from_payload_or_meta(meta, payload_key="bagging_result", id_key="bagging_result_id")
     output_bundle_id = _id_from_payload_or_meta(meta, payload_key="output_bundle", id_key="output_bundle_id")
 
@@ -371,10 +372,13 @@ def _audit_bagging_and_output(
 
 def _audit_order(session: Session, order: Order, workflow: OrderWorkflowState | None) -> list[LineageIssue]:
     meta = _workflow_meta(workflow)
+    missing_ids = [key for payload_key, key in (("bagging_result", "bagging_result_id"), ("output_bundle", "output_bundle_id"))
+                   if meta.get(payload_key) is not None and not _normalize_id(meta.get(key))]
+    meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, meta, expected_order_id=order.id)
     workflow_template_version_id = _normalize_id(getattr(workflow, "template_version_id", None)) or _normalize_id(
         meta.get("template_version_id")
     )
-    issues: list[LineageIssue] = []
+    issues: list[LineageIssue] = [_issue(order_id=order.id, issue_type=f"{key}_missing", repair_safety="blocked") for key in missing_ids]
     issues.extend(
         _audit_evidence(
             session=session,

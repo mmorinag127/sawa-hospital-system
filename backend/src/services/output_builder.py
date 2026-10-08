@@ -1898,6 +1898,8 @@ def _accepted_output_origin(session, order_id, current_input, candidate, *, lock
         payload = snapshot.snapshot_json
         if not isinstance(payload, dict) or snapshot.snapshot_digest != _canonical_payload_digest(payload):
             raise ValueError("output original confirmed receipt mismatch")
+        if order_output_artifact_service.confirmed_snapshot_artifact_payloads(session, snapshot, expected_order_id=order_id) is None:
+            raise ValueError("output original confirmed artifact mismatch")
         if not snapshots_equal(payload.get("saved_sheet"), current_input["draft"]["draft_sheet_json"]) or payload.get("selected_ocr_result_id") != current_input["evidence_run_id"] or snapshot.template_version_id != current_input["draft"]["template_version_id"]:
             raise ValueError("output original confirmed sheet mismatch")
         bagging = payload.get("bagging_result", {})
@@ -2021,14 +2023,16 @@ def _workflow_v2_materialization_candidate(
 ) -> dict | None:
     meta = workflow.secondary_actions_json if isinstance(workflow.secondary_actions_json, dict) else {}
     workflow_meta = meta.get("workflow_v2") if isinstance(meta.get("workflow_v2"), dict) else {}
-    workflow_meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, workflow_meta)
+    workflow_meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, workflow_meta, expected_order_id=order["id"])
     bagging_result = workflow_meta.get("bagging_result") if isinstance(workflow_meta.get("bagging_result"), dict) else None
-    if bagging_result is None:
-        bagging_id = str(workflow_meta.get("bagging_result_id") or "").strip()
-        if bagging_id:
-            artifact = session.get(OrderBaggingResult, bagging_id)
-            if artifact is not None and isinstance(artifact.payload_json, dict):
-                bagging_result = artifact.payload_json
+    output_bundle = workflow_meta.get("output_bundle")
+    if workflow_meta.get("output_bundle_id") is not None or workflow.state in {"output_review", "confirmed"}:
+        if not isinstance(output_bundle, dict):
+            raise ValueError("workflow-v2 output bundle artifact missing or invalid")
+        if not isinstance(bagging_result, dict) or output_bundle.get("source_bagging_result_id") != bagging_result.get("bagging_result_id"):
+            raise ValueError("workflow-v2 output bundle source mismatch")
+        if output_bundle.get("source_saved_sheet_id") != draft.id or output_bundle.get("template_version_id") != draft.template_version_id:
+            raise ValueError("workflow-v2 output bundle saved sheet mismatch")
     if isinstance(bagging_result, dict):
         source_saved_sheet_id = str(bagging_result.get("source_saved_sheet_id") or "").strip()
         template_version_id = str(bagging_result.get("template_version_id") or "").strip()
