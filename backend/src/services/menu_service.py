@@ -178,7 +178,7 @@ def _monthly_item_identity_key(
         str(name or "").strip(),
         str(_coerce_master_field_value("daypart", daypart) or "").strip(),
         str(category or "").strip(),
-        str(normalize_diet_type(diet_type) or "regular").strip(),
+        str(normalize_diet_type(diet_type) or "").strip(),
         str(facility_override or "").strip(),
     )
 
@@ -250,14 +250,14 @@ def _monthly_entry_override_key(entry: MonthlyMenuEntry) -> tuple[object, object
         entry.menu_date,
         entry.daypart,
         int(entry.slot_index) if entry.slot_index is not None else -1,
-        str(normalize_diet_type(entry.diet_type) or "regular").strip(),
+        str(normalize_diet_type(entry.diet_type) or "").strip(),
     )
 
 
 def _monthly_entry_diet_filter(column, diet_type: object):
-    normalized = normalize_diet_type(diet_type) or "regular"
-    if normalized == "regular":
-        return or_(column.is_(None), column == "", column == "regular")
+    normalized = normalize_diet_type(diet_type)
+    if not normalized:
+        return column.in_([])
     return column == normalized
 
 
@@ -2913,6 +2913,9 @@ def _find_existing_monthly_item(
     diet_type: str | None = None,
     exclude_id: str | None = None,
 ) -> MonthlyMenuItem | None:
+    normalized_diet = normalize_diet_type(diet_type)
+    if not normalized_diet:
+        return None
     query = select(MonthlyMenuItem).where(MonthlyMenuItem.monthly_menu_id == month_id).where(MonthlyMenuItem.name == name)
     scope = (facility_override or "").strip()
     if not scope:
@@ -2927,16 +2930,20 @@ def _find_existing_monthly_item(
     normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
     if normalized_daypart:
         query = query.where(MonthlyMenuItem.daypart == normalized_daypart)
+    else:
+        query = query.where(or_(MonthlyMenuItem.daypart.is_(None), MonthlyMenuItem.daypart == ""))
     normalized_category = str(category or "").strip()
     if normalized_category:
         query = query.where(MonthlyMenuItem.category == normalized_category)
-    normalized_diet = normalize_diet_type(diet_type)
-    if normalized_diet:
-        query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+    else:
+        query = query.where(or_(MonthlyMenuItem.category.is_(None), MonthlyMenuItem.category == ""))
+    query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
     if exclude_id:
         query = query.where(MonthlyMenuItem.id != exclude_id)
-    query = query.order_by(MonthlyMenuItem.id.asc())
-    return session.execute(query).scalars().first()
+    matches = session.execute(query).scalars().all()
+    if len(matches) > 1:
+        raise ValueError("monthly_menu_item_identity_ambiguous")
+    return matches[0] if matches else None
 
 
 def create_item_stub(month_id: str, name: str):
@@ -3009,12 +3016,18 @@ def _find_existing_monthly_entry(
     facility_override: str | None,
     diet_type: str | None,
 ) -> MonthlyMenuEntry | None:
+    if not normalize_diet_type(diet_type):
+        return None
     query = (
         select(MonthlyMenuEntry)
         .where(MonthlyMenuEntry.monthly_menu_id == month_id)
         .where(MonthlyMenuEntry.menu_date == menu_date)
-        .where(MonthlyMenuEntry.daypart == daypart)
     )
+    normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
+    if normalized_daypart:
+        query = query.where(MonthlyMenuEntry.daypart == normalized_daypart)
+    else:
+        query = query.where(or_(MonthlyMenuEntry.daypart.is_(None), MonthlyMenuEntry.daypart == ""))
     if slot_index is None:
         query = query.where(MonthlyMenuEntry.slot_index.is_(None))
     else:
@@ -3030,8 +3043,10 @@ def _find_existing_monthly_entry(
     else:
         query = query.where(MonthlyMenuEntry.facility_override == scope)
     query = query.where(_monthly_entry_diet_filter(MonthlyMenuEntry.diet_type, diet_type))
-    query = query.order_by(MonthlyMenuEntry.id.desc())
-    return session.execute(query).scalars().first()
+    matches = session.execute(query).scalars().all()
+    if len(matches) > 1:
+        raise ValueError("monthly_menu_entry_identity_ambiguous")
+    return matches[0] if matches else None
 
 
 def _find_best_monthly_item_for_entry(
@@ -3044,53 +3059,15 @@ def _find_best_monthly_item_for_entry(
     daypart: str | None = None,
     category: str | None = None,
 ) -> MonthlyMenuItem | None:
-    scope = (facility_override or "").strip() or None
-    item = _find_existing_monthly_item(
+    return _find_existing_monthly_item(
         session,
         month_id,
         name,
-        scope,
+        facility_override,
         daypart=daypart,
         category=category,
         diet_type=diet_type,
     )
-    if item is not None:
-        return item
-    normalized_diet = normalize_diet_type(diet_type)
-    if scope:
-        query = (
-            select(MonthlyMenuItem)
-            .where(MonthlyMenuItem.monthly_menu_id == month_id)
-            .where(MonthlyMenuItem.name == name)
-            .where(MonthlyMenuItem.facility_override == scope)
-            .order_by(MonthlyMenuItem.id.desc())
-        )
-        if normalized_diet:
-            query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
-        normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
-        if normalized_daypart:
-            query = query.where(MonthlyMenuItem.daypart == normalized_daypart)
-        normalized_category = str(category or "").strip()
-        if normalized_category:
-            query = query.where(MonthlyMenuItem.category == normalized_category)
-        item = session.execute(query).scalars().first()
-        if item is not None:
-            return item
-    query = (
-        select(MonthlyMenuItem)
-        .where(MonthlyMenuItem.monthly_menu_id == month_id)
-        .where(MonthlyMenuItem.name == name)
-        .order_by(MonthlyMenuItem.id.desc())
-    )
-    if normalized_diet:
-        query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
-    normalized_daypart = str(_coerce_master_field_value("daypart", daypart) or "").strip()
-    if normalized_daypart:
-        query = query.where(MonthlyMenuItem.daypart == normalized_daypart)
-    normalized_category = str(category or "").strip()
-    if normalized_category:
-        query = query.where(MonthlyMenuItem.category == normalized_category)
-    return session.execute(query).scalars().first()
 
 
 def _count_monthly_entry_refs(
@@ -3644,6 +3621,8 @@ def is_resolved_quantity(quantity) -> bool:
 
 def _unresolved_menu_fields(item: dict) -> list[str]:
     fields = []
+    if not normalize_diet_type(item.get("diet_type")):
+        fields.append("diet_type")
     if not is_resolved_quantity(item.get("qty_per_serving")):
         fields.append("qty_per_serving")
     if _normalize_menu_unit_type(item.get("unit_type")) not in {"g", "cut", "count"}:

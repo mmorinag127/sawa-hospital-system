@@ -101,7 +101,7 @@ def _normalized_explicit_diet_type(value) -> str:
 def _matches_explicit_line_identity(item: dict, *, daypart, diet, menu_date: date) -> bool:
     item_daypart = menu_service._coerce_master_field_value("daypart", item.get("daypart"))
     line_daypart = menu_service._coerce_master_field_value("daypart", daypart)
-    item_diet = str(menu_service.normalize_diet_type(item.get("diet_type")) or "regular").strip()
+    item_diet = str(menu_service.normalize_diet_type(item.get("diet_type")) or "").strip()
     return (
         item_daypart == line_daypart
         and item_diet == _normalized_explicit_diet_type(diet)

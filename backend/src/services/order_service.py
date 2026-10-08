@@ -18513,14 +18513,11 @@ def _merge_order_review_summary_with_sheet_context(
         draft_id = str(draft_record.get("id") or "").strip()
         if draft_id:
             merged["ocr_draft_revision_id"] = draft_id
-    current_sheet_revision_id = (
-        str(context.get("current_sheet_revision_id") or "").strip()
-        or _current_sheet_revision_id(
-            order_id=str((context.get("order_id") or "")).strip(),
-        )
-    )
+    current_sheet_revision_id = str(context.get("current_sheet_revision_id") or "").strip()
     if current_sheet_revision_id:
         merged["current_sheet_revision_id"] = current_sheet_revision_id
+    else:
+        merged.pop("current_sheet_revision_id", None)
     apply_blockers = _dedupe_str_tokens(
         list(merged.get("ocr_apply_blockers") or [])
         + list(gate.get("apply_blockers") or [])

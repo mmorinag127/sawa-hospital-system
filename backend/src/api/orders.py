@@ -511,7 +511,7 @@ def _needs_list_candidate_summary(order: dict) -> bool:
         return False
     facility_missing = not str(order.get("facility") or "").strip()
     week_value = str(order.get("week_value") or order.get("week") or "").strip()
-    week_range_missing = bool(week_value) and "@" not in week_value
+    week_range_missing = not week_value or "@" not in week_value
     return facility_missing or week_range_missing
 
 
@@ -527,14 +527,42 @@ def _attach_order_list_candidate_summary(
     if not isinstance(cached_payload, dict):
         cached_payload = None
     message_id = str(order.get("message_id") or "").strip()
-    if message_id and (not cached_payload or not effective_facility or not effective_week):
+    from src.services.canonical_facility_store import CanonicalStoreError
+    receipt_error = None
+    reference_hints = {}
+    if message_id:
         uploaded_pdf = uploaded_pdf_service.get_uploaded_pdf_by_message_id(message_id)
         if isinstance(uploaded_pdf, dict):
-            ingest_payload = uploaded_pdf_service.build_ingest_payload(uploaded_pdf)
-            if not effective_facility:
-                effective_facility = str(ingest_payload.get("facility_hint") or "").strip() or None
-            if not effective_week:
-                effective_week = str(ingest_payload.get("week_hint") or "").strip() or None
+            reference_hints = {key: uploaded_pdf.get(key) for key in ("facility_hint", "week_hint")}
+            try:
+                ingest_payload = uploaded_pdf_service.build_ingest_payload(uploaded_pdf)
+            except (ValueError, CanonicalStoreError) as exc:
+                receipt_error = str(exc)
+            else:
+                if not effective_facility:
+                    effective_facility = str(ingest_payload.get("facility_hint") or "").strip() or None
+                if not effective_week:
+                    effective_week = str(ingest_payload.get("week_hint") or "").strip() or None
+        else:
+            receipt_error = "uploaded_pdf_original_selection_missing"
+    else:
+        receipt_error = "uploaded_pdf_original_selection_missing"
+    if receipt_error:
+        order["candidate_resolution"] = {
+            "reference_hints": reference_hints,
+            "resolutions": {key: {
+                "decision_type": key, "resolved_value": None, "resolved_label": None,
+                "confidence": "unknown", "blocked": True,
+                "blocked_reasons": [receipt_error], "requires_user_choice": True,
+                "candidates": [],
+            } for key in ("facility", "week")},
+        }
+        summary = order["candidate_resolution"]
+        summary["gate_summary"] = candidate_resolution_service.summarize_resolution_gate(summary["resolutions"])
+        summary["requires_user_choice"] = True
+        summary["confidence_band"] = "unknown"
+        summary["critical_choices"] = []
+        return
     if cached_payload is None and not effective_facility and not effective_week:
         return
     summary = candidate_resolution_service.resolve_order_list_candidates(

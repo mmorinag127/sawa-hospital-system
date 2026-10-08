@@ -24,6 +24,8 @@ type Order = {
   candidate_resolution?: {
     resolutions?: {
       facility?: {
+        blocked?: boolean;
+        blocked_reasons?: string[];
         resolved_value?: string | null;
         resolved_label?: string | null;
         candidates?: Array<{
@@ -33,6 +35,8 @@ type Order = {
         }> | null;
       } | null;
       week?: {
+        blocked?: boolean;
+        blocked_reasons?: string[];
         resolved_value?: string | null;
         resolved_label?: string | null;
       } | null;
@@ -153,10 +157,21 @@ const mergeOrdersById = (current: Order[], incoming: Order[]) => {
   return Array.from(byId.values()).sort(compareOrdersByReceivedAt);
 };
 
+const hasBlockedCandidateResolution = (order: Order) =>
+  Object.values(order.candidate_resolution?.resolutions || {}).some(
+    (resolution) => Boolean(resolution?.blocked),
+  );
+
+const candidateBoundaryWarning = (order: Order) =>
+  Object.values(order.candidate_resolution?.resolutions || {}).some(
+    (resolution) => resolution?.blocked && Boolean(resolution.blocked_reasons?.length),
+  ) ? "施設・対象週の確認が必要です" : null;
+
 const normalizeWeekGroup = (order: Order) => {
   const candidateWeek = order.candidate_resolution?.resolutions?.week;
-  const candidateValue = String(candidateWeek?.resolved_value || "").trim();
-  const candidateLabel = String(candidateWeek?.resolved_label || "").trim();
+  const blocked = hasBlockedCandidateResolution(order);
+  const candidateValue = blocked ? "" : String(candidateWeek?.resolved_value || "").trim();
+  const candidateLabel = blocked ? "" : String(candidateWeek?.resolved_label || "").trim();
   const rawValue = candidateValue || String(order.week_value || order.week || "").trim();
   const rawLabel = candidateLabel || String(order.week_label || "").trim();
   const usesTemporaryWeek = Boolean(candidateValue || candidateLabel);
@@ -196,7 +211,7 @@ const normalizeWeekGroup = (order: Order) => {
 
 const weekMenuId = (order: Order) => {
   const rawValue = String(
-    order.candidate_resolution?.resolutions?.week?.resolved_value || order.week_value || order.week || "",
+    (!hasBlockedCandidateResolution(order) && order.candidate_resolution?.resolutions?.week?.resolved_value) || order.week_value || order.week || "",
   ).trim();
   if (!rawValue) return "";
   if (rawValue.includes("@")) return rawValue.split("@", 1)[0];
@@ -204,6 +219,7 @@ const weekMenuId = (order: Order) => {
 };
 
 const inlineFacilityHint = (order: Order) => {
+  if (hasBlockedCandidateResolution(order)) return null;
   const facility = order.candidate_resolution?.resolutions?.facility;
   const resolvedValue = String(facility?.resolved_value || "").trim();
   const resolvedLabel = String(facility?.resolved_label || "").trim();
@@ -1007,6 +1023,9 @@ export default function OrdersPage() {
           <span className={`status-pill ${statusClass(displayStatus)}`}>{displayStatus}</span>
         </div>
         <p className="order-card-week">{weekBucket.label}</p>
+        {candidateBoundaryWarning(order) ? (
+          <p className="list-workflow-support" role="alert">{candidateBoundaryWarning(order)}</p>
+        ) : null}
         {workflowHeadlineText(order) ? (
           <div className="list-workflow">
             <p className="list-workflow-title">{workflowHeadlineText(order)}</p>
