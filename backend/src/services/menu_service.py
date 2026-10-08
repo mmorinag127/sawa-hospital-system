@@ -3528,6 +3528,73 @@ def _shift_month_id(month_id: str, delta: int) -> str | None:
     return f"{shifted_year:04d}-{shifted_month:02d}"
 
 
+def _payload_contains_requested_month(payload: dict | None, month_id: str) -> bool:
+    normalized = _normalize_month_id(month_id)
+    if not normalized or not isinstance(payload, dict):
+        return False
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        menu_date = entry.get("menu_date")
+        if not menu_date:
+            continue
+        try:
+            parsed = date.fromisoformat(str(menu_date))
+        except Exception:
+            continue
+        if f"{parsed.year:04d}-{parsed.month:02d}" == normalized:
+            return True
+    return False
+
+
+def _canonicalize_resolved_menu_payload(
+    payload: dict | None,
+    requested_month_id: str,
+    resolved_month_id: str,
+) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+    requested = _normalize_month_id(requested_month_id)
+    resolved = _normalize_month_id(resolved_month_id)
+    if not requested or not resolved or requested == resolved:
+        return payload
+
+    normalized_payload = dict(payload)
+
+    menu_payload = payload.get("menu")
+    if isinstance(menu_payload, dict):
+        rewritten_menu = dict(menu_payload)
+        rewritten_menu["id"] = requested
+        rewritten_menu["requested_month_id"] = requested
+        rewritten_menu["source_month_id"] = resolved
+        normalized_payload["menu"] = rewritten_menu
+
+    def _rewrite_month_id(rows: object) -> object:
+        if not isinstance(rows, list):
+            return rows
+        rewritten_rows: list[object] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                rewritten_rows.append(row)
+                continue
+            updated = dict(row)
+            if "month_id" in updated:
+                updated["month_id"] = requested
+            updated["requested_month_id"] = requested
+            updated["source_month_id"] = resolved
+            rewritten_rows.append(updated)
+        return rewritten_rows
+
+    normalized_payload["items"] = _rewrite_month_id(payload.get("items"))
+    normalized_payload["entries"] = _rewrite_month_id(payload.get("entries"))
+    if "master_checks" in payload:
+        normalized_payload["master_checks"] = _rewrite_month_id(payload.get("master_checks"))
+    return normalized_payload
+
+
 
 
 @contextmanager

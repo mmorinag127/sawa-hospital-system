@@ -260,6 +260,58 @@ def test_shift_month_id_invalid_input_returns_none(month_id, delta):
     assert service._shift_month_id(month_id, delta) is None
 
 
+@pytest.mark.parametrize("payload,month_id,expected", [
+    ({"entries": [{"menu_date": "2026-11-01"}]}, "2026-11", True),
+    ({"entries": [{"menu_date": "2026-10-31"}]}, "2026-11", False),
+    ({"entries": [{"menu_date": "invalid"}, None, {}]}, "2026-11", False),
+    ({"entries": None}, "2026-11", False),
+    (None, "2026-11", False),
+    ({"entries": [{"menu_date": "2026-11-01"}]}, "invalid", False),
+])
+def test_recorded_payload_requested_month_membership(payload, month_id, expected):
+    assert service._payload_contains_requested_month(payload, month_id) is expected
+
+
+def test_resolved_menu_presentation_copy_preserves_recorded_source_and_quantities():
+    from copy import deepcopy
+
+    payload = {
+        "source_month_id": "2026-10",
+        "menu": {"id": "2026-10", "source_receipt": "recorded"},
+        "items": [{"month_id": "2026-10", "quantity": 0}],
+        "entries": [{"month_id": "2026-10", "menu_date": "2026-11-01", "quantity": None}],
+        "master_checks": [{"month_id": "2026-10", "quantity": 0}],
+    }
+    original = deepcopy(payload)
+    actual = service._canonicalize_resolved_menu_payload(payload, "2026-11", "2026-10")
+    assert payload == original
+    assert actual is not payload
+    assert actual["source_month_id"] == "2026-10"
+    assert actual["menu"] == {"id": "2026-11", "source_receipt": "recorded",
+                              "requested_month_id": "2026-11", "source_month_id": "2026-10"}
+    assert actual["menu"] is not payload["menu"]
+    for key in ("items", "entries", "master_checks"):
+        assert actual[key] is not payload[key]
+        assert actual[key][0] is not payload[key][0]
+        assert actual[key][0] == {**original[key][0], "month_id": "2026-11",
+                                  "requested_month_id": "2026-11", "source_month_id": "2026-10"}
+    assert actual["items"][0]["quantity"] == 0
+    assert actual["entries"][0]["quantity"] is None
+    assert actual["entries"][0]["menu_date"] == "2026-11-01"
+
+
+@pytest.mark.parametrize("requested,resolved", [
+    ("2026-10", "2026-10"), ("invalid", "2026-10"), ("2026-10", "invalid"),
+])
+def test_resolved_menu_matching_or_invalid_month_keeps_payload_identity(requested, resolved):
+    payload = {"menu": {"id": "2026-10"}, "items": [{"quantity": 0}]}
+    assert service._canonicalize_resolved_menu_payload(payload, requested, resolved) is payload
+
+
+def test_resolved_menu_non_dict_payload_is_not_manufactured():
+    assert service._canonicalize_resolved_menu_payload(None, "2026-11", "2026-10") is None
+
+
 def test_adjacent_month_read_and_command_use_explicit_recorded_source(store, tmp_path, monkeypatch):
     scope, _ = store
     parsed(monkeypatch)

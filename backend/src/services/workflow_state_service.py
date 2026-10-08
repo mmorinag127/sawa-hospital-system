@@ -497,15 +497,6 @@ def _augment_workflow_evidence_run(
     if not isinstance(payload, dict):
         return evidence_run
     return evidence_run
-    capabilities = ocr_evidence_service._build_capabilities(augmented_payload)
-    capabilities["legacy_editable"] = bool(
-        str(evidence_run.get("schema_version") or "").startswith("v1_legacy")
-    )
-    return {
-        **evidence_run,
-        "payload_json": augmented_payload,
-        "capabilities_json": capabilities,
-    }
 
 
 def _load_workflow_current_sheet_context(
