@@ -114,6 +114,14 @@ def candidate(name="Dish"):
                        "diet_type": "regular", "area_id": "new-area", "quantity_original": 17, "quantity_corrected": 19}]}
 
 
+def _stored_workflow_revision(order_id):
+    with db.session_scope() as session:
+        workflow = session.get(OrderWorkflowState, order_id)
+        if workflow is None or type(workflow.revision) is not int or workflow.revision < 1:
+            raise ValueError("stored_workflow_revision_required")
+        return workflow.revision
+
+
 @pytest.mark.parametrize("state", ["missing", "invalid", "conflicting", "resolved"])
 def test_operator_order_http_keeps_original_lines_and_strict_consumers_stop(readonly_database, state):
     seed(entries_only=state == "missing")
@@ -174,7 +182,7 @@ def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, mon
         calls.append(order["lines"])
         raise RuntimeError("injected enrichment failure")
     monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", enrich)
-    _, error = order_workflow_v2_service.run_bagging("operator-order")
+    _, error = order_workflow_v2_service.run_bagging("operator-order", expected_revision=_stored_workflow_revision("operator-order"))
     assert error == ("menu_amount_unresolved" if candidate_name == "Unknown" else "bagging_output_enrichment_failed")
     assert calls == ([] if candidate_name == "Unknown" else [adopted["lines"]])
     assert snapshot(readonly_database) == before
@@ -182,7 +190,7 @@ def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, mon
     bundle = {"source_bagging_result_id": "bagging", "source_saved_sheet_id": "draft"}
     monkeypatch.setattr(order_workflow_v2_service, "_workflow_meta_with_step4_artifacts", lambda *args: {"bagging_result": bagging, "output_bundle": bundle})
     if candidate_name == "Unknown":
-        _, error = order_workflow_v2_service.final_confirm("operator-order")
+        _, error = order_workflow_v2_service.final_confirm("operator-order", expected_revision=_stored_workflow_revision("operator-order"))
         assert error == "menu_amount_unresolved"
         assert snapshot(readonly_database) == before
 
@@ -243,7 +251,7 @@ def test_step4_empty_candidate_keeps_existing_stop(readonly_database, monkeypatc
         session.add(OrderWorkflowState(order_id="operator-order", draft_id="draft", state="sheet_saved"))
     monkeypatch.setattr(order_workflow_v2_service, "_build_materialization_candidate_for_saved_sheet", lambda **kwargs: {"lines": [], "error": "draft_lines_empty"})
     before = snapshot(readonly_database)
-    assert order_workflow_v2_service.run_bagging("operator-order")[1] == "draft_lines_empty"
+    assert order_workflow_v2_service.run_bagging("operator-order", expected_revision=_stored_workflow_revision("operator-order"))[1] == "draft_lines_empty"
     assert snapshot(readonly_database) == before
 
 
@@ -812,7 +820,7 @@ def test_step4_http_enrichment_error_creates_no_artifacts(readonly_database, mon
     monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", fail_enrichment)
     with TestClient(app) as client:
         before = snapshot(readonly_database)
-        response = client.post("/orders/operator-order/workflow-v2/bagging")
+        response = client.post("/orders/operator-order/workflow-v2/bagging", headers={"If-Match": str(_stored_workflow_revision("operator-order"))})
         assert response.status_code == 400
         assert response.json()["detail"] == "bagging_output_enrichment_failed"
         assert snapshot(readonly_database) == before
