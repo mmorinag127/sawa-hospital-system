@@ -61,6 +61,7 @@ type UploadItemResult = UploadResponse & {
 
 type UploadConditions = {
   facility_hint: string;
+  effective_date: string;
   week_hint: string;
   facility_name: string;
   received_at: string;
@@ -121,6 +122,14 @@ type WeekOption = {
   label?: string | null;
   date_from?: string | null;
   date_to?: string | null;
+};
+
+type FacilitySelectionPreview = {
+  facilityId: string;
+  effectiveDate: string;
+  weekHint: string;
+  revision: string;
+  versionId: string;
 };
 
 const currentMonthId = () => {
@@ -245,11 +254,52 @@ function PdfUploadScreen() {
   const [retryBusyId, setRetryBusyId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadForm = useForm<UploadConditions>({
-    defaultValues: { facility_hint: "", week_hint: "", facility_name: "", received_at: "", force: false, skip_ocr: false },
+    defaultValues: { facility_hint: "", effective_date: "", week_hint: "", facility_name: "", received_at: "", force: false, skip_ocr: false },
   });
+  const selectedFacilityId = uploadForm.watch("facility_hint");
+  const effectiveDate = uploadForm.watch("effective_date");
+  const selectedWeekHint = uploadForm.watch("week_hint");
+  const selectedWeek = weekOptions.find((option) => option.week_id === selectedWeekHint);
+  const periodStart = selectedWeek?.date_from;
+  const periodEnd = selectedWeek?.date_to;
+  const [selectionPreview, setSelectionPreview] = useState<FacilitySelectionPreview | null>(null);
+  const [selectionConfirmed, setSelectionConfirmed] = useState(false);
+  const [selectionError, setSelectionError] = useState("");
+  const selectionCurrent = selectionPreview?.facilityId === selectedFacilityId
+    && selectionPreview?.effectiveDate === effectiveDate
+    && selectionPreview?.weekHint === selectedWeekHint;
+
+  useEffect(() => {
+    let active = true;
+    setSelectionPreview(null);
+    setSelectionConfirmed(false);
+    setSelectionError("");
+    if (selectedFacilityId && effectiveDate && selectedWeekHint) {
+      if (!periodStart || !periodEnd || effectiveDate < periodStart || effectiveDate > periodEnd) {
+        setSelectionError("適用日は対象週の期間内で入力してください。");
+        return () => { active = false; };
+      }
+      void apiClient.get(`/facilities/${encodeURIComponent(selectedFacilityId)}/resolved`, {
+        params: { effective_date: effectiveDate },
+      }).then(({ data }) => {
+        if (!active) return;
+        if (data?.source !== "canonical_json" || data?.facility_id !== selectedFacilityId
+            || data?.effective_date !== effectiveDate
+            || typeof data?.revision !== "string" || !data.revision
+            || typeof data?.version?.version_id !== "string" || !data.version.version_id) {
+          setSelectionError("正本施設版を確認できません。");
+          return;
+        }
+        setSelectionPreview({ facilityId: selectedFacilityId, effectiveDate,
+          weekHint: selectedWeekHint, revision: data.revision, versionId: data.version.version_id });
+      }).catch(() => {
+        if (active) setSelectionError("適用日の正本施設版を解決できません。");
+      });
+    }
+    return () => { active = false; };
+  }, [selectedFacilityId, effectiveDate, selectedWeekHint, periodStart, periodEnd]);
 
   const selectedFacility = facilityOptions.find((option) => option.id === uploadForm.watch("facility_hint"));
-  const selectedWeek = weekOptions.find((option) => option.week_id === uploadForm.watch("week_hint"));
 
   const loadFacilityOptions = async () => {
     setFacilityOptionsLoading(true);
@@ -351,6 +401,13 @@ function PdfUploadScreen() {
       setMessage("対象週を選択してください。");
       return;
     }
+    if (!selectionConfirmed || !selectionPreview
+        || selectionPreview.facilityId !== conditions.facility_hint
+        || selectionPreview.effectiveDate !== conditions.effective_date
+        || selectionPreview.weekHint !== conditions.week_hint) {
+      setMessage("適用日と正本施設版を確認してください。");
+      return;
+    }
     setLoading(true);
     setMessage(pdfFiles.length === 1 ? "アップロードしています..." : `${pdfFiles.length}件のPDFをまとめて登録しています...`);
     setResults([]);
@@ -363,6 +420,9 @@ function PdfUploadScreen() {
       }
     }
     formData.append("facility_hint", conditions.facility_hint.trim());
+    formData.append("effective_date", selectionPreview.effectiveDate);
+    formData.append("expected_canonical_revision", selectionPreview.revision);
+    formData.append("selected_version_id", selectionPreview.versionId);
     formData.append("week_hint", conditions.week_hint.trim());
     if (conditions.facility_name.trim()) formData.append("facility_name", conditions.facility_name.trim());
     if (conditions.received_at.trim()) formData.append("received_at", new Date(conditions.received_at).toISOString());
@@ -488,6 +548,17 @@ function PdfUploadScreen() {
             {weekOptions.map((option) => <MenuItem key={option.week_id} value={option.week_id}>{option.label || option.week_id}</MenuItem>)}
           </FormTextField>
 
+          <FormTextField<UploadConditions> name="effective_date" label="施設版の適用日" type="date"
+            rules={{ required: "適用日を入力してください。" }} />
+          {selectionCurrent && selectionPreview ? (
+            <label className="field field-span">
+              <span>正本版: {selectionPreview.versionId} / revision: {selectionPreview.revision}</span>
+              <span><Checkbox checked={selectionConfirmed} disabled={loading}
+                onChange={(event) => setSelectionConfirmed(event.target.checked)} />この施設版を使用する</span>
+            </label>
+          ) : null}
+          {selectionError ? <span className="field-help field-help-error">{selectionError}</span> : null}
+
           <label className="field field-span">
             <span className="field-label">注文書PDF</span>
             <Input disableUnderline inputProps={{ accept: "application/pdf", multiple: true }}
@@ -559,7 +630,7 @@ function PdfUploadScreen() {
         </details>
 
         <div className="actions">
-          <Button type="submit" variant="contained" disabled={loading}>
+          <Button type="submit" variant="contained" disabled={loading || !selectionCurrent || !selectionConfirmed}>
             {loading ? "受付中..." : pdfFiles.length > 1 ? `${pdfFiles.length}件のPDFを登録` : "PDFを登録"}
           </Button>
           <Link href="/orders" className="btn secondary">

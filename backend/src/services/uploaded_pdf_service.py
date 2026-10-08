@@ -180,12 +180,15 @@ def create_uploaded_pdf_from_upload(
     source_kind: str,
     page_count: int | None = None,
     force: bool = False,
+    facility_selection: dict | None = None,
 ) -> tuple[dict[str, Any], bool]:
     from src.services.ingest_delivery_dispatch_service import required_config
     from src.services.ingest_delivery_service import transaction
     from src.services.ingest_job_service import create_ingest_receipt
     required_config()
     week_hint = require_explicit_ingest_week(week_hint)
+    from src.services.ingest_facility_selection_service import validate_selection
+    facility_selection = validate_selection(facility_selection, facility_hint, week_hint)
     now = _now()
     duplicate_blocked = False
     with transaction() as session:
@@ -199,6 +202,12 @@ def create_uploaded_pdf_from_upload(
             .scalars()
             .first()
         )
+        from src.workers.ingest_mail_adapter import IngestEmailPayload
+        from src.services.order_service import require_existing_ingest_selection
+        require_existing_ingest_selection(session, IngestEmailPayload(
+            message_id=saved.message_id, pdf_uri=saved.pdf_uri, received_at=saved.received_at,
+            facility_hint=facility_hint, week_hint=week_hint, facility_selection=facility_selection,
+        ))
         if row is None:
             row = UploadedPdf(
                 id=_make_uploaded_pdf_id(),
@@ -222,6 +231,9 @@ def create_uploaded_pdf_from_upload(
             )
             session.add(row)
         elif force:
+            original = build_ingest_payload(_serialize_uploaded_pdf(row), write_session=session)
+            if original["facility_selection"] != facility_selection:
+                raise ValueError("uploaded_pdf_facility_selection_changed")
             row.content_sha256 = saved.content_sha256
             row.source_kind = str(source_kind or row.source_kind or "manual_upload")
             row.original_filename = saved.original_filename
@@ -246,21 +258,25 @@ def create_uploaded_pdf_from_upload(
             row.current_document_id = None
             row.updated_at = now
         else:
+            original = build_ingest_payload(_serialize_uploaded_pdf(row), write_session=session)
+            if original["facility_selection"] != facility_selection:
+                raise ValueError("uploaded_pdf_facility_selection_changed")
             duplicate_blocked = True
             row.updated_at = now
         session.flush()
         serialized = _serialize_uploaded_pdf(row)
         if not duplicate_blocked:
-            serialized["ingest_receipt"] = create_ingest_receipt(build_ingest_payload(serialized),
+            serialized["ingest_receipt"] = create_ingest_receipt(build_ingest_payload(serialized,
+                facility_selection=facility_selection),
                 force=force, write_session=session)
         else:
             serialized["ingest_receipt"] = {"id": row.message_id, "enqueued": False}
     return serialized, duplicate_blocked
 
 
-def build_ingest_payload(uploaded_pdf: dict[str, Any]) -> dict[str, Any]:
+def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=None, write_session=None) -> dict[str, Any]:
     week_hint = require_explicit_ingest_week(uploaded_pdf.get("week_hint"))
-    return {
+    payload = {
         "message_id": uploaded_pdf.get("message_id"),
         "pdf_uri": uploaded_pdf.get("storage_uri"),
         "received_at": uploaded_pdf.get("received_at"),
@@ -275,6 +291,27 @@ def build_ingest_payload(uploaded_pdf: dict[str, Any]) -> dict[str, Any]:
         "order_id": uploaded_pdf.get("current_order_id") or None,
         "order_document_id": uploaded_pdf.get("current_document_id") or None,
     }
+    from src.services.ingest_facility_selection_service import validate_selection
+    if facility_selection is None:
+        from src.services.ingest_job_service import payload_digest
+        with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
+            if any(isinstance(row, IngestJob) and row.id == payload["message_id"]
+                   for row in list(session.new) + list(session.dirty) + list(session.deleted)):
+                raise ValueError("uploaded_pdf_original_input_pending_changes")
+            table = IngestJob.__table__
+            with session.no_autoflush:
+                job = session.execute(select(*table.c).where(
+                    table.c.id == payload["message_id"])).mappings().one_or_none()
+            if (job is None or not job["generation"] or not isinstance(job["payload"], dict)
+                    or payload_digest(job["payload"]) != job["input_digest"]):
+                raise ValueError("uploaded_pdf_original_selection_missing")
+            for key in ("message_id", "pdf_uri", "received_at", "facility_hint", "week_hint", "facility_name",
+                        "skip_ocr", "source_kind", "original_filename", "content_sha256", "uploaded_pdf_id"):
+                if job["payload"].get(key) != payload.get(key):
+                    raise ValueError("uploaded_pdf_original_input_changed")
+            facility_selection = job["payload"].get("facility_selection")
+    payload["facility_selection"] = validate_selection(facility_selection, payload["facility_hint"], week_hint)
+    return payload
 
 
 def get_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
@@ -399,6 +436,7 @@ def claim_uploaded_pdf(uploaded_pdf_id: str, *, worker_instance: str, write_sess
                 owner = lease.get("uploaded_lease") if isinstance(lease, dict) else None
                 if isinstance(owner, dict) and owner.get("lease_token") == row.lease_token:
                     return None
+        build_ingest_payload(_serialize_uploaded_pdf(row), write_session=session)
         next_attempt = int(row.attempt_count or 0) + 1
         result = session.execute(
             update(UploadedPdf)
@@ -639,6 +677,7 @@ def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
         row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True, with_for_update=True)
         if row is None:
             return None
+        build_ingest_payload(_serialize_uploaded_pdf(row), write_session=session)
         row.status = "pending"
         row.current_stage = "uploaded"
         row.lease_owner = None

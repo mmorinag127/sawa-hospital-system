@@ -150,6 +150,9 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     normalized = dict(payload)
     normalized["week_hint"] = require_explicit_ingest_week(normalized.get("week_hint"))
+    from src.services.ingest_facility_selection_service import validate_selection
+    normalized["facility_selection"] = validate_selection(
+        normalized.get("facility_selection"), normalized.get("facility_hint"), normalized["week_hint"])
     received_at = normalized.get("received_at")
     if hasattr(received_at, "isoformat"):
         normalized["received_at"] = received_at.isoformat()
@@ -170,6 +173,12 @@ def create_ingest_receipt(payload: dict[str, Any], force: bool = False, *, write
         session.execute(update(IngestJob).where(IngestJob.id == job_id).values(status=IngestJob.status))
         job = session.get(IngestJob, job_id, populate_existing=True, with_for_update=True)
         if job:
+            _normalize_payload(job.payload)
+            if payload_digest(job.payload) != job.input_digest:
+                raise ValueError("ingest_persisted_input_changed")
+            from src.services.workflow_attempt_guard_service import snapshots_equal
+            if not snapshots_equal(job.payload.get("facility_selection"), normalized["facility_selection"]):
+                raise ValueError("ingest_facility_selection_changed")
             if force:
                 job.status = "pending"
                 job.started_at = None
@@ -188,6 +197,9 @@ def create_ingest_receipt(payload: dict[str, Any], force: bool = False, *, write
             if force:
                 job.updated_at = now
         else:
+            from src.services.ingest_facility_selection_service import verify_initial_selection
+            normalized["facility_selection"] = verify_initial_selection(
+                normalized["facility_selection"], normalized.get("facility_hint"), normalized["week_hint"])
             job = IngestJob(
                     id=job_id,
                     status="pending",
@@ -224,6 +236,8 @@ def restart_ingest_job(job_id: str, *, write_session=None) -> bool:
             return False
         _normalize_payload(job.payload)
         digest = payload_digest(job.payload)
+        if digest != job.input_digest:
+            raise ValueError("ingest_persisted_input_changed")
         result = session.execute(
             update(IngestJob)
             .where(IngestJob.id == job_id)
@@ -365,6 +379,7 @@ def claim_ingest_job(job_id: str, *, generation: str, input_digest: str, uploade
         original = previous.payload if previous is not None and previous.generation == generation and previous.input_digest == input_digest else None
         if original is None or previous.generation_attempts is None:
             return None
+        _normalize_payload(original)
         if previous.status == "processing" and session.execute(select(OcrJob.id).where(
             OcrJob.status.in_(["awaiting_output", "recovering"]),
             OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["id"].as_string() == job_id,
@@ -375,7 +390,7 @@ def claim_ingest_job(job_id: str, *, generation: str, input_digest: str, uploade
             return None
         if uploaded_lease is not None:
             from src.services.uploaded_pdf_service import build_ingest_payload
-            captured = build_ingest_payload(uploaded_lease)
+            captured = build_ingest_payload(uploaded_lease, facility_selection=original["facility_selection"])
             for key in ("message_id", "pdf_uri", "received_at", "facility_hint", "week_hint", "facility_name", "skip_ocr", "source_kind", "original_filename", "content_sha256", "uploaded_pdf_id"):
                 if original.get(key) != captured.get(key):
                     raise ValueError("uploaded_pdf_original_input_changed")
@@ -524,7 +539,8 @@ def recover_completed_upload(uploaded, captured):
         job = session.get(IngestJob, captured["id"], populate_existing=True)
         if job is None or job.status != "done" or job.generation != captured["generation"] or job.claim_id != captured["claim_id"] or job.input_digest != captured["input_digest"] or payload_digest(job.payload) != job.input_digest:
             return False
-        authored = build_ingest_payload(uploaded)
+        _normalize_payload(job.payload)
+        authored = build_ingest_payload(uploaded, facility_selection=job.payload["facility_selection"])
         if any(job.payload.get(key) != authored.get(key) for key in ("message_id", "pdf_uri", "received_at", "facility_hint", "week_hint", "facility_name", "skip_ocr", "source_kind", "original_filename", "content_sha256", "uploaded_pdf_id")):
             return False
         original = OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]

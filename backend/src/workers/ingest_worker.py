@@ -212,6 +212,7 @@ def _mark_ocr_job_final_failed(job_id: str, *, error_message: str) -> dict | Non
             "order_document_id": document["id"],
             "facility_hint": captured["order"]["facility_code"],
             "week_hint": captured["order"]["week_code"],
+            "facility_selection": (boundary.get("ingest_lease") or {}).get("payload", {}).get("facility_selection"),
         })
         failed = create_order_from_ingest(
             payload, lines=None, document_status="error", error_message=error_message,

@@ -159,7 +159,13 @@ def _handle_uploaded_pdf_bytes(
     received_at_value: datetime,
     force_value: bool,
     skip_ocr_value: bool,
+    facility_selection: dict,
 ) -> dict[str, Any]:
+    from src.services.ingest_facility_selection_service import validate_selection
+    try:
+        facility_selection = validate_selection(facility_selection, facility_hint, week_hint)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     try:
         saved_result = save_uploaded_pdf(
             pdf_bytes=file_bytes,
@@ -195,16 +201,23 @@ def _handle_uploaded_pdf_bytes(
             facility_name=facility_name,
             skip_ocr_value=skip_ocr_value,
         )
-        uploaded_pdf, duplicate_blocked = create_uploaded_pdf_from_upload(
-            saved=saved,
-            facility_hint=facility_hint,
-            week_hint=week_hint,
-            facility_name=facility_name,
-            skip_ocr=skip_ocr_value,
-            source_kind="manual_upload",
-            force=force_value,
-            page_count=saved.total_pages or saved.page_number or 1,
-        )
+        try:
+            uploaded_pdf, duplicate_blocked = create_uploaded_pdf_from_upload(
+                saved=saved,
+                facility_hint=facility_hint,
+                week_hint=week_hint,
+                facility_name=facility_name,
+                skip_ocr=skip_ocr_value,
+                source_kind="manual_upload",
+                force=force_value,
+                page_count=saved.total_pages or saved.page_number or 1,
+                facility_selection=facility_selection,
+            )
+        except ValueError as exc:
+            if str(exc).startswith(("ingest_facility_", "ingest_order_", "uploaded_pdf_original_",
+                                    "uploaded_pdf_facility_")):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise
         payload["uploaded_pdf_id"] = uploaded_pdf["id"]
         receipt = uploaded_pdf["ingest_receipt"]
         job_id, enqueued = receipt["id"], receipt["enqueued"]
@@ -249,6 +262,7 @@ async def _handle_uploaded_pdf(
     received_at_value: datetime,
     force_value: bool,
     skip_ocr_value: bool,
+    facility_selection: dict,
 ) -> dict[str, Any]:
     raw_filename = str(pdf_file.filename or "").strip()
     if not raw_filename:
@@ -264,6 +278,7 @@ async def _handle_uploaded_pdf(
         received_at_value=received_at_value,
         force_value=force_value,
         skip_ocr_value=skip_ocr_value,
+        facility_selection=facility_selection,
     )
 
 
@@ -278,6 +293,9 @@ async def ingest_upload(
     received_at: str | None = Form(None),
     force: str | None = Form(None),
     skip_ocr: str | None = Form(None),
+    effective_date: str | None = Form(None),
+    expected_canonical_revision: str | None = Form(None),
+    selected_version_id: str | None = Form(None),
 ):
     _enforce_upload_content_length(request)
     upload_files = _normalize_upload_files(pdf_file, pdf_files)
@@ -285,6 +303,15 @@ async def ingest_upload(
         facility_hint=facility_hint,
         week_hint=week_hint,
     )
+    from src.services.ingest_facility_selection_service import capture_selection
+    from src.services.canonical_facility_store import CanonicalStoreError
+    try:
+        facility_selection = capture_selection(
+            facility_hint, effective_date, expected_canonical_revision, selected_version_id, week_hint)
+    except CanonicalStoreError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     received_at_value = _parse_optional_datetime(received_at)
     force_value = _parse_form_bool(force, default=False)
     skip_ocr_value = _parse_form_bool(skip_ocr, default=False)
@@ -299,6 +326,7 @@ async def ingest_upload(
                 received_at_value=received_at_value,
                 force_value=force_value,
                 skip_ocr_value=skip_ocr_value,
+                facility_selection=facility_selection,
             )
         )
     items: list[dict[str, Any]] = []

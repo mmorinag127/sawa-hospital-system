@@ -4575,6 +4575,17 @@ def preview_existing_order_for_ingest(payload: IngestEmailPayload) -> dict[str, 
         )
 
 
+def require_existing_ingest_selection(session, payload: IngestEmailPayload):
+    from src.services.ingest_facility_selection_service import validate_selection, require_order_selection
+    selection = validate_selection(payload.facility_selection, payload.facility_hint, payload.week_hint)
+    existing, _, _ = _find_existing_order_for_ingest(session, payload)
+    if existing is not None:
+        existing = session.get(Order, existing.id, populate_existing=True, with_for_update=True)
+        if existing is None:
+            raise ValueError("ingest_order_selection_target_changed")
+        require_order_selection(session, existing, selection)
+
+
 def _snapshot_order_lines(session, order_id: str) -> list[dict[str, Any]]:
     rows = session.execute(
         select(OrderLine)
@@ -4881,6 +4892,10 @@ def create_order_from_ingest(
     mapping_policy: dict[str, Any] | None = None,
 ):
     require_explicit_ingest_week(payload.week_hint)
+    from src.services.ingest_facility_selection_service import (
+        validate_selection, require_order_selection, materialize_selection,
+    )
+    selection = validate_selection(payload.facility_selection, payload.facility_hint, payload.week_hint)
     if lines is not None and not isinstance(mapping_policy, dict):
         raise ValueError("first_pass_mapping_policy_missing")
     if lines is not None and (
@@ -4897,9 +4912,11 @@ def create_order_from_ingest(
     with session_scope() as session:
         received_at = _normalize_received_at(payload.received_at)
         from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
-        ingest_lease = current_ingest_lease()
+        ingest_lease = execution_input.get("ingest_lease") if execution_input is not None else current_ingest_lease()
         if ingest_lease is not None and not lock_ingest_lease(session, ingest_lease):
             raise ValueError("ingest_attempt_changed")
+        if ingest_lease is None or (ingest_lease.get("payload") or {}).get("facility_selection") != selection:
+            raise ValueError("ingest_facility_selection_owner_changed")
         effective_week_hint = _derive_ingest_week_hint(payload)
         if execution_input is None and lines is None:
             # Serialize the existing registration keys before a new parent exists.
@@ -4921,6 +4938,13 @@ def create_order_from_ingest(
         existing, match_reason, effective_week_hint = _find_existing_order_for_ingest(
             session, payload, effective_week_hint=effective_week_hint,
         )
+        if existing is not None:
+            require_order_selection(session, existing, selection)
+            selected_projection_id = existing.template_version_id
+        else:
+            if execution_input is not None:
+                raise ValueError("ingest_registered_order_missing")
+            selected_projection_id = materialize_selection(session, selection)
         if ingest_lease is not None and payload.order_id is not None and (existing is None or existing.id != payload.order_id):
             raise ValueError("ingest_registered_order_changed")
         if execution_input is None and existing is not None:
@@ -5042,6 +5066,7 @@ def create_order_from_ingest(
         elif existing is None:
             order = Order(
                 id=_make_order_id(),
+                template_version_id=selected_projection_id,
                 facility_code=payload.facility_hint,
                 week_code=effective_week_hint,
                 document_uri=payload.pdf_uri,
@@ -14504,6 +14529,7 @@ def _reconcile_completed_ocr_job_with_input(job_id: str) -> bool:
             order_id=order_id, order_document_id=document["id"],
             facility_hint=captured["order"].get("facility_code"),
             week_hint=captured["order"].get("week_code"),
+            facility_selection=(execution_input.get("ingest_lease") or {}).get("payload", {}).get("facility_selection"),
         )
         attempts = 0
     if application_payload.order_id != order_id:

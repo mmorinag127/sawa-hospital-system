@@ -20,6 +20,7 @@ class IngestEmailPayload:
     order_id: Optional[str] = None
     uploaded_pdf_id: Optional[str] = None
     order_document_id: Optional[str] = None
+    facility_selection: Optional[dict] = None
 
 
 def parse_ingest_payload(data: dict) -> IngestEmailPayload:
@@ -43,6 +44,7 @@ def parse_ingest_payload(data: dict) -> IngestEmailPayload:
         order_id=data.get("order_id"),
         uploaded_pdf_id=data.get("uploaded_pdf_id"),
         order_document_id=data.get("order_document_id"),
+        facility_selection=data.get("facility_selection"),
     )
 
 
@@ -64,4 +66,5 @@ def to_job_kwargs(payload: IngestEmailPayload) -> dict:
         "order_id": payload.order_id,
         "uploaded_pdf_id": payload.uploaded_pdf_id,
         "order_document_id": payload.order_document_id,
+        "facility_selection": payload.facility_selection,
     }
