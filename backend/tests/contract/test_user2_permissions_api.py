@@ -98,7 +98,7 @@ def test_user2_facility_basic_update_allows_operator(monkeypatch, hospital_opera
     monkeypatch.setattr(
         facilities_api.facility_service,
         "update_facility",
-        lambda facility_id, name, areas: {"id": facility_id, "name": name, "areas": areas},
+        lambda facility_id, name, areas, *, expected_revision: {"id": facility_id, "name": name, "areas": areas},
     )
 
     client = TestClient(app)
