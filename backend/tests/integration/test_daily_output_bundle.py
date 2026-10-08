@@ -286,7 +286,7 @@ def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, m
     monkeypatch.setattr(
         output_builder,
         "_prepare_output_context",
-        lambda order_id: {
+        lambda order_id, *, include_bags, include_ocr_menu_meta, include_expanded_copy, timings, require_invoice: {
             "ORD-1": _make_context("ORD-1", "FAC001", "そよかぜ", "献立A"),
             "ORD-2": _make_context("ORD-2", "FAC001", "そよかぜ", "献立B"),
             "ORD-3": _make_context("ORD-3", "FAC002", "大和なでしこ", "献立C"),
@@ -346,7 +346,7 @@ def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path
     monkeypatch.setattr(
         output_builder,
         "_prepare_output_context",
-        lambda order_id: {
+        lambda order_id, *, include_bags, include_ocr_menu_meta, include_expanded_copy, timings, require_invoice: {
             "ORD-1": _make_context("ORD-1", "FAC001", "そよかぜ", "献立A"),
             "ORD-2": _make_context("ORD-2", "FAC001", "そよかぜ", "献立B"),
             "ORD-3": _make_context("ORD-3", "FAC002", "大和なでしこ", "献立C"),
@@ -1093,7 +1093,7 @@ def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_pat
     monkeypatch.setattr(
         output_builder,
         "_prepare_output_context",
-        lambda order_id: _make_context(order_id, "FAC001", "そよかぜ", "献立A"),
+        lambda order_id, *, include_bags, include_ocr_menu_meta, include_expanded_copy, timings, require_invoice: _make_context(order_id, "FAC001", "そよかぜ", "献立A"),
     )
     monkeypatch.setattr(
         output_builder,
@@ -1158,7 +1158,7 @@ def test_build_daily_output_bundle_empty_orders_are_not_errors(tmp_path, monkeyp
     monkeypatch.setattr(
         output_builder,
         "_prepare_output_context",
-        lambda order_id: _make_context(
+        lambda order_id, *, include_bags, include_ocr_menu_meta, include_expanded_copy, timings, require_invoice: _make_context(
             order_id,
             "FAC001" if order_id == "ORD-1" else "FAC002",
             "そよかぜ" if order_id == "ORD-1" else "池袋",

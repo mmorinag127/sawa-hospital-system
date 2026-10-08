@@ -114,6 +114,8 @@ def test_generate_signed_url_reuses_thread_local_client_and_cached_credentials(m
         def generate_signed_url(
             self,
             *,
+            generation,
+            query_parameters,
             version: str,
             expiration,
             method: str,
