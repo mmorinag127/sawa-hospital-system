@@ -81,6 +81,43 @@ def _sample_payload(quantity: str = "3") -> dict:
     }
 
 
+@pytest.fixture
+def registration_only_order(monkeypatch, tmp_path):
+    from datetime import date
+    from src.services.manual_upload_service import ManualUploadSavedFile
+    from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
+    from tests.helpers.ingest_original import (
+        authored_sources, configure_delivery, reserve_uploaded_original, register_authored_original,
+    )
+
+    configure_delivery(monkeypatch)
+
+    def forbidden_provider(*args, **kwargs):
+        pytest.fail("Registration-only evidence fixture must not execute OCR")
+
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", forbidden_provider)
+
+    def register(message_id):
+        uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC00001",
+            menu_date=date(2026, 3, 22), daypart="breakfast")
+        saved = ManualUploadSavedFile(message_id=message_id, pdf_uri=uri, content_sha256=digest,
+            original_filename="original.pdf", received_at=datetime(2026, 3, 22, 9, 0, 0))
+        uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
+            week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
+            skip_ocr=False, source_kind="manual_upload")
+        receipt = reserve_uploaded_original(uploaded["id"])
+        assert receipt["id"] == saved.message_id
+        order = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
+        with session_scope() as session:
+            persisted = session.get(Order, order["id"])
+            assert persisted is not None and persisted.template_version_id is not None
+            assert session.get(FacilityTemplateVersion, persisted.template_version_id) is not None
+            assert session.query(OrderOcrEvidenceRun).filter_by(order_id=order["id"]).all() == []
+        return order
+
+    return register
+
+
 def _attach_active_template_version(order_id: str, facility_id: str = "FAC00001") -> str:
     template_version_id = f"FTV{order_id[-8:]}"
     with session_scope() as session:
@@ -194,9 +231,9 @@ def test_persist_evidence_run_blocks_without_template_version():
     assert ocr_evidence_service.get_latest_evidence_run(order["id"]) is None
 
 
-def test_save_order_ocr_cache_does_not_create_legacy_mirror_for_hakodate_payload():
+def test_save_order_ocr_cache_does_not_create_legacy_mirror_for_hakodate_payload(registration_only_order):
     order_service.clear_all()
-    order = _seed_order("msg-hakodate-cache-no-legacy-mirror")
+    order = registration_only_order("msg-hakodate-cache-no-legacy-mirror")
     payload = {
         "status": "done",
         "stage": "done",
@@ -332,11 +369,10 @@ def test_classify_evidence_payload_rejects_hakodate_target_map_without_ocr_evide
     assert result["error"] == "evidence_unusable"
 
 
-def test_get_evidence_endpoint_does_not_backfill_from_cache_when_run_missing():
+def test_get_evidence_endpoint_does_not_backfill_from_cache_when_run_missing(registration_only_order):
     order_service.clear_all()
     client = TestClient(app)
-    order = _seed_order("msg-evidence-endpoint-no-backfill")
-    _attach_active_template_version(order["id"])
+    order = registration_only_order("msg-evidence-endpoint-no-backfill")
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("5")))
 
@@ -353,10 +389,9 @@ def test_get_evidence_endpoint_does_not_backfill_from_cache_when_run_missing():
     assert rows == []
 
 
-def test_get_latest_ocr_evidence_run_default_does_not_backfill_from_cache():
+def test_get_latest_ocr_evidence_run_default_does_not_backfill_from_cache(registration_only_order):
     order_service.clear_all()
-    order = _seed_order("msg-evidence-service-no-backfill")
-    _attach_active_template_version(order["id"])
+    order = registration_only_order("msg-evidence-service-no-backfill")
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("4")))
 
@@ -372,10 +407,9 @@ def test_get_latest_ocr_evidence_run_default_does_not_backfill_from_cache():
     assert rows == []
 
 
-def test_legacy_cache_backfill_option_is_disabled():
+def test_legacy_cache_backfill_option_is_disabled(registration_only_order):
     order_service.clear_all()
-    order = _seed_order("msg-evidence-service-backfill-disabled")
-    _attach_active_template_version(order["id"])
+    order = registration_only_order("msg-evidence-service-backfill-disabled")
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("4")))
 
@@ -391,10 +425,9 @@ def test_legacy_cache_backfill_option_is_disabled():
     assert rows == []
 
 
-def test_legacy_ocr_output_fallback_options_are_disabled():
+def test_legacy_ocr_output_fallback_options_are_disabled(registration_only_order):
     order_service.clear_all()
-    order = _seed_order("msg-ocr-output-fallback-disabled")
-    _attach_active_template_version(order["id"])
+    order = registration_only_order("msg-ocr-output-fallback-disabled")
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("6")))
 
@@ -412,11 +445,10 @@ def test_legacy_ocr_output_fallback_options_are_disabled():
     assert rows == []
 
 
-def test_get_ocr_output_endpoint_does_not_promote_cache_only_payload_to_current():
+def test_get_ocr_output_endpoint_does_not_promote_cache_only_payload_to_current(registration_only_order):
     order_service.clear_all()
     client = TestClient(app)
-    order = _seed_order("msg-ocr-output-cache-only-not-current")
-    _attach_active_template_version(order["id"])
+    order = registration_only_order("msg-ocr-output-cache-only-not-current")
     with session_scope() as session:
         session.add(OrderOcrCache(order_id=order["id"], payload=_sample_payload("6")))
 
