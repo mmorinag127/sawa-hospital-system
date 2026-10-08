@@ -150,9 +150,32 @@ def test_refresh_workflow_state_persists_current_state_snapshot() -> None:
     assert snapshot["resolved_week_id"] == "2026-03"
 
 
-def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row() -> None:
+def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row(monkeypatch, tmp_path) -> None:
+    from datetime import date
+    from src.services.manual_upload_service import ManualUploadSavedFile
+    from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
+    from src.workers import ingest_worker
+    from tests.helpers.ingest_original import (
+        authored_sources, configure_delivery, reserve_uploaded_original, register_authored_original,
+    )
+
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-v2-owned-row-001")
+    configure_delivery(monkeypatch)
+
+    def forbidden_provider(*args, **kwargs):
+        raise AssertionError("Registration-only workflow fixture must not execute OCR")
+
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", forbidden_provider)
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC00001",
+        menu_date=date(2026, 3, 22), daypart="breakfast")
+    saved = ManualUploadSavedFile(message_id="msg-workflow-v2-owned-row-001",
+        pdf_uri=uri, content_sha256=digest, original_filename="original.pdf",
+        received_at=datetime(2026, 3, 22, 9, 0, 0))
+    uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
+        week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
+        skip_ocr=False, source_kind="manual_upload")
+    reserve_uploaded_original(uploaded["id"])
+    order = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
     with session_scope() as session:
         row = session.get(OrderWorkflowState, order["id"])
         if row is None:

@@ -160,7 +160,7 @@ def test_reconcile_true_requires_actual_own_terminal_receipt(monkeypatch, rerun_
     monkeypatch.setattr(order_service, "get_job_request_mode", lambda job: "ocr_rerun")
     monkeypatch.setattr(order_service, "_load_pipeline_output_once", lambda ref: {"recognized_quantity": 0})
     monkeypatch.setattr(order_service, "_output_is_pending", lambda payload: False)
-    monkeypatch.setattr(order_service.ocr_evidence_service, "classify_evidence_payload", lambda payload: {"persistable": True})
+    monkeypatch.setattr(order_service.ocr_evidence_service, "classify_evidence_payload", lambda payload, *, expected_hakodate_source=None: {"persistable": True})
     assert order_service._reconcile_finished_ocr_rerun("order") is True
     assert state["evidence"] == {"recognized_quantity": 0}
     assert job.metrics["rerun_terminal_receipt"]["evidence_run_id"] == "own-evidence"
@@ -176,6 +176,6 @@ def test_reconcile_does_not_accept_success_without_receipt(monkeypatch, rerun_tr
     monkeypatch.setattr(order_service, "get_job_request_mode", lambda job: "ocr_rerun")
     monkeypatch.setattr(order_service, "_load_pipeline_output_once", lambda ref: {})
     monkeypatch.setattr(order_service, "_output_is_pending", lambda payload: False)
-    monkeypatch.setattr(order_service.ocr_evidence_service, "classify_evidence_payload", lambda payload: {"persistable": True})
+    monkeypatch.setattr(order_service.ocr_evidence_service, "classify_evidence_payload", lambda payload, *, expected_hakodate_source=None: {"persistable": True})
     monkeypatch.setattr(order_service, "_persist_ocr_rerun_completion", lambda *args, **kwargs: ({"id": "own-evidence"}, None))
     assert order_service._reconcile_finished_ocr_rerun("order") is False

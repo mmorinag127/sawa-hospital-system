@@ -106,7 +106,7 @@ def test_missing_capture_stops_without_entering_transaction(monkeypatch):
 def test_actual_rerun_callback_failure_uses_captured_atomic_completion(monkeypatch, completion_transaction, failure):
     job, workflow, _ = completion_transaction
     monkeypatch.setattr(orders, "get_ocr_job", lambda job_id: {"metrics": {}})
-    monkeypatch.setattr(orders.ocr_job_service, "update_job_for_workflow_attempt", lambda *args, **kwargs: {})
+    monkeypatch.setattr(orders.ocr_job_service, "update_job_for_workflow_attempt", lambda *args, **kwargs: (job, True))
     @contextmanager
     def slot(**kwargs):
         assert kwargs == {"order_id": "order", "job_id": "real-job"}
