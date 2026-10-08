@@ -72,6 +72,14 @@ async function mount(file, { api, props = {}, probe, route, component } = {}) {
   let Component, Boundary, unmounted = false;
   const element = values => React.createElement(Boundary, null, React.createElement(Component, values));
   const settle = async (action = () => {}) => { await act(async () => { await action(); await new Promise(resolve => nativeTimeout(resolve, 0)); }); };
+  async function waitFor(predicate, label = 'owned UI predicate', timeout = 10000) {
+    const deadline = Date.now() + timeout;
+    while (true) {
+      if (predicate()) return;
+      assert.ok(Date.now() < deadline, `${label} did not become ready within ${timeout}ms: ${dom.window.document.body.textContent}`);
+      await settle();
+    }
+  }
   async function unmount() { if (!unmounted && root) { unmounted = true; await act(async () => root.unmount()); } }
   async function close() {
     try { await unmount(); await loader?.close(); }
@@ -93,7 +101,7 @@ async function mount(file, { api, props = {}, probe, route, component } = {}) {
   }
   catch (reason) { await close(); throw reason; }
   return { React, act, loader, nav, probe, requirePackage, downloads, blobs, revoked, popups, document: dom.window.document,
-    settle, unmount, close,
+    settle, waitFor, unmount, close,
     async render(nextProps = props) { await settle(() => root.render(element(nextProps))); },
     async click(element) { assert.ok(element); await settle(() => element.click()); },
     button(text) { const matches = [...document.querySelectorAll('button')].filter(node => node.textContent.trim() === text); assert.equal(matches.length, 1, `button ${text}`); return matches[0]; },

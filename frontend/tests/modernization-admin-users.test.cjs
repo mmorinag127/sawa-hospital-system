@@ -8,6 +8,7 @@ function setup(items = [user('first'), user('second')]) {
   t.on('get', '/portal/users', () => ({ data: { items } })); return t;
 }
 async function edit(h, id = 'first') {
+  await h.waitFor(() => [...h.document.querySelectorAll('tbody tr')].some(node => node.textContent.includes(`${id}@example.invalid`)), `admin owned row ${id}`);
   const row = [...h.document.querySelectorAll('tbody tr')].find(node => node.textContent.includes(`${id}@example.invalid`));
   assert.ok(row); await h.click([...row.querySelectorAll('button')].find(node => node.textContent === '編集'));
   assert.ok(h.document.querySelector('input[name="account"]'));
@@ -52,7 +53,7 @@ for (const outcome of ['success', 'error']) {
       const h = await mount('src/pages/admin/users.tsx', { api: t.api });
       try {
         await h.settle(); await edit(h); await h.change(h.document.querySelector('input[name="account"]'), 'first-edited@local');
-        await h.click(h.button('保存')); assert.equal(writes(t).length, 1);
+        await h.click(h.button('保存')); await h.waitFor(() => writes(t).length === 1, 'actual admin write started');
         if (boundary === 'unmount') await h.unmount();
         else if (boundary === 'session') await h.session(false);
         else {

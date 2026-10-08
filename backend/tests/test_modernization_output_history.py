@@ -51,11 +51,18 @@ def history(isolated_formal_schema):
                 draft_id=f"{owner}-sheet", template_version_id=None, blockers_json=[],
                 secondary_actions_json={WORKFLOW_V2_META_KEY: {
                     "output_bundle_id": f"{owner}-current", "bagging_result_id": bag["bagging_result_id"]}}))
+    # SQLAlchemy's version mapper assigns the persisted initial revision.
+    # Capture it once; subsequent reads never refresh this expected baseline.
+    with session_scope() as session:
+        baseline = session.get(OrderWorkflowState, "synthetic-order").revision
+        assert type(baseline) is int and baseline > 0
+        assert session.get(OrderWorkflowState, "other-order").revision == baseline
+    isolated_formal_schema.modernization_history_revision = baseline
     return isolated_formal_schema
 
 
 def read(session, **changes):
-    return list_output_history(session, **{"order_id": "synthetic-order", "expected_workflow_revision": 7,
+    return list_output_history(session, **{"order_id": "synthetic-order", "expected_workflow_revision": session.get_bind().modernization_history_revision,
                                          "page": 1, "limit": 2, **changes})
 
 
@@ -96,11 +103,13 @@ def test_exact_current_reference_not_first_or_newest_pages_metadata_only_no_dml(
     ({"order_id": ""}, "order_id_required"), ({"order_id": " synthetic-order"}, "order_id_required"),
     ({"expected_workflow_revision": True}, "workflow_revision_required"),
     ({"expected_workflow_revision": 0}, "workflow_revision_required"),
-    ({"expected_workflow_revision": 8}, "workflow_revision_mismatch"),
+    ({"expected_workflow_revision": "next-baseline"}, "workflow_revision_mismatch"),
     ({"page": 0}, "pagination_invalid"), ({"page": 100001}, "pagination_invalid"),
     ({"limit": 0}, "pagination_invalid"), ({"limit": 101}, "pagination_invalid"),
 ])
 def test_explicit_queries_refuse_invalid_or_mismatched_values(history, changes, reason):
+    if changes.get("expected_workflow_revision") == "next-baseline":
+        changes = {**changes, "expected_workflow_revision": history.modernization_history_revision + 1}
     with session_scope() as session, pytest.raises(ValueError, match=reason):
         read(session, **changes)
 
@@ -235,7 +244,7 @@ def test_final_observed_workflow_read_rejects_interleaved_change(history, change
         if fired or not normalized.startswith("select order_workflow_states.revision, order_workflow_states.secondary_actions_json"):
             return
         fired.append(change)
-        values = {"revision": 8} if change == "revision" else {
+        values = {"revision": history.modernization_history_revision + 1} if change == "revision" else {
             "secondary_actions_json": {WORKFLOW_V2_META_KEY: {
                 "output_bundle_id": "synthetic-order-newest", "bagging_result_id": "synthetic-order-bag"}}}
         connection.execute(update(OrderWorkflowState).where(OrderWorkflowState.order_id == "synthetic-order").values(**values))
@@ -270,12 +279,12 @@ def test_registered_get_actual_role_query_status_and_no_generation(history, monk
     headers = {"Authorization": "Bearer synthetic-not-live"}
     app = FastAPI(); app.include_router(route.router, prefix="/outputs")
     with TestClient(app) as client:
-        query = {"order_id": "synthetic-order", "expected_workflow_revision": 7, "page": 1, "limit": 25}
+        query = {"order_id": "synthetic-order", "expected_workflow_revision": history.modernization_history_revision, "page": 1, "limit": 25}
         assert client.get("/outputs/history", params=query).status_code == 401
         response = client.get("/outputs/history", params=query, headers=headers)
         assert response.status_code == 200 and response.json()["current_output_bundle_id"] == "synthetic-order-current"
         assert client.get("/outputs/history", params={**query, "order_id": "missing"}, headers=headers).status_code == 404
-        assert client.get("/outputs/history", params={**query, "expected_workflow_revision": 8}, headers=headers).status_code == 409
+        assert client.get("/outputs/history", params={**query, "expected_workflow_revision": history.modernization_history_revision + 1}, headers=headers).status_code == 409
         assert client.get("/outputs/history", params={"order_id": "synthetic-order"}, headers=headers).status_code == 422
         role["role"] = "unknown"
         assert client.get("/outputs/history", params=query, headers=headers).status_code == 403

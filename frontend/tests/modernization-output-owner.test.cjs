@@ -55,9 +55,11 @@ for (const kind of ['list', 'output']) for (const boundary of ['condition', 'res
     try {
       await h.settle(); const previous = probe.current.orders;
       const url = kind === 'list' ? '/orders/by-line-date' : '/outputs/weekly-weight';
+      const previousCalls = t.calls.filter(call => call.url === url).length;
       t.on('get', url, () => pending.promise);
       const operation = await start(h, () => kind === 'list' ? probe.current.loadWeeklyOrders(probe.current.conditionForm.getValues())
         : probe.current.downloadWeeklyWeight(probe.current.conditionForm.getValues()));
+      await h.waitFor(() => t.calls.filter(call => call.url === url).length > previousCalls, `weekly ${kind} request started`);
       if (boundary === 'condition') await h.change(h.document.querySelector('input[name="week"]'), '2026-W09');
       if (boundary === 'reset') await h.settle(() => probe.current.conditionForm.reset({ week: '2026-W10', status: '確定' }));
       if (boundary === 'session') await h.session(false);
@@ -101,7 +103,7 @@ function context(section, label, params) {
   const envelope = { date: params.date, status: params.status || null, facility: null };
   const fulfilled = data => ({ status: 'fulfilled', data });
   if (section === 'primary') return { data: { ...envelope, sections: { orders: fulfilled({ date: params.date, orders: [{ id: label, facility: 'synthetic-facility', line_count: 0 }] }),
-    meal_counts: fulfilled({ groups: [{ daypart: '昼食', counts: [0, 6, 9].map(quantity => ({ diet_type: 'regular', quantity })) }] }) } } };
+    meal_counts: fulfilled({ groups: [{ daypart: '昼食', counts: [0, 6, 9].map((quantity, index) => ({ diet_type: ['regular', 'soft', 'mixer'][index], quantity })) }] }) } } };
   if (section === 'bags') return { data: { ...envelope, sections: { daily_bags: fulfilled({ groups: [], test_marker: label }),
     daily_bags_audit: fulfilled({ rule_based: { finding_count: 0 }, test_marker: label }) } } };
   return { data: { ...envelope, sections: { totals: fulfilled({ rows: [0, 6, 9].map(quantity => ({ menu_name: label, quantity })) }) } } };
@@ -180,6 +182,7 @@ for (const boundary of ['condition', 'session', 'unmount']) for (const outcome o
       t.on('get', '/orders/daily-bags/audit', () => pending.promise);
       const loading = await start(h, () => probe.current.loadOrders(probe.current.conditionForm.getValues()));
       const audit = await start(h, () => probe.current.runAuditAi());
+      assert.ok(t.calls.some(call => call.url === '/orders/daily-bags/audit'));
       if (boundary === 'condition') await h.change(h.document.querySelector('input[name="date"]'), '2026-02-16');
       if (boundary === 'session') await h.session(false);
       if (boundary === 'unmount') await h.unmount();
@@ -207,7 +210,7 @@ async function openEditor(h, probe, t) {
 
 test('daily callback-only row refresh keeps independent row/bulk drafts, exact zero body and delete target', async () => {
   // A successful callback double is not acceptance of the blocked public API.
-  const t = dailyTransport(), probe = dailyProbe(); t.on('post', '/orders/daily-output-overrides', () => ({ data: {} }));
+  const t = dailyTransport(), probe = dailyProbe(); t.on('post', '/orders/daily-output-overrides/upsert', () => ({ data: {} }));
   t.on('delete', '/orders/daily-output-overrides/override-GI7', () => ({ data: {} }));
   const h = await mount('src/pages/daily-delivery-notes.tsx', { api: t.api, probe });
   try {
@@ -231,14 +234,19 @@ test('daily callback-only row refresh keeps independent row/bulk drafts, exact z
 for (const kind of ['row', 'bulk', 'delete']) for (const outcome of ['success', 'error']) {
   test(`daily callback-only ${kind} late ${outcome} after newer draft/target never reloads or resets edits`, async () => {
     const pending = deferred(), t = dailyTransport(), probe = dailyProbe();
-    t.on('post', '/orders/daily-output-overrides', () => pending.promise);
-    t.on('post', '/orders/daily-output-overrides/bulk', () => pending.promise);
+    const mutationUrl = kind === 'bulk' ? '/orders/daily-output-overrides/upsert-bulk'
+      : kind === 'row' ? '/orders/daily-output-overrides/upsert' : '/orders/daily-output-overrides/override-GI7';
+    t.on(kind === 'delete' ? 'delete' : 'post', mutationUrl, () => pending.promise);
     t.on('delete', '/orders/daily-output-overrides/override-GI7', () => pending.promise);
     const h = await mount('src/pages/daily-delivery-notes.tsx', { api: t.api, probe });
     try {
       await applyDaily(h, probe); await openEditor(h, probe, t);
+      if (kind === 'bulk') await h.settle(() => probe.current.updateOverrideBulkDraft({ qty_per_serving: '6', unit_type: 'g' }));
       const operation = await start(h, () => kind === 'bulk' ? probe.current.saveBulkOverride()
         : kind === 'row' ? probe.current.saveOverrideRow(probe.current.selectedOverrideRow) : probe.current.deleteOverrideRow(probe.current.selectedOverrideRow));
+      await h.waitFor(() => t.calls.some(call => call.url === mutationUrl && call.method === (kind === 'delete' ? 'delete' : 'post')), `${kind} request started`);
+      const write = t.calls.find(call => call.url === mutationUrl && call.method !== 'get');
+      if (kind !== 'delete') assert.equal(write.body.qty_per_serving, kind === 'bulk' ? 6 : 0);
       await h.settle(() => { probe.current.updateOverrideDraft('GI7__regular', { qty_per_serving: '9' });
         probe.current.updateOverrideBulkDraft({ qty_per_serving: '6' }); probe.current.selectOverrideTarget('GI8', 'soft'); });
       const reads = t.calls.filter(call => call.method === 'get').length;
@@ -263,7 +271,7 @@ test('daily unresolved/duplicate explicit target stops; public blocker remains a
     await h.settle(() => probe.current.selectOverrideTarget('GI7', 'regular')); assert.equal(probe.current.selectedOverrideRow, null);
     assert.equal(t.calls.filter(call => call.method !== 'get').length, 0);
     await openEditor(h, probe, t);
-    t.on('post', '/orders/daily-output-overrides', () => Promise.reject({ response: { status: 409, data: { detail: 'daily_output_original_ownership_required' } } }));
+    t.on('post', '/orders/daily-output-overrides/upsert', () => Promise.reject({ response: { status: 409, data: { detail: 'daily_output_original_ownership_required' } } }));
     await h.settle(() => probe.current.saveOverrideRow(probe.current.selectedOverrideRow));
     assert.match(probe.current.overrideEditorMessage, /daily_output_original_ownership_required/);
     assert.doesNotMatch(probe.current.overrideEditorMessage, /保存しました/);
@@ -318,11 +326,17 @@ function workflowTransport() {
   }
   return { t, state };
 }
-async function workflow(h, probe) { await h.settle(); await h.settle(); assert.equal(probe.current.workflow?.revision, 7); assert.equal(probe.current.effectiveSelectedDocumentId, 'pdf-A'); }
+async function workflow(h, probe) {
+  await h.waitFor(() => probe.current?.workflow?.revision === 7 && probe.current.effectiveSelectedDocumentId === 'pdf-A', 'owned workflow/document read');
+  assert.equal(probe.current.workflow.revision, 7);
+  assert.equal(probe.current.effectiveSelectedDocumentId, 'pdf-A');
+}
 async function retireWorkflow(h, probe, state, boundary) {
   if (boundary === 'editor') await h.settle(() => probe.current.beginWorkflowEditorEdit('sheet'));
   if (boundary === 'revision') { state.revision = 8; await h.settle(() => probe.current.refreshAll()); }
   if (boundary === 'pdf') {
+    await h.click(h.document.querySelector('nav[aria-label="workflow steps"] button'));
+    await h.waitFor(() => [...h.document.querySelectorAll('select')].some(node => [...node.options].some(option => option.value === 'pdf-B')), 'Step1 actual PDF control');
     const select = [...h.document.querySelectorAll('select')].find(node => [...node.options].some(option => option.value === 'pdf-B'));
     assert.ok(select); await h.change(select, 'pdf-B');
   }
@@ -345,7 +359,8 @@ test('workflow owned HTML uses only its original popup and preserves returned 0/
     await h.settle(() => probe.current.openHtmlOutput(url, 'Synthetic HTML'));
     assert.equal(h.popups.length, 1);
     assert.equal(h.popups[0].writes.at(-1), html);
-    assert.equal(h.popups[0].focuses, 1);
+    // This actual HTML path writes/closes the original document, without focus().
+    assert.equal(h.popups[0].focuses, 0);
     assert.equal(h.downloads.length, 0);
     assert.equal(t.calls.filter(call => call.url === url).length, 1);
   } finally { await h.close(); }
@@ -360,6 +375,7 @@ for (const kind of ['download', 'preview']) for (const boundary of ['order', 'pd
     try {
       await workflow(h, probe);
       const op = await start(h, () => kind === 'download' ? probe.current.openOutput('/outputs/labels?order_id=synthetic-order', 'Synthetic CSV') : probe.current.loadOutputPreview('labels'));
+      assert.ok(t.calls.some(call => call.url === (kind === 'download' ? '/outputs/labels?order_id=synthetic-order' : '/outputs/file-preview')));
       const writes = h.popups.at(-1)?.writes.length || 0;
       await retireWorkflow(h, probe, state, boundary);
       await h.settle(() => outcome === 'success' ? pending.resolve({ data: kind === 'download' ? new Blob(['obsolete']) : '<p>obsolete</p>', headers: {} })
