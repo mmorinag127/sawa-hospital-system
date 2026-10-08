@@ -824,9 +824,13 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     }
   };
 
-  const validateSnapshot = (data: any) => {
+  const validateSnapshot = (data: any, expectedSourceMonth?: string) => {
     if (!data || !Array.isArray(data.items) || !Array.isArray(data.entries)
       || !Array.isArray(data.master_checks?.issues) || typeof data.revision !== "string") {
+      throw new Error("月次メニューと入力版の応答を確認できませんでした。");
+    }
+    if (expectedSourceMonth !== undefined && (data.source_month_id !== expectedSourceMonth
+      || (data.menu != null && data.menu.id !== expectedSourceMonth))) {
       throw new Error("月次メニューと入力版の応答を確認できませんでした。");
     }
   };
@@ -1014,13 +1018,20 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     }
   };
 
-  const adoptImport = (receipt: SavedMenuImport) => {
-    if (receipt.month_id !== monthId || !receipt.id || !receipt.revision || !hasSavedImportSource(receipt.source)
+  const validateImportReceipt = (receipt: SavedMenuImport, requestedId?: string, expectedState?: SavedMenuImport["state"]) => {
+    if (!receipt || receipt.month_id !== monthId || typeof receipt.id !== "string" || !receipt.id.trim()
+      || (requestedId !== undefined && receipt.id !== requestedId)
+      || (expectedState !== undefined && receipt.state !== expectedState)
+      || !receipt.revision || !hasSavedImportSource(receipt.source)
       || !hasSavedImportReview(receipt.review, receipt.source) || !hasSavedImportReview(receipt.current_review, receipt.source)
       || !receipt.current_input_revision || !receipt.input_revision
       || !["review", "applied"].includes(receipt.state)) {
       throw new Error("保存原本と差分の対応を確認できませんでした。");
     }
+  };
+
+  const adoptImport = (receipt: SavedMenuImport, requestedId?: string, expectedState?: SavedMenuImport["state"]) => {
+    validateImportReceipt(receipt, requestedId, expectedState);
     const saved = Object.fromEntries(receipt.current_review.resolutions.map((resolution) => [resolution.issue_key, resolution]));
     const resolutions = Object.fromEntries(receipt.current_review.issues.map((issue, index) => {
       const resolution = buildPendingReviewResolution(issue, index);
@@ -1041,7 +1052,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     try {
       const res = await apiClient.get(`/monthly-menus/${monthId}/imports/${receiptId}`);
       if (!current()) return;
-      adoptImport(res.data);
+      adoptImport(res.data, receiptId);
     } catch (error: any) {
       if (current()) setMessage(formatErrorDetail(error?.response?.data?.detail, "保存importを確認できませんでした。"));
     }
@@ -1179,9 +1190,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         { headers: { "If-Match": receipt.revision } });
       if (!current()) return;
       if (!apply) {
-        adoptImport(res.data);
+        adoptImport(res.data, receipt.id, "review");
         setMessage("差分設定を保存しました。対象と件数を確認して反映してください。");
       } else {
+        validateImportReceipt(res.data?.receipt, receipt.id, "applied");
+        validateSnapshot(res.data?.snapshot, receipt.month_id);
         adoptSnapshot(res.data.snapshot);
         setFile(null);
         setPendingReview(null);
