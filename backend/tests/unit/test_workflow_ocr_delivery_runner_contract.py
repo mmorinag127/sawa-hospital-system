@@ -1,11 +1,15 @@
 """Source-authored regression definitions; execution belongs to parent verification."""
 import pytest
 from copy import deepcopy
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from src.models.ocr_job import OcrJob
 from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+from src.models.order import Order
+from src.models.order_workflow_state import OrderWorkflowState
 
 from src.api import orders, worker
 from src.services import order_service
@@ -240,6 +244,180 @@ def test_original_pending_branch_remains_pending(monkeypatch):
         pytest.fail("pending handoff must not become a synthetic business failure")
     monkeypatch.setattr(orders, "_complete_workflow_ocr_run", forbid_completion)
     assert _run() == result
+
+
+@pytest.mark.parametrize("outcome", ["crash", "missing", "refusal"])
+def test_claimed_worker_negative_result_does_not_ack_or_change_persisted_state(
+    isolated_formal_schema, monkeypatch, outcome,
+):
+    """Claim/auth/mutex are explicit unit doubles, not source-capture proof.
+
+    The runner, claim ContextVar, callback and formally migrated persisted
+    no-write state are real. No OCR or business completion is simulated.
+    """
+    engine = isolated_formal_schema
+    order_id, job_id = "ORD-callback-contract", "OCR-captured-job"
+    attempt, revision = "attempt-captured", 17
+    delivery_id, generation, claim_token = "unit-original-delivery", 1, "unit-original-claim"
+    params = {
+        "request_mode": "ocr_reparse", "reparse_ocr_prompt": "prompt",
+        "reparse_prompt_preset": None, "reparse_requested_provider": None,
+        "reparse_ocr_model": None, "reparse_llm_assist": False,
+    }
+    request_identity = {"request_parameters": params, "selected_document_id": None}
+    expires = datetime.utcnow() + timedelta(minutes=5)
+    with Session(engine) as setup:
+        setup.add(Order(id=order_id, document_uri="fixture://no-upload", message_id="unit-message"))
+        setup.flush()
+        setup.add(OcrJob(id=job_id, order_id=order_id, status="running",
+                        input_reference="fixture://no-upload",
+                        metrics={"workflow_attempt_id": attempt,
+                                 "workflow_completion_revision": revision,
+                                 "workflow_ocr_delivery_id": delivery_id}))
+        setup.flush()
+        setup.add(WorkflowOcrDelivery(
+            id=delivery_id, order_id=order_id, job_id=job_id,
+            workflow_attempt_id=attempt, workflow_revision=revision,
+            delivery_generation=generation, task_name="unit-claimed-task",
+            task_contract={}, identity_sha256="unit-boundary-not-capture-proof",
+            request_mode="ocr_reparse", selected_pdf_receipt={},
+            request_identity=request_identity, state=delivery.CLAIMED,
+            claim_token=claim_token, lease_expires_at=expires,
+        ))
+        setup.commit()
+
+    def persisted():
+        with Session(engine) as session:
+            row, job = session.get(WorkflowOcrDelivery, delivery_id), session.get(OcrJob, job_id)
+            return {
+                "delivery": (row.order_id, row.job_id, row.workflow_revision,
+                             row.workflow_attempt_id, row.delivery_generation,
+                             row.claim_token, row.state, row.lease_expires_at,
+                             deepcopy(row.result_receipt), deepcopy(row.handoff_receipt),
+                             deepcopy(row.request_identity)),
+                "job": (job.order_id, job.status, job.error_message, deepcopy(job.metrics)),
+            }
+
+    before = persisted()
+    claim = {
+        "delivery_id": delivery_id, "generation": generation, "claim_token": claim_token,
+        "order_id": order_id, "job_id": job_id, "workflow_revision": revision,
+        "workflow_attempt_id": attempt, "business_status": "eligible",
+        "request_mode": "ocr_reparse", "request_identity": request_identity,
+    }
+    def claim_delivery(actual_id, actual_generation, *, lease_expires_at):
+        assert (actual_id, actual_generation) == (delivery_id, generation)
+        assert lease_expires_at == expires
+        return claim
+
+    mutex_events, completion_calls, ack_calls, reparse_calls = [], [], [], []
+    @contextmanager
+    def mutex(actual_id):
+        assert actual_id == delivery_id
+        mutex_events.append("entered")
+        try:
+            yield True
+        finally:
+            mutex_events.append("released")
+
+    crash = KeyboardInterrupt("crash")
+    def reparse(actual_id, **kwargs):
+        assert delivery._claim_context.get() is claim
+        assert actual_id == order_id
+        assert kwargs["ocr_job_id"] == job_id
+        assert kwargs["expected_workflow_revision"] == revision
+        assert kwargs["workflow_attempt_id"] == attempt
+        assert kwargs["ocr_prompt"] == "prompt"
+        assert kwargs["llm_assist"] is False
+        reparse_calls.append((actual_id, kwargs))
+        if outcome == "crash":
+            raise crash
+        if outcome == "missing":
+            return {}, None
+        return {"reparse_evidence_run_id": "OEV-superseded"}, "current_reparse_error"
+
+    def refuse(actual_id, actual_job, **kwargs):
+        completion_calls.append((actual_id, actual_job, kwargs))
+        assert actual_id == order_id and actual_job == job_id
+        assert kwargs["expected_revision"] == revision
+        assert kwargs["workflow_attempt_id"] == attempt
+        assert kwargs["evidence_run_id"] == "OEV-superseded"
+        assert kwargs["error"] == "current_reparse_error"
+        return None, "workflow_revision_conflict"
+
+    def forbidden_ack(*args):
+        ack_calls.append(args)
+        pytest.fail("crash, missing result or persistence refusal must not ACK")
+
+    monkeypatch.setattr(worker, "_required_worker_identity", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_lease_expiry", lambda: expires)
+    monkeypatch.setattr(worker, "execution_mutex", mutex)
+    monkeypatch.setattr(delivery, "inspect_generation", lambda *a: {"duplicate": False})
+    monkeypatch.setattr(delivery, "claim_delivery", claim_delivery)
+    monkeypatch.setattr(delivery, "acknowledge_claim", forbidden_ack)
+    monkeypatch.setattr(order_service, "reparse_order", reparse)
+    monkeypatch.setattr(orders, "_complete_workflow_ocr_run", refuse)
+    prior_context = delivery._claim_context.get()
+    if outcome == "crash":
+        with pytest.raises(KeyboardInterrupt, match="crash") as error:
+            worker.process_workflow_ocr_delivery(delivery_id, generation, None, None)
+        assert error.value is crash
+    else:
+        with pytest.raises(HTTPException) as error:
+            worker.process_workflow_ocr_delivery(delivery_id, generation, None, None)
+        assert error.value.status_code == 409
+        assert error.value.detail == (
+            "reparse_persisted_result_missing" if outcome == "missing" else "workflow_revision_conflict"
+        )
+    assert delivery._claim_context.get() is prior_context
+    assert mutex_events == ["entered", "released"]
+    assert len(reparse_calls) == 1
+    assert len(completion_calls) == (1 if outcome == "refusal" else 0)
+    assert ack_calls == []
+    assert persisted() == before
+
+
+def test_persisted_foreign_evidence_receipt_cannot_authorize_business_ack(isolated_formal_schema):
+    """Real saved JSON/status decision; synthetic row fixture, not OCR/source proof."""
+    engine = isolated_formal_schema
+    order_id, job_id, attempt, revision = "ORD-callback-contract", "OCR-captured-job", "attempt-captured", 17
+    delivery_id, claim_token = "unit-evidence-delivery", "unit-evidence-claim"
+    receipt = {
+        "order_id": order_id, "job_id": job_id, "workflow_attempt_id": attempt,
+        "workflow_revision": revision, "status": "done", "error": None,
+        "evidence_run_id": "OEV-foreign",
+        "workflow_delivery_owner": {
+            "delivery_id": delivery_id, "generation": 1, "claim_token": claim_token,
+        },
+    }
+    with Session(engine) as setup:
+        setup.add(Order(id=order_id, document_uri="fixture://no-upload", message_id="unit-message"))
+        setup.flush()
+        setup.add(OcrJob(
+            id=job_id, order_id=order_id, status="done", input_reference="fixture://no-upload",
+            metrics={"workflow_attempt_id": attempt, "evidence_run_id": "OEV-success",
+                     "rerun_terminal_receipt": receipt},
+        ))
+        setup.execute(OrderWorkflowState.__table__.insert().values(
+            order_id=order_id, state="ocr_running", revision=revision,
+            secondary_actions_json={"workflow_v2": {"ocr_job_attempt_id": attempt}},
+        ))
+        setup.flush()
+        setup.add(WorkflowOcrDelivery(
+            id=delivery_id, order_id=order_id, job_id=job_id,
+            workflow_attempt_id=attempt, workflow_revision=revision,
+            delivery_generation=1, task_name="unit-evidence-task", task_contract={},
+            identity_sha256="unit-boundary-not-capture-proof", request_mode="ocr_reparse",
+            selected_pdf_receipt={}, request_identity={}, state=delivery.CLAIMED,
+            claim_token=claim_token, result_receipt=receipt,
+        ))
+        setup.commit()
+    with Session(engine) as reader:
+        row = reader.get(WorkflowOcrDelivery, delivery_id)
+        assert delivery._business_status(reader, row) == "hard_stop"
+        assert row.state == delivery.CLAIMED
+        assert row.result_receipt["evidence_run_id"] == "OEV-foreign"
+        assert reader.get(OcrJob, job_id).metrics["evidence_run_id"] == "OEV-success"
 
 
 @pytest.mark.parametrize("generation", [None, True, False, 0, -1, "1"])

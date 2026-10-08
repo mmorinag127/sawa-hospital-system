@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
+import ast
 
 import pytest
 from fastapi import HTTPException
@@ -326,9 +327,40 @@ def test_reparse_callback_completes_success_failure_and_crash_from_captured_resu
         "def _run_ocr_rerun_background(", 1
     )[0]
 
-    assert 'result.get("reparse_evidence_run_id")' in callback
-    assert "reparse_evidence_missing" in callback
-    assert callback.count("_complete_workflow_ocr_run(") == 2
+    tree = ast.parse("def _run_reparse_background(" + callback)
+    function = tree.body[0]
+    completions = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name) and node.func.id == "_complete_workflow_ocr_run"]
+    assert len(completions) == 1
+    keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in completions[0].keywords}
+    assert keywords["evidence_run_id"] == "(result or {}).get('reparse_evidence_run_id')"
+    assert keywords["expected_revision"] == "expected_revision"
+    assert keywords["workflow_attempt_id"] == "workflow_attempt_id"
+    assert keywords["error"] == "error"
+    receipt_branch = next(node for node in function.body if isinstance(node, ast.If)
+                          and ast.unparse(node.test) == "isinstance(receipt, dict)")
+    assert isinstance(receipt_branch.body[-1], ast.Return)
+    assert ast.unparse(receipt_branch.body[-1].value) == "{'terminal_receipt': receipt}"
+    receipt_guard = receipt_branch.body[0]
+    assert isinstance(receipt_guard, ast.If)
+    for field, owner in (
+        ("job_id", "ocr_job_id"), ("order_id", "order_id"),
+        ("workflow_attempt_id", "workflow_attempt_id"), ("workflow_revision", "expected_revision"),
+    ):
+        assert f"receipt.get('{field}') != {owner}" in ast.unparse(receipt_guard.test)
+    assert "receipt.get('status') not in {'done', 'failed'}" in ast.unparse(receipt_guard.test)
+    assert isinstance(receipt_guard.body[0], ast.Raise)
+    assert "reparse_terminal_receipt_mismatch" in ast.unparse(receipt_guard)
+    missing_branch = next(node for node in function.body if isinstance(node, ast.If)
+                          and ast.unparse(node.test) == "not error")
+    assert isinstance(missing_branch.body[0], ast.Raise)
+    assert "reparse_persisted_result_missing" in ast.unparse(missing_branch)
+    assert function.body.index(receipt_branch) < function.body.index(missing_branch)
+    refusal = next(node for node in function.body if isinstance(node, ast.If)
+                   and ast.unparse(node.test) == "receipt is None")
+    assert isinstance(refusal.body[0], ast.Raise)
+    assert "completion_error or 'reparse_terminal_persist_refused'" in ast.unparse(refusal)
+    assert not any(isinstance(node, ast.Try) for node in ast.walk(function))
     assert "get_latest_ocr_evidence_run" not in callback
     assert "expected_revision=expected_revision" in callback
     assert "workflow_attempt_id=workflow_attempt_id" in callback
@@ -366,8 +398,8 @@ def test_reparse_result_contract_exposes_only_its_persisted_evidence_id():
             "OEV-superseded",
             None,
         ),
-        ({}, None, None, None, None, "reparse_evidence_missing"),
-        (None, None, KeyboardInterrupt("crash"), None, None, "reparse_crashed:crash"),
+        ({}, None, None, None, None, "reparse_persisted_result_missing"),
+        (None, None, KeyboardInterrupt("crash"), None, None, "crash"),
     ],
     ids=["success", "current-error", "superseded", "missing-own-result", "crash"],
 )
@@ -385,14 +417,26 @@ def test_reparse_callback_completes_with_only_its_returned_evidence_and_captured
     expected_revision = 17
     workflow_attempt_id = "attempt-captured"
     completion_calls = []
+    reparse_calls = []
+    receipt = {
+        "order_id": order_id, "job_id": ocr_job_id,
+        "workflow_revision": expected_revision, "workflow_attempt_id": workflow_attempt_id,
+        "evidence_run_id": expected_evidence_id,
+        "status": "failed" if reparse_error else "done", "error": reparse_error,
+    }
 
     def fake_reparse(actual_order_id, **kwargs):
         assert actual_order_id == order_id
         assert kwargs["workflow_attempt_id"] == workflow_attempt_id
         assert kwargs["expected_workflow_revision"] == expected_revision
         assert kwargs["ocr_job_id"] == ocr_job_id
+        reparse_calls.append((actual_order_id, kwargs))
         if crash is not None:
             raise crash
+        if completion_error is not None:
+            return result, completion_error
+        if expected_evidence_id is not None:
+            return {**result, "terminal_receipt": receipt}, reparse_error
         return result, reparse_error
 
     def fake_complete(actual_order_id, job_id, **kwargs):
@@ -402,25 +446,69 @@ def test_reparse_callback_completes_with_only_its_returned_evidence_and_captured
     monkeypatch.setattr(orders_api.order_service, "reparse_order", fake_reparse)
     monkeypatch.setattr(orders_api, "_complete_workflow_ocr_run", fake_complete)
 
-    orders_api._run_reparse_background(
-        order_id,
-        "prompt",
-        expected_revision=expected_revision,
-        workflow_attempt_id=workflow_attempt_id,
-        ocr_job_id=ocr_job_id,
-    )
+    def run():
+        return orders_api._run_reparse_background(
+            order_id, "prompt", expected_revision=expected_revision,
+            workflow_attempt_id=workflow_attempt_id, ocr_job_id=ocr_job_id,
+        )
 
-    assert len(completion_calls) == 1
-    actual_order_id, job_id, kwargs = completion_calls[0]
-    assert actual_order_id == order_id
-    assert job_id == ocr_job_id
-    assert kwargs["expected_revision"] == expected_revision
-    assert kwargs["workflow_attempt_id"] == workflow_attempt_id
-    assert kwargs.get("evidence_run_id") == expected_evidence_id
     if crash is not None:
-        assert kwargs["error"] == expected_error
+        with pytest.raises(KeyboardInterrupt, match=expected_error) as error:
+            run()
+        assert error.value is crash
+        assert completion_calls == []
+    elif completion_error is not None:
+        with pytest.raises(ValueError, match=completion_error):
+            run()
+        assert len(completion_calls) == 1
+        actual_order_id, job_id, kwargs = completion_calls[0]
+        assert actual_order_id == order_id
+        assert job_id == ocr_job_id
+        assert kwargs["expected_revision"] == expected_revision
+        assert kwargs["workflow_attempt_id"] == workflow_attempt_id
+        assert kwargs.get("evidence_run_id") == expected_evidence_id
+        assert kwargs["error"] == completion_error
+    elif expected_evidence_id is None:
+        with pytest.raises(ValueError, match=expected_error):
+            run()
+        assert completion_calls == []
     else:
-        assert kwargs.get("error") == expected_error
+        returned = run()
+        assert returned == {"terminal_receipt": receipt}
+        assert returned["terminal_receipt"] is receipt
+        assert receipt["order_id"] == order_id
+        assert receipt["job_id"] == ocr_job_id
+        assert receipt["workflow_revision"] == expected_revision
+        assert receipt["workflow_attempt_id"] == workflow_attempt_id
+        assert receipt["evidence_run_id"] == expected_evidence_id
+        assert receipt["error"] == expected_error
+        assert completion_calls == []
+    assert len(reparse_calls) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("order_id", "ORD-foreign"), ("job_id", "OCR-foreign"),
+    ("workflow_revision", 18), ("workflow_attempt_id", "attempt-foreign"),
+    ("status", "running"),
+])
+def test_reparse_callback_rejects_foreign_terminal_receipt(monkeypatch, field, value):
+    receipt = {
+        "order_id": "ORD-callback-contract", "job_id": "OCR-captured-job",
+        "workflow_revision": 17, "workflow_attempt_id": "attempt-captured",
+        "evidence_run_id": "OEV-success", "status": "done", "error": None,
+        field: value,
+    }
+    monkeypatch.setattr(orders_api.order_service, "reparse_order",
+                        lambda *args, **kwargs: ({"terminal_receipt": receipt}, None))
+    def forbidden(*args, **kwargs):
+        pytest.fail("foreign receipt must not be repaired using other evidence")
+    monkeypatch.setattr(orders_api, "_complete_workflow_ocr_run", forbidden)
+    monkeypatch.setattr(orders_api.order_service, "get_latest_ocr_evidence_run", forbidden)
+    with pytest.raises(ValueError, match="reparse_terminal_receipt_mismatch"):
+        orders_api._run_reparse_background(
+            "ORD-callback-contract", "prompt", expected_revision=17,
+            workflow_attempt_id="attempt-captured", ocr_job_id="OCR-captured-job",
+        )
 
 
 def test_cache_actual_write_requires_the_callers_real_job_id_and_keeps_first_pass_explicit():
