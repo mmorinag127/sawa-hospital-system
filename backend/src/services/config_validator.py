@@ -70,6 +70,13 @@ def _validate_column_field_consistency(
     path: str,
     errors: list[str],
 ) -> None:
+    column_errors: list[str] = []
+    _validate_columns(columns, f"{path.rsplit('.', 1)[0]}.columns", column_errors, [])
+    for error in column_errors:
+        if error not in errors:
+            errors.append(error)
+    if column_errors:
+        return
     values = _ensure_list(fields, path, errors)
     normalized_fields = [str(item).strip() for item in values if isinstance(item, str) and str(item).strip()]
     if not normalized_fields:
