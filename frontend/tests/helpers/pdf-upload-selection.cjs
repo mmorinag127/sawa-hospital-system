@@ -15,7 +15,8 @@ async function mount(api) {
   const { JSDOM } = require('jsdom');
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
   const saved = new Map();
-  for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'HTMLInputElement', 'DocumentFragment',
+  for (const key of ['window', 'document', 'navigator', 'Node', 'Element', 'HTMLElement',
+    'HTMLInputElement', 'HTMLSelectElement', 'DocumentFragment', 'MutationObserver',
     'Event', 'MouseEvent', 'File', 'FormData', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame',
     'IS_REACT_ACT_ENVIRONMENT']) {
     saved.set(key, Object.getOwnPropertyDescriptor(global, key));
