@@ -285,6 +285,11 @@ def readonly_database(request, tmp_path, monkeypatch):
                 connection.exec_driver_sql('CREATE DATABASE "' + name + '"')
                 created = True
             url = url.set(database=name)
+        master_path = tmp_path / "empty-facility-master.json"
+        master_path.write_text('{"facilities":[]}', encoding="utf-8")
+        monkeypatch.setenv("FACILITY_MASTER_PATH", str(master_path))
+        monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+        monkeypatch.delenv("K_SERVICE", raising=False)
         isolated = sa.create_engine(url)
         for variable in ("DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
             monkeypatch.delenv(variable, raising=False)
