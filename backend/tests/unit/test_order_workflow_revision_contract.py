@@ -12,6 +12,11 @@ from src.services import order_service
 from src.services import order_workflow_v2_service
 
 
+def _source_function(path, name):
+    return next(node for node in ast.parse(Path(path).read_text(encoding="utf-8")).body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name)
+
+
 def test_if_match_requires_a_quoted_integer_revision():
     assert _require_workflow_if_match('"7"') == 7
 
@@ -46,18 +51,23 @@ def test_revision_guard_accepts_current_and_rejects_old_or_double_command():
 
 def test_finalize_turns_a_simultaneous_sql_update_into_a_conflict():
     class ConcurrentSession:
+        info = {}
+        rolled_back = False
+
         def flush(self):
             raise StaleDataError("UPDATE matched zero rows")
 
         def rollback(self):
-            pass
+            self.rolled_back = True
 
-    workflow = SimpleNamespace(revision=4)
+    workflow = SimpleNamespace(revision=4, secondary_actions_json={})
+    session = ConcurrentSession()
 
     assert (
-        order_workflow_v2_service._finalize_workflow_mutation(ConcurrentSession(), workflow)
+        order_workflow_v2_service._finalize_workflow_mutation(session, workflow)
         == "workflow_revision_conflict"
     )
+    assert session.rolled_back is True
 
 
 def test_read_serialization_keeps_revision_without_mutating_workflow():
@@ -140,10 +150,14 @@ def test_manual_command_rejects_missing_revision_before_workflow_creation():
 
 
 def test_pre_save_status_for_uninitialized_workflow_is_a_read_projection():
-    status = order_workflow_v2_service._pre_save_status_for_sheet({}, "sheet-digest")
+    meta = {}
+    status = order_workflow_v2_service._pre_save_status_for_sheet(meta, "sheet-digest")
 
     assert status["sheet_hash"] == "sheet-digest"
-    assert status["checks"] == {}
+    assert status["anomaly_review_confirmed"] is False
+    assert status["sheet_review_confirmed"] is False
+    assert status["ready"] is False
+    assert meta == {}
 
 
 def test_migration_0029_only_initializes_when_adding_the_revision_column():
@@ -198,9 +212,37 @@ def test_queue_callers_dispatch_the_queue_captured_revision_and_attempt():
         Path(order_workflow_v2_service.__file__).parents[1] / "api" / "orders.py"
     ).read_text(encoding="utf-8")
 
-    assert "_dispatch_workflow_ocr_task(" in api_source
-    assert 'expected_revision=queued_workflow["revision"]' in api_source
-    assert 'workflow_attempt_id=queued_job["workflow_attempt_id"]' in api_source
+    api_tree = ast.parse(api_source)
+    dispatches = [node for node in ast.walk(api_tree) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name) and node.func.id == "_dispatch_workflow_ocr_delivery"]
+    assert len(dispatches) == 2
+    assert all(ast.unparse(node.args[0]) == "queued.get('delivery')" for node in dispatches)
+    queue = _source_function(order_workflow_v2_service.__file__, "mark_ocr_run_queued")
+    intent = next(node for node in ast.walk(queue) if isinstance(node, ast.Call)
+                  and ast.unparse(node.func) == "workflow_ocr_delivery_service.create_intent_in_session")
+    keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in intent.keywords}
+    assert keywords["order_id"] == "order.id"
+    assert keywords["job_id"] == "normalized_job_id"
+    assert keywords["workflow_revision"] == "_workflow_revision(workflow)"
+    assert keywords["workflow_attempt_id"] == "workflow_attempt_id or ''"
+    assert keywords["selected_pdf_receipt"] == "queued_metrics.get('selected_pdf_receipt') or {}"
+    assert keywords["request_identity"] == "delivery_request_identity or {}"
+    identity = next(node.value for node in ast.walk(queue) if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "delivery_request_identity" for target in node.targets))
+    fields = {key.value: ast.unparse(value) for key, value in zip(identity.keys, identity.values)}
+    assert fields["selected_document_id"] == "delivery_selected_document_id"
+    assert fields["selected_version_input"] == "selected_input"
+    missing = next(node for node in queue.body if isinstance(node, ast.If)
+                   and "input_reference" in ast.unparse(node.test))
+    assert isinstance(missing.body[0], ast.Return)
+    assert "workflow_ocr_delivery_input_reference_required" in ast.unparse(missing.body[0])
+    assert queue.body.index(missing) < next(i for i, node in enumerate(queue.body) if isinstance(node, ast.With))
+    dispatch = _source_function(Path(order_workflow_v2_service.__file__).parents[1] / "api" / "orders.py", "_dispatch_workflow_ocr_delivery")
+    invalid = next(node for node in dispatch.body if isinstance(node, ast.If))
+    assert ast.unparse(invalid.test) == "not delivery_id or type(generation) is not int"
+    assert isinstance(invalid.body[0], ast.Raise)
+    assert "workflow_ocr_delivery_missing" in ast.unparse(invalid.body[0])
+    assert dispatch.body.index(invalid) < next(i for i, node in enumerate(dispatch.body) if isinstance(node, ast.Try))
 
 
 def test_reparse_blocks_implicit_cross_provider_fallback_but_keeps_same_provider_retry():
@@ -520,7 +562,33 @@ def test_cache_actual_write_requires_the_callers_real_job_id_and_keeps_first_pas
     )[0]
 
     assert "normalized_job_id = str(job_id or \"\").strip()" in cache
-    assert "if not normalized_job_id:\n        return None" in cache
+    function = _source_function(order_service.__file__, "_save_order_ocr_cache")
+    guards = {ast.unparse(node.test): node for node in function.body if isinstance(node, ast.If)}
+    for condition in (
+        "normalized_job_id and synchronous_write_input is not None",
+        "not normalized_job_id and (not isinstance(synchronous_write_input, dict))",
+    ):
+        guard = guards[condition]
+        assert isinstance(guard.body[0], ast.Return)
+        assert isinstance(guard.body[0].value, ast.Constant) and guard.body[0].value.value is None
+    synchronous = guards["not normalized_job_id"]
+    assert ast.unparse(synchronous.body[0]) == "persist_evidence = False"
+    fence = next(node for node in ast.walk(function) if isinstance(node, ast.If)
+                 and ast.unparse(node.test) == "normalized_job_id"
+                 and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                         and child.func.id == "_workflow_attempt_write_fence" for child in ast.walk(node)))
+    assert ast.unparse(fence.body[0].value) == "_workflow_attempt_write_fence(session, normalized_job_id, order_id)"
+    assert ast.unparse(fence.orelse[0].value) == "_synchronous_cache_write_fence(session, order_id, synchronous_write_input)"
+    refusal = next(node for node in ast.walk(function) if isinstance(node, ast.If)
+                   and ast.unparse(node.test) == "not write_allowed")
+    assert isinstance(refusal.body[0], ast.Return) and refusal.body[0].value.value is None
+    sync_fence = _source_function(order_service.__file__, "_synchronous_cache_write_fence")
+    assert "captured_processing_config_matches" in ast.unparse(sync_fence)
+    assert "lock_current_synchronous_cache_write" in ast.unparse(sync_fence)
+    config_guard = next(node for node in sync_fence.body if isinstance(node, ast.If)
+                        and "captured_processing_config_matches" in ast.unparse(node.test))
+    assert isinstance(config_guard.body[0], ast.Return)
+    assert config_guard.body[0].value.value is False
     assert "_workflow_attempt_write_fence(session, normalized_job_id, order_id)" in cache
     assert "workflow_job_id=normalized_job_id" in cache
 
