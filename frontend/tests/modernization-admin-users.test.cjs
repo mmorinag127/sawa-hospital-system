@@ -171,3 +171,47 @@ test('role error/logout/session response cannot promote stale admin and SSR shar
     await h.session(false); assert.equal([...h.document.querySelectorAll('output')].every(node => JSON.parse(node.textContent).role === ''), true);
   } finally { await h.close(); }
 });
+
+for (const kind of ['network', 'lookalike', 'api-detail']) {
+  test(`shared admin error boundary ${kind} preserves safe detail without exposing transport internals`, async () => {
+    const t = setup();
+    const error = new Error('synthetic-private-network-message');
+    error.stack = 'synthetic-private-stack';
+    error.headers = { Authorization: 'synthetic-private-header' };
+    if (kind === 'lookalike') { error.name = 'LocalUserCommandError'; error.reason = 'systems'; }
+    if (kind === 'api-detail') error.response = { data: { detail: 'synthetic-safe-api-detail' } };
+    t.on('put', '/portal/users/first', () => { throw error; });
+    const h = await mount('src/pages/admin/users.tsx', { api: t.api });
+    try {
+      await edit(h);
+      await h.change(h.document.querySelector('input[name="account"]'), 'retained@local');
+      await h.click(h.button('保存'));
+      await h.waitFor(() => h.document.querySelector('[role="alert"]') !== null, 'owned save error');
+      const content = h.document.body.textContent;
+      assert.match(content, /ユーザーを保存できませんでした/);
+      if (kind === 'api-detail') assert.match(content, /ユーザーを保存できませんでした: synthetic-safe-api-detail/);
+      else assert.doesNotMatch(content, /未対応の値は破棄せず保存を停止/);
+      assert.doesNotMatch(content, /synthetic-private-network-message|synthetic-private-stack|synthetic-private-header/);
+      assert.equal(h.document.querySelector('input[name="account"]').value, 'retained@local');
+      assert.equal(writes(t).length, 1);
+      assert.equal(writes(t)[0].url, '/portal/users/first');
+      assert.deepEqual(writes(t)[0].body, { account: 'retained@local', role: 'operator', status: 'active', systems: [] });
+    } finally { await h.close(); }
+  });
+}
+
+test('owned response target validation displays only its known local reason and preserves entered values', async () => {
+  const t = setup();
+  t.on('put', '/portal/users/first', () => ({ data: { user: user('second') } }));
+  const h = await mount('src/pages/admin/users.tsx', { api: t.api });
+  try {
+    await edit(h);
+    await h.change(h.document.querySelector('input[name="account"]'), 'retained@local');
+    await h.click(h.button('保存'));
+    await h.waitFor(() => h.document.body.textContent.includes('保存されたユーザーの対象・値を確認できません。'), 'local saved-target blocker');
+    assert.equal(h.document.querySelector('input[name="account"]').value, 'retained@local');
+    assert.equal(writes(t).length, 1);
+    assert.equal(writes(t)[0].url, '/portal/users/first');
+    assert.doesNotMatch(h.document.body.textContent, /second@example.invalid を保存しました/);
+  } finally { await h.close(); }
+});

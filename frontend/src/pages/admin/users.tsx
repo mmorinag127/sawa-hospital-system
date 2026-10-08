@@ -42,7 +42,19 @@ const systemLabels: Record<SystemKey, string> = {
 };
 const isKnownSystem = (key: string): key is SystemKey => Object.prototype.hasOwnProperty.call(systemLabels, key);
 
+const localCommandReasons = {
+  target: "編集対象を確認できません。",
+  systems: "利用システムの現在値を確認してください。未対応の値は破棄せず保存を停止しました。",
+  cancelled: "ユーザー保存は取り消されました。",
+  retired: "ユーザー保存の編集対象が変更されました。",
+  savedTarget: "保存されたユーザーの対象・値を確認できません。",
+} as const;
+class LocalUserCommandError extends Error {
+  constructor(readonly reason: keyof typeof localCommandReasons) { super(localCommandReasons[reason]); }
+}
+
 const errorMessage = (error: unknown, fallback: string) => {
+  if (error instanceof LocalUserCommandError) return localCommandReasons[error.reason];
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   return typeof detail === "string" && detail.trim() ? `${fallback}: ${detail}` : fallback;
 };
@@ -149,11 +161,11 @@ function UsersContent({ session }: { session: string }) {
   };
   const save = async (values: User) => {
     const own = formLease.current;
-    if (!own?.() || !editing || values.id !== editing.id) throw new Error("編集対象を確認できません。");
-    if (values.systems.some(key => !isKnownSystem(key))) throw new Error("利用システムの現在値を確認してください。未対応の値は破棄せず保存を停止しました。");
+    if (!own?.() || !editing || values.id !== editing.id) throw new LocalUserCommandError("target");
+    if (values.systems.some(key => !isKnownSystem(key))) throw new LocalUserCommandError("systems");
     ++readGeneration.current;
     await client.cancelQueries({ queryKey });
-    if (!own()) throw new Error("ユーザー保存は取り消されました。");
+    if (!own()) throw new LocalUserCommandError("cancelled");
     setNotice(null);
     const body = {
       account: values.account, role: values.role, status: values.status, systems: values.systems,
@@ -164,9 +176,9 @@ function UsersContent({ session }: { session: string }) {
         : await apiClient.post<{ user: User }>("/portal/users", body);
       // Every completed permission write refreshes actual authority, even if its editor was retired.
       const refreshRole = () => session === browserSessionKey() ? refreshCurrentUserRole() : Promise.resolve();
-      if (!own()) { void refreshRole(); throw new Error("ユーザー保存の編集対象が変更されました。"); }
+      if (!own()) { void refreshRole(); throw new LocalUserCommandError("retired"); }
       const saved = response.data.user;
-      if (!validUser(saved) || (values.id && saved.id !== values.id)) { void refreshRole(); throw new Error("保存されたユーザーの対象・値を確認できません。"); }
+      if (!validUser(saved) || (values.id && saved.id !== values.id)) { void refreshRole(); throw new LocalUserCommandError("savedTarget"); }
       sortAfterSave.current = true;
       ++readGeneration.current;
       const next = items.some(item => item.id === saved.id) ? items.map(item => item.id === saved.id ? saved : item) : [...items, saved];
