@@ -94,7 +94,7 @@ def test_exact_page_and_missing_page_stop(name, path):
         def __init__(self, values): self.pages = values
         def __enter__(self): return self
         def __exit__(self, *args): pass
-    namespace = definitions(path, [name], {"_cap_detection_dpi": lambda dpi, **kw: dpi,
+    namespace = definitions(path, ["GridDetectionResult", name] if path == GRID else [name], {"_cap_detection_dpi": lambda dpi, **kw: dpi,
         "_downscale_image_if_needed": lambda value: value, "_detect_grid_from_image": lambda value, template: value})
     with patch("pdfplumber.open", return_value=Pdf(pages)):
         assert namespace[name](b"pdf transport", {"page": 2}).size == image.size

@@ -17,7 +17,7 @@ from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBund
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.facility import Facility
 from src.models.ocr_job import OcrJob
-from src.services import order_workflow_v2_service
+from src.services import order_service, order_workflow_v2_service
 
 
 def _current_workflow_revision(order_id: str) -> int:
