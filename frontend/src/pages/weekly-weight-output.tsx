@@ -133,6 +133,66 @@ function WeeklyWeightOutputScreen() {
   const [loading, setLoading] = useState(false);
   const [weekHistory, setWeekHistory] = useState<WeekHistoryItem[]>([]);
   const loadGeneration = useRef(0);
+  const downloadGeneration = useRef(0);
+  const inputGeneration = useRef(0);
+  const messageGeneration = useRef(0);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    let observedConditions = { ...conditionForm.getValues() };
+    let observedSession = browserSessionKey();
+    const retire = () => {
+      inputGeneration.current += 1;
+      loadGeneration.current += 1;
+      downloadGeneration.current += 1;
+      messageGeneration.current += 1;
+      setLoading(false);
+      setDownloading(false);
+      setMessage("");
+    };
+    const subscription = conditionForm.watch(() => {
+      const values = conditionForm.getValues();
+      if (values.week === observedConditions.week && values.status === observedConditions.status) return;
+      observedConditions = { ...values };
+      retire();
+    });
+    const stopSession = subscribeBrowserSession(() => {
+      const session = browserSessionKey();
+      if (session === observedSession) return;
+      observedSession = session;
+      retire();
+    });
+    return () => {
+      mounted.current = false;
+      inputGeneration.current += 1;
+      loadGeneration.current += 1;
+      downloadGeneration.current += 1;
+      messageGeneration.current += 1;
+      subscription.unsubscribe();
+      stopSession();
+    };
+  }, [conditionForm]);
+
+  const beginOperation = (kind: "list" | "output", conditions: WeeklyWeightConditions) => {
+    const operations = kind === "list" ? loadGeneration : downloadGeneration;
+    const operation = ++operations.current;
+    const input = inputGeneration.current;
+    const messageOwner = ++messageGeneration.current;
+    const session = browserSessionKey();
+    const captured = { ...conditions };
+    const current = () => {
+      const values = conditionForm.getValues();
+      return mounted.current && input === inputGeneration.current && operation === operations.current
+        && session === browserSessionKey() && captured.week === values.week && captured.status === values.status;
+    };
+    if (current()) {
+      setMessage("");
+      if (kind === "list") setLoading(false);
+      else setDownloading(false);
+    }
+    return { current, ownsMessage: () => current() && messageOwner === messageGeneration.current };
+  };
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -195,6 +255,8 @@ function WeeklyWeightOutputScreen() {
   }, [weekHistoryQuery.data]);
 
   const loadWeeklyOrders = async (conditions: WeeklyWeightConditions) => {
+    const owner = beginOperation("list", conditions);
+    if (!owner.current()) return;
     const targetDate = weekValueToMonday(conditions.week);
     if (!targetDate) throw new Error("週を指定してください。");
     const targetDates = Array.from({ length: 7 }, (_, index) => {
@@ -202,7 +264,6 @@ function WeeklyWeightOutputScreen() {
       item.setDate(item.getDate() + index);
       return isoDate(item);
     });
-    const generation = ++loadGeneration.current;
     setLoading(true);
     try {
       const responses = await Promise.all(
@@ -218,26 +279,28 @@ function WeeklyWeightOutputScreen() {
           if (order?.id) byId.set(order.id, order);
         });
       });
-      if (generation !== loadGeneration.current) return;
+      if (!owner.current()) return;
       setWeek(conditions.week);
       setStatus(conditions.status);
       setOrders(Array.from(byId.values()));
     } catch (error) {
-      if (generation === loadGeneration.current) {
+      if (owner.ownsMessage()) {
         setMessage("対象週の注文一覧を取得できませんでした。");
       }
       throw error;
     } finally {
-      setLoading(false);
+      if (owner.current()) setLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadWeeklyOrders({ week, status }).catch(() => undefined);
+    void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const downloadWeeklyWeight = async (conditions: WeeklyWeightConditions) => {
+    const owner = beginOperation("output", conditions);
+    if (!owner.current()) return;
     const targetDate = weekValueToMonday(conditions.week);
     if (!targetDate) {
       setMessage("週を指定してください。");
@@ -251,6 +314,7 @@ function WeeklyWeightOutputScreen() {
         responseType: "blob",
         timeout: 0,
       });
+      if (!owner.current()) return;
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
       const filename = extractFilename(contentDisposition) || `weekly_weight_${targetDate}.xlsx`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
@@ -262,12 +326,14 @@ function WeeklyWeightOutputScreen() {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      setMessage("週別重量表Excelをダウンロードしました。");
+      if (owner.ownsMessage()) setMessage("週別重量表Excelをダウンロードしました。");
     } catch (err: any) {
+      if (!owner.ownsMessage()) return;
       const detail = await extractErrorDetail(err);
+      if (!owner.ownsMessage()) return;
       setMessage(detail ? `週別重量表Excelの作成に失敗しました: ${detail}` : "週別重量表Excelの作成に失敗しました。");
     } finally {
-      setDownloading(false);
+      if (owner.current()) setDownloading(false);
     }
   };
 
