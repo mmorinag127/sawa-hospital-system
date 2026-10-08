@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FormTextField, SawaProvider } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
 import TopNav from "../components/TopNav";
-import { apiClient } from "../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
 import {
   fetchFacilityNameMap,
@@ -446,7 +446,6 @@ function DailyDeliveryNotesScreen() {
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const loadGeneration = useRef(0);
-  useEffect(() => () => { loadGeneration.current += 1; }, []);
   const [message, setMessage] = useState("");
   const [bagMessage, setBagMessage] = useState("");
   const [totalsMessage, setTotalsMessage] = useState("");
@@ -472,6 +471,55 @@ function DailyDeliveryNotesScreen() {
   const [overrideEditorBulkSaving, setOverrideEditorBulkSaving] = useState(false);
   const [overrideEditorSelectedFacilityId, setOverrideEditorSelectedFacilityId] = useState("");
   const [overrideEditorSelectedDietType, setOverrideEditorSelectedDietType] = useState("");
+  const mounted = useRef(true), contextGeneration = useRef(0), editorGeneration = useRef(0);
+  const operations = useRef<Record<string, number>>({});
+  const rowEdits = useRef<Record<string, number>>({}), bulkEdits = useRef(0);
+  const mainPending = useRef(false);
+  const writeFeedback = useRef(0);
+  const pendingLoadOwner = useRef<(() => boolean) | null>(null), pendingEditorOwner = useRef<(() => boolean) | null>(null);
+  const appliedConditions = useRef<DailyConditions>({ date, status });
+  const session = browserSessionKey();
+  const retire = () => {
+    ++contextGeneration.current; ++loadGeneration.current; ++writeFeedback.current;
+    mainPending.current = false;
+    pendingLoadOwner.current = null; pendingEditorOwner.current = null;
+    setLoading(false); setAuditAiLoading(false); setOverrideEditorLoading(false);
+    setOverrideEditorSavingKey(""); setOverrideEditorBulkSaving(false);
+    setMessage(""); setBagMessage(""); setTotalsMessage(""); setMealCountMessage("");
+    setAuditMessage(""); setOverrideEditorMessage(""); conditionForm.clearErrors("root");
+  };
+  const capture = (group: string, editor = false, rowKey?: string, bulk = false) => {
+    const generation = contextGeneration.current, editorVersion = editorGeneration.current;
+    const input = JSON.stringify(conditionForm.getValues());
+    const applied = JSON.stringify(appliedConditions.current);
+    const outputInput = JSON.stringify([rowEdits.current, bulkEdits.current]);
+    const draft = rowKey ? rowEdits.current[rowKey] ?? 0 : bulk ? bulkEdits.current : 0;
+    const operation = operations.current[group] = (operations.current[group] ?? 0) + 1;
+    return () => mounted.current && session === browserSessionKey() && hasActiveSessionAuthHeader()
+      && generation === contextGeneration.current && input === JSON.stringify(conditionForm.getValues())
+      && (group === "load" || applied === JSON.stringify(appliedConditions.current))
+      && (group !== "output" || outputInput === JSON.stringify([rowEdits.current, bulkEdits.current]))
+      && operation === operations.current[group] && (!editor || editorVersion === editorGeneration.current)
+      && (!rowKey || draft === (rowEdits.current[rowKey] ?? 0)) && (!bulk || draft === bulkEdits.current);
+  };
+  const releaseRetiredPending = () => {
+    if (pendingLoadOwner.current && !pendingLoadOwner.current()) { pendingLoadOwner.current = null; mainPending.current = false; setLoading(false); }
+    if (pendingEditorOwner.current && !pendingEditorOwner.current()) { pendingEditorOwner.current = null; setOverrideEditorLoading(false); }
+  };
+  const retireOutput = () => { operations.current.output = (operations.current.output ?? 0) + 1; setMessage(""); };
+  useEffect(() => {
+    mounted.current = true;
+    let input = JSON.stringify(conditionForm.getValues());
+    const subscription = conditionForm.watch(values => {
+      const next = JSON.stringify(values);
+      if (next !== input) { input = next; retire(); }
+    });
+    const unsubscribe = subscribeBrowserSession(retire);
+    return () => {
+      mounted.current = false; ++contextGeneration.current; ++loadGeneration.current; ++editorGeneration.current;
+      subscription.unsubscribe(); unsubscribe();
+    };
+  }, [conditionForm]);
 
   const facilityNamesQuery = useQuery({
     queryKey: ["daily-delivery-notes", "facilities"],
@@ -485,6 +533,7 @@ function DailyDeliveryNotesScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    const own = capture("facility-hints");
     const unresolved = orders
       .filter((order) => !order.facility && order.id)
       .slice(0, 50)
@@ -497,10 +546,12 @@ function DailyDeliveryNotesScreen() {
     const results: Record<string, FacilityHint> = {};
     const workers = Array.from({ length: 2 }, async () => {
       while (queue.length > 0) {
+        if (cancelled || !own()) return;
         const orderId = queue.shift();
         if (!orderId) continue;
         try {
           const candidates = await fetchOrderFacilityCandidates(orderId);
+          if (cancelled || !own()) return;
           const best = pickBestFacilityCandidate(candidates);
           if (best) results[orderId] = { ...best, order_id: orderId };
         } catch {
@@ -510,7 +561,7 @@ function DailyDeliveryNotesScreen() {
     });
 
     Promise.all(workers).then(() => {
-      if (cancelled) return;
+      if (cancelled || !own()) return;
       if (Object.keys(results).length === 0) return;
       setFacilityHints((prev) => ({ ...prev, ...results }));
     });
@@ -535,17 +586,48 @@ function DailyDeliveryNotesScreen() {
     return "未確定";
   };
 
-  const loadOrders = async (conditions: DailyConditions = { date, status }) => {
+  const loadOrders = async (conditions: DailyConditions = { date, status }, parentOwner?: () => boolean) => {
     if (!conditions.date) return;
+    // An internal refresh cannot supersede an explicit display request.
+    if (parentOwner && (!parentOwner() || mainPending.current)) return;
+    if (!parentOwner) retire();
+    operations.current.audit = (operations.current.audit ?? 0) + 1;
+    let auditOperation = operations.current.audit;
+    let outputOperation = operations.current.output;
+    const ownsAudit = () => auditOperation === operations.current.audit;
+    const ownsMessage = () => outputOperation === operations.current.output;
+    setAuditAiLoading(false); setAuditMessage("");
     const generation = ++loadGeneration.current;
+    const pageOwner = capture("load");
+    const own = () => generation === loadGeneration.current && pageOwner() && (!parentOwner || parentOwner());
+    pendingLoadOwner.current = own;
+    if (!parentOwner) mainPending.current = true;
     setLoading(true);
     try {
       const params: Record<string, string> = { date: conditions.date };
       if (conditions.status) params.status = conditions.status;
-      await Promise.all((["primary", "bags", "totals"] as const).map(async (section) => {
+      const responses = await Promise.all((["primary", "bags", "totals"] as const).map(async section => {
         try {
-          const contextRes = await apiClient.get("/orders/daily-output-context", { params: { ...params, section } });
-          if (generation !== loadGeneration.current) return;
+          const response = await apiClient.get("/orders/daily-output-context", { params: { ...params, section } });
+          if (response.data?.date !== conditions.date || response.data?.status !== (conditions.status || null)
+            || response.data?.facility !== null) throw new Error("集計の取得対象が一致しません。");
+          return { section, response, error: null as any };
+        } catch (error: any) { return { section, response: null, error }; }
+      }));
+      if (!own()) return;
+      const primary = responses.find(result => result.section === "primary")!;
+      if (primary.error || !sectionData<{ orders?: OrderSummary[] }>(primary.response?.data?.sections?.orders)) {
+        const error = primary.error ?? new Error(sectionErrorMessage(primary.response?.data?.sections?.orders, "注文一覧の取得に失敗しました。"));
+        const detail = error?.response?.data?.detail;
+        const text = detail ? `取得に失敗しました: ${detail}` : error instanceof Error ? error.message : "取得に失敗しました。";
+        if (ownsMessage()) setMessage(text);
+        setMealCountMessage(text);
+        throw error;
+      }
+      responses.forEach(({ section, response, error }) => {
+        try {
+          if (error) throw error;
+          const contextRes = response!;
           const sections = contextRes.data?.sections || {};
           if (section === "primary") {
             const ordersPayload = sectionData<{ orders?: OrderSummary[] }>(sections.orders);
@@ -553,18 +635,31 @@ function DailyDeliveryNotesScreen() {
               throw new Error(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
             }
             const items = Array.isArray(ordersPayload?.orders) ? ordersPayload.orders : [];
+            const appliedChanged = JSON.stringify(appliedConditions.current) !== JSON.stringify(conditions);
+            appliedConditions.current = { ...conditions };
+            releaseRetiredPending();
+            if (appliedChanged) {
+              auditOperation = operations.current.audit = (operations.current.audit ?? 0) + 1;
+              retireOutput();
+              outputOperation = operations.current.output;
+              setAuditAiLoading(false); setOverrideEditorSavingKey(""); setOverrideEditorBulkSaving(false);
+            }
             setDate(conditions.date);
             setStatus(conditions.status);
             setOrders(items);
+            if (ownsMessage()) setMessage("");
+            setMealCountMessage("");
             if (!items.length) {
               if (sections.orders?.status === "rejected") {
-                setMessage(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
+                if (ownsMessage()) setMessage(sectionErrorMessage(sections.orders, "注文一覧の取得に失敗しました。"));
               } else {
-                setMessage("該当する注文がありません。");
+                if (ownsMessage()) setMessage("該当する注文がありません。");
               }
             }
           }
           if (section === "bags") {
+            setBagMessage("");
+            if (ownsAudit()) setAuditMessage("");
             const bagPayload = sectionData<DailyBagSummaryResponse>(sections.daily_bags);
             if (bagPayload) {
               const payload = bagPayload || {};
@@ -579,18 +674,19 @@ function DailyDeliveryNotesScreen() {
             }
 
             const auditPayload = sectionData<DailyBagAuditResponse>(sections.daily_bags_audit);
-            if (auditPayload) {
+            if (ownsAudit() && auditPayload) {
               const payload = auditPayload || {};
               setDailyBagAudit(payload);
               if (!Number(payload?.rule_based?.finding_count || 0)) {
                 setAuditMessage("ルールベース監査で確認候補はありません。");
               }
-            } else {
+            } else if (ownsAudit()) {
               setDailyBagAudit({});
               setAuditMessage(sectionErrorMessage(sections.daily_bags_audit, "数量監査の取得に失敗しました。"));
             }
           }
           if (section === "totals") {
+            setTotalsMessage("");
             const totalsPayload = sectionData<{ rows?: TotalRow[] }>(sections.totals);
             if (totalsPayload) {
               const rows = Array.isArray(totalsPayload.rows) ? totalsPayload.rows : [];
@@ -617,27 +713,31 @@ function DailyDeliveryNotesScreen() {
             }
           }
         } catch (err: any) {
-          if (generation !== loadGeneration.current) return;
+          if (!own()) return;
           const detail = err?.response?.data?.detail;
           const error = detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。";
           if (section === "primary") {
-            setMessage(error);
+            if (ownsMessage()) setMessage(error);
             setMealCountMessage(error);
             throw err;
           } else if (section === "bags") {
+            setDailyBagSummary({});
             setBagMessage(error);
-            setAuditMessage(error);
+            if (ownsAudit()) { setDailyBagAudit({}); setAuditMessage(error); }
           } else {
+            setTotalsRows([]);
             setTotalsMessage(error);
           }
         }
-      }));
+      });
     } catch (err) {
-      if (generation === loadGeneration.current) {
+      if (own()) {
+        if (!parentOwner) conditionForm.setError("root", { message: err instanceof Error ? err.message : "集計の取得に失敗しました。" });
         throw err;
       }
     } finally {
-      if (generation === loadGeneration.current) {
+      if (own()) {
+        mainPending.current = false;
         setLoading(false);
       }
     }
@@ -645,12 +745,15 @@ function DailyDeliveryNotesScreen() {
 
   const runAuditAi = async () => {
     if (!date) return;
+    const own = capture("audit");
+    if (!own()) return;
     setAuditAiLoading(true);
     setAuditMessage("Gemini補助を実行中です...");
     try {
       const params: Record<string, string | boolean> = { date, use_ai: true };
       if (status) params.status = status;
       const res = await apiClient.get("/orders/daily-bags/audit", { params, timeout: 0 });
+      if (!own()) return;
       setDailyBagAudit(res.data || {});
       const aiStatus = String(res.data?.ai?.status || "");
       if (aiStatus === "completed") {
@@ -663,14 +766,18 @@ function DailyDeliveryNotesScreen() {
         setAuditMessage("Gemini補助は実行対象がありません。");
       }
     } catch (err: any) {
+      if (!own()) return;
       const detail = err?.response?.data?.detail;
       setAuditMessage(detail ? `Gemini補助に失敗しました: ${detail}` : "Gemini補助に失敗しました。");
     } finally {
-      setAuditAiLoading(false);
+      if (own()) setAuditAiLoading(false);
     }
   };
 
   const closeOverrideEditor = () => {
+    ++editorGeneration.current; ++writeFeedback.current;
+    retireOutput();
+    releaseRetiredPending();
     setOverrideEditor(null);
     setOverrideEditorLoading(false);
     setOverrideEditorMessage("");
@@ -682,12 +789,17 @@ function DailyDeliveryNotesScreen() {
     setOverrideEditorSelectedDietType("");
   };
 
-  const openOverrideEditor = async (menuGroup: DailyBagMenuGroup) => {
+  const openOverrideEditor = async (menuGroup: DailyBagMenuGroup, refresh?: { own: () => boolean; rowKey?: string; bulk?: boolean }) => {
     if (!date) return;
+    if (refresh && !refresh.own()) return;
+    if (!refresh) { closeOverrideEditor(); ++editorGeneration.current; }
+    const pageOwner = capture("editor-read", true);
+    const own = () => pageOwner() && (!refresh || refresh.own());
+    if (!own()) return;
+    pendingEditorOwner.current = own;
     setOverrideEditorLoading(true);
     setOverrideEditorMessage("");
-    setOverrideEditorDrafts({});
-    setOverrideEditorBulkSaving(false);
+    if (!refresh) { setOverrideEditorDrafts({}); setOverrideEditorBulkSaving(false); }
     try {
       const res = await apiClient.get("/orders/daily-output-overrides", {
         params: {
@@ -697,7 +809,12 @@ function DailyDeliveryNotesScreen() {
           menu_category: menuGroup.menu_category || "",
         },
       });
+      if (!own()) return;
       const payload: DailyOutputOverrideResponse = res.data || {};
+      if (payload.date !== date || typeof payload.daypart !== "string" || !payload.daypart.trim()
+        || typeof payload.menu_name !== "string" || !payload.menu_name.trim()
+        || (refresh && (payload.daypart !== overrideEditor?.daypart || payload.menu_name !== overrideEditor?.menu_name
+          || payload.menu_category !== overrideEditor?.menu_category))) throw new Error("編集対象の取得値が一致しません。");
       const rows = Array.isArray(payload.rows) ? payload.rows : [];
       const nextDrafts: Record<string, DailyOutputOverrideDraft> = {};
       rows.forEach((row) => {
@@ -715,34 +832,25 @@ function DailyDeliveryNotesScreen() {
         };
       });
       setOverrideEditor(payload);
-      setOverrideEditorDrafts(nextDrafts);
-      setOverrideEditorBulkDraft({
-        qty_per_serving:
-          rows[0]?.override?.qty_per_serving != null
-            ? String(rows[0].override?.qty_per_serving)
-            : rows[0]?.current_qty_per_serving != null
-              ? String(rows[0].current_qty_per_serving)
-            : "",
-        unit_type: normalizeOverrideUnitValue(rows[0]?.override?.unit_type || rows[0]?.current_unit_type || "g"),
-        note: "",
+      setOverrideEditorDrafts(previous => refresh ? { ...nextDrafts, ...previous,
+        ...(refresh.rowKey && nextDrafts[refresh.rowKey] ? { [refresh.rowKey]: nextDrafts[refresh.rowKey] } : {}) } : nextDrafts);
+      if (!refresh) setOverrideEditorBulkDraft({
+        qty_per_serving: rows[0]?.override?.qty_per_serving != null ? String(rows[0].override.qty_per_serving)
+          : rows[0]?.current_qty_per_serving != null ? String(rows[0].current_qty_per_serving) : "",
+        unit_type: normalizeOverrideUnitValue(rows[0]?.override?.unit_type || rows[0]?.current_unit_type || "g"), note: "",
       });
-      if (!overrideEditorSelectedFacilityId) {
-        setOverrideEditorSelectedFacilityId(String(rows[0]?.facility_id || "").trim());
-      }
-      if (!overrideEditorSelectedDietType) {
-        setOverrideEditorSelectedDietType(normalizeDietType(rows[0]?.diet_type));
-      }
       if (!rows.length) {
         setOverrideEditorMessage("編集対象の施設別行がありません。");
       }
+      return true;
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setOverrideEditor({ date, daypart: menuGroup.daypart || "", menu_name: menuGroup.menu_name || "", menu_category: menuGroup.menu_category || "", rows: [] });
+      if (!own()) return;
+      const detail = err?.response?.data?.detail || (err instanceof Error ? err.message : "");
+      if (!refresh) setOverrideEditor({ date, daypart: menuGroup.daypart || "", menu_name: menuGroup.menu_name || "", menu_category: menuGroup.menu_category || "", rows: [] });
       setOverrideEditorMessage(detail ? `設定一覧の取得に失敗しました: ${detail}` : "設定一覧の取得に失敗しました。");
-      setOverrideEditorSelectedFacilityId("");
-      setOverrideEditorSelectedDietType("");
+      if (!refresh) { setOverrideEditorSelectedFacilityId(""); setOverrideEditorSelectedDietType(""); }
     } finally {
-      setOverrideEditorLoading(false);
+      if (own()) setOverrideEditorLoading(false);
     }
   };
 
@@ -750,6 +858,10 @@ function DailyDeliveryNotesScreen() {
     rowKey: string,
     patch: Partial<DailyOutputOverrideDraft>,
   ) => {
+    rowEdits.current[rowKey] = (rowEdits.current[rowKey] ?? 0) + 1;
+    retireOutput();
+    ++writeFeedback.current; setOverrideEditorSavingKey(current => current === rowKey ? "" : current); setOverrideEditorMessage("");
+    releaseRetiredPending();
     setOverrideEditorDrafts((prev) => {
       const current = prev[rowKey] || {
         qty_per_serving: "",
@@ -769,6 +881,9 @@ function DailyDeliveryNotesScreen() {
   };
 
   const updateOverrideBulkDraft = (patch: Partial<DailyOutputOverrideBulkDraft>) => {
+    ++bulkEdits.current; ++writeFeedback.current; setOverrideEditorBulkSaving(false); setOverrideEditorMessage("");
+    retireOutput();
+    releaseRetiredPending();
     setOverrideEditorBulkDraft((prev) => ({
       ...prev,
       ...patch,
@@ -823,43 +938,25 @@ function DailyDeliveryNotesScreen() {
   );
 
   const selectedOverrideRow = useMemo(() => {
-    if (!selectedFacilityRows.length) return null;
-    return (
-      selectedFacilityRows.find((row) => normalizeDietType(row.diet_type) === overrideEditorSelectedDietType) ||
-      selectedFacilityRows[0]
-    );
+    if (!overrideEditorSelectedDietType) return null;
+    const matches = selectedFacilityRows.filter(row => String(row.diet_type || "").trim() === overrideEditorSelectedDietType);
+    return matches.length === 1 ? matches[0] : null;
   }, [overrideEditorSelectedDietType, selectedFacilityRows]);
-
-  useEffect(() => {
-    if (!overrideEditorRows.length) {
-      if (overrideEditorSelectedFacilityId) setOverrideEditorSelectedFacilityId("");
-      if (overrideEditorSelectedDietType) setOverrideEditorSelectedDietType("");
-      return;
-    }
-    const facilityIds = new Set(overrideEditorRows.map((row) => String(row.facility_id || "").trim()).filter(Boolean));
-    let nextFacilityId = overrideEditorSelectedFacilityId;
-    if (!nextFacilityId || !facilityIds.has(nextFacilityId)) {
-      nextFacilityId = String(overrideEditorRows[0]?.facility_id || "").trim();
-      if (nextFacilityId !== overrideEditorSelectedFacilityId) {
-        setOverrideEditorSelectedFacilityId(nextFacilityId);
-      }
-    }
-    if (!nextFacilityId) return;
-    const facilityRows = overrideEditorRows.filter((row) => String(row.facility_id || "").trim() === nextFacilityId);
-    if (!facilityRows.length) return;
-    const hasSelectedDiet = facilityRows.some(
-      (row) => normalizeDietType(row.diet_type) === overrideEditorSelectedDietType,
-    );
-    if (!hasSelectedDiet) {
-      const nextDietType = normalizeDietType(facilityRows[0]?.diet_type);
-      if (nextDietType !== overrideEditorSelectedDietType) {
-        setOverrideEditorSelectedDietType(nextDietType);
-      }
-    }
-  }, [overrideEditorRows, overrideEditorSelectedFacilityId, overrideEditorSelectedDietType]);
+  const selectOverrideTarget = (facility: string, diet: string) => {
+    ++editorGeneration.current; ++writeFeedback.current;
+    retireOutput();
+    releaseRetiredPending();
+    setOverrideEditorLoading(false); setOverrideEditorSavingKey(""); setOverrideEditorBulkSaving(false); setOverrideEditorMessage("");
+    setOverrideEditorSelectedFacilityId(facility); setOverrideEditorSelectedDietType(diet);
+  };
+  const ownsSelectedRow = (row: DailyOutputOverrideRow) => row === selectedOverrideRow && overrideEditorRows.includes(row)
+    && !!String(row.facility_id || "").trim() && !!String(row.diet_type || "").trim()
+    && String(row.diet_type).trim() !== "unknown";
 
   const saveOverrideRow = async (row: DailyOutputOverrideRow) => {
     if (!overrideEditor?.date) return;
+    if (overrideEditor.date !== date) { setOverrideEditorMessage("表示日と編集対象の日付が一致しません。編集対象を開き直してください。"); return; }
+    if (!ownsSelectedRow(row)) { setOverrideEditorMessage("施設・区分の編集対象を一意に選択してください。"); return; }
     const rowKey = buildDailyOutputOverrideRowKey(row);
     const draft = overrideEditorDrafts[rowKey];
     if (!draft) return;
@@ -869,6 +966,9 @@ function DailyDeliveryNotesScreen() {
       return;
     }
     const qtyPerServing = Number(draft.qty_per_serving);
+    const own = capture(`row:${rowKey}`, true, rowKey);
+    if (!own()) return;
+    const feedback = ++writeFeedback.current;
     setOverrideEditorSavingKey(rowKey);
     setOverrideEditorMessage("");
     try {
@@ -884,17 +984,20 @@ function DailyDeliveryNotesScreen() {
         note: draft.note,
         acknowledge_ambiguous: draft.acknowledge_ambiguous,
       });
-      await Promise.all([openOverrideEditor({
+      if (!own()) return;
+      retireOutput();
+      const [editorReloaded] = await Promise.all([openOverrideEditor({
         daypart: overrideEditor.daypart,
         menu_name: overrideEditor.menu_name,
         menu_category: overrideEditor.menu_category,
-      }), loadOrders()]);
-      setOverrideEditorMessage("施設別単位設定を保存しました。");
+      }, { own, rowKey }), loadOrders({ date, status }, own)]);
+      if (editorReloaded && own() && feedback === writeFeedback.current) setOverrideEditorMessage("施設別単位設定を保存しました。");
     } catch (err: any) {
+      if (!own() || feedback !== writeFeedback.current) return;
       const detail = err?.response?.data?.detail;
       if (detail?.code === "daily_output_override_ambiguous") {
-        setOverrideEditorMessage("現状が複数候補です。候補を確認し、理解したうえで保存に進んでください。");
         updateOverrideDraft(rowKey, { acknowledge_ambiguous: true });
+        setOverrideEditorMessage("現状が複数候補です。候補を確認し、理解したうえで保存に進んでください。");
       } else if (detail?.code === "daily_output_override_target_not_found") {
         setOverrideEditorMessage("対象の施設別行が見つかりません。日別一覧を再取得してからやり直してください。");
       } else if (typeof detail === "string" && detail) {
@@ -903,12 +1006,16 @@ function DailyDeliveryNotesScreen() {
         setOverrideEditorMessage("施設別単位設定の保存に失敗しました。");
       }
     } finally {
-      setOverrideEditorSavingKey("");
+      if (own()) setOverrideEditorSavingKey(current => current === rowKey ? "" : current);
     }
   };
 
   const saveBulkOverride = async () => {
     if (!overrideEditor?.date) return;
+    if (overrideEditor.date !== date) { setOverrideEditorMessage("表示日と編集対象の日付が一致しません。編集対象を開き直してください。"); return; }
+    const own = capture("bulk", true, undefined, true);
+    if (!own()) return;
+    const feedback = ++writeFeedback.current;
     const validationError = validateOverrideDraft(overrideEditorBulkDraft);
     if (validationError) {
       setOverrideEditorMessage(validationError);
@@ -926,16 +1033,19 @@ function DailyDeliveryNotesScreen() {
         unit_type: overrideEditorBulkDraft.unit_type,
         note: overrideEditorBulkDraft.note,
       });
-      await Promise.all([
+      if (!own()) return;
+      retireOutput();
+      const [editorReloaded] = await Promise.all([
         openOverrideEditor({
           daypart: overrideEditor.daypart,
           menu_name: overrideEditor.menu_name,
           menu_category: overrideEditor.menu_category,
-        }),
-        loadOrders(),
+        }, { own, bulk: true }),
+        loadOrders({ date, status }, own),
       ]);
-      setOverrideEditorMessage("全施設の単位設定を保存しました。");
+      if (editorReloaded && own() && feedback === writeFeedback.current) setOverrideEditorMessage("全施設の単位設定を保存しました。");
     } catch (err: any) {
+      if (!own() || feedback !== writeFeedback.current) return;
       const detail = err?.response?.data?.detail;
       if (detail?.code === "daily_output_override_bulk_requires_intervention") {
         setOverrideEditorMessage("曖昧な施設が含まれるため一括保存できません。施設を選んで個別に確定してください。");
@@ -945,37 +1055,48 @@ function DailyDeliveryNotesScreen() {
         setOverrideEditorMessage("全施設の単位設定保存に失敗しました。");
       }
     } finally {
-      setOverrideEditorBulkSaving(false);
+      if (own()) setOverrideEditorBulkSaving(false);
     }
   };
 
   const deleteOverrideRow = async (row: DailyOutputOverrideRow) => {
     const overrideId = row.override?.id;
     if (!overrideId || !overrideEditor) return;
+    if (overrideEditor.date !== date) { setOverrideEditorMessage("表示日と編集対象の日付が一致しません。編集対象を開き直してください。"); return; }
+    if (!ownsSelectedRow(row)) { setOverrideEditorMessage("施設・区分の編集対象を一意に選択してください。"); return; }
     const rowKey = buildDailyOutputOverrideRowKey(row);
+    const own = capture(`row:${rowKey}`, true, rowKey);
+    if (!own()) return;
+    const feedback = ++writeFeedback.current;
     setOverrideEditorSavingKey(rowKey);
     setOverrideEditorMessage("");
     try {
       await apiClient.delete(`/orders/daily-output-overrides/${overrideId}`);
-      await Promise.all([openOverrideEditor({
+      if (!own()) return;
+      retireOutput();
+      const [editorReloaded] = await Promise.all([openOverrideEditor({
         daypart: overrideEditor.daypart,
         menu_name: overrideEditor.menu_name,
         menu_category: overrideEditor.menu_category,
-      }), loadOrders()]);
-      setOverrideEditorMessage("施設別単位設定を解除しました。");
+      }, { own, rowKey }), loadOrders({ date, status }, own)]);
+      if (editorReloaded && own() && feedback === writeFeedback.current) setOverrideEditorMessage("施設別単位設定を解除しました。");
     } catch (err: any) {
+      if (!own() || feedback !== writeFeedback.current) return;
       const detail = err?.response?.data?.detail;
       setOverrideEditorMessage(detail ? `解除に失敗しました: ${detail}` : "解除に失敗しました。");
     } finally {
-      setOverrideEditorSavingKey("");
+      if (own()) setOverrideEditorSavingKey(current => current === rowKey ? "" : current);
     }
   };
 
   const openOutput = async (path: string, label: string) => {
+    const own = capture("output", true);
+    if (!own()) return;
     const timestamp = new Date().toLocaleString("ja-JP");
     setMessage(`${label}のダウンロードを開始します。 (${timestamp})`);
     try {
       const res = await apiClient.get(path, { responseType: "blob", timeout: 0 });
+      if (!own()) return;
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
       const filename = extractFilename(contentDisposition) || "output";
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
@@ -989,27 +1110,60 @@ function DailyDeliveryNotesScreen() {
       URL.revokeObjectURL(url);
     } catch (err: any) {
       const detail = await extractErrorDetail(err);
+      if (!own()) return;
       setMessage(detail ? `ダウンロードに失敗しました: ${detail}` : "ダウンロードに失敗しました。");
     }
   };
 
+  const capturePopup = (own: () => boolean) => {
+    const win = window.open("", "_blank");
+    if (!win) return null;
+    const original = win.document;
+    let retired = false;
+    const retirePopup = () => { retired = true; if (own()) setMessage(""); };
+    win.addEventListener("pagehide", retirePopup);
+    win.addEventListener("beforeunload", retirePopup);
+    win.addEventListener("hashchange", retirePopup);
+    win.addEventListener("popstate", retirePopup);
+    const current = () => {
+      try { return own() && !retired && !win.closed && win.document === original && win.location.href === "about:blank"; }
+      catch { return false; }
+    };
+    return {
+      current,
+      write: (html: string) => {
+        try {
+          if (!current()) return false;
+          original.open(); original.write(html); original.close();
+          return true;
+        } catch { return false; }
+      },
+      release: () => {
+        try {
+          win.removeEventListener("pagehide", retirePopup); win.removeEventListener("beforeunload", retirePopup);
+          win.removeEventListener("hashchange", retirePopup); win.removeEventListener("popstate", retirePopup);
+        } catch { /* The popup may now be cross-origin. */ }
+      },
+    };
+  };
+
   const openHtmlOutput = async (path: string, label: string) => {
+    const own = capture("output", true);
+    if (!own()) return;
+    const popup = capturePopup(own);
+    if (!popup) { setMessage("ブラウザで新しいタブを許可してください。"); return; }
     const timestamp = new Date().toLocaleString("ja-JP");
     setMessage(`${label}を開きます。 (${timestamp})`);
     try {
       const res = await apiClient.get(path, { responseType: "text", timeout: 0 });
-      const win = window.open("", "_blank");
-      if (!win) {
-        setMessage("ブラウザで新しいタブを許可してください。");
-        return;
-      }
-      win.document.open();
-      win.document.write(String(res.data || ""));
-      win.document.close();
+      if (!popup.write(String(res.data || ""))) return;
       setMessage(`${label}を別タブで開きました。`);
     } catch (err: any) {
       const detail = await extractErrorDetail(err);
+      if (!popup.current()) return;
       setMessage(detail ? `${label}を開けませんでした: ${detail}` : `${label}を開けませんでした。`);
+    } finally {
+      popup.release();
     }
   };
 
@@ -1018,6 +1172,10 @@ function DailyDeliveryNotesScreen() {
       setMessage("日付を指定してください。");
       return;
     }
+    const own = capture("output", true);
+    if (!own()) return;
+    const popup = capturePopup(own);
+    if (!popup) { setMessage("ブラウザで新しいタブを許可してください。"); return; }
     setMessage("当日納品書HTMLを作成中です...");
     try {
       const res = await apiClient.get("/outputs/daily-delivery-notes/html", {
@@ -1025,18 +1183,14 @@ function DailyDeliveryNotesScreen() {
         responseType: "text",
         timeout: 0,
       });
-      const win = window.open("", "_blank");
-      if (!win) {
-        setMessage("ブラウザで新しいタブを許可してください。");
-        return;
-      }
-      win.document.open();
-      win.document.write(String(res.data || ""));
-      win.document.close();
+      if (!popup.write(String(res.data || ""))) return;
       setMessage("当日納品書HTMLを別タブで開きました。");
     } catch (err: any) {
       const detail = await extractErrorDetail(err);
+      if (!popup.current()) return;
       setMessage(detail ? `当日納品書HTMLを開けませんでした: ${detail}` : "当日納品書HTMLを開けませんでした。");
+    } finally {
+      popup.release();
     }
   };
 
@@ -1045,6 +1199,8 @@ function DailyDeliveryNotesScreen() {
       setMessage("日付を指定してください。");
       return;
     }
+    const own = capture("output", true);
+    if (!own()) return;
     const label = bundleType === "labels_csv" ? "当日ラベルCSV" : "当日ラベルExcel";
     setMessage(`${label}を作成中です...`);
     try {
@@ -1053,6 +1209,7 @@ function DailyDeliveryNotesScreen() {
         responseType: "blob",
         timeout: 0,
       });
+      if (!own()) return;
       const contentDisposition = headerValueToString(
         res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"],
       );
@@ -1071,6 +1228,7 @@ function DailyDeliveryNotesScreen() {
       setMessage(`${label}をダウンロードしました。成功 ${successOrders}件 / 失敗 ${errorOrders}件`);
     } catch (err: any) {
       const detail = await extractErrorDetail(err);
+      if (!own()) return;
       setMessage(detail ? `一括ダウンロードに失敗しました: ${detail}` : "一括ダウンロードに失敗しました。");
     }
   };
@@ -1185,13 +1343,7 @@ function DailyDeliveryNotesScreen() {
             spacing={2}
             onSubmit={conditionForm.handleSubmit(async (values) => {
               conditionForm.clearErrors("root");
-              try {
-                await loadOrders(values);
-              } catch (error) {
-                conditionForm.setError("root", {
-                  message: error instanceof Error ? error.message : "集計の取得に失敗しました。",
-                });
-              }
+              try { await loadOrders(values); } catch { /* The owned load sets the root error. */ }
             })}
           >
             <FormTextField<DailyConditions> name="date" label="日付" type="date" rules={{ required: "日付を指定してください。" }} />
@@ -1708,9 +1860,10 @@ function DailyDeliveryNotesScreen() {
                       <NativeSelect
                         className="input delivery-ordinary-control"
                         value={overrideEditorSelectedFacilityId}
-                        onChange={(event) => setOverrideEditorSelectedFacilityId(event.target.value)}
+                        onChange={(event) => selectOverrideTarget(event.target.value, "")}
                         disableUnderline
                       >
+                        <option value="">施設を選択してください</option>
                         {overrideFacilityOptions.map((option) => (
                           <option key={option.facility_id} value={option.facility_id}>
                             {option.facility_label}
@@ -1719,15 +1872,16 @@ function DailyDeliveryNotesScreen() {
                         ))}
                       </NativeSelect>
                     </label>
-                    {selectedFacilityRows.length > 1 ? (
+                    {selectedFacilityRows.length > 0 ? (
                       <label className="field">
                         <span className="field-label">区分を選ぶ</span>
                         <NativeSelect
                           className="input delivery-ordinary-control"
                           value={overrideEditorSelectedDietType}
-                          onChange={(event) => setOverrideEditorSelectedDietType(event.target.value)}
+                          onChange={(event) => selectOverrideTarget(overrideEditorSelectedFacilityId, event.target.value)}
                           disableUnderline
                         >
+                          <option value="">区分を選択してください</option>
                           {selectedFacilityRows.map((row) => (
                             <option key={buildDailyOutputOverrideRowKey(row)} value={normalizeDietType(row.diet_type)}>
                               {formatDietType(row.diet_type)}
