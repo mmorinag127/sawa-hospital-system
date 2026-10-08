@@ -77,7 +77,7 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
         session.add(MonthlyMenu(id=month, month_start=menu_date.replace(day=1)))
         session.add(MonthlyMenuEntry(id="authored-physical-row", monthly_menu_id=month,
             menu_date=menu_date, daypart=daypart, name="Menu A", slot_index=0,
-            facility_override=facility_id))
+            facility_override=facility_id, diet_type="regular"))
     with fitz.open() as pdf:
         pdf.new_page()
         data = pdf.tobytes()
