@@ -32,9 +32,11 @@ async function mount(api) {
     esModuleInterop: true,
   } }).outputText;
   const module = { exports: {} };
-  let sharedUi;
+  let sharedUi, sharedForm, sharedMaterial;
   function load(name) {
     if (name === '@sawa/ui') return sharedUi;
+    if (name === 'react-hook-form') return sharedForm;
+    if (name === '@mui/material') return sharedMaterial;
     if (name === 'next/link') return { __esModule: true, default: ({ children, ...props }) => React.createElement('a', props, children) };
     if (name === '../components/TopNav') return { __esModule: true, default: () => null };
     if (name === '../services/apiClient') return { apiClient: api };
@@ -43,6 +45,8 @@ async function mount(api) {
   }
   try {
     sharedUi = await import('@sawa/ui');
+    sharedForm = await import('react-hook-form');
+    sharedMaterial = await import('@mui/material');
     vm.compileFunction(code, ['require', 'module', 'exports'], { filename })(load, module, module.exports);
     await act(async () => root.render(React.createElement(module.exports.default)));
   } catch (error) {
