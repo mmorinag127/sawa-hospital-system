@@ -312,3 +312,140 @@ def test_selected_real_artifacts_stop_after_owned_pdf_document_retirement(owned_
         assert session.get(OrderWorkflowState, ORDER).evidence_run_id == evidence["id"]
         assert session.get(OrderOcrEvidenceRun, evidence["id"]).payload_json == evidence["payload_json"]
         assert session.execute(select(OrderSheetDraft)).scalars().all() == []
+
+
+def _queue_and_claim_owned_workflow_attempt(f, *, force=False):
+    from src.services import workflow_ocr_delivery_service as delivery
+
+    with db.session_scope() as session:
+        order = session.get(Order, ORDER)
+        input_reference, selected = order_service._resolve_order_document_selection(
+            session, order, f.receipt["document_id"],
+        )
+        revision = session.get(OrderWorkflowState, ORDER).revision
+    assert input_reference == str(f.pdf)
+    assert selected["selected_version_input"]["document_id"] == f.receipt["document_id"]
+    queued, error = workflow.mark_ocr_run_queued(
+        ORDER, JOB, input_reference=input_reference, request_mode="ocr_rerun",
+        job_metrics={"selected_version_input": selected["selected_version_input"]},
+        delivery_selected_document_id=f.receipt["document_id"],
+        expected_revision=revision, force=force,
+    )
+    assert error is None, (error, queued)
+    assert queued["workflow"]["state"] == "ocr_running"
+    claim = delivery.claim_delivery(
+        queued["delivery"]["id"], queued["delivery"]["generation"],
+        lease_expires_at=datetime.utcnow() + timedelta(minutes=5),
+    )
+    assert not claim.get("duplicate"), claim
+    assert claim["order_id"] == ORDER
+    assert claim["job_id"] == JOB
+    assert claim["workflow_revision"] == queued["workflow"]["revision"]
+    assert claim["selected_pdf_receipt"] == f.receipt
+    with db.session_scope() as session:
+        job = session.get(OcrJob, JOB)
+        assert job.status == "running"
+        assert job.metrics["workflow_attempt_id"] == claim["workflow_attempt_id"]
+        assert job.metrics["workflow_completion_revision"] == claim["workflow_revision"]
+        assert job.metrics["selected_version_input"] == selected["selected_version_input"]
+        assert job.metrics["selected_pdf_receipt"] == f.receipt
+        assert job.metrics.get("rerun_terminal_receipt") is None
+    return claim
+
+
+def _owned_workflow_database_snapshot():
+    # Include deliveries, cache, drafts, evidence and source/version rows, not
+    # just the reusable job whose attempt ID changed.
+    with db.session_scope() as session:
+        return {
+            table.name: deepcopy([
+                dict(row) for row in session.execute(
+                    select(table).order_by(*table.primary_key.columns),
+                ).mappings()
+            ])
+            for table in db.Base.metadata.sorted_tables
+        }
+
+
+def _persist_owned_workflow_failure(claim):
+    from src.services import workflow_ocr_delivery_service as delivery
+
+    with delivery.claim_context(claim), order_service.workflow_ocr_write_context(
+        claim["workflow_attempt_id"], claim["workflow_revision"], JOB, ORDER,
+    ):
+        return order_service._persist_ocr_rerun_completion(
+            ORDER, JOB, own_payload=None, error="quad_estimation_failed",
+        )
+
+
+def _assert_owned_workflow_failure_receipt(claim, result, error):
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+
+    assert error == "quad_estimation_failed"
+    returned = result["terminal_receipt"]
+    assert returned["order_id"] == ORDER
+    assert returned["job_id"] == JOB
+    assert returned["workflow_attempt_id"] == claim["workflow_attempt_id"]
+    assert returned["workflow_revision"] == claim["workflow_revision"]
+    assert returned["status"] == "failed"
+    assert returned["error"] == error
+    assert returned["execution_id"] is None
+    assert returned["evidence_run_id"] is None
+    with db.session_scope() as session:
+        state = session.get(OrderWorkflowState, ORDER)
+        job = session.get(OcrJob, JOB)
+        delivery = session.get(WorkflowOcrDelivery, claim["delivery_id"])
+        assert state.state == "ocr_failed"
+        assert state.primary_action == "run_ocr"
+        assert state.blockers_json == [error]
+        assert state.revision == claim["workflow_revision"] + 1
+        assert state.evidence_run_id is None
+        assert state.draft_id is None
+        assert job.status == "failed"
+        assert job.error_message == error
+        assert job.metrics["workflow_attempt_id"] == claim["workflow_attempt_id"]
+        assert job.metrics["workflow_result_revision"] == state.revision
+        persisted = job.metrics["rerun_terminal_receipt"]
+        assert persisted == delivery.result_receipt
+        assert {key: persisted[key] for key in returned} == returned
+        assert persisted["workflow_delivery_owner"] == {
+            key: claim[key] for key in ("delivery_id", "generation", "claim_token")
+        }
+        assert session.execute(select(OrderOcrEvidenceRun)).scalars().all() == []
+        assert session.execute(select(OrderSheetDraft)).scalars().all() == []
+
+
+def test_old_failed_workflow_attempt_cannot_overwrite_force_queued_successor(owned_producer):
+    """Local failure handoff proof only; no native OCR result is asserted."""
+    f = owned_producer
+    pdf_before = f.pdf.read_bytes()
+    expected_before = deepcopy(f.expected)
+    claim_a = _queue_and_claim_owned_workflow_attempt(f)
+    claim_b = _queue_and_claim_owned_workflow_attempt(f, force=True)
+    assert claim_a["job_id"] == claim_b["job_id"]
+    assert claim_a["workflow_attempt_id"] != claim_b["workflow_attempt_id"]
+    assert claim_a["delivery_id"] != claim_b["delivery_id"]
+    assert claim_b["workflow_revision"] > claim_a["workflow_revision"]
+    before = _owned_workflow_database_snapshot()
+    with pytest.raises(ValueError, match="^reparse_attempt_superseded$"):
+        _persist_owned_workflow_failure(claim_a)
+    assert _owned_workflow_database_snapshot() == before
+
+    result, error = _persist_owned_workflow_failure(claim_b)
+    _assert_owned_workflow_failure_receipt(claim_b, result, error)
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+    with db.session_scope() as session:
+        assert session.get(WorkflowOcrDelivery, claim_a["delivery_id"]).result_receipt is None
+    assert f.pdf.read_bytes() == pdf_before
+    assert f.expected == expected_before
+
+
+def test_completed_current_workflow_failure_cannot_be_replayed(owned_producer):
+    """Replay the real completed claim, without rewriting its CAS revision."""
+    claim = _queue_and_claim_owned_workflow_attempt(owned_producer)
+    result, error = _persist_owned_workflow_failure(claim)
+    _assert_owned_workflow_failure_receipt(claim, result, error)
+    before = _owned_workflow_database_snapshot()
+    with pytest.raises(ValueError, match="^reparse_attempt_superseded$"):
+        _persist_owned_workflow_failure(claim)
+    assert _owned_workflow_database_snapshot() == before
