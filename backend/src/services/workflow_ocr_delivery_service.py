@@ -29,6 +29,7 @@ REQUEST_KEYS = {
     "reparse_requested_provider", "reparse_ocr_model", "reparse_llm_assist",
 }
 _claim_context = ContextVar("workflow_delivery_claim", default=None)
+_terminal_attempt_context = ContextVar("workflow_delivery_terminal_attempt", default=None)
 
 
 def _now():
@@ -284,10 +285,19 @@ def claim_delivery(delivery_id, generation, *, lease_expires_at):
 @contextmanager
 def claim_context(claim):
     token = _claim_context.set(claim)
+    terminal_token = _terminal_attempt_context.set({"job_id": claim["job_id"], "started": False})
     try:
         yield
     finally:
+        _terminal_attempt_context.reset(terminal_token)
         _claim_context.reset(token)
+
+
+def callback_failure_completion_allowed(job_id):
+    claim = _claim_context.get()
+    marker = _terminal_attempt_context.get()
+    return bool(claim is not None and claim["job_id"] == job_id
+        and marker is not None and marker["job_id"] == job_id and not marker["started"])
 
 
 def lock_claim_write(session, *, job_id, order_id, attempt, revision):
@@ -478,6 +488,10 @@ def bind_terminal_result_in_session(session, job, claim):
 
 
 def track_terminal_job(session, job_id):
+    marker = _terminal_attempt_context.get()
+    if marker is not None and marker["job_id"] == job_id:
+        # Mutable state survives rollback and is shared with copy_context workers.
+        marker["started"] = True
     transaction = session.get_nested_transaction() or session.get_transaction()
     if transaction is None:
         raise ValueError("workflow_ocr_delivery_terminal_transaction_missing")

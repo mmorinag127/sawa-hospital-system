@@ -80,7 +80,9 @@ def _lease_expiry():
 
 
 def _execute_claim(claim):
-    from src.api.orders import _run_ocr_rerun_background, _run_reparse_background
+    from src.api.orders import (
+        _complete_workflow_ocr_run, _run_ocr_rerun_background, _run_reparse_background,
+    )
     from src.services import order_service, ocr_job_service
     params = claim["request_identity"]["request_parameters"]
     common = {
@@ -97,15 +99,30 @@ def _execute_claim(claim):
             raise ValueError("workflow_ocr_delivery_pending_reconciliation_not_complete")
         return {"reconciled": True}
     if claim["request_mode"] == "ocr_rerun":
-        return _run_ocr_rerun_background(**common)
-    if claim["request_mode"] in {"ocr_reparse", "llm_reparse"}:
+        callback = _run_ocr_rerun_background
+    elif claim["request_mode"] in {"ocr_reparse", "llm_reparse"}:
         if type(params["reparse_llm_assist"]) is not bool:
             raise ValueError("workflow_ocr_delivery_llm_assist_required")
-        return _run_reparse_background(
+        callback = _run_reparse_background
+        common.update(
             ocr_prompt=params["reparse_ocr_prompt"], prompt_preset=params["reparse_prompt_preset"],
             ocr_provider=params["reparse_requested_provider"], ocr_model=params["reparse_ocr_model"],
-            llm_assist=params["reparse_llm_assist"], **common)
-    raise ValueError("workflow_ocr_delivery_request_mode_unknown")
+            llm_assist=params["reparse_llm_assist"])
+    else:
+        raise ValueError("workflow_ocr_delivery_request_mode_unknown")
+    try:
+        return callback(**common)
+    except Exception as exc:  # noqa: BLE001
+        if not delivery.callback_failure_completion_allowed(claim["job_id"]):
+            raise
+        receipt, completion_error = _complete_workflow_ocr_run(
+            claim["order_id"], claim["job_id"], error=f"{type(exc).__name__}: {exc}",
+            expected_revision=claim["workflow_revision"],
+            workflow_attempt_id=claim["workflow_attempt_id"],
+        )
+        if receipt is None or receipt.get("status") != "failed":
+            raise ValueError(completion_error or "ocr_rerun_terminal_persist_refused") from exc
+        return {"terminal_receipt": receipt}
 
 
 @router.post("/worker/workflow-ocr-deliveries/{delivery_id}/{generation}")

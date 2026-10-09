@@ -650,23 +650,6 @@ def _enqueue_order_reparse_job(
     return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow": queued_workflow}
 
 
-def _complete_background_ocr_failure(
-    order_id: str,
-    job_id: str | None,
-    exc: Exception,
-    *,
-    expected_revision: int | None,
-    workflow_attempt_id: str | None,
-) -> dict:
-    receipt, completion_error = _complete_workflow_ocr_run(
-        order_id, job_id, error=f"{type(exc).__name__}: {exc}", expected_revision=expected_revision,
-        workflow_attempt_id=workflow_attempt_id,
-    )
-    if receipt is None or receipt.get("status") != "failed":
-        raise ValueError(completion_error or "ocr_rerun_terminal_persist_refused") from exc
-    return {"terminal_receipt": receipt}
-
-
 def _run_reparse_background(
     order_id: str,
     ocr_prompt: str | None,
@@ -679,19 +662,13 @@ def _run_reparse_background(
     workflow_attempt_id: str | None = None,
     ocr_job_id: str | None = None,
 ) -> dict:
-    try:
-        result, error = order_service.reparse_order(
-            order_id, ocr_prompt=ocr_prompt, prompt_preset=prompt_preset,
-            ocr_provider=ocr_provider, ocr_model=ocr_model, llm_assist=llm_assist,
-            selected_document_id=selected_document_id,
-            workflow_attempt_id=workflow_attempt_id,
-            expected_workflow_revision=expected_revision, ocr_job_id=ocr_job_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return _complete_background_ocr_failure(
-            order_id, ocr_job_id, exc, expected_revision=expected_revision,
-            workflow_attempt_id=workflow_attempt_id,
-        )
+    result, error = order_service.reparse_order(
+        order_id, ocr_prompt=ocr_prompt, prompt_preset=prompt_preset,
+        ocr_provider=ocr_provider, ocr_model=ocr_model, llm_assist=llm_assist,
+        selected_document_id=selected_document_id,
+        workflow_attempt_id=workflow_attempt_id,
+        expected_workflow_revision=expected_revision, ocr_job_id=ocr_job_id,
+    )
     if error is None and order_service.is_own_pending_ocr_result(
         result, order_id=order_id, job_id=ocr_job_id,
         workflow_attempt_id=workflow_attempt_id, workflow_revision=expected_revision,
@@ -760,11 +737,6 @@ def _run_ocr_rerun_background(
         if receipt is None:
             raise ValueError(completion_error or "ocr_rerun_terminal_persist_refused") from exc
         return {"terminal_receipt": receipt}
-    except Exception as exc:  # noqa: BLE001
-        return _complete_background_ocr_failure(
-            order_id, ocr_job_id, exc, expected_revision=expected_revision,
-            workflow_attempt_id=workflow_attempt_id,
-        )
     if error is None and order_service.is_own_pending_ocr_result(
         evidence, order_id=order_id, job_id=ocr_job_id,
         workflow_attempt_id=workflow_attempt_id, workflow_revision=expected_revision,
