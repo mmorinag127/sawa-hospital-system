@@ -72,8 +72,8 @@ def test_singleton_saved_dates_text_bounds_and_all_geometry_agree(
                 assert text == f"{day.month}/{day.day}\n({'月火水木金土日'[day.weekday()]})"
                 font = renderer._load_font(round(float(cell.font.sz or 11) * 144 / 72), bold=bool(cell.font.bold))
                 width, height = renderer._text_bbox(draw, text, font)
-                left, right = geometry["x_positions"][1:3]
-                top, bottom = geometry["y_positions"][row:row + 2]
+                left, right = geometry["x_positions"][1], geometry["x_positions"][2]
+                top, bottom = geometry["y_positions"][row], geometry["y_positions"][row + 1]
                 text_x = left + max(4, ((right - left) - width) // 2)
                 text_y = top + max(3, ((bottom - top) - height) // 2)
                 bbox = draw.multiline_textbbox((text_x, text_y), text, font=font, spacing=2)
