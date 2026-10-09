@@ -484,3 +484,83 @@ test('AI current transport failure retains original three retry limit and readab
     assert.ok(f.probe.current.error); assert.equal(f.probe.current.workflowRevisionRef.current.revision, 8);
   } finally { clock.restore(); await f.h.close(); }
 });
+
+for (const boundary of ['route', 'auth', 'input', 'selected', 'operation'])
+for (const outcome of ['success', 'error']) test(`AI initial POST late ${outcome} after ${boundary} cannot adopt or start polling`, async () => {
+  const f = await setup(), clock = pollClock(f.h), pending = deferred(); let operation;
+  const response = { data: { workflow: { ...f.workflow(), revision: 8 }, job: {
+    job_id: JOB, order_id: ORDER, status: 'running', workflow_completion_revision: 8,
+  } } };
+  try {
+    f.t.on('post', `${BASE}/sheet/auto-edit`, () => pending.promise);
+    operation = await start(f.h, () => f.probe.current.proposeSheetAutoEdit());
+    const requests = calls(f, 'post', `${BASE}/sheet/auto-edit`);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].config.headers['If-Match'], '"7"');
+    assert.deepEqual(clone(requests[0].body.sheet.rows), clone(f.state.saved.rows));
+    assert.equal(clock.queue.size, 0, 'POST still pending, polling has not begun');
+    await retire(f, boundary);
+    const before = snapshot(f), beforeJob = f.probe.current.sheetAutoEditJobInputRef.current;
+    assert.equal(beforeJob, null, 'no job was adopted before initial POST completion');
+    await settleOld(f, pending, operation, outcome, response);
+    unchanged(f, before);
+    assert.equal(f.probe.current.sheetAutoEditJobInputRef.current, beforeJob);
+    assert.equal(clock.queue.size, 0, 'retired POST cannot schedule a poll');
+    assert.equal(calls(f, 'get', `${BASE}/sheet/auto-edit/${JOB}`).length, 0);
+    if (boundary === 'input') assert.equal(f.probe.current.pendingSheetCellEditsRef.current.get('0:4').value, '19');
+  } finally { pending.resolve(response); if (operation) await operation.promise; clock.restore(); await f.h.close(); }
+});
+
+for (const stage of ['refresh', 'load']) test(`facility save ${stage} failure is visible and cannot publish successful completion`, async () => {
+  const f = await setup(), failure = `synthetic follow-up ${stage} failure`;
+  const path = stage === 'refresh' ? BASE : '/facilities/facility-A';
+  const raw = f.probe.current.sheetPayload, beforeRows = clone(raw.rows);
+  try {
+    const priorReads = calls(f, 'get', path).length;
+    f.t.on('get', path, () => Promise.reject(new Error(failure)));
+    await f.h.settle(() => f.probe.current.saveFacilityTemplateColumns());
+    const requests = calls(f, 'put', `${BASE}/facility-template-columns`);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].config.headers['If-Match'], '"7"');
+    assert.equal(f.probe.current.workflowRevisionRef.current.revision, 8, 'own command adopted before follow-up failure');
+    assert.ok(calls(f, 'get', path).length > priorReads, 'failure is in the actual follow-up read');
+    assert.equal(f.probe.current.facilityTemplateSaving, false);
+    assert.ok(!f.probe.current.facilityTemplateMessage.includes('施設区分列を保存しました'));
+    assert.ok(!f.h.document.body.textContent.includes('施設区分列を保存しました'));
+    assert.ok(f.h.document.body.textContent.includes(failure), 'read failure remains visible in the actual UI');
+    assert.deepEqual(clone(raw.rows), beforeRows, 'discard does not mutate original operator rows');
+  } finally { await f.h.close(); }
+});
+
+for (const stage of ['refresh', 'load'])
+for (const boundary of ['route', 'auth'])
+for (const outcome of ['success', 'error']) test(`facility save ${stage} late ${outcome} after ${boundary} cannot publish completion`, async () => {
+  const f = await setup(), pending = deferred(); let operation;
+  const path = stage === 'refresh' ? BASE : '/facilities/facility-A';
+  try {
+    const priorReads = calls(f, 'get', path).length;
+    f.t.on('get', path, () => pending.promise);
+    operation = await start(f.h, () => f.probe.current.saveFacilityTemplateColumns());
+    await f.h.waitFor(() => calls(f, 'get', path).length > priorReads, 'own save reached pending follow-up read');
+    const requests = calls(f, 'put', `${BASE}/facility-template-columns`);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].config.headers['If-Match'], '"7"');
+    assert.equal(f.probe.current.workflowRevisionRef.current.revision, 8);
+    assert.equal(f.probe.current.sheetPayload, null, 'normal own save intentionally discarded sheet');
+    assert.ok(!f.probe.current.facilityTemplateMessage.includes('施設区分列を保存しました'));
+    const response = stage === 'refresh' ? { data: f.workflow() }
+      : { data: { resolved_config: clone(resolvedConfig) } };
+    await retire(f, boundary);
+    const before = snapshot(f), beforeMessage = f.probe.current.facilityTemplateMessage;
+    const beforeColumns = f.probe.current.facilityTemplateColumnDraft;
+    const templateReads = calls(f, 'get', '/facilities/facility-A').length;
+    await settleOld(f, pending, operation, outcome, response);
+    unchanged(f, before);
+    assert.equal(f.probe.current.facilityTemplateMessage, beforeMessage);
+    assert.equal(f.probe.current.facilityTemplateColumnDraft, beforeColumns);
+    assert.ok(!f.h.document.body.textContent.includes('施設区分列を保存しました'));
+    assert.equal(calls(f, 'get', '/facilities/facility-A').length, templateReads,
+      'retired follow-up cannot start another template read');
+  } finally { pending.resolve({ data: stage === 'refresh' ? f.workflow() : { resolved_config: clone(resolvedConfig) } });
+    if (operation) await operation.promise; await f.h.close(); }
+});
