@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 import urllib.request
@@ -19,29 +18,26 @@ sys.path.insert(0, str(BACKEND_ROOT))
 sys.path.insert(0, str(RUNTIME_DIR))
 
 import compare_kasuga_digit_preprocess_methods as cmp  # noqa: E402
-from src.services import order_form_service  # noqa: E402
-from src.services.hakodate_fixed_quad_registration_service import (  # noqa: E402
-    build_fixed_quad_template_registration,
-    render_pdf_page_to_bgr,
-)
 from src.services import hakodate_ocr_evidence_service  # noqa: E402
+from src.models.order import Order  # noqa: E402
+from src.db import session_scope  # noqa: E402
 from src.services.order_service import (  # noqa: E402
-    _estimate_hakodate_template_bbox_from_rendered_image,
-    _week_sheet_name_from_week_value,
+    _build_live_hakodate_manifest_item,
+    geometry_source_digest,
 )
-from src.services.storage_service import load_bytes_from_uri  # noqa: E402
-from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf  # noqa: E402
+from src.services.order_workflow_v2_service import _stable_json_hash  # noqa: E402
+from src.services.storage_service import verify_selected_pdf_source  # noqa: E402
+from src.services.workflow_attempt_guard_service import (  # noqa: E402
+    _order_execution_input,
+    capture_selected_pdf_receipt,
+    snapshots_equal,
+)
 from src.hakodate_best_method_runtime.render_best_method_overlay_all_facilities import (  # noqa: E402
     build_best_method_for_manifest_item,
 )
 
 
 DEFAULT_OUTPUT_DIR = WORKSPACE_ROOT / "tmp" / "hakodate_all_facilities_validation_20260501"
-DEFAULT_DRAFT_CACHE_DIR = RUNTIME_DIR / "best_method_overlay_all_facilities" / "draft_sheets"
-TEMPLATE_SNAPSHOT_REL = (
-    "tmp/outer_quad_eval_correct_20260426/"
-    "preprocess_v10_template_snap_real_orders_20260425_0430/templates"
-)
 
 
 def _json_get(url: str, auth_header: str, *, timeout: int = 120, retries: int = 4) -> dict[str, Any]:
@@ -68,41 +64,54 @@ def _load_manifest_items(manifest_path: Path) -> list[tuple[int, dict[str, Any]]
     return [(index, item) for index, item in enumerate(items, start=1) if isinstance(item, dict)]
 
 
-def _load_or_fetch_draft_sheet(order_id: str, auth_header: str, output_dir: Path) -> dict[str, Any]:
-    out = output_dir / "draft_sheets" / f"{order_id}_draft_sheet.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
-        return json.loads(out.read_text(encoding="utf-8"))
-    payload = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}/draft-sheet", auth_header)
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return payload
+def _capture_geometry_input(order_id: str) -> dict[str, Any]:
+    with session_scope() as session:
+        order = session.get(Order, order_id)
+        if order is None:
+            raise ValueError("validation_geometry_order_not_found")
+        captured = _order_execution_input(session, order, lock=False)
+        captured["selected_pdf_receipt"] = capture_selected_pdf_receipt(session, order)
+        verify_selected_pdf_source(captured["selected_pdf_receipt"])
+        return captured
 
 
-def _load_uri_bytes_for_validation(uri: str) -> bytes:
-    try:
-        return load_bytes_from_uri(uri)
-    except Exception:
-        if uri.startswith("gs://"):
-            return subprocess.check_output(["gcloud", "storage", "cat", uri])
-        raise
+def _validate_remote_geometry_source(captured: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    order = captured["order"]
+    receipt = review.get("source_receipt")
+    keys = (
+        "geometry_source_digest", "configured_input_digest", "physical_menu_entries",
+        "selected_pdf_receipt", "order_input_identity", "input_digest",
+        "selected_version_input", "workflow_revision",
+    )
+    if review.get("order_id") != order["id"] or not isinstance(receipt, dict) or any(key not in receipt for key in keys):
+        raise ValueError("validation_remote_geometry_source_required")
+    identity = {key: order[key] for key in ("facility_code", "week_code")}
+    expected_digest = geometry_source_digest(
+        captured["selected_pdf_receipt"], captured["configured_input"], identity,
+        physical_entries=captured["physical_menu_entries"],
+    )
+    if (receipt["geometry_source_digest"] != expected_digest
+            or receipt["configured_input_digest"] != _stable_json_hash(captured["configured_input"])
+            or not snapshots_equal(receipt["physical_menu_entries"], captured["physical_menu_entries"])
+            or not snapshots_equal(receipt["selected_pdf_receipt"], captured["selected_pdf_receipt"])
+            or not snapshots_equal(receipt["order_input_identity"], identity)):
+        raise ValueError("validation_remote_geometry_source_mismatch")
+    return {key: receipt[key] for key in keys}
 
 
-def _find_packaged_template_pdf(facility_id: str, week_sheet_name: str) -> Path | None:
-    filename = f"{facility_id}_{week_sheet_name}.pdf"
-    candidates = [
-        BACKEND_ROOT / TEMPLATE_SNAPSHOT_REL / filename,
-        *sorted(
-            (WORKSPACE_ROOT.parent / "integration").glob(
-                f"backend-deploy-*/backend/{TEMPLATE_SNAPSHOT_REL}/{filename}"
-            ),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        ),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+def _revalidate_comparison_geometry(
+    *, order_id: str, context: dict[str, Any], review: dict[str, Any],
+) -> None:
+    captured = context.get("captured_input")
+    remote_source = context.get("remote_geometry_source")
+    if not isinstance(captured, dict) or not isinstance(remote_source, dict):
+        raise ValueError("validation_comparison_geometry_context_required")
+    current = _capture_geometry_input(order_id)
+    if not snapshots_equal(captured, current):
+        raise ValueError("validation_geometry_source_changed")
+    current_source = _validate_remote_geometry_source(current, review)
+    if not snapshots_equal(remote_source, current_source):
+        raise ValueError("validation_remote_geometry_source_changed")
 
 
 def _build_live_manifest_item_from_stg_order(
@@ -112,95 +121,61 @@ def _build_live_manifest_item_from_stg_order(
     output_dir: Path,
     render_width: int,
     http_timeout: int,
-) -> dict[str, Any]:
+    expected_facility_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     order = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}", auth_header, timeout=http_timeout)
-    facility_id = str(order.get("facility") or order.get("facility_code") or "").strip()
-    document_uri = str(order.get("document") or order.get("document_uri") or "").strip()
-    week_value = str(order.get("week_value") or order.get("week") or "").strip()
-    if not facility_id:
-        raise ValueError(f"facility missing for {order_id}")
-    if not document_uri:
-        raise ValueError(f"document missing for {order_id}")
-    week_sheet_name = _week_sheet_name_from_week_value(week_value) or week_value
-    if not week_sheet_name:
-        raise ValueError(f"week unresolved for {order_id}")
-
-    live_dir = output_dir / "_live_inputs" / order_id
-    live_dir.mkdir(parents=True, exist_ok=True)
-    fax_pdf = live_dir / f"{order_id}_fax.pdf"
-    if not fax_pdf.exists():
-        fax_pdf.write_bytes(_load_uri_bytes_for_validation(document_uri))
-
-    packaged_template = _find_packaged_template_pdf(facility_id, week_sheet_name)
-    if packaged_template is not None:
-        structure_pdf = packaged_template
-    else:
-        structure_xlsx = order_form_service.build_fax_structure_only_excel(
-            facility_id=facility_id,
-            week_sheet_name=week_sheet_name,
-            output_dir=live_dir,
-        )
-        structure_pdf = live_dir / f"{structure_xlsx.stem}.pdf"
-        if not structure_pdf.exists():
-            render_workbook_path_to_pdf(
-                structure_xlsx,
-                output_path=structure_pdf,
-                sheet_name=week_sheet_name,
-            )
-
-    accepted_canvas_width = 2362
-    accepted_canvas_height = 4273
-    template_image = render_pdf_page_to_bgr(str(structure_pdf), width=accepted_canvas_width)
-    template_bbox = _estimate_hakodate_template_bbox_from_rendered_image(template_image)
-    registration_dir = live_dir / "fixed_quad"
-    registration, _images = build_fixed_quad_template_registration(
-        facility_code=facility_id,
-        order_id=order_id,
-        fax_pdf=str(fax_pdf),
-        template_pdf=str(structure_pdf),
-        quad_px=None,
-        manifest_template_bbox=template_bbox,
-        canvas_width=accepted_canvas_width,
-        canvas_height=accepted_canvas_height,
-        render_width=render_width,
-        quad_source=None,
-        output_dir=registration_dir,
+    if order.get("id") != order_id or order.get("facility") != expected_facility_id:
+        raise ValueError("validation_order_identity_mismatch")
+    captured = _capture_geometry_input(order_id)
+    selected_order = captured["order"]
+    receipt = captured["selected_pdf_receipt"]
+    # A local connection is usable only for the same current order/document as the API target.
+    if (selected_order["id"] != order_id
+            or selected_order["facility_code"] != expected_facility_id
+            or selected_order["week_code"] != order.get("week_value")
+            or receipt["order_id"] != order_id
+            or receipt["document_id"] != order.get("document_id")
+            or receipt["storage_uri"] != order.get("document")):
+        raise ValueError("validation_geometry_capture_api_mismatch")
+    review_url = f"{cmp.STG_API_BASE}/orders/{order_id}/workflow-v2/quad-review"
+    remote_source = _validate_remote_geometry_source(
+        captured, _json_get(review_url, auth_header, timeout=http_timeout),
     )
-    return {
-        "order_id": order_id,
-        "facility_code": facility_id,
-        "facility_id": facility_id,
-        "fax_pdf": str(fax_pdf),
-        "template_pdf": str(structure_pdf),
-        "step2_png": str(Path(registration.outputs["step2"])),
-        "template_bbox": template_bbox,
-        "quad_px": registration.quad_px,
-        "quad_source": registration.quad_source,
-        "week_sheet_name": week_sheet_name,
-        "source": "live_order_facility_source_workbook",
-    }
+    local_item = _build_live_hakodate_manifest_item(
+        order_id=order_id,
+        facility_id=expected_facility_id,
+        output_dir=output_dir / "_live_inputs" / order_id,
+        render_width=render_width,
+        document_uri_override=receipt["storage_uri"],
+        review_start_input=captured,
+    )
+    if not snapshots_equal(captured, _capture_geometry_input(order_id)):
+        raise ValueError("validation_geometry_source_changed")
+    current_source = _validate_remote_geometry_source(
+        captured, _json_get(review_url, auth_header, timeout=http_timeout),
+    )
+    if not snapshots_equal(remote_source, current_source):
+        raise ValueError("validation_remote_geometry_source_changed")
+    current = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}", auth_header, timeout=http_timeout)
+    if any(current.get(key) != order.get(key) for key in ("id", "facility", "week_value", "document", "document_id", "current_version")):
+        raise ValueError("validation_api_selected_document_changed")
+    return local_item, {"captured_input": captured, "remote_geometry_source": remote_source}
 
 
-def _cell_value_map_from_local_records(records_path: Path) -> dict[str, str]:
-    records = json.loads(records_path.read_text(encoding="utf-8"))
-    result: dict[str, str] = {}
-    if not isinstance(records, list):
-        return result
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        sheet_cell = str(record.get("sheet_cell") or "").strip()
-        if not sheet_cell:
-            continue
-        value = str(
-            record.get("pred_digits")
-            or record.get("ocr_normalized")
-            or record.get("ocr_text")
-            or ""
-        ).strip()
-        if value:
-            result[sheet_cell] = value
-    return result
+def _require_local_artifact(outputs: Any, key: str) -> list[dict[str, Any]]:
+    raw_path = outputs.get(key) if isinstance(outputs, dict) else None
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(f"validation_local_artifact_path_required:{key}")
+    path = Path(raw_path)
+    if not path.is_file():
+        raise ValueError(f"validation_local_artifact_missing:{key}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"validation_local_artifact_invalid:{key}") from exc
+    if not isinstance(payload, list) or not payload or not all(isinstance(item, dict) and item for item in payload):
+        raise ValueError(f"validation_local_artifact_invalid:{key}")
+    return payload
 
 
 def _cell_value_map_from_local_artifacts(
@@ -209,15 +184,11 @@ def _cell_value_map_from_local_artifacts(
     records_path: Path,
     regions_path: Path,
 ) -> dict[str, str]:
-    if not records_path.exists() or not regions_path.exists():
-        return _cell_value_map_from_local_records(records_path)
-    records = json.loads(records_path.read_text(encoding="utf-8"))
-    regions = json.loads(regions_path.read_text(encoding="utf-8"))
-    if not isinstance(records, list) or not isinstance(regions, list):
-        return _cell_value_map_from_local_records(records_path)
-    canonical_regions = [dict(item) for item in regions if isinstance(item, dict)]
+    outputs = {"records": str(records_path), "ocr_regions": str(regions_path)}
+    records = _require_local_artifact(outputs, "records")
+    canonical_regions = _require_local_artifact(outputs, "ocr_regions")
     raw_evidence_records: list[dict[str, Any]] = []
-    for index, region in enumerate(item for item in records if isinstance(item, dict)):
+    for index, region in enumerate(records):
         accepted_candidate = region.get("recognizer_accepted_candidate")
         accepted_candidate = accepted_candidate if isinstance(accepted_candidate, dict) else {}
         accepted_candidate_digits = str(accepted_candidate.get("normalized_digits") or "").strip()
@@ -397,6 +368,42 @@ def _summarize_numeric_sheet(sheet: dict[str, Any]) -> dict[str, Any]:
     return {"fields": len(fields), "rows": len(rows), "quantity_field_count": len(qty_indexes), "nonempty_quantity_cells": nonempty}
 
 
+def _require_comparison_sheet(payload: dict[str, Any], *, order_id: str, surface: str) -> dict[str, Any]:
+    if not isinstance(payload, dict) or payload.get("order_id") != order_id:
+        raise ValueError(f"validation_sheet_order_mismatch:{surface}")
+    sheet = payload.get("sheet")
+    if not isinstance(sheet, dict):
+        raise ValueError(f"validation_sheet_missing:{surface}")
+    fields, rows = sheet.get("fields"), sheet.get("rows")
+    if (not isinstance(fields, list) or not fields or not all(isinstance(field, str) for field in fields)
+            or not isinstance(rows, list) or not rows or not all(isinstance(row, list) for row in rows)):
+        raise ValueError(f"validation_sheet_fields_rows_invalid:{surface}")
+    return sheet
+
+
+def _require_comparison_lineage(
+    *, order_id: str, workflow: Any, preview: Any,
+    projection: Any = None, saved: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(workflow, dict) or workflow.get("order_id") != order_id:
+        raise ValueError("validation_workflow_order_mismatch")
+    revision = workflow.get("revision")
+    selected = workflow.get("selected_ocr_result_id")
+    if type(revision) is not int or revision < 1:
+        raise ValueError("validation_workflow_revision_invalid")
+    if not isinstance(selected, str) or not selected.strip():
+        raise ValueError("validation_workflow_selected_evidence_required")
+    if (not isinstance(preview, dict) or preview.get("status") != "ready"
+            or preview.get("blockers") or preview.get("source_evidence_run_id") != selected):
+        raise ValueError("validation_preview_workflow_lineage_mismatch")
+    if projection is not None or saved is not None:
+        _require_comparison_sheet(projection, order_id=order_id, surface="selected_ocr_projection")
+        _require_comparison_sheet(saved, order_id=order_id, surface="saved_sheet")
+        if projection.get("selected_ocr_result_id") != selected or saved.get("source_ocr_result_id") != selected:
+            raise ValueError("validation_sheet_ocr_lineage_mismatch")
+    return {"order_id": order_id, "revision": revision, "selected_ocr_result_id": selected}
+
+
 def validate_case(
     *,
     page_index: int,
@@ -410,16 +417,39 @@ def validate_case(
     facility_code = str(item.get("facility_code") or "").strip()
     case_dir = output_dir / f"{page_index:02d}_{facility_code}_{order_id}"
     case_dir.mkdir(parents=True, exist_ok=True)
+    workflow_path = f"/orders/{order_id}/workflow-v2"
+    workflow = _json_get(f"{cmp.STG_API_BASE}{workflow_path}", auth_header, timeout=http_timeout)
     preview = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}/hakodate-overlay-preview", auth_header, timeout=http_timeout)
-    ocr_sheet = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}/ocr-sheet", auth_header, timeout=http_timeout)
-    draft_sheet_live = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}/draft-sheet", auth_header, timeout=http_timeout)
+    projection_path = f"/orders/{order_id}/workflow-v2/sheet-source"
+    saved_path = f"/orders/{order_id}/workflow-v2/sheet"
+    projection = _json_get(f"{cmp.STG_API_BASE}{projection_path}", auth_header, timeout=http_timeout)
+    saved = _json_get(f"{cmp.STG_API_BASE}{saved_path}", auth_header, timeout=http_timeout)
+    lineage = _require_comparison_lineage(
+        order_id=order_id, workflow=workflow, preview=preview, projection=projection, saved=saved,
+    )
+    ocr_sheet = _require_comparison_sheet(projection, order_id=order_id, surface="selected_ocr_projection")
+    draft_sheet_live = _require_comparison_sheet(saved, order_id=order_id, surface="saved_sheet")
+    selected_result_id = projection.get("selected_ocr_result_id")
+    if (not isinstance(selected_result_id, str) or not selected_result_id.strip()
+            or saved.get("source_ocr_result_id") != selected_result_id
+            or not isinstance(preview, dict)
+            or preview.get("source_evidence_run_id") != selected_result_id):
+        raise ValueError("validation_sheet_ocr_lineage_mismatch")
+    assignment = preview.get("assignment")
+    if (preview.get("status") != "ready" or preview.get("blockers")
+            or not isinstance(assignment, dict)
+            or not isinstance(assignment.get("assignments"), list)
+            or not assignment["assignments"]
+            or not all(isinstance(entry, dict) and entry for entry in assignment["assignments"])):
+        raise ValueError("validation_preview_assignment_unavailable")
     draft_sheet = draft_sheet_live
-    local_item = _build_live_manifest_item_from_stg_order(
+    local_item, geometry_context = _build_live_manifest_item_from_stg_order(
         order_id=order_id,
         auth_header=auth_header,
         output_dir=output_dir,
         render_width=render_width,
         http_timeout=http_timeout,
+        expected_facility_id=facility_code,
     )
 
     started = time.perf_counter()
@@ -431,19 +461,15 @@ def validate_case(
         render_width=render_width,
     )
     local_seconds = time.perf_counter() - started
-    records_path = Path(str((local_summary.get("outputs") or {}).get("records") or ""))
-    regions_path = Path(str((local_summary.get("outputs") or {}).get("ocr_regions") or ""))
-    local_values = (
-        _cell_value_map_from_local_artifacts(
-            order_id=order_id,
-            records_path=records_path,
-            regions_path=regions_path,
-        )
-        if records_path.exists()
-        else {}
+    outputs = local_summary.get("outputs")
+    _require_local_artifact(outputs, "records")
+    _require_local_artifact(outputs, "ocr_regions")
+    local_values = _cell_value_map_from_local_artifacts(
+        order_id=order_id,
+        records_path=Path(outputs["records"]),
+        regions_path=Path(outputs["ocr_regions"]),
     )
 
-    assignment = preview.get("assignment") if isinstance(preview.get("assignment"), dict) else {}
     stg_assignment_values = _cell_value_map_from_assignment(assignment)
     stg_accepted_assignment_values_raw = _accepted_cell_value_map_from_assignment(assignment)
     truth_by_cell = _target_truth_by_sheet_cell(assignment)
@@ -469,6 +495,23 @@ def validate_case(
         or ocr_sheet_vs_draft_sheet
     )
 
+    _revalidate_comparison_geometry(
+        order_id=order_id, context=geometry_context,
+        review=_json_get(f"{cmp.STG_API_BASE}/orders/{order_id}/workflow-v2/quad-review", auth_header, timeout=http_timeout),
+    )
+    current_projection = _json_get(f"{cmp.STG_API_BASE}{projection_path}", auth_header, timeout=http_timeout)
+    current_saved = _json_get(f"{cmp.STG_API_BASE}{saved_path}", auth_header, timeout=http_timeout)
+    current_preview = _json_get(f"{cmp.STG_API_BASE}/orders/{order_id}/hakodate-overlay-preview", auth_header, timeout=http_timeout)
+    current_workflow = _json_get(f"{cmp.STG_API_BASE}{workflow_path}", auth_header, timeout=http_timeout)
+    current_lineage = _require_comparison_lineage(
+        order_id=order_id, workflow=current_workflow, preview=current_preview,
+        projection=current_projection, saved=current_saved,
+    )
+    if (not snapshots_equal(lineage, current_lineage)
+            or not snapshots_equal(projection, current_projection)
+            or not snapshots_equal(saved, current_saved)):
+        raise ValueError("validation_comparison_source_changed")
+
     result = {
         "page": page_index,
         "facility_code": facility_code,
@@ -478,6 +521,10 @@ def validate_case(
         "local_metrics": local_summary.get("metrics"),
         "stg_preview_status": preview.get("status"),
         "stg_source_evidence_run_id": preview.get("source_evidence_run_id"),
+        "sheet_sources": {
+            "ocr_sheet": {"source": "workflow_v2_selected_ocr_projection", "endpoint": projection_path, "selected_ocr_result_id": selected_result_id},
+            "draft_sheet": {"source": "saved_sheet", "endpoint": saved_path, "source_ocr_result_id": saved["source_ocr_result_id"]},
+        },
         "counts": {
             "local_nonempty_cells": len(local_values),
             "stg_assignment_nonempty_cells": len(stg_assignment_values),

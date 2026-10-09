@@ -24,15 +24,10 @@ sys.path.insert(0, str(RUNTIME_DIR))
 
 from src.services import hakodate_ocr_evidence_service, master_order_form_template_service, sheet_week_service  # noqa: E402
 from src.services.hakodate_cell_ocr_batch_service import build_hakodate_best_method_for_manifest_item  # noqa: E402
-from src.services.hakodate_fixed_quad_registration_service import (  # noqa: E402
-    build_fixed_quad_template_registration,
-    canonical_template_axes_from_workbook,
-    render_pdf_page_to_bgr,
-)
-from src.services.order_service import _estimate_hakodate_template_bbox_from_rendered_image  # noqa: E402
+from src.services.order_service import _build_live_hakodate_manifest_item  # noqa: E402
+from src.services.workflow_attempt_guard_service import snapshots_equal  # noqa: E402
+from validate_hakodate_all_facilities import _capture_geometry_input, _require_comparison_lineage, _require_local_artifact, _revalidate_comparison_geometry, _validate_remote_geometry_source  # noqa: E402
 from src.services.ocr_week_rerun_service import compose_api_root  # noqa: E402
-from src.services.storage_service import load_bytes_from_uri  # noqa: E402
-from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf  # noqa: E402
 
 
 class HttpClient:
@@ -127,24 +122,8 @@ def _operator_auth_header_from_gcloud() -> str:
     return f"Bearer {token}"
 
 
-def _week_sheet_name_from_week_value(value: str) -> str:
-    _month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(value)
-    if isinstance(start_date, date) and isinstance(end_date, date):
-        return f"{start_date.month}月{start_date.day}日～{end_date.month}月{end_date.day}日"
-    return str(value or "").strip()
-
-
 def _date_range(start: date, end: date) -> list[date]:
     return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
-
-
-def _load_uri_bytes(uri: str) -> bytes:
-    try:
-        return load_bytes_from_uri(uri)
-    except Exception:
-        if str(uri or "").startswith("gs://"):
-            return subprocess.check_output(["gcloud", "storage", "cat", uri])
-        raise
 
 
 def _collect_orders(
@@ -230,108 +209,46 @@ def _build_local_manifest_item_from_stg(
     order: dict[str, Any],
     output_dir: Path,
     render_width: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     order_id = str(order.get("id") or "").strip()
-    facility_id = str(order.get("facility") or order.get("facility_code") or "").strip()
-    document_uri = str(order.get("document") or order.get("document_uri") or "").strip()
-    week_value = str(order.get("week_value") or order.get("week") or "").strip()
+    facility_id = str(order.get("facility") or "").strip()
+    document_uri = str(order.get("document") or "").strip()
+    week_value = str(order.get("week_value") or "").strip()
     if not order_id or not facility_id or not document_uri:
         raise RuntimeError(f"order context incomplete: {order_id} {facility_id} {document_uri}")
 
-    workflow = client.request_json("GET", f"/orders/{order_id}/workflow-v2")
-    facility_payload = client.request_json("GET", f"/facilities/{facility_id}")
-    resolved_config = facility_payload.get("resolved_config")
-    if not isinstance(resolved_config, dict):
-        raise RuntimeError(f"resolved facility config missing: {facility_id}")
-    fax_template = resolved_config.get("fax_template") if isinstance(resolved_config.get("fax_template"), dict) else {}
-    selected_template_id = str(workflow.get("template_id") or fax_template.get("template_id") or "").strip() or None
-    month_id, _week_start, _week_end = sheet_week_service.parse_sheet_week_value(week_value)
-    stg_menu_entries: list[dict[str, Any]] | None = None
-    if month_id:
-        try:
-            menu_payload = client.request_json(
-                "GET",
-                f"/monthly-menus/{month_id}",
-                params={"facility_id": facility_id},
-            )
-            entries = menu_payload.get("entries") if isinstance(menu_payload, dict) else None
-            if isinstance(entries, list):
-                stg_menu_entries = [item for item in entries if isinstance(item, dict)]
-        except Exception:
-            stg_menu_entries = None
-
+    captured = _capture_geometry_input(order_id)
+    selected_order, receipt = captured["order"], captured["selected_pdf_receipt"]
+    if (selected_order["id"] != order_id or selected_order["facility_code"] != facility_id
+            or selected_order["week_code"] != week_value or receipt["order_id"] != order_id
+            or receipt["document_id"] != order.get("document_id") or receipt["storage_uri"] != document_uri):
+        raise ValueError("validation_geometry_capture_api_mismatch")
+    review_path = f"/orders/{order_id}/workflow-v2/quad-review"
+    remote_source = _validate_remote_geometry_source(captured, client.request_json("GET", review_path))
     case_dir = output_dir / f"{facility_id}_{order_id}" / "local_inputs"
-    case_dir.mkdir(parents=True, exist_ok=True)
-    fax_pdf = case_dir / f"{order_id}_fax.pdf"
-    if not fax_pdf.exists():
-        fax_pdf.write_bytes(_load_uri_bytes(document_uri))
-
-    structure_xlsx = master_order_form_template_service.build_facility_template_xlsx(
-        facility_config=resolved_config,
-        output_path=case_dir / f"{facility_id}_{order_id}_facility_template.xlsx",
-        week_value=week_value,
-        week_menu_entries=stg_menu_entries,
+    local_item = _build_live_hakodate_manifest_item(
+        order_id=order_id, facility_id=facility_id, output_dir=case_dir,
+        render_width=render_width, document_uri_override=document_uri,
+        review_start_input=captured,
     )
-    structure_pdf = case_dir / f"{structure_xlsx.stem}.pdf"
-    if not structure_pdf.exists():
-        render_workbook_path_to_pdf(
-            structure_xlsx,
-            output_path=structure_pdf,
-            sheet_name=master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME,
-        )
     local_template_diagnostics = master_order_form_template_service.build_facility_template_diagnostics(
-        facility_config=resolved_config,
+        facility_config=captured["configured_input"]["facility"],
         week_value=week_value,
-        week_menu_entries=stg_menu_entries,
+        week_menu_entries=captured["physical_menu_entries"],
     )
-
-    accepted_canvas_width = 2362
-    accepted_canvas_height = 4273
-    template_image = render_pdf_page_to_bgr(str(structure_pdf), width=accepted_canvas_width)
-    template_bbox = _estimate_hakodate_template_bbox_from_rendered_image(template_image)
-    template_axes_x, template_axes_y = canonical_template_axes_from_workbook(
-        structure_xlsx,
-        sheet_name=master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME,
-        canvas_width=accepted_canvas_width,
-        canvas_height=accepted_canvas_height,
-        table_bbox=template_bbox,
-    )
-    registration, _images = build_fixed_quad_template_registration(
-        facility_code=facility_id,
-        order_id=order_id,
-        fax_pdf=str(fax_pdf),
-        template_pdf=str(structure_pdf),
-        quad_px=None,
-        manifest_template_bbox=template_bbox,
-        canvas_width=accepted_canvas_width,
-        canvas_height=accepted_canvas_height,
-        render_width=render_width,
-        quad_source=None,
-        output_dir=case_dir / "fixed_quad",
-        template_axes_x=template_axes_x,
-        template_axes_y=template_axes_y,
-    )
+    if not snapshots_equal(captured, _capture_geometry_input(order_id)):
+        raise ValueError("validation_geometry_source_changed")
+    current_source = _validate_remote_geometry_source(captured, client.request_json("GET", review_path))
+    if not snapshots_equal(remote_source, current_source):
+        raise ValueError("validation_remote_geometry_source_changed")
+    current = client.request_json("GET", f"/orders/{order_id}")
+    if any(current.get(key) != order.get(key) for key in ("id", "facility", "week_value", "document", "document_id", "current_version")):
+        raise ValueError("validation_api_selected_document_changed")
     return {
-        "order_id": order_id,
-        "facility_code": facility_id,
-        "facility_id": facility_id,
-        "fax_pdf": str(fax_pdf),
-        "template_xlsx": str(structure_xlsx),
-        "template_pdf": str(structure_pdf),
-        "template_sheet_name": master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME,
-        "fax_template": fax_template,
-        "fax_template_id": selected_template_id,
-        "template_id": selected_template_id,
+        **local_item,
+        "fax_template": captured["configured_input"]["facility"]["fax_template"],
         "local_template_diagnostics": local_template_diagnostics,
-        "step2_png": str(Path(registration.outputs["step2"])),
-        "template_bbox": template_bbox,
-        "template_axes_x": template_axes_x,
-        "template_axes_y": template_axes_y,
-        "quad_px": registration.quad_px,
-        "quad_source": registration.quad_source,
-        "week_sheet_name": _week_sheet_name_from_week_value(week_value),
-        "source": "stg_order_resolved_config_local_rebuild",
-    }
+    }, {"captured_input": captured, "remote_geometry_source": remote_source}
 
 
 def _round_bbox(value: Any) -> list[float]:
@@ -431,18 +348,18 @@ def _compare_template_diagnostics(
                 "facility_template_canonical_digest": local_diagnostics.get("facility_template_canonical_digest"),
             },
         }
-    master_match = (
-        str(local_diagnostics.get("master_template_sha256") or "")
-        == str(stg_diagnostics.get("master_template_sha256") or "")
-    )
-    facility_digest_match = (
-        str(local_diagnostics.get("facility_template_canonical_digest") or "")
-        == str(stg_diagnostics.get("facility_template_canonical_digest") or "")
-    )
-    schema_digest_match = (
-        str(local_diagnostics.get("schema_digest") or "")
-        == str(stg_diagnostics.get("schema_digest") or "")
-    )
+    digest_keys = ("master_template_sha256", "facility_template_canonical_digest", "schema_digest")
+    for diagnostics in (local_diagnostics, stg_diagnostics):
+        if not isinstance(diagnostics, dict):
+            raise ValueError("validation_template_diagnostics_invalid")
+        for key in digest_keys:
+            digest = diagnostics.get(key)
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdefABCDEF" for char in digest)):
+                raise ValueError(f"validation_template_digest_invalid:{key}")
+    master_match = local_diagnostics["master_template_sha256"] == stg_diagnostics["master_template_sha256"]
+    facility_digest_match = local_diagnostics["facility_template_canonical_digest"] == stg_diagnostics["facility_template_canonical_digest"]
+    schema_digest_match = local_diagnostics["schema_digest"] == stg_diagnostics["schema_digest"]
     return {
         "status": "ok" if master_match and facility_digest_match and schema_digest_match else "ng",
         "master_template_sha256_match": master_match,
@@ -487,10 +404,20 @@ def _compare_one(
     facility_id = str(order.get("facility") or order.get("facility_code") or "").strip()
     case_dir = output_dir / f"{page:02d}_{facility_id}_{order_id}"
     case_dir.mkdir(parents=True, exist_ok=True)
+    workflow_path = f"/orders/{order_id}/workflow-v2"
+    workflow = client.request_json("GET", workflow_path)
     preview = client.request_json("GET", f"/orders/{order_id}/hakodate-overlay-preview")
-    stg_assignment = preview.get("assignment") if isinstance(preview.get("assignment"), dict) else {}
-    stg_targets = [item for item in (stg_assignment.get("target_cells") or []) if isinstance(item, dict)]
-    manifest_item = _build_local_manifest_item_from_stg(
+    lineage = _require_comparison_lineage(order_id=order_id, workflow=workflow, preview=preview)
+    if not isinstance(preview, dict) or preview.get("status") != "ready" or preview.get("blockers"):
+        raise ValueError("validation_preview_not_ready")
+    stg_assignment = preview.get("assignment")
+    if not isinstance(stg_assignment, dict):
+        raise ValueError("validation_preview_assignment_required")
+    stg_targets = stg_assignment.get("target_cells")
+    if (not isinstance(stg_targets, list) or not stg_targets
+            or not all(isinstance(target, dict) and target for target in stg_targets)):
+        raise ValueError("validation_preview_targets_invalid")
+    manifest_item, geometry_context = _build_local_manifest_item_from_stg(
         client=client,
         order=order,
         output_dir=case_dir,
@@ -512,10 +439,10 @@ def _compare_one(
         output_dir=case_dir / "local_best_method",
         render_width=render_width,
     )
-    local_regions_path = Path(str((local_summary.outputs or {}).get("ocr_regions") or ""))
-    local_regions = json.loads(local_regions_path.read_text(encoding="utf-8")) if local_regions_path.exists() else []
+    _require_local_artifact(local_summary.outputs, "records")
+    local_regions = _require_local_artifact(local_summary.outputs, "ocr_regions")
     local_targets = hakodate_ocr_evidence_service.target_cells_from_regions(
-        [item for item in local_regions if isinstance(item, dict)]
+        local_regions
     )
     for local_target, source_region in zip(local_targets, local_regions, strict=False):
         if not isinstance(local_target, dict) or not isinstance(source_region, dict):
@@ -531,9 +458,18 @@ def _compare_one(
         and diff["red_local_only_count"] == 0
         and diff["red_stg_only_count"] == 0
     )
-    template_ok = template_parity.get("status") == "ok" or (
-        template_parity.get("status") == "unavailable" and not require_template_parity
+    template_ok = template_parity.get("status") == "ok"
+    _revalidate_comparison_geometry(
+        order_id=order_id, context=geometry_context,
+        review=client.request_json("GET", f"/orders/{order_id}/workflow-v2/quad-review"),
     )
+    current_preview = client.request_json("GET", f"/orders/{order_id}/hakodate-overlay-preview")
+    current_workflow = client.request_json("GET", workflow_path)
+    current_lineage = _require_comparison_lineage(
+        order_id=order_id, workflow=current_workflow, preview=current_preview,
+    )
+    if not snapshots_equal(lineage, current_lineage):
+        raise ValueError("validation_comparison_source_changed")
     result = {
         "order_id": order_id,
         "facility_id": facility_id,

@@ -17,8 +17,10 @@ sys.path.insert(0, str(BACKEND_ROOT))
 
 from src.services.hakodate_fixed_quad_registration_service import (  # noqa: E402
     build_fixed_quad_template_registration,
+    canonical_template_axes_from_workbook,
     render_template_pdf_to_canvas,
 )
+from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf  # noqa: E402
 from src.services.hakodate_step_review_pipeline_service import (  # noqa: E402
     _bbox_quad_points,
     _bgr_to_rgb_image,
@@ -27,20 +29,6 @@ from src.services.hakodate_step_review_pipeline_service import (  # noqa: E402
     _split_line_masks,
     _write_pdf_from_pages,
 )
-
-
-def _load_template_axes_from_summary(path: Path | None) -> tuple[list[int] | None, list[int] | None, list[float]]:
-    if path is None:
-        return None, None, [12.0, 435.0, 2353.0, 4009.0]
-    data = json.loads(path.read_text(encoding="utf-8"))
-    xs = [int(value) for value in data.get("template_axes_x") or []]
-    ys = [int(value) for value in data.get("template_axes_y_all") or []]
-    bbox = data.get("legacy_manifest_template_bbox_not_used") or [12.0, 435.0, 2353.0, 4009.0]
-    if len(xs) < 2:
-        xs = None
-    if len(ys) < 2:
-        ys = None
-    return xs, ys, [float(value) for value in bbox]
 
 
 def _header_bounds(table_bbox: list[int], template_ys: list[int]) -> tuple[int, int, int, int]:
@@ -742,20 +730,31 @@ def _crop_header_debug_image(image: Image.Image, *, evidence: dict[str, Any], co
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fax-pdf", required=True, type=Path)
-    parser.add_argument("--template-pdf", required=True, type=Path)
-    parser.add_argument("--summary-json", type=Path)
-    parser.add_argument("--facility-code", default="FAC00008")
-    parser.add_argument("--order-id", default="ORDab6c77ff")
+    parser.add_argument("--template-xlsx", required=True, type=Path)
+    parser.add_argument("--template-sheet-name", required=True)
+    parser.add_argument("--template-pdf", type=Path, help="Historical reference only; the template is rendered from --template-xlsx")
+    parser.add_argument("--summary-json", type=Path, help="Historical reference only; not an axes source")
+    parser.add_argument("--facility-code", required=True)
+    parser.add_argument("--order-id", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--render-width", default=1864, type=int)
     args = parser.parse_args()
 
-    template_xs, template_ys, manifest_bbox = _load_template_axes_from_summary(args.summary_json)
+    template_xs, template_ys = canonical_template_axes_from_workbook(
+        args.template_xlsx, sheet_name=args.template_sheet_name,
+        canvas_width=2362, canvas_height=4273,
+    )
+    manifest_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    template_pdf = args.output_dir / f"{args.facility_code}_{args.order_id}_canonical_template.pdf"
+    render_workbook_path_to_pdf(
+        args.template_xlsx, output_path=template_pdf, sheet_name=args.template_sheet_name,
+    )
     registration, images = build_fixed_quad_template_registration(
         facility_code=args.facility_code,
         order_id=args.order_id,
         fax_pdf=str(args.fax_pdf),
-        template_pdf=str(args.template_pdf),
+        template_pdf=str(template_pdf),
         quad_px=None,
         manifest_template_bbox=manifest_bbox,
         canvas_width=2362,
@@ -765,10 +764,12 @@ def main() -> int:
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        template_workbook_path=args.template_xlsx,
+        template_sheet_name=args.template_sheet_name,
     )
     rectified = images["step2"]
     template_bgr = render_template_pdf_to_canvas(
-        str(args.template_pdf),
+        str(template_pdf),
         width=int(registration.rectified_canvas_size[0]),
         height=int(registration.rectified_canvas_size[1]),
     )
@@ -812,6 +813,11 @@ def main() -> int:
             {
                 "facility_code": args.facility_code,
                 "order_id": args.order_id,
+                "template_xlsx": str(args.template_xlsx),
+                "template_sheet_name": args.template_sheet_name,
+                "template_pdf": str(template_pdf),
+                "reference_template_pdf": str(args.template_pdf) if args.template_pdf is not None else None,
+                "reference_summary_json": str(args.summary_json) if args.summary_json is not None else None,
                 "quad_px": registration.quad_px,
                 "rectified_canvas_size": registration.rectified_canvas_size,
                 "template_outer_grid_bbox_used": registration.template_outer_grid_bbox_used,
