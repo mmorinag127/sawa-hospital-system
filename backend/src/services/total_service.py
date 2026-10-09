@@ -62,24 +62,6 @@ def _iter_confirmed_orders(date_from: date | None = None, date_to: date | None =
             yield order
 
 
-def _resolve_facility_name(facility_id: object) -> str:
-    facility_code = str(facility_id or "").strip()
-    if not facility_code:
-        return ""
-    try:
-        facility_config = config_service.get_facility_config(facility_code) or {}
-    except Exception:
-        facility_config = {}
-    name = str(facility_config.get("facility_name") or facility_config.get("name") or "").strip()
-    if name:
-        return name
-    try:
-        facility = config_service.get_facility_by_id(facility_code) or {}
-    except Exception:
-        return ""
-    return str(facility.get("facility_name") or facility.get("name") or "").strip()
-
-
 def _serialize_order_refs(order_refs: dict[tuple[str, str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:
     rows = list(order_refs.values())
     rows.sort(
@@ -119,7 +101,6 @@ def _final_quantity(quantity_corrected: object, quantity_original: object, zero_
 
 def build_totals(date_from: date | None, date_to: date | None, include_order_refs: bool = False) -> list[dict]:
     grouped: dict[tuple, dict] = {}
-    facility_name_cache: dict[str, str] = {}
     for order in _iter_confirmed_orders(date_from, date_to):
         order_payload = serialize_order(order)
         accepted = output_builder._accepted_output_candidate(order_payload)
@@ -161,10 +142,8 @@ def build_totals(date_from: date | None, date_to: date | None, include_order_ref
             )
             row["quantity"] += float(qty)
             if include_order_refs:
-                facility_name = facility_name_cache.get(facility_id)
-                if facility_name is None:
-                    facility_name = _resolve_facility_name(facility_id)
-                    facility_name_cache[facility_id] = facility_name
+                facility = accepted["configured_input"]["facility"]
+                facility_name = str(facility.get("facility_name") or facility.get("name") or "").strip()
                 source_diet_type = str(line.get("diet_type") or "").strip() or "unknown"
                 ref_key = (
                     order_id,
