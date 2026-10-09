@@ -183,6 +183,8 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
         if evidence is None or evidence.order_id != order_id:
             return None
         rejection = ocr_evidence_service.evidence_run_selectability_error(evidence)
+        if rejection == "evidence_unusable":
+            return None
         if rejection is not None:
             raise ocr_evidence_service.SelectedEvidenceRejected(rejection)
         if evidence.template_version_id != workflow.template_version_id:
