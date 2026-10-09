@@ -26,6 +26,7 @@ from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service, menu_service, sheet_week_service, master_order_form_template_service
+from src.services import canonical_facility_store
 from src.services.ingest_policy import parse_date_string
 from src.services.storage_service import (
     get_default_output_bucket,
@@ -226,20 +227,22 @@ _ORDER_FORM_NON_QUANTITY_HEADER_KEYWORDS = (
 )
 
 
-def _resolve_pattern(facility: dict, pattern_id: str | None) -> dict:
-    if pattern_id:
-        pattern = config_service.get_order_form_pattern(pattern_id)
-        if pattern:
-            return pattern
-    facility_pattern = facility.get("order_form_pattern_id")
-    if isinstance(facility_pattern, str) and facility_pattern.strip():
-        pattern = config_service.get_order_form_pattern(facility_pattern.strip())
-        if pattern:
-            return pattern
-    patterns = config_service.get_order_form_patterns()
-    if patterns:
-        return dict(patterns[0])
-    return {"pattern_id": "PATTERN_A", "label": "標準A", "marker_cells": []}
+def _resolve_pattern(facility: dict, pattern_id: str | None, *, master: dict) -> dict:
+    selected = pattern_id if pattern_id is not None else facility.get("order_form_pattern_id")
+    if selected is None or (pattern_id is None and selected == ""):
+        return {}
+    if not isinstance(selected, str) or not selected.strip():
+        raise ValueError("order form pattern invalid")
+    selected = selected.strip()
+    patterns = master.get("order_form_patterns", [])
+    if not isinstance(patterns, list) or any(not isinstance(pattern, dict) for pattern in patterns):
+        raise ValueError("order form patterns invalid")
+    matches = [pattern for pattern in patterns if str(pattern.get("pattern_id") or "").strip() == selected]
+    if len(matches) != 1:
+        raise ValueError("order form pattern not found" if not matches else "order form pattern ambiguous")
+    pattern = deepcopy(matches[0])
+    pattern["pattern_id"] = selected
+    return pattern
 
 
 def _safe_source_workbook_suffix(value: str) -> str:
@@ -270,39 +273,6 @@ def _resolve_source_workbook_path(source_workbook_name: str) -> Path:
             f"source workbook not found: {source_workbook_name} (dir={_FAX_SOURCE_TEMPLATE_DIR})"
         )
     return source_path
-
-
-def _resolve_source_workbook_name_for_month(fax_template_id: str, month_id: str) -> str:
-    spec = _resolve_fax_family_spec(fax_template_id)
-    month_sources = spec.get("month_sources") or {}
-    normalized_month = _normalize_month_id(month_id)
-    if normalized_month in month_sources:
-        return str(month_sources[normalized_month])
-    source_workbook = str(spec.get("source_workbook") or "").strip()
-    if source_workbook:
-        return source_workbook
-    raise ValueError(
-        f"source workbook not configured for fax_template_id={fax_template_id} month_id={normalized_month}"
-    )
-
-
-def _resolve_source_workbook_name_for_template_clone(fax_template_id: str, month_id: str) -> str:
-    spec = _resolve_fax_family_spec(fax_template_id)
-    month_sources = spec.get("month_sources") or {}
-    normalized_month = _normalize_month_id(month_id)
-    if normalized_month in month_sources:
-        return str(month_sources[normalized_month])
-    earlier_months = [source_month for source_month in month_sources if source_month <= normalized_month]
-    if earlier_months:
-        return str(month_sources[sorted(earlier_months)[-1]])
-    if month_sources:
-        return str(month_sources[sorted(month_sources)[-1]])
-    source_workbook = str(spec.get("source_workbook") or "").strip()
-    if source_workbook:
-        return source_workbook
-    raise ValueError(
-        f"source workbook not configured for fax_template_id={fax_template_id} month_id={normalized_month}"
-    )
 
 
 def _facility_source_workbook_names(facility: dict | None) -> list[str]:
@@ -341,46 +311,6 @@ def _resolve_facility_source_workbook_name_for_month(
     facility: dict, *, fax_template_id: str, month_id: str,
 ) -> str:
     return _read_saved_sheet_source_workbook(facility, _normalize_month_id(month_id))["reference"]
-
-
-def _resolve_facility_source_workbook_name_for_template_clone(
-    facility: dict,
-    *,
-    fax_template_id: str,
-    month_id: str,
-) -> str:
-    normalized_month = _normalize_month_id(month_id)
-    raw_month_sources = facility.get("order_form_month_sources")
-    if isinstance(raw_month_sources, dict):
-        source_workbook = str(raw_month_sources.get(normalized_month) or "").strip()
-        if source_workbook:
-            return source_workbook
-        earlier_months = [
-            str(source_month)
-            for source_month, source_name in raw_month_sources.items()
-            if str(source_month) <= normalized_month and str(source_name or "").strip()
-        ]
-        if earlier_months:
-            return str(raw_month_sources[sorted(earlier_months)[-1]])
-    raw_month_source_uris = facility.get("order_form_month_source_uris")
-    if isinstance(raw_month_source_uris, dict):
-        source_workbook = str(raw_month_source_uris.get(normalized_month) or "").strip()
-        if source_workbook:
-            return source_workbook
-        earlier_months = [
-            str(source_month)
-            for source_month, source_name in raw_month_source_uris.items()
-            if str(source_month) <= normalized_month and str(source_name or "").strip()
-        ]
-        if earlier_months:
-            return str(raw_month_source_uris[sorted(earlier_months)[-1]])
-    source_workbook = str(facility.get("order_form_source_workbook") or "").strip()
-    if source_workbook:
-        return source_workbook
-    source_workbook_uri = str(facility.get("order_form_source_workbook_uri") or "").strip()
-    if source_workbook_uri:
-        return source_workbook_uri
-    return _resolve_source_workbook_name_for_template_clone(fax_template_id, normalized_month)
 
 
 def _source_workbook_sheetnames(source_workbook_name: str) -> tuple[str, ...]:
@@ -575,13 +505,20 @@ def save_facility_source_workbook_upload(
     }
 
 
-def _resolve_facility(facility_id: str) -> dict:
-    facility = config_service.get_facility_config(facility_id)
-    if not facility:
-        facility = config_service.get_facility_by_id(facility_id)
-    if not facility:
-        raise ValueError("facility not found")
-    return facility
+def _resolve_monthly_facility(
+    snapshot: canonical_facility_store.MasterSnapshot, facility_id: str, month_id: str,
+) -> dict:
+    month_start = date.fromisoformat(f"{month_id}-01")
+    selections = [canonical_facility_store.resolve_facility_version(snapshot, facility_id, month_start + timedelta(days=day))
+                  for day in range(_month_end(month_start).day)]
+    version_ids = {selection["version"]["version_id"] for selection in selections}
+    if len(version_ids) != 1:
+        raise canonical_facility_store.CanonicalStoreError(
+            "order_form_month_multiple_versions_unresolved", status_code=409,
+            facility_id=facility_id, month_id=month_id, version_ids=sorted(version_ids),
+        )
+    # Every calendar date has resolved uniquely against this same captured master.
+    return config_service._validate_authored_facility_config(selections[0]["facility"], None)
 
 
 def _infer_fax_template_id_from_facility(facility: dict) -> str | None:
@@ -1112,12 +1049,13 @@ def _build_monthly_fax_order_form_workbook(
     month_id: str,
     entries: list[dict],
     pattern: dict,
+    source_workbook: dict[str, Any] | None = None,
 ) -> Workbook:
     fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
     spec = _resolve_fax_family_spec(fax_template_id)
-    source = _read_saved_sheet_source_workbook(facility, month_id)
+    source = source_workbook if source_workbook is not None else _read_saved_sheet_source_workbook(facility, month_id)
     source_workbook_name = source["reference"]
     workbook = load_workbook(BytesIO(source["bytes"]))
     template_sheet_name = _DEFAULT_WEEK_SHEET if _DEFAULT_WEEK_SHEET in workbook.sheetnames else workbook.sheetnames[0]
@@ -1175,22 +1113,53 @@ def build_order_form_excel(
     pattern_id: str | None = None,
 ) -> Path:
     normalized_month = _normalize_month_id(month_id)
-    facility = _resolve_facility(facility_id)
+    snapshot = canonical_facility_store.read_snapshot()
+    facility = _resolve_monthly_facility(snapshot, facility_id, normalized_month)
     entries = _collect_menu_entries(normalized_month, facility_id)
-    pattern = _resolve_pattern(facility, pattern_id)
+    pattern = _resolve_pattern(facility, pattern_id, master=snapshot.master)
+    source = _read_saved_sheet_source_workbook(facility, normalized_month)
     resolved_fax_template_id = _infer_fax_template_id_from_facility(facility)
     wb = _build_monthly_fax_order_form_workbook(
         facility=facility,
         month_id=normalized_month,
         entries=entries,
         pattern=pattern,
+        source_workbook=source,
     )
 
-    file_pattern = str(resolved_fax_template_id or pattern.get("pattern_id") or "PATTERN_A")
+    file_pattern = _sanitize_filename_fragment(str(resolved_fax_template_id))
+    safe_facility_id = _sanitize_filename_fragment(facility_id)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    output = _OUTPUT_DIR / f"order_form_{facility_id}_{normalized_month}_{file_pattern}_{stamp}.xlsx"
-    wb.save(output)
+    output_dir = _OUTPUT_DIR / uuid4().hex
+    output = output_dir / f"order_form_{safe_facility_id}_{normalized_month}_{file_pattern}_{stamp}.xlsx"
+    try:
+        buffer = BytesIO()
+        wb.save(buffer)
+        _verify_monthly_output_sources(snapshot, facility, normalized_month, source)
+        output_dir.mkdir()
+        try:
+            with output.open("xb") as target:
+                target.write(buffer.getvalue())
+            _verify_monthly_output_sources(snapshot, facility, normalized_month, source)
+        except BaseException:
+            output.unlink(missing_ok=True)
+            output_dir.rmdir()
+            raise
+    finally:
+        wb.close()
     return output
+
+
+def _verify_monthly_output_sources(
+    snapshot: canonical_facility_store.MasterSnapshot,
+    facility: dict, month_id: str, source: dict[str, Any],
+) -> None:
+    current = canonical_facility_store.read_snapshot()
+    canonical_facility_store.check_revision(current, snapshot.revision)
+    if current.source != snapshot.source:
+        raise canonical_facility_store.CanonicalStoreError("facility_master_revision_conflict", status_code=409)
+    if _read_saved_sheet_source_workbook(facility, month_id) != source:
+        raise ValueError("monthly order form source workbook changed")
 
 
 def _dates_from_saved_sheet(fields: list[Any], rows: list[Any], received_at: datetime) -> list[date]:

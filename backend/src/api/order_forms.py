@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 
 from src.api.auth import require_role
 from src.services import order_form_service
+from src.services.canonical_facility_store import CanonicalStoreError
 
 
 router = APIRouter()
@@ -25,6 +26,8 @@ def generate_order_form(
             month_id=month_id,
             pattern_id=pattern_id,
         )
+    except CanonicalStoreError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
