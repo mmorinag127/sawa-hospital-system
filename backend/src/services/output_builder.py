@@ -2122,20 +2122,6 @@ def _workflow_v2_materialization_candidate(
     return deepcopy(candidate)
 
 
-def _workflow_v2_draft_record_for_outputs(draft: OrderSheetDraft) -> dict:
-    return {
-        "id": draft.id,
-        "order_id": draft.order_id,
-        "base_evidence_run_id": draft.base_evidence_run_id,
-        "base_template_resolution_id": draft.base_template_resolution_id,
-        "base_menu_snapshot_id": draft.base_menu_snapshot_id,
-        "draft_sheet_json": draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {},
-        "draft_state": str(draft.draft_state or "saved").strip() or "saved",
-        "blockers_json": list(draft.blockers_json or []),
-        "warnings_json": list(draft.warnings_json or []),
-    }
-
-
 def _normalize_rule_text(value: str | None) -> str:
     if not value:
         return ""
@@ -3198,65 +3184,6 @@ def _legacy_entry_quantity_field(diet: str | None, area: str | None) -> str | No
     return f"qty_{diet_key}_{area_key.lower()}"
 
 
-def _sum_quantity_map(quantity_map: dict[str, Any], keys: tuple[str, ...]) -> float | None:
-    total = 0.0
-    matched = False
-    for key in keys:
-        qty = _parse_ocr_quantity(quantity_map.get(key))
-        if qty is None:
-            continue
-        total += qty
-        matched = True
-    if not matched:
-        return None
-    return total if total > 0 else None
-
-
-def _generic_quantity_total(quantity_map: dict[str, Any], diet_key: str | None) -> float | None:
-    normalized_diet = _normalize_diet_key(diet_key)
-    if normalized_diet == "regular":
-        override_qty = (
-            _parse_ocr_quantity(quantity_map.get("change_2_x"))
-            if "change_2_x" in quantity_map
-            else None
-        )
-        if override_qty is None and "change_1_x" in quantity_map:
-            override_qty = _parse_ocr_quantity(quantity_map.get("change_1_x"))
-        if override_qty is not None:
-            return override_qty
-        return _sum_quantity_map(quantity_map, ("regular_x", "regular_bag_x", "staff_x", "daycare_x"))
-    if normalized_diet == "regular_bag":
-        return _sum_quantity_map(quantity_map, ("regular_bag_x",))
-    if normalized_diet == "no_fried":
-        return _sum_quantity_map(quantity_map, ("no_fried_x",))
-    if normalized_diet == "soft":
-        return _sum_quantity_map(quantity_map, ("soft_x",))
-    if normalized_diet == "mixer":
-        return _sum_quantity_map(quantity_map, ("mixer_x",))
-    if normalized_diet in {"禁食", "forbidden"}:
-        return _sum_quantity_map(quantity_map, ("forbidden_x", "no_meat_x", "no_fish_x", "forbidden_other_x"))
-    return None
-
-
-def _resolve_payload_template(payload: dict[str, Any], template: dict[str, Any] | None) -> dict[str, Any] | None:
-    resolved = template if isinstance(template, dict) else None
-    if not isinstance(payload, dict):
-        return resolved
-    template_id = payload.get("template_id")
-    if not isinstance(template_id, str):
-        classification = payload.get("classification")
-        if isinstance(classification, dict):
-            template_id = classification.get("matched_template_id")
-    if not isinstance(template_id, str):
-        return resolved
-    template_id = template_id.strip()
-    if not template_id:
-        return resolved
-    if isinstance(resolved, dict) and resolved.get("template_id") == template_id:
-        return resolved
-    return resolved
-
-
 def _extract_ocr_entries_from_structured_payload(
     payload: dict[str, Any],
     template: dict[str, Any] | None,
@@ -3264,7 +3191,6 @@ def _extract_ocr_entries_from_structured_payload(
 ) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
-    template = _resolve_payload_template(payload, template)
     if not isinstance(template, dict):
         return []
     rows = order_service._extract_sheet_rows_from_payload(payload, template)
@@ -3350,52 +3276,6 @@ def _extract_ocr_entries_from_structured_payload(
                 payload_entry[legacy_field] = qty
         entries.append(payload_entry)
     return entries
-
-
-def _lookup_ocr_entry_quantity(entry: dict[str, Any], diet_key: str | None, area_key: str | None) -> float | None:
-    if not isinstance(entry, dict):
-        return None
-    quantity_map = entry.get("quantity_map")
-    normalized_diet = _normalize_diet_key(diet_key)
-    normalized_area = str(area_key or "").strip().upper()
-    if isinstance(quantity_map, dict):
-        key = _entry_quantity_key(normalized_diet, area_key)
-        if key and key in quantity_map:
-            exact_qty = _parse_ocr_quantity(quantity_map.get(key))
-            if normalized_area not in {"", "X"} or normalized_diet not in {"regular", "禁食", "forbidden"}:
-                return exact_qty
-        if normalized_area in {"", "X"}:
-            generic_total = _generic_quantity_total(quantity_map, normalized_diet)
-            if generic_total is not None:
-                return generic_total
-    if normalized_diet == "regular":
-        if normalized_area == "2F":
-            return _parse_ocr_quantity(entry.get("qty_regular_2f"))
-        if normalized_area == "3F":
-            return _parse_ocr_quantity(entry.get("qty_regular_3f"))
-        qty_2f = _parse_ocr_quantity(entry.get("qty_regular_2f")) or 0.0
-        qty_3f = _parse_ocr_quantity(entry.get("qty_regular_3f")) or 0.0
-        total = qty_2f + qty_3f
-        return total if total > 0 else None
-    if normalized_diet == "soft":
-        if normalized_area == "2F":
-            return _parse_ocr_quantity(entry.get("qty_soft_2f"))
-        if normalized_area == "3F":
-            return _parse_ocr_quantity(entry.get("qty_soft_3f"))
-        qty_2f = _parse_ocr_quantity(entry.get("qty_soft_2f")) or 0.0
-        qty_3f = _parse_ocr_quantity(entry.get("qty_soft_3f")) or 0.0
-        total = qty_2f + qty_3f
-        return total if total > 0 else None
-    if normalized_diet == "mixer":
-        if normalized_area == "2F":
-            return _parse_ocr_quantity(entry.get("qty_mixer_2f"))
-        if normalized_area == "3F":
-            return _parse_ocr_quantity(entry.get("qty_mixer_3f"))
-        qty_2f = _parse_ocr_quantity(entry.get("qty_mixer_2f")) or 0.0
-        qty_3f = _parse_ocr_quantity(entry.get("qty_mixer_3f")) or 0.0
-        total = qty_2f + qty_3f
-        return total if total > 0 else None
-    return None
 
 
 def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None, *, parsed_input: dict | None = None) -> dict[str, object]:
