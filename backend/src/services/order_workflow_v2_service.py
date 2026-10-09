@@ -3824,6 +3824,13 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        return _build_sheet_from_selected_ocr(order_id)
+    except ocr_evidence_service.SelectedEvidenceRejected as exc:
+        return None, str(exc)
+
+
+def _build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:

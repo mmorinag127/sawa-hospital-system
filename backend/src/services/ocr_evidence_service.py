@@ -730,38 +730,46 @@ def get_selected_evidence_run(order_id: str) -> dict[str, Any] | None:
         return _serialize_evidence_run(row, include_payload=True)
 
 
-def evidence_run_is_selectable(row: OrderOcrEvidenceRun) -> bool:
+class SelectedEvidenceRejected(ValueError):
+    """A selected persisted result cannot be used by a dependent operation."""
+
+
+def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
     payload = row.payload_json or {}
     if any(key in payload for key in ("hakodate_preprocessing", "hakodate_ocr_evidence", "hakodate_target_cell_map", "hakodate_ocr_evidence_records", "hakodate_overlay")) and not isinstance(payload.get("hakodate_canonical_pipeline"), dict):
-        return False
+        return "evidence_unusable"
     if isinstance(payload.get("hakodate_canonical_pipeline"), dict):
         from src.services import order_service
         source = payload.get("hakodate_repair_source_receipt")
         if not isinstance(source, dict):
-            return False
+            return "evidence_unusable"
         try:
             order_service._validate_hakodate_original_execution(payload)
             original_source = (row.artifact_manifest_json or {}).get("original_hakodate_source")
             if not isinstance(original_source, dict):
-                return False
+                return "evidence_unusable"
             order_service._validate_hakodate_owned_artifacts(payload, original_source)
-        except (ValueError, KeyError, TypeError):
-            return False
+        except (ValueError, KeyError, TypeError) as exc:
+            return str(exc) if isinstance(exc, ValueError) and str(exc) else "evidence_unusable"
     if _has_failed_evidence_status(row.status, payload.get("status"), payload.get("stage")):
-        return False
+        return "evidence_unusable"
     if (row.payload_json or {}).get("canonical_adoption_allowed") is False:
-        return False
+        return "evidence_unusable"
     if row.status in {"diagnostic_only", "repair_blocked"} or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"}:
-        return False
+        return "evidence_unusable"
     if row.producer_version == "legacy-cache-mirror/v1":
-        return False
+        return "evidence_unusable"
     execution = (row.payload_json or {}).get("_ocr_execution")
     if execution is not None:
         if not isinstance(execution, dict) or execution.get("evidence_run_id") != row.id or not execution.get("job_id"):
-            return False
+            return "evidence_unusable"
         if (execution.get("workflow_attempt_id") is None) != (execution.get("workflow_revision") is None):
-            return False
-    return True
+            return "evidence_unusable"
+    return None
+
+
+def evidence_run_is_selectable(row: OrderOcrEvidenceRun) -> bool:
+    return evidence_run_selectability_error(row) is None
 
 
 def list_evidence_runs(order_id: str) -> list[dict[str, Any]]:
