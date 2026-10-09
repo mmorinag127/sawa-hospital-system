@@ -286,6 +286,9 @@ def _wait_for_output(
 ) -> dict[str, Any]:
     try:
         from google.cloud import storage  # type: ignore
+        from google.api_core import exceptions as api_exceptions
+        from google.api_core.retry import if_transient_error
+        from requests.exceptions import Timeout as TransportTimeout
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("google-cloud-storage is required for OCR pipeline output") from exc
     client = storage.Client()
@@ -293,11 +296,30 @@ def _wait_for_output(
     deadline = start + timeout_seconds
     read_timeout = _get_output_read_timeout()
     while time.monotonic() < deadline:
+        output_exists = False
+        blob = client.bucket(bucket).blob(object_name)
         try:
-            blob = client.bucket(bucket).blob(object_name)
-            if blob.exists(timeout=read_timeout, retry=None):
+            output_exists = blob.exists(timeout=read_timeout, retry=None)
+            if output_exists:
                 blob.reload(timeout=read_timeout, retry=None)
                 data = blob.download_as_bytes(if_generation_match=int(blob.generation), timeout=read_timeout, retry=None)
+        except Exception as exc:  # noqa: BLE001
+            if not (if_transient_error(exc) or isinstance(exc, (
+                api_exceptions.DeadlineExceeded, api_exceptions.GatewayTimeout,
+                api_exceptions.BadGateway, TransportTimeout, TimeoutError,
+            )) or (output_exists and isinstance(exc, (
+                api_exceptions.NotFound, api_exceptions.PreconditionFailed,
+            )))):
+                raise
+            logger.warning(
+                "OCR pipeline output poll failed bucket=%s name=%s timeout=%ss error=%s",
+                bucket,
+                object_name,
+                read_timeout,
+                str(exc),
+            )
+        else:
+            if output_exists:
                 payload = json.loads(data.decode("utf-8"))
                 from src.services.ocr_job_service import validate_own_pipeline_result
 
@@ -333,16 +355,6 @@ def _wait_for_output(
                     status or "-",
                     stage or "-",
                 )
-        except ValueError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "OCR pipeline output poll failed bucket=%s name=%s timeout=%ss error=%s",
-                bucket,
-                object_name,
-                read_timeout,
-                str(exc),
-            )
         time.sleep(poll_interval)
     elapsed = time.monotonic() - start
     logger.warning(
