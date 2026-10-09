@@ -29,7 +29,20 @@ class MemoryBlob:
             raise self.transport.failure
         self.transport.objects[self.key] = bytes(data)
 
-    def download_as_bytes(self):
+    def reload(self, *, retry):
+        assert retry is None
+        self.generation = self.transport.generations[self.key]
+        self.transport.events.append(("reload", self.key, self.generation))
+
+    def download_as_bytes(self, **kwargs):
+        if kwargs:
+            generation = self.transport.generations[self.key]
+            assert kwargs == {"if_generation_match": int(generation), "retry": None}
+            assert type(kwargs["if_generation_match"]) is int
+            assert self.generation == generation
+            data = self.transport.objects[self.key]
+            self.transport.events.append(("download-pinned", self.key, generation, sha256(data).hexdigest()))
+            return data
         self.transport.events.append(("download", self.key))
         return self.transport.objects[self.key]
 
@@ -49,6 +62,7 @@ class MemoryClient:
     def __init__(self):
         self.events = []
         self.objects = {}
+        self.generations = {}
         self.failure = None
 
     def bucket(self, name):
@@ -130,13 +144,24 @@ def test_cloud_run_registered_endpoint_retains_missing_storage_503(
         "facility_id": "synthetic-storage",
         "facility_name": "Synthetic workbook storage facility", "areas": [],
     }]}), encoding="utf-8")
-    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
-    monkeypatch.setenv("FACILITY_MASTER_PATH", str(master_path))
+    master_bytes = master_path.read_bytes()
+    master_digest = sha256(master_bytes).hexdigest()
+    master_key = ("componentcanonical", "facilities.json")
+    master_uri = "gs://componentcanonical/facilities.json"
+    master_generation = "123456789"
+    client.objects[master_key] = master_bytes
+    client.generations[master_key] = master_generation
+    monkeypatch.setenv("FACILITY_MASTER_URI", master_uri)
+    monkeypatch.delenv("FACILITY_MASTER_PATH", raising=False)
     monkeypatch.setenv("K_SERVICE", "synthetic-cloud-run-component")
     monkeypatch.setenv("RAW_BUCKET", "must-not-use-raw")
     if output_bucket is not None:
         monkeypatch.setenv("OCR_OUTPUT_BUCKET", output_bucket)
     snapshot = facility_master_service.get_snapshot()
+    assert snapshot.source == master_uri
+    assert snapshot.revision.startswith("gcs:")
+    assert snapshot.revision.endswith(f":{master_generation}")
+    assert snapshot.master == json.loads(master_bytes)
     assert snapshot.master["facilities"][0]["facility_id"] == "synthetic-storage"
     assert any(route.endpoint is facilities.upload_order_form_source_workbook
                for route in facilities.router.routes)
@@ -150,10 +175,14 @@ def test_cloud_run_registered_endpoint_retains_missing_storage_503(
         assert caught.value.status_code == 503
         assert caught.value.detail == "source_workbook_gcs_storage_required"
         assert upload.file.tell() == 0
-        assert client.events == []
-        assert client.objects == {}
         assert not materialized.exists()
         assert facility_master_service.get_snapshot().revision == snapshot.revision
+        assert client.objects == {master_key: master_bytes}
+        assert client.generations == {master_key: master_generation}
+        assert client.events == [
+            ("reload", master_key, master_generation),
+            ("download-pinned", master_key, master_generation, master_digest),
+        ] * 3
     finally:
         upload.file.close()
 
