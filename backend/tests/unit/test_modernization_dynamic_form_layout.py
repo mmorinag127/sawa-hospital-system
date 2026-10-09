@@ -233,3 +233,57 @@ def test_weekless_prototype_keeps_explicit_static_contract(tmp_path, copied_mast
         assert {"E11:E12", "E13:E15", "E16:E18"}.issubset({str(region) for region in ws.merged_cells.ranges})
     finally:
         workbook.close()
+
+
+@pytest.mark.parametrize("sizes,extra,expected_count", [
+    ((2, 3, 3), 0, 56), ((2, 3, 3), 2, 58), ((5, 5, 5), 0, 105),
+], ids=["render-56", "render-58", "render-five-per-meal"])
+def test_actual_synthetic_png_pixels_match_dynamic_body_geometry(tmp_path, copied_master, sizes, extra, expected_count):
+    """Copied-master synthetic rendering only, not recognizer/native FAX/stg proof."""
+    from PIL import Image
+    from src.services import workbook_pdf_renderer as renderer
+
+    entries = entries_for(range(7), sizes)
+    for index in range(extra):
+        entries.append({**entries[-1], "name": f"render-last-extra-{index}", "sort_order": 4 + index})
+    workbook = build_reload(tmp_path, copied_master, entries)
+    try:
+        ws = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
+        plan = master.validated_body_row_plan(ws)
+        assert len(plan) == expected_count
+        end = 10 + expected_count
+        assert plan[-1]["worksheet_row"] == end
+        assert ws.cell(end, 4).value == entries[-1]["name"]
+        geometry = renderer.worksheet_render_geometry(ws, dpi=144)
+        grid = assignment._structure_grid_from_rendered_worksheet(ws, dpi=144)
+        image = renderer.render_worksheet_to_image(ws, dpi=144)
+        png = tmp_path / f"synthetic-body-{expected_count}.png"
+        try:
+            image.save(png, format="PNG")
+        finally:
+            image.close()
+        with Image.open(png) as actual:
+            assert actual.format == "PNG"
+            assert actual.size == (geometry["image_width"], geometry["image_height"])
+            assert geometry["print_range"] == [1, 1, 7, end + 2]
+            width, height = actual.size
+            assert grid["detected_row_count"] == expected_count + 2
+            assert round(grid["row_edges"][-2] * height) == geometry["y_positions"][end]
+            bottom = round(grid["row_edges"][-1] * height)
+            assert bottom == geometry["y_positions"][end + 1]
+            assert bottom < height - renderer._DEFAULT_MARGIN_PX
+            left, right = [round(grid["column_edges"][index] * width) for index in (5, 6)]
+            assert (left, right) == (geometry["x_positions"][6], geometry["x_positions"][7])
+            center = (left + right) // 2
+            pixels = actual.convert("RGB")
+            try:
+                # F is an empty, unmerged quantity column: text cannot mimic this border.
+                assert all(pixels.getpixel((x, bottom)) == (0, 0, 0) for x in range(left + 4, right - 3))
+                assert [pixels.getpixel((center, bottom + dy)) for dy in (-1, 0, 1)] == [(0, 0, 0)] * 3
+                assert pixels.getpixel((center, bottom - 5)) == (255, 255, 255)
+                last_row_center = (geometry["y_positions"][end] + bottom) // 2
+                assert pixels.getpixel((right, last_row_center)) == (0, 0, 0)
+            finally:
+                pixels.close()
+    finally:
+        workbook.close()
