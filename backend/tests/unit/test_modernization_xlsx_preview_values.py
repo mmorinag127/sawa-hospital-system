@@ -85,7 +85,7 @@ def test_dates_and_text_keep_date_format_and_html_escaping(tmp_path):
     _, html = save_and_render(workbook, tmp_path, title="Preview <&>")
     assert PreviewTable(html).texts() == [["2026-03-01", "2026-03-07", raw, "0"]]
     assert "<h2>Dates &amp; &lt;text&gt;</h2>" in html
-    assert "<h1>Preview &lt;&amp;&gt;</h1>" in html
+    assert "<h1>Preview &lt;&amp;&gt; プレビュー</h1>" in html
     assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &#x27;quoted&#x27;" in html
     assert "<script>" not in html
 
