@@ -7751,16 +7751,11 @@ def _resolve_daily_bag_menu_category(bag: dict[str, Any], stats: dict[str, Any])
     )
 
 
-def _resolve_facility_label_for_code(facility_code: str) -> str:
-    facility_code = str(facility_code or "").strip()
+def _resolve_facility_label_for_code(facility_config: dict[str, Any]) -> str:
+    facility_code = str(facility_config.get("facility_id") or "").strip()
     if not facility_code:
         return "未確定"
-    facility_name = ""
-    try:
-        facility_config = config_service.get_facility_config(facility_code) or {}
-        facility_name = str(facility_config.get("facility_name") or "").strip()
-    except Exception:
-        facility_name = ""
+    facility_name = str(facility_config.get("facility_name") or "").strip()
     return f"{facility_name} ({facility_code})" if facility_name else facility_code
 
 
@@ -7825,7 +7820,6 @@ def list_daily_output_override_editor_rows(
     if not normalized_daypart or not normalized_menu_name:
         raise ValueError("daypart and menu_name are required")
 
-    facility_labels: dict[str, str] = {}
     row_map: dict[tuple[str, str], dict[str, Any]] = {}
     overrides = daily_output_override_service.list_overrides(
         output_date=target_date,
@@ -7851,12 +7845,11 @@ def list_daily_output_override_editor_rows(
         if not isinstance(order_payload, dict):
             continue
         facility_code = str(order_payload.get("facility") or "").strip()
-        facility_label = facility_labels.get(facility_code)
-        if facility_label is None:
-            facility_label = _resolve_facility_label_for_code(facility_code)
-            facility_labels[facility_code] = facility_label
         from src.services.output_builder import _accepted_output_candidate
         accepted_candidate = _accepted_output_candidate(order_payload)
+        facility_label = _resolve_facility_label_for_code(
+            accepted_candidate["configured_input"]["facility"],
+        )
         lines = build_order_lines_for_outputs(order_payload, accepted_candidate=accepted_candidate)
         for line in lines:
             line_date = _normalize_entry_date(line.get("date"))
@@ -8243,7 +8236,6 @@ def get_daily_bag_summary(
 ) -> dict[str, Any]:
     orders = list_orders_by_line_date(target_date, facility_id=facility_id, status=status)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
-    facility_labels: dict[str, str] = {}
     from src.services.output_builder import build_bag_payload_for_outputs, build_order_lines_for_outputs
 
     for order_summary in orders:
@@ -8264,11 +8256,9 @@ def get_daily_bag_summary(
         bag_rows = build_bag_payload_for_outputs(order_payload, order_lines=order_lines, accepted_candidate=accepted_candidate)
         if not bag_rows:
             continue
-        facility_code = str(order_payload.get("facility") or "").strip()
-        facility_label = facility_labels.get(facility_code)
-        if facility_label is None:
-            facility_label = _resolve_facility_label_for_code(facility_code)
-            facility_labels[facility_code] = facility_label
+        facility_label = _resolve_facility_label_for_code(
+            accepted_candidate["configured_input"]["facility"],
+        )
 
         for bag in bag_rows:
             if _normalize_bag_summary_date(bag.get("date")) != target_date.isoformat():
