@@ -35,6 +35,7 @@ from src.services.order_serialization_service import menu_amount_resolution, can
 from src.services.menu_service import MenuReadUnresolved
 from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.workflow_attempt_guard_service import (
+    SelectedPdfReceiptError,
     lock_current_workflow_attempt, lock_current_workflow_revision, lock_order_execution_input,
     current_nonworkflow_execution, lock_actual_write_ownership,
     advance_nonworkflow_order_input,
@@ -1535,15 +1536,19 @@ def _workflow_menu_amount_resolution(session, order, workflow):
         if version and _normalize_id(draft.template_version_id) != version:
             error = "saved_sheet_template_mismatch"
     if error is None:
-        candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft)
-        if not isinstance(candidate, dict):
-            error = "saved_sheet_materialization_failed"
+        try:
+            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft)
+        except SelectedPdfReceiptError as exc:
+            error = str(exc)
         else:
-            error = _normalize_id(candidate.get("error"))
-            if not error and not candidate.get("lines"):
-                error = "draft_lines_empty"
-            if not error:
-                return candidate_menu_amount_resolution(order, candidate)
+            if not isinstance(candidate, dict):
+                error = "saved_sheet_materialization_failed"
+            else:
+                error = _normalize_id(candidate.get("error"))
+                if not error and not candidate.get("lines"):
+                    error = "draft_lines_empty"
+                if not error:
+                    return candidate_menu_amount_resolution(order, candidate)
     return {"status": "unresolved", "blocker": error, "message": error, "affected_lines": []}
 
 

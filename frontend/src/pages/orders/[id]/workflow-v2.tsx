@@ -847,6 +847,10 @@ const describeWorkflowBlocker = (code: string) => {
   const normalized = String(code || "").trim();
   const labels: Record<string, string> = {
     menu_amount_unresolved: "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。",
+    selected_pdf_document_required: "注文に紐づくFAX PDFを確認してください。",
+    selected_pdf_input_mismatch: "選択したFAX PDFが注文の参照元と一致していません。",
+    selected_pdf_digest_required: "FAX PDFの照合情報が不足しているため、処理を停止しています。",
+    selected_pdf_generation_required: "FAX PDFの保存版を特定できないため、処理を停止しています。",
     menu_entries_missing: "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_object_missing: "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_lookup_failed: "対象週の月次メニューを解決できません。メニュー登録を確認してください。",
@@ -1835,11 +1839,12 @@ export default function OrderWorkflowV2Page() {
   const menuAmountResolution = workflow?.saved_sheet_id
     ? workflow.menu_amount_resolution
     : orderDetail?.menu_amount_resolution;
+  const menuAmountBlocker = menuAmountResolution?.blocker || "menu_amount_unresolved";
   const menuAmountUnresolved = Boolean(workflow?.saved_sheet_id && !menuAmountResolution)
     || menuAmountResolution?.status === "unresolved"
     || workflowBlockers.includes("menu_amount_unresolved");
-  if (menuAmountUnresolved && !workflowBlockers.includes("menu_amount_unresolved")) {
-    workflowBlockers.push("menu_amount_unresolved");
+  if (menuAmountUnresolved && !workflowBlockers.includes(menuAmountBlocker)) {
+    workflowBlockers.push(menuAmountBlocker);
   }
   const ocrJobErrorMessage = String(
     workflow?.ocr_job?.error_user_message
@@ -3818,7 +3823,7 @@ export default function OrderWorkflowV2Page() {
 
   const runBagging = () =>
     runAction("Step4 bagging", async ({ adopt }) => {
-      if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker("menu_amount_unresolved"));
+      if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker(menuAmountBlocker));
       await executeWorkflowMutation("bagging", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/bagging`, undefined, config), adopt);
     }, {
       successMessage: "出力確認を作成しました",
@@ -3870,7 +3875,7 @@ export default function OrderWorkflowV2Page() {
     runAction(
       "Step4 final confirm",
       async ({ adopt, assertCurrent }) => {
-        if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker("menu_amount_unresolved"));
+        if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker(menuAmountBlocker));
         await executeWorkflowMutation("finalConfirm", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
           confirmed_by: "operator",
         }, config), adopt);

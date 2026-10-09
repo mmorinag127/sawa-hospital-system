@@ -30,6 +30,10 @@ _nonworkflow_execution: ContextVar[dict[str, Any] | None] = ContextVar("nonworkf
 _workflow_execution: ContextVar[dict[str, Any] | None] = ContextVar("workflow_execution", default=None)
 
 
+class SelectedPdfReceiptError(ValueError):
+    pass
+
+
 @event.listens_for(Session, "before_flush")
 def _bind_workflow_delivery_pending_handoff(session, flush_context, instances):
     from src.services.workflow_ocr_delivery_service import bind_pending_handoff_in_session
@@ -229,34 +233,34 @@ def _document_belongs_to_order(session, document, order_id):
 
 def capture_selected_pdf_receipt(session, order, selected=None, input_reference=None):
     if order is None:
-        raise ValueError("selected_pdf_document_required")
+        raise SelectedPdfReceiptError("selected_pdf_document_required")
     if selected is not None:
         uri, message = selected.get("storage_uri"), selected.get("message_id")
         document_id = selected.get("document_id")
         document = session.get(OrderDocument, document_id) if document_id else None
         if not _document_belongs_to_order(session, document, order.id) or document.storage_uri != uri:
-            raise ValueError("selected_pdf_document_required")
+            raise SelectedPdfReceiptError("selected_pdf_document_required")
         if message is None:
             message = document.source_email_id
         elif message != document.source_email_id:
-            raise ValueError("selected_pdf_input_mismatch")
+            raise SelectedPdfReceiptError("selected_pdf_input_mismatch")
     else:
         document = session.get(OrderDocument, order.current_document_id) if order.current_document_id else None
         if not _document_belongs_to_order(session, document, order.id):
-            raise ValueError("selected_pdf_document_required")
+            raise SelectedPdfReceiptError("selected_pdf_document_required")
         uri, message, document_id = document.storage_uri, document.source_email_id, document.id
     if input_reference is not None and uri != input_reference:
-        raise ValueError("selected_pdf_input_mismatch")
+        raise SelectedPdfReceiptError("selected_pdf_input_mismatch")
     if not isinstance(uri, str) or not uri:
-        raise ValueError("selected_pdf_input_mismatch")
+        raise SelectedPdfReceiptError("selected_pdf_input_mismatch")
     rows = session.execute(select(UploadedPdf).where(UploadedPdf.message_id == message, UploadedPdf.storage_uri == uri)).scalars().all()
     if len(rows) != 1 or not re.fullmatch(r"[0-9a-f]{64}", str(rows[0].content_sha256 or "")):
-        raise ValueError("selected_pdf_digest_required")
+        raise SelectedPdfReceiptError("selected_pdf_digest_required")
     generation = None
     if urlparse(uri).scheme == "gs":
         values = parse_qs(urlparse(uri).query).get("generation", [])
         if values and (len(values) != 1 or not values[0].isdigit()):
-            raise ValueError("selected_pdf_generation_required")
+            raise SelectedPdfReceiptError("selected_pdf_generation_required")
         generation = values[0] if values else None
     return {"uploaded_pdf_id": rows[0].id, "document_id": document_id, "order_id": order.id, "message_id": message,
             "storage_uri": uri, "sha256": rows[0].content_sha256, "generation": generation}
