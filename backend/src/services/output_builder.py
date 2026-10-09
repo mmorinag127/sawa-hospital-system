@@ -28,8 +28,9 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 from src.db import session_scope
 from src.models.order import Order
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
-from src.models.order_output_artifact import OrderBaggingResult
+from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.facility_template_version import FacilityTemplateVersion
@@ -1858,7 +1859,7 @@ def _accepted_output_candidate(order: dict, *, write_session=None) -> dict:
     order_id = str(order.get("id") or "").strip()
     if not order_id:
         raise ValueError("accepted output order missing")
-    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session, session.no_autoflush:
         workflow = session.get(OrderWorkflowState, order_id)
         if workflow is None or not workflow.draft_id:
             raise ValueError("accepted saved sheet missing")
@@ -1867,7 +1868,94 @@ def _accepted_output_candidate(order: dict, *, write_session=None) -> dict:
             raise ValueError("accepted saved sheet mismatch")
         if not draft.template_version_id or workflow.template_version_id != draft.template_version_id:
             raise ValueError("accepted template identity missing or mismatched")
-        return _workflow_v2_materialization_candidate(session, order, workflow, draft)
+        candidate = _workflow_v2_materialization_candidate(session, order, workflow, draft)
+        _validate_accepted_read_receipt(session, order_id, workflow, draft, candidate)
+        return candidate
+
+
+def _validate_accepted_read_receipt(session, order_id, workflow, draft, candidate):
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    order = session.get(Order, order_id)
+    evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id) if workflow.evidence_run_id else None
+    if (
+        order is None or evidence is None or evidence.order_id != order_id
+        or draft.base_evidence_run_id != evidence.id
+        or evidence.template_version_id != draft.template_version_id
+        or order.template_version_id != draft.template_version_id
+        or not isinstance(draft.draft_sheet_json, dict)
+        or any(draft.draft_sheet_json.get(key) and draft.draft_sheet_json[key] != evidence.id
+               for key in ("base_evidence_run_id", "evidence_run_id"))
+    ):
+        raise ValueError("output original saved sheet identity mismatch")
+    current_input = {
+        "draft_id": draft.id, "evidence_run_id": evidence.id,
+        "draft": {"draft_sheet_json": draft.draft_sheet_json, "template_version_id": draft.template_version_id},
+    }
+    meta = (workflow.secondary_actions_json or {}).get("workflow_v2", {})
+    bagging = session.get(OrderBaggingResult, meta["bagging_result_id"]) if meta.get("bagging_result_id") else None
+    if bagging is None or bagging.source_ocr_result_id != evidence.id:
+        raise ValueError("output original saved sheet identity mismatch")
+    output_record = session.get(OrderOutputBundle, meta["output_bundle_id"]) if meta.get("output_bundle_id") else None
+    output = output_record.payload_json if output_record is not None else None
+    if (workflow.confirmed_snapshot_id or workflow.state == "confirmed" or order.status == "確定"
+            or meta.get("confirmed_snapshot_id") or (isinstance(output, dict) and output.get("confirmed_snapshot_id"))):
+        snapshot = session.get(OrderConfirmedSnapshot, workflow.confirmed_snapshot_id) if workflow.confirmed_snapshot_id else None
+        _validate_accepted_confirmed_receipt(session, order_id, meta, snapshot, current_input, candidate)
+        return
+    _, start = _accepted_bagging_start_input(meta, workflow.revision, candidate)
+    if (start.get("order_id") != order_id or start.get("draft_id") != draft.id
+            or start.get("evidence_run_id") != evidence.id):
+        raise ValueError("output original bagging input mismatch")
+    versions = start.get("input_versions")
+    if not isinstance(versions, dict):
+        raise ValueError("output original bagging input mismatch")
+    # Compare persisted read inputs only: no current policy/menu recapture or locks.
+    for key, row in (("draft", draft), ("evidence", evidence)):
+        current = {column.key: getattr(row, column.key) for column in row.__table__.columns}
+        if not snapshots_equal(versions.get(key), current):
+            raise ValueError("output original bagging input mismatch")
+    if not snapshots_equal(candidate.get("configured_input"), start.get("configured_input")):
+        raise ValueError("output original bagging configuration mismatch")
+
+
+def _validate_accepted_confirmed_receipt(session, order_id, meta, snapshot, current_input, candidate):
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    from src.services.order_workflow_v2_service import _canonical_payload_digest, _serialize_materialized_order_line
+    if snapshot is None or snapshot.order_id != order_id or snapshot.saved_sheet_id != current_input["draft_id"]:
+        raise ValueError("output original confirmed receipt missing")
+    payload = snapshot.snapshot_json
+    if not isinstance(payload, dict) or snapshot.snapshot_digest != _canonical_payload_digest(payload):
+        raise ValueError("output original confirmed receipt mismatch")
+    if order_output_artifact_service.confirmed_snapshot_artifact_payloads(session, snapshot, expected_order_id=order_id) is None:
+        raise ValueError("output original confirmed artifact mismatch")
+    if not snapshots_equal(payload.get("saved_sheet"), current_input["draft"]["draft_sheet_json"]) or payload.get("selected_ocr_result_id") != current_input["evidence_run_id"] or snapshot.template_version_id != current_input["draft"]["template_version_id"]:
+        raise ValueError("output original confirmed sheet mismatch")
+    bagging = payload.get("bagging_result", {})
+    # The top-level candidate also carries the final materialization input receipt.
+    # Compare the accepted bagging candidate; the snapshot digest covers both.
+    if (snapshot.bagging_result_id != meta.get("bagging_result_id")
+            or snapshot.output_bundle_id != meta.get("output_bundle_id")
+            or not snapshots_equal(bagging.get("materialization_candidate"), candidate)):
+        raise ValueError("output original confirmed candidate mismatch")
+    order = session.get(Order, order_id)
+    current_lines = [_serialize_materialized_order_line(line) for line in sorted(order.lines, key=lambda line: line.id)]
+    saved_lines = payload.get("order_lines")
+    if (not isinstance(saved_lines, list)
+            or any(not isinstance(line, dict) or not isinstance(line.get("id"), str) for line in saved_lines)
+            or not snapshots_equal(current_lines, sorted(saved_lines, key=lambda line: line["id"]))
+            or any(line.confirmed_snapshot_id != snapshot.id for line in order.lines)):
+        raise ValueError("output original confirmed lines mismatch")
+
+
+def _accepted_bagging_start_input(meta, revision, candidate):
+    from src.services.order_workflow_v2_service import _canonical_payload_digest
+    proof = meta.get("bagging_input_proof")
+    if not isinstance(proof, dict) or type(proof.get("owned_revision")) is not int or proof["owned_revision"] != revision:
+        raise ValueError("output original bagging proof missing")
+    start = proof.get("start_input")
+    if proof.get("bagging_result_id") != meta.get("bagging_result_id") or proof.get("materialization_digest") != _canonical_payload_digest(candidate) or not isinstance(start, dict):
+        raise ValueError("output original bagging proof mismatch")
+    return proof, start
 
 
 def _capture_output_adoption(order_id: str, session) -> dict:
@@ -1885,7 +1973,6 @@ def _capture_output_adoption(order_id: str, session) -> dict:
 
 def _accepted_output_origin(session, order_id, current_input, candidate, *, lock=False):
     from src.services.workflow_attempt_guard_service import snapshots_equal
-    from src.services.order_workflow_v2_service import _canonical_payload_digest, _serialize_materialized_order_line
     workflow = session.get(OrderWorkflowState, order_id)
     meta = (workflow.secondary_actions_json or {}).get("workflow_v2", {})
     if workflow.confirmed_snapshot_id:
@@ -1893,30 +1980,9 @@ def _accepted_output_origin(session, order_id, current_input, candidate, *, lock
         if lock and session.bind.dialect.name != "sqlite":
             query = query.with_for_update()
         snapshot = session.execute(query.execution_options(populate_existing=True)).scalar_one_or_none()
-        if snapshot is None or snapshot.order_id != order_id or snapshot.saved_sheet_id != current_input["draft_id"]:
-            raise ValueError("output original confirmed receipt missing")
-        payload = snapshot.snapshot_json
-        if not isinstance(payload, dict) or snapshot.snapshot_digest != _canonical_payload_digest(payload):
-            raise ValueError("output original confirmed receipt mismatch")
-        if order_output_artifact_service.confirmed_snapshot_artifact_payloads(session, snapshot, expected_order_id=order_id) is None:
-            raise ValueError("output original confirmed artifact mismatch")
-        if not snapshots_equal(payload.get("saved_sheet"), current_input["draft"]["draft_sheet_json"]) or payload.get("selected_ocr_result_id") != current_input["evidence_run_id"] or snapshot.template_version_id != current_input["draft"]["template_version_id"]:
-            raise ValueError("output original confirmed sheet mismatch")
-        bagging = payload.get("bagging_result", {})
-        if snapshot.bagging_result_id != meta.get("bagging_result_id") or not snapshots_equal(bagging.get("materialization_candidate"), candidate):
-            raise ValueError("output original confirmed candidate mismatch")
-        order = session.get(Order, order_id)
-        current_lines = [_serialize_materialized_order_line(line) for line in sorted(order.lines, key=lambda line: line.id)]
-        saved_lines = payload.get("order_lines")
-        if not isinstance(saved_lines, list) or not snapshots_equal(current_lines, sorted(saved_lines, key=lambda line: line["id"])):
-            raise ValueError("output original confirmed lines mismatch")
+        _validate_accepted_confirmed_receipt(session, order_id, meta, snapshot, current_input, candidate)
         return order_service._json_snapshot({column.key: getattr(snapshot, column.key) for column in snapshot.__table__.columns})
-    proof = meta.get("bagging_input_proof")
-    if not isinstance(proof, dict) or type(proof.get("owned_revision")) is not int or proof["owned_revision"] != current_input["workflow_revision"]:
-        raise ValueError("output original bagging proof missing")
-    start = proof.get("start_input")
-    if proof.get("bagging_result_id") != meta.get("bagging_result_id") or proof.get("materialization_digest") != _canonical_payload_digest(candidate) or not isinstance(start, dict):
-        raise ValueError("output original bagging proof mismatch")
+    proof, start = _accepted_bagging_start_input(meta, current_input["workflow_revision"], candidate)
     for key in ("order_id", "input_versions", "selected_pdf_receipt", "configured_input", "physical_menu_entries", "draft_id", "evidence_run_id"):
         if key not in start or not snapshots_equal(start[key], current_input.get(key)):
             raise ValueError("output original bagging input mismatch")
