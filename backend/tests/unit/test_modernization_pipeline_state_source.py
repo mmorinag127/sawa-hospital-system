@@ -9,7 +9,6 @@ from datetime import datetime
 from copy import deepcopy
 from hashlib import sha256
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +22,7 @@ from src.services.workflow_attempt_guard_service import (
 from src import db
 from src.models.ocr_job import OcrJob
 from test_modernization_owned_ocr_workflow import FACILITY, JOB, ORDER, OwnedProducer
+from modernization_owned_pipeline_transport import install_owned_pipeline_transport
 
 
 @pytest.fixture(autouse=True)
@@ -142,8 +142,6 @@ def test_real_owned_caller_request_write_failure_propagates_before_http_or_poll(
     tmp_path, monkeypatch, trigger_url, wait_for_output,
 ):
     """Transport component: real ownership, no real GCS/HTTP/recognition."""
-    from google.cloud import storage
-
     f = OwnedProducer(tmp_path, monkeypatch)
     try:
         monkeypatch.setenv("OCR_PIPELINE_STATE_URI", str(tmp_path / "caller-state.json"))
@@ -157,40 +155,7 @@ def test_real_owned_caller_request_write_failure_propagates_before_http_or_poll(
         else:
             monkeypatch.setenv("OCR_PIPELINE_URL", trigger_url)
 
-        objects = {}
-        transport_events = []
-
-        class Blob:
-            def __init__(self, bucket, name, generation=None):
-                self.key = (bucket, name)
-                self.generation = generation
-                self.metadata = None
-
-            def upload_from_string(self, data, *, content_type, if_generation_match):
-                assert if_generation_match == 0
-                assert self.key not in objects
-                self.generation = len(objects) + 1
-                objects[self.key] = (bytes(data), deepcopy(self.metadata), self.generation, content_type)
-                transport_events.append(("upload", self.key))
-
-            def reload(self):
-                _, metadata, generation, _ = objects[self.key]
-                assert self.generation == generation
-                self.metadata = deepcopy(metadata)
-                transport_events.append(("reload", self.key))
-
-            def download_as_bytes(self, *, if_generation_match):
-                data, _, generation, _ = objects[self.key]
-                assert self.generation == if_generation_match == generation
-                transport_events.append(("download", self.key))
-                return data
-
-        class Client:
-            def bucket(self, name):
-                assert name == "explicit-component-input"
-                return SimpleNamespace(blob=lambda object_name, generation=None: Blob(name, object_name, generation))
-
-        monkeypatch.setattr(storage, "Client", Client)
+        objects, transport_events = install_owned_pipeline_transport(monkeypatch)
         external_calls = []
 
         def forbidden_http(*args, **kwargs):
