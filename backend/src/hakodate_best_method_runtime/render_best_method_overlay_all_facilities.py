@@ -311,8 +311,6 @@ def _run_text_recognizer_records(
         regions=regions,
         line_mask=None,
         mode="corner_cc",
-        min_ink_area=18,
-        min_ink_height=8,
     )
     contact_seconds = time.perf_counter() - contact_t0
     recognized_regions, metrics = run_text_recognizer_direct(

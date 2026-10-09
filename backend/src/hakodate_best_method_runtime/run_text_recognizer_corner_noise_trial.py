@@ -355,19 +355,32 @@ def _warp_polygon_cell_to_axis_aligned_crop(
     rectified_fax_bgr: np.ndarray,
     polygon: list[list[float]] | None,
 ) -> tuple[np.ndarray, list[float], tuple[int, int, int, int], tuple[int, int, int, int]] | None:
-    if not polygon or len(polygon) < 4:
+    if polygon is None:
         return None
-    pts = np.array([[float(point[0]), float(point[1])] for point in polygon[:4]], dtype=np.float32)
+    if len(polygon) != 4:
+        raise ValueError("recognizer_crop_polygon_invalid")
+    pts = np.array(polygon, dtype=np.float32)
+    height, width = rectified_fax_bgr.shape[:2]
+    if (
+        pts.shape != (4, 2)
+        or not np.isfinite(pts).all()
+        or (pts[:, 0] < 0).any()
+        or (pts[:, 0] > width).any()
+        or (pts[:, 1] < 0).any()
+        or (pts[:, 1] > height).any()
+        or not cv2.isContourConvex(pts)
+        or cv2.contourArea(pts) <= 0
+    ):
+        raise ValueError("recognizer_crop_polygon_invalid")
     top_w = float(np.linalg.norm(pts[1] - pts[0]))
     bottom_w = float(np.linalg.norm(pts[2] - pts[3]))
     left_h = float(np.linalg.norm(pts[3] - pts[0]))
     right_h = float(np.linalg.norm(pts[2] - pts[1]))
     out_w = int(round(max(top_w, bottom_w)))
     out_h = int(round(max(left_h, right_h)))
-    if out_w < 8 or out_h < 8:
-        return None
-    out_w = min(max(out_w, 8), 360)
-    out_h = min(max(out_h, 8), 220)
+    if out_w < 2 or out_h < 2:
+        raise ValueError("recognizer_crop_dimensions_invalid")
+    # Rectify at source resolution; fit the foreground uniformly only afterwards.
     dst = np.array(
         [
             [0.0, 0.0],
@@ -410,26 +423,26 @@ def build_recognizer_contact_sheet(
     min_ink_area: int = 18,
     min_ink_height: int = 8,
 ) -> tuple[Image.Image, list[dict[str, Any]], list[list[list[int]]], list[dict[str, Any]]]:
+    # Keep legacy ink arguments for callers, but never use them to skip recognition.
     height, width = rectified_fax_bgr.shape[:2]
     candidate_items: list[tuple[int, dict[str, Any], Image.Image, tuple[int, int, int, int], dict[str, Any]]] = []
     skipped_regions: list[dict[str, Any]] = []
     for slot_index, region in enumerate(regions):
         box = region.get("bbox")
-        if not isinstance(box, list):
-            continue
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or not all(isinstance(value, (int, float)) and np.isfinite(value) for value in box)
+            or not (0 <= box[0] < box[2] <= width and 0 <= box[1] < box[3] <= height)
+        ):
+            raise ValueError(f"recognizer_crop_bbox_invalid: target_index={slot_index}")
         polygon = _region_polygon(region)
+        if region.get("polygon") is not None and polygon is None:
+            raise ValueError(f"recognizer_crop_polygon_invalid: target_index={slot_index}")
         warped_cell = _warp_polygon_cell_to_axis_aligned_crop(rectified_fax_bgr, polygon) if mode.startswith("corner_cc") else None
         if warped_cell is not None:
             crop, preprocess_cell_box, preprocess_px_box, source_px_box = warped_cell
             px_box = source_px_box
-        elif polygon and mode.startswith("corner_cc"):
-            px_box = _safe_int_box_for_polygon(
-                polygon,
-                width=width,
-                height=height,
-                pad_x_px=2,
-                pad_y_px=10,
-            )
         elif mode == "dynamic":
             px_box = _expanded_cell_box(box, width=width, height=height, pad_x_px=4, pad_y_px=12)
         elif mode == "corner_cc":
@@ -437,18 +450,18 @@ def build_recognizer_contact_sheet(
         else:
             px_box = _safe_int_box(box, width=width, height=height, margin_ratio=margin_ratio)
         if not px_box:
-            continue
+            raise ValueError(f"recognizer_crop_bbox_empty: target_index={slot_index}")
         if warped_cell is None:
             x0, y0, x1, y1 = px_box
             crop = rectified_fax_bgr[y0:y1, x0:x1]
             if crop.size == 0:
-                continue
+                raise ValueError(f"recognizer_crop_empty: target_index={slot_index}")
             crop = _mask_crop_to_region_polygon(crop, polygon=polygon, crop_box=px_box)
             preprocess_cell_box = box
             preprocess_px_box = px_box
             source_px_box = px_box
         if crop.size == 0:
-            continue
+            raise ValueError(f"recognizer_crop_empty: target_index={slot_index}")
         crop_line_mask = None if warped_cell is not None or line_mask is None else line_mask[y0:y1, x0:x1]
         if mode == "dynamic":
             crop_image, ink_stats = _preprocess_dynamic_crop_for_recognizer(
@@ -475,38 +488,15 @@ def build_recognizer_contact_sheet(
                 slot_height=slot_height,
                 mode=mode,
             )
-        is_candidate = bool(
-            int(ink_stats["ink_area"]) >= min_ink_area and int(ink_stats["bbox_height"]) >= min_ink_height
-        )
-        if mode.startswith("corner_cc") and int(ink_stats.get("digit_like_component_count") or 0) <= 0:
-            is_candidate = False
         prepared_region = {
             **region,
             "ocr_contact_slot_index": slot_index,
             "ocr_cell_crop_bbox_px": [int(value) for value in source_px_box],
             "recognizer_crop_mode": mode,
             "recognizer_ink_stats": ink_stats,
-            "recognizer_candidate": is_candidate,
+            "recognizer_candidate": True,
         }
-        if is_candidate:
-            candidate_items.append((slot_index, prepared_region, crop_image, source_px_box, ink_stats))
-        else:
-            skipped_regions.append(
-                {
-                    **prepared_region,
-                    "ocr_contact_slot": [],
-                    "ocr_contact_crop_box": [],
-                    "ocr_text": "",
-                    "ocr_normalized": "",
-                    "ocr_words": [],
-                    "ocr_word_count": 0,
-                    "recognizer_raw_text": "",
-                    "recognizer_score": 0.0,
-                    "recognizer_direction": "",
-                    "recognizer_accepted": False,
-                    "recognizer_skipped": True,
-                }
-            )
+        candidate_items.append((slot_index, prepared_region, crop_image, source_px_box, ink_stats))
     row_count = max(1, (len(candidate_items) + columns - 1) // columns)
     sheet = Image.new("RGB", (columns * slot_width, row_count * slot_height), "white")
     usable_regions: list[dict[str, Any]] = []
