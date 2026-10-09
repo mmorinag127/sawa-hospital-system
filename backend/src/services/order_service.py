@@ -182,8 +182,9 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
         evidence = session.get(OrderOcrEvidenceRun, evidence_run_id) if evidence_run_id else None
         if evidence is None or evidence.order_id != order_id:
             return None
-        if not ocr_evidence_service.evidence_run_is_selectable(evidence):
-            return None
+        rejection = ocr_evidence_service.evidence_run_selectability_error(evidence)
+        if rejection is not None:
+            raise ocr_evidence_service.SelectedEvidenceRejected(rejection)
         if evidence.template_version_id != workflow.template_version_id:
             return None
         draft_id = str(workflow.draft_id or "").strip() or None
@@ -11607,6 +11608,8 @@ def _load_latest_hakodate_overlay_source(
 ) -> tuple[dict[str, Any], str | None, bool]:
     try:
         captured_input = captured_input if captured_input is not None else _capture_synchronous_cache_write_input(order_id)
+    except ocr_evidence_service.SelectedEvidenceRejected:
+        raise
     except ValueError:
         return {}, None, False
     if captured_input is None:
@@ -11614,8 +11617,8 @@ def _load_latest_hakodate_overlay_source(
     latest_evidence = captured_input["evidence"]
     try:
         _validate_selected_hakodate_artifacts(latest_evidence, captured_input)
-    except ValueError:
-        return {}, None, False
+    except ValueError as exc:
+        raise ocr_evidence_service.SelectedEvidenceRejected(str(exc)) from exc
     latest_payload = latest_evidence.get("payload_json") if isinstance(latest_evidence, dict) else None
     if (
         isinstance(latest_payload, dict)
@@ -11762,7 +11765,10 @@ def get_cached_hakodate_overlay_preview(order_id: str) -> dict[str, Any]:
             raise ValueError("synchronous_input_missing")
     except ValueError as exc:
         return {"status": "blocked", "blockers": [str(exc)], "overlay_url": None, "overlay_uri": None, "assignment": None, "job_status": job_status}
-    overlay_payload, evidence_run_id, has_latest_hakodate_evidence = _load_latest_hakodate_overlay_source(order_id, captured_input=captured_input)
+    try:
+        overlay_payload, evidence_run_id, has_latest_hakodate_evidence = _load_latest_hakodate_overlay_source(order_id, captured_input=captured_input)
+    except ocr_evidence_service.SelectedEvidenceRejected as exc:
+        return {"status": "blocked", "blockers": [str(exc)], "overlay_url": None, "overlay_uri": None, "assignment": None, "job_status": job_status}
     if not isinstance(overlay_payload, dict):
         return {
             "status": "blocked",
@@ -21510,7 +21516,10 @@ def _build_hakodate_overlay_preview(
         return {"status": "blocked", "blockers": [str(exc)], "overlay_url": None, "job_status": job_status}
     if captured_input is None:
         return {"status": "blocked", "blockers": ["synchronous_input_missing"], "overlay_url": None, "job_status": job_status}
-    cached_payload, evidence_run_id, has_latest_hakodate_evidence = _load_latest_hakodate_overlay_source(order_id, captured_input=captured_input)
+    try:
+        cached_payload, evidence_run_id, has_latest_hakodate_evidence = _load_latest_hakodate_overlay_source(order_id, captured_input=captured_input)
+    except ocr_evidence_service.SelectedEvidenceRejected as exc:
+        return {"status": "blocked", "blockers": [str(exc)], "overlay_url": None, "job_status": job_status}
     if not has_latest_hakodate_evidence:
         return {"status": "blocked", "blockers": ["hakodate_selected_evidence_invalid"], "overlay_url": None, "job_status": job_status}
     assignment, assignment_error = build_order_hakodate_assignment(

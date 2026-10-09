@@ -2,6 +2,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.api import (
     auth_config,
@@ -25,11 +26,17 @@ from src.api import (
     portal,
 )
 from src.services import facility_service, facility_template_version_service, menu_service
+from src.services.ocr_evidence_service import SelectedEvidenceRejected
 from src.services.read_only_request_guard_service import read_only_request_guard
 from src import db
 from src.maintenance.formal_migration_schema import require_formal_head
 
 app = FastAPI(title="Hospital Order System API")
+
+
+@app.exception_handler(SelectedEvidenceRejected)
+async def _selected_evidence_rejected(request, exc: SelectedEvidenceRejected):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.middleware("http")
