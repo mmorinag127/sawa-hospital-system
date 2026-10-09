@@ -1,8 +1,9 @@
 """Owned SQLite delivery execution, not recognizer, HTTP/OIDC, PG or live proof.
 
 The existing fixture creates real dated JSON, monthly SQL, PDF/version receipts
-and workflow context. Its existing generated FAX fails actual quad estimation
-before the recognizer; no geometry or whole-producer double is used. The
+and workflow context. This negative fixture separately registers an explicitly
+gridless FAX retaining facility/period, so actual quad estimation fails before
+the recognizer; the positive generated FAX remains unchanged. The
 negative commit case uses a SQLAlchemy transaction event, not a
 replacement completion, ownership, assignment or receipt implementation.
 """
@@ -13,9 +14,10 @@ from hashlib import sha256
 
 import pytest
 from sqlalchemy import event
+from reportlab.pdfgen import canvas
 
 from test_modernization_owned_ocr_workflow import (
-    JOB, ORDER, OwnedProducer, _owned_workflow_database_snapshot,
+    JOB, ORDER, FACILITY, START, END, TEMPLATE, OwnedProducer, _owned_workflow_database_snapshot,
     _queue_and_claim_owned_workflow_attempt,
 )
 from src import db
@@ -27,6 +29,7 @@ from src.services import workflow_ocr_delivery_service as delivery
 from src.services import workflow_ocr_delivery_execution_service as execution
 from src.services import ocr_execution_lock_service as slots
 from src.services import master_order_form_template_service as master
+from src.services import order_workflow_v2_service as workflow
 
 
 @pytest.fixture
@@ -35,7 +38,28 @@ def owned_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(execution, "engine", f.engine)
     monkeypatch.setattr(slots, "engine", f.engine)
     try:
+        positive_path = f.pdf
+        positive_bytes = positive_path.read_bytes()
+        negative_path = tmp_path / "synthetic-gridless-negative.pdf"
+        pdf = canvas.Canvas(str(negative_path), pagesize=(595, 842))
+        pdf.drawString(40, 800, f"Facility: {FACILITY}")
+        pdf.drawString(40, 780, f"Period: {START.isoformat()} - {END.isoformat()}")
+        pdf.drawString(40, 760, "Synthetic negative: no outer grid or table rulings")
+        pdf.save()
+        with db.session_scope() as session:
+            f.add_document(session, "DOC-NEGATIVE", "PDF-NEGATIVE", negative_path,
+                           message_id="UNIT-NATIVE-NEGATIVE-MESSAGE")
+        current, error = workflow.get_workflow_readonly(ORDER)
+        assert error is None, error
+        f.context, error = workflow.confirm_context(
+            order_id=ORDER, facility_id=FACILITY, week_start=START.isoformat(),
+            week_end=END.isoformat(), template_id=TEMPLATE, expected_revision=current["revision"],
+        )
+        assert error is None, (error, f.context)
+        f.pdf = negative_path
+        assert positive_path.read_bytes() == positive_bytes
         yield f
+        assert positive_path.read_bytes() == positive_bytes
     finally:
         f.engine.dispose()
         assert sha256(master.MASTER_TEMPLATE_PATH.read_bytes()).hexdigest() == f.locked_hash

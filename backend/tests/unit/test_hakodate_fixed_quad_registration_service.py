@@ -1,7 +1,11 @@
 import cv2
 import numpy as np
-from openpyxl import Workbook
 import pytest
+from copy import deepcopy
+from shutil import copyfile
+
+from test_modernization_dynamic_form_layout import facility, entries_for, WEEK
+from src.services import master_order_form_template_service as master
 
 from src.services.hakodate_fixed_quad_registration_service import (
     canonical_template_axes_from_workbook,
@@ -9,6 +13,28 @@ from src.services.hakodate_fixed_quad_registration_service import (
     resolve_template_axes_from_manifest_or_image,
     rectify_fax_to_template_grid,
 )
+
+
+@pytest.fixture
+def generated_source(tmp_path):
+    original = master.MASTER_TEMPLATE_PATH.read_bytes()
+    copied = tmp_path / "master-copy.xlsx"
+    copyfile(master.MASTER_TEMPLATE_PATH, copied)
+    config = deepcopy(facility())
+    config["fax_template"]["columns"] = config["fax_template"]["columns"][:3] + [
+        {"index": 3 + index, "role": "quantity", "name": f"qty.{diet}_x",
+         "header": diet, "diet_type": diet, "area_id": "X"}
+        for index, diet in enumerate(("regular", "no_meat", "no_fish", "staff"))
+    ]
+    rows = entries_for(range(7), (2, 3, 3))
+    rows.append({**rows[-1], "name": "last-57", "sort_order": 4})
+    output = master.build_facility_template_xlsx(
+        facility_config=config, master_template_path=copied,
+        output_path=tmp_path / "generated.xlsx", week_value=WEEK, week_menu_entries=rows,
+    )
+    yield output
+    assert master.MASTER_TEMPLATE_PATH.read_bytes() == original
+    assert copied.read_bytes() == original
 
 
 def test_extract_template_axes_fills_partial_header_line_by_gap_without_table_external_fallback() -> None:
@@ -27,6 +53,8 @@ def test_extract_template_axes_fills_partial_header_line_by_gap_without_table_ex
     table_xs, table_ys, all_xs, all_ys = extract_template_axes_from_image(
         image,
         manifest_template_bbox=[10, 120, 390, 3600],
+        expected_x_edge_count=4,
+        expected_y_edge_count=60,
     )
 
     assert table_xs == xs
@@ -54,24 +82,17 @@ def test_extract_template_axes_blocks_incomplete_table_instead_of_using_external
         extract_template_axes_from_image(
             image,
             manifest_template_bbox=[10, 120, 390, 860],
+            expected_x_edge_count=4,
+            expected_y_edge_count=60,
         )
 
 
-def test_canonical_template_axes_from_workbook_uses_semantic_row_edges(tmp_path) -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.title = "2026-04"
-    worksheet.print_area = "A1:H69"
-    for row in range(1, 70):
-        worksheet.row_dimensions[row].height = 10 + (row % 3)
-    for col in range(1, 9):
-        worksheet.column_dimensions[chr(64 + col)].width = 8 + col
-    workbook_path = tmp_path / "template.xlsx"
-    workbook.save(workbook_path)
+def test_canonical_template_axes_from_workbook_uses_semantic_row_edges(tmp_path, generated_source) -> None:
+    workbook_path = generated_source
 
     xs, ys = canonical_template_axes_from_workbook(
         workbook_path,
-        sheet_name="2026-04",
+        sheet_name=master.FACILITY_TEMPLATE_SHEET_NAME,
         canvas_width=1200,
         canvas_height=2400,
     )
@@ -82,13 +103,14 @@ def test_canonical_template_axes_from_workbook_uses_semantic_row_edges(tmp_path)
     assert all(ys[index] < ys[index + 1] for index in range(len(ys) - 1))
 
 
-def test_manifest_explicit_template_axes_are_used_without_image_line_detection() -> None:
+def test_manifest_explicit_template_axes_are_used_without_image_line_detection(generated_source) -> None:
     image = np.full((100, 100, 3), 255, dtype=np.uint8)
-    xs = [10, 30, 60, 90]
+    xs = [10 + index * 10 for index in range(9)]
     ys = [10 + index for index in range(60)]
 
     resolved_xs, resolved_ys, all_xs, all_ys = resolve_template_axes_from_manifest_or_image(
-        item={"template_axes_x": xs, "template_axes_y": ys},
+        item={"template_axes_x": xs, "template_axes_y": ys,
+              "template_xlsx": generated_source, "template_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME},
         template_image=image,
         manifest_template_bbox=[0, 0, 99, 99],
     )
