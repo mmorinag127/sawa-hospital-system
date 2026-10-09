@@ -300,6 +300,14 @@ def _rows_from_pipeline_payload(
     )
     if not isinstance(payload, dict):
         return None
+    if _collect_structured_tables(payload):
+        rows = rows_from_structured_payload(
+            payload, template,
+            allow_payload_template_override=allow_payload_template_override,
+        )
+        if not rows:
+            raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        return rows
     base_rows: list[list[str]] | None = None
     table_rows = payload.get("table_rows")
     if isinstance(table_rows, list):
@@ -324,23 +332,14 @@ def _rows_from_pipeline_payload(
     if base_rows is None:
         table_raw = payload.get("table_raw")
         if isinstance(table_raw, str) and table_raw.strip():
-            rows = _rows_from_markdown_blocks(table_raw, template)
-            if rows:
-                base_rows = rows
+            return rows_from_explicit_physical_payload(payload, template)
     if base_rows is None:
         nested = payload.get("table")
         if isinstance(nested, dict):
-            rows = _rows_from_payload(nested, template)
-            if rows:
-                base_rows = rows
-            if base_rows is None:
-                rows = rows_from_structured_payload(
-                    nested,
-                    template,
-                    allow_payload_template_override=allow_payload_template_override,
-                )
-                if rows:
-                    base_rows = rows
+            base_rows = _rows_from_pipeline_payload(
+                nested, template,
+                allow_payload_template_override=allow_payload_template_override,
+            )
     if base_rows is None:
         qty = payload.get("qty")
         if isinstance(qty, dict):
@@ -2280,17 +2279,19 @@ def _matrix_from_structured_cells(
 def _collect_structured_tables(payload: object) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
-    seen_table_ids: set[str] = set()
+    seen_tables: dict[str, dict[str, Any]] = {}
     structured_tables: list[dict[str, Any]] = []
 
     def _collect(table_payload: object) -> None:
         if not isinstance(table_payload, dict):
             return
         table_id = str(table_payload.get("table_id") or "").strip()
-        if table_id and table_id in seen_table_ids:
+        if table_id and table_id in seen_tables:
+            if table_payload != seen_tables[table_id]:
+                raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
             return
         if table_id:
-            seen_table_ids.add(table_id)
+            seen_tables[table_id] = table_payload
         structured_tables.append(table_payload)
 
     top_tables = payload.get("tables")
@@ -2307,6 +2308,8 @@ def _collect_structured_tables(payload: object) -> list[dict[str, Any]]:
                 continue
             for table_payload in page_tables:
                 _collect(table_payload)
+    if payload.get("pipeline_mode") == "structured_v2" and not structured_tables:
+        raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
     return structured_tables
 
 
@@ -2347,24 +2350,120 @@ def _resolve_structured_table_mapping(
     return projected
 
 
-def rows_from_structured_payload(
-    payload: object,
-    template: dict,
-    *,
-    allow_payload_template_override: bool = True,
-) -> list[list[str]] | None:
-    template = _resolve_payload_template(
-        payload,
-        template,
-        allow_payload_template_override=allow_payload_template_override,
-    )
-    structured_tables = _collect_structured_tables(payload)
-    if not structured_tables:
-        return None
+class CanonicalOcrProjectionError(ValueError):
+    pass
 
-    normalized: list[list[str]] = []
+
+def _parse_resolved_column_mapping_pairs(
+    payload: dict[str, Any],
+    fields: list[str],
+) -> list[tuple[int, str]]:
+    resolution = payload.get("column_mapping_resolution")
+    if not isinstance(resolution, dict):
+        return []
+    if resolution.get("blocked") or resolution.get("requires_user_choice"):
+        raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+    if resolution.get("resolved_value") and resolution.get("resolved_column_mapping_id") and (
+        resolution["resolved_value"] != resolution["resolved_column_mapping_id"]
+    ):
+        raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+    raw_value = str(
+        resolution.get("resolved_value")
+        or resolution.get("resolved_column_mapping_id")
+        or ""
+    ).strip()
+    if not raw_value:
+        return []
+    pairs: list[tuple[int, str]] = []
+    seen_fields: set[str] = set()
+    seen_sources: set[int] = set()
+    for chunk in raw_value.split("|"):
+        token = str(chunk or "").strip()
+        if ":" not in token:
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        source_raw, field = token.split(":", 1)
+        try:
+            source_col_index = int(source_raw)
+        except ValueError:
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped") from None
+        field = str(field or "").strip()
+        if (
+            source_col_index < 0 or source_col_index in seen_sources
+            or field in seen_fields or field not in fields or not field.startswith("qty.")
+        ):
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        seen_fields.add(field)
+        seen_sources.add(source_col_index)
+        pairs.append((source_col_index, field))
+    return pairs
+
+
+def _require_ocr_quantity_mapping(
+    *, template: dict[str, Any], fields: list[str], observed_width: int,
+    payload_pairs: list[tuple[int, str]],
+) -> dict[int, int]:
+    expected = {field for field in fields if field.startswith("qty.")}
+    if not expected:
+        raise CanonicalOcrProjectionError("sheet_quantity_columns_missing")
+    by_field: dict[str, int] = {}
+    by_source: dict[int, str] = {}
+    columns = template.get("columns")
+    if isinstance(columns, list):
+        for column in columns:
+            if not isinstance(column, dict):
+                continue
+            field = _explicit_field_from_template_column(column, fields)
+            if field not in expected:
+                continue
+            source = column.get("source_index")
+            if source is None:
+                source = column.get("index")
+            if type(source) is not int or source < 0 or source >= observed_width:
+                raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+            if field in by_field or source in by_source:
+                raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+            by_field[field] = source
+            by_source[source] = field
+    for source, field in payload_pairs:
+        if source >= observed_width or (
+            field in by_field and by_field[field] != source
+        ) or (source in by_source and by_source[source] != field):
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        by_field[field] = source
+        by_source[source] = field
+    if set(by_field) != expected:
+        raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+    return {source: fields.index(field) for field, source in by_field.items()}
+
+
+def rows_from_explicit_physical_payload(
+    payload: dict[str, Any],
+    template: dict[str, Any],
+) -> list[list[str]]:
+    fields = _get_row_fields(template)
+    if not fields:
+        raise CanonicalOcrProjectionError("sheet_fields_not_found")
+    payload_quantity_pairs = _parse_resolved_column_mapping_pairs(payload, fields)
+    try:
+        structured_tables = _collect_structured_tables(payload)
+    except ValueError as exc:
+        raise CanonicalOcrProjectionError(str(exc)) from exc
+
+    quantity_dest_indexes = {
+        idx for idx, field in enumerate(fields) if str(field or "").strip().startswith("qty.")
+    }
+    position_fallback_resolution = payload.get("column_mapping_resolution")
+    uses_position_fallback = (
+        isinstance(position_fallback_resolution, dict)
+        and str(position_fallback_resolution.get("decision_source") or "").strip() == "position_fallback"
+    )
+    if uses_position_fallback:
+        raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+    rebuilt_rows: list[list[str]] = []
     for table_payload in structured_tables:
-        matrix: list[list[str]] | None = None
+        if not isinstance(table_payload, dict):
+            continue
+        matrix = None
         raw_rows = table_payload.get("rows")
         if isinstance(raw_rows, list) and raw_rows:
             matrix = _normalize_table_matrix_rows(raw_rows)
@@ -2382,10 +2481,149 @@ def rows_from_structured_payload(
                 )
         if not matrix:
             continue
-        rows = _rows_from_table_matrix(matrix, template)
-        if rows:
-            normalized.extend(rows)
-    return normalized or None
+        normalized_matrix = _normalize_table_matrix_rows(matrix)
+        observed_width = max((len(row) for row in normalized_matrix), default=0)
+        explicit_mapped_indexes: dict[int, int] = {}
+        explicit_dest_indexes: set[int] = set()
+        resolved = _resolve_structured_table_mapping(matrix, template)
+        mapping_meta = resolved[0] if isinstance(resolved, tuple) and len(resolved) == 2 else None
+        if not isinstance(mapping_meta, dict):
+            continue
+        mapped_indexes = mapping_meta.get("mapped_indexes")
+        row_map = mapping_meta.get("row_map")
+        if not isinstance(mapped_indexes, dict) or not isinstance(row_map, dict):
+            continue
+        quantity_mapping = _require_ocr_quantity_mapping(
+            template=template, fields=fields, observed_width=observed_width,
+            payload_pairs=payload_quantity_pairs,
+        )
+        final_mapped_indexes = {
+            int(source_col_index): int(dest_idx)
+            for source_col_index, dest_idx in mapped_indexes.items()
+            if isinstance(dest_idx, int) and 0 <= dest_idx < len(fields) and dest_idx not in quantity_dest_indexes
+        }
+        if bool(template.get("columns_authoritative")) and observed_width > 0:
+            explicit_mapped_indexes = {
+                int(source_col_index): int(dest_idx)
+                for source_col_index, dest_idx in _mapped_indexes_from_template_columns(
+                    template=template,
+                    fields=fields,
+                    observed_width=observed_width,
+                ).items()
+                if 0 <= int(dest_idx) < len(fields) and int(dest_idx) not in quantity_dest_indexes
+            }
+            if explicit_mapped_indexes:
+                explicit_source_indexes = set(explicit_mapped_indexes.keys())
+                explicit_dest_indexes = set(explicit_mapped_indexes.values())
+                final_mapped_indexes = {
+                    source_col_index: dest_idx
+                    for source_col_index, dest_idx in final_mapped_indexes.items()
+                    if source_col_index not in explicit_source_indexes and dest_idx not in explicit_dest_indexes
+                }
+                final_mapped_indexes.update(explicit_mapped_indexes)
+        if any(
+            source in final_mapped_indexes and final_mapped_indexes[source] != target
+            for source, target in quantity_mapping.items()
+        ):
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        final_mapped_indexes.update(quantity_mapping)
+        for raw_row_index in sorted(int(idx) for idx in row_map.keys()):
+            if raw_row_index < 0 or raw_row_index >= len(normalized_matrix):
+                continue
+            row = normalized_matrix[raw_row_index]
+            output_row = [""] * len(fields)
+            for source_col_index, dest_idx in final_mapped_indexes.items():
+                if source_col_index < len(row):
+                    output_row[dest_idx] = row[source_col_index]
+            if any(str(cell or "").strip() for cell in output_row):
+                rebuilt_rows.append([_coerce_row_cell(cell) for cell in output_row])
+
+    # Markdown is a different representation, not additional selected evidence.
+    if structured_tables:
+        if not rebuilt_rows:
+            raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        return rebuilt_rows
+
+    table_raw = payload.get("table_raw")
+    if not isinstance(table_raw, str) or not table_raw.strip():
+        if payload.get("table_rows") or payload.get("rows") or payload.get("qty"):
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        return rebuilt_rows
+    markdown_tables = _extract_markdown_tables(table_raw)
+    if not markdown_tables:
+        raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
+    markdown_rows: list[list[str]] = []
+    fields_set = set(fields)
+    for markdown_header, data_rows in markdown_tables:
+        observed_width = max(
+            len(markdown_header),
+            max((len(row) for row in data_rows if isinstance(row, list)), default=0),
+        )
+        quantity_mapping = _require_ocr_quantity_mapping(
+            template=template, fields=fields, observed_width=observed_width,
+            payload_pairs=payload_quantity_pairs,
+        )
+        markdown_mapped_indexes: dict[int, int] = {}
+        if bool(template.get("columns_authoritative")) and observed_width > 0:
+            markdown_mapped_indexes = {
+                int(source_col_index): int(dest_idx)
+                for source_col_index, dest_idx in _mapped_indexes_from_template_columns(
+                    template=template,
+                    fields=fields,
+                    observed_width=observed_width,
+                ).items()
+                if 0 <= int(dest_idx) < len(fields) and int(dest_idx) not in quantity_dest_indexes
+            }
+        if not markdown_mapped_indexes:
+            seen_non_quantity_dest_indexes: set[int] = set()
+            for source_col_index, header_cell in enumerate(markdown_header):
+                mapped_field = _field_from_header(str(header_cell or ""), fields_set)
+                dest_idx = fields.index(mapped_field) if mapped_field in fields else None
+                if (
+                    dest_idx is None
+                    or dest_idx in quantity_dest_indexes
+                    or dest_idx in seen_non_quantity_dest_indexes
+                ):
+                    continue
+                markdown_mapped_indexes[source_col_index] = dest_idx
+                seen_non_quantity_dest_indexes.add(dest_idx)
+        if any(
+            source in markdown_mapped_indexes and markdown_mapped_indexes[source] != target
+            for source, target in quantity_mapping.items()
+        ):
+            raise CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        for raw_row in data_rows:
+            if not isinstance(raw_row, list):
+                continue
+            output_row = [""] * len(fields)
+            for source_col_index, dest_idx in markdown_mapped_indexes.items():
+                if source_col_index < 0 or source_col_index >= len(raw_row):
+                    continue
+                output_row[dest_idx] = _coerce_row_cell(raw_row[source_col_index])
+            for source_col_index, dest_idx in quantity_mapping.items():
+                if source_col_index < len(raw_row):
+                    output_row[dest_idx] = _coerce_row_cell(raw_row[source_col_index])
+            if any(str(cell or "").strip() for cell in output_row):
+                markdown_rows.append(output_row)
+    if not markdown_rows:
+        raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
+    return markdown_rows
+
+
+def rows_from_structured_payload(
+    payload: object,
+    template: dict,
+    *,
+    allow_payload_template_override: bool = True,
+) -> list[list[str]] | None:
+    template = _resolve_payload_template(
+        payload,
+        template,
+        allow_payload_template_override=allow_payload_template_override,
+    )
+    if not _collect_structured_tables(payload):
+        return None
+    return rows_from_explicit_physical_payload(payload, template)
 
 
 def _structured_issue_value_contains_digits(value: str) -> bool:
@@ -2587,7 +2825,7 @@ def _rows_from_markdown(markdown: str, template: dict) -> list[list[str]] | None
 
 
 def rows_from_markdown(markdown: str, template: dict) -> list[list[str]] | None:
-    return _rows_from_markdown(markdown, template)
+    return rows_from_explicit_physical_payload({"table_raw": markdown}, template) or None
 
 
 def rows_from_pipeline_payload(
@@ -2601,6 +2839,53 @@ def rows_from_pipeline_payload(
         template,
         allow_payload_template_override=allow_payload_template_override,
     )
+
+
+def date_strings_from_row_source(
+    payload: dict,
+    template: dict,
+    *,
+    rows: list[list[str]] | None = None,
+) -> list[str]:
+    fields = _get_row_fields(template)
+    own_result = payload.get("_reparse_recognizer_result")
+    if isinstance(own_result, dict):
+        own_rows = own_result.get("rows")
+        if own_result.get("fields") != fields or not isinstance(own_rows, list) or not own_rows or any(
+            not isinstance(row, list) or len(row) != len(fields) for row in own_rows
+        ):
+            raise CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        rows = own_rows
+        metadata = own_result
+        physical_source = False
+    else:
+        structured_tables = _collect_structured_tables(payload)
+        if rows is None:
+            rows = _rows_from_pipeline_payload(payload, template, allow_payload_template_override=False)
+        metadata = payload
+        physical_source = bool(structured_tables) or (
+            not payload.get("rows") and not payload.get("table_rows")
+            and isinstance(payload.get("table_raw"), str) and bool(payload["table_raw"].strip())
+        )
+    date_indexes = [index for index, field in enumerate(fields) if field.startswith("date")]
+    values = [
+        _coerce_row_cell(row[index]).strip()
+        for row in rows or [] if isinstance(row, list)
+        for index in date_indexes if index < len(row) and _coerce_row_cell(row[index]).strip()
+    ]
+    # Physical rows never borrow header/footer or alternate-representation dates.
+    if physical_source:
+        return values
+    if not rows:
+        return []
+    if metadata is payload and not payload.get("rows") and not payload.get("table_rows") and isinstance(payload.get("table"), dict):
+        return date_strings_from_row_source(payload["table"], template)
+    raw_dates = metadata.get("date_strings")
+    semantic_dates = [
+        str(value).strip() for value in raw_dates
+        if value is not None and str(value).strip()
+    ] if isinstance(raw_dates, list) else []
+    return semantic_dates + values
 
 
 def _extract_facility_and_dates_tesseract(image, template: dict) -> tuple[str | None, list[str]]:
@@ -2723,9 +3008,7 @@ def extract_fax_data(
             raw_name = output.get("facility_name")
             if isinstance(raw_name, str):
                 facility_name = raw_name.strip() or None
-            raw_dates = output.get("date_strings")
-            if isinstance(raw_dates, list):
-                date_strings = [str(item) for item in raw_dates if str(item).strip()]
+            date_strings = date_strings_from_row_source(output, template, rows=rows)
             table_raw = output.get("table_raw")
             if isinstance(table_raw, str) and table_raw.strip():
                 raw_text = table_raw.strip()
@@ -2762,9 +3045,7 @@ def extract_fax_data(
                 raw_name = output.get("facility_name")
                 if isinstance(raw_name, str):
                     facility_name = raw_name.strip() or None
-                raw_dates = output.get("date_strings")
-                if isinstance(raw_dates, list):
-                    date_strings = [str(item) for item in raw_dates if str(item).strip()]
+                date_strings = date_strings_from_row_source(output, template, rows=rows)
             if not isinstance(provider_debug, dict):
                 provider_debug = {}
             provider_debug.setdefault("provider", "openai")
@@ -2799,9 +3080,7 @@ def extract_fax_data(
                 raw_name = output.get("facility_name")
                 if isinstance(raw_name, str):
                     facility_name = raw_name.strip() or None
-                raw_dates = output.get("date_strings")
-                if isinstance(raw_dates, list):
-                    date_strings = [str(item) for item in raw_dates if str(item).strip()]
+                date_strings = date_strings_from_row_source(output, template, rows=rows)
             if not isinstance(provider_debug, dict):
                 provider_debug = {}
             provider_debug.setdefault("provider", "gemini")

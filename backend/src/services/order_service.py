@@ -1282,7 +1282,7 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
     month_ids = _sheet_week_month_ids(week_id)
     if not month_ids:
         return []
-    selected_by_physical_slot: dict[tuple[str, str, int], dict] = {}
+    variants_by_physical_slot: dict[tuple[str, str, int], dict[str, dict]] = {}
     order_index = 0
     for month_id in month_ids:
         raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id)
@@ -1293,7 +1293,7 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
                 continue
             menu_name = str(raw.get("name") or "").strip()
             if not menu_name:
-                continue
+                raise ValueError("physical_menu_variant_name_required")
             menu_date = _normalize_entry_date(raw.get("menu_date"))
             daypart_key = _normalize_daypart_key(raw.get("daypart"))
             slot_index_raw = raw.get("slot_index")
@@ -1315,37 +1315,25 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
                 "slot_index": slot_index,
                 "order": order_index,
             }
-            current = selected_by_physical_slot.get(physical_key)
-            if current is not None:
-                variants = current.get("diet_variants")
-                if variants is None:
-                    variants = {current["diet_type"]: deepcopy(current)}
-                    current["diet_variants"] = variants
-                diet = menu_service.normalize_diet_type(raw.get("diet_type"))
-                if not isinstance(diet, str) or not diet:
-                    raise ValueError("physical_menu_diet_identity_required")
-                if diet in variants:
-                    raise ValueError("physical_menu_row_duplicate")
-                payload["diet_type"] = diet
-                variants[diet] = payload
-                common_fields = set.intersection(*(set(variant) for variant in variants.values()))
-                common = {
-                    field: deepcopy(next(iter(variants.values()))[field])
-                    for field in common_fields
-                    if all(snapshots_equal(variant[field], next(iter(variants.values()))[field]) for variant in variants.values())
-                }
-                physical_order = current["order"]
-                current.clear()
-                current.update(common)
-                current.update(order=physical_order, diet_variants=variants)
-                continue
             diet = menu_service.normalize_diet_type(raw.get("diet_type"))
             if not isinstance(diet, str) or not diet:
                 raise ValueError("physical_menu_diet_identity_required")
             payload["diet_type"] = diet
-            selected_by_physical_slot[physical_key] = payload
+            variants = variants_by_physical_slot.setdefault(physical_key, {})
+            if diet in variants:
+                raise ValueError("physical_menu_row_duplicate")
+            variants[diet] = payload
             order_index += 1
-    entries = list(selected_by_physical_slot.values())
+    entries: list[dict] = []
+    for variants in variants_by_physical_slot.values():
+        regular = variants.get("regular")
+        if regular is None:
+            continue
+        # Logical diet variants never create a physical slot or replace its name.
+        physical_entry = deepcopy(regular)
+        if len(variants) > 1:
+            physical_entry["diet_variants"] = deepcopy(variants)
+        entries.append(physical_entry)
     entries.sort(
         key=lambda item: (
             item.get("menu_date") or date.min,
@@ -1626,7 +1614,7 @@ def _build_position_menu_entries_from_ocr_payload(
     else:
         fill_missing_date_with_first_seen = large_cell_mode
 
-    date_candidates = _collect_sheet_dates_from_payload(source_payload, received_at)
+    date_candidates = _collect_sheet_dates_from_payload(source_payload, received_at, template)
     default_date = min(date_candidates) if date_candidates else None
     first_date_in_table: date | None = None
     latest_resolved_date: date | None = None
@@ -1889,7 +1877,7 @@ def _build_position_menu_entries_from_structured_tables(
     if not tables:
         return []
 
-    default_dates = _collect_sheet_dates_from_payload(payload, received_at)
+    default_dates = _collect_sheet_dates_from_payload(payload, received_at, template)
     default_date = min(default_dates) if default_dates else None
     entries: list[dict[str, Any]] = []
     seen_identities: set[tuple[str, str, str]] = set()
@@ -2369,6 +2357,7 @@ def _build_reparse_position_menu_entries(
     existing_lines: list[dict[str, Any]] | None = None,
     extra_payload_dates: set[date] | None = None,
     received_at: datetime,
+    template: dict[str, Any],
 ) -> list[dict]:
     lines_for_scope = list(lines or [])
     payload_dates: set[date] = {
@@ -2377,12 +2366,14 @@ def _build_reparse_position_menu_entries(
     existing_line_dates = _collect_line_dates_for_position_scope(existing_lines)
     line_dates = _collect_line_dates_for_position_scope(lines_for_scope)
     if isinstance(parsed_output, dict):
-        payload_dates |= {
+        payload_dates = {
             item
-            for item in _collect_sheet_dates_from_payload(parsed_output, received_at)
+            for item in _collect_sheet_dates_from_payload(parsed_output, received_at, template)
             if isinstance(item, date)
         }
-    payload_dates |= _collect_sheet_dates_from_rows(rows, received_at=received_at)
+    payload_dates |= _collect_sheet_dates_from_rows(
+        rows, received_at=received_at, fields=_get_row_fields(template),
+    )
     observed_payload_dates = {
         item for item in payload_dates if isinstance(item, date)
     }
@@ -3935,19 +3926,22 @@ def _validate_reparse_lines_against_weekly_menu(
         return None, None
 
     weekly_key_set: set[tuple[str, str, str]] = set()
-    weekly_key_by_source_row: dict[int, tuple[str, str, str]] = {}
+    weekly_keys_by_source_row: dict[int, set[tuple[str, str, str]]] = {}
     for idx, entry in enumerate(entries):
         if "diet_variants" in entry and not entry.get("menu_name"):
             raise ValueError("physical_menu_common_name_unresolved")
-        key = _build_canonical_menu_key(
-            menu_date=entry.get("menu_date"),
-            daypart=entry.get("daypart_key"),
-            menu_name=entry.get("menu_name"),
-        )
-        if key is None:
-            continue
-        weekly_key_set.add(key)
-        weekly_key_by_source_row[idx] = key
+        variants = entry.get("diet_variants")
+        logical_entries = list(variants.values()) if isinstance(variants, dict) else [entry]
+        keys = {
+            key for logical_entry in logical_entries
+            if (key := _build_canonical_menu_key(
+                menu_date=logical_entry.get("menu_date"),
+                daypart=logical_entry.get("daypart_key"),
+                menu_name=logical_entry.get("menu_name"),
+            )) is not None
+        }
+        weekly_key_set.update(keys)
+        weekly_keys_by_source_row[idx] = keys
 
     if not weekly_key_set:
         return None, None
@@ -3982,14 +3976,14 @@ def _validate_reparse_lines_against_weekly_menu(
         rows_are_body_only=rows_are_body_only,
     )
     for source_row_index in sorted(numeric_source_rows):
-        expected_key = weekly_key_by_source_row.get(source_row_index)
-        if expected_key is None:
+        expected_keys = weekly_keys_by_source_row.get(source_row_index)
+        if not expected_keys:
             continue
         actual_keys = line_keys_by_source_row.get(source_row_index) or set()
         if not actual_keys:
             missing_source_rows.append(source_row_index)
             continue
-        if expected_key not in actual_keys:
+        if not expected_keys.intersection(actual_keys):
             mismatch_source_rows.append(source_row_index)
 
     if not invalid_lines and not mismatch_source_rows and not missing_source_rows:
@@ -12367,7 +12361,17 @@ def _build_canonical_bootstrap_sheet(
     payload_unstructured_qty: list[str] = []
     payload_explicit_quantity_pairs: list[tuple[int, int]] = []
     if isinstance(ocr_payload, dict):
-        payload_rows = _extract_sheet_rows_from_payload(ocr_payload, template)
+        try:
+            payload_rows = _extract_sheet_rows_from_payload(ocr_payload, template)
+        except _CanonicalOcrProjectionError as exc:
+            return _build_blocked_sheet_payload(
+                order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
+                fields=fields, header=header, blockers=[str(exc)],
+                source=_canonical_blocked_sheet_source(fields=fields),
+                base_template_resolution_id=effective_template_id,
+                base_evidence_run_id=str(base_evidence_run.get("id") or "").strip() or None,
+                menu_diagnostics=menu_diagnostics,
+            ), None
         payload_unstructured_qty = _extract_payload_unstructured_quantity_candidates(ocr_payload)
         payload_explicit_quantity_pairs = _resolved_quantity_source_target_pairs(ocr_payload, fields)
 
@@ -15620,6 +15624,9 @@ def _template_authoritative_quantity_mapping_ready(
     fields: list[str] | None,
 ) -> bool:
     if not isinstance(payload, dict) or not isinstance(template, dict):
+        return False
+    if isinstance(payload.get("_reparse_recognizer_result"), dict):
+        _extract_sheet_rows_from_payload_uncanonicalized(payload, template)
         return False
     normalized_fields = [
         str(field or "").strip()
@@ -18959,7 +18966,10 @@ def apply_submitted_ocr_sheet(
     if parsed_rows:
         source = "structured_rows"
     elif has_markdown:
-        parsed_rows = rows_from_markdown(markdown or "", template) or []
+        try:
+            parsed_rows = rows_from_markdown(markdown or "", template) or []
+        except _CanonicalOcrProjectionError as exc:
+            return None, str(exc)
     if not parsed_rows:
         return None, "rows_empty"
 
@@ -20636,10 +20646,13 @@ def review_ocr_table_with_llm(
     if not isinstance(template, dict):
         return None, "template_unresolved"
 
-    baseline = _resolve_llm_review_baseline(
-        order_id=order_id, payload=payload, template=template,
-        synchronous_write_input=synchronous_write_input,
-    )
+    try:
+        baseline = _resolve_llm_review_baseline(
+            order_id=order_id, payload=payload, template=template,
+            synchronous_write_input=synchronous_write_input,
+        )
+    except _CanonicalOcrProjectionError as exc:
+        return None, str(exc)
     baseline_rows = baseline.get("rows") if isinstance(baseline, dict) else []
     baseline_fields = baseline.get("fields") if isinstance(baseline, dict) else []
     baseline_row_ids = baseline.get("row_ids") if isinstance(baseline, dict) else []
@@ -20707,18 +20720,21 @@ def review_ocr_table_with_llm(
     model_name = str(provider_debug.get("model") or "").strip() or None
     prepared_payload = None
     if isinstance(parsed_review.get("output_payload"), dict):
-        prepared_payload = _prepare_llm_review_output_payload(
-            payload=parsed_review["output_payload"],
-            baseline=baseline,
-            template=template,
-            pdf_variant_requested=str(pdf_variant_meta.get("requested") or "raw"),
-            pdf_variant_used=str(pdf_variant_meta.get("used") or "raw"),
-            pdf_variant_fallback_reason=(
-                str(pdf_variant_meta.get("fallback_reason")).strip()
-                if pdf_variant_meta.get("fallback_reason")
-                else None
-            ),
-        )
+        try:
+            prepared_payload = _prepare_llm_review_output_payload(
+                payload=parsed_review["output_payload"],
+                baseline=baseline,
+                template=template,
+                pdf_variant_requested=str(pdf_variant_meta.get("requested") or "raw"),
+                pdf_variant_used=str(pdf_variant_meta.get("used") or "raw"),
+                pdf_variant_fallback_reason=(
+                    str(pdf_variant_meta.get("fallback_reason")).strip()
+                    if pdf_variant_meta.get("fallback_reason")
+                    else None
+                ),
+            )
+        except _CanonicalOcrProjectionError as exc:
+            return None, str(exc)
         if prepared_payload is None:
             return None, "llm_review_invalid_json"
     if prepared_payload is None:
@@ -22109,13 +22125,18 @@ def _collect_dates_from_sheet_rows(
     return dates
 
 
-def _collect_sheet_dates_from_rows(rows: list[list[Any]] | None, *, received_at: datetime) -> set[date]:
+def _collect_sheet_dates_from_rows(
+    rows: list[list[Any]] | None, *, received_at: datetime, fields: list[str],
+) -> set[date]:
     dates: set[date] = set()
+    date_indexes = [index for index, field in enumerate(fields) if field.startswith("date")]
     for row in rows or []:
         if not isinstance(row, list):
             continue
-        for cell in row[:2]:
-            parsed = parse_date_string(str(cell or "").strip(), received_at)
+        for index in date_indexes:
+            if index >= len(row):
+                continue
+            parsed = parse_date_string(str(row[index] or "").strip(), received_at)
             if parsed:
                 dates.add(parsed)
     return dates
@@ -22171,8 +22192,9 @@ def _sheet_month_distance(from_month_id: str | None, to_month_id: str | None) ->
     return sheet_week_service.sheet_month_distance(from_month_id, to_month_id)
 
 
-def _collect_sheet_dates_from_payload(payload: dict[str, Any], received_at: datetime) -> list[date]:
-    payload = _sanitize_payload_table_raw(payload)
+def _collect_sheet_dates_from_payload(
+    payload: dict[str, Any], received_at: datetime, template: dict[str, Any],
+) -> list[date]:
     dates: list[date] = []
     seen: set[str] = set()
     latest_resolved_date: date | None = None
@@ -22212,42 +22234,8 @@ def _collect_sheet_dates_from_payload(payload: dict[str, Any], received_at: date
         dates.append(parsed)
         latest_resolved_date = parsed
 
-    for raw in payload.get("date_strings") or []:
+    for raw in fax_extractor.date_strings_from_row_source(payload, template):
         _push(raw)
-
-    table_rows = payload.get("table_rows")
-    if isinstance(table_rows, list):
-        for row in table_rows[:200]:
-            if not isinstance(row, list):
-                continue
-            for cell in row[:2]:
-                _push(cell)
-
-    for table_payload in _collect_structured_tables_from_payload(payload):
-        rows = table_payload.get("rows")
-        if not isinstance(rows, list):
-            continue
-        for row in rows[:200]:
-            if not isinstance(row, list):
-                continue
-            for cell in row[:2]:
-                _push(cell)
-
-    table_raw = payload.get("table_raw")
-    if isinstance(table_raw, str) and table_raw.strip():
-        table_raw = _normalize_table_raw_text(table_raw)
-        # Prefer markdown table rows to avoid matching unrelated footer timestamps.
-        for raw_line in table_raw.splitlines():
-            line = raw_line.strip()
-            if not line.startswith("|"):
-                continue
-            cells = [cell.strip() for cell in line.strip("|").split("|")]
-            for cell in cells[:2]:
-                _push(cell)
-        if not dates:
-            for match in re.finditer(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{1,2}[/-]\d{1,2}", table_raw):
-                _push(match.group(0))
-
     return dates
 
 
@@ -22976,6 +22964,9 @@ def _overlay_structured_block_total_cells_onto_sheet_row_lists(
     normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
     if not normalized_rows or not normalized_fields or not isinstance(raw_payload, dict) or not isinstance(template, dict):
         return normalized_rows, {}
+    if isinstance(raw_payload.get("_reparse_recognizer_result"), dict):
+        _extract_sheet_rows_from_payload_uncanonicalized(raw_payload, template)
+        return normalized_rows, {}
     helper_semantics = _resolve_block_helper_column_indexes(fields=normalized_fields, header=header)
     block_total_columns = {
         idx for idx, semantic in helper_semantics.items() if semantic == "block_total"
@@ -23202,40 +23193,13 @@ def _evaluate_sheet_structural_projection_corruption(
     }
 
 
+_CanonicalOcrProjectionError = fax_extractor.CanonicalOcrProjectionError
+
+
 def _extract_sheet_rows_from_payload(payload: dict[str, Any], template: dict[str, Any]) -> list[list[str]]:
-    payload = _sanitize_payload_table_raw(payload)
     fields = _get_row_fields(template)
-    header = _sheet_header_from_template(fields, template)
-    resolved_rows = _extract_sheet_rows_from_resolved_column_mapping(payload, template)
-    if resolved_rows:
-        resolved_rows = _overlay_aux_display_cells_from_template_rows(
-            rows=resolved_rows,
-            payload=payload,
-            template=template,
-        )
-        resolved_rows, _helper_stats = _canonicalize_block_helper_display_rows(
-            rows=resolved_rows,
-            fields=fields,
-            header=header,
-        )
-        return _canonicalize_sheet_daypart_rows(
-            rows=resolved_rows,
-            fields=fields,
-        )
-    rows = rows_from_pipeline_payload(
-        payload,
-        template,
-        allow_payload_template_override=False,
-    )
-    if not rows:
-        return []
-    rows, _helper_stats = _canonicalize_block_helper_display_rows(
-        rows=[[_field_value_to_str(cell) for cell in row] for row in rows],
-        fields=fields,
-        header=header,
-    )
     return _canonicalize_sheet_daypart_rows(
-        rows=rows,
+        rows=_extract_sheet_rows_from_payload_uncanonicalized(payload, template),
         fields=fields,
     )
 
@@ -23244,29 +23208,73 @@ def _extract_sheet_rows_from_payload_uncanonicalized(payload: dict[str, Any], te
     own_result = payload.get("_reparse_recognizer_result")
     if isinstance(own_result, dict):
         if own_result.get("fields") != _row_fields_from_template(template):
-            return []
-        return deepcopy(own_result.get("rows")) if isinstance(own_result.get("rows"), list) else []
-    payload = _sanitize_payload_table_raw(payload)
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        own_rows = own_result.get("rows")
+        if not isinstance(own_rows, list) or not own_rows or any(
+            not isinstance(row, list) or len(row) != len(own_result["fields"])
+            for row in own_rows
+        ):
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        return deepcopy(own_rows)
     fields = _get_row_fields(template)
+    raw_rows = payload.get("rows")
+    try:
+        structured_tables = fax_extractor._collect_structured_tables(payload)
+    except ValueError as exc:
+        raise _CanonicalOcrProjectionError(str(exc)) from exc
+    if not structured_tables and isinstance(raw_rows, list) and raw_rows:
+        # Provider-normalized dictionaries bind quantities by authored field name,
+        # not by a physical source-column offset (including sparse row patches).
+        if all(isinstance(row, dict) for row in raw_rows):
+            if not fields or any(
+                "row_index" not in row and not any(
+                    field in row or (
+                        field.startswith("qty.") and isinstance(row.get("qty"), dict)
+                        and field[4:] in row["qty"]
+                    )
+                    for field in fields
+                )
+                for row in raw_rows
+            ):
+                raise _CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+            try:
+                indexes = [int(row["row_index"]) for row in raw_rows if "row_index" in row]
+            except (ValueError, TypeError):
+                raise _CanonicalOcrProjectionError("sheet_canonical_mismatch") from None
+            if any(index < 0 for index in indexes) or len(set(indexes)) != len(indexes):
+                raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+            semantic_rows = fax_extractor._rows_from_payload(deepcopy(payload), template)
+            if not semantic_rows:
+                raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+            table_rows = payload.get("table_rows")
+            if table_rows is not None and (
+                not isinstance(table_rows, list)
+                or any(not isinstance(row, list) or len(row) != len(fields) for row in table_rows)
+                or [[_field_value_to_str(cell) for cell in row] for row in table_rows] != semantic_rows
+            ):
+                raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+            return semantic_rows
+        if not fields or any(not isinstance(row, list) or len(row) != len(fields) for row in raw_rows):
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        semantic_rows = [[_field_value_to_str(cell) for cell in row] for row in raw_rows]
+        table_rows = payload.get("table_rows")
+        if table_rows is not None and (
+            not isinstance(table_rows, list)
+            or any(not isinstance(row, list) or len(row) != len(fields) for row in table_rows)
+            or [[_field_value_to_str(cell) for cell in row] for row in table_rows] != semantic_rows
+        ):
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        return semantic_rows
+    if not structured_tables and payload.get("table_rows"):
+        table_rows = payload["table_rows"]
+        if not fields or not isinstance(table_rows, list) or any(
+            not isinstance(row, list) or len(row) != len(fields) for row in table_rows
+        ):
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        return [[_field_value_to_str(cell) for cell in row] for row in table_rows]
+    payload = _sanitize_payload_table_raw(payload)
     header = _sheet_header_from_template(fields, template)
-    resolved_rows = _extract_sheet_rows_from_resolved_column_mapping(payload, template)
-    if resolved_rows:
-        resolved_rows = _overlay_aux_display_cells_from_template_rows(
-            rows=[[_field_value_to_str(cell) for cell in row] for row in resolved_rows],
-            payload=payload,
-            template=template,
-        )
-        resolved_rows, _helper_stats = _canonicalize_block_helper_display_rows(
-            rows=resolved_rows,
-            fields=fields,
-            header=header,
-        )
-        return resolved_rows
-    rows = rows_from_pipeline_payload(
-        payload,
-        template,
-        allow_payload_template_override=False,
-    )
+    rows = _extract_sheet_rows_from_resolved_column_mapping(payload, template)
     if not rows:
         return []
     normalized_rows = [[_field_value_to_str(cell) for cell in row] for row in rows]
@@ -23421,33 +23429,7 @@ def _parse_resolved_column_mapping_pairs(
     payload: dict[str, Any],
     fields: list[str],
 ) -> list[tuple[int, str]]:
-    resolution = payload.get("column_mapping_resolution")
-    if not isinstance(resolution, dict):
-        return []
-    raw_value = str(
-        resolution.get("resolved_value")
-        or resolution.get("resolved_column_mapping_id")
-        or ""
-    ).strip()
-    if not raw_value:
-        return []
-    pairs: list[tuple[int, str]] = []
-    seen_fields: set[str] = set()
-    for chunk in raw_value.split("|"):
-        token = str(chunk or "").strip()
-        if ":" not in token:
-            continue
-        source_raw, field = token.split(":", 1)
-        try:
-            source_col_index = int(source_raw)
-        except Exception:
-            continue
-        field = str(field or "").strip()
-        if not field or field in seen_fields or field not in fields or not field.startswith("qty."):
-            continue
-        seen_fields.add(field)
-        pairs.append((source_col_index, field))
-    return pairs
+    return fax_extractor._parse_resolved_column_mapping_pairs(payload, fields)
 
 
 def _template_explicit_quantity_pairs(
@@ -23487,6 +23469,9 @@ def _overlay_aux_display_cells_from_template_rows(
         if isinstance(row, list)
     ]
     if not normalized_rows:
+        return normalized_rows
+    if isinstance(payload.get("_reparse_recognizer_result"), dict):
+        _extract_sheet_rows_from_payload_uncanonicalized(payload, template)
         return normalized_rows
     fields = _get_row_fields(template)
     aux_indexes = [idx for idx, field in enumerate(fields) if _is_aux_sheet_field(field)]
@@ -23938,262 +23923,14 @@ def _extract_sheet_rows_from_resolved_column_mapping(
     payload: dict[str, Any],
     template: dict[str, Any],
 ) -> list[list[str]]:
-    fields = _get_row_fields(template)
-    if not fields:
-        return []
-    payload_quantity_pairs = _parse_resolved_column_mapping_pairs(payload, fields)
-    structured_tables = fax_extractor._collect_structured_tables(payload)
-
-    quantity_dest_indexes = {
-        idx for idx, field in enumerate(fields) if str(field or "").strip().startswith("qty.")
-    }
-    position_fallback_resolution = payload.get("column_mapping_resolution")
-    uses_position_fallback = (
-        isinstance(position_fallback_resolution, dict)
-        and str(position_fallback_resolution.get("decision_source") or "").strip() == "position_fallback"
-    )
-    if uses_position_fallback:
-        return []
-    field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields)}
-    date_idx = next(
-        (idx for idx, field in enumerate(fields) if str(field or "").strip().startswith("date")),
-        None,
-    )
-    daypart_idx = field_index.get("daypart")
-    menu_idx = field_index.get("menu")
-    if menu_idx is None:
-        menu_idx = field_index.get("menu_name")
-
-    def _merge_rows_by_identity(
-        primary_rows: list[list[str]],
-        secondary_rows: list[list[str]],
-    ) -> list[list[str]]:
-        merged: list[list[str]] = []
-        seen_identities: set[tuple[str, str, str]] = set()
-        for row in primary_rows:
-            if not isinstance(row, list):
-                continue
-            identity = _sheet_identity_from_values(
-                row,
-                date_idx=date_idx,
-                daypart_idx=daypart_idx,
-                menu_idx=menu_idx,
-            )
-            if identity == ("", "", ""):
-                continue
-            if identity in seen_identities:
-                continue
-            seen_identities.add(identity)
-            merged.append(list(row))
-        for row in secondary_rows:
-            if not isinstance(row, list):
-                continue
-            identity = _sheet_identity_from_values(
-                row,
-                date_idx=date_idx,
-                daypart_idx=daypart_idx,
-                menu_idx=menu_idx,
-            )
-            if identity == ("", "", ""):
-                continue
-            if identity in seen_identities:
-                continue
-            seen_identities.add(identity)
-            merged.append(list(row))
-        return merged
-
-    rebuilt_rows: list[list[str]] = []
-    for table_payload in structured_tables:
-        if not isinstance(table_payload, dict):
-            continue
-        matrix = None
-        raw_rows = table_payload.get("rows")
-        if isinstance(raw_rows, list) and raw_rows:
-            matrix = fax_extractor._normalize_table_matrix_rows(raw_rows)
-        if matrix is None:
-            raw_cells = table_payload.get("cells")
-            if isinstance(raw_cells, list) and raw_cells:
-                matrix = fax_extractor._matrix_from_structured_cells(
-                    raw_cells,
-                    row_count_hint=table_payload.get("row_count")
-                    if isinstance(table_payload.get("row_count"), int)
-                    else table_payload.get("n_row"),
-                    col_count_hint=table_payload.get("col_count")
-                    if isinstance(table_payload.get("col_count"), int)
-                    else table_payload.get("n_col"),
-                )
-        if not matrix:
-            continue
-        normalized_matrix = fax_extractor._normalize_table_matrix_rows(matrix)
-        observed_width = max((len(row) for row in normalized_matrix), default=0)
-        explicit_mapped_indexes: dict[int, int] = {}
-        explicit_dest_indexes: set[int] = set()
-        explicit_quantity_pairs = _template_explicit_quantity_pairs(
-            template=template,
-            fields=fields,
-            observed_width=observed_width,
-        )
-        resolved = fax_extractor._resolve_structured_table_mapping(matrix, template)
-        mapping_meta = resolved[0] if isinstance(resolved, tuple) and len(resolved) == 2 else None
-        if not isinstance(mapping_meta, dict):
-            continue
-        mapped_indexes = mapping_meta.get("mapped_indexes")
-        row_map = mapping_meta.get("row_map")
-        if not isinstance(mapped_indexes, dict) or not isinstance(row_map, dict):
-            continue
-        final_mapped_indexes = {
-            int(source_col_index): int(dest_idx)
-            for source_col_index, dest_idx in mapped_indexes.items()
-            if isinstance(dest_idx, int) and 0 <= dest_idx < len(fields) and dest_idx not in quantity_dest_indexes
-        }
-        if bool(template.get("columns_authoritative")) and observed_width > 0:
-            explicit_mapped_indexes = {
-                int(source_col_index): int(dest_idx)
-                for source_col_index, dest_idx in fax_extractor._mapped_indexes_from_template_columns(
-                    template=template,
-                    fields=fields,
-                    observed_width=observed_width,
-                ).items()
-                if 0 <= int(dest_idx) < len(fields)
-            }
-            if explicit_mapped_indexes:
-                explicit_source_indexes = set(explicit_mapped_indexes.keys())
-                explicit_dest_indexes = set(explicit_mapped_indexes.values())
-                final_mapped_indexes = {
-                    source_col_index: dest_idx
-                    for source_col_index, dest_idx in final_mapped_indexes.items()
-                    if source_col_index not in explicit_source_indexes and dest_idx not in explicit_dest_indexes
-                }
-                final_mapped_indexes.update(explicit_mapped_indexes)
-        for source_col_index, field in explicit_quantity_pairs:
-            dest_idx = field_index.get(str(field or "").strip())
-            if dest_idx is None:
-                continue
-            final_mapped_indexes[source_col_index] = dest_idx
-            explicit_dest_indexes.add(dest_idx)
-        for source_col_index, field in payload_quantity_pairs:
-            dest_idx = field_index.get(str(field or "").strip())
-            if dest_idx is None or dest_idx in explicit_dest_indexes:
-                continue
-            final_mapped_indexes[source_col_index] = dest_idx
-        for raw_row_index in sorted(int(idx) for idx in row_map.keys()):
-            if raw_row_index < 0 or raw_row_index >= len(normalized_matrix):
-                continue
-            row = normalized_matrix[raw_row_index]
-            output_row = [""] * len(fields)
-            for source_col_index, dest_idx in final_mapped_indexes.items():
-                if source_col_index < len(row):
-                    output_row[dest_idx] = row[source_col_index]
-            if any(str(cell or "").strip() for cell in output_row):
-                rebuilt_rows.append([_field_value_to_str(cell) for cell in output_row])
-
-    table_raw = payload.get("table_raw")
-    if not isinstance(table_raw, str) or not table_raw.strip():
-        return rebuilt_rows
-    markdown_tables = fax_extractor._extract_markdown_tables(table_raw)
-    if not markdown_tables:
-        return rebuilt_rows
-    markdown_rows: list[list[str]] = []
-    fields_set = set(fields)
-    for markdown_header, data_rows in markdown_tables:
-        observed_width = max(
-            len(markdown_header),
-            max((len(row) for row in data_rows if isinstance(row, list)), default=0),
-        )
-        markdown_mapped_indexes: dict[int, int] = {}
-        markdown_explicit_dest_indexes: set[int] = set()
-        if bool(template.get("columns_authoritative")) and observed_width > 0:
-            markdown_mapped_indexes = {
-                int(source_col_index): int(dest_idx)
-                for source_col_index, dest_idx in fax_extractor._mapped_indexes_from_template_columns(
-                    template=template,
-                    fields=fields,
-                    observed_width=observed_width,
-                ).items()
-                if 0 <= int(dest_idx) < len(fields)
-            }
-            markdown_explicit_dest_indexes = set(markdown_mapped_indexes.values())
-        if not markdown_mapped_indexes:
-            seen_non_quantity_dest_indexes: set[int] = set()
-            for source_col_index, header_cell in enumerate(markdown_header):
-                mapped_field = _field_from_header(str(header_cell or ""), fields_set)
-                dest_idx = field_index.get(str(mapped_field or "").strip())
-                if (
-                    dest_idx is None
-                    or dest_idx in quantity_dest_indexes
-                    or dest_idx in seen_non_quantity_dest_indexes
-                ):
-                    continue
-                markdown_mapped_indexes[source_col_index] = dest_idx
-                seen_non_quantity_dest_indexes.add(dest_idx)
-        for raw_row in data_rows:
-            if not isinstance(raw_row, list):
-                continue
-            output_row = [""] * len(fields)
-            for source_col_index, dest_idx in markdown_mapped_indexes.items():
-                if source_col_index < 0 or source_col_index >= len(raw_row):
-                    continue
-                output_row[dest_idx] = _field_value_to_str(raw_row[source_col_index])
-            for source_col_index, field in payload_quantity_pairs:
-                dest_idx = field_index.get(str(field or "").strip())
-                if (
-                    dest_idx is None
-                    or dest_idx in markdown_explicit_dest_indexes
-                    or source_col_index < 0
-                    or source_col_index >= len(raw_row)
-                ):
-                    continue
-                output_row[dest_idx] = _field_value_to_str(raw_row[source_col_index])
-            if any(str(cell or "").strip() for cell in output_row):
-                markdown_rows.append(output_row)
-    if not rebuilt_rows:
-        return markdown_rows
-    return _merge_rows_by_identity(rebuilt_rows, markdown_rows)
+    return fax_extractor.rows_from_explicit_physical_payload(payload, template)
 
 
 def _extract_first_pass_rows_from_payload(
     payload: dict[str, Any],
     template: dict[str, Any],
 ) -> list[list[str]]:
-    payload = _sanitize_payload_table_raw(payload)
-    fields = _get_row_fields(template)
-    raw_rows = payload.get("rows")
-    normalized_raw_rows: list[list[str]] = []
-    if isinstance(raw_rows, list):
-        for row in raw_rows:
-            if not isinstance(row, list):
-                continue
-            normalized_raw_rows.append([_field_value_to_str(cell) for cell in row])
-    structured_candidate_rows = _extract_structured_candidate_rows_from_payload(payload, template)
-    fragmented_rows = _extract_fragmented_quantity_rows_from_structured_payload(payload, template)
-    selected_rows = _select_canonical_first_pass_rows(
-        candidates=[
-            ("structured", structured_candidate_rows),
-            ("fragmented", fragmented_rows),
-        ],
-        fields=fields,
-        template=template,
-    )
-    if selected_rows:
-        return selected_rows
-    rows = structured_candidate_rows
-    if not rows:
-        table_raw = payload.get("table_raw")
-        if isinstance(table_raw, str) and table_raw.strip():
-            rows = rows_from_markdown(table_raw, template) or []
-    if rows and normalized_raw_rows and _first_pass_payload_header_is_generic(payload, template):
-        return _canonicalize_sheet_daypart_rows(
-            rows=normalized_raw_rows,
-            fields=fields,
-        )
-    if not rows and normalized_raw_rows:
-        rows = normalized_raw_rows
-    if not rows:
-        return []
-    return _canonicalize_sheet_daypart_rows(
-        rows=[[_field_value_to_str(cell) for cell in row] for row in rows],
-        fields=fields,
-    )
+    return _extract_sheet_rows_from_payload(payload, template)
 
 
 def _first_pass_payload_header_is_generic(
@@ -24250,6 +23987,11 @@ def _resolve_payload_sheet_template(
 def _collect_structured_tables_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
+    if payload.get("pipeline_mode") == "structured_v2":
+        try:
+            return fax_extractor._collect_structured_tables(payload)
+        except ValueError as exc:
+            raise _CanonicalOcrProjectionError(str(exc)) from exc
     tables: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
 
@@ -24309,13 +24051,16 @@ def _collect_raw_payload_cell_issues(
             value = llm_review.get(key)
             if isinstance(value, list):
                 candidates.extend(value)
-    candidates.extend(
-        structured_cell_issues_from_payload(
-            payload,
-            template or {},
-            allow_payload_template_override=False,
+    if isinstance(payload.get("_reparse_recognizer_result"), dict):
+        _extract_sheet_rows_from_payload_uncanonicalized(payload, template or {})
+    else:
+        candidates.extend(
+            structured_cell_issues_from_payload(
+                payload,
+                template or {},
+                allow_payload_template_override=False,
+            )
         )
-    )
 
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -24563,7 +24308,7 @@ def _build_sheet_lines_from_ocr_payload(
         else dict(policy.get("quantity_rules", {}))
     )
     effective_quantity_rules["rows_are_body_only"] = True
-    date_candidates = _collect_sheet_dates_from_payload(payload, received_at)
+    date_candidates = _collect_sheet_dates_from_payload(payload, received_at, template)
     default_date = min(date_candidates) if date_candidates else None
     lines = parse_order_lines(
         sheet_rows,
@@ -28884,11 +28629,20 @@ def get_ocr_sheet(
     if field_error:
         return None, field_error
     quantity_index = _build_sheet_quantity_index(fields)
-    template_authoritative_quantity_ready = _template_authoritative_quantity_mapping_ready(
-        ocr_payload,
-        template,
-        fields,
-    )
+    try:
+        template_authoritative_quantity_ready = _template_authoritative_quantity_mapping_ready(
+            ocr_payload, template, fields,
+        )
+    except ValueError as exc:
+        if str(exc) != "sheet_canonical_mismatch":
+            raise
+        return _build_blocked_sheet_payload(
+            order_id=order_id, facility_id=facility_id, week_id=week_id,
+            fields=fields, header=header, blockers=[str(exc)],
+            source=_canonical_blocked_sheet_source(fields=fields),
+            base_template_resolution_id=effective_template_id,
+            base_evidence_run_id=str((evidence_run_override or {}).get("id") or "").strip() or None,
+        ), None
 
     context_draft_record = (
         current_sheet_context.get("draft_record")
@@ -28963,13 +28717,23 @@ def get_ocr_sheet(
     sheet_lines: list[dict[str, Any]] = []
     sheet_lines_source = "suppressed"
     if isinstance(ocr_payload, dict):
-        payload_sheet_lines = _build_sheet_lines_from_ocr_payload(
-            payload=ocr_payload,
-            template=template,
-            received_at=received_at,
-            week_id=resolved_week_id,
-            facility_id=facility_id,
-        )
+        try:
+            payload_sheet_lines = _build_sheet_lines_from_ocr_payload(
+                payload=ocr_payload,
+                template=template,
+                received_at=received_at,
+                week_id=resolved_week_id,
+                facility_id=facility_id,
+            )
+        except _CanonicalOcrProjectionError as exc:
+            return _build_blocked_sheet_payload(
+                order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
+                fields=fields, header=header, blockers=[str(exc)],
+                source=_canonical_blocked_sheet_source(fields=fields),
+                base_template_resolution_id=effective_template_id,
+                base_evidence_run_id=str((evidence_run_override or {}).get("id") or "").strip() or None,
+                menu_diagnostics=menu_diagnostics,
+            ), None
         if payload_sheet_lines:
             sheet_lines = payload_sheet_lines
             sheet_lines_source = "ocr_payload"
@@ -29017,7 +28781,7 @@ def get_ocr_sheet(
     payload_dates = (
         {
             item
-            for item in _collect_sheet_dates_from_payload(ocr_payload, received_at)
+            for item in _collect_sheet_dates_from_payload(ocr_payload, received_at, template)
             if isinstance(item, date)
         }
         if isinstance(ocr_payload, dict)
@@ -30722,11 +30486,14 @@ def build_order_hakodate_assignment(
                 _validate_hakodate_owned_artifacts(payload, _hakodate_owned_source(captured_config, receipt, synchronous_write_input))
         except ValueError as exc:
             return None, str(exc)
-    baseline = _resolve_llm_review_baseline(
-        order_id=order_id,
-        payload=payload,
-        template=template_to_use,
-    )
+    try:
+        baseline = _resolve_llm_review_baseline(
+            order_id=order_id,
+            payload=payload,
+            template=template_to_use,
+        )
+    except _CanonicalOcrProjectionError as exc:
+        return None, str(exc)
     skeleton_rows = _hakodate_skeleton_rows_from_baseline(baseline)
     assignment = _build_hakodate_evidence_assignment_from_payload(
         order_id=order_id,
@@ -30774,11 +30541,14 @@ def build_order_hakodate_template_candidate(
 
     template_to_use = dict(template)
     template_to_use["facility_id"] = facility_id
-    baseline = _resolve_llm_review_baseline(
-        order_id=order_id,
-        payload=payload,
-        template=template_to_use,
-    )
+    try:
+        baseline = _resolve_llm_review_baseline(
+            order_id=order_id,
+            payload=payload,
+            template=template_to_use,
+        )
+    except _CanonicalOcrProjectionError as exc:
+        return None, str(exc)
     skeleton_rows = _hakodate_skeleton_rows_from_baseline(baseline)
     candidate = hakodate_assignment_service.build_facility_template_regeneration_candidate(
         template_to_use,
@@ -34144,25 +33914,33 @@ def reparse_order(
         }
         if not capture_own_reparse_request(ocr_job_id, original_request):
             return None, "reparse_original_request_conflict"
-        return _reparse_order_with_attempt(
-            order_id,
-            ocr_prompt=ocr_prompt,
-            prompt_preset=prompt_preset,
-            ocr_provider=ocr_provider,
-            ocr_model=ocr_model,
-            llm_assist=llm_assist,
-            auto_fallback_context=auto_fallback_context,
-            evaluator_feedback=evaluator_feedback,
-            feedback_retry_depth=feedback_retry_depth,
-            draft_rows_override=draft_rows_override,
-            draft_rows_label=draft_rows_label,
-            resume_first_pass_payload=resume_first_pass_payload,
-            resume_first_pass_output_reference=resume_first_pass_output_reference,
-            selected_document_id=selected_document_id,
-            workflow_attempt_id=workflow_attempt_id,
-            ocr_job_id=ocr_job_id,
-            original_request=original_request,
-        )
+        try:
+            return _reparse_order_with_attempt(
+                order_id,
+                ocr_prompt=ocr_prompt,
+                prompt_preset=prompt_preset,
+                ocr_provider=ocr_provider,
+                ocr_model=ocr_model,
+                llm_assist=llm_assist,
+                auto_fallback_context=auto_fallback_context,
+                evaluator_feedback=evaluator_feedback,
+                feedback_retry_depth=feedback_retry_depth,
+                draft_rows_override=draft_rows_override,
+                draft_rows_label=draft_rows_label,
+                resume_first_pass_payload=resume_first_pass_payload,
+                resume_first_pass_output_reference=resume_first_pass_output_reference,
+                selected_document_id=selected_document_id,
+                workflow_attempt_id=workflow_attempt_id,
+                ocr_job_id=ocr_job_id,
+                original_request=original_request,
+            )
+        except _CanonicalOcrProjectionError as exc:
+            _update_reparse_job_progress(
+                ocr_job_id, status="failed", processing_stage="inference",
+                result_state="hard_failed", error_message=str(exc),
+                metrics_patch={"error": str(exc)},
+            )
+            return None, str(exc)
 
 
 def _reparse_order_with_attempt(
@@ -34597,13 +34375,9 @@ def _reparse_order_with_attempt(
                     pipeline_output_payload,
                     template_to_use,
                 )
-            if not pipeline_rows_for_rescue:
-                table_raw = pipeline_output_payload.get("table_raw")
-                if isinstance(table_raw, str) and table_raw.strip():
-                    pipeline_rows_for_rescue = rows_from_markdown(table_raw, template_to_use) or []
             pipeline_anchor_dates = {
                 item
-                for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at)
+                for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at, template_to_use)
                 if isinstance(item, date)
             }
             if position_entries_for_existing_week and not stable_existing_anchor_scope:
@@ -34774,6 +34548,9 @@ def _reparse_order_with_attempt(
             pipeline_output_payload = extracted.own_pipeline_payload
             pipeline_output_ref = pipeline_output_payload.get("output_reference")
             current_pipeline_result = True
+            extracted.table_rows = _extract_sheet_rows_from_payload_uncanonicalized(
+                pipeline_output_payload, template_to_use,
+            )
         extracted_data = extracted
         actual_provider = str(extracted.ocr_provider or "").strip().lower()
         if llm_assist and actual_provider.endswith("_fallback_pipeline"):
@@ -35684,14 +35461,15 @@ def _reparse_order_with_attempt(
     if not week_id:
         return _rejected_reparse_result(order_id, week_payload, ocr_job_id, "week_unresolved")
     pipeline_payload_dates: set[date] = set()
-    if isinstance(pipeline_output_payload, dict):
+    if isinstance(week_payload, dict):
         pipeline_payload_dates = {
             item
-            for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at)
+            for item in _collect_sheet_dates_from_payload(week_payload, received_at, template_to_use)
             if isinstance(item, date)
         }
     reparse_position_entries = _build_reparse_position_menu_entries(
         week_id=week_id,
+        template=template_to_use,
         facility_id=facility_id,
         lines=week_resolution_lines,
         rows=[list(row) for row in rows if isinstance(row, list)],
