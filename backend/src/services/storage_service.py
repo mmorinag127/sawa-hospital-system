@@ -341,11 +341,7 @@ def save_output_json(storage: StorageService, job_id: str, name: str, payload: d
 
 
 def get_default_output_bucket() -> str | None:
-    return os.getenv("OCR_OUTPUT_BUCKET") or os.getenv("RAW_BUCKET")
-
-
-def get_default_artifact_bucket() -> str | None:
-    return os.getenv("OCR_ARTIFACT_BUCKET") or os.getenv("RAW_BUCKET")
+    return (os.getenv("OCR_OUTPUT_BUCKET") or "").strip() or None
 
 
 def save_canonical_artifact_bytes(job_id: str, name: str, data: bytes, content_type: str) -> str:

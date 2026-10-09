@@ -60,9 +60,6 @@ _ORDER_FORM_SOURCE_TEMPLATE_MANIFEST = _ORDER_FORM_SOURCE_TEMPLATE_ASSET_DIR / "
 _SOURCE_WORKBOOK_MATERIALIZED_DIR = Path(
     os.getenv("FAX_SOURCE_TEMPLATE_MATERIALIZED_DIR", "/tmp/fax-source-template-workbooks")
 )
-_SOURCE_WORKBOOK_UPLOAD_DIR = Path(
-    os.getenv("FAX_SOURCE_TEMPLATE_UPLOAD_DIR", "/tmp/fax-source-template-uploads")
-)
 
 
 class WeekEntriesWriteResult(int):
@@ -472,23 +469,17 @@ def save_facility_source_workbook_upload(
     safe_name = _sanitize_filename_fragment(Path(filename or "source_workbook").stem)
     object_name = f"{safe_name}_{digest[:12]}{suffix}"
     bucket = get_default_output_bucket()
-    if bucket:
-        uri = save_artifact_bytes_to_gcs(
-            bucket,
-            f"facility-template-{facility_id}",
-            object_name,
-            data,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        storage = "gcs"
-    else:
-        _SOURCE_WORKBOOK_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        target = _SOURCE_WORKBOOK_UPLOAD_DIR / object_name
-        target.write_bytes(data)
-        uri = str(target)
-        storage = "local"
+    if not bucket:
+        raise ValueError("source_workbook_gcs_storage_required")
+    uri = save_artifact_bytes_to_gcs(
+        bucket,
+        f"facility-template-{facility_id}",
+        object_name,
+        data,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
     # Validate the uploaded workbook before it is referenced by facility config.
-    workbook_path = _materialize_source_workbook_uri(f"file://{uri}") if uri.startswith("/") else _resolve_source_workbook_path(uri)
+    workbook_path = _resolve_source_workbook_path(uri)
     workbook = load_workbook(workbook_path, read_only=True)
     try:
         sheetnames = list(workbook.sheetnames)
@@ -498,7 +489,7 @@ def save_facility_source_workbook_upload(
         raise ValueError("source workbook has no sheets")
     return {
         "uri": uri,
-        "storage": storage,
+        "storage": "gcs",
         "filename": filename,
         "sha256": digest,
         "sheetnames": sheetnames,
