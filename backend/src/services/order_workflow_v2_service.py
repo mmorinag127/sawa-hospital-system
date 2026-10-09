@@ -340,28 +340,29 @@ def _format_week_code_from_range(week_start: str, week_end: str) -> str | None:
 
 
 def _effective_facility_config_date_from_meta(meta: dict[str, Any], order: Order | None = None) -> date | None:
-    for value in (
-        meta.get("week_start"),
-        meta.get("effective_facility_config_date"),
-        getattr(order, "week_code", None),
-        getattr(order, "received_at", None),
+    _month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(order.week_code if order is not None else None)
+    if start_date is None or end_date is None:
+        raise ValueError("week_range_required")
+    for key, expected_date in (
+        ("week_start", start_date),
+        ("week_end", end_date),
+        ("effective_facility_config_date", start_date),
     ):
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        text = str(value or "").strip()
-        if not text:
+        value = _normalize_id(meta.get(key))
+        if not value:
             continue
-        if "@" in text:
-            _month_id, start_date, _end_date = sheet_week_service.parse_sheet_week_value(text)
-            if isinstance(start_date, date):
-                return start_date
         try:
-            return date.fromisoformat(text[:10])
-        except Exception:
-            continue
-    return None
+            actual_date = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("week_range_invalid") from exc
+        if actual_date != expected_date:
+            raise ValueError("template_version_mismatch")
+    week_code = _normalize_id(meta.get("week_code"))
+    if week_code:
+        _meta_month, meta_start, meta_end = sheet_week_service.parse_sheet_week_value(week_code)
+        if (meta_start, meta_end) != (start_date, end_date):
+            raise ValueError("template_version_mismatch")
+    return start_date
 
 
 def _week_range_from_week_code(week_code: object) -> tuple[str | None, str | None]:
@@ -699,6 +700,12 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         if not _workflow_meta_has_resolved_template(meta):
             _apply_template_lineage_blocker(row, "template_version_required")
             return _serialize_workflow(row), "template_version_required"
+        _, template_error = _require_workflow_template_version_from_context(
+            session, order=order, workflow=row, meta=meta,
+        )
+        if template_error:
+            _apply_template_lineage_blocker(row, template_error)
+            return _serialize_workflow(row), template_error
         _refresh_ocr_prerequisite_state(session, order, row)
         revision_error = _finalize_workflow_mutation(session, row)
         if revision_error:
@@ -769,7 +776,18 @@ def _effective_workflow_template_id(meta: dict[str, Any]) -> str | None:
 
 
 def _effective_workflow_template_version_id(row: OrderWorkflowState, meta: dict[str, Any]) -> str | None:
-    return _normalize_id(row.template_version_id) or _normalize_id(meta.get("template_version_id")) or None
+    template_version_id, _error = _workflow_template_version_identity(row, meta)
+    return template_version_id
+
+
+def _workflow_template_version_identity(row: OrderWorkflowState, meta: dict[str, Any]) -> tuple[str | None, str | None]:
+    template_version_id = _normalize_id(row.template_version_id)
+    if not template_version_id:
+        return None, "template_version_required"
+    cached_id = _normalize_id(meta.get("template_version_id"))
+    if cached_id and cached_id != template_version_id:
+        return None, "template_version_mismatch"
+    return template_version_id, None
 
 
 def _canonical_workflow_template_version(session, template_version_id, facility_id):
@@ -780,7 +798,7 @@ def _canonical_workflow_template_version(session, template_version_id, facility_
     if version is None:
         return None, "template_version_mismatch"
     try:
-        lineage.verify_projection(version)
+        receipt = lineage.verify_projection(version)
     except CanonicalStoreError:
         return None, "template_version_mismatch"
     if facility_id and _normalize_id(version.facility_id) != facility_id:
@@ -788,6 +806,10 @@ def _canonical_workflow_template_version(session, template_version_id, facility_
     validation = facility_template_version_service.validate_template_columns(list(version.columns_json or []))
     if validation.get("errors"):
         return None, "facility_template_unresolved"
+    try:
+        config_service.validate_selected_authored_facility_config(facility_id, receipt["authored_version"])
+    except (CanonicalStoreError, ValueError, OSError):
+        return None, "template_version_mismatch"
     return version, None
 
 
@@ -798,18 +820,15 @@ def _require_workflow_template_version_from_context(
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
 ) -> tuple[str | None, str | None]:
-    template_version_id = _effective_workflow_template_version_id(workflow, meta)
+    template_version_id, identity_error = _workflow_template_version_identity(workflow, meta)
+    if identity_error == "template_version_mismatch":
+        return None, identity_error
     if template_version_id:
-        facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
-        version, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
+        template_version_id, error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=meta,
+        )
         if error:
             return None, error
-        effective_date = _effective_facility_config_date_from_meta(meta, order)
-        if effective_date is not None and not facility_template_version_service.template_version_applies_on(
-            version,
-            effective_date,
-        ):
-            return None, "template_version_mismatch"
         return template_version_id, None
     if not _workflow_meta_has_confirmed_context(meta):
         return None, "context_not_confirmed"
@@ -828,11 +847,12 @@ def _resolve_evidence_template_version(
     *,
     required_template_version_id: str | None = None,
 ) -> tuple[str | None, str | None]:
-    workflow_template_version_id = (
-        _normalize_id(required_template_version_id)
-        or _normalize_id(workflow.template_version_id)
-        or _normalize_id(meta.get("template_version_id"))
-    )
+    workflow_template_version_id, identity_error = _workflow_template_version_identity(workflow, meta)
+    if identity_error:
+        return None, identity_error
+    required_id = _normalize_id(required_template_version_id)
+    if required_id and required_id != workflow_template_version_id:
+        return None, "template_version_mismatch"
     evidence_template_version_id = _normalize_id(evidence.template_version_id)
     if workflow_template_version_id and not evidence_template_version_id:
         return None, "template_version_mismatch"
@@ -840,7 +860,7 @@ def _resolve_evidence_template_version(
         return None, "template_version_mismatch"
     if evidence_template_version_id and not workflow_template_version_id:
         return None, "template_version_mismatch"
-    return evidence_template_version_id or workflow_template_version_id or None, None
+    return workflow_template_version_id, None
 
 
 def _ensure_ocr_job_lineage(
@@ -1193,28 +1213,18 @@ def _workflow_lineage_error(
 ) -> str | None:
     meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(workflow)
     state = _canonical_workflow_v2_state(workflow, meta)
-    if not state or state in {
-        "uploaded",
-        "not_initialized",
-        "facility_template_unresolved",
-        "template_version_required",
-        "template_version_mismatch",
-        "ocr_failed",
-    }:
+    if _workflow_template_selection_pending(workflow, meta):
         return None
 
     if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
         if not _workflow_meta_has_confirmed_context(meta):
             return "context_not_confirmed"
 
-    template_version_id = _effective_workflow_template_version_id(workflow, meta)
-    if _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state):
-        if not template_version_id:
-            return "template_version_required"
-        facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
-        _, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
-        if error:
-            return error
+    template_version_id, error = _require_existing_workflow_template_version(
+        session, order=order, workflow=workflow, meta=meta,
+    )
+    if error:
+        return error
 
     if _workflow_state_requires_selected_ocr(state):
         if not workflow.evidence_run_id:
@@ -1502,26 +1512,68 @@ def _require_existing_workflow_template_version(
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
 ) -> tuple[str | None, str | None]:
-    template_version_id = _effective_workflow_template_version_id(workflow, meta)
-    if not template_version_id:
-        return None, "template_version_required"
-    facility_id = _normalize_id(meta.get("facility_id")) or _normalize_id(order.facility_code)
-    _, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
-    if error:
-        return None, error
-    return template_version_id, None
+    with session.no_autoflush:
+        template_version_id, error = _workflow_template_version_identity(workflow, meta)
+        if error:
+            return None, error
+        order_template_version_id = _normalize_id(order.template_version_id)
+        if not order_template_version_id:
+            return None, "template_version_required"
+        if order_template_version_id != template_version_id:
+            return None, "template_version_mismatch"
+        facility_id = _normalize_id(order.facility_code)
+        if not facility_id:
+            return None, "facility_missing"
+        context_facility_id = _normalize_id(meta.get("facility_id"))
+        if context_facility_id and context_facility_id != facility_id:
+            return None, "template_version_mismatch"
+        version, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
+        if error:
+            return None, error
+        try:
+            effective_date = _effective_facility_config_date_from_meta(meta, order)
+        except ValueError as exc:
+            return None, str(exc)
+        if not facility_template_version_service.template_version_applies_on(version, effective_date):
+            return None, "template_version_mismatch"
+        return template_version_id, None
+
+
+def _workflow_template_selection_pending(workflow: OrderWorkflowState, meta: dict[str, Any]) -> bool:
+    state = _canonical_workflow_v2_state(workflow, meta)
+    return not state or state in {
+        "uploaded", "not_initialized", "facility_template_unresolved",
+        "template_version_required", "template_version_mismatch",
+    } or (state == "ocr_failed" and not _workflow_meta_has_confirmed_context(meta))
+
+
+def _selected_workflow_template_error(session, order, workflow):
+    meta = _workflow_meta(workflow)
+    if _workflow_template_selection_pending(workflow, meta):
+        return None
+    _, error = _require_existing_workflow_template_version(
+        session, order=order, workflow=workflow, meta=meta,
+    )
+    return error
 
 
 def _workflow_menu_amount_resolution(session, order, workflow):
-    if workflow is None or not workflow.draft_id:
+    if workflow is None:
+        return menu_amount_resolution(order)
+    template_error = _selected_workflow_template_error(session, order, workflow)
+    if template_error:
+        return {"status": "unresolved", "blocker": template_error, "message": template_error, "affected_lines": []}
+    if not workflow.draft_id:
         return menu_amount_resolution(order)
     draft = session.get(OrderSheetDraft, workflow.draft_id)
     error = None
     if draft is None or draft.order_id != order.id:
         error = "saved_sheet_missing"
     else:
-        version = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
-        if version and _normalize_id(draft.template_version_id) != version:
+        version, error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+        )
+        if error is None and _normalize_id(draft.template_version_id) != version:
             error = "saved_sheet_template_mismatch"
     if error is None:
         try:
@@ -1541,7 +1593,7 @@ def _workflow_menu_amount_resolution(session, order, workflow):
 
 
 def get_workflow_readonly(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
+    with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -2236,6 +2288,9 @@ def mark_ocr_run_queued(
                 reservation_metrics["reparse_read_input"] = capture_reparse_read_input(session, order)
             except ValueError as exc:
                 return finalize_queue_blocker(str(exc))
+            captured_order = reservation_metrics["reparse_read_input"].get("order") or {}
+            if _normalize_id(captured_order.get("template_version_id")) != template_version_id:
+                return finalize_queue_blocker("template_version_mismatch")
             selected_input = reservation_metrics.get("selected_version_input")
             if delivery_selected_document_id and selected_input is None:
                 return finalize_queue_blocker("selected_document_input_missing")
@@ -2296,7 +2351,6 @@ def mark_ocr_run_queued(
         workflow.draft_id = None
         workflow.confirmed_snapshot_id = None
         workflow.template_version_id = template_version.id
-        order.template_version_id = template_version.id
         session.flush()
         _delete_downstream_after_ocr_change(session, order.id)
         workflow.state = "ocr_running"
@@ -2592,7 +2646,7 @@ def _align_hakodate_sheet_payload_for_workflow(
 
 
 def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
+    with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -2603,6 +2657,10 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             if workflow is not None
             else None
         )
+        if workflow is not None and workflow_template_version_id:
+            workflow_template_version_id, _template_error = _require_existing_workflow_template_version(
+                session, order=order, workflow=workflow, meta=workflow_meta,
+            )
         rows = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
@@ -2736,6 +2794,9 @@ def set_expanded_cell_copy_mode(order_id: str, mode: str) -> tuple[dict[str, Any
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
         meta = _workflow_meta(workflow)
+        template_error = _selected_workflow_template_error(session, order, workflow)
+        if template_error:
+            return None, template_error
         previous_mode = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
         meta["expanded_cell_copy_mode"] = normalized_mode
         meta["bagging_result_id"] = None
@@ -3057,6 +3118,11 @@ def confirm_sheet_review(
         if not workflow.evidence_run_id:
             return None, "selected_ocr_required"
         meta = _workflow_meta(workflow)
+        _, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=meta,
+        )
+        if template_error:
+            return None, template_error
         _set_pre_save_check(meta, "sheet_review", sheet_hash=sheet_hash)
         _write_workflow_meta(workflow, meta)
         revision_error = _finalize_workflow_mutation(session, workflow)
@@ -3077,7 +3143,7 @@ def get_sheet_pre_save_status(
     if not isinstance(sheet, dict):
         return None, "sheet_required"
     sheet_hash = _stable_json_hash(sheet)
-    with session_scope() as session:
+    with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -3089,6 +3155,9 @@ def get_sheet_pre_save_status(
                 "pre_save_status": _pre_save_status_for_sheet({}, sheet_hash),
             }, None
         meta = _workflow_meta(workflow)
+        template_error = _selected_workflow_template_error(session, order, workflow)
+        if template_error:
+            return None, template_error
         return {
             "workflow": _serialize_workflow(workflow),
             "pre_save_checks": _workflow_pre_save_checks(meta),
@@ -3113,6 +3182,14 @@ def propose_sheet_auto_edit(
             return None, "workflow_not_initialized"
         if _workflow_revision(workflow) != expected_revision:
             return None, WORKFLOW_REVISION_CONFLICT
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        _, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+        )
+        if template_error:
+            return None, template_error
     service = _get_order_service_module()
     if start_input is None:
         try:
@@ -3173,6 +3250,14 @@ def start_sheet_auto_edit_job(
             return None, "workflow_not_initialized"
         if _workflow_revision(workflow) != _expected_workflow_revision.get():
             return None, WORKFLOW_REVISION_CONFLICT
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        _, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+        )
+        if template_error:
+            return None, template_error
     service = _get_order_service_module()
     try:
         start_input = service._capture_synchronous_cache_write_input(order_id)
@@ -3317,13 +3402,16 @@ def get_sheet_auto_edit_job(
     order_id: str,
     job_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
+    with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
         workflow = _get_workflow_readonly(session, order.id)
         if workflow is None:
             return None, "workflow_not_found"
+        template_error = _selected_workflow_template_error(session, order, workflow)
+        if template_error:
+            return None, template_error
         meta = _workflow_meta(workflow)
         job = meta.get(SHEET_AUTO_EDIT_JOB_META_KEY)
         if not isinstance(job, dict):
@@ -3548,6 +3636,16 @@ def _build_materialization_candidate_for_saved_sheet(
     order: Order,
     saved_sheet: OrderSheetDraft,
 ) -> dict[str, Any]:
+    workflow = _get_workflow_readonly(session, order.id)
+    if workflow is None:
+        return {"error": "workflow_not_initialized", "lines": []}
+    version, template_error = _require_existing_workflow_template_version(
+        session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+    )
+    if template_error:
+        return {"error": template_error, "lines": []}
+    if _normalize_id(saved_sheet.template_version_id) != version:
+        return {"error": "saved_sheet_template_mismatch", "lines": []}
     order_service_module = _get_order_service_module()
     captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session)
     if not isinstance(captured, dict) or captured.get("draft_id") != saved_sheet.id:
@@ -3790,7 +3888,7 @@ def _recover_confirmed_artifacts_from_snapshot(
 
 
 def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
+    with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -3802,9 +3900,11 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(
-            _workflow_meta(workflow).get("template_version_id")
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
         )
+        if template_error:
+            return None, template_error
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
             return None, "saved_sheet_template_mismatch"
@@ -3933,7 +4033,11 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+        )
+        if template_error:
+            return None, template_error
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
             return None, "saved_sheet_template_mismatch"
@@ -4008,6 +4112,9 @@ def run_sheet_anomaly_review(
         if error:
             return None, error
         workflow = _get_or_create_workflow(session, order.id)
+        template_error = _selected_workflow_template_error(session, order, workflow)
+        if template_error:
+            return None, template_error
         review_sheet = sheet if isinstance(sheet, dict) else None
         if review_sheet is None and not workflow.draft_id:
             return None, "saved_sheet_required"
@@ -4016,7 +4123,11 @@ def run_sheet_anomaly_review(
         if review_sheet is None:
             if draft is None or draft.order_id != order.id:
                 return None, "saved_sheet_missing"
-            workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+            workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+                session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+            )
+            if template_error:
+                return None, template_error
             draft_template_version_id = _normalize_id(draft.template_version_id)
             if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
                 return None, "saved_sheet_template_mismatch"
@@ -4140,7 +4251,11 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             return None, "bagging_result_required"
         if _bagging_result_has_excluded_materialization_lines(bagging_result):
             return None, "bagging_result_stale_template_columns"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+        )
+        if template_error:
+            return None, template_error
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
             return None, "bagging_result_template_mismatch"
@@ -4178,7 +4293,11 @@ def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | N
             return None, "bagging_result_required"
         if _bagging_result_has_excluded_materialization_lines(bagging_result):
             return None, "bagging_result_stale_template_columns"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(_workflow_meta(workflow).get("template_version_id"))
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
+        )
+        if template_error:
+            return None, template_error
         bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
         if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
             return None, "bagging_result_template_mismatch"
@@ -4227,7 +4346,11 @@ def final_confirm(
         draft = session.get(OrderSheetDraft, workflow.draft_id)
         if draft is None or draft.order_id != order.id:
             return None, "saved_sheet_missing"
-        workflow_template_version_id = _normalize_id(workflow.template_version_id) or _normalize_id(meta.get("template_version_id"))
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=meta,
+        )
+        if template_error:
+            return None, template_error
         draft_template_version_id = _normalize_id(draft.template_version_id)
         if workflow_template_version_id and draft_template_version_id != workflow_template_version_id:
             return None, "saved_sheet_template_mismatch"
@@ -4352,11 +4475,15 @@ def final_confirm(
 
 
 def get_inspection(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
+    with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
         workflow = _get_workflow_readonly(session, order.id)
+        if workflow is not None:
+            template_error = _selected_workflow_template_error(session, order, workflow)
+            if template_error:
+                return None, template_error
         ocr_results = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
