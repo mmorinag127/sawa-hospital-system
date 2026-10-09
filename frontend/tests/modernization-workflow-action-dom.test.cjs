@@ -564,3 +564,71 @@ for (const outcome of ['success', 'error']) test(`facility save ${stage} late ${
   } finally { pending.resolve({ data: stage === 'refresh' ? f.workflow() : { resolved_config: clone(resolvedConfig) } });
     if (operation) await operation.promise; await f.h.close(); }
 });
+
+// Synthetic transport/mounted production UI only; backend receipt validation is
+// covered separately by the owned SQLite/service/HTTP definitions, not mocked here.
+for (const [code, label] of [
+  ['selected_pdf_document_required', '注文に紐づくFAX PDFを確認してください。'],
+  ['selected_pdf_input_mismatch', '選択したFAX PDFが注文の参照元と一致していません。'],
+  ['selected_pdf_digest_required', 'FAX PDFの照合情報が不足しているため、処理を停止しています。'],
+  ['selected_pdf_generation_required', 'FAX PDFの保存版を特定できないため、処理を停止しています。'],
+  ['menu_amount_unresolved', '月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。'],
+]) test(`readonly ${code} keeps exact message, blocks both output callbacks and preserves raw cells`, async () => {
+  const f = await setup();
+  try {
+    f.state.saved = sheet(RAW);
+    f.state.workflow.menu_amount_resolution = { status: 'unresolved', blocker: code,
+      message: code, affected_lines: [] };
+    await f.h.settle(() => f.probe.current.refreshAll());
+    await f.h.settle(() => f.probe.current.setVisibleStep(4));
+    assert.equal(f.probe.current.workflow.menu_amount_resolution.blocker, code);
+    const original = clone(f.probe.current.sheetPayload.rows);
+    assert.deepEqual(original[0].slice(4), RAW);
+    assert.ok(f.h.document.body.textContent.includes(label));
+    if (code !== 'menu_amount_unresolved') {
+      assert.ok(!f.h.document.body.textContent.includes('月次メニューの一人量または単位を確認してください'));
+    }
+    for (const text of ['出力確認を作成', '確定して一覧にもどる']) {
+      const button = [...f.h.document.querySelectorAll('button')].find(item => item.textContent.trim() === text);
+      assert.ok(button, text);
+      assert.equal(button.disabled, true, text);
+    }
+    for (const action of ['runBagging', 'finalConfirm']) {
+      await f.h.settle(() => f.probe.current[action]());
+      assert.equal(f.probe.current.error, label);
+      assert.ok(f.h.document.body.textContent.includes(label));
+      assert.deepEqual(clone(f.probe.current.sheetPayload.rows), original);
+      assert.equal(calls(f, 'post', `${BASE}/bagging`).length, 0);
+      assert.equal(calls(f, 'post', `${BASE}/confirm`).length, 0);
+      assert.equal(f.h.nav.router.asPath, `/orders/${ORDER}/workflow-v2`);
+    }
+    assert.deepEqual(clone(f.state.saved.rows), original);
+  } finally { await f.h.close(); }
+});
+
+for (const action of ['runBagging', 'finalConfirm'])
+test(`resolved receipt boundary retains ordinary ${action} output and raw cells`, async () => {
+  const f = await setup();
+  try {
+    f.state.saved = sheet(RAW);
+    await f.h.settle(() => f.probe.current.refreshAll());
+    await f.h.settle(() => f.probe.current.setVisibleStep(4));
+    const original = clone(f.probe.current.sheetPayload.rows);
+    assert.deepEqual(original[0].slice(4), RAW);
+    for (const text of ['出力確認を作成', '確定して一覧にもどる']) {
+      const button = [...f.h.document.querySelectorAll('button')].find(item => item.textContent.trim() === text);
+      assert.ok(button, text);
+      assert.equal(button.disabled, false, text);
+    }
+    assert.ok(!f.h.document.body.textContent.includes('月次メニューの一人量または単位を確認してください'));
+    await f.h.settle(() => f.probe.current[action]());
+    const path = action === 'runBagging' ? 'bagging' : 'confirm';
+    const requests = calls(f, 'post', `${BASE}/${path}`);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].config.headers['If-Match'], '"7"');
+    assert.equal(f.probe.current.error, '');
+    assert.deepEqual(clone(f.state.saved.rows), original);
+    if (action === 'runBagging') assert.deepEqual(clone(f.probe.current.sheetPayload.rows), original);
+    else assert.equal(f.h.nav.router.asPath, '/orders');
+  } finally { await f.h.close(); }
+});
