@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any
 
 from src.services import (
-    config_service,
+    config_service as config_service,
     position_column_mapping_service,
     sheet_week_service,
     week_candidate_service,
@@ -436,59 +436,6 @@ def build_template_resolution_snapshot(payload: dict[str, Any] | None) -> dict[s
     }
 
 
-def _collapse_equivalent_template_resolution(
-    *,
-    facility_id: str | None,
-    resolution: dict[str, Any],
-) -> dict[str, Any]:
-    if not isinstance(resolution, dict):
-        return resolution
-    normalized_facility_id = str(facility_id or "").strip() or None
-    if not normalized_facility_id:
-        return resolution
-    facility_config = config_service.get_facility_config(normalized_facility_id)
-    if not isinstance(facility_config, dict):
-        return resolution
-    configured_template_ids = facility_config.get("fax_template_ids") or facility_config.get("fax_template_id")
-    collapsed_template_ids = config_service.collapse_equivalent_template_ids(
-        normalized_facility_id,
-        configured_template_ids,
-    )
-    if len(collapsed_template_ids) != 1:
-        return resolution
-    resolved_value = str(resolution.get("resolved_value") or "").strip()
-    if resolved_value:
-        return resolution
-    candidates = resolution.get("candidates") if isinstance(resolution.get("candidates"), list) else []
-    candidate_values = [
-        str(item.get("value") or "").strip()
-        for item in candidates
-        if isinstance(item, dict) and str(item.get("value") or "").strip()
-    ]
-    configured_values = {
-        str(item).strip()
-        for item in (
-            facility_config.get("fax_template_ids")
-            if isinstance(facility_config.get("fax_template_ids"), list)
-            else [facility_config.get("fax_template_id")]
-        )
-        if str(item).strip()
-    }
-    if candidate_values and any(value not in configured_values for value in candidate_values):
-        return resolution
-    canonical_template_id = collapsed_template_ids[0]
-    return {
-        **resolution,
-        "resolved_value": canonical_template_id,
-        "resolved_label": canonical_template_id,
-        "confidence": resolution.get("confidence") or "high",
-        "blocked": False,
-        "blocked_reasons": [],
-        "requires_user_choice": False,
-        "candidates": [{"value": canonical_template_id, "label": canonical_template_id, "score": 1.0, "reason": "effective_template_equivalent"}],
-    }
-
-
 def _collect_issue_codes(payload: dict[str, Any] | None) -> list[str]:
     if not isinstance(payload, dict):
         return []
@@ -822,10 +769,7 @@ def resolve_order_candidates(
         payload=augmented_payload,
         facility_id=facility.get("resolved_value") or facility_code,
     )
-    template = _collapse_equivalent_template_resolution(
-        facility_id=facility.get("resolved_value") or facility_code,
-        resolution=build_template_resolution_snapshot(augmented_payload),
-    )
+    template = build_template_resolution_snapshot(evidence_payload)
     column_mapping = build_column_mapping_resolution(augmented_payload)
     quantity = build_quantity_resolution(augmented_payload)
     resolutions = {
