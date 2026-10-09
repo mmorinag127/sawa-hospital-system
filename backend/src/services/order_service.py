@@ -6165,10 +6165,15 @@ def _build_materialization_candidate_from_draft_record(
         }
     policy = deepcopy(configured_input["policy"])
     effective_received_at = received_at or datetime.utcnow()
-    semantic_materialization_supported = _draft_sheet_supports_direct_materialization(
+    _, identity_issues = _materialization_identity_rows(
         fields=draft_sheet.get("fields"),
         rows_payload=effective_rows_payload,
+        template=template, existing_week_code=existing_week_code,
     )
+    if identity_issues:
+        return {"source": "draft_sheet", "draft_id": draft_record.get("id"),
+                "error": "sheet_identity_review_required", "cell_issues": identity_issues,
+                "line_count": 0, "lines": []}
     candidate_lines = _build_materialization_lines_from_sheet_rows(
         fields=draft_sheet.get("fields"),
         rows_payload=effective_rows_payload,
@@ -6177,31 +6182,8 @@ def _build_materialization_candidate_from_draft_record(
         cell_provenance_rows=draft_sheet.get("cell_provenance_rows"),
         received_at=effective_received_at,
         date_policy=policy,
+        template=template, existing_week_code=existing_week_code,
     )
-    if semantic_materialization_supported and not candidate_lines:
-        return {"source": "draft_sheet", "draft_id": draft_record.get("id"),
-                "error": "draft_lines_empty", "line_count": 0, "lines": []}
-    if not candidate_lines:
-        parsed_rows = _normalize_structured_rows(
-            header=draft_sheet.get("header"),
-            rows_payload=effective_rows_payload,
-            template=template,
-        )
-        if not parsed_rows:
-            return {
-                "source": "draft_sheet",
-                "draft_id": draft_record.get("id"),
-                "error": "draft_rows_unparseable",
-                "line_count": 0,
-                "lines": [],
-            }
-        candidate_lines = parse_order_lines(
-            parsed_rows,
-            template,
-            effective_received_at,
-            policy.get("quantity_rules", {}),
-            date_policy=policy,
-        )
     if not candidate_lines:
         return {
             "source": "draft_sheet",
@@ -6406,6 +6388,120 @@ def _materialization_quantity_cell_issues(
     return issues
 
 
+def _explicit_sheet_date_parts(value: str) -> tuple[int | None, int, int, int | None] | None:
+    text = re.sub(r"\s+", "", value.translate(_SHEET_TRANSLATION))
+    text = re.sub(r"(?<=\d)[年月]", "/", text)
+    text = re.sub(r"(?<=\d)日", "", text)
+    match = re.fullmatch(
+        r"(?:(\d{4})[/-])?(\d{1,2})[/-](\d{1,2})(?:[（(]([月火水木金土日])(?:曜(?:日)?)?[）)])?", text,
+    )
+    if match is None:
+        return None
+    year, month, day, weekday = match.groups()
+    year = int(year) if year else None
+    month, day = int(month), int(day)
+    weekday = "月火水木金土日".index(weekday) if weekday is not None else None
+    if year is not None:
+        try:
+            explicit_date = date(year, month, day)
+        except ValueError:
+            return None
+        if weekday is not None and explicit_date.weekday() != weekday:
+            return None
+    return year, month, day, weekday
+
+
+def _materialization_identity_rows(
+    *, fields: object, rows_payload: object, template: dict[str, Any] | None,
+    existing_week_code: str | None,
+) -> tuple[list[tuple[int, date, str, str]], list[dict[str, Any]]]:
+    issues: list[dict[str, Any]] = []
+
+    def issue(row_index: int | None, column_index: int | None, raw: object, code: str) -> None:
+        issues.append({"row_index": row_index, "column_index": column_index,
+                       "field": fields[column_index] if isinstance(fields, list) and column_index is not None else None,
+                       "raw": deepcopy(raw), "value": deepcopy(raw), "source": "draft_sheet",
+                       "issue_code": code, "severity": "warning"})
+
+    if not isinstance(fields, list) or not isinstance(rows_payload, list) or not isinstance(template, dict):
+        issue(None, None, fields, "sheet_template_field_invalid")
+        return [], issues
+    normalized_fields = [str(field if field is not None else "").strip() for field in fields]
+    indexes = _resolve_structural_row_field_indexes(normalized_fields)[:3]
+    if (not all(normalized_fields) or len(set(normalized_fields)) != len(normalized_fields)
+            or _draft_fields_look_generic(normalized_fields) or any(index is None for index in indexes)
+            or not _build_sheet_quantity_index(normalized_fields, include_excluded=False)):
+        issue(None, None, fields, "sheet_template_field_invalid")
+        return [], issues
+    date_idx, daypart_idx, menu_idx = indexes
+    for aliases in ({"daypart", "meal", "time"}, {"menu", "menuname", "menu_name"}):
+        if sum(_normalize_sheet_text(field).lower() in aliases for field in normalized_fields) != 1:
+            issue(None, None, fields, "sheet_template_field_invalid")
+    if sum(field.lower().startswith("date") for field in normalized_fields) != 1:
+        issue(None, None, fields, "sheet_template_field_invalid")
+    if issues:
+        return [], issues
+    month_id, start, end = _parse_sheet_week_value(existing_week_code)
+    previous: list[Any] | None = None
+    resolved = []
+    for row_index, row in enumerate(rows_payload):
+        if not isinstance(row, (list, dict)):
+            issue(row_index, None, row, "sheet_row_identity_invalid")
+            previous = None
+            continue
+        values = _normalize_materialization_row_values(fields=normalized_fields, row=row)
+        if not any(value.strip() for value in values):
+            continue
+        if values[date_idx].strip() and _explicit_sheet_date_parts(values[date_idx]) is None:
+            issue(row_index, date_idx, values[date_idx], "sheet_date_identity_unresolved")
+            previous = None
+            continue
+        try:
+            copied = _authored_sheet_identity_value_copy(
+                values, indexes=indexes, template=template, previous=previous,
+            )
+        except _CanonicalOcrProjectionError:
+            issue(row_index, None, row, "sheet_row_identity_invalid")
+            previous = None
+            continue
+        raw_date = _safe_row_get(copied, date_idx)
+        parts = _explicit_sheet_date_parts(raw_date)
+        parsed_date = None
+        if parts is not None:
+            year, month, day, weekday = parts
+            years = {year} if year is not None else (
+                set(range(start.year, end.year + 1)) if start is not None and end is not None
+                else {int(month_id[:4])} if month_id else set()
+            )
+            dates = []
+            for candidate_year in years:
+                try:
+                    candidate = date(candidate_year, month, day)
+                except ValueError:
+                    continue
+                if not year and len(years) > 1 and not start <= candidate <= end:
+                    continue
+                dates.append(candidate)
+            if len(dates) == 1:
+                parsed_date = dates[0]
+                if weekday is not None and parsed_date.weekday() != weekday:
+                    parsed_date = None
+        daypart = _canonical_daypart_key(_safe_row_get(copied, daypart_idx))
+        menu_name = _safe_row_get(copied, menu_idx).strip()
+        if parsed_date is None:
+            issue(row_index, date_idx, values[date_idx], "sheet_date_identity_unresolved")
+        if not daypart:
+            issue(row_index, daypart_idx, values[daypart_idx], "sheet_daypart_identity_unresolved")
+        if not menu_name:
+            issue(row_index, menu_idx, values[menu_idx], "sheet_menu_identity_unresolved")
+        if parsed_date is None or not daypart or not menu_name:
+            previous = None
+            continue
+        previous = copied
+        resolved.append((row_index, parsed_date, daypart, menu_name))
+    return resolved, issues
+
+
 def _build_materialization_lines_from_sheet_rows(
     *,
     fields: object,
@@ -6415,9 +6511,14 @@ def _build_materialization_lines_from_sheet_rows(
     cell_provenance_rows: object | None = None,
     received_at: datetime,
     date_policy: dict,
+    template: dict[str, Any] | None = None,
+    existing_week_code: str | None = None,
 ) -> list[dict[str, Any]]:
-    if not isinstance(fields, list) or not isinstance(rows_payload, list):
-        return []
+    identities, identity_issues = _materialization_identity_rows(
+        fields=fields, rows_payload=rows_payload, template=template, existing_week_code=existing_week_code,
+    )
+    if identity_issues:
+        raise ValueError("sheet_identity_review_required")
     if _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload):
         raise ValueError("sheet_ocr_review_required")
     normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
@@ -6434,11 +6535,10 @@ def _build_materialization_lines_from_sheet_rows(
         if "remarks" in normalized_fields
         else (normalized_fields.index("note") if "note" in normalized_fields else None)
     )
-    latest_resolved_date: date | None = None
-    first_date_in_table: date | None = None
     materialized_lines: list[dict[str, Any]] = []
 
-    for row_index, row in enumerate(rows_payload):
+    for row_index, parsed_date, daypart, menu_name in identities:
+        row = rows_payload[row_index]
         values = _normalize_materialization_row_values(fields=normalized_fields, row=row)
         if not values:
             continue
@@ -6458,25 +6558,7 @@ def _build_materialization_lines_from_sheet_rows(
             fields=normalized_fields,
         )
 
-        raw_date = values[date_idx] if date_idx is not None and date_idx < len(values) else ""
-        parsed_date = _extract_entry_date_from_sheet_cell(raw_date, received_at, date_policy=date_policy)
-        if parsed_date is None:
-            parsed_date = _infer_following_date_from_weekday_hint(latest_resolved_date, raw_date)
-        if parsed_date is None and not str(raw_date or "").strip():
-            parsed_date = latest_resolved_date or first_date_in_table
-        if isinstance(parsed_date, date):
-            latest_resolved_date = parsed_date
-            if first_date_in_table is None:
-                first_date_in_table = parsed_date
-
-        raw_daypart = values[daypart_idx] if daypart_idx is not None and daypart_idx < len(values) else ""
-        daypart = _normalize_daypart_key(raw_daypart)
-        raw_menu = values[menu_idx] if menu_idx < len(values) else ""
-        menu_name = str(raw_menu or "").strip()
         change_note = str(values[note_idx] or "").strip() if note_idx is not None and note_idx < len(values) else ""
-
-        if not isinstance(parsed_date, date) or not daypart or not menu_name:
-            continue
 
         for (diet_key, area_key), col_idx in quantity_index.items():
             if col_idx < 0 or col_idx >= len(values):
@@ -25514,6 +25596,45 @@ def _build_neighbor_menu_refs(items: list[dict[str, Any]]) -> tuple[list[str], l
     return previous, next_values
 
 
+def _authored_sheet_identity_value_copy(
+    values: list[Any], *,
+    indexes: tuple[int | None, int | None, int | None], template: dict[str, Any] | None,
+    previous: list[Any] | None = None, authored_identity: tuple | None = None,
+) -> list[Any]:
+    if not isinstance(values, list) or any(index is None for index in indexes):
+        raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+    date_idx, daypart_idx, _ = indexes
+    copied = list(values)
+    if authored_identity is not None:
+        if not isinstance(authored_identity, tuple) or len(authored_identity) != 3:
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        for index, authored in zip(indexes, authored_identity):
+            if _safe_row_get(copied, index).strip():
+                continue
+            while len(copied) <= index:
+                copied.append("")
+            copied[index] = authored
+    roles = (template or {}).get("fill_forward_roles", [])
+    if not isinstance(roles, list) or any(not isinstance(role, str) for role in roles):
+        raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+    if not _safe_row_get(copied, date_idx).strip() and "date" in roles and previous is not None:
+        while len(copied) <= date_idx:
+            copied.append("")
+        copied[date_idx] = _safe_row_get(previous, date_idx)
+
+    current_date = _explicit_sheet_date_parts(_safe_row_get(copied, date_idx))
+    if _safe_row_get(copied, date_idx).strip() and current_date is None:
+        raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+    previous_date = _explicit_sheet_date_parts(_safe_row_get(previous, date_idx)) if previous is not None else None
+    if (not _safe_row_get(copied, daypart_idx).strip() and "daypart" in roles
+            and previous is not None and current_date is not None
+            and previous_date is not None and current_date[:3] == previous_date[:3]):
+        while len(copied) <= daypart_idx:
+            copied.append("")
+        copied[daypart_idx] = _safe_row_get(previous, daypart_idx)
+    return copied
+
+
 def _build_canonical_payload_row_mapping(
     *,
     rows: list[dict[str, Any]],
@@ -25551,8 +25672,6 @@ def _build_canonical_payload_row_mapping(
         match = re.search(r"(\d{4})[/-]\d{1,2}[/-]\d{1,2}", raw_date)
         return match.group(1) if match else ""
 
-    fill_forward_roles = set((template or {}).get("fill_forward_roles") or []) & {"date", "daypart"}
-
     def _resolved_identity_copies(
         values_rows: list[Any],
         *,
@@ -25560,17 +25679,17 @@ def _build_canonical_payload_row_mapping(
         skip_empty: bool = False,
     ) -> list[tuple[int, tuple[str, str, str], str]]:
         resolved: list[tuple[int, tuple[str, str, str], str]] = []
-        previous_date = ""
-        previous_daypart = ""
-        previous_date_identity = ("", "")
+        previous_values = None
         for row_idx, values in enumerate(values_rows):
             if not isinstance(values, list):
                 raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
             if skip_empty and not any(_field_value_to_str(cell).strip() for cell in values):
                 continue
-            # Identity copies share authored continuation rules, never raw-cell writes.
-            identity_values = list(values)
             authored_identity = authored_identities[row_idx] if authored_identities is not None else None
+            identity_values = _authored_sheet_identity_value_copy(
+                values, indexes=(date_idx, daypart_idx, menu_idx),
+                template=template, previous=previous_values, authored_identity=authored_identity,
+            )
             authored_values = None
             if authored_identity is not None:
                 if not isinstance(authored_identity, tuple) or len(authored_identity) != 3:
@@ -25578,27 +25697,6 @@ def _build_canonical_payload_row_mapping(
                 authored_values = [""] * len(fields)
                 for idx, authored in zip((date_idx, daypart_idx, menu_idx), authored_identity):
                     authored_values[idx] = authored
-                    if _field_value_to_str(_safe_row_get(identity_values, idx)).strip():
-                        continue
-                    while len(identity_values) <= idx:
-                        identity_values.append("")
-                    identity_values[idx] = authored
-            raw_date = _field_value_to_str(_safe_row_get(identity_values, date_idx)).strip()
-            if not raw_date and "date" in fill_forward_roles:
-                while len(identity_values) <= date_idx:
-                    identity_values.append("")
-                identity_values[date_idx] = previous_date
-            date_identity = (
-                _normalize_sheet_date_key(_safe_row_get(identity_values, date_idx)),
-                _year(identity_values),
-            )
-            if date_identity != previous_date_identity:
-                previous_daypart = ""
-            raw_daypart = _field_value_to_str(_safe_row_get(identity_values, daypart_idx)).strip()
-            if not raw_daypart and "daypart" in fill_forward_roles:
-                while len(identity_values) <= daypart_idx:
-                    identity_values.append("")
-                identity_values[daypart_idx] = previous_daypart
             identity = _identity(identity_values)
             year = _year(identity_values)
             if authored_values is not None:
@@ -25607,9 +25705,7 @@ def _build_canonical_payload_row_mapping(
                 authored_year = _year(authored_values)
                 if year and authored_year and year != authored_year:
                     raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
-            previous_date = _field_value_to_str(_safe_row_get(identity_values, date_idx))
-            previous_daypart = _field_value_to_str(_safe_row_get(identity_values, daypart_idx))
-            previous_date_identity = date_identity
+            previous_values = identity_values
             resolved.append((row_idx, identity, year))
         return resolved
 
