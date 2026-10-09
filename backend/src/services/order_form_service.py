@@ -16,6 +16,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.worksheet.print_settings import PrintArea
 from sqlalchemy import select
 
 from src.db import session_scope
@@ -24,7 +25,7 @@ from src.models.order_version import OrderVersion
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services import config_service, menu_service, sheet_week_service
+from src.services import config_service, menu_service, sheet_week_service, master_order_form_template_service
 from src.services.ingest_policy import parse_date_string
 from src.services.storage_service import (
     get_default_output_bucket,
@@ -337,29 +338,9 @@ def _facility_source_workbook_names(facility: dict | None) -> list[str]:
 
 
 def _resolve_facility_source_workbook_name_for_month(
-    facility: dict,
-    *,
-    fax_template_id: str,
-    month_id: str,
+    facility: dict, *, fax_template_id: str, month_id: str,
 ) -> str:
-    normalized_month = _normalize_month_id(month_id)
-    raw_month_sources = facility.get("order_form_month_sources")
-    if isinstance(raw_month_sources, dict):
-        source_workbook = str(raw_month_sources.get(normalized_month) or "").strip()
-        if source_workbook:
-            return source_workbook
-    raw_month_source_uris = facility.get("order_form_month_source_uris")
-    if isinstance(raw_month_source_uris, dict):
-        source_workbook = str(raw_month_source_uris.get(normalized_month) or "").strip()
-        if source_workbook:
-            return source_workbook
-    source_workbook = str(facility.get("order_form_source_workbook") or "").strip()
-    if source_workbook:
-        return source_workbook
-    source_workbook_uri = str(facility.get("order_form_source_workbook_uri") or "").strip()
-    if source_workbook_uri:
-        return source_workbook_uri
-    return _resolve_source_workbook_name_for_month(fax_template_id, normalized_month)
+    return _read_saved_sheet_source_workbook(facility, _normalize_month_id(month_id))["reference"]
 
 
 def _resolve_facility_source_workbook_name_for_template_clone(
@@ -632,18 +613,19 @@ def _collect_menu_entries(month_id: str, facility_id: str) -> list[dict]:
     if not isinstance(entries, list) or not entries:
         raise ValueError("monthly menu entries not found")
     normalized: list[dict] = []
-    for entry in entries:
+    for source_index, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            continue
+            raise ValueError("monthly menu entry invalid")
         menu_date = _parse_menu_date(entry.get("menu_date"))
         daypart = entry.get("daypart")
         name = entry.get("name")
         if not menu_date or not daypart or not name:
-            continue
+            raise ValueError("monthly menu entry identity unresolved")
         normalized.append(
             {
                 **entry,
                 "_menu_date_obj": menu_date,
+                "_source_index": source_index,
             }
         )
     if not normalized:
@@ -748,33 +730,11 @@ def _week_entry_overflow_payload(entry: dict) -> dict[str, str]:
 
 
 def _split_week_entries_for_order_form(week_entries: list[dict]) -> tuple[list[dict], list[dict[str, str]], int]:
-    valid_entries = [entry for entry in week_entries if isinstance(entry.get("_menu_date_obj"), date)]
-    body_capacity = _ORDER_FORM_BODY_END_ROW - _ORDER_FORM_BODY_START_ROW + 1
-    if len(valid_entries) <= body_capacity:
-        return valid_entries, [], len(valid_entries)
-
-    physical_entries: list[dict] = []
-    overflow_entries: list[dict[str, str]] = []
-    counts_by_daypart: dict[tuple[date, str], int] = {}
-    for entry in valid_entries:
-        menu_date = entry["_menu_date_obj"]
-        daypart_key = _week_menu_daypart_key(entry.get("daypart"))
-        capacity = _week_menu_daypart_capacity(entry.get("daypart"))
-        if capacity is None:
-            physical_entries.append(entry)
-            continue
-        counter_key = (menu_date, daypart_key)
-        counts_by_daypart[counter_key] = counts_by_daypart.get(counter_key, 0) + 1
-        if counts_by_daypart[counter_key] > capacity:
-            overflow_entries.append(_week_entry_overflow_payload(entry))
-            continue
-        physical_entries.append(entry)
-
-    if len(physical_entries) > body_capacity:
-        overflow_entries.extend(_week_entry_overflow_payload(entry) for entry in physical_entries[body_capacity:])
-        physical_entries = physical_entries[:body_capacity]
-
-    return physical_entries, overflow_entries, len(valid_entries)
+    for entry in week_entries:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("_menu_date_obj"), date)
+                or not str(entry.get("daypart") or "").strip() or not str(entry.get("name") or "").strip()):
+            raise ValueError("week menu entry identity unresolved")
+    return list(week_entries), [], len(week_entries)
 
 
 def _write_facility_name_in_box(worksheet, facility_name: str) -> None:
@@ -838,60 +798,19 @@ def _write_weekday_label_for_date_block(
     )
 
 
-def _write_week_entries(worksheet, week_entries: list[dict]) -> WeekEntriesWriteResult:
-    row_idx = _ORDER_FORM_BODY_START_ROW
-    current_date: date | None = None
-    date_start_row = _ORDER_FORM_BODY_START_ROW
-    current_daypart = ""
-    written_rows = 0
+def _write_week_entries(worksheet, week_entries: list[dict], *, facility_config: dict) -> WeekEntriesWriteResult:
     physical_entries, overflow_entries, source_rows = _split_week_entries_for_order_form(week_entries)
-
-    for entry in physical_entries:
-        menu_date = entry.get("_menu_date_obj")
-        if not isinstance(menu_date, date):
-            continue
-        daypart = str(entry.get("daypart") or "").strip()
-        category = str(entry.get("category") or "")
-        menu_name = str(entry.get("name") or "")
-
-        if current_date != menu_date:
-            if current_date is not None and row_idx - 1 > date_start_row:
-                _write_weekday_label_for_date_block(
-                    worksheet,
-                    date_start_row=date_start_row,
-                    date_end_row=row_idx - 1,
-                    menu_date=current_date,
-                )
-            current_date = menu_date
-            date_start_row = row_idx
-            current_daypart = ""
-            _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=1, value=menu_date)
-
-        _write_to_cell_or_merged_anchor(
-            worksheet,
-            row_idx=row_idx,
-            col_idx=2,
-            value=daypart if current_daypart != daypart else None,
-        )
-        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=3, value=category)
-        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=4, value=menu_name)
-
-        current_daypart = daypart
-        row_idx += 1
-        written_rows += 1
-
-    if current_date is not None and row_idx - 1 > date_start_row:
-        _write_weekday_label_for_date_block(
-            worksheet,
-            date_start_row=date_start_row,
-            date_end_row=row_idx - 1,
-            menu_date=current_date,
-        )
-    return WeekEntriesWriteResult(
-        written_rows,
-        source_rows=source_rows,
-        overflow_entries=overflow_entries,
+    if not physical_entries:
+        raise ValueError("week menu source unavailable")
+    targets = _worksheet_quantity_column_role_map(worksheet, template=facility_config.get("fax_template"))
+    merge_columns = _source_body_merge_columns(worksheet, facility_config=facility_config, targets=targets)
+    plan = master_order_form_template_service.write_source_workbook_body(
+        worksheet, physical_entries, declared_body_end_row=_ORDER_FORM_BODY_END_ROW,
+        body_merge_columns=merge_columns, source_marker_row=_BOTTOM_MARKER_ROW,
     )
+    result = WeekEntriesWriteResult(plan["written_rows"], source_rows=source_rows, overflow_entries=overflow_entries)
+    result.body_plan = plan
+    return result
 
 
 def _sheet_field_indexes(fields: list[Any]) -> dict[str, int]:
@@ -926,7 +845,7 @@ def _sheet_cell(row: list[Any], idx: int | None) -> object:
 
 
 def _coerce_quantity_cell(value: object) -> object:
-    text = str(value or "").strip()
+    text = str(value if value is not None else "").strip()
     if not text:
         return None
     normalized = text.replace(",", "")
@@ -978,19 +897,69 @@ def _field_role(field: object, label: object = "") -> str | None:
     return None
 
 
-def _worksheet_quantity_column_role_map(worksheet) -> dict[str, int]:
-    merged_values = _worksheet_effective_merged_values(worksheet)
-    result: dict[str, int] = {}
-    for col_idx in sorted(_worksheet_quantity_column_indexes(worksheet)):
-        header_parts = [
-            worksheet.cell(row=row_idx, column=col_idx).value or merged_values.get((row_idx, col_idx))
-            for row_idx in _ORDER_FORM_HEADER_ROWS
-        ]
-        role = _field_role("", "".join(str(part or "") for part in header_parts))
-        if role and role not in result:
-            result[role] = col_idx
-    if "forbidden_other" in result and "no_fried" not in result:
-        result["no_fried"] = result["forbidden_other"]
+def _worksheet_quantity_column_role_map(worksheet, *, template: dict) -> dict[str, int]:
+    from src.services.template_field_schema_service import canonical_field_name_from_template_column
+
+    columns = template.get("columns") if isinstance(template, dict) else None
+    if not isinstance(columns, list) or not columns:
+        raise ValueError("source workbook canonical columns missing")
+    effective = _worksheet_effective_merged_values(worksheet)
+    result = {}
+    occupied = set()
+    quantity_targets = set()
+    structural_targets = {"date": 1, "daypart": 2, "menu": 4, "menu_name": 4, "category": 3}
+    for column in columns:
+        if not isinstance(column, dict):
+            raise ValueError("source workbook canonical column invalid")
+        role = str(column.get("role") or "").strip()
+        name = canonical_field_name_from_template_column(column)
+        if role == "category":
+            name = "category"
+        source_index = column.get("source_index")
+        if (not name or name in result or not isinstance(source_index, int) or isinstance(source_index, bool)
+                or source_index < 0 or source_index in occupied):
+            raise ValueError("source workbook canonical column ambiguous")
+        target = source_index + 1
+        occupied.add(source_index)
+        if role in structural_targets and target != structural_targets[role]:
+            raise ValueError("source workbook structural layout mismatch")
+        if role in {"quantity", "quantity_change"}:
+            quantity_targets.add(target)
+            if target < 5 or target > worksheet.max_column:
+                raise ValueError("source workbook quantity column missing")
+            parts = list(dict.fromkeys(
+                _normalize_sheet_label(effective.get((row, target), worksheet.cell(row, target).value))
+                for row in range(7, 11)
+            ))
+            parts = [part for part in parts if part]
+            expected = _normalize_sheet_label(column.get("delivery_header") or column.get("header"))
+            if expected:
+                matches = expected in parts or expected == "".join(parts)
+            else:
+                # Validate the authored destination; never choose a destination from a header.
+                diet = config_service._parse_quantity_field_name(name)["diet"]
+                matches = any(config_service._normalize_field_diet_token(part) == diet for part in parts)
+            if not matches:
+                raise ValueError(f"source workbook quantity header mismatch:{name}")
+        result[name] = target
+    if not quantity_targets or _worksheet_quantity_column_indexes(worksheet) - quantity_targets:
+        raise ValueError("source workbook canonical quantity columns incomplete")
+    return result
+
+
+def _source_body_merge_columns(worksheet, *, facility_config: dict, targets: dict[str, int]) -> set[int]:
+    from src.services.template_field_schema_service import canonical_field_name_from_template_column
+
+    columns = [
+        {**column, "name": canonical_field_name_from_template_column(column)}
+        for column in facility_config["fax_template"]["columns"]
+    ]
+    selected = master_order_form_template_service._configured_body_merge_columns(
+        facility_config=facility_config, generated_columns=columns, use_source_indexes=True,
+    )
+    result = {target for target, _column, _mode in selected}
+    if any(target < 5 or target > worksheet.max_column or target not in targets.values() for target in result):
+        raise ValueError("source workbook merge column unmapped")
     return result
 
 
@@ -1009,92 +978,69 @@ def _write_to_cell_or_merged_anchor(worksheet, *, row_idx: int, col_idx: int, va
 
 
 def _write_saved_sheet_rows_to_order_form(
-    worksheet,
-    *,
-    fields: list[Any],
-    header: list[Any] | None = None,
-    rows: list[Any],
-    received_at: datetime,
-) -> int:
-    header_values = list(header or [])
-    role_indexes: dict[str, int] = {}
-    quantity_field_roles: list[tuple[int, str]] = []
-    structural_roles = {"date", "daypart", "category", "menu", "remarks"}
-    for idx, field in enumerate(fields):
-        label = _sheet_field_label(fields, header_values, idx)
-        role = _field_role(field, label)
-        if role in structural_roles and role not in role_indexes:
-            role_indexes[role] = idx
-        elif role and role not in structural_roles:
-            quantity_field_roles.append((idx, role))
+    worksheet, *, fields: list[Any], header: list[Any] | None = None,
+    rows: list[Any], received_at: datetime, template: dict, week_code: str, facility_config: dict,
+) -> WeekEntriesWriteResult:
+    from src.services.order_service import _materialization_identity_rows, _resolve_structural_row_field_indexes
+    from src.services.template_field_schema_service import canonical_field_name_from_template_column
 
-    quantity_columns_by_role = _worksheet_quantity_column_role_map(worksheet)
-    if not quantity_columns_by_role:
-        raise ValueError("order form quantity columns not found")
+    identities, issues = _materialization_identity_rows(
+        fields=fields, rows_payload=rows, template=template, existing_week_code=week_code,
+    )
+    if issues or not identities:
+        raise ValueError("saved sheet row identity unresolved")
+    targets = _worksheet_quantity_column_role_map(worksheet, template=template)
+    date_index, daypart_index, menu_index, _quantity_indexes = _resolve_structural_row_field_indexes(fields)
+    identity_indexes = {date_index, daypart_index, menu_index}
+    category_indexes = [index for index, field in enumerate(fields) if field in {"category", "menu_category"}]
+    if len(category_indexes) > 1:
+        raise ValueError("saved sheet category field ambiguous")
+    identity_indexes.update(category_indexes)
+    if any(field not in targets for index, field in enumerate(fields) if index not in identity_indexes):
+        raise ValueError("saved sheet canonical field unmapped")
+    configured = {
+        canonical_field_name_from_template_column(column): column for column in template["columns"]
+    }
+    quantity_names = {name for name, column in configured.items() if column.get("role") in {"quantity", "quantity_change"}}
+    if not quantity_names or not quantity_names.issubset(fields):
+        raise ValueError("saved sheet quantity fields missing")
+    field_indexes = {field: index for index, field in enumerate(fields)}
+    category_name = fields[category_indexes[0]] if category_indexes else None
 
-    row_idx = _ORDER_FORM_BODY_START_ROW
-    current_date: date | None = None
-    date_start_row = _ORDER_FORM_BODY_START_ROW
-    current_daypart = ""
-    written_rows = 0
-    for raw_row in rows:
-        if not isinstance(raw_row, list):
-            continue
-        if row_idx > _ORDER_FORM_BODY_END_ROW:
-            raise ValueError("saved sheet exceeds supported template rows")
-        date_idx = role_indexes.get("date")
-        daypart_idx = role_indexes.get("daypart")
-        category_idx = role_indexes.get("category")
-        menu_idx = role_indexes.get("menu")
-        date_value = _sheet_cell(raw_row, date_idx)
-        parsed_date = parse_date_string(str(date_value or ""), received_at) if date_value not in (None, "") else None
-        daypart = str(_sheet_cell(raw_row, daypart_idx) or "").strip()
-        category = str(_sheet_cell(raw_row, category_idx) or "").strip()
-        menu_name = str(_sheet_cell(raw_row, menu_idx) or "").strip()
-        if not any([parsed_date, daypart, category, menu_name]) and not any(
-            str(_sheet_cell(raw_row, idx) or "").strip()
-            for idx, _role in quantity_field_roles
-        ):
-            continue
-        if parsed_date and current_date != parsed_date:
-            if current_date is not None and row_idx - 1 > date_start_row:
-                _write_weekday_label_for_date_block(
-                    worksheet,
-                    date_start_row=date_start_row,
-                    date_end_row=row_idx - 1,
-                    menu_date=current_date,
-                )
-            current_date = parsed_date
-            date_start_row = row_idx
-            current_daypart = ""
-            _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=1, value=parsed_date)
-        _write_to_cell_or_merged_anchor(
-            worksheet,
-            row_idx=row_idx,
-            col_idx=2,
-            value=daypart if daypart and current_daypart != daypart else None,
-        )
-        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=3, value=category or None)
-        _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=4, value=menu_name or None)
-        for qty_idx, role in quantity_field_roles:
-            col_idx = quantity_columns_by_role.get(role)
-            if col_idx is None:
+    def raw_cell(raw_index: int, field: str) -> object:
+        row = rows[raw_index]
+        return row.get(field) if isinstance(row, dict) else _sheet_cell(row, field_indexes[field])
+
+    entries = [
+        {"_source_index": raw_index, "_menu_date_obj": menu_date, "daypart": daypart, "name": menu,
+         "category": raw_cell(raw_index, category_name) if category_name in field_indexes else ""}
+        for raw_index, menu_date, daypart, menu in identities
+    ]
+    result = _write_week_entries(worksheet, entries, facility_config=facility_config)
+    writes = {}
+    for row in result.body_plan["physical_row_plan"]:
+        for index, field in enumerate(fields):
+            if index in identity_indexes:
                 continue
-            value = _coerce_quantity_cell(_sheet_cell(raw_row, qty_idx))
-            if value is not None:
-                _write_to_cell_or_merged_anchor(worksheet, row_idx=row_idx, col_idx=col_idx, value=value)
-        if daypart:
-            current_daypart = daypart
-        row_idx += 1
-        written_rows += 1
-    if current_date is not None and row_idx - 1 > date_start_row:
-        _write_weekday_label_for_date_block(
-            worksheet,
-            date_start_row=date_start_row,
-            date_end_row=row_idx - 1,
-            menu_date=current_date,
-        )
-    return written_rows
+            value = raw_cell(row["source_index"], field)
+            writes[(row["worksheet_row"], targets[field])] = (
+                _coerce_quantity_cell(value) if field in quantity_names else value
+            )
+    for region in worksheet.merged_cells.ranges:
+        if region.min_row < _ORDER_FORM_BODY_START_ROW or region.min_row > result.body_plan["body_end_row"]:
+            continue
+        keys = [(row, column) for row in range(region.min_row, region.max_row + 1)
+                for column in range(region.min_col, region.max_col + 1) if (row, column) in writes]
+        if keys:
+            value = writes[keys[0]]
+            if any(writes[key] != value for key in keys):
+                raise ValueError("saved sheet source merge quantity conflict")
+            for key in keys:
+                del writes[key]
+            writes[(region.min_row, region.min_col)] = value
+    for (row, column), value in writes.items():
+        worksheet.cell(row, column).value = value
+    return result
 
 
 def _set_deadline_text_for_week(worksheet, start_date: date) -> None:
@@ -1150,6 +1096,7 @@ def _append_monthly_metadata_sheet(
             meta.append([f"week_{index}_written_rows", int(result.written_rows)])
             meta.append([f"week_{index}_source_rows", int(result.source_rows)])
             meta.append([f"week_{index}_overflow_rows", int(result.overflow_rows)])
+            meta.append([f"week_{index}_physical_row_plan", json.dumps(result.body_plan["physical_row_plan"], ensure_ascii=False)])
             if result.overflow_rows:
                 meta.append(
                     [
@@ -1170,14 +1117,9 @@ def _build_monthly_fax_order_form_workbook(
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
     spec = _resolve_fax_family_spec(fax_template_id)
-    source_workbook_name = _resolve_facility_source_workbook_name_for_month(
-        facility,
-        fax_template_id=fax_template_id,
-        month_id=month_id,
-    )
-    source_path = _resolve_source_workbook_path(source_workbook_name)
-
-    workbook = load_workbook(source_path)
+    source = _read_saved_sheet_source_workbook(facility, month_id)
+    source_workbook_name = source["reference"]
+    workbook = load_workbook(BytesIO(source["bytes"]))
     template_sheet_name = _DEFAULT_WEEK_SHEET if _DEFAULT_WEEK_SHEET in workbook.sheetnames else workbook.sheetnames[0]
     week_ranges = _build_week_ranges_for_month(month_id)
     _ensure_workbook_sheet_count(workbook, template_sheet_name, len(week_ranges))
@@ -1191,11 +1133,10 @@ def _build_monthly_fax_order_form_workbook(
         worksheet = workbook.worksheets[index]
         sheet_name = _format_week_sheet_name(start_date, end_date)
         worksheet.title = sheet_name
-        _clear_week_sheet_body(worksheet)
         _write_facility_name_in_box(worksheet, facility_name)
         _set_deadline_text_for_week(worksheet, start_date)
         week_write_results.append(
-            _write_week_entries(worksheet, _select_entries_for_range(entries, start_date, end_date))
+            _write_week_entries(worksheet, _select_entries_for_range(entries, start_date, end_date), facility_config=facility)
         )
         _apply_fax_metadata_header(
             worksheet,
@@ -1205,9 +1146,10 @@ def _build_monthly_fax_order_form_workbook(
             week_sheet_name=sheet_name,
             family_label=family_label,
         )
-        _apply_fax_markers(worksheet)
-        _apply_bottom_instruction_strip(worksheet, fax_template_id=fax_template_id, base_label="monthly")
-        _extend_print_area(worksheet, bottom_row=_BOTTOM_MARKER_ROW)
+        layout = week_write_results[-1].body_plan
+        _apply_fax_markers(worksheet, bottom_row=layout["marker_row"])
+        _apply_bottom_instruction_strip(worksheet, fax_template_id=fax_template_id, base_label="monthly", bottom_row=layout["instruction_row"])
+        _extend_print_area(worksheet, bottom_row=max(layout["marker_row"], layout["instruction_row"]), row_delta=layout["row_delta"])
 
     _append_monthly_metadata_sheet(
         workbook,
@@ -1437,7 +1379,6 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     worksheet = workbook[week_sheet_name]
 
     facility_name = str(facility.get("facility_name") or facility.get("name") or facility_id)
-    _clear_week_sheet_body(worksheet)
     _write_facility_name(worksheet, facility_name)
     _write_facility_name_in_box(worksheet, facility_name)
     _set_deadline_text_for_week(worksheet, week_start)
@@ -1447,6 +1388,9 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
         header=header if isinstance(header, list) else None,
         rows=rows,
         received_at=received_at,
+        template=facility.get("fax_template"),
+        week_code=captured["week_code"],
+        facility_config=facility,
     )
     if written_rows <= 0:
         raise ValueError("saved sheet has no writable rows")
@@ -1461,9 +1405,10 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
         label="FAX読取シートExcel作成",
         fax_version=fax_version,
     )
-    _apply_fax_markers(worksheet)
-    _apply_bottom_instruction_strip(worksheet, fax_template_id=fax_template_id, base_label="saved_sheet")
-    _extend_print_area(worksheet, bottom_row=_BOTTOM_MARKER_ROW)
+    layout = written_rows.body_plan
+    _apply_fax_markers(worksheet, bottom_row=layout["marker_row"])
+    _apply_bottom_instruction_strip(worksheet, fax_template_id=fax_template_id, base_label="saved_sheet", bottom_row=layout["instruction_row"])
+    _extend_print_area(worksheet, bottom_row=max(layout["marker_row"], layout["instruction_row"]), row_delta=layout["row_delta"])
     _append_hidden_metadata_sheet(
         workbook,
         source_workbook_name=source_workbook_name,
@@ -1480,7 +1425,8 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     metadata.append(["order_id", normalized_order_id])
     metadata.append(["month_id", month_id])
     metadata.append(["saved_sheet_draft_id", captured["draft_id"]])
-    metadata.append(["saved_sheet_row_count", written_rows])
+    metadata.append(["saved_sheet_row_count", int(written_rows)])
+    metadata.append(["physical_row_plan", json.dumps(written_rows.body_plan["physical_row_plan"], ensure_ascii=False)])
 
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe_facility_id = _sanitize_filename_fragment(facility_id)
@@ -1768,20 +1714,20 @@ def _apply_fax_metadata_header(
     header_cell.border = _THIN_BORDER
 
 
-def _apply_fax_markers(worksheet) -> None:
-    worksheet.row_dimensions[_BOTTOM_MARKER_ROW].height = 18
-    for cell_ref in ("A1", "L1", f"A{_BOTTOM_MARKER_ROW}", f"L{_BOTTOM_MARKER_ROW}"):
+def _apply_fax_markers(worksheet, *, bottom_row: int = _BOTTOM_MARKER_ROW) -> None:
+    worksheet.row_dimensions[bottom_row].height = 18
+    for cell_ref in ("A1", "L1", f"A{bottom_row}", f"L{bottom_row}"):
         cell = worksheet[cell_ref]
         cell.value = None
         cell.fill = _MARKER_FILL
         cell.border = _THIN_BORDER
 
 
-def _apply_bottom_instruction_strip(worksheet, *, fax_template_id: str, base_label: str) -> None:
+def _apply_bottom_instruction_strip(worksheet, *, fax_template_id: str, base_label: str, bottom_row: int = _BOTTOM_MARKER_ROW) -> None:
     _ = fax_template_id
     _ = base_label
-    _safe_merge(worksheet, f"B{_BOTTOM_MARKER_ROW}:K{_BOTTOM_MARKER_ROW}")
-    info_cell = worksheet[f"B{_BOTTOM_MARKER_ROW}"]
+    _safe_merge(worksheet, f"B{bottom_row}:K{bottom_row}")
+    info_cell = worksheet[f"B{bottom_row}"]
     info_cell.value = None
     info_cell.font = Font(name="Meiryo", size=8, bold=True)
     info_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -1789,17 +1735,16 @@ def _apply_bottom_instruction_strip(worksheet, *, fax_template_id: str, base_lab
     info_cell.border = _THIN_BORDER
 
 
-def _extend_print_area(worksheet, *, bottom_row: int) -> None:
-    print_area = worksheet.print_area
-    if not print_area:
+def _extend_print_area(worksheet, *, bottom_row: int, row_delta: int = 0) -> None:
+    if not worksheet.print_area:
         worksheet.print_area = f"A1:L{bottom_row}"
         return
-    area_ref = print_area.split("!", 1)[-1].replace("$", "")
-    min_col, min_row, max_col, max_row = range_boundaries(area_ref)
-    max_row = max(max_row, bottom_row)
-    worksheet.print_area = (
-        f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
-    )
+    ranges = list(PrintArea.from_string(worksheet.print_area).ranges)
+    if len(ranges) != 1:
+        raise ValueError("source workbook print area ambiguous")
+    min_col, min_row, max_col, max_row = ranges[0].bounds
+    max_row = max(max_row + row_delta, bottom_row)
+    worksheet.print_area = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
 
 
 def _append_hidden_metadata_sheet(

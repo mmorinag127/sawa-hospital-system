@@ -384,6 +384,7 @@ def _configured_body_merge_columns(
     *,
     facility_config: dict[str, Any],
     generated_columns: list[dict[str, Any]],
+    use_source_indexes: bool = False,
 ) -> list[tuple[int, dict[str, Any], str]]:
     policy = _body_merge_policy_from_config(facility_config)
     policy_mode = _body_merge_mode(policy.get("mode"))
@@ -409,7 +410,8 @@ def _configured_body_merge_columns(
         role = str(column.get("role") or "").strip()
         if role != "quantity":
             raise FacilityTemplateBuildError("facility_template_body_merge_non_quantity_column")
-        selected.append((GENERATED_START_COL + offset, column, mode))
+        target_col = column["source_index"] + 1 if use_source_indexes else GENERATED_START_COL + offset
+        selected.append((target_col, column, mode))
     if bool(policy.get("required", False)) and not selected:
         raise FacilityTemplateBuildError("facility_template_body_merge_columns_missing")
     return selected
@@ -851,25 +853,25 @@ def _split_week_menu_identity_entries(entries: list[dict[str, Any]]) -> tuple[li
     return list(entries), [], len(entries)
 
 
-def _resize_week_body(ws: Worksheet, body_end_row: int) -> None:
+def _resize_week_body(ws: Worksheet, body_end_row: int, *, source_body_end_row: int = BODY_END_ROW) -> None:
     """Resize only the generated copy; openpyxl does not shift merges/dimensions."""
-    delta = body_end_row - BODY_END_ROW
+    delta = body_end_row - source_body_end_row
     footer_merges = []
     for region in list(ws.merged_cells.ranges):
         if region.max_row < BODY_START_ROW:
             continue
-        if region.min_row < BODY_START_ROW or region.min_row <= BODY_END_ROW < region.max_row:
+        if region.min_row < BODY_START_ROW or region.min_row <= source_body_end_row < region.max_row:
             raise FacilityTemplateBuildError("week_menu_body_merge_boundary_invalid")
-        if region.min_row > BODY_END_ROW:
+        if region.min_row > source_body_end_row:
             footer_merges.append(region.bounds)
         ws.unmerge_cells(str(region))
     body_styles = [copy(ws.cell(BODY_START_ROW, col)._style) for col in range(1, ws.max_column + 1)]
     body_dimension = copy(ws.row_dimensions[BODY_START_ROW])
     footer_dimensions = {
-        row: copy(dimension) for row, dimension in ws.row_dimensions.items() if row > BODY_END_ROW
+        row: copy(dimension) for row, dimension in ws.row_dimensions.items() if row > source_body_end_row
     }
     if delta > 0:
-        ws.insert_rows(BODY_END_ROW + 1, delta)
+        ws.insert_rows(source_body_end_row + 1, delta)
     elif delta < 0:
         ws.delete_rows(body_end_row + 1, -delta)
     for row in list(ws.row_dimensions):
@@ -907,17 +909,24 @@ def _week_body_spans(entries: list[dict[str, Any]], *, by_daypart: bool) -> list
     return spans
 
 
-def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> dict[str, Any]:
+def _write_week_menu_identity(
+    ws: Worksheet, entries: list[dict[str, Any]], *, source_body_end_row: int = BODY_END_ROW,
+    preserve_date_cells: bool = False,
+) -> dict[str, Any]:
     physical_entries, overflow_entries, source_rows = _split_week_menu_identity_entries(entries)
     if not physical_entries:
         raise FacilityTemplateBuildError("week_menu_body_entries_missing")
     body_end_row = BODY_START_ROW + len(physical_entries) - 1
-    _resize_week_body(ws, body_end_row)
+    _resize_week_body(ws, body_end_row, source_body_end_row=source_body_end_row)
     day_spans = _week_body_spans(physical_entries, by_daypart=False)
     meal_spans = _week_body_spans(physical_entries, by_daypart=True)
     for start, end, menu_date in day_spans:
         if start == end:
-            ws.cell(start, 1).value = f"{menu_date.isoformat()} ({_weekday_label(menu_date)})"
+            if preserve_date_cells:
+                ws.cell(start, 1).value = menu_date
+                ws.cell(start, 1).number_format = "m/d (aaa)"
+            else:
+                ws.cell(start, 1).value = f"{menu_date.isoformat()} ({_weekday_label(menu_date)})"
         else:
             ws.merge_cells(start_row=start, start_column=1, end_row=end - 1, end_column=1)
             ws.cell(start, 1).value = menu_date
@@ -949,6 +958,155 @@ def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> d
         "body_spans": [(start, end, key[1]) for start, end, key in meal_spans],
         "physical_row_plan": row_plan,
     }
+
+
+def _source_workbook_footer_plan(ws: Worksheet, *, body_end_row: int, marker_row: int) -> dict[str, Any]:
+    marker_rows = []
+    for region in ws.merged_cells.ranges:
+        if (region.min_col, region.max_col) != (2, 11) or region.min_row != region.max_row:
+            continue
+        row = region.min_row
+        if row <= body_end_row:
+            continue
+        corners = [ws.cell(row, column) for column in (1, 12)]
+        if all(cell.value is None and cell.fill.fgColor.type == "rgb"
+               and cell.fill.fgColor.rgb in {"00000000", "FF000000"} and cell.fill.patternType == "solid"
+               for cell in corners) and all(ws.cell(row, column).value is None for column in range(2, 12)):
+            marker_rows.append(row)
+    if len(marker_rows) > 1:
+        raise FacilityTemplateBuildError("source_workbook_marker_boundary_ambiguous")
+    existing_marker = marker_rows[0] if marker_rows else None
+    print_ranges = list(PrintArea.from_string(ws.print_area).ranges) if ws.print_area else []
+    if len(print_ranges) > 1:
+        raise FacilityTemplateBuildError("source_workbook_print_area_ambiguous")
+    marker_region_end = existing_marker if existing_marker is not None else marker_row
+
+    def visible_style(row: int, column: int | None = None) -> bool:
+        if row <= marker_region_end and (column is None or column <= 12):
+            return True
+        return any(region.min_row <= row <= region.max_row
+                   and (column is None or region.min_col <= column <= region.max_col)
+                   for region in print_ranges)
+
+    footer_rows = {
+        cell.row for row in ws.iter_rows(min_row=body_end_row + 1) for cell in row
+        if cell.row != existing_marker
+        and (cell.value is not None or (cell.has_style and visible_style(cell.row, cell.column)))
+    }
+    footer_rows.update(
+        region.max_row for region in ws.merged_cells.ranges
+        if region.min_row > body_end_row and region.min_row != existing_marker
+    )
+    footer_rows.update(row for row in ws.row_dimensions
+                       if row > body_end_row and row != existing_marker and visible_style(row))
+    for drawing in [*ws._images, *ws._charts]:
+        anchor = drawing.anchor
+        start = getattr(anchor, "_from", None)
+        end = getattr(anchor, "to", None)
+        if start is not None and start.row >= body_end_row:
+            footer_rows.add(start.row + 1)
+            if end is not None:
+                footer_rows.add(end.row + 1)
+            else:
+                extent = getattr(anchor, "ext", None)
+                if extent is None:
+                    raise FacilityTemplateBuildError("source_workbook_footer_drawing_extent_missing")
+                row = start.row + 1
+                remaining = start.rowOff + extent.cy
+                while remaining > 0:
+                    dimension = ws.row_dimensions.get(row)
+                    height = dimension.height if dimension is not None else None
+                    if height is None:
+                        height = ws.sheet_format.defaultRowHeight
+                    if height is None or height <= 0:
+                        raise FacilityTemplateBuildError("source_workbook_footer_drawing_row_height_invalid")
+                    remaining -= height * 12700
+                    footer_rows.add(row)
+                    row += 1
+    footer_end = max(footer_rows, default=body_end_row)
+    if existing_marker is not None and existing_marker <= footer_end:
+        raise FacilityTemplateBuildError("source_workbook_marker_footer_overlap")
+    source_marker = existing_marker if existing_marker is not None else max(marker_row, footer_end + 2)
+    return {
+        "source_footer_start_row": min(footer_rows) if footer_rows else None,
+        "source_footer_end_row": footer_end if footer_rows else None,
+        "source_marker_row": source_marker,
+        "source_instruction_row": source_marker,
+    }
+
+
+def write_source_workbook_body(
+    ws: Worksheet, entries: list[dict[str, Any]], *, declared_body_end_row: int,
+    body_merge_columns: set[int], source_marker_row: int,
+) -> dict[str, Any]:
+    """Use the source's explicit footer boundary, not the master's fixed body end."""
+    footer_rows = [
+        region.min_row for region in ws.merged_cells.ranges
+        if region.min_col == 1 and region.max_col == 3
+        and region.min_row == region.max_row and region.min_row > BODY_START_ROW
+    ]
+    if len(footer_rows) == 1:
+        source_end = footer_rows[0] - 1
+    elif not footer_rows:
+        # The accepting source-export caller supplies its existing body contract.
+        source_end = declared_body_end_row
+    else:
+        raise FacilityTemplateBuildError("source_workbook_footer_boundary_invalid")
+    if source_end < BODY_START_ROW or any(
+        isinstance(ws.cell(row, 4), MergedCell) for row in range(BODY_START_ROW, source_end + 1)
+    ):
+        raise FacilityTemplateBuildError("source_workbook_body_layout_invalid")
+    merge_columns = set()
+    meal_ranges = {
+        (region.min_row, region.max_row) for region in ws.merged_cells.ranges
+        if region.min_col == region.max_col == 2 and region.min_row >= BODY_START_ROW
+        and region.max_row <= source_end and region.max_row > region.min_row
+    }
+    for region in ws.merged_cells.ranges:
+        if region.min_row < BODY_START_ROW or region.min_row > source_end or region.max_col < 5:
+            continue
+        if region.min_col != region.max_col or region.max_row > source_end:
+            raise FacilityTemplateBuildError("source_workbook_body_merge_invalid")
+        if region.max_row > region.min_row:
+            merge_columns.add(region.min_col)
+    for column in merge_columns:
+        ranges = {
+            (region.min_row, region.max_row) for region in ws.merged_cells.ranges
+            if region.min_col == region.max_col == column and region.min_row >= BODY_START_ROW
+            and region.max_row <= source_end and region.max_row > region.min_row
+        }
+        if not meal_ranges or ranges != meal_ranges:
+            raise FacilityTemplateBuildError("source_workbook_quantity_merge_policy_unresolved")
+    if not merge_columns.issubset(body_merge_columns):
+        raise FacilityTemplateBuildError("source_workbook_quantity_merge_policy_mismatch")
+    footer_plan = _source_workbook_footer_plan(ws, body_end_row=source_end, marker_row=source_marker_row)
+    result = _write_week_menu_identity(
+        ws, entries, source_body_end_row=source_end, preserve_date_cells=True,
+    )
+    _write_body_grid(ws, ws.max_column, result["body_end_row"])
+    for column in sorted(body_merge_columns):
+        for start, end, _daypart in result["body_spans"]:
+            ws.merge_cells(start_row=start, start_column=column, end_row=end, end_column=column)
+    delta = result["body_end_row"] - source_end
+    # openpyxl moves cells, but drawing anchors are independent of insert/delete_rows.
+    for drawing in [*ws._images, *ws._charts]:
+        anchor = drawing.anchor
+        if isinstance(anchor, str):
+            from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+            column, row = coordinate_from_string(anchor)
+            if row > source_end:
+                drawing.anchor = f"{get_column_letter(column_index_from_string(column))}{row + delta}"
+        else:
+            for marker in (getattr(anchor, "_from", None), getattr(anchor, "to", None)):
+                if marker is not None and marker.row >= source_end:
+                    marker.row += delta
+    result["source_body_end_row"] = source_end
+    result["row_delta"] = delta
+    result.update(footer_plan)
+    for name in ("footer_start_row", "footer_end_row", "marker_row", "instruction_row"):
+        source_row = footer_plan[f"source_{name}"]
+        result[name] = source_row + delta if source_row is not None else None
+    return result
 
 
 def _apply_week_menu_identity(
