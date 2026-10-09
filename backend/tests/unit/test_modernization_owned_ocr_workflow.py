@@ -192,6 +192,7 @@ class OwnedProducer:
         order = session.get(Order, ORDER)
         order.current_document_id = document_id
         order.document_uri = str(path)
+        order.message_id = message_id
         session.flush()
         order_service._record_current_order_version(session, order, session.get(OrderDocument, document_id))
         self.receipt = capture_selected_pdf_receipt(session, order)
