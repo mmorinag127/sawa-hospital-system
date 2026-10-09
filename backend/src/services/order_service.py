@@ -21461,7 +21461,8 @@ def get_ocr_pages(
     if not facility_id:
         return None, "facility_unresolved"
     try:
-        facility_template = config_service.get_authored_facility_config(facility_id)["fax_template"]
+        facility_config = _read_order_authored_facility_config(order_id, facility_id)
+        facility_template = facility_config["fax_template"]
     except ValueError as exc:
         return None, str(exc)
     active_evidence_payload = None
@@ -21594,14 +21595,7 @@ def get_ocr_pages(
         "grid_qty_gap_tolerance": 0.02,
         "grid_left_date_ratio": 0.2,
     }
-    template = None
-    if isinstance(facility_id, str) and facility_id:
-        try:
-            fac_config = config_service.get_facility_config(facility_id)
-        except Exception:  # noqa: BLE001
-            fac_config = None
-        if fac_config:
-            template = fac_config.get("fax_template") or {}
+    template = facility_template
     if isinstance(template, dict):
         table_box, table_units, grid_column_edges, grid_row_edges = _resolve_ocr_pages_grid_metadata(
             template=template,
