@@ -11,6 +11,7 @@ from src.db import session_scope
 from src.models.order import Order, OrderLine
 from src.models.order_version import OrderVersion
 from src.services import menu_service, sheet_week_service
+from src.services.workflow_attempt_guard_service import selected_version_snapshot
 
 
 def _collect_menu_items_for_week(
@@ -44,6 +45,7 @@ def _collect_menu_items_for_week(
 
 def _serialize_order_version(version: OrderVersion) -> dict[str, Any]:
     return {
+        "selected_version_input": selected_version_snapshot(version),
         "id": version.id,
         "order_id": version.order_id,
         "version_no": version.version_no,

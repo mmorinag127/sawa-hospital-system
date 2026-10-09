@@ -26,7 +26,6 @@ from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 from sqlalchemy import select, delete, func, or_, update
-from sqlalchemy.orm import object_session
 
 from src.db import session_scope
 from src.models.order import Order, OrderLine, OrderMenuSnapshot
@@ -121,12 +120,14 @@ from src.services.ocr_pipeline_service import (
     is_ocr_pipeline_output_pending,
     run_ocr_pipeline,
 )
-from src.services.order_serialization_service import serialize_order, serialize_order_summary
+from src.services.order_serialization_service import (
+    serialize_order, serialize_order_summary,
+    _serialize_order_version, _list_order_versions, _list_order_versions_for_serialization,
+)
 from src.services.workflow_attempt_guard_service import (
     lock_actual_write_ownership,
     lock_order_execution_input,
     captured_evidence_source,
-    selected_version_snapshot,
     lock_current_synchronous_cache_write,
     synchronous_input_versions,
     capture_nonworkflow_execution, nonworkflow_execution_context,
@@ -4668,42 +4669,6 @@ def _record_current_order_version(session, order: Order, document: OrderDocument
             )
         )
     session.flush()
-
-
-def _serialize_order_version(version: OrderVersion) -> dict[str, Any]:
-    return {
-        "selected_version_input": selected_version_snapshot(version),
-        "id": version.id,
-        "order_id": version.order_id,
-        "version_no": version.version_no,
-        "document_id": version.document_id,
-        "message_id": version.message_id,
-        "storage_uri": version.storage_uri,
-        "facility_code": version.facility_code,
-        "week_code": version.week_code,
-        "received_at": version.received_at,
-        "line_snapshot": version.line_snapshot or [],
-        "line_count": len(version.line_snapshot or []),
-        "is_current": bool(version.is_current),
-        "created_at": version.created_at,
-    }
-
-
-def _list_order_versions(session, order_id: str) -> list[dict[str, Any]]:
-    rows = session.execute(
-        select(OrderVersion)
-        .where(OrderVersion.order_id == order_id)
-        .order_by(OrderVersion.version_no.desc(), OrderVersion.received_at.desc(), OrderVersion.id.desc())
-    ).scalars().all()
-    return [_serialize_order_version(row) for row in rows]
-
-
-def _list_order_versions_for_serialization(order: Order) -> list[dict[str, Any]]:
-    session = object_session(order)
-    if session is not None:
-        return _list_order_versions(session, order.id)
-    with session_scope() as scoped_session:
-        return _list_order_versions(scoped_session, order.id)
 
 
 def _resolve_order_document_selection(
