@@ -57,6 +57,26 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 INGEST_POLICY_PATH = Path(os.getenv("INGEST_POLICY_PATH", DATA_DIR / "ingest_policy.template.json"))
 
 
+def validate_selected_authored_facility_config(
+    facility_id: str, selected_authored_version: dict[str, Any], *, master: dict | None = None,
+) -> dict[str, Any]:
+    """Read-only selected-version validation without menu or ingest-policy capture."""
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+
+    source = load_facility_master() if master is None else master
+    matches = [item for item in source.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
+    if len(matches) != 1:
+        raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
+    versions = matches[0].get("versions")
+    matching = [item for item in versions if isinstance(item, dict) and item.get("version_id") == selected_authored_version.get("version_id")] if isinstance(versions, list) else []
+    if len(matching) != 1 or not snapshots_equal(matching[0], selected_authored_version):
+        raise ValueError("original_template_configured_source_mismatch")
+    facility = _validate_authored_facility_config(deepcopy(selected_authored_version["facility"]), None)
+    if facility.get("facility_id") != facility_id:
+        raise ValueError("original_template_configured_source_mismatch")
+    return facility
+
+
 def capture_authored_processing_config(facility_id: str, *, selected_authored_version: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         master = load_facility_master()
@@ -67,15 +87,7 @@ def capture_authored_processing_config(facility_id: str, *, selected_authored_ve
     if len(matches) != 1:
         raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
     if selected_authored_version is not None:
-        from src.services.workflow_attempt_guard_service import snapshots_equal
-
-        versions = matches[0].get("versions")
-        matching = [item for item in versions if isinstance(item, dict) and item.get("version_id") == selected_authored_version.get("version_id")] if isinstance(versions, list) else []
-        if len(matching) != 1 or not snapshots_equal(matching[0], selected_authored_version):
-            raise ValueError("original_template_configured_source_mismatch")
-        facility = _validate_authored_facility_config(deepcopy(selected_authored_version["facility"]), None)
-        if facility.get("facility_id") != facility_id:
-            raise ValueError("original_template_configured_source_mismatch")
+        facility = validate_selected_authored_facility_config(facility_id, selected_authored_version, master=master)
     else:
         facility = _validate_authored_facility_config(deepcopy(matches[0]), None)
     if not isinstance(policy, dict):

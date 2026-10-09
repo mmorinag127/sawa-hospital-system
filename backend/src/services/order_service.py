@@ -696,6 +696,38 @@ def _materialize_facility_template_for_template_id(
     return deepcopy(authored["fax_template"])
 
 
+def _read_order_authored_facility_config(order_id: str, facility_id: str | None = None) -> dict[str, Any]:
+    from src.services import canonical_facility_lineage as lineage
+    from src.services.canonical_facility_store import CanonicalStoreError
+    from src.services.workflow_attempt_guard_service import current_workflow_execution
+
+    try:
+        configured_execution = current_nonworkflow_execution() is not None or current_workflow_execution() is not None
+        if configured_execution and facility_id is not None:
+            return config_service.get_authored_facility_config(facility_id)
+        with session_scope() as session, session.no_autoflush:
+            order = session.get(Order, order_id)
+            if order is None:
+                raise ValueError("order_not_found")
+            owner = str(order.facility_code or "").strip()
+            if not owner:
+                raise ValueError("facility_missing")
+            if facility_id is not None and owner != facility_id:
+                raise ValueError("configured_execution_facility_mismatch")
+            if configured_execution:
+                return config_service.get_authored_facility_config(owner)
+            selected_id = str(order.template_version_id or "").strip()
+            projection = lineage.read_projection(session, selected_id) if selected_id else None
+            if projection is None:
+                raise ValueError("original_template_projection_missing")
+            receipt = lineage.verify_projection(projection)
+            if receipt["facility_id"] != owner:
+                raise ValueError("original_template_configured_source_mismatch")
+            return config_service.validate_selected_authored_facility_config(owner, receipt["authored_version"])
+    except CanonicalStoreError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def _resolve_effective_sheet_template(
     *,
     order_id: str | None,
@@ -712,7 +744,10 @@ def _resolve_effective_sheet_template(
     resolved_facility_config = facility_config
     try:
         if resolved_facility_config is None:
-            resolved_facility_config = config_service.get_authored_facility_config(normalized_facility_id)
+            resolved_facility_config = (
+                _read_order_authored_facility_config(order_id, normalized_facility_id)
+                if order_id else config_service.get_authored_facility_config(normalized_facility_id)
+            )
         if not isinstance(resolved_facility_config, dict):
             return None, None, None, "facility_not_found"
         if resolved_facility_config.get("facility_id") != normalized_facility_id:
@@ -12173,7 +12208,7 @@ def _build_canonical_bootstrap_sheet(
         log_context="Canonical current sheet template lookup failed",
     )
     if not isinstance(facility_config, dict):
-        return None, "facility_not_found"
+        return None, template_error or "facility_not_found"
     if not isinstance(template, dict):
         blocked_payload = _build_blocked_sheet_payload(
             order_id=order_id,
@@ -13525,6 +13560,27 @@ def _unresolved_order_week_context(order_id: str) -> dict[str, Any] | None:
     }
 
 
+def _current_sheet_template_read_boundary(order_id: str) -> tuple[bool, dict[str, Any] | None]:
+    unresolved = _unresolved_order_week_context(order_id)
+    if unresolved is not None:
+        return True, unresolved
+    try:
+        _read_order_authored_facility_config(order_id)
+    except ValueError as exc:
+        reason = str(exc)
+        if reason == "order_not_found":
+            return True, None
+        return True, {
+            "order_id": order_id, "resolved_week_id": None,
+            "fields": [], "header": [], "rows": [], "row_ids": [],
+            "blockers": [reason], "warnings": [],
+            "draft_record": {"blockers_json": [reason]},
+            "draft_payload": None, "has_persisted_draft": False,
+            "authoritative_persisted_draft": False, "clean_saved_draft": False,
+        }
+    return False, None
+
+
 def _build_current_sheet_context_uncached(
     order_id: str,
     *,
@@ -13536,9 +13592,9 @@ def _build_current_sheet_context_uncached(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
-    unresolved = _unresolved_order_week_context(normalized_order_id)
-    if unresolved is not None:
-        return unresolved
+    stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
+    if stopped:
+        return blocked_context
     synchronous_write_input = (
         _capture_synchronous_cache_write_input(normalized_order_id) if allow_state_mutation else None
     )
@@ -13730,6 +13786,9 @@ def refresh_current_sheet_context(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
+    stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
+    if stopped:
+        return blocked_context
     context = _build_current_sheet_context_uncached(
         normalized_order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -13737,7 +13796,8 @@ def refresh_current_sheet_context(
         backfill_from_revision=backfill_from_revision,
         allow_state_mutation=True,
     )
-    if isinstance(context, dict) and "week_unresolved" in context.get("blockers", []):
+    if (isinstance(context, dict) and context.get("blockers")
+            and context.get("resolved_week_id") is None and context.get("draft_payload") is None):
         return context
     if _current_sheet_context_uses_canonical_snapshot(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -13767,9 +13827,9 @@ def get_current_sheet_context(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
-    unresolved = _unresolved_order_week_context(normalized_order_id)
-    if unresolved is not None:
-        return unresolved
+    stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
+    if stopped:
+        return blocked_context
     if _current_sheet_context_uses_canonical_snapshot(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
@@ -15963,15 +16023,8 @@ def _load_pipeline_output_once(output_ref: str | None) -> Optional[dict]:
 
 
 def _resolve_order_fax_template(order_id: str) -> dict[str, Any] | None:
-    facility_id: str | None = None
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if isinstance(order, Order):
-            facility_id = str(order.facility_code or "").strip() or None
-    if not facility_id:
-        return None
     try:
-        return config_service.get_authored_facility_config(facility_id)["fax_template"]
+        return _read_order_authored_facility_config(order_id)["fax_template"]
     except ValueError:
         return None
 
@@ -27004,7 +27057,7 @@ def build_recoverable_ocr_sheet_payload(
         log_context="Facility config lookup failed",
     )
     if not facility_config:
-        return None, error_code
+        return None, template_error or error_code
     fields, field_index = _build_sheet_fields_and_indexes(template) if isinstance(template, dict) else ([], {})
     field_error = _validate_sheet_template_fields(fields)
     fallback_source = _canonical_blocked_sheet_source(
@@ -27265,7 +27318,7 @@ def get_ocr_sheet(
         log_context="Facility config lookup failed",
     )
     if not facility_config:
-        return None, "facility_not_found"
+        return None, template_error or "facility_not_found"
     if not isinstance(template, dict):
         return build_recoverable_ocr_sheet_payload(
             order_id,
@@ -29055,7 +29108,7 @@ def build_order_hakodate_assignment(
         facility_config=(captured_config or {}).get("facility"),
     )
     if not facility_config:
-        return None, "facility_not_found"
+        return None, template_error or "facility_not_found"
     if not isinstance(template, dict):
         return None, template_error or "template_unresolved"
 
@@ -29165,7 +29218,7 @@ def build_order_hakodate_template_candidate(
         log_context="Hakodate template candidate lookup failed",
     )
     if not facility_config:
-        return None, "facility_not_found"
+        return None, template_error or "facility_not_found"
     if not isinstance(template, dict):
         return None, template_error or "template_unresolved"
 
