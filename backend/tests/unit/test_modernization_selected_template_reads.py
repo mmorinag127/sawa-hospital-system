@@ -251,6 +251,13 @@ def test_nonexistent_order_stays_none_without_database_mutation(owned):
             assert reader("COMPONENT-NO-SUCH-ORDER") is None
 
 
+def test_order_bound_requested_facility_mismatch_stops_without_database_mutation(owned):
+    with unchanged_reads(owned):
+        assert resolve(owned, facility_id="ABSENT") == (
+            None, None, None, "configured_execution_facility_mismatch",
+        )
+
+
 def test_registered_template_candidate_http_discloses_missing_selection(owned, monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     reject_selected(owned, "missing-selection")

@@ -96,7 +96,7 @@ from src.services.template_field_schema_service import (
     classify_aux_header_semantic,
     normalize_aux_semantic_display_value,
 )
-from src.services.storage_service import load_bytes_from_uri, get_default_output_bucket, save_artifact_bytes_to_gcs
+from src.services.storage_service import load_bytes_from_uri, get_default_output_bucket as get_default_output_bucket, save_artifact_bytes_to_gcs
 from src.services.storage_service import generate_signed_url_from_uri, sign_published_figure_references
 from src.services.grid_detector import GridDetectionResult, detect_table_grid, detect_table_grid_image
 from src.services.pdf_render import render_pdf_to_png_bytes

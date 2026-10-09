@@ -45,7 +45,9 @@ def resolve(fixture, config, **kwargs):
 def test_canonical_template_is_exact_independent_copy(owned, supplied):
     config = config_service.get_authored_facility_config("F")
     before = deepcopy(config)
-    result_config, template, identifier, error = resolve(owned, config if supplied else None)
+    result_config, template, identifier, error = resolve(
+        owned, config if supplied else None, order_id=owned.order_id if supplied else None,
+    )
     assert error is None
     assert result_config == before
     assert template == before["fax_template"]
@@ -146,6 +148,7 @@ def test_supplied_invalid_authority_stops_despite_matching_hints(owned, invalid,
 def test_absent_facility_does_not_infer_from_order_or_hints(owned, facility_id, error):
     assert resolve(
         owned, None, facility_id=facility_id,
+        order_id=None if facility_id == "ABSENT" else owned.order_id,
         ocr_payload={"facility_id": "F", "template_id": "fax_layout_regular_forbidden_v1"},
     ) == (None, None, None, error)
 
