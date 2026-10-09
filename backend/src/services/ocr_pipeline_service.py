@@ -534,11 +534,8 @@ def run_ocr_pipeline(
         trigger_error_message: str | None = None
         trigger_error_is_terminal = False
         if url:
-            try:
-                save_pipeline_request(job_id, input_reference)
-                request_state_saved = True
-            except Exception:  # noqa: BLE001
-                logger.warning("OCR pipeline state save (request) failed")
+            save_pipeline_request(job_id, input_reference)
+            request_state_saved = True
             logger.info("OCR pipeline request POST url=%s", url)
             req = Request(
                 url,
@@ -568,7 +565,6 @@ def run_ocr_pipeline(
                     trigger_error_message,
                 )
                 if wait_for_output and trigger_error_is_terminal:
-                    save_pipeline_error(job_id, trigger_error_message)
                     raise OCRPipelineTriggerFailedError(
                         input_reference=input_reference,
                         output_reference=output_reference,
@@ -577,11 +573,8 @@ def run_ocr_pipeline(
         else:
             logger.info("OCR pipeline request skipped (OCR_PIPELINE_URL not set)")
 
-        if wait_for_output and not request_state_saved:
-            try:
-                save_pipeline_request(job_id, input_reference)
-            except Exception:  # noqa: BLE001
-                logger.warning("OCR pipeline state save (request) failed")
+        if not request_state_saved:
+            save_pipeline_request(job_id, input_reference)
         if not wait_for_output:
             response = {
                 "status": "running",
@@ -616,10 +609,7 @@ def run_ocr_pipeline(
             ) from exc
         from src.services.ocr_job_service import validate_own_pipeline_result
         validate_own_pipeline_result(output, output_reference)
-        try:
-            save_pipeline_success(job_id, output_reference)
-        except Exception:  # noqa: BLE001
-            logger.warning("OCR pipeline state save (success) failed")
+        save_pipeline_success(job_id, output_reference)
         if trigger_error_message and isinstance(output, dict):
             output = dict(output)
             output.setdefault("trigger_error", trigger_error_message)
@@ -629,10 +619,9 @@ def run_ocr_pipeline(
         return output
     except Exception as exc:  # noqa: BLE001
         try:
-            if not isinstance(exc, OCRPipelineTriggerFailedError):
-                save_pipeline_error(job_id, str(exc))
-        except Exception:  # noqa: BLE001
-            logger.warning("OCR pipeline state save (error) failed")
+            save_pipeline_error(job_id, str(exc))
+        except Exception as state_exc:  # noqa: BLE001
+            exc.add_note(f"OCR pipeline state error recording failed: {type(state_exc).__name__}: {state_exc}")
         raise
     finally:
         if acquired and semaphore:

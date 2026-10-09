@@ -5,8 +5,7 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
-from src.services.storage_service import get_default_output_bucket
-from src.services.storage_uri import format_gcs_uri, parse_gcs_uri
+from src.services.storage_uri import parse_gcs_uri
 
 try:
     from google.cloud import storage  # type: ignore
@@ -18,21 +17,31 @@ class OCRPipelineStateConfigError(RuntimeError):
     pass
 
 
-def _default_state_uri() -> str | None:
-    bucket = os.getenv("OCR_PIPELINE_STATE_BUCKET") or os.getenv("RAW_BUCKET") or get_default_output_bucket()
-    if not bucket:
-        return None
-    object_name = os.getenv("OCR_PIPELINE_STATE_OBJECT", "ocr/pipeline_state.json")
-    return format_gcs_uri(bucket, object_name)
-
-
-def _state_uri() -> str | None:
-    return os.getenv("OCR_PIPELINE_STATE_URI") or _default_state_uri()
+def _state_uri() -> str:
+    uri = (os.getenv("OCR_PIPELINE_STATE_URI") or "").strip()
+    if not uri:
+        raise OCRPipelineStateConfigError("OCR_PIPELINE_STATE_URI is not configured")
+    try:
+        parsed = urlparse(uri)
+        if "?" in uri or "#" in uri:
+            raise OCRPipelineStateConfigError("pipeline state URI must identify a writable object")
+        if parsed.scheme in ("", "file"):
+            if parsed.netloc or not os.path.isabs(parsed.path):
+                raise OCRPipelineStateConfigError("pipeline state file path must be absolute and local")
+        elif parsed.scheme == "gs":
+            source = parse_gcs_uri(uri)
+            if source.generation is not None or source.query or source.fragment:
+                raise OCRPipelineStateConfigError("pipeline state URI must identify a writable object")
+        else:
+            raise OCRPipelineStateConfigError(f"unsupported pipeline state uri: {uri}")
+    except ValueError as exc:
+        raise OCRPipelineStateConfigError("invalid OCR_PIPELINE_STATE_URI") from exc
+    return uri
 
 
 def _load_gs(bucket: str, object_name: str) -> dict | None:
     if storage is None:
-        return None
+        raise OCRPipelineStateConfigError("pipeline state GCS storage SDK is unavailable")
     client = storage.Client()
     blob = client.bucket(bucket).blob(object_name)
     if not blob.exists():
@@ -43,7 +52,7 @@ def _load_gs(bucket: str, object_name: str) -> dict | None:
 
 def _save_gs(bucket: str, object_name: str, payload: dict) -> None:
     if storage is None:
-        return
+        raise OCRPipelineStateConfigError("pipeline state GCS storage SDK is unavailable")
     client = storage.Client()
     blob = client.bucket(bucket).blob(object_name)
     blob.upload_from_string(json.dumps(payload), content_type="application/json")
@@ -64,8 +73,6 @@ def _save_file(path: str, payload: dict) -> None:
 
 def load_pipeline_state() -> dict | None:
     uri = _state_uri()
-    if not uri:
-        return None
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         path = parsed.path if parsed.scheme else uri
@@ -80,8 +87,6 @@ def load_pipeline_state() -> dict | None:
 
 def _save_state(payload: dict) -> None:
     uri = _state_uri()
-    if not uri:
-        return
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         path = parsed.path if parsed.scheme else uri
