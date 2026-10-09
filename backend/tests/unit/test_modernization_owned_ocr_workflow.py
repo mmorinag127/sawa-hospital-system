@@ -71,6 +71,16 @@ class OwnedProducer:
         monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
         monkeypatch.setenv("HF_DATASETS_OFFLINE", "1")
         monkeypatch.setenv("TMPDIR", str(root))
+        for key, value in {
+            "PROJECT_ID": "synthetic-owned-ocr-unit",
+            "LOCATION": "asia-northeast2",
+            "QUEUE": "synthetic-owned-ocr-unit",
+            "TARGET_URL": "https://reserved.invalid",
+            "SERVICE_ACCOUNT_EMAIL": "unit-worker@synthetic-owned-ocr-unit.iam.gserviceaccount.com",
+            "AUDIENCE": "https://reserved.invalid",
+            "DISPATCH_DEADLINE_SECONDS": "300",
+        }.items():
+            monkeypatch.setenv("HOSPITAL_WORKFLOW_OCR_DELIVERY_" + key, value)
         self.master_json = root / "authored-facilities.json"
         monkeypatch.setenv("FACILITY_MASTER_PATH", str(self.master_json))
         policy = root / "ingest-policy.json"
@@ -157,7 +167,7 @@ class OwnedProducer:
                                   received_at=datetime(2026, 3, 1, 9),
                                   template_version_id=self.projection_id))
             session.flush()
-            self.add_document(session, "DOC-NATIVE", "PDF-NATIVE", self.pdf)
+            self.add_document(session, "DOC-NATIVE", "PDF-NATIVE", self.pdf, message_id=ORDER)
         initial, error = workflow.get_workflow_readonly(ORDER)
         assert error is None, error
         self.context, error = workflow.confirm_context(
@@ -166,14 +176,14 @@ class OwnedProducer:
         )
         assert error is None, (error, self.context)
 
-    def add_document(self, session, document_id, uploaded_id, path):
+    def add_document(self, session, document_id, uploaded_id, path, *, message_id):
         session.add(OrderDocument(
             id=document_id, facility_code=FACILITY, week_code=WEEK, storage_uri=str(path),
-            source_email_id=ORDER, received_at=datetime(2026, 3, 1, 9), status="done",
+            source_email_id=message_id, received_at=datetime(2026, 3, 1, 9), status="done",
         ))
         session.flush()
         session.add(UploadedPdf(
-            id=uploaded_id, message_id=ORDER, storage_uri=str(path), original_filename=path.name,
+            id=uploaded_id, message_id=message_id, storage_uri=str(path), original_filename=path.name,
             content_sha256=sha256(path.read_bytes()).hexdigest(), page_count=1,
             received_at=datetime(2026, 3, 1, 9), current_document_id=document_id,
             current_order_id=ORDER,
@@ -302,7 +312,8 @@ def test_selected_real_artifacts_stop_after_owned_pdf_document_retirement(owned_
     alternate = f.root / "owned-successor.pdf"
     shutil.copyfile(f.pdf, alternate)
     with db.session_scope() as session:
-        f.add_document(session, "DOC-SUCCESSOR", "PDF-SUCCESSOR", alternate)
+        f.add_document(session, "DOC-SUCCESSOR", "PDF-SUCCESSOR", alternate,
+                       message_id="UNIT-NATIVE-SUCCESSOR-MESSAGE")
     assert f.receipt != old_receipt
     assert f.receipt["sha256"] == old_receipt["sha256"], "same bytes do not authorize another document"
     result, error = workflow.build_sheet_from_selected_ocr(ORDER)
@@ -461,7 +472,8 @@ def _add_owned_version_successor(f):
     successor = f.root / "version-successor.pdf"
     shutil.copyfile(f.pdf, successor)
     with db.session_scope() as session:
-        f.add_document(session, "DOC-VERSION-SUCCESSOR", "PDF-VERSION-SUCCESSOR", successor)
+        f.add_document(session, "DOC-VERSION-SUCCESSOR", "PDF-VERSION-SUCCESSOR", successor,
+                       message_id="UNIT-VERSION-SUCCESSOR-MESSAGE")
     assert f.receipt["document_id"] != original_receipt["document_id"]
     assert f.receipt["sha256"] == original_receipt["sha256"]
     return original_receipt
