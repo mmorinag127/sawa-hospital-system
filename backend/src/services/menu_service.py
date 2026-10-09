@@ -2916,7 +2916,8 @@ def _find_existing_monthly_item(
     exclude_id: str | None = None,
 ) -> MonthlyMenuItem | None:
     normalized_diet = normalize_diet_type(diet_type)
-    if not normalized_diet:
+    # Nonempty inputs discarded by normalization are not unresolved identities.
+    if normalized_diet is None and diet_type is not None and str(diet_type).strip():
         return None
     query = select(MonthlyMenuItem).where(MonthlyMenuItem.monthly_menu_id == month_id).where(MonthlyMenuItem.name == name)
     scope = (facility_override or "").strip()
@@ -2939,7 +2940,10 @@ def _find_existing_monthly_item(
         query = query.where(MonthlyMenuItem.category == normalized_category)
     else:
         query = query.where(or_(MonthlyMenuItem.category.is_(None), MonthlyMenuItem.category == ""))
-    query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+    if normalized_diet is None:
+        query = query.where(or_(MonthlyMenuItem.diet_type.is_(None), MonthlyMenuItem.diet_type == ""))
+    else:
+        query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
     if exclude_id:
         query = query.where(MonthlyMenuItem.id != exclude_id)
     matches = session.execute(query).scalars().all()
