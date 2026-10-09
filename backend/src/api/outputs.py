@@ -125,7 +125,7 @@ def _render_xlsx_preview(path: Path, title: str) -> str:
                 if style:
                     attrs.append(f'style="{escape(style)}"')
                 value = cell.value
-                text = value.strftime("%Y-%m-%d") if hasattr(value, "strftime") else str(value or "")
+                text = value.strftime("%Y-%m-%d") if hasattr(value, "strftime") else str(value if value is not None else "")
                 cells_html.append(f"<td {' '.join(attrs)}>{escape(text)}</td>")
             rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
         sheet_html.append(
