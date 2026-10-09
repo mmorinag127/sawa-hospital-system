@@ -765,19 +765,7 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
 
 
 def _effective_workflow_template_id(meta: dict[str, Any]) -> str | None:
-    template_id = _normalize_id(meta.get("template_id"))
-    if template_id:
-        return template_id
-    facility_id = _normalize_id(meta.get("facility_id"))
-    if not facility_id:
-        return None
-    try:
-        facility_config = config_service.get_facility_config(facility_id)
-    except Exception:
-        return None
-    if not isinstance(facility_config, dict):
-        return None
-    return _normalize_id(facility_config.get("fax_template_id")) or None
+    return _normalize_id(meta.get("template_id")) or None
 
 
 def _effective_workflow_template_version_id(row: OrderWorkflowState, meta: dict[str, Any]) -> str | None:
