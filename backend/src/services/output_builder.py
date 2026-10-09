@@ -5878,59 +5878,6 @@ def build_daily_output_bundle(
             )
 
     request_dir.mkdir(parents=True, exist_ok=False)
-    use_reference_daily_delivery = False
-    if use_reference_daily_delivery:
-        workbook = _create_reference_daily_delivery_workbook(
-            target_date=target_date,
-            grouped_outputs=grouped_outputs,
-        )
-        if normalized_type == "both":
-            used_titles = set(workbook.sheetnames)
-            if "メニュー" not in workbook.sheetnames:
-                menu_ws = workbook.create_sheet(title="メニュー", index=0)
-                _populate_daily_label_menu_sheet(menu_ws, target_date)
-                used_titles.add("メニュー")
-            for group in sorted(grouped_outputs.values(), key=_daily_label_group_sort_key):
-                filtered_bags = group.get("bags") or []
-                if not filtered_bags:
-                    continue
-                sheet_name = _create_daily_labels_sheet(
-                    workbook,
-                    used_titles,
-                    title_seed=f"ラベル_{_daily_label_sheet_name(group.get('facility_code'), group.get('facility_name'))}",
-                    bags=filtered_bags,
-                    label_profile=group["label_profile"],
-                    facility_name=group["facility_config"].get("facility_name"),
-                )
-                group.setdefault("_reference_bundle_label_sheets", []).append(sheet_name)
-        workbook.save(bundle_path)
-        manifest_items.extend(
-            {
-                "order_ids": list(group["order_ids"]),
-                "facility_code": group["facility_code"],
-                "facility_name": group["facility_name"],
-                "status": "ok",
-                "files": [
-                    item
-                    for item in [
-                        _reference_delivery_sheet_name(group.get("facility_code"), group.get("facility_name")),
-                        *list(group.get("_reference_bundle_label_sheets") or []),
-                    ]
-                    if item
-                ],
-            }
-            for group in grouped_outputs.values()
-        )
-        summary = {
-            "target_date": target_date.isoformat(),
-            "bundle_type": normalized_type,
-            "total_orders": len(orders),
-            "success_orders": len(grouped_outputs),
-            **_daily_bundle_status_counts(manifest_items),
-            "items": manifest_items,
-        }
-        return bundle_path, summary
-
     if normalized_type in {"labels", "labels_csv"}:
         zip_path = request_dir / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.zip"
         success_count = 0
