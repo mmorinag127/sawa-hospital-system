@@ -13851,110 +13851,15 @@ def get_current_sheet_context(
     )
 
 
-def _get_ocr_output_bucket() -> str | None:
-    return (
-        str(os.getenv("OCR_PIPELINE_BUCKET") or "").strip()
-        or str(os.getenv("OCR_PIPELINE_INPUT_BUCKET") or "").strip()
-        or get_default_output_bucket()
-    )
-
-
-def _get_ocr_output_prefix() -> str:
-    prefix = str(os.getenv("OCR_PIPELINE_OUTPUT_PREFIX") or "output/").strip() or "output/"
-    if not prefix.endswith("/"):
-        prefix = f"{prefix}/"
-    return prefix
-
-
 def _list_latest_completed_ocr_outputs(
     order_id: str,
     *,
     not_before: datetime | None = None,
     limit: int = 5,
 ) -> list[tuple[str, dict[str, Any]]]:
-    bucket = _get_ocr_output_bucket()
-    if not bucket:
-        return []
-    try:
-        from google.cloud import storage  # type: ignore
-    except Exception:
-        return []
-
-    prefix = f"{_get_ocr_output_prefix()}OCR-{str(order_id or '').strip()}_"
-    client = storage.Client()
-    timeout = 15.0
-    candidates: list[tuple[datetime, str]] = []
-    try:
-        for blob in client.list_blobs(bucket, prefix=prefix, timeout=timeout):
-            name = str(getattr(blob, "name", "") or "").strip()
-            if not name.endswith(".pdf.json"):
-                continue
-            updated = getattr(blob, "updated", None)
-            updated_naive: datetime | None = None
-            if isinstance(updated, datetime):
-                updated_naive = updated.astimezone(timezone.utc).replace(tzinfo=None) if updated.tzinfo else updated
-            if isinstance(not_before, datetime) and isinstance(updated_naive, datetime) and updated_naive < not_before:
-                continue
-            candidates.append((updated_naive or datetime.min, name))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("OCR output list failed", order_id=order_id, error=str(exc))
-        return []
-
-    completed: list[tuple[str, dict[str, Any]]] = []
-    for _updated, name in sorted(candidates, reverse=True)[: max(limit, 1)]:
-        object_uri = f"gs://{bucket}/{name}"
-        try:
-            raw = client.bucket(bucket).blob(name).download_as_bytes(timeout=timeout, retry=None)
-            payload = json.loads(raw.decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("OCR output read failed", order_id=order_id, uri=object_uri, error=str(exc))
-            continue
-        state = _classify_owned_evidence_payload(payload)
-        status = str(payload.get("status") or "").strip().lower()
-        stage = str(payload.get("stage") or "").strip().lower()
-        if state.get("persistable") and (status == "done" or stage == "done"):
-            completed.append((object_uri, payload))
-            continue
-        if status in {"failed", "error"} or stage in {"failed", "error"}:
-            completed.append((object_uri, payload))
-    return completed
-
-
-def _parse_ocr_output_reference_timestamp(value: object) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    name = text.rsplit("/", 1)[-1]
-    match = re.search(r"_(\d{8})_(\d{6})_(\d+)\.pdf(?:\.json)?$", name)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(
-            f"{match.group(1)} {match.group(2)} {match.group(3)}",
-            "%Y%m%d %H%M%S %f",
-        )
-    except Exception:
-        return None
-
-
-def _resolve_reparse_job_not_before(job: dict[str, Any] | None) -> datetime | None:
-    if not isinstance(job, dict):
-        return None
-    metrics = job.get("metrics")
-    metrics = metrics if isinstance(metrics, dict) else {}
-    candidates = [
-        metrics.get("awaiting_output_since"),
-        metrics.get("stage_updated_at"),
-        job.get("updated_at"),
-        job.get("created_at"),
-    ]
-    for candidate in candidates:
-        parsed = _parse_revision_datetime(candidate)
-        if isinstance(parsed, datetime):
-            if parsed.tzinfo is not None:
-                return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            return parsed
-    return None
+    raise LegacyOcrEvidenceFallbackDisabledError(
+        "legacy OCR output discovery is disabled; use the owned output reference"
+    )
 
 
 def _clean_ocr_rerun_terminal_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
