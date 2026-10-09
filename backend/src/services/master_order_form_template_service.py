@@ -978,6 +978,9 @@ def _write_week_menu_identity(
                 cell = ws.cell(start, 1)
                 cell.value = menu_date
                 cell.number_format = "m/d\n(aaa)"
+                font = copy(cell.font)
+                font.sz = min(float(font.sz or 11), 14)
+                cell.font = font
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 ws.row_dimensions[start].height = max(
                     float(ws.row_dimensions[start].height or ws.sheet_format.defaultRowHeight or 15),
