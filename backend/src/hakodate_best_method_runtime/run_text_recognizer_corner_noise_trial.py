@@ -369,7 +369,7 @@ def _warp_polygon_cell_to_axis_aligned_crop(
         or (pts[:, 1] < 0).any()
         or (pts[:, 1] > height).any()
         or not cv2.isContourConvex(pts)
-        or cv2.contourArea(pts) <= 0
+        or cv2.contourArea(pts, oriented=True) <= 0
     ):
         raise ValueError("recognizer_crop_polygon_invalid")
     top_w = float(np.linalg.norm(pts[1] - pts[0]))
