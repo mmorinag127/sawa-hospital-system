@@ -454,3 +454,111 @@ def test_completed_current_workflow_failure_cannot_be_replayed(owned_producer):
     with pytest.raises(ValueError, match="^reparse_attempt_superseded$"):
         _persist_owned_workflow_failure(claim)
     assert _owned_workflow_database_snapshot() == before
+
+
+def _add_owned_version_successor(f):
+    original_receipt = deepcopy(f.receipt)
+    successor = f.root / "version-successor.pdf"
+    shutil.copyfile(f.pdf, successor)
+    with db.session_scope() as session:
+        f.add_document(session, "DOC-VERSION-SUCCESSOR", "PDF-VERSION-SUCCESSOR", successor)
+    assert f.receipt["document_id"] != original_receipt["document_id"]
+    assert f.receipt["sha256"] == original_receipt["sha256"]
+    return original_receipt
+
+
+def _assert_public_version_snapshots(payload):
+    from src.models.order_version import OrderVersion
+    from src.services.workflow_attempt_guard_service import selected_version_snapshot
+
+    with db.session_scope() as session:
+        versions = session.execute(
+            select(OrderVersion).where(OrderVersion.order_id == ORDER),
+        ).scalars().all()
+        expected = {version.id: selected_version_snapshot(version) for version in versions}
+        assert len(expected) == 2
+        assert len(payload["versions"]) == len(expected)
+        assert {version["id"] for version in payload["versions"]} == set(expected)
+        for public in payload["versions"]:
+            actual = session.get(OrderVersion, public["id"])
+            snapshot = public["selected_version_input"]
+            assert snapshot == expected[actual.id]
+            assert json.loads(json.dumps(snapshot, allow_nan=False)) == snapshot
+            assert snapshot["document_id"] == public["document_id"] == actual.document_id
+            assert snapshot["received_at"] == actual.received_at.isoformat()
+            assert snapshot["created_at"] == actual.created_at.isoformat()
+            assert snapshot["is_current"] is actual.is_current
+        current = [version for version in payload["versions"] if version["is_current"]]
+        assert len(current) == 1
+        assert payload["current_version"] == current[0]
+        assert payload["document_id"] == current[0]["document_id"]
+
+
+def test_public_order_versions_transport_current_and_historical_exact_snapshots(owned_producer):
+    """Local API selection helpers only; no HTTP, OCR or live execution proof."""
+    from src.api import orders as orders_api
+
+    f = owned_producer
+    original_receipt = _add_owned_version_successor(f)
+    before = _owned_workflow_database_snapshot()
+    public = order_service.get_order_by_id(ORDER)
+    assert public is not None
+    _assert_public_version_snapshots(public)
+    assert public["current_version"]["document_id"] == f.receipt["document_id"]
+    historical = [v for v in public["versions"] if v["document_id"] == original_receipt["document_id"]]
+    assert len(historical) == 1
+    assert historical[0]["is_current"] is False
+    for document_id in (None, original_receipt["document_id"], f.receipt["document_id"]):
+        selected_order, selected = orders_api._resolve_order_document_version(ORDER, document_id)
+        assert selected_order == public
+        expected_document = f.receipt["document_id"] if document_id is None else document_id
+        matches = [v for v in public["versions"] if v["document_id"] == expected_document]
+        assert len(matches) == 1
+        assert selected == matches[0]
+        metrics = orders_api._document_selection_metrics(selected)
+        assert metrics["selected_version_input"] == matches[0]["selected_version_input"]
+        assert metrics["selected_document_id"] == expected_document
+        assert metrics["selected_document_version"] == matches[0]["version_no"]
+        assert metrics["selected_document_is_current"] is matches[0]["is_current"]
+        json.dumps(metrics["selected_version_input"], allow_nan=False)
+    assert _owned_workflow_database_snapshot() == before
+
+
+@pytest.mark.parametrize("detached", [False, True], ids=["attached", "detached"])
+def test_public_order_summary_versions_preserve_exact_snapshots(owned_producer, detached):
+    from sqlalchemy.orm import object_session
+    from src.services.order_serialization_service import serialize_order_summary
+
+    f = owned_producer
+    _add_owned_version_successor(f)
+    before = _owned_workflow_database_snapshot()
+    with db.session_scope() as session:
+        order = session.get(Order, ORDER)
+        if detached:
+            session.expunge(order)
+            assert object_session(order) is None
+        else:
+            assert object_session(order) is session
+        summary = serialize_order_summary(order)
+    _assert_public_version_snapshots(summary)
+    assert summary["current_version"]["document_id"] == f.receipt["document_id"]
+    assert _owned_workflow_database_snapshot() == before
+
+
+def test_public_version_snapshot_guard_accepts_exact_and_rejects_tampered_without_writes(owned_producer):
+    from src.services.workflow_attempt_guard_service import lock_selected_version_input
+
+    _add_owned_version_successor(owned_producer)
+    public = order_service.get_order_by_id(ORDER)
+    _assert_public_version_snapshots(public)
+    before = _owned_workflow_database_snapshot()
+    for version in public["versions"]:
+        captured = deepcopy(version["selected_version_input"])
+        unchanged = deepcopy(captured)
+        tampered = deepcopy(captured)
+        tampered["is_current"] = not captured["is_current"]
+        with db.session_scope() as session:
+            assert lock_selected_version_input(session, ORDER, captured) is True
+            assert lock_selected_version_input(session, ORDER, tampered) is False
+        assert captured == unchanged
+    assert _owned_workflow_database_snapshot() == before
