@@ -1305,7 +1305,8 @@ def _workflow_lineage_error(
             return "confirmed_snapshot_lineage_missing"
         if snapshot.bagging_result_id != _normalize_id(meta.get("bagging_result_id")) or snapshot.output_bundle_id != _normalize_id(meta.get("output_bundle_id")):
             return "confirmed_snapshot_lineage_mismatch"
-        if _normalize_id(meta.get("confirmed_snapshot_id")) not in {None, confirmed_snapshot_id}:
+        meta_confirmed_snapshot_id = _normalize_id(meta.get("confirmed_snapshot_id"))
+        if meta_confirmed_snapshot_id and meta_confirmed_snapshot_id != confirmed_snapshot_id:
             return "confirmed_snapshot_lineage_mismatch"
     return None
 
