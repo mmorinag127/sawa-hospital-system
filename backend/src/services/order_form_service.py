@@ -4,11 +4,13 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 import hashlib
 import json
+from io import BytesIO
 from pathlib import Path
 import os
 import re
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -20,8 +22,9 @@ from src.db import session_scope
 from src.models.order import Order
 from src.models.order_version import OrderVersion
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services import config_service, draft_sheet_service, menu_service, sheet_week_service
+from src.services import config_service, menu_service, sheet_week_service
 from src.services.ingest_policy import parse_date_string
 from src.services.storage_service import (
     get_default_output_bucket,
@@ -1273,18 +1276,131 @@ def _resolve_week_range_for_saved_sheet(
     month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_code)
     if month_id and isinstance(start_date, date) and isinstance(end_date, date):
         return month_id, start_date, end_date
-    saved_dates = _dates_from_saved_sheet(fields, rows, received_at)
-    if saved_dates:
-        first_date = min(saved_dates)
-        for candidate_start, candidate_end in _build_week_ranges_for_month(first_date.strftime("%Y-%m")):
-            if candidate_start <= first_date <= candidate_end:
-                return candidate_start.strftime("%Y-%m"), candidate_start, candidate_end
-    if month_id:
-        ranges = _build_week_ranges_for_month(month_id)
-        if ranges:
-            start, end = ranges[0]
-            return month_id, start, end
     raise ValueError("order week is unresolved")
+
+
+def _capture_saved_sheet_order_form_input(session, order_id: str) -> dict[str, Any]:
+    from src.services import canonical_facility_lineage as lineage, ocr_evidence_service
+    from src.services.canonical_facility_store import CanonicalStoreError
+    from src.services.facility_template_version_service import template_version_applies_on
+
+    order = session.get(Order, order_id)
+    if order is None:
+        raise ValueError("order not found")
+    workflow = session.get(OrderWorkflowState, order_id)
+    if workflow is None or not workflow.draft_id:
+        raise ValueError("saved sheet not found")
+    if type(workflow.revision) is not int:
+        raise ValueError("saved sheet workflow revision missing")
+    draft = session.get(OrderSheetDraft, workflow.draft_id)
+    if draft is None or draft.order_id != order_id:
+        raise ValueError("saved sheet order mismatch")
+    evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id) if workflow.evidence_run_id else None
+    if evidence is None or evidence.order_id != order_id or not ocr_evidence_service.evidence_run_is_selectable(evidence):
+        raise ValueError("saved sheet selected OCR mismatch")
+    if draft.base_evidence_run_id != evidence.id:
+        raise ValueError("saved sheet selected OCR mismatch")
+    template_version_id = workflow.template_version_id
+    if not template_version_id or any(value != template_version_id for value in (
+        order.template_version_id, draft.template_version_id, evidence.template_version_id,
+    )):
+        raise ValueError("saved sheet template mismatch")
+    payload = draft.draft_sheet_json
+    if not isinstance(payload, dict) or any(
+        payload.get(key) and payload[key] != evidence.id
+        for key in ("base_evidence_run_id", "evidence_run_id")
+    ):
+        raise ValueError("saved sheet OCR lineage mismatch")
+    if payload.get("source") == "reparse_candidate" or payload.get("adopted") is False:
+        raise ValueError("saved sheet candidate not adopted")
+    fields, rows = payload.get("fields"), payload.get("rows")
+    if not isinstance(fields, list) or not isinstance(rows, list) or not rows:
+        raise ValueError("saved sheet rows not found")
+    month_id, week_start, week_end = _resolve_week_range_for_saved_sheet(
+        week_code=order.week_code, fields=fields, rows=rows, received_at=order.received_at,
+    )
+    facility_id = str(order.facility_code or "").strip()
+    if not facility_id:
+        raise ValueError("facility missing")
+    workflow_meta = workflow.secondary_actions_json
+    if workflow_meta is not None and not isinstance(workflow_meta, dict):
+        raise ValueError("saved sheet context mismatch")
+    meta = (workflow_meta or {}).get("workflow_v2", {})
+    if not isinstance(meta, dict):
+        raise ValueError("saved sheet context mismatch")
+    for key, expected in (("facility_id", facility_id), ("week_start", week_start.isoformat()),
+                          ("week_end", week_end.isoformat()), ("template_version_id", template_version_id)):
+        if meta.get(key) and str(meta[key]) != expected:
+            raise ValueError("saved sheet context mismatch")
+    try:
+        projection = lineage.read_projection(session, template_version_id)
+        if projection is None:
+            raise ValueError("saved sheet template missing")
+        receipt = lineage.verify_projection(projection)
+        selected, dated_projection = lineage.resolve(session, facility_id, week_start)
+        if (receipt["facility_id"] != facility_id or dated_projection.id != projection.id
+                or not template_version_applies_on(projection, week_start)):
+            raise ValueError("saved sheet dated template mismatch")
+        facility = config_service._validate_authored_facility_config(
+            deepcopy(selected), projection.template_id,
+        )
+    except CanonicalStoreError as exc:
+        raise ValueError(str(exc)) from exc
+    if draft.base_template_resolution_id and draft.base_template_resolution_id != projection.template_id:
+        raise ValueError("saved sheet template lineage mismatch")
+    return deepcopy({
+        "order_id": order_id, "facility_id": facility_id, "week_code": order.week_code,
+        "received_at": order.received_at, "document_id": order.current_document_id,
+        "workflow_revision": workflow.revision, "workflow_meta": workflow_meta,
+        "draft_id": draft.id, "draft_state": draft.draft_state, "draft_edited_at": draft.edited_at,
+        "draft_created_at": draft.created_at, "draft_payload": payload,
+        "draft_base_template_resolution_id": draft.base_template_resolution_id, "draft_edited_by": draft.edited_by,
+        "evidence_id": evidence.id, "evidence_payload": evidence.payload_json,
+        "evidence_manifest": evidence.artifact_manifest_json, "evidence_status": evidence.status,
+        "evidence_source": evidence.source, "evidence_producer": evidence.producer_version,
+        "evidence_artifact_digest": evidence.artifact_digest,
+        "template_version_id": template_version_id, "template_receipt": receipt,
+        "facility": facility, "month_id": month_id, "week_start": week_start, "week_end": week_end,
+        "fax_version": _current_order_version_metadata(session, order_id),
+    })
+
+
+def _read_saved_sheet_source_workbook(facility: dict, month_id: str) -> dict[str, Any]:
+    month_refs = {}
+    for key in ("order_form_month_sources", "order_form_month_source_uris"):
+        mapping = facility.get(key)
+        if mapping is not None and not isinstance(mapping, dict):
+            raise ValueError("saved sheet source mapping invalid")
+        if isinstance(mapping, dict) and month_id in mapping:
+            month_refs[key] = mapping[month_id]
+    selected = month_refs if month_refs else {key: facility[key] for key in (
+        "order_form_source_workbook", "order_form_source_workbook_uri",
+    ) if facility.get(key) is not None}
+    refs = list(selected.values())
+    if not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+        raise ValueError("saved sheet source workbook not configured")
+    refs = list(dict.fromkeys(ref.strip() for ref in refs))
+    source_bytes = None
+    for ref in refs:
+        parsed = urlparse(ref)
+        if parsed.scheme in {"gs", "file"}:
+            data = load_bytes_from_uri(ref)
+        elif parsed.scheme:
+            raise ValueError("saved sheet source workbook URI invalid")
+        else:
+            path = Path(ref)
+            data = (path if path.is_absolute() else _FAX_SOURCE_TEMPLATE_DIR / path).read_bytes()
+        if not data:
+            raise ValueError("saved sheet source workbook empty")
+        if source_bytes is not None and source_bytes != data:
+            raise ValueError("saved sheet source workbook ambiguous")
+        source_bytes = data
+    # References are aliases only after their actual bytes have been verified equal.
+    reference = selected.get("order_form_month_source_uris") if month_refs else selected.get("order_form_source_workbook_uri")
+    if reference is None:
+        reference = selected["order_form_month_sources"] if month_refs else selected["order_form_source_workbook"]
+    return {"reference": reference.strip(), "references": refs, "bytes": source_bytes,
+            "sha256": hashlib.sha256(source_bytes).hexdigest()}
 
 
 def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
@@ -1292,64 +1408,31 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     if not normalized_order_id:
         raise ValueError("order_id is required")
     generated_at = datetime.utcnow()
-    fax_version: dict[str, Any] = {}
     with session_scope() as session:
-        order = session.get(Order, normalized_order_id)
-        if not order:
-            raise ValueError("order not found")
-        fax_version = _current_order_version_metadata(session, normalized_order_id)
-        facility_id = str(order.facility_code or "").strip()
-        week_code = order.week_code
-        received_at = order.received_at or datetime.utcnow()
-        workflow = session.get(OrderWorkflowState, normalized_order_id)
-        workflow_draft_id = str(getattr(workflow, "draft_id", None) or "").strip() or None
-        draft_row = session.get(OrderSheetDraft, workflow_draft_id) if workflow_draft_id else None
-        if draft_row is not None and draft_row.order_id == normalized_order_id:
-            draft = {
-                "id": draft_row.id,
-                "draft_sheet_json": draft_row.draft_sheet_json if isinstance(draft_row.draft_sheet_json, dict) else {},
-            }
-        else:
-            draft = None
-    if not facility_id:
-        raise ValueError("facility missing")
-
-    if not isinstance(draft, dict):
-        draft = draft_sheet_service.get_latest_sheet_draft(normalized_order_id)
-    draft_payload = draft.get("draft_sheet_json") if isinstance(draft, dict) else None
-    if not isinstance(draft_payload, dict):
-        raise ValueError("saved sheet not found")
+        captured = _capture_saved_sheet_order_form_input(session, normalized_order_id)
+    facility_id = captured["facility_id"]
+    received_at = captured["received_at"]
+    fax_version = captured["fax_version"]
+    draft_payload = captured["draft_payload"]
     fields = draft_payload.get("fields")
     header = draft_payload.get("header")
     rows = draft_payload.get("rows")
     if not isinstance(fields, list) or not isinstance(rows, list) or not rows:
         raise ValueError("saved sheet rows not found")
 
-    facility = _resolve_facility(facility_id)
+    facility = captured["facility"]
     fax_template_id = str(_infer_fax_template_id_from_facility(facility) or "").strip()
     if not fax_template_id:
         raise ValueError("facility fax_template_id not found")
     spec = _resolve_fax_family_spec(fax_template_id)
-    month_id, week_start, week_end = _resolve_week_range_for_saved_sheet(
-        week_code=week_code,
-        fields=fields,
-        rows=rows,
-        received_at=received_at,
-    )
+    month_id, week_start, week_end = captured["month_id"], captured["week_start"], captured["week_end"]
     week_sheet_name = _format_week_sheet_name(week_start, week_end)
-    try:
-        source_workbook_name = resolve_facility_source_workbook_name_for_week_sheet(facility, week_sheet_name)
-    except ValueError as exc:
-        if "week sheet not configured" not in str(exc):
-            raise
-        source_workbook_name = _resolve_facility_source_workbook_name_for_template_clone(
-            facility,
-            fax_template_id=fax_template_id,
-            month_id=month_id,
-        )
-    source_path = _resolve_source_workbook_path(source_workbook_name)
-    workbook = load_workbook(source_path)
-    _ensure_week_sheet_from_template(workbook, week_sheet_name)
+    source = _read_saved_sheet_source_workbook(facility, month_id)
+    source_workbook_name = source["reference"]
+    workbook = load_workbook(BytesIO(source["bytes"]))
+    if week_sheet_name not in workbook.sheetnames:
+        workbook.close()
+        raise ValueError("saved sheet week not found in configured workbook")
     _keep_only_target_sheet(workbook, week_sheet_name)
     worksheet = workbook[week_sheet_name]
 
@@ -1396,14 +1479,26 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     metadata = workbook["設定"]
     metadata.append(["order_id", normalized_order_id])
     metadata.append(["month_id", month_id])
-    metadata.append(["saved_sheet_draft_id", str(draft.get("id") or "") if isinstance(draft, dict) else ""])
+    metadata.append(["saved_sheet_draft_id", captured["draft_id"]])
     metadata.append(["saved_sheet_row_count", written_rows])
 
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe_facility_id = _sanitize_filename_fragment(facility_id)
     safe_week = _sanitize_filename_fragment(week_sheet_name)
-    output = _OUTPUT_DIR / f"fax_read_sheet_excel_{normalized_order_id}_{safe_facility_id}_{safe_week}_{stamp}.xlsx"
-    workbook.save(output)
+    output_dir = _OUTPUT_DIR / uuid4().hex
+    output = output_dir / f"fax_read_sheet_excel_{normalized_order_id}_{safe_facility_id}_{safe_week}_{stamp}.xlsx"
+    with session_scope() as session:
+        current = _capture_saved_sheet_order_form_input(session, normalized_order_id)
+        current_source = _read_saved_sheet_source_workbook(current["facility"], current["month_id"])
+        if current != captured or current_source != source:
+            workbook.close()
+            raise ValueError("saved sheet output input changed")
+    try:
+        output_dir.mkdir()
+        with output.open("xb") as target:
+            workbook.save(target)
+    finally:
+        workbook.close()
     return output
 
 
