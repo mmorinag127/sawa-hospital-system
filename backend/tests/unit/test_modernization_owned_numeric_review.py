@@ -7,6 +7,7 @@ confirmation is simulated from the authored workbook, never from OCR values.
 
 from copy import deepcopy
 from datetime import date
+import json
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -14,6 +15,7 @@ import pytest
 
 from test_modernization_owned_numeric_fax import numeric_fax
 from test_modernization_owned_ocr_workflow import FACILITY, ORDER, WEEK
+from test_modernization_workflow_surface_parity import database_snapshot
 from src import db
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
@@ -22,6 +24,7 @@ from src.services import canonical_ocr_artifact_service as artifacts
 from src.services import master_order_form_template_service as master
 from src.services import ocr_evidence_service, order_service
 from src.services import order_workflow_v2_service as workflow
+from src.services.template_field_schema_service import build_template_field_schema_contract
 
 
 def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_fax):
@@ -47,6 +50,36 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     artifacts.validate_payload(payload)
     assert len(payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]) == 8
     f.select()
+    original_json = f.master_json.read_bytes()
+    before_output_read = database_snapshot()
+    try:
+        diverged = json.loads(original_json)
+        root = next(entry for entry in diverged["facilities"] if entry["facility_id"] == FACILITY)
+        selected_versions = deepcopy(root["versions"])
+        selected_template = deepcopy(selected_versions[0]["facility"]["fax_template"])
+        root["fax_template"]["header_rows"] = 2
+        root_quantity = next(column for column in root["fax_template"]["columns"] if column["role"] == "quantity")
+        root_quantity["diet_type"] = "staff"
+        assert root["versions"] == selected_versions
+        assert root["fax_template"] != selected_template
+        f.master_json.write_text(json.dumps(diverged, ensure_ascii=False), encoding="utf-8")
+        output, output_error = order_service.get_ocr_output(ORDER, persist_cache=False)
+        assert output_error is None, (output_error, output)
+        assert order_service._resolve_order_fax_template(ORDER) == selected_template
+        assert output["_template_field_schema"] == build_template_field_schema_contract(selected_template)
+        assert output["_template_field_schema"]["quantity_fields"] == ["qty.regular_x"]
+        output_records = output["hakodate_ocr_evidence_records"]
+        output_by_cell = {record["engine_metadata"]["sheet_cell"]: record for record in output_records}
+        assert len(output_records) == len(output_by_cell) == 56
+        assert set(output_by_cell) == {target["sheet_cell"] for target in f.plan}
+        for target, expected in zip(f.plan, authored, strict=True):
+            assert output_by_cell[target["sheet_cell"]]["raw_text"] == expected
+            assert output_by_cell[target["sheet_cell"]]["normalized_value"] == expected
+        assert output["hakodate_canonical_pipeline"]["artifact_packet"] == payload["hakodate_canonical_pipeline"]["artifact_packet"]
+        assert database_snapshot() == before_output_read
+    finally:
+        f.master_json.write_bytes(original_json)
+    assert f.master_json.read_bytes() == original_json
     projected, error = workflow.build_sheet_from_selected_ocr(ORDER)
     assert error is None, (error, projected)
     assert projected["selected_ocr_result_id"] == evidence["id"]
