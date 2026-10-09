@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils import range_boundaries
 from PIL import Image, ImageDraw, ImageFont
 
-from src.services import config_service, hakodate_assignment_service, master_order_form_template_service
+from src.services import config_service, hakodate_assignment_service, master_order_form_template_service, workbook_pdf_renderer
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
     render_pdf_page_to_bgr,
@@ -2440,7 +2440,22 @@ def _row_intersection_correct_ys(
     rectified_fax: np.ndarray,
     corrected_xs: list[float],
     template_ys: list[int],
+    worksheet: Any,
 ) -> tuple[list[float] | None, dict[str, Any]]:
+    if worksheet is None:
+        raise ValueError("fax_row_worksheet_required")
+    row_edges = master_order_form_template_service.validated_template_row_edges(worksheet)
+    if len(template_ys) != len(row_edges) or len(corrected_xs) != worksheet.max_column + 1:
+        return None, {"used": False, "reason": "fax_row_canonical_axes_mismatch"}
+    if any(not np.isfinite(value) for value in [*template_ys, *corrected_xs]) or any(
+        right <= left for axis in (template_ys, corrected_xs) for left, right in zip(axis, axis[1:])
+    ):
+        return None, {"used": False, "reason": "fax_row_canonical_axes_mismatch"}
+    header_contract = workbook_pdf_renderer.worksheet_header_boundary_contract(
+        worksheet,
+        header_edge_rows=master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS,
+        body_start_row=STEP_REVIEW_BODY_START_ROW,
+    )
     if len(corrected_xs) < 2 or len(template_ys) < 2:
         return None, {"used": False, "reason": "insufficient_axes_for_row_intersection_match"}
     points, detection = _detect_table_intersections_for_row_axis(
@@ -2455,27 +2470,65 @@ def _row_intersection_correct_ys(
         corrected_xs=[float(value) for value in corrected_xs],
     )
     y_clusters = _filter_structural_y_clusters(voted_y_clusters)
-    # Menu cardinality is not the number of printed bands. In particular,
-    # split-month sheets retain blank days before or after the ordered meals.
-    body_starts = [
-        index for index, cluster in enumerate(y_clusters)
-        if index > 0
-        and 0 in cluster.get("column_votes", [])
-        and 3 in cluster.get("column_votes", [])
-        and 4 in cluster.get("column_votes", [])
-    ]
-    if not body_starts or body_starts[0] < STEP_REVIEW_HEADER_BANDS:
+    # Match printed header intersections before the generic body filter: a
+    # partial group-header ruling can have fewer votes than a body boundary.
+    physical_matches = []
+    for logical_index, boundary in enumerate(header_contract):
+        if not boundary["column_votes"]:
+            continue
+        candidates = [
+            index for index, cluster in enumerate(voted_y_clusters)
+            if all(
+                abs(float(cluster["value"]) - float(template_ys[logical_index]))
+                < abs(float(cluster["value"]) - float(other_y))
+                for other_index, other_y in enumerate(template_ys) if other_index != logical_index
+            )
+            and set(boundary["column_votes"]).issubset(cluster.get("column_votes", []))
+        ]
+        if len(candidates) != 1:
+            return None, {"used": False, "reason": "fax_body_header_boundary_unresolved",
+                          "header_boundary_contract": header_contract, "header_candidates": candidates, **detection}
+        physical_matches.append((logical_index, candidates[0]))
+    matched_indexes = [index for _, index in physical_matches]
+    if any(right <= left for left, right in zip(matched_indexes, matched_indexes[1:])):
         return None, {"used": False, "reason": "fax_body_header_boundary_unresolved", **detection}
-    body_start = body_starts[0]
-    selected = [*y_clusters[:STEP_REVIEW_HEADER_BANDS], *y_clusters[body_start:]]
-    corrected = [float(cluster["value"]) for cluster in selected]
+    body_cluster = voted_y_clusters[matched_indexes[-1]]
+    body_y = float(body_cluster["value"])
+    matched_clusters = [voted_y_clusters[index] for index in matched_indexes]
+    if any(float(cluster["value"]) < body_y and cluster not in matched_clusters for cluster in y_clusters):
+        return None, {"used": False, "reason": "fax_header_sequence_ambiguous", **detection}
+    observed_header = {logical: float(voted_y_clusters[index]["value"]) for logical, index in physical_matches}
+    logical_header = []
+    header_sources = []
+    for logical_index, boundary in enumerate(header_contract[:-1]):
+        if logical_index in observed_header:
+            value = observed_header[logical_index]
+            source = "observed_printed_header_intersections"
+        else:
+            before = max(index for index in observed_header if index < logical_index)
+            after = min(index for index in observed_header if index > logical_index)
+            ratio = (boundary["render_y"] - header_contract[before]["render_y"]) / (
+                header_contract[after]["render_y"] - header_contract[before]["render_y"]
+            )
+            value = observed_header[before] + ratio * (observed_header[after] - observed_header[before])
+            source = "canonical_relative_position_between_observed_header_boundaries"
+        logical_header.append(value)
+        header_sources.append({"worksheet_row": boundary["worksheet_row"], "y": value, "source": source})
+    # Preserve every observed body band, including blank days; never fit body
+    # cardinality to the menu count or synthesize missing body coordinates.
+    body_clusters = [body_cluster, *(cluster for cluster in y_clusters if float(cluster["value"]) > body_y)]
+    corrected = [*logical_header, *(float(cluster["value"]) for cluster in body_clusters)]
+    if any(right <= left for left, right in zip(corrected, corrected[1:])):
+        return None, {"used": False, "reason": "fax_header_sequence_ambiguous", **detection}
     structural_evidence = {
         "used": True,
         "reason": "observed_fax_boundaries_including_blank_bands",
-        "body_start_cluster_index": body_start,
+        "body_start_cluster_index": matched_indexes[-1],
+        "header_boundaries": header_sources,
+        "header_boundary_contract": header_contract,
         "detected_body_band_count": len(corrected) - STEP_REVIEW_HEADER_BANDS - 1,
         "body_day_boundary_indexes": [
-            index for index, cluster in enumerate(y_clusters[body_start:])
+            index for index, cluster in enumerate(body_clusters)
             if 0 in cluster.get("column_votes", [])
         ],
     }
@@ -3151,7 +3204,7 @@ def _align_axes(
     rectified_fax: np.ndarray,
     template_xs: list[int],
     template_ys: list[int],
-    worksheet: Any | None = None,
+    worksheet: Any,
     fax_template: dict[str, Any] | None = None,
     header_axis_override: dict[str, Any] | None = None,
     row_axis_override: dict[str, Any] | None = None,
@@ -3200,6 +3253,7 @@ def _align_axes(
         rectified_fax=rectified_fax,
         corrected_xs=[float(value) for value in matched_xs],
         template_ys=template_ys,
+        worksheet=worksheet,
     )
     if row_corrected_ys is None:
         raise ValueError(str(row_y_match.get("reason") or "fax_row_boundaries_unresolved"))

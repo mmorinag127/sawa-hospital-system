@@ -352,6 +352,39 @@ def worksheet_render_geometry(
     }
 
 
+def worksheet_header_boundary_contract(worksheet, *, header_edge_rows: tuple[int, ...], body_start_row: int) -> list[dict]:
+    geometry = worksheet_render_geometry(worksheet)
+    min_col, min_row, max_col, max_row = geometry["print_range"]
+    rows = (*header_edge_rows, body_start_row)
+    if min_col != 1 or max_col != worksheet.max_column or not min_row <= rows[0] < rows[-1] <= max_row:
+        raise ValueError("worksheet_header_print_range_invalid")
+    xs, ys = geometry["x_positions"], geometry["y_positions"]
+    segments = _collect_border_segments(
+        worksheet, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row,
+        x_positions=xs, y_positions=ys,
+    )
+    boundaries = []
+    for row in rows:
+        y = ys[row]
+        horizontal = [(start, end) for (axis, position, start, end) in segments if axis == "h" and position == y]
+        supports = [
+            col - 1 for col, x in xs.items()
+            if any(start <= x <= end for start, end in horizontal)
+            and any(axis == "v" and position == x and start <= y <= end
+                    for axis, position, start, end in segments)
+        ]
+        if horizontal and len(supports) < 2:
+            raise ValueError("worksheet_header_intersections_unresolved")
+        boundaries.append({
+            "worksheet_row": row, "render_y": y,
+            "horizontal_segments": [list(segment) for segment in horizontal],
+            "column_votes": supports,
+        })
+    if not boundaries[0]["column_votes"] or not boundaries[-1]["column_votes"]:
+        raise ValueError("worksheet_header_outer_boundaries_missing")
+    return boundaries
+
+
 def render_worksheet_to_image(
     worksheet,
     *,
