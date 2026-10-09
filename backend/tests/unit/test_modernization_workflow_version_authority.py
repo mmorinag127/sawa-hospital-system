@@ -25,11 +25,15 @@ from test_modernization_workflow_surface_parity import database_snapshot, surfac
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.menu import MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
 from src.models.order import Order, OrderLine
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.models.order_output_artifact import OrderOutputBundle
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import canonical_facility_lineage as lineage
 from src.services import config_service
+from src.services import facility_template_version_service
+from src.services import order_output_artifact_service as artifacts
 from src.services import order_workflow_v2_service as workflow
 
 
@@ -412,9 +416,19 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
     master = json.loads(fixture.master_path.read_bytes())
     master["facilities"][0].update(deepcopy(fixture.authored))
     fixture.master_path.write_text(json.dumps(master, ensure_ascii=False), encoding="utf-8")
+    with unchanged_read(fixture), fixture.session_scope() as session:
+        assert config_service.get_facility_config("F")["fax_template"] == fixture.authored["fax_template"]
+        selected, selection_error = facility_template_version_service.resolve_single_active_template_version(
+            session, "F", effective_date="2026-03-01",
+        )
+        assert selection_error is None
+        assert selected.id == fixture.projection_id
+        assert selected.source == lineage.SOURCE
+        assert selected.template_id == fixture.authored["fax_template"]["template_id"]
     result, error = workflow.confirm_context(
         order_id=fixture.order_id, facility_id="F", week_start="2026-03-01", week_end="2026-03-07",
         template_id="COMPONENT-UNDECLARED-TEMPLATE",
+        expected_revision=revision(fixture),
     )
     assert result is None and error == "template_version_mismatch"
     with unchanged_read(fixture):
@@ -430,6 +444,7 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
     result, error = workflow.confirm_context(
         order_id=fixture.order_id, facility_id="F", week_start="2026-03-01", week_end="2026-03-07",
         template_id=fixture.authored["fax_template"]["template_id"],
+        expected_revision=revision(fixture),
     )
     assert error is None
     assert (result["state"], result["template_version_id"]) == ("context_confirmed", fixture.projection_id)
@@ -439,3 +454,113 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
             state = session.get(OrderWorkflowState, fixture.order_id)
             assert state.template_version_id == session.get(Order, fixture.order_id).template_version_id == fixture.projection_id
             assert state.secondary_actions_json["workflow_v2"]["template_version_id"] == fixture.projection_id
+
+
+@pytest.mark.parametrize("duplicate", ["missing", "blank", "matching"])
+def test_optional_confirmed_duplicate_preserves_public_reads_and_quantities(confirmed_receipt, duplicate):
+    fixture, _candidate = confirmed_receipt
+    saved = fixture.saved()
+    with fixture.session_scope() as session:
+        state = session.get(OrderWorkflowState, fixture.order_id)
+        snapshot_id = state.confirmed_snapshot_id
+        assert snapshot_id
+        snapshot = session.get(OrderConfirmedSnapshot, snapshot_id)
+        assert artifacts.confirmed_snapshot_artifact_payloads(
+            session, snapshot, expected_order_id=fixture.order_id,
+        ) is not None
+
+        def set_duplicate(meta):
+            if duplicate == "missing":
+                meta.pop("confirmed_snapshot_id", None)
+            else:
+                meta["confirmed_snapshot_id"] = " \t " if duplicate == "blank" else snapshot_id
+        write_meta(session, fixture, set_duplicate)
+    assert_valid_reads(fixture, saved, "confirmed")
+    with unchanged_read(fixture), fixture.session_scope() as session:
+        assert session.get(OrderWorkflowState, fixture.order_id).confirmed_snapshot_id == snapshot_id
+        lines = session.execute(select(OrderLine).where(
+            OrderLine.order_id == fixture.order_id,
+        ).order_by(OrderLine.menu_name)).scalars().all()
+        assert [(line.menu_name, line.quantity_original, line.quantity_corrected, line.confirmed_snapshot_id)
+                for line in lines] == [
+            ("選択献立0", 7, None, snapshot_id), ("選択献立3", 0, None, snapshot_id),
+        ]
+
+
+@pytest.mark.parametrize("fault,reason", [
+    ("duplicate-other", "confirmed_snapshot_lineage_mismatch"),
+    ("snapshot-digest", "confirmed_snapshot_lineage_mismatch"),
+    ("artifact-missing", "confirmed_snapshot_lineage_mismatch"),
+    ("artifact-tampered", "confirmed_snapshot_lineage_mismatch"),
+])
+def test_direct_confirmed_db_corruption_remains_blocked_without_read_writes(confirmed_receipt, fault, reason):
+    """Deliberate DB corruption, not a normal operator save or provider result."""
+    fixture, _candidate = confirmed_receipt
+    saved = fixture.saved()
+    pristine = database_snapshot()
+    with fixture.session_scope() as session:
+        state = session.get(OrderWorkflowState, fixture.order_id)
+        snapshot = session.get(OrderConfirmedSnapshot, state.confirmed_snapshot_id)
+        output_id = snapshot.output_bundle_id
+        assert artifacts.confirmed_snapshot_artifact_payloads(
+            session, snapshot, expected_order_id=fixture.order_id,
+        ) is not None
+        if fault == "duplicate-other":
+            write_meta(session, fixture, lambda meta: meta.update(confirmed_snapshot_id="COMPONENT-FOREIGN-SNAPSHOT"))
+        elif fault == "snapshot-digest":
+            snapshot.snapshot_digest = "0" * 64
+        elif fault == "artifact-tampered":
+            artifact = session.get(OrderOutputBundle, output_id)
+            payload = deepcopy(artifact.payload_json)
+            payload["status"] = "COMPONENT-TAMPERED"
+            artifact.payload_json = payload
+            assert artifacts.payload_digest(payload) != artifact.payload_digest
+    if fault == "artifact-missing":
+        # Deliberately break the FK-backed receipt in this disposable SQLite DB.
+        # Restore enforcement before any production reader runs.
+        with fixture.engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
+            try:
+                assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 0
+                deleted = connection.execute(OrderOutputBundle.__table__.delete().where(
+                    OrderOutputBundle.id == output_id,
+                ))
+                assert deleted.rowcount == 1
+                connection.commit()
+            finally:
+                connection.rollback()
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+                connection.commit()
+    assert database_snapshot() != pristine
+    with unchanged_read(fixture):
+        current, error = workflow.get_workflow_readonly(fixture.order_id)
+        assert error is None
+        assert current["state"] == reason
+        assert current["blockers"] == [reason]
+        results, error = workflow.list_ocr_results(fixture.order_id)
+        assert error is None
+        assert results["workflow_state"] == reason
+        assert results["blockers"] == [reason]
+        inspection, error = workflow.get_inspection(fixture.order_id)
+        assert error is None
+        assert inspection["workflow"]["state"] == reason
+        assert inspection["workflow"]["blockers"] == [reason]
+        assert inspection["saved_sheet"]["sheet"] == saved
+        draft, error = workflow.get_saved_sheet(fixture.order_id)
+        assert error is None and draft["sheet"] == saved
+        assert_saved(fixture, saved)
+        with fixture.session_scope() as session:
+            snapshot = session.get(OrderConfirmedSnapshot, session.get(
+                OrderWorkflowState, fixture.order_id,
+            ).confirmed_snapshot_id)
+            packet = artifacts.confirmed_snapshot_artifact_payloads(
+                session, snapshot, expected_order_id=fixture.order_id,
+            )
+            assert (packet is not None) == (fault == "duplicate-other")
+            lines = session.execute(select(OrderLine).where(
+                OrderLine.order_id == fixture.order_id,
+            ).order_by(OrderLine.menu_name)).scalars().all()
+            assert [(line.menu_name, line.quantity_original, line.quantity_corrected)
+                    for line in lines] == [("選択献立0", 7, None), ("選択献立3", 0, None)]
