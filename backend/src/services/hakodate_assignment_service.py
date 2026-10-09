@@ -362,10 +362,10 @@ def _cell_bbox(
     ]
 
 
-def _worksheet_row_to_structure_grid_index(worksheet_row: int) -> int | None:
+def _worksheet_row_to_structure_grid_index(worksheet_row: int, *, body_end_row: int = _STRUCTURE_BODY_END_ROW) -> int | None:
     if worksheet_row in (7, 8):
         return worksheet_row - 7
-    if _STRUCTURE_BODY_START_ROW <= worksheet_row <= _STRUCTURE_BODY_END_ROW:
+    if _STRUCTURE_BODY_START_ROW <= worksheet_row <= body_end_row:
         return 2 + (worksheet_row - _STRUCTURE_BODY_START_ROW)
     return None
 
@@ -398,6 +398,7 @@ def _merged_or_single_cell_bbox(
     row_edges: list[float],
     column_edges: list[float],
     merged_cells: dict[tuple[int, int], dict[str, Any]],
+    body_end_row: int = _STRUCTURE_BODY_END_ROW,
 ) -> tuple[list[float], dict[str, Any] | None]:
     merged = merged_cells.get((worksheet_row, worksheet_col))
     if not merged:
@@ -407,8 +408,8 @@ def _merged_or_single_cell_bbox(
             row_edges=row_edges,
             column_edges=column_edges,
         ), None
-    start_row_index = _worksheet_row_to_structure_grid_index(int(merged["min_row"]))
-    end_row_index = _worksheet_row_to_structure_grid_index(int(merged["max_row"]))
+    start_row_index = _worksheet_row_to_structure_grid_index(int(merged["min_row"]), body_end_row=body_end_row)
+    end_row_index = _worksheet_row_to_structure_grid_index(int(merged["max_row"]), body_end_row=body_end_row)
     if start_row_index is None or end_row_index is None:
         return _cell_bbox(
             row_index=row_index,
@@ -448,11 +449,12 @@ def _worksheet_merge_regions_for_grid(
     quantity_columns: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     quantity_columns = set(quantity_columns or set())
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     regions: list[dict[str, Any]] = []
     for merged_range in worksheet.merged_cells.ranges:
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-        start_row_index = _worksheet_row_to_structure_grid_index(int(min_row))
-        end_row_index = _worksheet_row_to_structure_grid_index(int(max_row))
+        start_row_index = _worksheet_row_to_structure_grid_index(int(min_row), body_end_row=body_end_row)
+        end_row_index = _worksheet_row_to_structure_grid_index(int(max_row), body_end_row=body_end_row)
         if start_row_index is None or end_row_index is None:
             continue
         start_col_index = max(0, int(min_col) - 1)
@@ -1403,6 +1405,7 @@ def _column_slots_from_worksheet(
     merged_values = _merged_value_map(worksheet)
     canonical_slots = _canonical_column_slots_from_template(template, col_count=col_count)
     canonical_specs = _canonical_slot_specs_from_template(template)
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     slots: list[dict[str, Any]] = []
     for raw_col_index in range(col_count):
         worksheet_col = raw_col_index + 1
@@ -1413,7 +1416,7 @@ def _column_slots_from_worksheet(
             for row in _STRUCTURE_HEADER_ROWS
         ]
         body_samples: list[str] = []
-        for row in range(_STRUCTURE_BODY_START_ROW, _STRUCTURE_BODY_END_ROW + 1):
+        for row in range(_STRUCTURE_BODY_START_ROW, body_end_row + 1):
             text = _normalize_slot_text(worksheet.cell(row=row, column=worksheet_col).value)
             if text:
                 body_samples.append(text)
@@ -1477,12 +1480,13 @@ def _column_slots_from_worksheet(
 
 
 def _workbook_physical_row_map(worksheet: Any, *, row_count: int, header_rows: int = 2) -> dict[int, dict[str, Any]]:
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
+    if row_count != header_rows + body_end_row - _STRUCTURE_BODY_START_ROW + 1:
+        raise ValueError("structure_body_row_count_changed")
     rows: dict[int, dict[str, Any]] = {}
     last_date = ""
     for row_index in range(header_rows, row_count):
         worksheet_row = _STRUCTURE_BODY_START_ROW + (row_index - header_rows)
-        if worksheet_row > _STRUCTURE_BODY_END_ROW:
-            break
         date_text = _normalize_slot_text(worksheet.cell(row=worksheet_row, column=1).value)
         if date_text and not _is_weekday_only(date_text):
             last_date = date_text
@@ -1613,6 +1617,7 @@ def _structure_grid_for_facility_template(
 
 
 def _structure_grid_from_rendered_worksheet(worksheet: Any, *, dpi: int) -> dict[str, Any]:
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     min_col, min_row, max_col, max_row = workbook_pdf_renderer._sheet_print_range(worksheet)  # noqa: SLF001
     margin_px = workbook_pdf_renderer._DEFAULT_MARGIN_PX  # noqa: SLF001
     default_row_height = worksheet.sheet_format.defaultRowHeight
@@ -1640,14 +1645,14 @@ def _structure_grid_from_rendered_worksheet(worksheet: Any, *, dpi: int) -> dict
 
     table_cols = list(range(1, max_col + 1))
     header_rows = [7, 8]
-    body_rows = list(range(_STRUCTURE_BODY_START_ROW, _STRUCTURE_BODY_END_ROW + 1))
+    body_rows = list(range(_STRUCTURE_BODY_START_ROW, body_end_row + 1))
     grid_rows = header_rows + body_rows
     x_edges_px = [x_positions[col] for col in table_cols if col in x_positions]
     if max_col + 1 in x_positions:
         x_edges_px.append(x_positions[max_col + 1])
     y_edges_px = [y_positions[row] for row in grid_rows if row in y_positions]
-    if _STRUCTURE_BODY_END_ROW + 1 in y_positions:
-        y_edges_px.append(y_positions[_STRUCTURE_BODY_END_ROW + 1])
+    if body_end_row + 1 in y_positions:
+        y_edges_px.append(y_positions[body_end_row + 1])
     if len(x_edges_px) < 2 or len(y_edges_px) < 2:
         raise ValueError("structure_grid_not_found")
     column_edges = [float(x) / float(image_width) for x in x_edges_px]
@@ -2173,6 +2178,7 @@ def build_structure_slot_assignment_from_pdf(
         col_count=len(structure_columns) - 1,
         template=template,
     )
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     physical_row_map = _workbook_physical_row_map(worksheet, row_count=len(structure_rows) - 1)
     merged_cells = _worksheet_merged_cell_map(worksheet)
     quantity_columns = _worksheet_quantity_column_indexes(worksheet)
@@ -2234,6 +2240,7 @@ def build_structure_slot_assignment_from_pdf(
                 row_edges=structure_rows,
                 column_edges=structure_columns,
                 merged_cells=merged_cells,
+                body_end_row=body_end_row,
             )
             fax_cell_box, _actual_merged_cell = _merged_or_single_cell_bbox(
                 row_index=row_index,
@@ -2243,6 +2250,7 @@ def build_structure_slot_assignment_from_pdf(
                 row_edges=actual_rows,
                 column_edges=actual_columns,
                 merged_cells=merged_cells,
+                body_end_row=body_end_row,
             )
             fax_cell_center = [
                 (fax_cell_box[0] + fax_cell_box[2]) / 2.0,

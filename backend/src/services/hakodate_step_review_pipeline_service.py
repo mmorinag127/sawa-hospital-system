@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils import range_boundaries
 from PIL import Image, ImageDraw, ImageFont
 
-from src.services import config_service, hakodate_assignment_service
+from src.services import config_service, hakodate_assignment_service, master_order_form_template_service
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
     render_pdf_page_to_bgr,
@@ -2536,23 +2536,24 @@ def _single_cell_bbox(
     ]
 
 
-def _step_review_worksheet_row_to_grid_index(worksheet_row: int) -> int | None:
+def _step_review_worksheet_row_to_grid_index(worksheet_row: int, *, body_end_row: int = STEP_REVIEW_BODY_END_ROW) -> int | None:
     if 7 <= worksheet_row <= 8:
         return 0
     if 9 <= worksheet_row <= 10:
         return 1
-    if STEP_REVIEW_BODY_START_ROW <= worksheet_row <= STEP_REVIEW_BODY_END_ROW:
+    if STEP_REVIEW_BODY_START_ROW <= worksheet_row <= body_end_row:
         return STEP_REVIEW_HEADER_BANDS + (worksheet_row - STEP_REVIEW_BODY_START_ROW)
     return None
 
 
 def _step_review_physical_row_map(worksheet: Any, *, row_count: int) -> dict[int, dict[str, Any]]:
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
+    if row_count != STEP_REVIEW_HEADER_BANDS + body_end_row - STEP_REVIEW_BODY_START_ROW + 1:
+        raise ValueError("fax_physical_row_count_changed")
     rows: dict[int, dict[str, Any]] = {}
     last_date = ""
     for row_index in range(STEP_REVIEW_HEADER_BANDS, row_count):
         worksheet_row = STEP_REVIEW_BODY_START_ROW + (row_index - STEP_REVIEW_HEADER_BANDS)
-        if worksheet_row > STEP_REVIEW_BODY_END_ROW:
-            break
         date_text = hakodate_assignment_service._normalize_slot_text(worksheet.cell(row=worksheet_row, column=1).value)  # noqa: SLF001
         if date_text and not hakodate_assignment_service._is_weekday_only(date_text):  # noqa: SLF001
             last_date = date_text
@@ -2632,6 +2633,7 @@ def _step_review_merged_or_single_cell_bbox(
     column_edges: list[float],
     merged_cells: dict[tuple[int, int], dict[str, Any]],
     worksheet_grid_rows: dict[int, int] | None = None,
+    body_end_row: int = STEP_REVIEW_BODY_END_ROW,
 ) -> tuple[list[float], dict[str, Any] | None]:
     merged = merged_cells.get((worksheet_row, worksheet_col))
     if not merged:
@@ -2645,8 +2647,8 @@ def _step_review_merged_or_single_cell_bbox(
         start_row_index = worksheet_grid_rows.get(int(merged["min_row"]))
         end_row_index = worksheet_grid_rows.get(int(merged["max_row"]))
     else:
-        start_row_index = _step_review_worksheet_row_to_grid_index(int(merged["min_row"]))
-        end_row_index = _step_review_worksheet_row_to_grid_index(int(merged["max_row"]))
+        start_row_index = _step_review_worksheet_row_to_grid_index(int(merged["min_row"]), body_end_row=body_end_row)
+        end_row_index = _step_review_worksheet_row_to_grid_index(int(merged["max_row"]), body_end_row=body_end_row)
     if start_row_index is None or end_row_index is None:
         raise ValueError("fax_merged_cell_row_mapping_unresolved")
     start_col_index = max(0, int(merged["min_col"]) - 1)
@@ -2676,11 +2678,12 @@ def _step_review_merge_regions_for_grid(
     quantity_columns: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     quantity_columns = set(quantity_columns or set())
+    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     regions: list[dict[str, Any]] = []
     for merged_range in worksheet.merged_cells.ranges:
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-        start_row_index = _step_review_worksheet_row_to_grid_index(int(min_row))
-        end_row_index = _step_review_worksheet_row_to_grid_index(int(max_row))
+        start_row_index = _step_review_worksheet_row_to_grid_index(int(min_row), body_end_row=body_end_row)
+        end_row_index = _step_review_worksheet_row_to_grid_index(int(max_row), body_end_row=body_end_row)
         if start_row_index is None or end_row_index is None:
             continue
         start_col_index = max(0, int(min_col) - 1)
@@ -3411,7 +3414,8 @@ def canonical_logical_target_plan(*, worksheet: Any, fax_template: dict, draft_s
     menu_col = _menu_column_from_slots(slots, worksheet)
     by_col = {slot["worksheet_col_index"]: slot for slot in slots}
     fields, rows = draft_sheet.get("fields"), draft_sheet.get("rows")
-    if not isinstance(fields, list) or not isinstance(rows, list) or not rows or len(rows) > master.BODY_END_ROW - master.BODY_START_ROW + 1:
+    physical_plan = master.validated_body_row_plan(worksheet)
+    if not isinstance(fields, list) or not isinstance(rows, list) or not rows or len(rows) != len(physical_plan):
         raise ValueError("hakodate_draft_sheet_row_map_unresolved")
     roles = {}
     for role, names in (("date", {"date", "date_mmdd"}), ("daypart", {"daypart"}), ("menu", {"menu", "menu_name"})):
@@ -3426,6 +3430,11 @@ def canonical_logical_target_plan(*, worksheet: Any, fax_template: dict, draft_s
             raise ValueError("hakodate_physical_row_unresolved")
         worksheet_row = master.BODY_START_ROW + offset
         if hakodate_assignment_service._normalize_menu_key(worksheet.cell(worksheet_row, menu_col).value) != hakodate_assignment_service._normalize_menu_key(row[roles["menu"]]):
+            raise ValueError("hakodate_physical_row_changed")
+        physical = physical_plan[offset]
+        draft_date = master._parse_menu_date(row[roles["date"]])
+        if (draft_date is None or draft_date.isoformat() != physical["date"]
+                or str(row[roles["daypart"]] or "").strip() != physical["daypart"]):
             raise ValueError("hakodate_physical_row_changed")
         for worksheet_col in range(menu_col + 1, worksheet.max_column + 1):
             slot = by_col.get(worksheet_col)

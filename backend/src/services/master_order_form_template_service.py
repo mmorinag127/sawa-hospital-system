@@ -14,6 +14,7 @@ from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.units import pixels_to_EMU
+from openpyxl.worksheet.print_settings import PrintArea
 from openpyxl.worksheet.worksheet import Worksheet
 
 from src.services import config_service, menu_service, sheet_week_service
@@ -132,10 +133,10 @@ def _generated_columns(columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _unmerge_generated_area(ws: Worksheet, end_col: int) -> None:
+def _unmerge_generated_area(ws: Worksheet, end_col: int, body_end_row: int = BODY_END_ROW) -> None:
     for merged_range in list(ws.merged_cells.ranges):
         min_col, min_row, max_col, max_row = merged_range.bounds
-        if max_row < HEADER_TOP_ROW or min_row > BODY_END_ROW:
+        if max_row < HEADER_TOP_ROW or min_row > body_end_row:
             continue
         if max_col < GENERATED_START_COL or min_col > end_col:
             continue
@@ -177,8 +178,8 @@ def _normalize_static_right_merges(ws: Worksheet, end_col: int) -> None:
                 break
 
 
-def _clear_generated_area(ws: Worksheet, end_col: int) -> None:
-    for row in range(HEADER_TOP_ROW, BODY_END_ROW + 1):
+def _clear_generated_area(ws: Worksheet, end_col: int, body_end_row: int = BODY_END_ROW) -> None:
+    for row in range(HEADER_TOP_ROW, body_end_row + 1):
         for col in range(GENERATED_START_COL, end_col + 1):
             cell = ws.cell(row, col)
             if isinstance(cell, MergedCell):
@@ -322,10 +323,10 @@ def _write_header(ws: Worksheet, generated_columns: list[dict[str, Any]], end_co
         _set_border(ws.cell(row, end_col), right=thick)
 
 
-def _write_body_grid(ws: Worksheet, end_col: int) -> None:
+def _write_body_grid(ws: Worksheet, end_col: int, body_end_row: int = BODY_END_ROW) -> None:
     thick = _style_side("thick")
     thin = _style_side("thin")
-    for row in range(BODY_START_ROW, BODY_END_ROW + 1):
+    for row in range(BODY_START_ROW, body_end_row + 1):
         row_top = _copy_side(ws.cell(row, 4).border.top)
         row_bottom = _copy_side(ws.cell(row, 4).border.bottom)
         for col in range(GENERATED_START_COL, end_col + 1):
@@ -334,7 +335,7 @@ def _write_body_grid(ws: Worksheet, end_col: int) -> None:
         _set_border(ws.cell(row, GENERATED_START_COL), left=thick)
         _set_border(ws.cell(row, end_col), right=thick)
     for col in range(GENERATED_START_COL, end_col + 1):
-        _set_border(ws.cell(BODY_END_ROW, col), bottom=thick)
+        _set_border(ws.cell(body_end_row, col), bottom=thick)
 
 
 def _week_sheet_name_from_week_value(week_value: object | None) -> str | None:
@@ -433,6 +434,7 @@ def _apply_configured_body_merges(
     facility_config: dict[str, Any],
     generated_columns: list[dict[str, Any]],
     end_col: int,
+    body_spans: list[tuple[int, int, str]] | None = None,
 ) -> list[dict[str, Any]]:
     selected_columns = _configured_body_merge_columns(
         facility_config=facility_config,
@@ -442,7 +444,7 @@ def _apply_configured_body_merges(
         return []
 
     applied: list[dict[str, Any]] = []
-    spans = _standard_daypart_body_spans()
+    spans = _standard_daypart_body_spans() if body_spans is None else body_spans
     for target_col, column, mode in selected_columns:
         if target_col < GENERATED_START_COL or target_col > end_col:
             raise FacilityTemplateBuildError("facility_template_body_merge_target_out_of_range")
@@ -740,7 +742,7 @@ def build_facility_template_diagnostics(
     ]
     facility_payload = _worksheet_digest_payload(
         worksheet,
-        max_row=PRINT_END_ROW,
+        max_row=next(row[1] for row in schema_rows if row[0] == "print_end_row"),
         max_col=end_col,
     )
     canonical_payload = {
@@ -778,20 +780,20 @@ def _parse_menu_date(value: object) -> date | None:
 def _normalize_week_menu_entries(*, entries: Any, week_value: object) -> list[dict[str, Any]]:
     month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_value)
     if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
-        return []
+        raise FacilityTemplateBuildError("week_menu_week_invalid")
     if not isinstance(entries, list):
-        return []
+        raise FacilityTemplateBuildError("week_menu_entries_invalid")
     normalized: list[dict[str, Any]] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            continue
+            raise FacilityTemplateBuildError("week_menu_entry_invalid")
         menu_date = _parse_menu_date(entry.get("menu_date"))
         daypart = str(entry.get("daypart") or "").strip()
         menu_name = str(entry.get("name") or "").strip()
         if "diet_variants" in entry and not menu_name:
             raise ValueError("physical_menu_common_name_unresolved")
         if not isinstance(menu_date, date) or not daypart or not menu_name:
-            continue
+            raise FacilityTemplateBuildError("week_menu_entry_identity_unresolved")
         if not (start_date <= menu_date <= end_date):
             continue
         normalized.append(
@@ -842,104 +844,110 @@ def _write_cell_if_writable(ws: Worksheet, *, row: int, column: int, value: obje
     cell.value = value
 
 
-def _week_menu_overflow_entry_payload(entry: dict[str, Any]) -> dict[str, str]:
-    menu_date = entry.get("_menu_date_obj")
-    return {
-        "date": menu_date.isoformat() if isinstance(menu_date, date) else "",
-        "daypart": str(entry.get("daypart") or "").strip(),
-        "category": str(entry.get("category") or "").strip(),
-        "name": str(entry.get("name") or "").strip(),
-    }
-
-
-def _week_menu_daypart_key(daypart: object) -> str:
-    text = str(daypart or "").strip()
-    if text.startswith("朝"):
-        return "朝"
-    if text.startswith("昼"):
-        return "昼"
-    if text.startswith("夕"):
-        return "夕"
-    return text
-
-
-def _week_menu_daypart_capacity(daypart: object) -> int | None:
-    key = _week_menu_daypart_key(daypart)
-    if key == "朝":
-        return 2
-    if key in {"昼", "夕"}:
-        return 3
-    return None
-
-
 def _split_week_menu_identity_entries(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]], int]:
-    valid_entries = [entry for entry in entries if isinstance(entry.get("_menu_date_obj"), date)]
-    body_capacity = BODY_END_ROW - BODY_START_ROW + 1
-    if len(valid_entries) <= body_capacity:
-        return valid_entries, [], len(valid_entries)
+    for entry in entries:
+        if not isinstance(entry.get("_menu_date_obj"), date):
+            raise FacilityTemplateBuildError("week_menu_entry_identity_unresolved")
+    return list(entries), [], len(entries)
 
-    physical_entries: list[dict[str, Any]] = []
-    overflow_entries: list[dict[str, str]] = []
-    counts_by_daypart: dict[tuple[date, str], int] = {}
-    for entry in valid_entries:
-        menu_date = entry["_menu_date_obj"]
-        daypart_key = _week_menu_daypart_key(entry.get("daypart"))
-        capacity = _week_menu_daypart_capacity(entry.get("daypart"))
-        if capacity is None:
-            physical_entries.append(entry)
+
+def _resize_week_body(ws: Worksheet, body_end_row: int) -> None:
+    """Resize only the generated copy; openpyxl does not shift merges/dimensions."""
+    delta = body_end_row - BODY_END_ROW
+    footer_merges = []
+    for region in list(ws.merged_cells.ranges):
+        if region.max_row < BODY_START_ROW:
             continue
-        counter_key = (menu_date, daypart_key)
-        counts_by_daypart[counter_key] = counts_by_daypart.get(counter_key, 0) + 1
-        if counts_by_daypart[counter_key] > capacity:
-            overflow_entries.append(_week_menu_overflow_entry_payload(entry))
-            continue
-        physical_entries.append(entry)
+        if region.min_row < BODY_START_ROW or region.min_row <= BODY_END_ROW < region.max_row:
+            raise FacilityTemplateBuildError("week_menu_body_merge_boundary_invalid")
+        if region.min_row > BODY_END_ROW:
+            footer_merges.append(region.bounds)
+        ws.unmerge_cells(str(region))
+    body_styles = [copy(ws.cell(BODY_START_ROW, col)._style) for col in range(1, ws.max_column + 1)]
+    body_dimension = copy(ws.row_dimensions[BODY_START_ROW])
+    footer_dimensions = {
+        row: copy(dimension) for row, dimension in ws.row_dimensions.items() if row > BODY_END_ROW
+    }
+    if delta > 0:
+        ws.insert_rows(BODY_END_ROW + 1, delta)
+    elif delta < 0:
+        ws.delete_rows(body_end_row + 1, -delta)
+    for row in list(ws.row_dimensions):
+        if row >= BODY_START_ROW:
+            del ws.row_dimensions[row]
+    for row in range(BODY_START_ROW, body_end_row + 1):
+        dimension = copy(body_dimension)
+        dimension.index = row
+        ws.row_dimensions[row] = dimension
+        for col, style in enumerate(body_styles, 1):
+            cell = ws.cell(row, col)
+            cell._style = copy(style)
+            cell.value = None
+            cell.border = Border(left=_style_side(), right=_style_side(), top=_style_side(), bottom=_style_side())
+        _set_border(ws.cell(row, 1), left=_style_side("thick"))
+    for col in range(1, ws.max_column + 1):
+        _set_border(ws.cell(BODY_START_ROW, col), top=_style_side("thick"))
+    for row, dimension in footer_dimensions.items():
+        dimension.index = row + delta
+        ws.row_dimensions[row + delta] = dimension
+    for min_col, min_row, max_col, max_row in footer_merges:
+        ws.merge_cells(start_row=min_row + delta, start_column=min_col, end_row=max_row + delta, end_column=max_col)
 
-    if len(physical_entries) > body_capacity:
-        overflow_entries.extend(
-            _week_menu_overflow_entry_payload(entry)
-            for entry in physical_entries[body_capacity:]
-        )
-        physical_entries = physical_entries[:body_capacity]
 
-    return physical_entries, overflow_entries, len(valid_entries)
+def _week_body_spans(entries: list[dict[str, Any]], *, by_daypart: bool) -> list[tuple[int, int, Any]]:
+    spans: list[tuple[int, int, Any]] = []
+    for offset, entry in enumerate(entries):
+        key = (entry["_menu_date_obj"], str(entry["daypart"]).strip()) if by_daypart else entry["_menu_date_obj"]
+        row = BODY_START_ROW + offset
+        if spans and spans[-1][2] == key:
+            start, _end, _key = spans[-1]
+            spans[-1] = (start, row, key)
+        else:
+            spans.append((row, row, key))
+    return spans
 
 
 def _write_week_menu_identity(ws: Worksheet, entries: list[dict[str, Any]]) -> dict[str, Any]:
-    _clear_body_identity_values(ws)
     physical_entries, overflow_entries, source_rows = _split_week_menu_identity_entries(entries)
-    row_idx = BODY_START_ROW
-    current_date: date | None = None
-    date_start_row = BODY_START_ROW
-    current_daypart = ""
-    written = 0
-    for entry in physical_entries:
-        menu_date = entry.get("_menu_date_obj")
-        if not isinstance(menu_date, date):
-            continue
-        daypart = str(entry.get("daypart") or "").strip()
-        category = str(entry.get("category") or "").strip()
-        name = str(entry.get("name") or "").strip()
-        if current_date != menu_date:
-            if current_date is not None and row_idx - 1 > date_start_row:
-                _write_cell_if_writable(ws, row=row_idx - 1, column=1, value=_weekday_label(current_date))
-            current_date = menu_date
-            date_start_row = row_idx
-            current_daypart = ""
-            _write_cell_if_writable(ws, row=row_idx, column=1, value=menu_date)
-        _write_cell_if_writable(ws, row=row_idx, column=2, value=daypart if current_daypart != daypart else None)
-        _write_cell_if_writable(ws, row=row_idx, column=3, value=category)
-        _write_cell_if_writable(ws, row=row_idx, column=4, value=name)
-        current_daypart = daypart
-        row_idx += 1
-        written += 1
-    if current_date is not None and row_idx - 1 > date_start_row:
-        _write_cell_if_writable(ws, row=row_idx - 1, column=1, value=_weekday_label(current_date))
+    if not physical_entries:
+        raise FacilityTemplateBuildError("week_menu_body_entries_missing")
+    body_end_row = BODY_START_ROW + len(physical_entries) - 1
+    _resize_week_body(ws, body_end_row)
+    day_spans = _week_body_spans(physical_entries, by_daypart=False)
+    meal_spans = _week_body_spans(physical_entries, by_daypart=True)
+    for start, end, menu_date in day_spans:
+        if start == end:
+            ws.cell(start, 1).value = f"{menu_date.isoformat()} ({_weekday_label(menu_date)})"
+        else:
+            ws.merge_cells(start_row=start, start_column=1, end_row=end - 1, end_column=1)
+            ws.cell(start, 1).value = menu_date
+            ws.cell(end, 1).value = _weekday_label(menu_date)
+    for start, end, (_menu_date, daypart) in meal_spans:
+        ws.merge_cells(start_row=start, start_column=2, end_row=end, end_column=2)
+        ws.cell(start, 2).value = daypart
+    row_plan = []
+    for offset, entry in enumerate(physical_entries):
+        row = BODY_START_ROW + offset
+        ws.cell(row, 3).value = str(entry.get("category") or "").strip()
+        ws.cell(row, 4).value = str(entry["name"]).strip()
+        row_plan.append({
+            "worksheet_row": row,
+            "source_index": entry["_source_index"],
+            "date": entry["_menu_date_obj"].isoformat(),
+            "daypart": str(entry["daypart"]).strip(),
+            "category": str(entry.get("category") or "").strip(),
+            "name": str(entry["name"]).strip(),
+        })
+    for col in range(1, 5):
+        _set_border(ws.cell(body_end_row, col), bottom=_style_side("thick"))
     return {
-        "written_rows": written,
+        "written_rows": len(physical_entries),
         "source_rows": source_rows,
         "overflow_rows": len(overflow_entries),
         "overflow_entries": overflow_entries,
+        "body_end_row": body_end_row,
+        "body_spans": [(start, end, key[1]) for start, end, key in meal_spans],
+        "physical_row_plan": row_plan,
     }
 
 
@@ -954,15 +962,127 @@ def _apply_week_menu_identity(
         return {"written_rows": 0, "source_rows": 0, "overflow_rows": 0, "overflow_entries": []}
     facility_id = str(facility_config.get("facility_id") or facility_config.get("id") or "").strip()
     if not facility_id:
-        return {"written_rows": 0, "source_rows": 0, "overflow_rows": 0, "overflow_entries": []}
+        raise FacilityTemplateBuildError("week_menu_facility_missing")
     entries = (
         _normalize_week_menu_entries(entries=week_menu_entries, week_value=week_value)
         if week_menu_entries is not None
         else _collect_week_menu_entries(facility_id=facility_id, week_value=week_value)
     )
     if not entries:
-        return {"written_rows": 0, "source_rows": 0, "overflow_rows": 0, "overflow_entries": []}
+        raise FacilityTemplateBuildError("week_menu_entries_missing")
     return _write_week_menu_identity(ws, entries)
+
+
+def validated_body_row_plan(ws: Worksheet, *, allow_static: bool = False) -> list[dict[str, Any]] | None:
+    """Validate generated physical identity before consumers map geometry to rows."""
+    wb = ws.parent
+    if "generated_template_schema" not in wb.sheetnames:
+        if allow_static and ws.title == MASTER_SHEET_NAME:
+            return None
+        raise FacilityTemplateBuildError("generated_body_schema_missing")
+    schema = {
+        row[0]: row[1] for row in wb["generated_template_schema"].iter_rows(values_only=True)
+        if len(row) >= 2 and isinstance(row[0], str)
+    }
+    if not schema.get("week_value"):
+        if allow_static:
+            return None
+        raise FacilityTemplateBuildError("generated_body_week_missing")
+    if not schema.get("week_menu_rows"):
+        raise FacilityTemplateBuildError("generated_body_entries_missing")
+    try:
+        plan = json.loads(schema["week_menu_physical_row_plan"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FacilityTemplateBuildError("generated_body_row_plan_invalid") from exc
+    end_row = schema.get("body_end_row")
+    end_col = schema.get("generated_end_col")
+    try:
+        print_ranges = PrintArea.from_string(ws.print_area).ranges
+        print_bounds = [area.bounds for area in print_ranges]
+    except (TypeError, ValueError) as exc:
+        raise FacilityTemplateBuildError("generated_body_print_area_invalid") from exc
+    if (not isinstance(plan, list) or not plan or type(end_row) is not int
+            or type(end_col) is not int or end_col != ws.max_column
+            or schema.get("week_menu_rows") != len(plan)
+            or schema.get("week_menu_source_rows") != len(plan)
+            or schema.get("week_menu_overflow_rows") != 0
+            or end_row != BODY_START_ROW + len(plan) - 1
+            or schema.get("print_end_row") != PRINT_END_ROW + end_row - BODY_END_ROW
+            or print_bounds != [(1, 1, end_col, schema.get("print_end_row"))]):
+        raise FacilityTemplateBuildError("generated_body_row_plan_changed")
+    merged_values = {}
+    for region in ws.merged_cells.ranges:
+        if region.min_row < BODY_START_ROW or region.max_row > end_row:
+            if region.min_row <= end_row and region.max_row >= BODY_START_ROW:
+                raise FacilityTemplateBuildError("generated_body_merge_boundary_invalid")
+            continue
+        value = ws.cell(region.min_row, region.min_col).value
+        for row in range(region.min_row, region.max_row + 1):
+            for col in range(region.min_col, region.max_col + 1):
+                merged_values[(row, col)] = value
+    source_indexes = set()
+    effective_date = None
+    for offset, entry in enumerate(plan):
+        row = BODY_START_ROW + offset
+        if (not isinstance(entry, dict) or entry.get("worksheet_row") != row
+                or type(entry.get("source_index")) is not int or entry["source_index"] in source_indexes):
+            raise FacilityTemplateBuildError("generated_body_row_identity_invalid")
+        source_indexes.add(entry["source_index"])
+        date_value = merged_values.get((row, 1), ws.cell(row, 1).value)
+        menu_date = _parse_menu_date(date_value)
+        if menu_date is not None:
+            effective_date = menu_date
+        elif effective_date is not None and date_value == _weekday_label(effective_date):
+            menu_date = effective_date
+        daypart = merged_values.get((row, 2), ws.cell(row, 2).value)
+        if (menu_date is None or menu_date.isoformat() != entry.get("date")
+                or daypart != entry.get("daypart") or not daypart
+                or str(ws.cell(row, 3).value or "") != entry.get("category")
+                or ws.cell(row, 4).value != entry.get("name") or not entry.get("name")):
+            raise FacilityTemplateBuildError("generated_body_row_identity_changed")
+    for col in range(1, end_col + 1):
+        if getattr(ws.cell(end_row, col).border.bottom, "style", None) != "thick":
+            raise FacilityTemplateBuildError("generated_body_end_border_changed")
+    try:
+        details = json.loads(schema["configured_body_merged_range_details"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FacilityTemplateBuildError("generated_body_merge_plan_invalid") from exc
+    if not isinstance(details, list) or len(details) != schema.get("configured_body_merged_ranges"):
+        raise FacilityTemplateBuildError("generated_body_merge_plan_invalid")
+    meal_spans = set()
+    start = BODY_START_ROW
+    for offset, entry in enumerate(plan):
+        if offset + 1 == len(plan) or (entry["date"], entry["daypart"]) != (plan[offset + 1]["date"], plan[offset + 1]["daypart"]):
+            meal_spans.add((start, BODY_START_ROW + offset, entry["daypart"]))
+            start = BODY_START_ROW + offset + 1
+    declared_ranges = set()
+    spans_by_column: dict[int, set[tuple[int, int, str]]] = {}
+    for detail in details:
+        if not isinstance(detail, dict):
+            raise FacilityTemplateBuildError("generated_body_merge_plan_invalid")
+        col, first, last = detail.get("target_col"), detail.get("min_row"), detail.get("max_row")
+        span = (first, last, detail.get("daypart"))
+        if (type(col) is not int or not GENERATED_START_COL <= col <= end_col
+                or type(first) is not int or type(last) is not int
+                or not isinstance(detail.get("daypart"), str) or span not in meal_spans):
+            raise FacilityTemplateBuildError("generated_body_merge_plan_changed")
+        target = f"{get_column_letter(col)}{first}:{get_column_letter(col)}{last}"
+        if detail.get("target_range") != target:
+            raise FacilityTemplateBuildError("generated_body_merge_plan_changed")
+        declared_ranges.add((col, first, col, last))
+        spans_by_column.setdefault(col, set()).add(span)
+    actual_ranges = {
+        region.bounds for region in ws.merged_cells.ranges
+        if region.min_col >= GENERATED_START_COL and BODY_START_ROW <= region.min_row <= end_row
+    }
+    if actual_ranges != declared_ranges or any(spans != meal_spans for spans in spans_by_column.values()):
+        raise FacilityTemplateBuildError("generated_body_merge_plan_changed")
+    return plan
+
+
+def validated_body_end_row(ws: Worksheet, *, allow_static: bool = False) -> int:
+    plan = validated_body_row_plan(ws, allow_static=allow_static)
+    return plan[-1]["worksheet_row"] if plan is not None else BODY_END_ROW
 
 
 def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_columns: list[dict[str, Any]], end_col: int) -> None:
@@ -1031,24 +1151,30 @@ def build_facility_template_workbook(
         week_value=week_value,
         week_menu_entries=week_menu_entries,
     )
+    body_end_row = week_menu_identity_result.get("body_end_row", BODY_END_ROW)
+    print_end_row = PRINT_END_ROW + body_end_row - BODY_END_ROW
 
     end_col = _ensure_generated_capacity(ws, len(generated_columns))
     _normalize_static_right_merges(ws, end_col)
-    _unmerge_generated_area(ws, max(end_col, MASTER_GENERATED_END_COL))
+    _unmerge_generated_area(ws, max(end_col, MASTER_GENERATED_END_COL), body_end_row)
     _trim_unused_generated_columns(ws, end_col)
-    _clear_generated_area(ws, end_col)
+    _clear_generated_area(ws, end_col, body_end_row)
     _write_header(ws, generated_columns, end_col)
-    _write_body_grid(ws, end_col)
+    _write_body_grid(ws, end_col, body_end_row)
     applied_body_merges = _apply_configured_body_merges(
         ws,
         facility_config=facility_config,
         generated_columns=generated_columns,
         end_col=end_col,
+        body_spans=week_menu_identity_result.get("body_spans"),
     )
     _set_generated_widths(ws, generated_columns, end_col)
-    ws.print_area = f"A1:{get_column_letter(end_col)}{PRINT_END_ROW}"
+    ws.print_area = f"A1:{get_column_letter(end_col)}{print_end_row}"
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)
     wb["generated_template_schema"].append(["week_value", str(week_value or "")])
+    wb["generated_template_schema"].append(["body_end_row", body_end_row])
+    wb["generated_template_schema"].append(["print_end_row", print_end_row])
+    wb["generated_template_schema"].append(["week_menu_physical_row_plan", json.dumps(week_menu_identity_result.get("physical_row_plan") or [], ensure_ascii=False)])
     wb["generated_template_schema"].append(["week_menu_rows", int(week_menu_identity_result.get("written_rows") or 0)])
     wb["generated_template_schema"].append(["week_menu_source_rows", int(week_menu_identity_result.get("source_rows") or 0)])
     wb["generated_template_schema"].append(["week_menu_overflow_rows", int(week_menu_identity_result.get("overflow_rows") or 0)])
@@ -1062,6 +1188,8 @@ def build_facility_template_workbook(
     wb["generated_template_schema"].append(
         ["configured_body_merged_range_details", json.dumps(applied_body_merges, ensure_ascii=False, sort_keys=True)]
     )
+    if week_value:
+        validated_body_row_plan(ws)
     return wb
 
 
