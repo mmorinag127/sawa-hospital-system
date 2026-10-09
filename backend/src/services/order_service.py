@@ -661,28 +661,9 @@ def _run_roi_ocr_pipeline(
 def _resolve_preferred_template_ids(facility_config: dict[str, Any] | None) -> tuple[str | None, list[str]]:
     if not isinstance(facility_config, dict):
         return None, []
-    facility_id = str(facility_config.get("facility_id") or facility_config.get("id") or "").strip() or None
-    template_id = facility_config.get("fax_template_id")
-    if isinstance(template_id, str):
-        template_id = template_id.strip() or None
-    template_ids_raw = facility_config.get("fax_template_ids")
-    template_ids: list[str] = []
-    if isinstance(template_ids_raw, list):
-        for item in template_ids_raw:
-            token = str(item or "").strip()
-            if token and token not in template_ids:
-                template_ids.append(token)
-    if facility_id:
-        template_ids = config_service.collapse_equivalent_template_ids(facility_id, template_ids)
-    if template_id and template_id not in template_ids:
-        template_ids.insert(0, template_id)
-    if facility_id:
-        template_ids = config_service.collapse_equivalent_template_ids(facility_id, template_ids)
-        if template_id and template_id not in template_ids and template_ids:
-            template_id = template_ids[0]
-    if not template_id and template_ids:
-        template_id = template_ids[0]
-    return template_id, template_ids
+    authored = config_service._validate_authored_facility_config(facility_config, None)
+    template_id = authored["fax_template"].get("template_id")
+    return (template_id, [template_id]) if template_id else (None, [])
 
 
 def _load_facility_config_with_master_fallback(
@@ -706,73 +687,13 @@ def _load_facility_config_with_master_fallback(
 def _materialize_facility_template_for_template_id(
     facility_config: dict[str, Any], template_id: str | None,
 ) -> dict[str, Any] | None:
-    facility_id = facility_config.get("facility_id") if isinstance(facility_config, dict) else None
-    if not facility_id:
+    if not isinstance(facility_config, dict):
         return None
     try:
-        authored = config_service.get_facility_config_for_template(facility_id, template_id)
+        authored = config_service._validate_authored_facility_config(facility_config, template_id)
     except ValueError:
         return None
     return deepcopy(authored["fax_template"])
-
-
-def _strong_semantic_template_ids_from_payload(
-    payload: dict[str, Any] | None,
-    facility_config: dict[str, Any] | None,
-    candidate_template_ids: list[str],
-) -> list[str]:
-    if not isinstance(payload, dict) or not isinstance(facility_config, dict):
-        return []
-    table_raw = str(payload.get("table_raw") or "").strip()
-    header_cells = _extract_markdown_header_cells(table_raw) if table_raw else []
-    scored_matches: list[tuple[tuple[int, int, int], str]] = []
-    for template_id in candidate_template_ids:
-        template = _materialize_facility_template_for_template_id(facility_config, template_id)
-        if not isinstance(template, dict):
-            continue
-        fields = [field for field in _get_row_fields(template) if str(field).strip()]
-        if not fields or not header_cells:
-            continue
-        fields_set = set(fields)
-        mapped_fields = {
-            mapped
-            for mapped in (_field_from_header(cell, fields_set) for cell in header_cells)
-            if isinstance(mapped, str) and mapped.strip()
-        }
-        if not mapped_fields:
-            continue
-        structural_count = len(
-            {
-                field
-                for field in mapped_fields
-                if field in {"date_mmdd", "date", "daypart", "menu", "menu_name"}
-            }
-        )
-        quantity_count = len({field for field in mapped_fields if field.startswith("qty.")})
-        populated_quantity_indexes = set()
-        parsed_rows = rows_from_markdown(table_raw, template) or []
-        quantity_indexes = [idx for idx, field in enumerate(fields) if field.startswith("qty.")]
-        for row in parsed_rows:
-            if not isinstance(row, list):
-                continue
-            for idx in quantity_indexes:
-                if idx < len(row) and _parse_strict_numeric_cell(row[idx]) is not None:
-                    populated_quantity_indexes.add(idx)
-        scored_matches.append(
-            (
-                (quantity_count, structural_count, len(populated_quantity_indexes), len(mapped_fields)),
-                template_id,
-            )
-        )
-    if not scored_matches:
-        return []
-    scored_matches.sort(reverse=True)
-    top_score = scored_matches[0][0]
-    if top_score[0] <= 0 or top_score[1] < 3:
-        return []
-    if sum(1 for score, _template_id in scored_matches if score == top_score) != 1:
-        return []
-    return [template_id for score, template_id in scored_matches if score == top_score]
 
 
 def _resolve_effective_sheet_template(
@@ -788,82 +709,19 @@ def _resolve_effective_sheet_template(
     normalized_facility_id = str(facility_id or "").strip() or None
     if not normalized_facility_id:
         return None, None, None, "facility_missing"
-    resolved_facility_config = (
-        facility_config
-        if isinstance(facility_config, dict)
-        else _load_facility_config_with_master_fallback(
-            normalized_facility_id,
-            log_context=log_context,
-        )
-    )
-    if not isinstance(resolved_facility_config, dict):
-        return None, None, None, "facility_not_found"
-    preferred_template_id, preferred_template_ids = _resolve_preferred_template_ids(resolved_facility_config)
-    if not preferred_template_ids and preferred_template_id:
-        preferred_template_ids = [preferred_template_id]
-    effective_template_id = preferred_template_id
-    if len(preferred_template_ids) >= 2:
-        latest_template_decision = (
-            critical_decision_service.get_latest_decision(order_id, "template")
-            if str(order_id or "").strip()
-            else None
-        )
-        selected_template_id = (
-            str((latest_template_decision or {}).get("selected_value") or "").strip()
-            if isinstance(latest_template_decision, dict)
-            else ""
-        )
-        if selected_template_id and selected_template_id in preferred_template_ids:
-            effective_template_id = selected_template_id
-        else:
-            candidate_template_id = ""
-            if allow_workflow_resolution:
-                candidate_resolution = (
-                    get_order_candidate_resolution(order_id)
-                    if str(order_id or "").strip()
-                    else None
-                )
-                resolution_template = (
-                    ((candidate_resolution or {}).get("resolutions") or {}).get("template")
-                    if isinstance(candidate_resolution, dict)
-                    else None
-                )
-                candidate_template_id = (
-                    str((resolution_template or {}).get("resolved_value") or "").strip()
-                    if isinstance(resolution_template, dict)
-                    else ""
-                )
-            if candidate_template_id and candidate_template_id in preferred_template_ids:
-                effective_template_id = candidate_template_id
-            else:
-                normalized_draft_template_id = str(draft_template_id or "").strip()
-                payload_resolution = _get_template_resolution(ocr_payload)
-                payload_template_id = (
-                    str((payload_resolution or {}).get("resolved_template_id") or "").strip()
-                    if isinstance(payload_resolution, dict)
-                    else ""
-                )
-                if payload_template_id and payload_template_id in preferred_template_ids:
-                    effective_template_id = payload_template_id
-                else:
-                    strong_matches = _strong_semantic_template_ids_from_payload(
-                        ocr_payload,
-                        resolved_facility_config,
-                        preferred_template_ids,
-                    )
-                    if len(strong_matches) == 1:
-                        effective_template_id = strong_matches[0]
-                    elif not isinstance(ocr_payload, dict) and normalized_draft_template_id and normalized_draft_template_id in preferred_template_ids:
-                        effective_template_id = normalized_draft_template_id
-                    else:
-                        return resolved_facility_config, None, None, "template_unresolved"
-    template = _materialize_facility_template_for_template_id(
-        resolved_facility_config,
-        effective_template_id,
-    )
-    if not isinstance(template, dict):
-        return resolved_facility_config, None, effective_template_id, "template_unresolved"
-    return resolved_facility_config, template, effective_template_id, None
+    resolved_facility_config = facility_config
+    try:
+        if resolved_facility_config is None:
+            resolved_facility_config = config_service.get_authored_facility_config(normalized_facility_id)
+        if not isinstance(resolved_facility_config, dict):
+            return None, None, None, "facility_not_found"
+        if resolved_facility_config.get("facility_id") != normalized_facility_id:
+            return resolved_facility_config, None, None, "configured_execution_facility_mismatch"
+        authored = config_service._validate_authored_facility_config(resolved_facility_config, None)
+    except ValueError as exc:
+        return resolved_facility_config, None, None, str(exc)
+    template = deepcopy(authored["fax_template"])
+    return resolved_facility_config, template, template.get("template_id"), None
 
 
 def clear_all():
