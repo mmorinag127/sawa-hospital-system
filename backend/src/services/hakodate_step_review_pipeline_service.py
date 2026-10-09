@@ -2520,17 +2520,71 @@ def _row_intersection_correct_ys(
     corrected = [*logical_header, *(float(cluster["value"]) for cluster in body_clusters)]
     if any(right <= left for left, right in zip(corrected, corrected[1:])):
         return None, {"used": False, "reason": "fax_header_sequence_ambiguous", **detection}
+    physical_plan = master_order_form_template_service.validated_body_row_plan(worksheet)
+    if not physical_plan:
+        return None, {"used": False, "reason": "fax_canonical_day_source_missing", **detection}
+    observed_body_count = len(body_clusters) - 1
+    day_source = {
+        "source": "validated_generated_template_schema.week_menu_physical_row_plan",
+        "worksheet": worksheet.title,
+        "body_start_worksheet_row": STEP_REVIEW_BODY_START_ROW,
+        "canonical_physical_row_count": len(physical_plan),
+        "observed_physical_row_count": observed_body_count,
+    }
+    if observed_body_count != len(physical_plan):
+        return None, {"used": False, "reason": "fax_physical_body_count_changed",
+                      "canonical_day_source": day_source, **detection}
+    canonical_date_boundaries = workbook_pdf_renderer.worksheet_date_column_boundary_indexes(
+        worksheet, body_start_row=physical_plan[0]["worksheet_row"],
+        body_end_row=physical_plan[-1]["worksheet_row"],
+    )
+    observed_date_boundaries = [
+        index for index, cluster in enumerate(body_clusters) if 0 in cluster.get("column_votes", [])
+    ]
+    day_source["date_column_boundary_source"] = "actual_worksheet_renderer.merge_aware_borders.column_A"
+    day_source["canonical_date_column_boundary_indexes"] = canonical_date_boundaries
+    day_source["observed_date_column_boundary_indexes"] = observed_date_boundaries
+    if observed_date_boundaries != canonical_date_boundaries:
+        return None, {"used": False, "reason": "fax_date_column_physical_boundaries_changed",
+                      "canonical_day_source": day_source,
+                      "missing_date_column_boundary_indexes": sorted(set(canonical_date_boundaries) - set(observed_date_boundaries)),
+                      "extra_date_column_boundary_indexes": sorted(set(observed_date_boundaries) - set(canonical_date_boundaries)),
+                      **detection}
+    dates = [entry["date"] for entry in physical_plan]
+    if dates != sorted(dates):
+        return None, {"used": False, "reason": "fax_canonical_day_identity_ambiguous",
+                      "canonical_day_source": day_source, **detection}
+    # Date-cell subdivisions (including the final weekday cell) are printed
+    # boundaries, but only physical-plan date changes delimit calendar days.
+    day_boundaries = [0, *(index for index in range(1, len(dates)) if dates[index] != dates[index - 1]), len(dates)]
+    missing_day_support = [index for index in day_boundaries if 0 not in body_clusters[index].get("column_votes", [])]
+    if missing_day_support:
+        return None, {"used": False, "reason": "fax_canonical_day_boundary_unobserved",
+                      "canonical_day_source": day_source, "missing_date_column_boundary_indexes": missing_day_support,
+                      **detection}
+    day_source["days"] = [
+        {"date": dates[first], "first_body_row_index": first, "stop_body_row_index": stop,
+         "first_worksheet_row": physical_plan[first]["worksheet_row"],
+         "last_worksheet_row": physical_plan[stop - 1]["worksheet_row"]}
+        for first, stop in zip(day_boundaries, day_boundaries[1:])
+    ]
+    date_subdivisions = [
+        {"body_boundary_index": index, "date": dates[index],
+         "worksheet_row": physical_plan[index]["worksheet_row"], "observed_y": float(cluster["value"]),
+         "source": "canonical_rendered_weekday_or_date_cell_subdivision"}
+        for index, cluster in enumerate(body_clusters)
+        if index in canonical_date_boundaries and index not in day_boundaries
+    ]
     structural_evidence = {
         "used": True,
         "reason": "observed_fax_boundaries_including_blank_bands",
         "body_start_cluster_index": matched_indexes[-1],
         "header_boundaries": header_sources,
         "header_boundary_contract": header_contract,
-        "detected_body_band_count": len(corrected) - STEP_REVIEW_HEADER_BANDS - 1,
-        "body_day_boundary_indexes": [
-            index for index, cluster in enumerate(body_clusters)
-            if 0 in cluster.get("column_votes", [])
-        ],
+        "detected_body_band_count": observed_body_count,
+        "body_day_boundary_indexes": day_boundaries,
+        "canonical_day_source": day_source,
+        "date_column_subdivision_boundaries": date_subdivisions,
     }
     evidence = {
         "used": False,

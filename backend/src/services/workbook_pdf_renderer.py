@@ -385,6 +385,26 @@ def worksheet_header_boundary_contract(worksheet, *, header_edge_rows: tuple[int
     return boundaries
 
 
+def worksheet_date_column_boundary_indexes(worksheet, *, body_start_row: int, body_end_row: int) -> list[int]:
+    geometry = worksheet_render_geometry(worksheet)
+    min_col, min_row, max_col, max_row = geometry["print_range"]
+    if min_col != 1 or not min_row <= body_start_row <= body_end_row < max_row:
+        raise ValueError("worksheet_date_column_print_range_invalid")
+    xs, ys = geometry["x_positions"], geometry["y_positions"]
+    segments = _collect_border_segments(
+        worksheet, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row,
+        x_positions=xs, y_positions=ys,
+    )
+    date_left = xs[1]
+    return [
+        row - body_start_row for row in range(body_start_row, body_end_row + 2)
+        if any(axis == "h" and position == ys[row] and start <= date_left < end
+               for axis, position, start, end in segments)
+        and any(axis == "v" and position == date_left and start <= ys[row] <= end
+                for axis, position, start, end in segments)
+    ]
+
+
 def render_worksheet_to_image(
     worksheet,
     *,
