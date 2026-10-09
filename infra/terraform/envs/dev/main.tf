@@ -84,6 +84,7 @@ module "cloudrun" {
     GOOGLE_OAUTH_CLIENT_ID   = var.google_oauth_client_id
     GCP_PROJECT_ID           = var.project_id
     RAW_BUCKET               = "${var.project_id}-${local.env}-raw"
+    OCR_OUTPUT_BUCKET        = "${var.project_id}-${local.env}-raw"
     FACILITY_MASTER_PATH     = "/app/src/data/facility_master.test.json"
     CORS_ALLOW_ORIGINS       = "https://web-dev-m3j47i2tgq-an.a.run.app,https://web-dev-161384524548.asia-northeast1.run.app"
     TEMPLATE_COLLECTION      = "templates"

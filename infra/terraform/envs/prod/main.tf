@@ -98,6 +98,7 @@ module "cloudrun" {
     GOOGLE_OAUTH_CLIENT_ID = var.google_oauth_client_id
     GCP_PROJECT_ID         = var.project_id
     RAW_BUCKET             = "${var.project_id}-${local.env}-raw"
+    OCR_OUTPUT_BUCKET      = "${var.project_id}-${local.env}-raw"
     TEMPLATE_BUCKET        = "${var.project_id}-${local.env}-templates"
     FACILITY_MASTER_PATH   = "/app/src/data/facility_master.template.json"
     # Allow both the stable a.run.app URL and the regional run.app URL (canonical host redirect).
