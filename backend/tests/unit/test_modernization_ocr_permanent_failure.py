@@ -17,7 +17,7 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError, Transp
 from google.cloud import storage
 from requests.exceptions import ConnectionError, Timeout
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from starlette.requests import Request
 
 from modernization_owned_pipeline_transport import install_owned_pipeline_transport
@@ -30,7 +30,7 @@ from test_modernization_owned_ocr_workflow import (
     _queue_and_claim_owned_workflow_attempt,
 )
 from src import db
-from src.api import worker
+from src.api import orders, worker
 from src.models.ocr_job import OcrJob
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
@@ -295,7 +295,7 @@ def queue(f, mode, *, force=False):
         revision = session.get(OrderWorkflowState, ORDER).revision
     queued, error = workflow.mark_ocr_run_queued(
         ORDER, JOB, input_reference=str(f.pdf), request_mode=mode,
-        job_metrics={"selected_version_input": selected[0]["selected_version_input"],
+        job_metrics={**orders._document_selection_metrics(selected[0]),
                      "reparse_ocr_prompt": None, "reparse_prompt_preset": None,
                      "reparse_requested_provider": None, "reparse_ocr_model": None,
                      "reparse_llm_assist": mode == "llm_reparse"},
@@ -425,7 +425,7 @@ def test_real_worker_permanent_failure_persists_owned_terminal_and_ack(
         assert job.metrics.get("pending_receipt") is None
         assert job.metrics.get("auto_recovery_count", 0) == 0
         if mode != "ocr_rerun":
-            assert receipt["error"] == f"{type(fault).__name__}: {fault}"
+            assert receipt["error"] == f"{type(fault).__name__}: {fault}".strip()
         assert len(after[WorkflowOcrDelivery.__tablename__]) == len(before[WorkflowOcrDelivery.__tablename__])
 
 
@@ -518,6 +518,90 @@ def test_real_pending_handoff_ack_is_not_failed_or_requeued(owned_producer, monk
         assert row.state == delivery.ACKNOWLEDGED and row.lease_expires_at is None
         assert row.result_receipt is None
     assert len([entry for entry in events if entry[0] == "upload"]) == len(objects) == 2
+
+
+def test_pending_commit_refusal_is_not_reclassified_completed_or_acked(owned_producer, monkeypatch):
+    """Real pending persistence; synthetic GCS/clock, first SQL commit refused."""
+    f = owned_producer
+    configure_pipeline(f, monkeypatch)
+    queued = queue(f, "ocr_reparse")
+    claim = claim_queued(queued)
+    before = _owned_workflow_database_snapshot()
+    pdf_before, expected_before = f.pdf.read_bytes(), deepcopy(f.expected)
+    objects, events = install_owned_pipeline_transport(monkeypatch)
+    clock = PollClock()
+    monkeypatch.setattr(pipeline, "time", clock)
+    attempted_pending = []
+    attempted_terminal = []
+    committed_before_pending = []
+    refusal = RuntimeError("synthetic first pending commit refused")
+
+    def reject_first_pending_commit(session):
+        for instance in session.identity_map.values():
+            if not isinstance(instance, OcrJob) or instance.id != JOB:
+                continue
+            metrics = instance.metrics or {}
+            if isinstance(metrics.get("rerun_terminal_receipt"), dict):
+                attempted_terminal.append(deepcopy(metrics["rerun_terminal_receipt"]))
+            if instance.status != "awaiting_output":
+                continue
+            pending = deepcopy(metrics["pending_receipt"])
+            attempted_pending.append(pending)
+            assert pending["selected_document_id"] == f.receipt["document_id"]
+            assert pending["workflow_attempt_id"] == claim["workflow_attempt_id"]
+            assert pending["workflow_revision"] == claim["workflow_revision"]
+            assert pending["workflow_delivery_owner"] == {
+                key: claim[key] for key in ("delivery_id", "generation", "claim_token")
+            }
+            row = session.get(WorkflowOcrDelivery, claim["delivery_id"])
+            assert row.handoff_receipt["pending_receipt"] == pending
+            assert row.handoff_receipt["selected_pdf_receipt"] == claim["selected_pdf_receipt"]
+            if len(attempted_pending) == 1:
+                # A separate connection sees committed progress, not this flushed
+                # pending transaction. Read Core rows without nested Session events.
+                with f.engine.connect() as connection:
+                    committed_before_pending.append({
+                        table.name: deepcopy([
+                            dict(record) for record in connection.execute(
+                                select(table).order_by(*table.primary_key.columns),
+                            ).mappings()
+                        ])
+                        for table in db.Base.metadata.sorted_tables
+                    })
+                raise refusal
+
+    event.listen(f.sessions, "before_commit", reject_first_pending_commit)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            execute_delivery(claim)
+        assert raised.value is refusal
+    finally:
+        event.remove(f.sessions, "before_commit", reject_first_pending_commit)
+    assert len(attempted_pending) == len(committed_before_pending) == 1
+    assert attempted_terminal == []
+    assert clock.sleeps == [1, 1, 1]
+    assert len([entry for entry in events if entry[0] == "upload"]) == len(objects) == 2
+    after = _owned_workflow_database_snapshot()
+    assert after == committed_before_pending[0]
+    assert stable_data(after) == stable_data(before)
+    assert after[OrderWorkflowState.__tablename__] == before[OrderWorkflowState.__tablename__]
+    assert after[WorkflowOcrDelivery.__tablename__] == before[WorkflowOcrDelivery.__tablename__]
+    with db.session_scope() as session:
+        job = session.get(OcrJob, JOB)
+        row = session.get(WorkflowOcrDelivery, claim["delivery_id"])
+        assert job.status == "running"
+        assert job.metrics.get("pending_receipt") is None
+        assert job.metrics.get("rerun_terminal_receipt") is None
+        assert job.metrics.get("auto_recovery_count", 0) == 0
+        assert row.state == delivery.CLAIMED
+        assert row.claim_token == claim["claim_token"]
+        assert row.delivery_generation == claim["generation"]
+        assert row.lease_expires_at is not None
+        assert row.handoff_receipt is None and row.result_receipt is None
+    with pytest.raises(ValueError, match="^workflow_ocr_delivery_persisted_result_missing$"):
+        delivery.acknowledge_claim(claim["delivery_id"], claim["generation"], claim["claim_token"])
+    assert _owned_workflow_database_snapshot() == after
+    assert f.pdf.read_bytes() == pdf_before and f.expected == expected_before
 
 
 def test_real_native_done_receipt_survives_duplicate_callback(numeric_fax, monkeypatch):
