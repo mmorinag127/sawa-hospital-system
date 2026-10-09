@@ -241,6 +241,19 @@ def test_bagging_receipt_drift_stops_without_recapture(owned_bagging, fault, err
             artifact.payload_json = payload
             artifact.payload_digest = payload_digest(payload)
         state.secondary_actions_json = meta
+    if fault in {"start-sheet", "proof-digest"}:
+        # The fault setup's ORM commit advanced the technical revision. Align
+        # only the proof owner via Core so this setup does not advance it again.
+        with fixture.session_scope() as session:
+            state = session.get(OrderWorkflowState, fixture.order_id)
+            meta = deepcopy(state.secondary_actions_json)
+            meta["workflow_v2"]["bagging_input_proof"]["owned_revision"] = state.revision
+            session.execute(OrderWorkflowState.__table__.update().where(
+                OrderWorkflowState.order_id == fixture.order_id,
+            ).values(secondary_actions_json=meta))
+        with fixture.session_scope() as session:
+            state = session.get(OrderWorkflowState, fixture.order_id)
+            assert state.secondary_actions_json["workflow_v2"]["bagging_input_proof"]["owned_revision"] == state.revision
     assert database_snapshot() != pristine
     assert_rejected(fixture, candidate, "bagged", error, monkeypatch)
     assert [row[4] for row in fixture.saved()["rows"]] == ["7", "", "", "0"]
