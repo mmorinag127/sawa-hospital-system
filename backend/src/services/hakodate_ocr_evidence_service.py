@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
+import math
 import re
 from typing import Any
 
@@ -56,8 +57,146 @@ class AssignedOcrResult:
 
 def normalize_ocr_value(value: object) -> str:
     text = str(value if value is not None else "").strip().translate(_FULLWIDTH_DIGIT_TRANS)
-    text = re.sub(r"[^0-9,.]", "", text)
-    return text.strip(".,")
+    if not text:
+        return ""
+    if re.fullmatch(r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.0+)?", text):
+        return text.replace(",", "").split(".")[0].lstrip("0") or "0"
+    # Keep uncertain raw text visible; validation, not character deletion, stops it.
+    return str(value if value is not None else "")
+
+
+def validate_ocr_quantity_source(record: dict[str, Any]) -> str:
+    sources = [record]
+    metadata = record.get("engine_metadata")
+    if isinstance(metadata, dict):
+        if metadata.get("quantity_source_issue"):
+            raise ValueError("hakodate_ocr_quantity_unresolved")
+        original = metadata.get("recognizer_output")
+        if isinstance(original, dict):
+            sources.append(original)
+        original_values = metadata.get("source_values")
+        if isinstance(original_values, dict):
+            sources.append(original_values)
+    values = []
+    for source in sources:
+        raw_keys = [key for key in ("raw_text", "text", "recognizer_raw_text", "ocr_text") if key in source]
+        if not raw_keys:
+            raise ValueError("hakodate_ocr_quantity_source_missing")
+        for key in raw_keys:
+            value = normalize_ocr_value(source[key])
+            if value and not re.fullmatch(r"[0-9]+", value):
+                raise ValueError("hakodate_ocr_quantity_unresolved")
+            values.append(value)
+        for key in ("normalized_value", "ocr_normalized", "pred_digits"):
+            if key in source and source[key] is not None:
+                value = normalize_ocr_value(source[key])
+                if value and not re.fullmatch(r"[0-9]+", value):
+                    raise ValueError("hakodate_ocr_quantity_unresolved")
+                values.append(value)
+        candidate = source.get("recognizer_accepted_candidate")
+        if isinstance(candidate, dict):
+            for key in ("text", "normalized_digits"):
+                if key in candidate and candidate[key] is not None:
+                    value = normalize_ocr_value(candidate[key])
+                    if value and not re.fullmatch(r"[0-9]+", value):
+                        raise ValueError("hakodate_ocr_quantity_unresolved")
+                    values.append(value)
+    if len(set(values)) != 1:
+        raise ValueError("hakodate_ocr_quantity_source_conflict")
+    return values[0]
+
+
+def authored_cell_role(target: dict[str, Any]) -> str:
+    role = target.get("role")
+    fields = [target[key] for key in ("field", "semantic_field") if target.get(key) is not None]
+    if not isinstance(role, str) or role not in {"quantity", "note"} or not fields:
+        raise ValueError("hakodate_target_role_unresolved")
+    if any(not isinstance(field, str) or (
+        not field.startswith("qty.") if role == "quantity" else field not in {"note", "remarks"}
+    ) for field in fields):
+        raise ValueError("hakodate_target_role_conflict")
+    if len(set(fields)) != 1:
+        raise ValueError("hakodate_target_role_conflict")
+    return role
+
+
+def validate_ocr_source_for_role(record: dict[str, Any], role: str) -> str:
+    sources = [record]
+    metadata = record.get("engine_metadata")
+    if isinstance(metadata, dict):
+        sources.extend(metadata[key] for key in ("recognizer_output", "source_values") if isinstance(metadata.get(key), dict))
+    for source in sources:
+        if "role" in source and authored_cell_role(source) != role:
+            raise ValueError("hakodate_target_role_conflict")
+        for key in ("field", "semantic_field"):
+            if key in source and source[key] is not None:
+                authored_cell_role({"role": role, "field": source[key]})
+    if role == "quantity":
+        return validate_ocr_quantity_source(record)
+    if role != "note":
+        raise ValueError("hakodate_target_role_unresolved")
+    values = []
+    for source in sources:
+        raw_keys = [key for key in ("raw_text", "text", "recognizer_raw_text", "ocr_text") if key in source]
+        if not raw_keys:
+            raise ValueError("hakodate_ocr_quantity_source_missing")
+        values.extend(str(source[key] if source[key] is not None else "") for key in raw_keys)
+    if len(set(values)) != 1:
+        raise ValueError("hakodate_ocr_quantity_source_conflict")
+    return values[0]
+
+
+def validate_assigned_ocr_value(assignment: dict[str, Any]) -> str:
+    targets = _logical_sheet_targets_for_assignment(assignment)
+    role = authored_cell_role(targets[0])
+    if "role" in assignment and authored_cell_role(assignment) != role:
+        raise ValueError("hakodate_target_role_conflict")
+    if role == "quantity":
+        return validate_assigned_ocr_quantity(assignment)
+    state = assignment.get("assignment_state")
+    value = assignment.get("assigned_value") if "assigned_value" in assignment else assignment.get("value_normalized")
+    value = str(value if value is not None else "")
+    raw_texts = assignment.get("raw_texts")
+    if not isinstance(raw_texts, list) or state not in {"assigned", "blank", "blank_evidence"}:
+        raise ValueError("hakodate_ocr_quantity_unresolved")
+    if (not raw_texts and (state != "blank" or value)) or any(str(raw if raw is not None else "") != value for raw in raw_texts):
+        raise ValueError("hakodate_ocr_quantity_source_conflict")
+    if (state in {"blank", "blank_evidence"} and value) or (state == "assigned" and not value):
+        raise ValueError("hakodate_ocr_quantity_source_conflict")
+    return value
+
+
+def validate_assigned_ocr_quantity(assignment: dict[str, Any]) -> str:
+    state = assignment.get("assignment_state")
+    value_key = "assigned_value" if "assigned_value" in assignment else "value_normalized"
+    value = assignment.get(value_key)
+    raw_texts = assignment.get("raw_texts")
+    if not isinstance(raw_texts, list):
+        raise ValueError("hakodate_ocr_quantity_source_missing")
+    if state == "blank" and not raw_texts:
+        return validate_ocr_quantity_source({"raw_text": "", "normalized_value": value})
+    if state not in {"assigned", "blank_evidence"} or not raw_texts:
+        raise ValueError("hakodate_ocr_quantity_unresolved")
+    values = [
+        validate_ocr_quantity_source({"raw_text": raw, "normalized_value": value})
+        for raw in raw_texts
+    ]
+    if (
+        len(set(values)) != 1 or (state == "blank_evidence" and values[0])
+        or (state == "assigned" and not values[0])
+    ):
+        raise ValueError("hakodate_ocr_quantity_source_conflict")
+    return values[0]
+
+
+def normalize_ocr_confidence(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return score if math.isfinite(score) and 0.0 <= score <= 1.0 else None
 
 
 def _stable_id(parts: list[object]) -> str:
@@ -105,12 +244,15 @@ def evidence_from_records(
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for index, record in enumerate(records):
-        raw_text_value = record.get("raw_text")
-        if raw_text_value is None or str(raw_text_value).strip() == "":
-            raw_text_value = record.get("text")
-        raw_text = str(raw_text_value if raw_text_value is not None else "").strip()
-        if not raw_text and not retain_empty_records:
-            continue
+        raw_text_value = record.get("raw_text") if "raw_text" in record else record.get("text")
+        raw_text = str(raw_text_value if raw_text_value is not None else "")
+        metadata = dict(record.get("engine_metadata") or {})
+        # Preserve source aliases until the authored target supplies the cell role.
+        metadata.setdefault("source_values", {key: record[key] for key in (
+            "raw_text", "text", "recognizer_raw_text", "ocr_text", "normalized_value",
+            "ocr_normalized", "pred_digits", "recognizer_accepted_candidate", "role", "field", "semantic_field",
+        ) if key in record})
+        normalized_value = raw_text
         source_bbox = _as_float_box(record.get("source_bbox") or record.get("bbox"))
         center = _as_center(record.get("center"), fallback_box=source_bbox)
         evidence_id = str(
@@ -118,10 +260,12 @@ def evidence_from_records(
             or _stable_id([run_id, engine, source_scope, index, raw_text, source_bbox, center])
         )
         confidence = record.get("confidence")
-        try:
-            confidence_value = float(confidence) if confidence is not None else None
-        except Exception:
+        confidence_value = normalize_ocr_confidence(confidence)
+        metadata.setdefault("raw_confidence", confidence)
+        if metadata.get("confidence_source_issue") or normalize_ocr_confidence(metadata["raw_confidence"]) is None:
             confidence_value = None
+        if confidence_value is None:
+            metadata["confidence_source_issue"] = "hakodate_ocr_confidence_unresolved"
         evidence.append(
             asdict(
                 OcrEvidenceRecord(
@@ -130,13 +274,13 @@ def evidence_from_records(
                     engine=engine,
                     source_scope=source_scope,
                     raw_text=raw_text,
-                    normalized_value=str(record["normalized_value"] if record.get("normalized_value") is not None else normalize_ocr_value(raw_text)),
+                    normalized_value=normalized_value,
                     confidence=confidence_value,
                     source_bbox=source_bbox,
                     center=center,
                     candidate_type=str(record.get("candidate_type") or candidate_type),
                     raw_payload_ref=str(record.get("raw_payload_ref") or raw_payload_ref or ""),
-                    engine_metadata=dict(record.get("engine_metadata") or {}),
+                    engine_metadata=metadata,
                 )
             )
         )
@@ -145,41 +289,54 @@ def evidence_from_records(
 
 def target_cells_from_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cells: list[dict[str, Any]] = []
-    for index, region in enumerate(regions):
+    for region in regions:
+        if not isinstance(region, dict):
+            raise ValueError("hakodate_logical_targets_invalid")
+        metadata = region.get("metadata", {})
+        if not isinstance(metadata, dict) or "metadata" in metadata:
+            raise ValueError("hakodate_logical_targets_invalid")
+        metadata = dict(metadata)
+        for key, value in region.items():
+            if key in {
+                "target_cell_id", "sheet_cell", "worksheet_row", "worksheet_col",
+                "semantic_field", "field", "bbox", "center", "metadata",
+            }:
+                continue
+            if key in metadata and metadata[key] != value:
+                raise ValueError("hakodate_logical_targets_invalid")
+            metadata[key] = value
         box = _as_float_box(region.get("bbox"))
-        if not box:
-            continue
-        center = _as_center(region.get("center"), fallback_box=box)
-        if not center:
-            continue
+        if not box or not all(math.isfinite(value) for value in box) or box[0] >= box[2] or box[1] >= box[3]:
+            raise ValueError("hakodate_target_bbox_invalid")
+        if "center" in region:
+            raw_center = region["center"]
+            if not isinstance(raw_center, (list, tuple)) or len(raw_center) != 2:
+                raise ValueError("hakodate_target_center_invalid")
+            center = _as_center(raw_center)
+        else:
+            center = _center_from_box(box)
+        if not center or not all(math.isfinite(value) for value in center) or not _contains_point(box, center):
+            raise ValueError("hakodate_target_center_invalid")
         target_id = str(region.get("target_cell_id") or region.get("sheet_cell") or region.get("region_id") or "")
-        if not target_id:
-            target_id = f"target_{index}"
+        if not target_id.strip():
+            raise ValueError("hakodate_target_identity_required")
+        if any(cell["target_cell_id"] == target_id for cell in cells):
+            raise ValueError("hakodate_logical_targets_invalid")
+        _logical_sheet_targets_for_assignment({
+            **region, "semantic_field": region.get("semantic_field") or region.get("field"),
+            "target_metadata": metadata,
+        })
         cells.append(
             asdict(
                 TargetCell(
                     target_cell_id=target_id,
-                    sheet_cell=str(region.get("sheet_cell") or target_id),
+                    sheet_cell=str(region.get("sheet_cell") or ""),
                     worksheet_row=int(region.get("worksheet_row") or 0),
                     worksheet_col=int(region.get("worksheet_col") or 0),
                     semantic_field=str(region.get("semantic_field") or region.get("field") or ""),
                     bbox=box,
                     center=center,
-                    metadata={
-                        key: value
-                        for key, value in region.items()
-                        if key
-                        not in {
-                            "target_cell_id",
-                            "sheet_cell",
-                            "worksheet_row",
-                            "worksheet_col",
-                            "semantic_field",
-                            "field",
-                            "bbox",
-                            "center",
-                        }
-                    },
+                    metadata=metadata,
                 )
             )
         )
@@ -195,8 +352,15 @@ def _area(box: list[float]) -> float:
 
 
 def _mean_confidence(records: list[dict[str, Any]]) -> float | None:
-    values = [float(record["confidence"]) for record in records if record.get("confidence") is not None]
-    if not values:
+    for record in records:
+        metadata = record.get("engine_metadata")
+        if isinstance(metadata, dict) and (
+            metadata.get("confidence_source_issue")
+            or ("raw_confidence" in metadata and normalize_ocr_confidence(metadata["raw_confidence"]) is None)
+        ):
+            return None
+    values = [normalize_ocr_confidence(record.get("confidence")) for record in records]
+    if not values or any(value is None for value in values):
         return None
     return round(sum(values) / len(values), 4)
 
@@ -215,10 +379,12 @@ def assign_evidence_to_target_cells(
         center = _as_center(evidence.get("center"), fallback_box=_as_float_box(evidence.get("source_bbox")))
         if not center:
             unassigned.append({**evidence, "unassigned_reason": "missing_center"})
+            blockers.append(f"hakodate_target_role_unresolved: {evidence.get('evidence_id')}")
             continue
         matches = [target for target in targets if _contains_point(target["bbox"], center)]
         if not matches:
             unassigned.append({**evidence, "unassigned_reason": "outside_target_cells"})
+            blockers.append(f"hakodate_target_role_unresolved: {evidence.get('evidence_id')}")
             continue
         matches.sort(key=lambda target: (_area(target["bbox"]), str(target["target_cell_id"])))
         best = matches[0]
@@ -238,13 +404,25 @@ def assign_evidence_to_target_cells(
     for target in targets:
         target_id = str(target["target_cell_id"])
         records = by_target.get(target_id) or []
-        values = [str(record.get("normalized_value") or "") for record in records if str(record.get("normalized_value") or "")]
+        logical_targets = _logical_sheet_targets_for_assignment({**target, "target_metadata": target["metadata"]})
+        role = authored_cell_role(logical_targets[0])
+        values = []
+        unresolved = False
+        for record in records:
+            try:
+                values.append(validate_ocr_source_for_role(record, role))
+            except ValueError as exc:
+                blockers.append(f"{exc}: {record.get('evidence_id')}")
+                unresolved = True
         unique_values = sorted(set(values))
-        if not records:
+        if unresolved:
+            state = "unresolved"
+            assigned_value = ""
+        elif not records:
             state = "blank"
             assigned_value = ""
         elif len(unique_values) <= 1:
-            state = "assigned" if unique_values else "blank_evidence"
+            state = "assigned" if unique_values and unique_values[0] else "blank_evidence"
             assigned_value = unique_values[0] if unique_values else ""
         else:
             state = "conflict"
@@ -262,7 +440,7 @@ def assign_evidence_to_target_cells(
                     assigned_value=assigned_value,
                     assignment_confidence=_mean_confidence(records),
                     assignment_state=state,
-                    raw_texts=[str(record.get("raw_text") or "") for record in records],
+                    raw_texts=[str(record.get("raw_text") if record.get("raw_text") is not None else "") for record in records],
                     target_metadata=dict(target.get("metadata") or {}),
                 )
             )
@@ -284,20 +462,66 @@ def assign_evidence_to_target_cells(
 
 
 def _logical_sheet_targets_for_assignment(assignment: dict[str, Any]) -> list[dict[str, Any]]:
-    metadata = assignment.get("target_metadata") if isinstance(assignment.get("target_metadata"), dict) else {}
+    metadata = assignment.get("target_metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("hakodate_logical_targets_invalid")
     logical_targets = metadata.get("logical_targets") if isinstance(metadata, dict) else None
-    if isinstance(logical_targets, list) and logical_targets:
-        targets = [target for target in logical_targets if isinstance(target, dict)]
-        if targets:
-            return targets
-    return [
-        {
-            "sheet_cell": assignment.get("sheet_cell"),
-            "worksheet_row": assignment.get("worksheet_row"),
-            "worksheet_col": assignment.get("worksheet_col"),
-            "field": assignment.get("semantic_field"),
-        }
-    ]
+    if "logical_targets" in metadata:
+        if not isinstance(logical_targets, list) or not logical_targets or any(
+            not isinstance(target, dict) for target in logical_targets
+        ):
+            raise ValueError("hakodate_logical_targets_invalid")
+        targets = logical_targets
+        roles = {authored_cell_role(target) for target in targets}
+        if len(roles) != 1:
+            raise ValueError("hakodate_target_role_conflict")
+        if "role" in assignment and assignment["role"] not in tuple(roles):
+            raise ValueError("hakodate_target_role_conflict")
+        if "role" in metadata:
+            if metadata["role"] not in tuple(roles):
+                raise ValueError("hakodate_target_role_conflict")
+            if assignment.get("semantic_field") is not None:
+                authored_cell_role({"role": metadata["role"], "field": assignment["semantic_field"]})
+        for target in targets:
+            row, col = target.get("worksheet_row"), target.get("worksheet_col")
+            sheet_cell = target.get("sheet_cell")
+            semantic_field = target.get("field") or target.get("semantic_field")
+            if (
+                type(row) is not int or type(col) is not int or row <= 0 or col <= 0
+                or not isinstance(sheet_cell, str)
+                or sheet_cell != f"{get_column_letter(col)}{row}"
+                or not isinstance(semantic_field, str) or not semantic_field.strip()
+            ):
+                raise ValueError("hakodate_logical_targets_invalid")
+        sheet_cells = [target["sheet_cell"] for target in targets]
+        if len(set(sheet_cells)) != len(sheet_cells):
+            raise ValueError("hakodate_logical_targets_invalid")
+        covered = metadata.get("covered_sheet_cells")
+        if covered is not None and (
+            not isinstance(covered, list) or any(not isinstance(cell, str) for cell in covered)
+            or len(set(covered)) != len(covered)
+            or set(covered) != set(sheet_cells)
+        ):
+            raise ValueError("hakodate_logical_targets_invalid")
+        return targets
+    if metadata.get("merged_cell") or "covered_sheet_cells" in metadata:
+        raise ValueError("hakodate_logical_targets_required")
+    target = {
+        **{key: metadata[key] for key in (
+            "grid_row_index", "grid_col_index", "field_label", "date", "daypart", "menu_name", "role",
+        ) if key in metadata},
+        "sheet_cell": assignment.get("sheet_cell"),
+        "worksheet_row": assignment.get("worksheet_row"),
+        "worksheet_col": assignment.get("worksheet_col"),
+        "field": assignment.get("semantic_field"),
+        "role": metadata.get("role") if "role" in metadata else assignment.get("role"),
+    }
+    return _logical_sheet_targets_for_assignment({"target_metadata": {"logical_targets": [target]}})
+
+
+def logical_sheet_targets_from_region(region: dict[str, Any]) -> list[dict[str, Any]]:
+    target = target_cells_from_regions([region])[0]
+    return _logical_sheet_targets_for_assignment({**target, "target_metadata": target["metadata"]})
 
 
 def sheet_output_from_assigned_results(
@@ -312,7 +536,18 @@ def sheet_output_from_assigned_results(
     output_blockers = list(blockers or [])
     for assignment in assignments:
         state = str(assignment.get("assignment_state") or "")
-        for target in _logical_sheet_targets_for_assignment(assignment):
+        try:
+            assigned_value = validate_assigned_ocr_value(assignment)
+        except ValueError as exc:
+            output_blockers.append(str(exc))
+            assigned_value = ""
+            state = "conflict" if state == "conflict" else "unresolved"
+        try:
+            targets = _logical_sheet_targets_for_assignment(assignment)
+        except ValueError as exc:
+            output_blockers.append(str(exc))
+            continue
+        for target in targets:
             sheet_cell = str(target.get("sheet_cell") or "").strip()
             if not sheet_cell:
                 output_blockers.append(f"assignment missing sheet_cell: {assignment.get('target_cell_id')}")
@@ -340,12 +575,13 @@ def sheet_output_from_assigned_results(
                 "worksheet_col": worksheet_col,
                 "column_letter": get_column_letter(worksheet_col),
                 "semantic_field": semantic_field,
+                "role": target.get("role"),
                 "field_label": target.get("field_label"),
                 "date": target.get("date"),
                 "daypart": target.get("daypart"),
                 "menu_name": target.get("menu_name"),
-                "value_text": assignment.get("assigned_value") or "",
-                "value_normalized": assignment.get("assigned_value") or "",
+                "value_text": assigned_value,
+                "value_normalized": assigned_value,
                 "assignment_state": state,
                 "assignment_confidence": assignment.get("assignment_confidence"),
                 "target_cell_id": assignment.get("target_cell_id"),

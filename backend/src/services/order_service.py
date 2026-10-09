@@ -6152,12 +6152,17 @@ def _build_materialization_candidate_from_draft_record(
             "line_count": 0,
             "lines": [],
         }
-    effective_rows_payload = _apply_expanded_cell_copy_to_materialization_rows_payload(
-        fields=draft_sheet.get("fields"),
-        rows_payload=rows_payload,
-        facility_config=facility_config,
-        week_sheet_name=_week_sheet_name_from_week_value(existing_week_code),
+    # Materialization and its guard must use the original saved quantities.
+    effective_rows_payload = rows_payload
+    quantity_issues = _materialization_quantity_cell_issues(
+        fields=draft_sheet.get("fields"), rows_payload=rows_payload,
     )
+    if quantity_issues:
+        return {
+            "source": "draft_sheet", "draft_id": draft_record.get("id"),
+            "error": "sheet_ocr_review_required", "cell_issues": quantity_issues,
+            "line_count": 0, "lines": [],
+        }
     policy = deepcopy(configured_input["policy"])
     effective_received_at = received_at or datetime.utcnow()
     semantic_materialization_supported = _draft_sheet_supports_direct_materialization(
@@ -6293,8 +6298,6 @@ def _parse_materialization_quantity_cell(value: object) -> float | None:
     compact = compact.replace(",", "").replace("，", "")
     compact = compact.replace("．", ".").replace("。", ".")
     compact = compact.strip("()[]（）")
-    if re.fullmatch(r"-?\d+\.", compact):
-        compact = compact[:-1]
     if not re.fullmatch(r"-?\d+(?:\.\d+)?", compact):
         return None
     try:
@@ -6304,10 +6307,7 @@ def _parse_materialization_quantity_cell(value: object) -> float | None:
     if parsed < 0:
         return None
     if not parsed.is_integer():
-        if re.fullmatch(r"\d\.\d", compact):
-            parsed = float(compact.replace(".", ""))
-        else:
-            return None
+        return None
     return parsed
 
 
@@ -6376,42 +6376,34 @@ def _materialization_row_metadata_values(
     return values
 
 
-def _apply_expanded_cell_copy_to_materialization_rows_payload(
-    *,
-    fields: object,
-    rows_payload: object,
-    facility_config: dict[str, Any] | None,
-    week_sheet_name: str | None = None,
-) -> object:
-    if not _expanded_cell_same_daypart_copy_enabled(
-        facility_config,
-        week_sheet_name=week_sheet_name,
-    ):
-        return rows_payload
-    if not isinstance(fields, list) or not isinstance(rows_payload, list) or not rows_payload:
-        return rows_payload
-    normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
-    if not normalized_fields or _draft_fields_look_generic(normalized_fields):
-        return rows_payload
-    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
-    if not quantity_index:
-        return rows_payload
-
-    normalized_rows: list[dict[str, Any]] = []
-    for row in rows_payload:
-        values = _normalize_materialization_row_values(fields=normalized_fields, row=row)
-        if not values:
-            values = [""] * len(normalized_fields)
-        normalized_rows.append({"values": values})
-    filled = _apply_expanded_cell_same_daypart_copy(
-        rows=normalized_rows,
-        fields=normalized_fields,
-        quantity_index=quantity_index,
-        facility_config=facility_config,
-    )
-    if filled <= 0:
-        return rows_payload
-    return [list(row.get("values") or []) for row in normalized_rows]
+def _materialization_quantity_cell_issues(
+    *, fields: object, rows_payload: object,
+) -> list[dict[str, Any]]:
+    if not isinstance(fields, list) or not isinstance(rows_payload, list):
+        return []
+    normalized_fields = [str(field if field is not None else "").strip() for field in fields]
+    quantity_columns = {}
+    for index, field in enumerate(normalized_fields):
+        diet, area = _quantity_meta_from_field(field)
+        if field.startswith("qty.") or (diet and area):
+            quantity_columns[index] = bool(diet and area)
+    normalized_rows = [
+        _normalize_materialization_row_values(fields=normalized_fields, row=row)
+        for row in rows_payload
+    ]
+    issues = []
+    for row_index, row in enumerate(normalized_rows):
+        for column_index, mapped in quantity_columns.items():
+            raw = row[column_index] if column_index < len(row) else ""
+            if raw.strip() and (not mapped or _parse_materialization_quantity_cell(raw) is None):
+                issues.append({
+                    "row_index": row_index, "column_index": column_index,
+                    "field": normalized_fields[column_index],
+                    "issue_code": "review_required" if mapped else "sheet_template_field_invalid",
+                    "severity": "warning",
+                    "source": "draft_sheet", "raw": raw, "value": raw,
+                })
+    return issues
 
 
 def _build_materialization_lines_from_sheet_rows(
@@ -6426,6 +6418,8 @@ def _build_materialization_lines_from_sheet_rows(
 ) -> list[dict[str, Any]]:
     if not isinstance(fields, list) or not isinstance(rows_payload, list):
         return []
+    if _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload):
+        raise ValueError("sheet_ocr_review_required")
     normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return []
@@ -6726,6 +6720,12 @@ def _build_materialization_quantity_guard_detail(
     rows_payload: object,
     candidate_lines: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
+    quantity_issues = _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload)
+    if quantity_issues:
+        return {
+            "error": "sheet_ocr_review_required", "cell_issues": quantity_issues,
+            "mismatch_count": len(quantity_issues), "mismatches": quantity_issues,
+        }
     expected = _apply_change_override_priority_to_quantity_summary(
         _build_sheet_source_row_quantity_summary(fields=fields, rows_payload=rows_payload)
     )
@@ -10127,24 +10127,18 @@ def _hakodate_canonical_payload_from_manifest_item(
         for index, region in enumerate(evidence_source_records):
             accepted_candidate = region.get("recognizer_accepted_candidate")
             accepted_candidate = accepted_candidate if isinstance(accepted_candidate, dict) else {}
-            accepted_digits = accepted_candidate.get("normalized_digits")
-            accepted_candidate_digits = str(accepted_digits if accepted_digits is not None else "").strip()
-            raw_text = ""
-            for value in (accepted_candidate_digits, region.get("ocr_normalized"), region.get("ocr_text"), region.get("raw_text"), region.get("pred_digits")):
-                if value is not None and str(value).strip() != "":
-                    raw_text = str(value).strip()
-                    break
+            if "recognizer_raw_text" in region:
+                raw_value = region["recognizer_raw_text"]
+            elif "raw_text" in region:
+                raw_value = region["raw_text"]
+            else:
+                raw_value = region.get("ocr_text")
+            raw_text = str(raw_value if raw_value is not None else "")
             confidence_source = (
                 accepted_candidate.get("score")
                 if str(region.get("recognizer_decision_source") or "").strip() == "topk_digits"
                 else region.get("recognizer_score")
             )
-            if confidence_source is None:
-                confidence_source = region.get("score")
-            try:
-                confidence = float(confidence_source) if confidence_source is not None else None
-            except Exception:
-                confidence = None
             box = region.get("bbox")
             center = None
             if isinstance(box, list) and len(box) == 4:
@@ -10155,10 +10149,10 @@ def _hakodate_canonical_payload_from_manifest_item(
             raw_evidence_records.append(
                 {
                     "text": raw_text,
-                    "normalized_value": hakodate_ocr_evidence_service.normalize_ocr_value(raw_text),
+                    "normalized_value": raw_text,
                     "bbox": box,
                     "center": center,
-                    "confidence": confidence,
+                    "confidence": confidence_source,
                     "evidence_id": f"hakodate-cell-{index}",
                     "engine_metadata": {
                         "source_region_id": region.get("region_id"),
@@ -24601,57 +24595,6 @@ def _sheet_candidate_sort_key(
     )
 
 
-def _select_dominant_quantity_columns_from_rows(
-    *,
-    rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
-) -> list[int]:
-    if not rows or not quantity_index:
-        return []
-    quantity_columns = sorted(set(quantity_index.values()))
-    if not quantity_columns:
-        return []
-    hits: dict[int, int] = {col_idx: 0 for col_idx in quantity_columns}
-    for row in rows:
-        values = row.get("values")
-        if not isinstance(values, list):
-            continue
-        for col_idx in quantity_columns:
-            if col_idx < 0 or col_idx >= len(values):
-                continue
-            if _row_quantity_value(values, col_idx) is None:
-                continue
-            hits[col_idx] = int(hits.get(col_idx, 0)) + 1
-    max_hit = max((int(hits.get(col_idx, 0)) for col_idx in quantity_columns), default=0)
-    if max_hit <= 0:
-        return []
-    return [col_idx for col_idx in quantity_columns if int(hits.get(col_idx, 0)) == max_hit]
-
-
-def _apply_weekly_menu_order_line_cluster_consensus_fill(
-    *,
-    rows: list[dict[str, Any]],
-    fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
-) -> int:
-    if not rows or not fields or not quantity_index:
-        return 0
-    dominant_columns = _select_dominant_quantity_columns_from_rows(
-        rows=rows,
-        quantity_index=quantity_index,
-    )
-    if not dominant_columns:
-        return 0
-    # Keep this pass conservative for order-line based sheets.
-    # Use only one dominant quantity column to avoid cross-column side effects.
-    target_columns = [min(dominant_columns)]
-    return _fill_cluster_consensus_quantities(
-        rows=rows,
-        fields=fields,
-        quantity_columns=target_columns,
-    )
-
-
 def _parse_sheet_fill_decision(value: object) -> bool | None:
     if isinstance(value, bool):
         return bool(value)
@@ -24663,30 +24606,6 @@ def _parse_sheet_fill_decision(value: object) -> bool | None:
     if text in {"0", "false", "no", "deny", "denied", "reject", "rejected"}:
         return False
     return None
-
-
-def _llm_allows_order_line_cluster_consensus_fill(ocr_payload: dict[str, Any] | None) -> bool:
-    if not isinstance(ocr_payload, dict):
-        return False
-
-    candidates: list[object] = [
-        ocr_payload.get("_sheet_fill_decision"),
-    ]
-    reparse_debug = ocr_payload.get("_reparse_debug")
-    if isinstance(reparse_debug, dict):
-        candidates.append(reparse_debug.get("sheet_cluster_fill_decision"))
-        candidates.append(reparse_debug.get("order_line_cluster_fill_decision"))
-    ocr_debug = ocr_payload.get("_ocr_debug")
-    if isinstance(ocr_debug, dict):
-        candidates.append(ocr_debug.get("sheet_cluster_fill_decision"))
-        candidates.append(ocr_debug.get("order_line_cluster_fill_decision"))
-
-    for candidate in candidates:
-        parsed = _parse_sheet_fill_decision(candidate)
-        if parsed is None:
-            continue
-        return parsed
-    return False
 
 
 def _build_sheet_trace_rows(
@@ -24819,12 +24738,9 @@ def _empty_ocr_numeric_cell_summary() -> dict[str, int]:
 
 
 def _hakodate_ocr_confidence_tier(confidence: object) -> str:
-    if confidence is None:
-        return "high"
-    try:
-        score = float(confidence)
-    except Exception:
-        return "high"
+    score = hakodate_ocr_evidence_service.normalize_ocr_confidence(confidence)
+    if score is None:
+        return ""
     if score >= 0.90:
         return "high"
     if score >= 0.15:
@@ -25985,375 +25901,6 @@ def _fill_isolated_sheet_quantity_gaps(
             _set_row_quantity_value(current_values, col_idx, prev_qty)
             filled += 1
             break
-    return filled
-
-
-def _fill_cluster_consensus_quantities(
-    *,
-    rows: list[dict[str, Any]],
-    fields: list[str],
-    quantity_columns: list[int],
-) -> int:
-    if not rows or not quantity_columns:
-        return 0
-    cluster_starts = _build_sheet_cluster_starts(rows, fields)
-    ranges: list[tuple[int, int]] = []
-    if rows:
-        start = 0
-        current_cluster = cluster_starts.get(0, 0)
-        for idx in range(1, len(rows)):
-            if cluster_starts.get(idx) != current_cluster:
-                ranges.append((start, idx - 1))
-                start = idx
-                current_cluster = cluster_starts.get(idx, idx)
-        ranges.append((start, len(rows) - 1))
-
-    filled = 0
-    for start_idx, end_idx in ranges:
-        cluster_len = end_idx - start_idx + 1
-        if cluster_len <= 1:
-            continue
-        for col_idx in quantity_columns:
-            counts: dict[float, int] = {}
-            non_empty = 0
-            for row_idx in range(start_idx, end_idx + 1):
-                values = rows[row_idx].get("values")
-                if not isinstance(values, list):
-                    continue
-                qty = _row_quantity_value(values, col_idx)
-                if qty is None:
-                    continue
-                non_empty += 1
-                counts[qty] = int(counts.get(qty, 0)) + 1
-            missing = cluster_len - non_empty
-            if missing <= 0 or not counts:
-                continue
-
-            best_qty, best_count = max(counts.items(), key=lambda item: (item[1], item[0]))
-            should_fill = False
-            if non_empty == 1:
-                # Span-written fax styles frequently place one quantity for a
-                # 2-3 row daypart cluster. Mirror only for small clusters.
-                should_fill = cluster_len in {2, 3} and missing == (cluster_len - 1)
-            else:
-                dominance = best_count / max(non_empty, 1)
-                should_fill = best_count >= 2 and dominance >= 0.8
-            if not should_fill:
-                continue
-
-            for row_idx in range(start_idx, end_idx + 1):
-                values = rows[row_idx].get("values")
-                if not isinstance(values, list):
-                    continue
-                if _row_quantity_value(values, col_idx) is not None:
-                    continue
-                _set_row_quantity_value(values, col_idx, best_qty)
-                filled += 1
-    return filled
-
-
-def _expanded_cell_same_daypart_copy_enabled(
-    facility_config: dict[str, Any] | None,
-    *,
-    week_sheet_name: str | None = None,
-) -> bool:
-    if not isinstance(facility_config, dict):
-        return False
-    if isinstance(facility_config.get("expanded_cell_same_daypart_copy_enabled"), bool):
-        return bool(facility_config.get("expanded_cell_same_daypart_copy_enabled"))
-    try:
-        if order_form_service.facility_template_has_vertical_merged_quantity_cells(
-            facility_config,
-            week_sheet_name=week_sheet_name,
-        ):
-            return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to inspect facility template merged quantity cells",
-            facility_id=facility_config.get("facility_id"),
-            week_sheet_name=week_sheet_name,
-            error=str(exc),
-        )
-    return False
-
-
-def _expanded_cell_body_merge_policy(facility_config: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(facility_config, dict):
-        return {}
-    fax_template = facility_config.get("fax_template")
-    for source in (fax_template,):
-        if not isinstance(source, dict):
-            continue
-        policy = source.get("body_merge_policy")
-        if isinstance(policy, dict):
-            return dict(policy)
-    return {}
-
-
-def _expanded_cell_body_merge_target_tokens(policy: dict[str, Any]) -> set[str]:
-    raw_columns = policy.get("columns")
-    if raw_columns is None:
-        raw_columns = policy.get("target_columns")
-    if raw_columns is None:
-        raw_columns = policy.get("target_names")
-    if raw_columns is None:
-        raw_columns = policy.get("quantity_names")
-    if isinstance(raw_columns, str):
-        raw_columns = [raw_columns]
-    if not isinstance(raw_columns, list):
-        return set()
-    return {_normalize_sheet_text(item).lower() for item in raw_columns if _normalize_sheet_text(item)}
-
-
-def _expanded_cell_template_field_tokens(
-    facility_config: dict[str, Any] | None,
-    fields: list[str],
-) -> dict[str, set[str]]:
-    if not isinstance(facility_config, dict):
-        return {}
-    template = facility_config.get("fax_template")
-    columns = template.get("columns") if isinstance(template, dict) else None
-    if not isinstance(columns, list):
-        return {}
-    tokens_by_field: dict[str, set[str]] = {str(field or "").strip(): set() for field in fields}
-    for fallback_index, column in enumerate(columns):
-        if not isinstance(column, dict):
-            continue
-        field = fax_extractor._canonical_field_name_from_template_column(column, fallback_index=fallback_index)
-        if field not in tokens_by_field:
-            continue
-        raw_tokens = [
-            field,
-            column.get("name"),
-            column.get("header"),
-            column.get("display_name"),
-            column.get("label"),
-            column.get("diet_type"),
-        ]
-        tokens_by_field[field].update(
-            _normalize_sheet_text(token).lower()
-            for token in raw_tokens
-            if _normalize_sheet_text(token)
-        )
-    return tokens_by_field
-
-
-def _expanded_cell_same_daypart_copy_target_columns(
-    *,
-    fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
-    facility_config: dict[str, Any] | None,
-) -> list[int]:
-    all_quantity_columns = sorted(set(quantity_index.values()))
-    if not all_quantity_columns:
-        return []
-    policy = _expanded_cell_body_merge_policy(facility_config)
-    mode = _normalize_sheet_text(policy.get("mode")).lower()
-    target_tokens = _expanded_cell_body_merge_target_tokens(policy)
-    if not target_tokens:
-        # Legacy explicit boolean mode predates column-level body_merge_policy.
-        # Keep it as the only case that applies to all quantity columns.
-        return all_quantity_columns
-    if mode not in {"daypart", "meal", "meal_period"}:
-        return []
-    template_tokens_by_field = _expanded_cell_template_field_tokens(facility_config, fields)
-    target_columns: list[int] = []
-    for col_idx in all_quantity_columns:
-        field = str(fields[col_idx] if 0 <= col_idx < len(fields) else "").strip()
-        tokens = {_normalize_sheet_text(field).lower()}
-        tokens.update(template_tokens_by_field.get(field, set()))
-        if tokens.intersection(target_tokens):
-            target_columns.append(col_idx)
-    return sorted(set(target_columns))
-
-
-def _apply_expanded_cell_same_daypart_copy(
-    *,
-    rows: list[dict[str, Any]],
-    fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
-    facility_config: dict[str, Any] | None = None,
-) -> int:
-    if not rows or not fields or not quantity_index:
-        return 0
-    target_columns = _expanded_cell_same_daypart_copy_target_columns(
-        fields=fields,
-        quantity_index=quantity_index,
-        facility_config=facility_config,
-    )
-    if not target_columns:
-        return 0
-    return _fill_cluster_consensus_quantities(
-        rows=rows,
-        fields=fields,
-        quantity_columns=target_columns,
-    )
-
-
-def _fill_blank_daypart_clusters_by_consensus(
-    *,
-    rows: list[dict[str, Any]],
-    fields: list[str],
-    quantity_columns: list[int],
-) -> int:
-    if not rows or not quantity_columns:
-        return 0
-    _date_idx, daypart_idx, _menu_idx = _resolve_sheet_field_indexes(fields)
-    if daypart_idx is None:
-        return 0
-
-    cluster_starts = _build_sheet_cluster_starts(rows, fields)
-    cluster_ranges: list[tuple[int, int]] = []
-    if rows:
-        start = 0
-        current_cluster = cluster_starts.get(0, 0)
-        for idx in range(1, len(rows)):
-            if cluster_starts.get(idx) != current_cluster:
-                cluster_ranges.append((start, idx - 1))
-                start = idx
-                current_cluster = cluster_starts.get(idx, idx)
-        cluster_ranges.append((start, len(rows) - 1))
-    if not cluster_ranges:
-        return 0
-
-    try:
-        min_dominance = float(os.getenv("OCR_SHEET_DAYPART_CONSENSUS_MIN_DOMINANCE", "0.85"))
-    except Exception:
-        min_dominance = 0.85
-    if min_dominance <= 0:
-        min_dominance = 0.85
-    if min_dominance > 1:
-        min_dominance = 1.0
-    try:
-        edge_min_support = max(2, int(os.getenv("OCR_SHEET_DAYPART_CONSENSUS_EDGE_MIN_SUPPORT", "3")))
-    except Exception:
-        edge_min_support = 3
-    try:
-        edge_min_dominance = float(os.getenv("OCR_SHEET_DAYPART_CONSENSUS_EDGE_MIN_DOMINANCE", "0.95"))
-    except Exception:
-        edge_min_dominance = 0.95
-    if edge_min_dominance <= 0:
-        edge_min_dominance = 0.95
-    if edge_min_dominance > 1:
-        edge_min_dominance = 1.0
-
-    cluster_infos: list[dict[str, Any]] = []
-    daypart_clusters: dict[str, list[int]] = {}
-    for start_idx, end_idx in cluster_ranges:
-        sample_values = rows[start_idx].get("values")
-        if not isinstance(sample_values, list):
-            sample_values = []
-        daypart_key = _normalize_sheet_text(_safe_row_get(sample_values, daypart_idx))
-        cluster_idx = len(cluster_infos)
-        daypart_clusters.setdefault(daypart_key, []).append(cluster_idx)
-
-        non_empty_by_col: dict[int, int] = {}
-        representative_by_col: dict[int, float | None] = {}
-        for col_idx in quantity_columns:
-            counts: dict[float, int] = {}
-            non_empty = 0
-            for row_idx in range(start_idx, end_idx + 1):
-                values = rows[row_idx].get("values")
-                if not isinstance(values, list):
-                    continue
-                qty = _row_quantity_value(values, col_idx)
-                if qty is None:
-                    continue
-                non_empty += 1
-                counts[qty] = int(counts.get(qty, 0)) + 1
-            non_empty_by_col[col_idx] = non_empty
-            if not counts:
-                representative_by_col[col_idx] = None
-                continue
-            best_qty, best_count = max(counts.items(), key=lambda item: (item[1], item[0]))
-            if non_empty == 1:
-                representative_by_col[col_idx] = best_qty
-                continue
-            dominance = best_count / max(non_empty, 1)
-            representative_by_col[col_idx] = best_qty if best_count >= 2 and dominance >= 0.8 else None
-
-        cluster_infos.append(
-            {
-                "start": start_idx,
-                "end": end_idx,
-                "non_empty_by_col": non_empty_by_col,
-                "representative_by_col": representative_by_col,
-            }
-        )
-
-    filled = 0
-    for col_idx in quantity_columns:
-        for daypart_key, cluster_indexes in daypart_clusters.items():
-            if not daypart_key:
-                continue
-            observed: list[tuple[int, float]] = []
-            for cluster_idx in cluster_indexes:
-                representative = cluster_infos[cluster_idx]["representative_by_col"].get(col_idx)
-                if representative is None or representative <= 0:
-                    continue
-                observed.append((cluster_idx, float(representative)))
-            if len(observed) < 2:
-                continue
-
-            observed_counts: dict[float, int] = {}
-            for _cluster_idx, quantity in observed:
-                observed_counts[quantity] = int(observed_counts.get(quantity, 0)) + 1
-            dominant_qty, dominant_count = max(observed_counts.items(), key=lambda item: (item[1], item[0]))
-            dominance = dominant_count / max(len(observed), 1)
-            if dominance < min_dominance:
-                continue
-
-            for cluster_idx in cluster_indexes:
-                non_empty = int(cluster_infos[cluster_idx]["non_empty_by_col"].get(col_idx, 0))
-                if non_empty > 0:
-                    continue
-
-                start_idx = int(cluster_infos[cluster_idx]["start"])
-                end_idx = int(cluster_infos[cluster_idx]["end"])
-                cluster_len = end_idx - start_idx + 1
-                if cluster_len not in {2, 3}:
-                    continue
-
-                prev_qty: float | None = None
-                next_qty: float | None = None
-                for observed_idx, observed_qty in reversed(observed):
-                    if observed_idx < cluster_idx:
-                        prev_qty = observed_qty
-                        break
-                for observed_idx, observed_qty in observed:
-                    if observed_idx > cluster_idx:
-                        next_qty = observed_qty
-                        break
-
-                should_fill = False
-                if prev_qty is not None and next_qty is not None:
-                    should_fill = (
-                        abs(prev_qty - dominant_qty) <= 0.0001 and abs(next_qty - dominant_qty) <= 0.0001
-                    )
-                elif prev_qty is None and next_qty is not None:
-                    should_fill = (
-                        abs(next_qty - dominant_qty) <= 0.0001
-                        and len(observed) >= edge_min_support
-                        and dominance >= edge_min_dominance
-                    )
-                elif next_qty is None and prev_qty is not None:
-                    should_fill = (
-                        abs(prev_qty - dominant_qty) <= 0.0001
-                        and len(observed) >= edge_min_support
-                        and dominance >= edge_min_dominance
-                    )
-                if not should_fill:
-                    continue
-
-                for row_idx in range(start_idx, end_idx + 1):
-                    values = rows[row_idx].get("values")
-                    if not isinstance(values, list):
-                        continue
-                    if _row_quantity_value(values, col_idx) is not None:
-                        continue
-                    _set_row_quantity_value(values, col_idx, dominant_qty)
-                    filled += 1
-
     return filled
 
 
@@ -27997,10 +27544,6 @@ def get_ocr_sheet(
     rows = _clone_sheet_rows(base_rows)
     sheet_warnings: list[str] = []
     shell_projection_stats: dict[str, Any] = {}
-    expanded_cell_same_daypart_copy_enabled = _expanded_cell_same_daypart_copy_enabled(
-        facility_config,
-        week_sheet_name=_week_sheet_name_from_week_value(resolved_week_id),
-    )
     payload_mapping_block_reason = _sheet_payload_mapping_block_reason(
         source=source,
         ocr_payload=ocr_payload,
@@ -28035,8 +27578,6 @@ def get_ocr_sheet(
         _append_sheet_warning("sheet_payload_mapping_low_confidence")
     elif payload_mapping_hard_blocked:
         _append_sheet_warning("sheet_payload_mapping_blocked_unresolved_template")
-
-    llm_allows_cluster_fill = _llm_allows_order_line_cluster_consensus_fill(ocr_payload)
 
     # Weekly menu + template is the primary source of truth for structure.
     # Current-sheet quantities may only come from identity-aligned OCR/Gemini/user
@@ -29206,7 +28747,6 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
                             "reason": "hakodate_target_cell_reset",
                         }
                 )
-                break
     applied: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
@@ -29228,7 +28768,19 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             if isinstance(source_target.get("metadata"), dict) and not isinstance(merged_cell.get("metadata"), dict):
                     merged_cell["metadata"] = dict(source_target.get("metadata") or {})
             cell = merged_cell
-        value = str(cell.get("value_normalized") or cell.get("value_text") or "").strip()
+        raw_value = cell.get("value_normalized")
+        if raw_value is None:
+            raw_value = cell.get("value_text")
+        value = str(raw_value if raw_value is not None else "").strip()
+        if cell.get("assignment_state") not in {"assigned", "blank", "blank_evidence"}:
+            skipped.append({**cell, "skip_reason": "assignment_state_unresolved", "value": value})
+            continue
+        try:
+            value = hakodate_ocr_evidence_service.validate_assigned_ocr_value(cell)
+            role = hakodate_ocr_evidence_service.authored_cell_role(cell)
+        except ValueError as exc:
+            skipped.append({**cell, "skip_reason": str(exc), "value": value})
+            continue
         logical_row_index, has_logical_identity = _hakodate_projection_row_from_logical_identity(
             cell,
             row_identity_index=row_identity_index,
@@ -29264,7 +28816,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         classification = _hakodate_ocr_classification_for_confidence(confidence)
         confidence_tier = _hakodate_ocr_confidence_tier(confidence)
         placement_basis = _hakodate_ocr_placement_basis_for_confidence(confidence)
-        if value:
+        if value and role == "quantity":
             ocr_numeric_cell_summary["raw_ocr_numeric_count"] += 1
             summary_key = (
                 "accepted_count"
@@ -29323,46 +28875,9 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
                 "classification": classification,
             }
         )
-    expanded_cell_filled = 0
-    effective_facility_config = facility_config
-    if effective_facility_config is None:
+    if facility_config is None:
         raise ValueError("hakodate_projection_config_required")
-    effective_week_sheet_name = week_sheet_name
-    if not effective_week_sheet_name:
-        week_id = str(base_sheet.get("week_id") or base_sheet.get("resolved_week_id") or "").strip()
-        effective_week_sheet_name = _week_sheet_name_from_week_value(week_id)
-    if _expanded_cell_same_daypart_copy_enabled(
-        effective_facility_config,
-        week_sheet_name=effective_week_sheet_name,
-    ):
-        quantity_index = _build_sheet_quantity_index(fields)
-        expanded_rows = [{"values": row} for row in rows]
-        before_rows = [list(row) for row in rows]
-        expanded_cell_filled = _apply_expanded_cell_same_daypart_copy(
-            rows=expanded_rows,
-            fields=fields,
-            quantity_index=quantity_index,
-            facility_config=effective_facility_config,
-        )
-        if expanded_cell_filled > 0:
-            rows = [
-                list(row.get("values") or [])
-                for row in expanded_rows
-            ]
-            for row_index, (before, after) in enumerate(zip(before_rows, rows, strict=False)):
-                for col_index, after_value in enumerate(after):
-                    if str(before[col_index] if col_index < len(before) else "").strip():
-                        continue
-                    if not str(after_value or "").strip():
-                        continue
-                    while len(cell_confidence_rows) <= row_index:
-                        cell_confidence_rows.append(["" for _ in range(column_count)])
-                        cell_provenance_rows.append(["" for _ in range(column_count)])
-                    while len(cell_confidence_rows[row_index]) <= col_index:
-                        cell_confidence_rows[row_index].append("")
-                        cell_provenance_rows[row_index].append("")
-                    cell_confidence_rows[row_index][col_index] = "high"
-                    cell_provenance_rows[row_index][col_index] = "expanded_cell_same_daypart_copy"
+    # Explicit logical targets have already been expanded by the evidence service.
     projected["rows"] = rows
     projected["fields"] = fields
     projected["cell_confidence_rows"] = cell_confidence_rows
@@ -29389,11 +28904,11 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             "deferred_count": len(deferred),
             "ignored_count": len(ignored),
             "cleared_legacy_cell_count": len(cleared),
-            "expanded_cell_same_daypart_filled_count": expanded_cell_filled,
+            "expanded_cell_same_daypart_filled_count": 0,
         },
     }
     blockers = list(assignment.get("blockers") or [])
-    if any(str(item.get("value") or item.get("value_normalized") or item.get("value_text") or "").strip() for item in skipped):
+    if skipped or any(item["value"] != "" for item in deferred):
         blockers.append("hakodate_sheet_projection_incomplete")
     projected["blockers"] = sorted(set(str(item) for item in blockers if str(item).strip()))
     projected["warnings"] = sorted(

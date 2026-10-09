@@ -17,6 +17,7 @@ from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw, ImageFont
 
 from src.services import config_service, hakodate_assignment_service, hakodate_physical_menu_row_service
+from src.services import hakodate_ocr_evidence_service
 from src.services.storage_service import load_bytes_from_uri
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
@@ -49,7 +50,6 @@ from src.services.hakodate_step_review_pipeline_service import (
 
 
 DEFAULT_CELL_OCR_ENGINE = "yomitoku_contact_sheet_batch"
-_FULLWIDTH_DIGIT_TRANS = str.maketrans("０１２３４５６７８９，．", "0123456789,.")
 _LOCAL_YOMITOKU_ANALYZER = None
 _LOCAL_YOMITOKU_ANALYZER_KEY: tuple[str, bool] | None = None
 
@@ -153,9 +153,7 @@ class HakodateCellOcrCaseResult:
 
 
 def _normalize_digits(value: object) -> str:
-    text = str(value or "").strip().translate(_FULLWIDTH_DIGIT_TRANS)
-    text = re.sub(r"[^0-9,.]", "", text)
-    return text.strip(".,")
+    return hakodate_ocr_evidence_service.normalize_ocr_value(value)
 
 
 def _safe_int_box(
@@ -559,6 +557,12 @@ def assign_yomitoku_words_to_contact_regions(
     sheet_size: tuple[int, int],
 ) -> list[dict[str, Any]]:
     width, height = sheet_size
+    roles = {
+        str(region.get("region_id")): hakodate_ocr_evidence_service.authored_cell_role(
+            hakodate_ocr_evidence_service.logical_sheet_targets_from_region(region)[0]
+        )
+        for region in regions
+    }
     by_region_id: dict[str, list[dict[str, Any]]] = {str(region.get("region_id")): [] for region in regions}
     for raw_word in words:
         text = str(raw_word.get("text") or "").strip()
@@ -579,7 +583,7 @@ def assign_yomitoku_words_to_contact_regions(
                         "text": text,
                         "x": cx,
                         "y": cy,
-                        "normalized_digits": _normalize_digits(text),
+                        "normalized_digits": text if roles[str(region.get("region_id"))] == "note" else _normalize_digits(text),
                         "source_word": raw_word,
                     }
                 )
@@ -592,7 +596,7 @@ def assign_yomitoku_words_to_contact_regions(
             {
                 **region,
                 "ocr_text": text,
-                "ocr_normalized": _normalize_digits(text),
+                "ocr_normalized": text if roles[str(region.get("region_id"))] == "note" else _normalize_digits(text),
                 "ocr_words": region_words,
                 "ocr_word_count": len(region_words),
             }
@@ -603,12 +607,14 @@ def assign_yomitoku_words_to_contact_regions(
 def sheet_assignments_from_ocr_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     assignments: list[dict[str, Any]] = []
     for region in regions:
-        logical_targets = region.get("logical_targets") or []
-        if not isinstance(logical_targets, list):
-            logical_targets = []
+        logical_targets = hakodate_ocr_evidence_service.logical_sheet_targets_from_region(region)
+        role = hakodate_ocr_evidence_service.authored_cell_role(logical_targets[0])
+        try:
+            quantity = hakodate_ocr_evidence_service.validate_ocr_source_for_role(region, role)
+        except ValueError as exc:
+            raw = {key: region[key] for key in ("recognizer_raw_text", "raw_text", "ocr_text") if key in region}
+            raise ValueError(f"{exc}: region={region.get('region_id')!r}, raw={raw!r}") from exc
         for target in logical_targets:
-            if not isinstance(target, dict):
-                continue
             assignments.append(
                 {
                     "sheet_cell": target.get("sheet_cell"),
@@ -616,13 +622,14 @@ def sheet_assignments_from_ocr_regions(regions: list[dict[str, Any]]) -> list[di
                     "worksheet_col": target.get("worksheet_col"),
                     "grid_row_index": target.get("grid_row_index"),
                     "grid_col_index": target.get("grid_col_index"),
-                    "field": target.get("field"),
+                    "field": target.get("field") or target.get("semantic_field"),
+                    "role": role,
                     "field_label": target.get("field_label"),
                     "date": target.get("date"),
                     "daypart": target.get("daypart"),
                     "menu_name": target.get("menu_name"),
-                    "value_text": region.get("ocr_text") or "",
-                    "value_normalized": region.get("ocr_normalized") or "",
+                    "value_text": str(region["ocr_text"] if region.get("ocr_text") is not None else ""),
+                    "value_normalized": quantity,
                     "source_region_id": region.get("region_id"),
                     "source_region_bbox": region.get("bbox"),
                     "source_region_crop_bbox_px": region.get("ocr_cell_crop_bbox_px"),
@@ -637,6 +644,14 @@ def sheet_value_grid_from_assignments(assignments: list[dict[str, Any]]) -> dict
     row_indexes: set[int] = set()
     col_indexes: set[int] = set()
     for assignment in assignments:
+        try:
+            role = hakodate_ocr_evidence_service.authored_cell_role(assignment)
+            quantity = hakodate_ocr_evidence_service.validate_ocr_source_for_role({
+                "raw_text": assignment.get("value_text"),
+                "normalized_value": assignment.get("value_normalized"),
+            }, role)
+        except ValueError as exc:
+            raise ValueError(f"{exc}: cell={assignment.get('sheet_cell')!r}, raw={assignment.get('value_text')!r}") from exc
         sheet_cell = str(assignment.get("sheet_cell") or "").strip()
         if not sheet_cell:
             continue
@@ -654,9 +669,10 @@ def sheet_value_grid_from_assignments(assignments: list[dict[str, Any]]) -> dict
             "worksheet_row": worksheet_row,
             "worksheet_col": worksheet_col,
             "column_letter": get_column_letter(worksheet_col),
-            "value_text": assignment.get("value_text") or "",
-            "value_normalized": assignment.get("value_normalized") or "",
+            "value_text": str(assignment["value_text"] if assignment.get("value_text") is not None else ""),
+            "value_normalized": quantity,
             "field": assignment.get("field"),
+            "role": role,
             "field_label": assignment.get("field_label"),
             "date": assignment.get("date"),
             "daypart": assignment.get("daypart"),
@@ -732,9 +748,11 @@ def validate_cell_ocr_mapping(
         errors.append(f"regions without assignments: {missing_region_ids[:12]}")
 
     for region_id, region in region_by_id.items():
-        expected_targets = region.get("logical_targets") or []
-        if not isinstance(expected_targets, list):
-            expected_targets = []
+        try:
+            expected_targets = hakodate_ocr_evidence_service.logical_sheet_targets_from_region(region)
+        except ValueError as exc:
+            errors.append(f"{region_id}: {exc}")
+            continue
         actual_assignments = assignments_by_region.get(region_id) or []
         if len(actual_assignments) != len(expected_targets):
             errors.append(
@@ -744,12 +762,15 @@ def validate_cell_ocr_mapping(
 
         region_text = str(region.get("ocr_text") or "")
         region_normalized = str(region.get("ocr_normalized") or "")
+        role = hakodate_ocr_evidence_service.authored_cell_role(expected_targets[0])
+        if role == "note":
+            region_normalized = region_text
         region_words = region.get("ocr_words") or []
         if not isinstance(region_words, list):
             errors.append(f"{region_id}: ocr_words is not a list")
             region_words = []
         reparsed_text = _words_to_region_text(region_words)
-        reparsed_normalized = _normalize_digits(reparsed_text)
+        reparsed_normalized = reparsed_text if role == "note" else _normalize_digits(reparsed_text)
         if reparsed_text != region_text:
             errors.append(f"{region_id}: raw OCR words do not reparse to ocr_text")
         if reparsed_normalized != region_normalized:
