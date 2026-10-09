@@ -19,7 +19,8 @@ from test_modernization_workflow_surface_parity import database_snapshot, surfac
 from test_modernization_owned_ocr_workflow import (
     JOB, ORDER, OwnedProducer, _queue_and_claim_owned_workflow_attempt,
 )
-from src.models.menu import MenuFacilityOverride, MenuMaster, MonthlyMenu, MonthlyMenuEntry
+from src.models.document import OrderDocument
+from src.models.menu import MenuFacilityOverride, MenuMaster, MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
 from src.models.ocr_job import OcrJob
 from src.models.order import Order
 from src.models.order_sheet_draft import OrderSheetDraft
@@ -33,6 +34,18 @@ from src.services import workflow_ocr_delivery_service as delivery
 
 NAMES = [f"選択献立{i}" for i in range(4)]
 SAVED_WEEK = "2026-03@2026-03-01~2026-03-07"
+
+
+@pytest.fixture
+def geometry_bagging(owned_bagging):
+    f = owned_bagging
+    f.authored["fax_template"]["page"] = 1
+    f.republish()
+    with f.session_scope() as session:
+        orders._record_current_order_version(
+            session, session.get(Order, f.order_id), session.get(OrderDocument, "UNIT-DOC"),
+        )
+    return f
 
 
 def writer_lock(session, order_id):
@@ -140,6 +153,7 @@ def test_flushed_defaults_and_snapshot_matching_share_writer_connection(owned_ba
     with f.sessions() as session:
         writer_lock(session, f.order_id)
         session.get(MenuMaster, "UNIT-MASTER-0").qty_per_serving = 102
+        session.get(MonthlyMenuItem, "UNIT-ITEM-0").qty_per_serving = 102
         session.flush()
         lines = [{"menu_name": NAMES[0], "daypart": "朝", "quantity_original": 7},
                  {"menu_name": NAMES[3], "daypart": "朝", "quantity_original": 0},
@@ -181,6 +195,11 @@ def test_explicit_override_and_cross_month_rows_equal_standalone(owned_bagging):
                                          facility_id="F", qty_per_serving=125, unit_type="g"))
         session.add(MonthlyMenu(id="2026-04", month_start=date(2026, 4, 1)))
         session.flush()
+        session.add(MonthlyMenuItem(
+            id="OWNER-APRIL-ITEM", monthly_menu_id="2026-04", menu_master_id="UNIT-MASTER-0",
+            name=NAMES[0], unit_type="g", qty_per_serving=100,
+            daypart="朝", category="主", diet_type="regular", facility_override="F",
+        ))
         for identifier, day, month in [("OWNER-MARCH", date(2026, 3, 31), "2026-03"),
                                        ("OWNER-APRIL", date(2026, 4, 1), "2026-04")]:
             session.add(MonthlyMenuEntry(id=identifier, monthly_menu_id=month, menu_date=day,
@@ -271,8 +290,8 @@ def test_actual_owned_fences_reject_changed_input_without_extra_connection(owned
     assert database_snapshot() == before
 
 
-def test_geometry_revalidation_and_quad_axis_saved_receipts_share_session(owned_bagging):
-    f = owned_bagging
+def test_geometry_revalidation_and_quad_axis_saved_receipts_share_session(geometry_bagging):
+    f = geometry_bagging
     before = database_snapshot()
     with f.sessions() as session:
         writer_lock(session, f.order_id)
@@ -329,8 +348,8 @@ def test_active_ingest_and_quad_axis_callers_explicitly_forward_session():
 
 
 @pytest.mark.parametrize("command", ["quad", "header", "row"])
-def test_actual_quad_and_axis_save_commands_use_one_owned_transaction(owned_bagging, command):
-    f = owned_bagging
+def test_actual_quad_and_axis_save_commands_use_one_owned_transaction(geometry_bagging, command):
+    f = geometry_bagging
     original = f.saved()
     with f.session_scope() as session:
         receipt, _captured = workflow._axis_source_receipt(
