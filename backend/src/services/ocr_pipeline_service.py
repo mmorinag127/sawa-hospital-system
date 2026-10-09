@@ -14,10 +14,6 @@ from src.services.storage_uri import format_gcs_uri, parse_gcs_uri
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-from src.services.storage_service import (
-    get_default_output_bucket,
-    get_default_artifact_bucket,
-)
 from src.services.ocr_pipeline_state_store import (
     save_pipeline_request,
     save_pipeline_success,
@@ -35,19 +31,13 @@ def _sanitize_object_name(value: str) -> str:
 
 
 def _get_pipeline_bucket() -> str:
-    bucket = (
-        os.getenv("OCR_PIPELINE_BUCKET")
-        or os.getenv("OCR_PIPELINE_INPUT_BUCKET")
-        or get_default_output_bucket()
-        or get_default_artifact_bucket()
-    )
+    bucket = (os.getenv("OCR_PIPELINE_BUCKET") or "").strip()
     if not bucket:
-        raise RuntimeError("OCR pipeline bucket is not configured")
+        raise RuntimeError("OCR_PIPELINE_BUCKET is not configured")
+    legacy_bucket = (os.getenv("OCR_PIPELINE_INPUT_BUCKET") or "").strip()
+    if legacy_bucket and legacy_bucket != bucket:
+        raise RuntimeError("OCR_PIPELINE_INPUT_BUCKET conflicts with OCR_PIPELINE_BUCKET")
     return bucket
-
-
-def _is_pytest() -> bool:
-    return bool(os.getenv("PYTEST_CURRENT_TEST"))
 
 
 def _get_pipeline_url() -> str | None:
@@ -176,12 +166,12 @@ def is_ocr_pipeline_output_pending(payload: dict[str, object] | None) -> bool:
 
 def get_pipeline_config() -> dict[str, Any]:
     url = _get_pipeline_url()
-    bucket = (
-        os.getenv("OCR_PIPELINE_BUCKET")
-        or os.getenv("OCR_PIPELINE_INPUT_BUCKET")
-        or get_default_output_bucket()
-        or get_default_artifact_bucket()
-    )
+    error = None
+    try:
+        bucket = _get_pipeline_bucket()
+    except RuntimeError as exc:
+        bucket = None
+        error = str(exc)
     trigger_mode = "gcs_only"
     if bucket and url:
         trigger_mode = "gcs_http"
@@ -191,6 +181,7 @@ def get_pipeline_config() -> dict[str, Any]:
         # The OCR pipeline is triggered by writing to GCS in this system, so the bucket
         # is the only hard requirement. OCR_PIPELINE_URL is optional (HTTP trigger mode).
         "configured": bool(bucket),
+        "error": error,
         "url_set": bool(url),
         "bucket_set": bool(bucket),
         "bucket": bucket,
@@ -405,18 +396,7 @@ def run_ocr_pipeline(
         _inflight_delta(1)
         logger.info("OCR pipeline slot acquired inflight=%s", _PIPELINE_INFLIGHT)
     try:
-        try:
-            bucket = _get_pipeline_bucket()
-        except RuntimeError:
-            if _is_pytest():
-                logger.warning("OCR pipeline bucket missing in pytest; returning unclassified stub.")
-                return {
-                    "status": "unclassified",
-                    "template_id": None,
-                    "input_reference": input_reference,
-                    "output_reference": None,
-                }
-            raise
+        bucket = _get_pipeline_bucket()
 
         input_prefix = _get_prefix("OCR_PIPELINE_INPUT_PREFIX", "input/")
         output_prefix = _get_prefix("OCR_PIPELINE_OUTPUT_PREFIX", "output/")
