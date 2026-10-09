@@ -9792,6 +9792,8 @@ def _build_live_hakodate_manifest_item(
         output_dir=registration_dir,
         template_axes_x=template_axes_x,
         template_axes_y=template_axes_y,
+        template_workbook_path=structure_xlsx,
+        template_sheet_name=template_sheet_name,
         page=_authored_geometry_page(quad_configured_input),
     )
     step2_png = Path(registration.outputs["step2"])
@@ -14786,8 +14788,10 @@ def _rerun_ocr_evidence_only_with_input(
     )
 
     def _hakodate_rerun_failure_payload(exc: Exception) -> dict[str, Any]:
+        from src.services.hakodate_fixed_quad_registration_service import QuadEstimationError
+
         raw_message = str(exc).strip()
-        if "edge locked quad estimation failed" in raw_message:
+        if isinstance(exc, QuadEstimationError):
             return {
                 "error": "quad_estimation_failed",
                 "error_detail": raw_message,

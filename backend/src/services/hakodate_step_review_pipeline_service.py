@@ -25,9 +25,9 @@ from src.services.hakodate_fixed_quad_registration_service import (
 
 WEEK_SHEET_NAME = "4月26日～4月30日"
 TARGET_RULE = "all columns strictly right of menu(献立)"
-STEP_REVIEW_BODY_START_ROW = 11
-STEP_REVIEW_BODY_END_ROW = 67
-STEP_REVIEW_HEADER_BANDS = 2
+STEP_REVIEW_BODY_START_ROW = master_order_form_template_service.BODY_START_ROW
+STEP_REVIEW_BODY_END_ROW = master_order_form_template_service.BODY_END_ROW
+STEP_REVIEW_HEADER_BANDS = len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS)
 
 
 @dataclass(frozen=True)
@@ -2537,13 +2537,7 @@ def _single_cell_bbox(
 
 
 def _step_review_worksheet_row_to_grid_index(worksheet_row: int, *, body_end_row: int = STEP_REVIEW_BODY_END_ROW) -> int | None:
-    if 7 <= worksheet_row <= 8:
-        return 0
-    if 9 <= worksheet_row <= 10:
-        return 1
-    if STEP_REVIEW_BODY_START_ROW <= worksheet_row <= body_end_row:
-        return STEP_REVIEW_HEADER_BANDS + (worksheet_row - STEP_REVIEW_BODY_START_ROW)
-    return None
+    return master_order_form_template_service.template_row_to_grid_index(worksheet_row, body_end_row=body_end_row)
 
 
 def _step_review_physical_row_map(worksheet: Any, *, row_count: int) -> dict[int, dict[str, Any]]:
@@ -3084,13 +3078,13 @@ def _post_menu_boundary_preserving_xs(
     fax_x_candidates: list[float],
     fax_template: dict[str, Any] | None = None,
 ) -> tuple[list[float], dict[str, Any]]:
-    if worksheet is None or len(matched_xs) < 3:
+    if worksheet is None:
         return matched_xs, {"used": False, "reason": "worksheet_unavailable"}
-    col_count = min(int(getattr(worksheet, "max_column", 0) or 0), len(matched_xs) - 1)
+    col_count = worksheet.max_column
+    if len(matched_xs) != col_count + 1:
+        raise ValueError("hakodate_original_target_inputs_required")
     if col_count < 2:
         return matched_xs, {"used": False, "reason": "not_enough_columns"}
-    if col_count != worksheet.max_column:
-        raise ValueError("hakodate_original_target_inputs_required")
     slots = hakodate_assignment_service.canonical_generated_column_slots(fax_template, col_count=col_count)
     menu_col = _menu_column_from_slots(slots, worksheet)
     post_start_edge_index = int(menu_col)
@@ -3460,8 +3454,8 @@ def _post_menu_target_regions(
     draft_sheet: dict[str, Any] | None = None,
     menu_body_row_indexes: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    col_count = min(int(worksheet.max_column or 0), len(column_edges) - 1)
-    if col_count != worksheet.max_column or draft_sheet is None:
+    col_count = worksheet.max_column
+    if len(column_edges) != col_count + 1 or draft_sheet is None:
         raise ValueError("hakodate_original_target_inputs_required")
     plan = canonical_logical_target_plan(worksheet=worksheet, fax_template=fax_template, draft_sheet=draft_sheet)
     slots = hakodate_assignment_service.canonical_generated_column_slots(fax_template, col_count=col_count)
@@ -3660,6 +3654,8 @@ def build_hakodate_step_review_for_manifest_item(
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        template_workbook_path=item.get("template_xlsx"),
+        template_sheet_name=item.get("template_sheet_name"),
         page=page,
     )
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width, page=page)

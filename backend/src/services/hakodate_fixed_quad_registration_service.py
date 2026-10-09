@@ -11,7 +11,7 @@ import numpy as np
 from openpyxl import load_workbook
 from PIL import Image
 
-from src.services import workbook_pdf_renderer
+from src.services import master_order_form_template_service, workbook_pdf_renderer
 
 
 FORBIDDEN_DOWNSTREAM_METHODS = [
@@ -19,10 +19,12 @@ FORBIDDEN_DOWNSTREAM_METHODS = [
     "drop_one_extra_fax_line_by_min_affine_residual",
     "ordered_affine_dp_match_with_interpolated_missing_lines",
 ]
-ORDER_FORM_TEMPLATE_Y_EDGE_COUNT = 60
 TWO_STAGE_HEADER_BOUNDARY_MIN_WIDTH_RATIO = 0.12
-ORDER_FORM_TEMPLATE_HEADER_EDGE_ROWS = (7, 9)
-ORDER_FORM_TEMPLATE_BODY_EDGE_ROWS = tuple(range(11, 69))
+
+
+class QuadEstimationError(ValueError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"edge locked quad estimation failed: {reason}")
 
 
 @dataclass(frozen=True)
@@ -114,22 +116,7 @@ def _edge_locked_choose_component(combined: np.ndarray) -> tuple[np.ndarray, dic
             best = row
     source = "large_grid_component"
     if best is None:
-        for label in range(1, count):
-            x, y, w, h, area = stats[label]
-            row = {
-                "label": int(label),
-                "x": int(x),
-                "y": int(y),
-                "w": int(w),
-                "h": int(h),
-                "area": int(area),
-                "score": float(area),
-            }
-            if best is None or row["score"] > best["score"]:
-                best = row
-        source = "fallback_largest_component"
-    if best is None:
-        raise ValueError("edge locked grid component not found")
+        raise QuadEstimationError("edge locked grid component not found")
     return (labels == best["label"]).astype("uint8") * 255, best, source
 
 
@@ -402,7 +389,7 @@ def resolve_fixed_quad_px_for_manifest_item(
         raise ValueError("quad_px missing and fax_pdf/local_pdf unavailable")
     estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220, render_width=render_width, page=page)
     if estimate["status"] != "ok":
-        raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
+        raise QuadEstimationError(str(estimate["reasons"]))
     return estimate["refined_quad_px"], "edge_locked_v4_estimated_from_fax_pdf", estimate
 
 
@@ -476,7 +463,7 @@ def _fill_missing_table_y_edges_by_gap(
 ) -> list[int]:
     table_ys = sorted(y for y in strong_ys if y >= table_y0 - 5)
     if len(table_ys) >= expected_count:
-        return table_ys[:expected_count]
+        return table_ys
 
     missing_count = expected_count - len(table_ys)
     if missing_count <= 0:
@@ -525,7 +512,10 @@ def extract_template_axes_from_image(
     template_image: np.ndarray,
     *,
     manifest_template_bbox: list[float],
+    expected_x_edge_count: int,
+    expected_y_edge_count: int,
 ) -> tuple[list[int], list[int], list[int], list[int]]:
+    _validate_expected_y_edge_count(expected_y_edge_count)
     height, width = template_image.shape[:2]
     gray = cv2.cvtColor(template_image, cv2.COLOR_BGR2GRAY)
     binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)[1]
@@ -558,35 +548,69 @@ def extract_template_axes_from_image(
         strong_ys=strong_ys,
         weak_ys=weak_ys,
         table_y0=manifest_y0,
-        expected_count=ORDER_FORM_TEMPLATE_Y_EDGE_COUNT,
+        expected_count=expected_y_edge_count,
     )
     if not ys:
         raise ValueError("template table y axes not found")
-    if len(ys) != ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:
+    if len(ys) != expected_y_edge_count:
         raise ValueError(
             "template table y axes incomplete: "
-            f"expected={ORDER_FORM_TEMPLATE_Y_EDGE_COUNT} actual={len(ys)}"
+            f"expected={expected_y_edge_count} actual={len(ys)}"
         )
+    xs, ys = _normalize_explicit_template_axes(
+        xs, ys, expected_x_edge_count=expected_x_edge_count,
+        expected_y_edge_count=expected_y_edge_count,
+    )
     return xs, ys, [int(v) for v in xs], [int(v) for v in ys_all]
+
+
+def _validate_expected_y_edge_count(count: int) -> None:
+    if type(count) is not int or count < len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS) + 2:
+        raise ValueError("canonical_template_y_edge_count_unresolved")
+
+
+def template_axis_edge_counts_from_workbook(workbook_path: Path | str | None, *, sheet_name: str | None) -> tuple[int, int]:
+    if not workbook_path or not sheet_name:
+        raise ValueError("canonical_template_workbook_required")
+    workbook = load_workbook(Path(workbook_path))
+    try:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"template axes sheet not found: {sheet_name}")
+        worksheet = workbook[sheet_name]
+        edge_rows = master_order_form_template_service.validated_template_row_edges(worksheet, allow_static=True)
+        return worksheet.max_column + 1, len(edge_rows)
+    finally:
+        workbook.close()
 
 
 def _normalize_explicit_template_axes(
     template_axes_x: list[Any] | None,
     template_axes_y: list[Any] | None,
+    *,
+    expected_x_edge_count: int,
+    expected_y_edge_count: int,
 ) -> tuple[list[int], list[int]]:
+    if type(expected_x_edge_count) is not int or expected_x_edge_count < 2:
+        raise ValueError("canonical_template_x_edge_count_unresolved")
+    _validate_expected_y_edge_count(expected_y_edge_count)
     if template_axes_x is None or template_axes_y is None:
         raise ValueError("canonical template axes require both x and y")
     try:
-        xs = sorted({int(round(float(value))) for value in template_axes_x})
+        xs = [int(round(float(value))) for value in template_axes_x]
         ys = [int(round(float(value))) for value in template_axes_y]
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"canonical template axes invalid:{exc}") from exc
-    if len(xs) < 2:
-        raise ValueError("canonical template x axes incomplete")
-    if len(ys) != ORDER_FORM_TEMPLATE_Y_EDGE_COUNT:
+    if len(xs) != expected_x_edge_count:
+        raise ValueError(
+            "canonical template x axes incomplete: "
+            f"expected={expected_x_edge_count} actual={len(xs)}"
+        )
+    if any(xs[index] >= xs[index + 1] for index in range(len(xs) - 1)):
+        raise ValueError("canonical template x axes are not strictly increasing")
+    if len(ys) != expected_y_edge_count:
         raise ValueError(
             "canonical template y axes incomplete: "
-            f"expected={ORDER_FORM_TEMPLATE_Y_EDGE_COUNT} actual={len(ys)}"
+            f"expected={expected_y_edge_count} actual={len(ys)}"
         )
     if any(ys[index] >= ys[index + 1] for index in range(len(ys) - 1)):
         raise ValueError("canonical template y axes are not strictly increasing")
@@ -599,17 +623,24 @@ def resolve_template_axes_from_manifest_or_image(
     template_image: np.ndarray,
     manifest_template_bbox: list[float],
 ) -> tuple[list[int], list[int], list[int], list[int]]:
+    expected_x_count, expected_y_count = template_axis_edge_counts_from_workbook(
+        item.get("template_xlsx"), sheet_name=item.get("template_sheet_name"),
+    )
     has_x = "template_axes_x" in item
     has_y = "template_axes_y" in item
     if has_x or has_y:
         xs, ys = _normalize_explicit_template_axes(
             item.get("template_axes_x") if isinstance(item, dict) else None,
             item.get("template_axes_y") if isinstance(item, dict) else None,
+            expected_x_edge_count=expected_x_count,
+            expected_y_edge_count=expected_y_count,
         )
         return xs, ys, list(xs), list(ys)
     return extract_template_axes_from_image(
         template_image,
         manifest_template_bbox=manifest_template_bbox,
+        expected_x_edge_count=expected_x_count,
+        expected_y_edge_count=expected_y_count,
     )
 
 
@@ -622,9 +653,15 @@ def canonical_template_axes_from_workbook(
     table_bbox: list[float] | None = None,
 ) -> tuple[list[int], list[int]]:
     workbook = load_workbook(Path(workbook_path))
-    if sheet_name not in workbook.sheetnames:
-        raise ValueError(f"template axes sheet not found: {sheet_name}")
-    geometry = workbook_pdf_renderer.worksheet_render_geometry(workbook[sheet_name])
+    try:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(f"template axes sheet not found: {sheet_name}")
+        worksheet = workbook[sheet_name]
+        edge_rows = master_order_form_template_service.validated_template_row_edges(worksheet, allow_static=True)
+        expected_x_count = worksheet.max_column + 1
+        geometry = workbook_pdf_renderer.worksheet_render_geometry(worksheet)
+    finally:
+        workbook.close()
     image_width = float(geometry["image_width"])
     image_height = float(geometry["image_height"])
     if image_width <= 0 or image_height <= 0:
@@ -632,19 +669,20 @@ def canonical_template_axes_from_workbook(
     x_scale = float(canvas_width) / image_width
     y_scale = float(canvas_height) / image_height
     raw_x_positions = sorted(int(value) for value in geometry["x_positions"].values())
-    xs = sorted({int(round(float(value) * x_scale)) for value in raw_x_positions})
+    xs = [int(round(float(value) * x_scale)) for value in raw_x_positions]
     if table_bbox is not None and len(table_bbox) == 4:
         x0 = float(table_bbox[0])
         x1 = float(table_bbox[2])
         tolerance = max(8.0, float(canvas_width) * 0.01)
         xs = [x for x in xs if x0 - tolerance <= float(x) <= x1 + tolerance]
     y_positions = geometry["y_positions"]
-    edge_rows = list(ORDER_FORM_TEMPLATE_HEADER_EDGE_ROWS) + list(ORDER_FORM_TEMPLATE_BODY_EDGE_ROWS)
     missing_rows = [row for row in edge_rows if row not in y_positions]
     if missing_rows:
         raise ValueError(f"canonical template y edge rows missing:{missing_rows}")
     ys = [int(round(float(y_positions[row]) * y_scale)) for row in edge_rows]
-    return _normalize_explicit_template_axes(xs, ys)
+    return _normalize_explicit_template_axes(
+        xs, ys, expected_x_edge_count=expected_x_count, expected_y_edge_count=len(edge_rows),
+    )
 
 
 def draw_fixed_quad_overlay(original: np.ndarray, quad: np.ndarray) -> np.ndarray:
@@ -803,12 +841,15 @@ def build_fixed_quad_template_registration(
     output_dir: Path | None = None,
     template_axes_x: list[int] | None = None,
     template_axes_y: list[int] | None = None,
+    template_workbook_path: Path | str | None = None,
+    template_sheet_name: str | None = None,
     page: int = 1,
 ) -> tuple[FixedQuadTemplateRegistrationResult, dict[str, np.ndarray]]:
+    expected_x_count, expected_y_count = template_axis_edge_counts_from_workbook(template_workbook_path, sheet_name=template_sheet_name)
     if quad_px is None:
         estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220, render_width=render_width, page=page)
         if estimate["status"] != "ok":
-            raise ValueError(f"edge locked quad estimation failed: {estimate['reasons']}")
+            raise QuadEstimationError(str(estimate["reasons"]))
         quad_px = estimate["refined_quad_px"]
         if quad_source is None:
             quad_source = "edge_locked_v4_estimated_from_fax_pdf"
@@ -819,12 +860,17 @@ def build_fixed_quad_template_registration(
         height=canvas_height,
     )
     if template_axes_x is not None or template_axes_y is not None:
-        xs, ys = _normalize_explicit_template_axes(template_axes_x, template_axes_y)
+        xs, ys = _normalize_explicit_template_axes(
+            template_axes_x, template_axes_y,
+            expected_x_edge_count=expected_x_count, expected_y_edge_count=expected_y_count,
+        )
         ys_all = list(ys)
     else:
         xs, ys, _xs_all, ys_all = extract_template_axes_from_image(
             template,
             manifest_template_bbox=manifest_template_bbox,
+            expected_x_edge_count=expected_x_count,
+            expected_y_edge_count=expected_y_count,
         )
     table_bbox = [xs[0], ys[0], xs[-1], ys[-1]]
     rectified = rectify_fax_to_template_grid(
@@ -902,5 +948,7 @@ def replay_fixed_quad_template_overlay(
         render_width=render_width,
         quad_source=item.get("quad_source"),
         output_dir=output_dir,
+        template_workbook_path=item.get("template_xlsx"),
+        template_sheet_name=item.get("template_sheet_name"),
     )
     return asdict(result)

@@ -232,6 +232,8 @@ def build_hakodate_preprocessing_for_manifest_item(
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        template_workbook_path=item.get("template_xlsx"),
+        template_sheet_name=item.get("template_sheet_name"),
         page=page,
     )
     original = render_pdf_page_to_bgr(item["fax_pdf"], width=render_width, page=page)

@@ -12,7 +12,7 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.worksheet.print_settings import PrintArea
 from openpyxl.worksheet.worksheet import Worksheet
@@ -30,6 +30,7 @@ HEADER_TOP_ROW = 7
 HEADER_GROUP_BOTTOM_ROW = 8
 HEADER_LEAF_TOP_ROW = 9
 HEADER_BOTTOM_ROW = 10
+TEMPLATE_HEADER_EDGE_ROWS = (HEADER_TOP_ROW, HEADER_LEAF_TOP_ROW)
 BODY_START_ROW = 11
 BODY_END_ROW = 67
 PRINT_END_ROW = 69
@@ -166,13 +167,47 @@ def _ensure_generated_capacity(ws: Worksheet, required_count: int) -> int:
 def _trim_unused_generated_columns(ws: Worksheet, end_col: int) -> None:
     if end_col >= MASTER_GENERATED_END_COL:
         return
+    # delete_cols does not move merged ranges; stale ranges recreate deleted cells on reload.
+    for region in list(ws.merged_cells.ranges):
+        if region.max_col <= end_col:
+            continue
+        if region.min_col > end_col:
+            raise FacilityTemplateBuildError("generated_static_merge_outside_columns")
+        bounds = region.bounds
+        ws.unmerge_cells(str(region))
+        ws.merge_cells(start_column=bounds[0], start_row=bounds[1], end_column=end_col, end_row=bounds[3])
     ws.delete_cols(end_col + 1, MASTER_GENERATED_END_COL - end_col)
+    for key in list(ws.column_dimensions):
+        dimension = ws.column_dimensions[key]
+        first_col = dimension.min or column_index_from_string(key)
+        last_col = dimension.max or first_col
+        if first_col > end_col:
+            del ws.column_dimensions[key]
+        elif last_col > end_col:
+            dimension.max = end_col
 
 
 def _normalize_static_right_merges(ws: Worksheet, end_col: int) -> None:
     min_static_col = 7
+    target_col = min_static_col if end_col >= min_static_col else GENERATED_START_COL
     if end_col < min_static_col:
-        return
+        for original, replacement in (("A3:E3", "A3:D3"), (FACILITY_NAME_RANGE, "A4:D5")):
+            if original in ws.merged_cells:
+                ws.unmerge_cells(original)
+                ws.merge_cells(replacement)
+        # Keep the original image bytes and rendered size, above the right-side instructions.
+        image_height_points = 0.0
+        for image in ws._images:
+            anchor = image.anchor
+            if not isinstance(anchor, OneCellAnchor):
+                raise FacilityTemplateBuildError("generated_static_image_anchor_invalid")
+            anchor._from.col = GENERATED_START_COL - 1
+            anchor._from.row = 0
+            anchor._from.colOff = pixels_to_EMU(4)
+            anchor._from.rowOff = pixels_to_EMU(4)
+            image_height_points = max(image_height_points, float(anchor.ext.cy) / EMU_PER_PIXEL * 72.0 / 96.0 + 6.0)
+        if image_height_points:
+            ws.row_dimensions[1].height = max(float(ws.row_dimensions[1].height or 0), image_height_points)
     for row in range(2, 7):
         for merged_range in list(ws.merged_cells.ranges):
             min_col, min_row, max_col, max_row = merged_range.bounds
@@ -181,11 +216,14 @@ def _normalize_static_right_merges(ws: Worksheet, end_col: int) -> None:
                 alignment = copy(ws.cell(row, min_col).alignment)
                 font = copy(ws.cell(row, min_col).font)
                 ws.unmerge_cells(str(merged_range))
-                ws.merge_cells(start_row=row, start_column=min_col, end_row=row, end_column=end_col)
-                cell = ws.cell(row, min_col)
+                ws.cell(row, min_col).value = None
+                ws.merge_cells(start_row=row, start_column=target_col, end_row=row, end_column=end_col)
+                cell = ws.cell(row, target_col)
                 cell.value = value
                 cell.alignment = alignment
                 cell.font = font
+                if end_col < min_static_col:
+                    cell.alignment = Alignment(horizontal=alignment.horizontal, vertical="center", wrap_text=True)
                 break
 
 
@@ -1252,6 +1290,21 @@ def validated_body_row_plan(ws: Worksheet, *, allow_static: bool = False) -> lis
 def validated_body_end_row(ws: Worksheet, *, allow_static: bool = False) -> int:
     plan = validated_body_row_plan(ws, allow_static=allow_static)
     return plan[-1]["worksheet_row"] if plan is not None else BODY_END_ROW
+
+
+def validated_template_row_edges(ws: Worksheet, *, allow_static: bool = False) -> tuple[int, ...]:
+    body_end = validated_body_end_row(ws, allow_static=allow_static)
+    return TEMPLATE_HEADER_EDGE_ROWS + tuple(range(BODY_START_ROW, body_end + 2))
+
+
+def template_row_to_grid_index(worksheet_row: int, *, body_end_row: int) -> int | None:
+    for index, start in enumerate(TEMPLATE_HEADER_EDGE_ROWS):
+        stop = TEMPLATE_HEADER_EDGE_ROWS[index + 1] if index + 1 < len(TEMPLATE_HEADER_EDGE_ROWS) else BODY_START_ROW
+        if start <= worksheet_row < stop:
+            return index
+    if BODY_START_ROW <= worksheet_row <= body_end_row:
+        return len(TEMPLATE_HEADER_EDGE_ROWS) + worksheet_row - BODY_START_ROW
+    return None
 
 
 def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_columns: list[dict[str, Any]], end_col: int) -> None:

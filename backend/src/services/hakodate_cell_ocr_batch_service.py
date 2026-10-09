@@ -1213,6 +1213,8 @@ def _build_preprocess_for_ocr(
         output_dir=None,
         template_axes_x=template_xs,
         template_axes_y=template_ys,
+        template_workbook_path=item.get("template_xlsx"),
+        template_sheet_name=item.get("template_sheet_name"),
         page=selected_page,
     )
     mark_timing("fixed_quad_registration_seconds", step_t0)

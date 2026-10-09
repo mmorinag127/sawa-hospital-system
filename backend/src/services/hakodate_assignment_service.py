@@ -33,9 +33,9 @@ _SIGNATURE_COMPONENT_KEYS = (
     "hakodate_template_signature_components",
     "template_signature_components",
 )
-_STRUCTURE_BODY_START_ROW = 11
-_STRUCTURE_BODY_END_ROW = 67
-_STRUCTURE_HEADER_ROWS = (7, 8, 9)
+_STRUCTURE_BODY_START_ROW = master_order_form_template_service.BODY_START_ROW
+_STRUCTURE_BODY_END_ROW = master_order_form_template_service.BODY_END_ROW
+_STRUCTURE_HEADER_ROWS = tuple(range(master_order_form_template_service.HEADER_TOP_ROW, master_order_form_template_service.HEADER_LEAF_TOP_ROW + 1))
 _DEFAULT_WEEK_SHEET_NAME = "3月22日～3月28日"
 _ORDER_FORM_QUANTITY_HEADER_KEYWORDS = (
     "常食",
@@ -363,11 +363,7 @@ def _cell_bbox(
 
 
 def _worksheet_row_to_structure_grid_index(worksheet_row: int, *, body_end_row: int = _STRUCTURE_BODY_END_ROW) -> int | None:
-    if worksheet_row in (7, 8):
-        return worksheet_row - 7
-    if _STRUCTURE_BODY_START_ROW <= worksheet_row <= body_end_row:
-        return 2 + (worksheet_row - _STRUCTURE_BODY_START_ROW)
-    return None
+    return master_order_form_template_service.template_row_to_grid_index(worksheet_row, body_end_row=body_end_row)
 
 
 def _worksheet_merged_cell_map(worksheet: Any) -> dict[tuple[int, int], dict[str, Any]]:
@@ -1479,7 +1475,7 @@ def _column_slots_from_worksheet(
     return _apply_implicit_canonical_slots(slots, canonical_specs)
 
 
-def _workbook_physical_row_map(worksheet: Any, *, row_count: int, header_rows: int = 2) -> dict[int, dict[str, Any]]:
+def _workbook_physical_row_map(worksheet: Any, *, row_count: int, header_rows: int = len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS)) -> dict[int, dict[str, Any]]:
     body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     if row_count != header_rows + body_end_row - _STRUCTURE_BODY_START_ROW + 1:
         raise ValueError("structure_body_row_count_changed")
@@ -1617,42 +1613,18 @@ def _structure_grid_for_facility_template(
 
 
 def _structure_grid_from_rendered_worksheet(worksheet: Any, *, dpi: int) -> dict[str, Any]:
-    body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
-    min_col, min_row, max_col, max_row = workbook_pdf_renderer._sheet_print_range(worksheet)  # noqa: SLF001
-    margin_px = workbook_pdf_renderer._DEFAULT_MARGIN_PX  # noqa: SLF001
-    default_row_height = worksheet.sheet_format.defaultRowHeight
-    col_widths: dict[int, int] = {}
-    row_heights: dict[int, int] = {}
-    for col in range(min_col, max_col + 1):
-        dim = worksheet.column_dimensions[get_column_letter(col)]
-        col_widths[col] = workbook_pdf_renderer._column_width_to_pixels(dim.width, dpi=dpi)  # noqa: SLF001
-    for row in range(min_row, max_row + 1):
-        dim = worksheet.row_dimensions[row]
-        row_heights[row] = workbook_pdf_renderer._row_height_to_pixels(dim.height or default_row_height, dpi=dpi)  # noqa: SLF001
-
-    x_positions = {min_col: margin_px}
-    current_x = margin_px
-    for col in range(min_col, max_col + 1):
-        current_x += col_widths[col]
-        x_positions[col + 1] = current_x
-    y_positions = {min_row: margin_px}
-    current_y = margin_px
-    for row in range(min_row, max_row + 1):
-        current_y += row_heights[row]
-        y_positions[row + 1] = current_y
-    image_width = current_x + margin_px
-    image_height = current_y + margin_px
-
+    edge_rows = master_order_form_template_service.validated_template_row_edges(worksheet, allow_static=True)
+    geometry = workbook_pdf_renderer.worksheet_render_geometry(worksheet, dpi=dpi)
+    x_positions, y_positions = geometry["x_positions"], geometry["y_positions"]
+    image_width, image_height = geometry["image_width"], geometry["image_height"]
+    max_col = worksheet.max_column
     table_cols = list(range(1, max_col + 1))
-    header_rows = [7, 8]
-    body_rows = list(range(_STRUCTURE_BODY_START_ROW, body_end_row + 1))
-    grid_rows = header_rows + body_rows
+    if any(col not in x_positions for col in range(1, max_col + 2)) or any(row not in y_positions for row in edge_rows):
+        raise ValueError("structure_grid_geometry_incomplete")
     x_edges_px = [x_positions[col] for col in table_cols if col in x_positions]
     if max_col + 1 in x_positions:
         x_edges_px.append(x_positions[max_col + 1])
-    y_edges_px = [y_positions[row] for row in grid_rows if row in y_positions]
-    if body_end_row + 1 in y_positions:
-        y_edges_px.append(y_positions[body_end_row + 1])
+    y_edges_px = [y_positions[row] for row in edge_rows]
     if len(x_edges_px) < 2 or len(y_edges_px) < 2:
         raise ValueError("structure_grid_not_found")
     column_edges = [float(x) / float(image_width) for x in x_edges_px]
