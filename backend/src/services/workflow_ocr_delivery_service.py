@@ -300,6 +300,13 @@ def callback_failure_completion_allowed(job_id):
         and marker is not None and marker["job_id"] == job_id and not marker["started"])
 
 
+def _mark_result_persistence_started(job_id):
+    marker = _terminal_attempt_context.get()
+    if marker is not None and marker["job_id"] == job_id:
+        # Mutable state survives rollback and is shared with copy_context workers.
+        marker["started"] = True
+
+
 def lock_claim_write(session, *, job_id, order_id, attempt, revision):
     """Run inside the actual result transaction after workflow/job locks."""
     claim = _claim_context.get()
@@ -446,6 +453,7 @@ def bind_pending_handoff_in_session(session, job):
         return
     if claim is None or job.id != claim["job_id"] or job.status != "awaiting_output":
         return
+    _mark_result_persistence_started(job.id)
     if not lock_claim_write(session, job_id=job.id, order_id=claim["order_id"],
                             attempt=claim["workflow_attempt_id"], revision=claim["workflow_revision"]):
         raise ValueError("workflow_ocr_delivery_handoff_claim_lost")
@@ -488,10 +496,7 @@ def bind_terminal_result_in_session(session, job, claim):
 
 
 def track_terminal_job(session, job_id):
-    marker = _terminal_attempt_context.get()
-    if marker is not None and marker["job_id"] == job_id:
-        # Mutable state survives rollback and is shared with copy_context workers.
-        marker["started"] = True
+    _mark_result_persistence_started(job_id)
     transaction = session.get_nested_transaction() or session.get_transaction()
     if transaction is None:
         raise ValueError("workflow_ocr_delivery_terminal_transaction_missing")

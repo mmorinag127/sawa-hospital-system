@@ -81,6 +81,7 @@ def _lease_expiry():
 
 def _execute_claim(claim):
     from src.api.orders import (
+        OcrBackgroundExecutionFailure,
         _complete_workflow_ocr_run, _run_ocr_rerun_background, _run_reparse_background,
     )
     from src.services import order_service, ocr_job_service
@@ -112,11 +113,12 @@ def _execute_claim(claim):
         raise ValueError("workflow_ocr_delivery_request_mode_unknown")
     try:
         return callback(**common)
-    except Exception as exc:  # noqa: BLE001
+    except OcrBackgroundExecutionFailure as exc:
+        original = exc.original_exception
         if not delivery.callback_failure_completion_allowed(claim["job_id"]):
-            raise
+            raise original
         receipt, completion_error = _complete_workflow_ocr_run(
-            claim["order_id"], claim["job_id"], error=f"{type(exc).__name__}: {exc}",
+            claim["order_id"], claim["job_id"], error=f"{type(original).__name__}: {original}",
             expected_revision=claim["workflow_revision"],
             workflow_attempt_id=claim["workflow_attempt_id"],
         )

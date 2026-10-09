@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from typing import Literal
 from datetime import datetime, timedelta, date as dt_date
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Header, Query, Request
@@ -16,6 +17,7 @@ from src.services import (
 )
 from src.services import order_workflow_v2_service
 from src.services import workflow_ocr_delivery_dispatch_service
+from src.services import workflow_ocr_delivery_service
 from src.services import ocr_job_service
 from src.services import shipping_status_store
 from src.services.ocr_job_service import (
@@ -650,6 +652,24 @@ def _enqueue_order_reparse_job(
     return {"accepted": True, "ocr_job_id": ocr_job_id, "workflow": queued_workflow}
 
 
+class OcrBackgroundExecutionFailure(Exception):
+    def __init__(self, original_exception: Exception):
+        self.original_exception = original_exception
+        super().__init__(str(original_exception))
+
+
+@contextmanager
+def _ocr_execution_failure_boundary(job_id):
+    try:
+        yield
+    except OcrExecutionSlotTimeout:
+        raise
+    except Exception as exc:
+        if not workflow_ocr_delivery_service.callback_failure_completion_allowed(job_id):
+            raise
+        raise OcrBackgroundExecutionFailure(exc) from exc
+
+
 def _run_reparse_background(
     order_id: str,
     ocr_prompt: str | None,
@@ -662,13 +682,14 @@ def _run_reparse_background(
     workflow_attempt_id: str | None = None,
     ocr_job_id: str | None = None,
 ) -> dict:
-    result, error = order_service.reparse_order(
-        order_id, ocr_prompt=ocr_prompt, prompt_preset=prompt_preset,
-        ocr_provider=ocr_provider, ocr_model=ocr_model, llm_assist=llm_assist,
-        selected_document_id=selected_document_id,
-        workflow_attempt_id=workflow_attempt_id,
-        expected_workflow_revision=expected_revision, ocr_job_id=ocr_job_id,
-    )
+    with _ocr_execution_failure_boundary(ocr_job_id):
+        result, error = order_service.reparse_order(
+            order_id, ocr_prompt=ocr_prompt, prompt_preset=prompt_preset,
+            ocr_provider=ocr_provider, ocr_model=ocr_model, llm_assist=llm_assist,
+            selected_document_id=selected_document_id,
+            workflow_attempt_id=workflow_attempt_id,
+            expected_workflow_revision=expected_revision, ocr_job_id=ocr_job_id,
+        )
     if error is None and order_service.is_own_pending_ocr_result(
         result, order_id=order_id, job_id=ocr_job_id,
         workflow_attempt_id=workflow_attempt_id, workflow_revision=expected_revision,
@@ -722,10 +743,11 @@ def _run_ocr_rerun_background(
                 "ocr_slot_wait_seconds": round((acquired_at - started_at).total_seconds(), 3),
                 "ocr_execution_slot": slot})
             with order_service.workflow_ocr_write_context(workflow_attempt_id, expected_revision, ocr_job_id, order_id):
-                evidence, error = order_service.rerun_ocr_evidence_only(
-                    order_id, job_id=ocr_job_id, project_sheet=False,
-                    refresh_workflow=False, selected_document_id=selected_document_id,
-                )
+                with _ocr_execution_failure_boundary(ocr_job_id):
+                    evidence, error = order_service.rerun_ocr_evidence_only(
+                        order_id, job_id=ocr_job_id, project_sheet=False,
+                        refresh_workflow=False, selected_document_id=selected_document_id,
+                    )
     except OcrExecutionSlotTimeout as exc:
         receipt, completion_error = _complete_workflow_ocr_run(
             order_id, ocr_job_id, error="ocr_execution_slot_timeout",
