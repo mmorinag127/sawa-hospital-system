@@ -1132,17 +1132,11 @@ def _canonical_daypart_key(value: object) -> str:
     if not normalized:
         return ""
     lowered = normalized.lower()
-    if "breakfast" in lowered or lowered == "morning":
+    if lowered in {"朝", "朝食", "breakfast", "morning"}:
         return "朝"
-    if "lunch" in lowered or lowered == "noon":
+    if lowered in {"昼", "昼食", "lunch", "noon"}:
         return "昼"
-    if "dinner" in lowered or "supper" in lowered or lowered in {"evening", "night"}:
-        return "夕"
-    if "朝" in normalized:
-        return "朝"
-    if "昼" in normalized:
-        return "昼"
-    if "夕" in normalized or "夜" in normalized:
+    if lowered in {"夕", "夕食", "夜", "夜食", "dinner", "supper", "evening", "night"}:
         return "夕"
     return ""
 
@@ -12363,6 +12357,7 @@ def _build_canonical_bootstrap_sheet(
     if isinstance(ocr_payload, dict):
         try:
             payload_rows = _extract_sheet_rows_from_payload(ocr_payload, template)
+            payload_explicit_quantity_pairs = _resolved_quantity_source_target_pairs(ocr_payload, fields, template)
         except _CanonicalOcrProjectionError as exc:
             return _build_blocked_sheet_payload(
                 order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
@@ -12373,56 +12368,75 @@ def _build_canonical_bootstrap_sheet(
                 menu_diagnostics=menu_diagnostics,
             ), None
         payload_unstructured_qty = _extract_payload_unstructured_quantity_candidates(ocr_payload)
-        payload_explicit_quantity_pairs = _resolved_quantity_source_target_pairs(ocr_payload, fields)
 
-    if order_lines:
-        has_order_lines = True
-        _apply_order_line_quantities_to_sheet_rows(
-            rows=rows,
-            fields=fields,
-            quantity_index=quantity_index,
-            order_lines=order_lines,
-        )
-        mapped_count = _count_non_empty_quantity_cells(
-            rows=rows,
-            quantity_index=quantity_index,
-        )
-        mapped_mode = "identity"
-    elif isinstance(ocr_payload, dict):
-        if payload_rows:
-            match_stats = _apply_payload_quantities_numeric_only(
+    try:
+        if order_lines:
+            has_order_lines = True
+            _apply_order_line_quantities_to_sheet_rows(
                 rows=rows,
                 fields=fields,
                 quantity_index=quantity_index,
-                payload_rows=payload_rows,
-                payload_unstructured_qty=payload_unstructured_qty,
-                allow_heuristics=False,
-                enable_daypart_consensus=False,
-                explicit_quantity_pairs=payload_explicit_quantity_pairs,
-                overlay_structural_fields_from_sheet_rows=True,
-                allow_row_index_fallback=False,
-                allow_span_copy=False,
+                order_lines=order_lines,
             )
             mapped_count = _count_non_empty_quantity_cells(
                 rows=rows,
                 quantity_index=quantity_index,
             )
-            if mapped_count > 0:
-                mapped_mode = "payload_row"
+            mapped_mode = "identity"
+        elif isinstance(ocr_payload, dict):
+            if payload_rows:
+                match_stats = _apply_payload_quantities_numeric_only(
+                    rows=rows,
+                    fields=fields,
+                    quantity_index=quantity_index,
+                    payload_rows=payload_rows,
+                    payload_unstructured_qty=payload_unstructured_qty,
+                    allow_heuristics=False,
+                    enable_daypart_consensus=False,
+                    explicit_quantity_pairs=payload_explicit_quantity_pairs,
+                    overlay_structural_fields_from_sheet_rows=True,
+                    allow_row_index_fallback=False,
+                    allow_span_copy=False,
+                    template=template,
+                )
+                mapped_count = _count_non_empty_quantity_cells(
+                    rows=rows,
+                    quantity_index=quantity_index,
+                )
+                if mapped_count > 0:
+                    mapped_mode = "payload_row"
+            else:
+                match_stats = None
         else:
             match_stats = None
-    else:
-        match_stats = None
-    if payload_rows:
-        rows = _overlay_payload_aux_cells_onto_sheet_rows(
-            rows=rows,
-            fields=fields,
-            header=_sheet_header_from_template(fields, template),
-            payload_rows=payload_rows,
-            raw_payload=ocr_payload if isinstance(ocr_payload, dict) else None,
-            template=template,
-        )
+        if payload_rows:
+            rows = _overlay_payload_aux_cells_onto_sheet_rows(
+                rows=rows,
+                fields=fields,
+                header=_sheet_header_from_template(fields, template),
+                payload_rows=payload_rows,
+                raw_payload=ocr_payload if isinstance(ocr_payload, dict) else None,
+                template=template,
+            )
+    except _CanonicalOcrProjectionError as exc:
+        return _build_blocked_sheet_payload(
+            order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
+            fields=fields, header=header, blockers=[str(exc)],
+            source=_canonical_blocked_sheet_source(fields=fields),
+            base_template_resolution_id=effective_template_id,
+            base_evidence_run_id=str(base_evidence_run.get("id") or "").strip() or None,
+            menu_diagnostics=menu_diagnostics,
+        ), None
 
+    cell_issues = (
+        _map_payload_cell_issues_to_sheet_rows(
+            payload=ocr_payload, template=template, rows=rows, fields=fields,
+        )
+        if isinstance(ocr_payload, dict) and not has_order_lines else []
+    )
+    quantity_blockers = ["sheet_ocr_review_required"] if cell_issues else []
+    if not has_order_lines and isinstance(match_stats, dict) and match_stats.get("unmapped"):
+        quantity_blockers.append("sheet_quantity_column_unmapped")
     sheet_payload = {
         "order_id": order_id,
         "facility_id": facility_id,
@@ -12443,20 +12457,20 @@ def _build_canonical_bootstrap_sheet(
             else None
         ),
         "warnings": _replace_menu_blocker_tokens(
-            [],
+            quantity_blockers,
             canonical_code=_canonical_menu_diagnostic_code(menu_diagnostics),
         ),
-        "blockers": [],
-        "draft_state": "draft_ready",
+        "blockers": quantity_blockers,
+        "draft_state": "draft_blocked" if quantity_blockers else "draft_ready",
         "base_template_resolution_id": effective_template_id,
         "base_evidence_run_id": str((base_evidence_run or {}).get("id") or "").strip() or None,
         "menu_diagnostics": menu_diagnostics,
         "row_diagnostics": [],
         "projection_diagnostics": {},
-        "cell_issues": [],
+        "cell_issues": cell_issues,
         "issue_summary": {
-            "review_required_cell_count": 0,
-            "issue_codes": [],
+            "review_required_cell_count": len(cell_issues),
+            "issue_codes": sorted({issue["issue_code"] for issue in cell_issues}),
         },
         "trace": {
             "rows": _build_sheet_trace_rows(
@@ -16814,7 +16828,7 @@ def _validate_and_merge_reparse_full_table_candidate(
             fields=fields,
         )
         if len(normalized_authoritative_quantity_rows) != len(normalized_baseline_rows):
-            normalized_authoritative_quantity_rows = []
+            return [], {"error": "sheet_canonical_mismatch", "detail": detail}
     if authoritative_quantity_requested:
         for row_index in range(len(normalized_baseline_rows)):
             authoritative_row = (
@@ -16905,6 +16919,13 @@ def _validate_and_merge_reparse_full_table_candidate(
                     }
                 )
 
+    if authoritative_quantity_requested:
+        quantity_issues = _canonical_quantity_cell_issues(merged_rows, fields)
+        if quantity_issues:
+            return [], {
+                "error": "sheet_ocr_review_required",
+                "detail": {**detail, "cell_issues": quantity_issues},
+            }
     if invalid_quantities:
         return [], {
             "error": "llm_full_table_invalid_quantity_text",
@@ -16962,9 +16983,12 @@ def _build_reparse_authoritative_quantity_baseline_rows(
         rows=baseline_rows,
         fields=fields,
         payload_rows=payload_rows,
-        explicit_quantity_pairs=_resolved_quantity_source_target_pairs(raw_output, fields),
+        explicit_quantity_pairs=_resolved_quantity_source_target_pairs(raw_output, fields, template),
         strict_raw_ocr_only=True,
+        template=template,
     )
+    if projection_stats.get("unmapped"):
+        raise _CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
     if not any(int(value or 0) > 0 for value in projection_stats.values()):
         return [], projection_stats
     return projected_rows, projection_stats
@@ -22398,116 +22422,15 @@ def _canonicalize_sheet_daypart_rows(
     ]
     if not normalized_rows or not fields:
         return normalized_rows
-    date_idx, daypart_idx, _menu_idx, _quantity_indexes = _resolve_structural_row_field_indexes(fields)
+    _date_idx, daypart_idx, _menu_idx, _quantity_indexes = _resolve_structural_row_field_indexes(fields)
     if daypart_idx is None:
         return normalized_rows
-
-    blocks: list[dict[str, Any]] = []
-    current_block: dict[str, Any] | None = None
-    current_date_key = ""
-    for row_idx, row in enumerate(normalized_rows):
-        raw_date = row[date_idx] if date_idx is not None and date_idx < len(row) else ""
-        raw_daypart = row[daypart_idx] if daypart_idx < len(row) else ""
-        date_key = _normalize_sheet_date_key(raw_date) or str(raw_date or "").strip()
-        if date_key:
-            current_date_key = date_key
-        elif current_date_key:
-            date_key = current_date_key
-        raw_daypart_token = str(raw_daypart or "").strip()
-        if raw_daypart_token in {'"', "＂", "〃"}:
-            raw_daypart_token = ""
-        supported_daypart = _canonical_daypart_key(raw_daypart_token)
-        if (
-            not raw_daypart_token
-            and current_block is not None
-            and str(current_block.get("date_key") or "") == date_key
-        ):
-            row_indexes = current_block.setdefault("row_indexes", [])
-            if isinstance(row_indexes, list):
-                row_indexes.append(row_idx)
+    for row in normalized_rows:
+        if daypart_idx >= len(row):
             continue
-        block_key = (date_key, raw_daypart_token)
-        if current_block is None or current_block.get("key") != block_key:
-            current_block = {
-                "key": block_key,
-                "date_key": date_key,
-                "raw_daypart_token": raw_daypart_token,
-                "supported_daypart": supported_daypart,
-                "row_indexes": [row_idx],
-            }
-            blocks.append(current_block)
-            continue
-        row_indexes = current_block.setdefault("row_indexes", [])
-        if isinstance(row_indexes, list):
-            row_indexes.append(row_idx)
-
-    blocks_by_date: dict[str, list[dict[str, Any]]] = {}
-    date_order: list[str] = []
-    for block in blocks:
-        date_key = str(block.get("date_key") or "")
-        if date_key not in blocks_by_date:
-            blocks_by_date[date_key] = []
-            date_order.append(date_key)
-        blocks_by_date[date_key].append(block)
-
-    for date_key in date_order:
-        date_blocks = blocks_by_date.get(date_key) or []
-        if not date_blocks:
-            continue
-        assigned_by_block = [
-            str(block.get("supported_daypart") or "")
-            for block in date_blocks
-        ]
-        anchored_indexes = [idx for idx, value in enumerate(assigned_by_block) if value]
-        if len(anchored_indexes) >= 1:
-            first_anchor_idx = anchored_indexes[0]
-            last_supported = assigned_by_block[first_anchor_idx]
-            for idx in range(first_anchor_idx + 1, len(assigned_by_block)):
-                value = assigned_by_block[idx]
-                if value:
-                    last_supported = value
-                    continue
-                raw_token = str(date_blocks[idx].get("raw_daypart_token") or "").strip()
-                if not raw_token:
-                    assigned_by_block[idx] = last_supported
-        if not all(bool(item) for item in assigned_by_block):
-            chosen_sequence = _choose_canonical_daypart_sequence(
-                supported_by_block={
-                    idx: value
-                    for idx, value in enumerate(assigned_by_block)
-                    if value
-                },
-                block_count=len(date_blocks),
-            )
-            if chosen_sequence:
-                for idx, value in enumerate(assigned_by_block):
-                    if value:
-                        continue
-                    raw_token = str(date_blocks[idx].get("raw_daypart_token") or "").strip()
-                    if (
-                        len(anchored_indexes) == 1
-                        and anchored_indexes[0] > 1
-                        and idx < anchored_indexes[0]
-                        and not raw_token
-                    ):
-                        assigned_by_block[idx] = assigned_by_block[anchored_indexes[0]]
-                        continue
-                    if raw_token and len(anchored_indexes) < 2:
-                        continue
-                    assigned_by_block[idx] = (
-                        chosen_sequence[idx] if idx < len(chosen_sequence) else chosen_sequence[-1]
-                    )
-        for block_idx, block in enumerate(date_blocks):
-            assigned_daypart = assigned_by_block[block_idx] if block_idx < len(assigned_by_block) else ""
-            if not assigned_daypart:
-                continue
-            for row_idx in block.get("row_indexes") or []:
-                if not isinstance(row_idx, int) or row_idx < 0 or row_idx >= len(normalized_rows):
-                    continue
-                row = normalized_rows[row_idx]
-                while len(row) <= daypart_idx:
-                    row.append("")
-                row[daypart_idx] = assigned_daypart
+        canonical = _canonical_daypart_key(row[daypart_idx])
+        if canonical:
+            row[daypart_idx] = canonical
     return normalized_rows
 
 
@@ -23564,6 +23487,7 @@ def _overlay_payload_aux_cells_onto_sheet_rows(
         fields=normalized_fields,
         payload_rows=normalized_payload_rows,
         quantity_index=None,
+        template=template,
     )
     if not row_mapping:
         return cloned_rows
@@ -23707,6 +23631,7 @@ def _project_payload_display_cells_onto_sheet_row_lists(
         fields=normalized_fields,
         payload_rows=normalized_payload_rows,
         strict_raw_ocr_only=True,
+        template=template,
     )
     resolved_rows: list[list[str]] = []
     for row_idx, row in enumerate(normalized_rows):
@@ -23739,17 +23664,13 @@ def _project_payload_display_cells_onto_sheet_row_lists(
 def _resolved_quantity_source_target_pairs(
     payload: dict[str, Any],
     fields: list[str],
+    template: dict[str, Any],
 ) -> list[tuple[int, int]]:
-    field_index = {str(field or "").strip(): idx for idx, field in enumerate(fields)}
-    pairs: list[tuple[int, int]] = []
-    seen_targets: set[int] = set()
-    for _source_col_index, mapped_field in _parse_resolved_column_mapping_pairs(payload, fields):
-        target_idx = field_index.get(str(mapped_field or "").strip())
-        if target_idx is None or target_idx in seen_targets:
-            continue
-        seen_targets.add(target_idx)
-        pairs.append((int(target_idx), int(target_idx)))
-    return pairs
+    if fields != _get_row_fields(template):
+        raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+    # Projection has already resolved physical bindings or semantic field names.
+    _extract_sheet_rows_from_payload_uncanonicalized(payload, template)
+    return [(idx, idx) for idx, field in enumerate(fields) if field.startswith("qty.")]
 
 
 def _resolve_fragmented_structured_source_indexes(
@@ -24027,6 +23948,31 @@ def _collect_structured_tables_from_payload(payload: dict[str, Any] | None) -> l
     return tables
 
 
+def _canonical_quantity_cell_issues(
+    rows: list[list[str]],
+    fields: list[str],
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows):
+        for column_index, field in enumerate(fields):
+            if not field.startswith("qty."):
+                continue
+            raw = _field_value_to_str(row[column_index]) if column_index < len(row) else ""
+            if not raw.strip() or _parse_strict_numeric_cell(raw) is not None:
+                continue
+            issues.append({
+                "row_index": row_index,
+                "column_index": column_index,
+                "field": field,
+                "issue_code": "review_required",
+                "severity": "warning",
+                "source": "ocr_payload",
+                "raw": raw,
+                "value": raw,
+            })
+    return issues
+
+
 def _collect_raw_payload_cell_issues(
     payload: dict[str, Any] | None,
     template: dict[str, Any] | None = None,
@@ -24061,6 +24007,11 @@ def _collect_raw_payload_cell_issues(
                 allow_payload_template_override=False,
             )
         )
+    if template:
+        candidates.extend(_canonical_quantity_cell_issues(
+            _extract_sheet_rows_from_payload_uncanonicalized(payload, template),
+            _get_row_fields(template),
+        ))
 
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -24213,30 +24164,15 @@ def _map_payload_cell_issues_to_sheet_rows(
     issues = _extract_payload_cell_issues(payload, template)
     if not issues or not rows:
         return []
-    has_daypart_field = "daypart" in fields
-    lookup_exact: dict[tuple[str, str, str], int] = {}
-    lookup_date_menu: dict[tuple[str, str], int] = {}
-    for row_index, row in enumerate(rows):
-        identity = row.get("identity")
-        if not isinstance(identity, tuple) or len(identity) != 3:
-            continue
-        lookup_exact[identity] = row_index
-        lookup_date_menu[(identity[0], identity[2])] = row_index
+    payload_rows = _extract_first_pass_rows_from_payload(payload, template or {})
+    row_mapping, _counts, _stages = _build_canonical_payload_row_mapping(
+        rows=rows, fields=fields, payload_rows=payload_rows, template=template,
+    )
+    target_by_source = {source_idx: target_idx for target_idx, source_idx in row_mapping.items()}
 
     mapped: list[dict[str, Any]] = []
     for issue in issues:
-        date_key = str(issue.get("date_key") or "")
-        daypart_key = str(issue.get("daypart_key") or "")
-        menu_key = str(issue.get("menu_key") or "")
-        target_row_index: int | None = None
-        if date_key or daypart_key or menu_key:
-            target_row_index = lookup_exact.get((date_key, daypart_key, menu_key))
-            if target_row_index is None and not has_daypart_field:
-                target_row_index = lookup_date_menu.get((date_key, menu_key))
-        if target_row_index is None:
-            source_row_index = issue.get("source_row_index")
-            if isinstance(source_row_index, int) and 0 <= source_row_index < len(rows):
-                target_row_index = source_row_index
+        target_row_index = target_by_source.get(issue.get("source_row_index"))
         normalized = dict(issue)
         normalized["row_index"] = target_row_index if target_row_index is not None else -1
         normalized["mapped"] = target_row_index is not None
@@ -25662,301 +25598,143 @@ def _build_neighbor_menu_refs(items: list[dict[str, Any]]) -> tuple[list[str], l
     return previous, next_values
 
 
+def _build_canonical_payload_row_mapping(
+    *,
+    rows: list[dict[str, Any]],
+    fields: list[str],
+    payload_rows: list[list[str]],
+    template: dict[str, Any] | None = None,
+) -> tuple[dict[int, int], dict[str, int], dict[int, str]]:
+    stage_counts = {"exact": 0, "partial": 0, "neighbor": 0, "row_index": 0}
+    if not rows or not payload_rows:
+        return {}, stage_counts, {}
+    date_idx, daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
+    if any(idx is None for idx in (date_idx, daypart_idx, menu_idx)):
+        raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+
+    def _identity(values: list[Any]) -> tuple[str, str, str]:
+        raw_date = _field_value_to_str(_safe_row_get(values, date_idx)).translate(_SHEET_TRANSLATION)
+        date_tokens = set(re.findall(r"(?<!\d)(?:(\d{4})[/-])?(\d{1,2})[/-](\d{1,2})(?!\d)", raw_date))
+        if len(date_tokens) != 1:
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        raw_daypart = _safe_row_get(values, daypart_idx)
+        daypart = _canonical_daypart_key(raw_daypart)
+        if not daypart:
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        identity = (
+            _normalize_sheet_date_key(_safe_row_get(values, date_idx)),
+            daypart,
+            _normalize_menu_text(_safe_row_get(values, menu_idx)),
+        )
+        if not all(identity):
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        return identity
+
+    def _year(values: list[Any]) -> str:
+        raw_date = _field_value_to_str(_safe_row_get(values, date_idx)).translate(_SHEET_TRANSLATION)
+        match = re.search(r"(\d{4})[/-]\d{1,2}[/-]\d{1,2}", raw_date)
+        return match.group(1) if match else ""
+
+    fill_forward_roles = set((template or {}).get("fill_forward_roles") or []) & {"date", "daypart"}
+
+    def _resolved_identity_copies(
+        values_rows: list[Any],
+        *,
+        authored_identities: list[Any] | None = None,
+        skip_empty: bool = False,
+    ) -> list[tuple[int, tuple[str, str, str], str]]:
+        resolved: list[tuple[int, tuple[str, str, str], str]] = []
+        previous_date = ""
+        previous_daypart = ""
+        previous_date_identity = ("", "")
+        for row_idx, values in enumerate(values_rows):
+            if not isinstance(values, list):
+                raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+            if skip_empty and not any(_field_value_to_str(cell).strip() for cell in values):
+                continue
+            # Identity copies share authored continuation rules, never raw-cell writes.
+            identity_values = list(values)
+            authored_identity = authored_identities[row_idx] if authored_identities is not None else None
+            authored_values = None
+            if authored_identity is not None:
+                if not isinstance(authored_identity, tuple) or len(authored_identity) != 3:
+                    raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+                authored_values = [""] * len(fields)
+                for idx, authored in zip((date_idx, daypart_idx, menu_idx), authored_identity):
+                    authored_values[idx] = authored
+                    if _field_value_to_str(_safe_row_get(identity_values, idx)).strip():
+                        continue
+                    while len(identity_values) <= idx:
+                        identity_values.append("")
+                    identity_values[idx] = authored
+            raw_date = _field_value_to_str(_safe_row_get(identity_values, date_idx)).strip()
+            if not raw_date and "date" in fill_forward_roles:
+                while len(identity_values) <= date_idx:
+                    identity_values.append("")
+                identity_values[date_idx] = previous_date
+            date_identity = (
+                _normalize_sheet_date_key(_safe_row_get(identity_values, date_idx)),
+                _year(identity_values),
+            )
+            if date_identity != previous_date_identity:
+                previous_daypart = ""
+            raw_daypart = _field_value_to_str(_safe_row_get(identity_values, daypart_idx)).strip()
+            if not raw_daypart and "daypart" in fill_forward_roles:
+                while len(identity_values) <= daypart_idx:
+                    identity_values.append("")
+                identity_values[daypart_idx] = previous_daypart
+            identity = _identity(identity_values)
+            year = _year(identity_values)
+            if authored_values is not None:
+                if identity != _identity(authored_values):
+                    raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+                authored_year = _year(authored_values)
+                if year and authored_year and year != authored_year:
+                    raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+            previous_date = _field_value_to_str(_safe_row_get(identity_values, date_idx))
+            previous_daypart = _field_value_to_str(_safe_row_get(identity_values, daypart_idx))
+            previous_date_identity = date_identity
+            resolved.append((row_idx, identity, year))
+        return resolved
+
+    target_indexes: dict[tuple[str, str, str], list[int]] = {}
+    target_years: dict[int, str] = {}
+    for row_idx, identity, year in _resolved_identity_copies(
+        [row.get("values") for row in rows],
+        authored_identities=[row.get("identity") for row in rows],
+    ):
+        target_indexes.setdefault(identity, []).append(row_idx)
+        target_years[row_idx] = year
+
+    source_indexes: dict[tuple[str, str, str], list[int]] = {}
+    source_years: dict[int, str] = {}
+    for payload_idx, identity, year in _resolved_identity_copies(payload_rows, skip_empty=True):
+        source_indexes.setdefault(identity, []).append(payload_idx)
+        source_years[payload_idx] = year
+
+    mapping: dict[int, int] = {}
+    for identity, payload_indexes in source_indexes.items():
+        target_candidates = target_indexes.get(identity, [])
+        if len(payload_indexes) != 1 or len(target_candidates) != 1:
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        payload_idx = payload_indexes[0]
+        row_idx = target_candidates[0]
+        if source_years[payload_idx] and target_years[row_idx] and source_years[payload_idx] != target_years[row_idx]:
+            raise _CanonicalOcrProjectionError("sheet_canonical_mismatch")
+        mapping[row_idx] = payload_idx
+    stage_counts["exact"] = len(mapping)
+    return mapping, stage_counts, {row_idx: "exact" for row_idx in mapping}
+
+
 def _build_payload_row_mapping_by_menu_priority(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
     payload_rows: list[list[str]],
     quantity_index: dict[tuple[str, str], int] | None = None,
+    template: dict[str, Any] | None = None,
 ) -> tuple[dict[int, int], dict[str, int], dict[int, str]]:
-    if not rows or not payload_rows:
-        return {}, {"exact": 0, "partial": 0, "neighbor": 0, "row_index": 0}, {}
-
-    date_idx, daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
-    if menu_idx is None:
-        fallback = {
-            idx: idx
-            for idx in range(min(len(rows), len(payload_rows)))
-        }
-        fallback_stage = {idx: "row_index" for idx in fallback.keys()}
-        return fallback, {"exact": 0, "partial": 0, "neighbor": 0, "row_index": len(fallback)}, fallback_stage
-
-    sheet_items: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows):
-        values = row.get("values")
-        if not isinstance(values, list):
-            values = []
-        menu_raw = _safe_row_get(values, menu_idx)
-        sheet_items.append(
-            {
-                "idx": idx,
-                "menu_raw": menu_raw,
-                "menu_norm": _normalize_menu_text(menu_raw),
-                "date_norm": _normalize_sheet_date_key(_safe_row_get(values, date_idx)),
-                "daypart_norm": _normalize_sheet_text(_safe_row_get(values, daypart_idx)),
-            }
-        )
-
-    payload_items: list[dict[str, Any]] = []
-    for idx, payload_row in enumerate(payload_rows):
-        row_values = payload_row if isinstance(payload_row, list) else []
-        menu_raw = _safe_row_get(row_values, menu_idx)
-        payload_items.append(
-            {
-                "idx": idx,
-                "menu_raw": menu_raw,
-                "menu_norm": _normalize_menu_text(menu_raw),
-                "date_norm": _normalize_sheet_date_key(_safe_row_get(row_values, date_idx)),
-                "daypart_norm": _normalize_sheet_text(_safe_row_get(row_values, daypart_idx)),
-            }
-        )
-    last_payload_date = ""
-    for item in payload_items:
-        current_date = str(item.get("date_norm") or "")
-        if current_date:
-            last_payload_date = current_date
-        elif last_payload_date:
-            item["date_norm"] = last_payload_date
-
-    quantity_columns = (
-        sorted(set(quantity_index.values()))
-        if isinstance(quantity_index, dict) and quantity_index
-        else []
-    )
-    sheet_menu_norms = [
-        str(item.get("menu_norm") or "")
-        for item in sheet_items
-        if str(item.get("menu_norm") or "")
-    ]
-    try:
-        row_index_window = max(0, int(os.getenv("OCR_SHEET_ROW_INDEX_WINDOW", "3")))
-    except Exception:
-        row_index_window = 3
-
-    def _payload_row_has_qty(payload_idx: int) -> bool:
-        if payload_idx < 0 or payload_idx >= len(payload_rows):
-            return False
-        payload_row = payload_rows[payload_idx]
-        if not isinstance(payload_row, list):
-            return False
-        if not quantity_columns:
-            return True
-        return _payload_row_has_numeric_quantity(payload_row, quantity_columns)
-
-    def _payload_row_has_menu(payload_idx: int) -> bool:
-        if payload_idx < 0 or payload_idx >= len(payload_items):
-            return False
-        return bool(str(payload_items[payload_idx].get("menu_norm") or ""))
-
-    def _payload_row_has_loose_numeric(payload_idx: int) -> bool:
-        if payload_idx < 0 or payload_idx >= len(payload_rows):
-            return False
-        payload_row = payload_rows[payload_idx]
-        if not isinstance(payload_row, list):
-            return False
-        skip_columns = set(quantity_columns)
-        if date_idx is not None:
-            skip_columns.add(date_idx)
-        if daypart_idx is not None:
-            skip_columns.add(daypart_idx)
-        if menu_idx is not None:
-            skip_columns.add(menu_idx)
-        return bool(_payload_row_numeric_candidates(payload_row, skip_columns=skip_columns))
-
-    def _payload_row_has_assignable_signal(payload_idx: int) -> bool:
-        if _payload_row_has_qty(payload_idx):
-            return True
-        if _payload_row_has_menu(payload_idx):
-            return True
-        return _payload_row_has_loose_numeric(payload_idx)
-
-    def _payload_row_is_row_index_eligible(payload_idx: int, *, sheet_idx: int | None = None) -> bool:
-        if payload_idx < 0 or payload_idx >= len(payload_rows):
-            return False
-        payload_row = payload_rows[payload_idx]
-        if not isinstance(payload_row, list):
-            return False
-        if not _payload_row_has_assignable_signal(payload_idx):
-            return False
-        if sheet_idx is not None:
-            if row_index_window > 0 and abs(sheet_idx - payload_idx) > row_index_window:
-                return False
-            if 0 <= sheet_idx < len(sheet_items):
-                sheet_date = str(sheet_items[sheet_idx].get("date_norm") or "")
-                payload_date = str(payload_items[payload_idx].get("date_norm") or "")
-                if sheet_date and payload_date and sheet_date != payload_date:
-                    return False
-        menu_norm = str(payload_items[payload_idx].get("menu_norm") or "")
-        if not menu_norm:
-            return True
-        for sheet_menu in sheet_menu_norms:
-            if menu_norm in sheet_menu or sheet_menu in menu_norm:
-                return True
-            if SequenceMatcher(None, menu_norm, sheet_menu).ratio() >= 0.62:
-                return True
-        return False
-
-    sheet_prev, sheet_next = _build_neighbor_menu_refs(sheet_items)
-    payload_prev, payload_next = _build_neighbor_menu_refs(payload_items)
-    for idx, item in enumerate(sheet_items):
-        item["prev_menu"] = sheet_prev[idx]
-        item["next_menu"] = sheet_next[idx]
-    for idx, item in enumerate(payload_items):
-        item["prev_menu"] = payload_prev[idx]
-        item["next_menu"] = payload_next[idx]
-
-    mapping: dict[int, int] = {}
-    used_payload: set[int] = set()
-    mapping_stage: dict[int, str] = {}
-    stage_counts = {"exact": 0, "partial": 0, "neighbor": 0, "row_index": 0}
-
-    def _mark(stage: str, sheet_idx: int, payload_idx: int) -> None:
-        mapping[sheet_idx] = payload_idx
-        used_payload.add(payload_idx)
-        mapping_stage[sheet_idx] = stage
-        stage_counts[stage] += 1
-
-    def _score_date_day(sheet_item: dict[str, Any], payload_item: dict[str, Any]) -> tuple[int, int]:
-        date_match = int(
-            bool(sheet_item.get("date_norm"))
-            and bool(payload_item.get("date_norm"))
-            and sheet_item.get("date_norm") == payload_item.get("date_norm")
-        )
-        daypart_match = int(
-            bool(sheet_item.get("daypart_norm"))
-            and bool(payload_item.get("daypart_norm"))
-            and sheet_item.get("daypart_norm") == payload_item.get("daypart_norm")
-        )
-        return date_match, daypart_match
-
-    # 1) Exact menu match
-    for sheet_item in sheet_items:
-        sheet_idx = int(sheet_item["idx"])
-        if sheet_idx in mapping:
-            continue
-        menu_norm = str(sheet_item.get("menu_norm") or "")
-        if not menu_norm:
-            continue
-        candidates: list[tuple[tuple[int, int, int], int]] = []
-        for payload_item in payload_items:
-            payload_idx = int(payload_item["idx"])
-            if payload_idx in used_payload:
-                continue
-            if not _payload_row_has_assignable_signal(payload_idx):
-                continue
-            if menu_norm != str(payload_item.get("menu_norm") or ""):
-                continue
-            date_match, daypart_match = _score_date_day(sheet_item, payload_item)
-            score = (date_match, daypart_match, -abs(sheet_idx - payload_idx))
-            candidates.append((score, payload_idx))
-        if candidates:
-            _, selected = max(candidates, key=lambda item: item[0])
-            _mark("exact", sheet_idx, selected)
-
-    # 2) Partial menu match
-    for sheet_item in sheet_items:
-        sheet_idx = int(sheet_item["idx"])
-        if sheet_idx in mapping:
-            continue
-        menu_norm = str(sheet_item.get("menu_norm") or "")
-        if not menu_norm:
-            continue
-        candidates: list[tuple[tuple[float, int, int, int], int]] = []
-        for payload_item in payload_items:
-            payload_idx = int(payload_item["idx"])
-            if payload_idx in used_payload:
-                continue
-            if not _payload_row_has_assignable_signal(payload_idx):
-                continue
-            payload_menu = str(payload_item.get("menu_norm") or "")
-            if not payload_menu:
-                continue
-            ratio = SequenceMatcher(None, menu_norm, payload_menu).ratio()
-            contains = menu_norm in payload_menu or payload_menu in menu_norm
-            if not contains and ratio < 0.72:
-                continue
-            date_match, daypart_match = _score_date_day(sheet_item, payload_item)
-            score = (ratio, date_match, daypart_match, -abs(sheet_idx - payload_idx))
-            candidates.append((score, payload_idx))
-        if candidates:
-            _, selected = max(candidates, key=lambda item: item[0])
-            _mark("partial", sheet_idx, selected)
-
-    # 3) Neighbor menu match
-    for sheet_item in sheet_items:
-        sheet_idx = int(sheet_item["idx"])
-        if sheet_idx in mapping:
-            continue
-        candidates: list[tuple[tuple[int, int, int, int], int]] = []
-        for payload_item in payload_items:
-            payload_idx = int(payload_item["idx"])
-            if payload_idx in used_payload:
-                continue
-            if not _payload_row_has_assignable_signal(payload_idx):
-                continue
-            payload_menu = str(payload_item.get("menu_norm") or "")
-            if not payload_menu:
-                continue
-            prev_match = int(
-                bool(sheet_item.get("prev_menu"))
-                and bool(payload_item.get("prev_menu"))
-                and sheet_item.get("prev_menu") == payload_item.get("prev_menu")
-            )
-            next_match = int(
-                bool(sheet_item.get("next_menu"))
-                and bool(payload_item.get("next_menu"))
-                and sheet_item.get("next_menu") == payload_item.get("next_menu")
-            )
-            neighbor_hits = prev_match + next_match
-            if neighbor_hits <= 0:
-                continue
-            date_match, daypart_match = _score_date_day(sheet_item, payload_item)
-            score = (neighbor_hits, date_match, daypart_match, -abs(sheet_idx - payload_idx))
-            candidates.append((score, payload_idx))
-        if candidates:
-            _, selected = max(candidates, key=lambda item: item[0])
-            _mark("neighbor", sheet_idx, selected)
-
-    # 4) Row index fallback
-    reserved_direct_payload: set[int] = set()
-    for sheet_item in sheet_items:
-        sheet_idx = int(sheet_item["idx"])
-        if sheet_idx in mapping:
-            continue
-        if (
-            0 <= sheet_idx < len(payload_items)
-            and sheet_idx not in used_payload
-            and _payload_row_is_row_index_eligible(sheet_idx, sheet_idx=sheet_idx)
-        ):
-            reserved_direct_payload.add(sheet_idx)
-
-    for sheet_item in sheet_items:
-        sheet_idx = int(sheet_item["idx"])
-        if sheet_idx in mapping:
-            continue
-        direct = sheet_idx
-        if (
-            0 <= direct < len(payload_items)
-            and direct not in used_payload
-            and _payload_row_is_row_index_eligible(direct, sheet_idx=sheet_idx)
-        ):
-            _mark("row_index", sheet_idx, direct)
-            continue
-        candidates: list[tuple[int, int]] = []
-        for payload_item in payload_items:
-            payload_idx = int(payload_item["idx"])
-            if payload_idx in used_payload:
-                continue
-            if payload_idx in reserved_direct_payload and payload_idx != sheet_idx:
-                continue
-            if not _payload_row_is_row_index_eligible(payload_idx, sheet_idx=sheet_idx):
-                continue
-            candidates.append((abs(sheet_idx - payload_idx), payload_idx))
-        if candidates:
-            _, selected = min(candidates, key=lambda item: item[0])
-            _mark("row_index", sheet_idx, selected)
-
-    return mapping, stage_counts, mapping_stage
+    return _build_canonical_payload_row_mapping(rows=rows, fields=fields, payload_rows=payload_rows, template=template)
 
 
 def _build_sheet_cluster_starts(rows: list[dict[str, Any]], fields: list[str]) -> dict[int, int]:
@@ -26121,36 +25899,8 @@ def _select_trusted_payload_quantity_columns(
                 continue
             parsed_hits[col_idx] = int(parsed_hits.get(col_idx, 0)) + 1
 
-    try:
-        min_non_empty = max(1, int(os.getenv("OCR_SHEET_QTY_COLUMN_MIN_NON_EMPTY", "6")))
-    except Exception:
-        min_non_empty = 6
-    try:
-        min_purity = float(os.getenv("OCR_SHEET_QTY_COLUMN_MIN_PURITY", "0.6"))
-    except Exception:
-        min_purity = 0.6
-    if min_purity <= 0 or min_purity > 1:
-        min_purity = 0.6
-
-    trusted: list[int] = []
-    for col_idx in quantity_columns:
-        non_empty = int(non_empty_hits.get(col_idx, 0))
-        parsed = int(parsed_hits.get(col_idx, 0))
-        if parsed <= 0:
-            # Column has no numeric parse; keep it neutral (no writes will happen).
-            trusted.append(col_idx)
-            continue
-        if non_empty >= min_non_empty:
-            purity = parsed / max(non_empty, 1)
-            if purity < min_purity:
-                continue
-        trusted.append(col_idx)
-
-    if not trusted:
-        trusted = [col_idx for col_idx in quantity_columns if int(parsed_hits.get(col_idx, 0)) > 0]
-    if not trusted:
-        trusted = list(quantity_columns)
-    return trusted, parsed_hits, non_empty_hits
+    # Numeric coverage is diagnostic, never authority to discard a bound column.
+    return list(quantity_columns), parsed_hits, non_empty_hits
 
 
 def _row_has_any_quantity(values: list[Any], quantity_columns: list[int]) -> bool:
@@ -26168,6 +25918,15 @@ def _row_quantity_value(values: list[Any], col_idx: int) -> float | None:
     if col_idx < 0 or col_idx >= len(values):
         return None
     return _parse_sheet_quantity_cell(values[col_idx])
+
+
+def _transcribe_bound_quantity_cell(values: list[Any], col_idx: int, raw: Any) -> None:
+    if col_idx < 0:
+        raise _CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+    while len(values) <= col_idx:
+        values.append("")
+    # Blank and uncertain recognizer text remain distinct from a missing binding.
+    values[col_idx] = _field_value_to_str(raw)
 
 
 def _set_row_quantity_value(values: list[Any], col_idx: int, qty: float) -> None:
@@ -26852,6 +26611,7 @@ def _apply_payload_cells_by_menu_priority(
     payload_unstructured_qty: list[str] | None = None,
     allow_heuristics: bool = True,
     explicit_quantity_pairs: list[tuple[int, int]] | None = None,
+    template: dict[str, Any] | None = None,
 ) -> dict[str, int]:
     if not rows or not fields or not payload_rows:
         return {
@@ -26869,6 +26629,7 @@ def _apply_payload_cells_by_menu_priority(
         fields=fields,
         payload_rows=payload_rows,
         quantity_index=quantity_index,
+        template=template,
     )
     stage_counts.setdefault("loose_cell", 0)
     stage_counts.setdefault("gap_fill", 0)
@@ -26883,7 +26644,6 @@ def _apply_payload_cells_by_menu_priority(
         for source_col_idx, target_col_idx in (explicit_quantity_pairs or [])
         if int(target_col_idx) in quantity_columns
     ]
-    use_explicit_quantity_mapping = bool(explicit_quantity_pairs)
     if explicit_quantity_pairs:
         trusted_quantity_columns = sorted({target_col_idx for _source_col_idx, target_col_idx in explicit_quantity_pairs})
         _raw_quantity_hits = {col_idx: 0 for col_idx in trusted_quantity_columns}
@@ -26908,33 +26668,6 @@ def _apply_payload_cells_by_menu_priority(
         for idx, field in enumerate(fields)
         if idx not in immutable_columns and idx not in quantity_columns and _is_sheet_note_field(field)
     ]
-    _date_idx, _daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
-    dominant_quantity_columns: set[int] = set(trusted_quantity_columns)
-    if trusted_quantity_columns and menu_idx is not None:
-        quantity_hits: dict[int, int] = {col_idx: 0 for col_idx in trusted_quantity_columns}
-        for payload_row in payload_rows:
-            if not isinstance(payload_row, list):
-                continue
-            payload_menu = _safe_row_get(payload_row, menu_idx)
-            if not _normalize_menu_text(payload_menu):
-                continue
-            quantity_pairs = (
-                list(explicit_quantity_pairs)
-                if explicit_quantity_pairs
-                else [(col_idx, col_idx) for col_idx in trusted_quantity_columns]
-            )
-            for source_col_idx, target_col_idx in quantity_pairs:
-                if source_col_idx >= len(payload_row):
-                    continue
-                qty = _parse_sheet_quantity_cell(payload_row[source_col_idx])
-                if qty is None:
-                    continue
-                quantity_hits[target_col_idx] = quantity_hits.get(target_col_idx, 0) + 1
-        max_hit = max(quantity_hits.values()) if quantity_hits else 0
-        if max_hit > 0:
-            dominant_quantity_columns = {col for col, count in quantity_hits.items() if count == max_hit}
-    span_copy_hints: dict[tuple[int, int], int] = {}
-
     def _apply_payload_row_to_sheet_row(row_idx: int, payload_idx: int) -> None:
         if row_idx < 0 or row_idx >= len(rows):
             return
@@ -26953,54 +26686,10 @@ def _apply_payload_cells_by_menu_priority(
             if explicit_quantity_pairs
             else [(col_idx, col_idx) for col_idx in trusted_quantity_columns]
         )
-        stage = mapping_stage.get(row_idx)
-        payload_menu = _safe_row_get(payload_row, menu_idx) if menu_idx is not None else ""
-        if stage == "row_index" and not _normalize_menu_text(payload_menu) and dominant_quantity_columns:
-            apply_quantity_pairs = [
-                (source_col_idx, target_col_idx)
-                for source_col_idx, target_col_idx in apply_quantity_pairs
-                if target_col_idx in dominant_quantity_columns
-            ]
-
-        applied_qty = False
         for source_col_idx, target_col_idx in apply_quantity_pairs:
-            if source_col_idx >= len(payload_row):
-                continue
-            span_repeat = 0
-            span_candidate = _parse_explicit_span_quantity_cell(payload_row[source_col_idx])
-            qty = (
-                _parse_strict_numeric_cell(payload_row[source_col_idx])
-                if use_explicit_quantity_mapping
-                else _parse_sheet_quantity_cell(payload_row[source_col_idx])
-            )
-            if qty is None and use_explicit_quantity_mapping:
-                qty = _parse_sheet_quantity_cell(payload_row[source_col_idx])
-            if qty is None and span_candidate is not None:
-                qty = span_candidate[0]
-            if qty is None:
-                continue
-            _set_row_quantity_value(values, target_col_idx, qty)
-            applied_qty = True
-            if span_candidate is not None:
-                span_repeat = int(span_candidate[1])
-            if span_repeat >= 2:
-                key = (row_idx, target_col_idx)
-                span_copy_hints[key] = max(int(span_copy_hints.get(key, 0)), int(span_repeat))
-
-        if allow_heuristics and not applied_qty and trusted_quantity_columns:
-            loose_candidates = _payload_row_numeric_candidates(
-                payload_row,
-                skip_columns=immutable_columns | set(quantity_columns) | set(aux_columns),
-            )
-            if loose_candidates:
-                target_columns = (
-                    list(dominant_quantity_columns)
-                    if dominant_quantity_columns
-                    else list(trusted_quantity_columns)
-                )
-                if target_columns:
-                    _set_row_quantity_value(values, target_columns[0], loose_candidates[0])
-                    stage_counts["loose_cell"] = int(stage_counts.get("loose_cell", 0)) + 1
+            if source_col_idx < 0 or source_col_idx >= len(payload_row):
+                raise _CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+            _transcribe_bound_quantity_cell(values, target_col_idx, payload_row[source_col_idx])
 
         for col_idx in aux_columns:
             if col_idx >= len(payload_row):
@@ -27025,37 +26714,6 @@ def _apply_payload_cells_by_menu_priority(
     for row_idx, payload_idx in row_mapping.items():
         _apply_payload_row_to_sheet_row(row_idx, payload_idx)
 
-    span_filled = _apply_explicit_span_quantity_copy(
-        rows=rows,
-        fields=fields,
-        span_copy_hints=span_copy_hints,
-    )
-    if span_filled > 0:
-        stage_counts["span_copy"] = int(stage_counts.get("span_copy", 0)) + span_filled
-
-    if allow_heuristics:
-        preferred_columns = (
-            sorted(dominant_quantity_columns) if dominant_quantity_columns else list(trusted_quantity_columns)
-        )
-        gap_filled = _fill_isolated_sheet_quantity_gaps(
-            rows=rows,
-            fields=fields,
-            quantity_columns=trusted_quantity_columns,
-            preferred_columns=preferred_columns,
-        )
-        if gap_filled > 0:
-            stage_counts["gap_fill"] = int(stage_counts.get("gap_fill", 0)) + gap_filled
-
-        unstructured_filled = _apply_unstructured_quantity_candidates(
-            rows=rows,
-            fields=fields,
-            quantity_columns=trusted_quantity_columns,
-            preferred_columns=preferred_columns,
-            candidates=list(payload_unstructured_qty or []),
-        )
-        if unstructured_filled > 0:
-            stage_counts["unstructured"] = int(stage_counts.get("unstructured", 0)) + unstructured_filled
-
     return stage_counts
 
 
@@ -27066,264 +26724,9 @@ def _build_payload_row_mapping_by_row_index_numeric_only(
     payload_rows: list[list[str]],
     quantity_columns: list[int],
     allow_row_index_fallback: bool = False,
+    template: dict[str, Any] | None = None,
 ) -> tuple[dict[int, int], dict[str, int], dict[int, str]]:
-    stage_counts = {"exact": 0, "partial": 0, "neighbor": 0, "row_index": 0}
-    if not rows or not payload_rows:
-        return {}, stage_counts, {}
-
-    date_idx, daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
-    skip_columns = set(quantity_columns)
-    if date_idx is not None:
-        skip_columns.add(date_idx)
-    if daypart_idx is not None:
-        skip_columns.add(daypart_idx)
-    if menu_idx is not None:
-        skip_columns.add(menu_idx)
-
-    try:
-        row_index_window = max(0, int(os.getenv("OCR_SHEET_ROW_INDEX_WINDOW", "3")))
-    except Exception:
-        row_index_window = 3
-
-    sheet_items: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows):
-        values = row.get("values")
-        if not isinstance(values, list):
-            values = []
-        date_norm = _normalize_sheet_date_key(_safe_row_get(values, date_idx))
-        daypart_norm = _normalize_sheet_text(_safe_row_get(values, daypart_idx))
-        menu_norm = _normalize_menu_text(_safe_row_get(values, menu_idx))
-        sheet_items.append(
-            {
-                "idx": idx,
-                "date_norm": date_norm,
-                "daypart_norm": daypart_norm,
-                "menu_norm": menu_norm,
-                "identity": (date_norm, _normalize_daypart_key(daypart_norm), menu_norm),
-            }
-        )
-
-    payload_items: list[dict[str, Any]] = []
-    for idx, payload_row in enumerate(payload_rows):
-        row_values = payload_row if isinstance(payload_row, list) else []
-        date_norm = _normalize_sheet_date_key(_safe_row_get(row_values, date_idx))
-        daypart_norm = _normalize_sheet_text(_safe_row_get(row_values, daypart_idx))
-        menu_norm = _normalize_menu_text(_safe_row_get(row_values, menu_idx))
-        payload_items.append(
-            {
-                "idx": idx,
-                "date_norm": date_norm,
-                "daypart_norm": daypart_norm,
-                "menu_norm": menu_norm,
-                "identity": (date_norm, _normalize_daypart_key(daypart_norm), menu_norm),
-            }
-        )
-    # OCR table often omits date/daypart for continuation rows. Carry-forward
-    # keeps row-index rescue aligned within the same daily block.
-    last_payload_date = ""
-    last_payload_daypart = ""
-    for item in payload_items:
-        current_date = str(item.get("date_norm") or "")
-        current_daypart = str(item.get("daypart_norm") or "")
-        if current_date:
-            last_payload_date = current_date
-        elif last_payload_date:
-            item["date_norm"] = last_payload_date
-        if current_daypart:
-            last_payload_daypart = current_daypart
-        elif last_payload_daypart:
-            item["daypart_norm"] = last_payload_daypart
-        item["identity"] = (
-            str(item.get("date_norm") or ""),
-            _normalize_daypart_key(item.get("daypart_norm")),
-            str(item.get("menu_norm") or ""),
-        )
-
-    def _strict_canonical_daypart(value: object) -> str:
-        text = _normalize_sheet_text(value)
-        if not text:
-            return ""
-        hits: list[str] = []
-        if "朝" in text:
-            hits.append("朝")
-        if "昼" in text:
-            hits.append("昼")
-        if "夕" in text or "夜" in text:
-            hits.append("夕")
-        if len(set(hits)) != 1:
-            return ""
-        return hits[0]
-
-    def _payload_row_has_numeric_signal(payload_idx: int) -> bool:
-        if payload_idx < 0 or payload_idx >= len(payload_rows):
-            return False
-        payload_row = payload_rows[payload_idx]
-        if not isinstance(payload_row, list):
-            return False
-        if _payload_row_has_numeric_quantity(payload_row, quantity_columns):
-            return True
-        if _extract_payload_row_span_hint(payload_row, quantity_columns=quantity_columns) > 0:
-            return True
-        return bool(_payload_row_numeric_candidates(payload_row, skip_columns=skip_columns))
-
-    def _payload_row_is_row_index_eligible(
-        payload_idx: int,
-        *,
-        sheet_idx: int | None = None,
-        enforce_window: bool = True,
-    ) -> bool:
-        if not _payload_row_has_numeric_signal(payload_idx):
-            return False
-        if sheet_idx is None:
-            return True
-        if enforce_window and row_index_window > 0 and abs(sheet_idx - payload_idx) > row_index_window:
-            return False
-        if 0 <= sheet_idx < len(sheet_items) and 0 <= payload_idx < len(payload_items):
-            sheet_date = str(sheet_items[sheet_idx].get("date_norm") or "")
-            payload_date = str(payload_items[payload_idx].get("date_norm") or "")
-            if sheet_date and payload_date and sheet_date != payload_date:
-                return False
-        return True
-
-    eligible_payload_indexes = [
-        idx for idx in range(len(payload_rows)) if _payload_row_has_numeric_signal(idx)
-    ]
-    if not eligible_payload_indexes:
-        return {}, stage_counts, {}
-
-    mapping: dict[int, int] = {}
-    used_payload: set[int] = set()
-    mapping_stage: dict[int, str] = {}
-
-    exact_payload_by_identity: dict[tuple[str, str, str], list[int]] = {}
-    partial_payload_by_date_menu: dict[tuple[str, str], list[int]] = {}
-    for payload_item in payload_items:
-        payload_idx_raw = payload_item.get("idx")
-        try:
-            payload_idx = int(payload_idx_raw)
-        except Exception:
-            payload_idx = -1
-        if payload_idx < 0 or payload_idx >= len(payload_rows):
-            continue
-        if not _payload_row_has_numeric_signal(payload_idx):
-            continue
-        identity = payload_item.get("identity")
-        if isinstance(identity, tuple) and len(identity) == 3 and any(identity):
-            exact_payload_by_identity.setdefault(identity, []).append(payload_idx)
-            partial_key = (str(identity[0] or ""), str(identity[2] or ""))
-            if partial_key != ("", ""):
-                partial_payload_by_date_menu.setdefault(partial_key, []).append(payload_idx)
-
-    def _claim_payload(
-        payload_idx: int,
-        *,
-        sheet_idx: int,
-        stage: str,
-        enforce_window: bool,
-    ) -> bool:
-        if payload_idx in used_payload:
-            return False
-        if not _payload_row_is_row_index_eligible(
-            payload_idx,
-            sheet_idx=sheet_idx,
-            enforce_window=enforce_window,
-        ):
-            return False
-        mapping[sheet_idx] = payload_idx
-        used_payload.add(payload_idx)
-        mapping_stage[sheet_idx] = stage
-        stage_counts[stage] = int(stage_counts.get(stage, 0)) + 1
-        return True
-
-    for sheet_item in sheet_items:
-        sheet_idx_raw = sheet_item.get("idx")
-        try:
-            sheet_idx = int(sheet_idx_raw)
-        except Exception:
-            sheet_idx = -1
-        if sheet_idx < 0:
-            continue
-        identity = sheet_item.get("identity")
-        if not isinstance(identity, tuple) or len(identity) != 3 or identity == ("", "", ""):
-            continue
-        candidates = exact_payload_by_identity.get(identity) or []
-        for payload_idx in candidates:
-            if _claim_payload(
-                payload_idx,
-                sheet_idx=sheet_idx,
-                stage="exact",
-                enforce_window=False,
-            ):
-                break
-
-    for sheet_item in sheet_items:
-        sheet_idx_raw = sheet_item.get("idx")
-        try:
-            sheet_idx = int(sheet_idx_raw)
-        except Exception:
-            sheet_idx = -1
-        if sheet_idx < 0 or sheet_idx in mapping:
-            continue
-        identity = sheet_item.get("identity")
-        if not isinstance(identity, tuple) or len(identity) != 3:
-            continue
-        partial_key = (str(identity[0] or ""), str(identity[2] or ""))
-        if partial_key == ("", ""):
-            continue
-        candidates = partial_payload_by_date_menu.get(partial_key) or []
-        for payload_idx in candidates:
-            if _claim_payload(
-                payload_idx,
-                sheet_idx=sheet_idx,
-                stage="partial",
-                enforce_window=False,
-            ):
-                break
-
-    if not allow_row_index_fallback:
-        return mapping, stage_counts, mapping_stage
-
-    reserved_direct_payload = {
-        idx
-        for idx in eligible_payload_indexes
-        if 0 <= idx < len(rows) and _payload_row_is_row_index_eligible(idx, sheet_idx=idx)
-    }
-
-    for sheet_idx in range(len(rows)):
-        if sheet_idx in mapping:
-            continue
-        if (
-            0 <= sheet_idx < len(payload_rows)
-            and sheet_idx not in used_payload
-            and _payload_row_is_row_index_eligible(sheet_idx, sheet_idx=sheet_idx)
-        ):
-            _claim_payload(
-                sheet_idx,
-                sheet_idx=sheet_idx,
-                stage="row_index",
-                enforce_window=True,
-            )
-            continue
-        candidates: list[tuple[int, int]] = []
-        for payload_idx in eligible_payload_indexes:
-            if payload_idx in used_payload:
-                continue
-            if payload_idx in reserved_direct_payload and payload_idx != sheet_idx:
-                continue
-            if not _payload_row_is_row_index_eligible(payload_idx, sheet_idx=sheet_idx):
-                continue
-            distance = abs(sheet_idx - payload_idx)
-            candidates.append((distance, payload_idx))
-        if candidates:
-            _distance, selected = min(candidates, key=lambda item: item[0])
-            _claim_payload(
-                selected,
-                sheet_idx=sheet_idx,
-                stage="row_index",
-                enforce_window=True,
-            )
-
-    return mapping, stage_counts, mapping_stage
+    return _build_canonical_payload_row_mapping(rows=rows, fields=fields, payload_rows=payload_rows, template=template)
 
 
 def _overlay_payload_structural_cells_from_sheet_rows(
@@ -27373,6 +26776,7 @@ def _apply_payload_quantities_numeric_only(
     overlay_structural_fields_from_sheet_rows: bool = False,
     allow_row_index_fallback: bool = False,
     allow_span_copy: bool = True,
+    template: dict[str, Any] | None = None,
 ) -> dict[str, int]:
     stage_counts = {
         "exact": 0,
@@ -27441,30 +26845,25 @@ def _apply_payload_quantities_numeric_only(
         if not mapped_quantity_columns:
             mapped_quantity_columns = list(quantity_columns)
             payload_quantity_columns = list(mapped_quantity_columns)
-    dominant_quantity_columns: set[int] = set(mapped_quantity_columns)
-    max_hit = max((int(quantity_hits.get(col, 0)) for col in mapped_quantity_columns), default=0)
-    if max_hit > 0:
-        dominant_quantity_columns = {
-            col
-            for col in mapped_quantity_columns
-            if int(quantity_hits.get(col, 0)) == max_hit
-        }
-    sparse_threshold = 2
-    if max_hit > 0:
-        sparse_threshold = max(sparse_threshold, int((max_hit * 0.25) + 0.9999))
-
     row_mapping, mapping_counts, _mapping_stage = _build_payload_row_mapping_by_row_index_numeric_only(
         rows=rows,
         fields=fields,
         payload_rows=payload_rows,
         quantity_columns=payload_quantity_columns,
         allow_row_index_fallback=allow_row_index_fallback,
+        template=template,
     )
     for key, value in mapping_counts.items():
         stage_counts[key] = int(value)
-    span_copy_hints: dict[tuple[int, int], int] = {}
-    span_row_hints: dict[int, int] = {}
-
+    mapped_payload_indexes = set(row_mapping.values())
+    stage_counts["unmapped"] = sum(
+        1 for payload_idx, payload_row in enumerate(payload_rows)
+        if payload_idx not in mapped_payload_indexes and any(
+            source_col_idx < len(payload_row)
+            and _field_value_to_str(payload_row[source_col_idx]).strip()
+            for source_col_idx in payload_quantity_columns
+        )
+    )
     for row_idx, payload_idx in row_mapping.items():
         if row_idx < 0 or row_idx >= len(rows):
             continue
@@ -27473,66 +26872,20 @@ def _apply_payload_quantities_numeric_only(
         payload_row = working_payload_rows[payload_idx]
         if not isinstance(payload_row, list):
             continue
-        row_span_hint = _extract_payload_row_span_hint(
-            payload_row,
-            quantity_columns=payload_quantity_columns,
-        )
-        if row_span_hint > 0:
-            span_row_hints[row_idx] = max(int(span_row_hints.get(row_idx, 0)), int(row_span_hint))
         target = rows[row_idx]
         values = target.get("values")
         if not isinstance(values, list):
             continue
 
-        parsed_quantities: list[tuple[int, int, float, int]] = []
         quantity_pairs = (
             list(explicit_quantity_pairs)
             if explicit_quantity_pairs
             else [(col_idx, col_idx) for col_idx in mapped_quantity_columns]
         )
         for source_col_idx, target_col_idx in quantity_pairs:
-            if source_col_idx >= len(payload_row):
-                continue
-            span_repeat = 0
-            span_candidate = _parse_explicit_span_quantity_cell(payload_row[source_col_idx])
-            qty = (
-                _parse_strict_numeric_cell(payload_row[source_col_idx])
-                if explicit_quantity_pairs
-                else _parse_sheet_quantity_cell(payload_row[source_col_idx])
-            )
-            if qty is None and explicit_quantity_pairs:
-                qty = _parse_sheet_quantity_cell(payload_row[source_col_idx])
-            if qty is None and span_candidate is not None:
-                qty = span_candidate[0]
-            if qty is None:
-                continue
-            if span_candidate is not None:
-                span_repeat = int(span_candidate[1])
-            parsed_quantities.append((source_col_idx, target_col_idx, qty, span_repeat))
-
-        filtered_quantities = list(parsed_quantities)
-
-        applied_qty = False
-        for _source_col_idx, target_col_idx, qty, span_repeat in filtered_quantities:
-            _set_row_quantity_value(values, target_col_idx, qty)
-            applied_qty = True
-            if span_repeat >= 2:
-                key = (row_idx, target_col_idx)
-                span_copy_hints[key] = max(int(span_copy_hints.get(key, 0)), int(span_repeat))
-
-        if allow_heuristics and not applied_qty:
-            loose_candidates = _payload_row_numeric_candidates(
-                payload_row,
-                skip_columns=immutable_columns | set(quantity_columns) | set(aux_columns),
-            )
-            target_columns = (
-                sorted(dominant_quantity_columns)
-                if dominant_quantity_columns
-                else list(mapped_quantity_columns)
-            )
-            if loose_candidates and target_columns:
-                _set_row_quantity_value(values, target_columns[0], loose_candidates[0])
-                stage_counts["loose_cell"] = int(stage_counts.get("loose_cell", 0)) + 1
+            if source_col_idx < 0 or source_col_idx >= len(payload_row):
+                raise _CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+            _transcribe_bound_quantity_cell(values, target_col_idx, payload_row[source_col_idx])
 
         for col_idx in aux_columns:
             if col_idx >= len(payload_row):
@@ -27544,69 +26897,6 @@ def _apply_payload_quantities_numeric_only(
                 values.append("")
             values[col_idx] = aux_value
 
-    if allow_span_copy:
-        span_filled = _apply_explicit_span_quantity_copy(
-            rows=rows,
-            fields=fields,
-            span_copy_hints=span_copy_hints,
-        )
-        if span_filled > 0:
-            stage_counts["span_copy"] = int(stage_counts.get("span_copy", 0)) + span_filled
-
-        span_row_filled = _apply_payload_row_span_hints(
-            rows=rows,
-            fields=fields,
-            quantity_columns=mapped_quantity_columns,
-            span_row_hints=span_row_hints,
-        )
-        if span_row_filled > 0:
-            stage_counts["span_copy"] = int(stage_counts.get("span_copy", 0)) + span_row_filled
-
-    if enable_daypart_consensus:
-        cluster_filled = _fill_cluster_consensus_quantities(
-            rows=rows,
-            fields=fields,
-            quantity_columns=mapped_quantity_columns,
-        )
-        if cluster_filled > 0:
-            stage_counts["cluster_fill"] = int(stage_counts.get("cluster_fill", 0)) + cluster_filled
-        daypart_consensus_columns: list[int] = []
-        if dominant_quantity_columns:
-            daypart_consensus_columns = [min(dominant_quantity_columns)]
-        elif mapped_quantity_columns:
-            daypart_consensus_columns = [mapped_quantity_columns[0]]
-        daypart_consensus_filled = _fill_blank_daypart_clusters_by_consensus(
-            rows=rows,
-            fields=fields,
-            quantity_columns=daypart_consensus_columns,
-        )
-        if daypart_consensus_filled > 0:
-            stage_counts["cluster_fill"] = int(stage_counts.get("cluster_fill", 0)) + daypart_consensus_filled
-
-    if allow_heuristics:
-        preferred_columns = (
-            sorted(dominant_quantity_columns)
-            if dominant_quantity_columns
-            else list(mapped_quantity_columns)
-        )
-        gap_filled = _fill_isolated_sheet_quantity_gaps(
-            rows=rows,
-            fields=fields,
-            quantity_columns=mapped_quantity_columns,
-            preferred_columns=preferred_columns,
-        )
-        if gap_filled > 0:
-            stage_counts["gap_fill"] = int(stage_counts.get("gap_fill", 0)) + gap_filled
-
-        unstructured_filled = _apply_unstructured_quantity_candidates(
-            rows=rows,
-            fields=fields,
-            quantity_columns=mapped_quantity_columns,
-            preferred_columns=preferred_columns,
-            candidates=list(payload_unstructured_qty or []),
-        )
-        if unstructured_filled > 0:
-            stage_counts["unstructured"] = int(stage_counts.get("unstructured", 0)) + unstructured_filled
     return stage_counts
 
 
@@ -27617,6 +26907,7 @@ def _project_payload_quantities_onto_sheet_row_lists(
     payload_rows: list[list[str]] | None,
     explicit_quantity_pairs: list[tuple[int, int]] | None = None,
     strict_raw_ocr_only: bool = False,
+    template: dict[str, Any] | None = None,
 ) -> tuple[list[list[str]], dict[str, int]]:
     normalized_rows = [
         [_field_value_to_str(cell) for cell in row]
@@ -27654,6 +26945,7 @@ def _project_payload_quantities_onto_sheet_row_lists(
         overlay_structural_fields_from_sheet_rows=True,
         allow_row_index_fallback=False,
         allow_span_copy=not strict_raw_ocr_only,
+        template=template,
     )
     resolved_rows: list[list[str]] = []
     for row_idx, original_row in enumerate(normalized_rows):
@@ -27749,9 +27041,12 @@ def _collect_payload_quantity_date_groups(
             groups.append(current_group)
         if current_group is None or not current_date_key:
             continue
-        if not _row_has_numeric_quantity_cells(payload_row, quantity_columns):
-            continue
         menu_norm = _normalize_menu_text(_safe_row_get(payload_row, menu_idx))
+        if not menu_norm and not any(
+            col_idx < len(payload_row) and _field_value_to_str(payload_row[col_idx]).strip()
+            for col_idx in quantity_columns
+        ):
+            continue
         item = {
             "payload_row_index": payload_idx,
             "row": list(payload_row),
@@ -27876,11 +27171,8 @@ def _apply_payload_quantity_row_to_shell_row(
     applied_cells = 0
     for col_idx in quantity_columns:
         if col_idx < 0 or col_idx >= len(payload_row):
-            continue
-        qty = _parse_sheet_quantity_cell(payload_row[col_idx])
-        if qty is None:
-            continue
-        _set_row_quantity_value(values, col_idx, qty)
+            raise _CanonicalOcrProjectionError("sheet_quantity_column_unmapped")
+        _transcribe_bound_quantity_cell(values, col_idx, payload_row[col_idx])
         applied_cells += 1
     return applied_cells
 
@@ -27892,187 +27184,51 @@ def _project_payload_quantities_onto_weekly_menu_shell(
     payload_rows: list[list[str]],
     template: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    cloned_rows = [dict(item) for item in (rows or []) if isinstance(item, dict)]
+    cloned_rows = _clone_sheet_rows(rows)
     if not cloned_rows or not fields or not payload_rows:
         return cloned_rows, {}
     quantity_columns = _template_quantity_column_indexes(template)
     if not quantity_columns:
         return cloned_rows, {}
-
-    shell_groups = _build_weekly_menu_shell_date_groups(rows=cloned_rows, fields=fields)
-    payload_groups = _collect_payload_quantity_date_groups(
-        payload_rows=payload_rows,
-        fields=fields,
-        quantity_columns=quantity_columns,
+    row_mapping, _counts, _stages = _build_canonical_payload_row_mapping(
+        rows=cloned_rows, fields=fields, payload_rows=payload_rows,
+        template=template,
     )
-    date_group_mappings, mapping_stats = _map_payload_date_groups_to_weekly_menu_shell(
-        payload_groups=payload_groups,
-        shell_groups=shell_groups,
-    )
-    if not date_group_mappings:
-        return cloned_rows, mapping_stats
-
-    date_idx, daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
-    exact_row_count = 0
-    ordered_row_count = 0
     mapped_cell_count = 0
-    overflow_row_count = 0
-    exact_target_row_indexes: list[int] = []
-    ordered_target_row_indexes: list[int] = []
-    unmapped_payload_row_indexes: list[int] = []
+    date_idx, _daypart_idx, _menu_idx = _resolve_sheet_field_indexes(fields)
+    date_keys: set[str] = set()
     accepted_payload_mappings: list[dict[str, Any]] = []
-
-    for payload_group, shell_group in date_group_mappings:
-        payload_items = list(payload_group.get("items") or [])
-        shell_row_indexes = [
-            int(item)
-            for item in (shell_group.get("row_indexes") or [])
-            if isinstance(item, int) and 0 <= item < len(cloned_rows)
-        ]
-        if not payload_items or not shell_row_indexes:
-            continue
-        shell_menu_to_row_index: dict[str, int] = {}
-        duplicate_shell_menus: set[str] = set()
-        shell_row_positions: dict[int, int] = {}
-        for shell_position, row_idx in enumerate(shell_row_indexes):
-            values = cloned_rows[row_idx].get("values")
-            if not isinstance(values, list):
-                continue
-            shell_row_positions[row_idx] = shell_position
-            row_menu_norm = _normalize_menu_text(_safe_row_get(values, menu_idx))
-            if not row_menu_norm:
-                continue
-            if row_menu_norm in shell_menu_to_row_index:
-                duplicate_shell_menus.add(row_menu_norm)
-                continue
-            shell_menu_to_row_index[row_menu_norm] = row_idx
-
-        exact_mapping: dict[int, int] = {}
-        used_payload_item_indexes: set[int] = set()
-        used_shell_row_indexes: set[int] = set()
-        unresolved_named_items: set[int] = set()
-        last_exact_shell_position = -1
-        monotonic_exact_mapping = True
-        for item_idx, payload_item in enumerate(payload_items):
-            payload_menu_norm = str(payload_item.get("menu_norm") or "").strip()
-            if not payload_menu_norm:
-                continue
-            if payload_menu_norm in duplicate_shell_menus:
-                unresolved_named_items.add(item_idx)
-                continue
-            target_row_idx = shell_menu_to_row_index.get(payload_menu_norm)
-            if target_row_idx is None or target_row_idx in used_shell_row_indexes:
-                unresolved_named_items.add(item_idx)
-                continue
-            shell_position = shell_row_positions.get(target_row_idx, -1)
-            if shell_position < last_exact_shell_position:
-                monotonic_exact_mapping = False
-                break
-            last_exact_shell_position = shell_position
-            exact_mapping[target_row_idx] = item_idx
-            used_payload_item_indexes.add(item_idx)
-            used_shell_row_indexes.add(target_row_idx)
-
-        if not monotonic_exact_mapping:
-            unresolved_named_items = {
-                item_idx
-                for item_idx, payload_item in enumerate(payload_items)
-                if str(payload_item.get("menu_norm") or "").strip()
-            }
-            exact_mapping = {}
-            used_payload_item_indexes.clear()
-            used_shell_row_indexes.clear()
-
-        if not exact_mapping:
-            overflow_row_count += len(payload_items)
-            unmapped_payload_row_indexes.extend(
-                int(item.get("payload_row_index"))
-                for item in payload_items
-                if isinstance(item.get("payload_row_index"), int)
-            )
-            continue
-
-        for target_row_idx, item_idx in exact_mapping.items():
-            payload_row = payload_items[item_idx].get("row")
-            if not isinstance(payload_row, list):
-                continue
-            mapped_cell_count += _apply_payload_quantity_row_to_shell_row(
-                row=cloned_rows[target_row_idx],
-                payload_row=payload_row,
-                quantity_columns=quantity_columns,
-            )
-            exact_row_count += 1
-            exact_target_row_indexes.append(int(target_row_idx))
-            payload_row_index = payload_items[item_idx].get("payload_row_index")
-            if isinstance(payload_row_index, int):
-                accepted_payload_mappings.append(
-                    {
-                        "payload_row_index": int(payload_row_index),
-                        "target_row_index": int(target_row_idx),
-                        "mapping_type": "exact",
-                    }
-                )
-
-        remaining_row_indexes = [
-            row_idx for row_idx in shell_row_indexes if row_idx not in used_shell_row_indexes
-        ]
-        remaining_items = [
-            payload_item
-            for item_idx, payload_item in enumerate(payload_items)
-            if item_idx not in used_payload_item_indexes
-        ]
-        if unresolved_named_items or any(
-            str(payload_item.get("menu_norm") or "").strip()
-            for payload_item in remaining_items
-        ):
-            overflow_row_count += len(remaining_items)
-            unmapped_payload_row_indexes.extend(
-                int(payload_item.get("payload_row_index"))
-                for payload_item in remaining_items
-                if isinstance(payload_item.get("payload_row_index"), int)
-            )
-            continue
-
-        for target_row_idx, payload_item in zip(remaining_row_indexes, remaining_items):
-            payload_row = payload_item.get("row")
-            if not isinstance(payload_row, list):
-                continue
-            mapped_cell_count += _apply_payload_quantity_row_to_shell_row(
-                row=cloned_rows[target_row_idx],
-                payload_row=payload_row,
-                quantity_columns=quantity_columns,
-            )
-            ordered_row_count += 1
-            ordered_target_row_indexes.append(int(target_row_idx))
-            payload_row_index = payload_item.get("payload_row_index")
-            if isinstance(payload_row_index, int):
-                accepted_payload_mappings.append(
-                    {
-                        "payload_row_index": int(payload_row_index),
-                        "target_row_index": int(target_row_idx),
-                        "mapping_type": "ordered",
-                    }
-                )
-
-        if len(remaining_items) > len(remaining_row_indexes):
-            overflow_items = remaining_items[len(remaining_row_indexes) :]
-            overflow_row_count += len(overflow_items)
-            unmapped_payload_row_indexes.extend(
-                int(item.get("payload_row_index"))
-                for item in overflow_items
-                if isinstance(item.get("payload_row_index"), int)
-            )
-
+    for row_idx, payload_idx in row_mapping.items():
+        payload_row = payload_rows[payload_idx]
+        mapped_cell_count += _apply_payload_quantity_row_to_shell_row(
+            row=cloned_rows[row_idx], payload_row=payload_row, quantity_columns=quantity_columns,
+        )
+        target = cloned_rows[row_idx]
+        target_date = _safe_row_get(target["values"], date_idx)
+        if not _field_value_to_str(target_date).strip() and isinstance(target.get("identity"), tuple):
+            target_date = target["identity"][0]
+        date_keys.add(_normalize_sheet_date_key(target_date))
+        accepted_payload_mappings.append({
+            "payload_row_index": payload_idx,
+            "target_row_index": row_idx,
+            "mapping_type": "exact",
+        })
     return cloned_rows, {
-        **mapping_stats,
-        "exact_row_count": exact_row_count,
-        "ordered_row_count": ordered_row_count,
-        "mapped_row_count": exact_row_count + ordered_row_count,
+        "mapped_date_group_count": len(date_keys),
+        "unresolved_date_group_count": 0,
+        "date_group_mappings": [
+            {"payload_date_key": key, "shell_date_key": key, "reason": "exact"}
+            for key in sorted(date_keys)
+        ],
+        "unresolved_payload_dates": [],
+        "exact_row_count": len(row_mapping),
+        "ordered_row_count": 0,
+        "mapped_row_count": len(row_mapping),
         "mapped_cell_count": mapped_cell_count,
-        "overflow_row_count": overflow_row_count,
-        "exact_target_row_indexes": exact_target_row_indexes[:200],
-        "ordered_target_row_indexes": ordered_target_row_indexes[:200],
-        "unmapped_payload_row_indexes": unmapped_payload_row_indexes[:80],
+        "overflow_row_count": 0,
+        "exact_target_row_indexes": list(row_mapping)[:200],
+        "ordered_target_row_indexes": [],
+        "unmapped_payload_row_indexes": [],
         "accepted_payload_mappings": accepted_payload_mappings[:400],
     }
 
@@ -28887,12 +28043,19 @@ def get_ocr_sheet(
     # lines. Row-index/source-row/payload rescue paths are forbidden here.
     if _source_uses_weekly_menu_shell(source):
         if raw_first_pass_rows:
-            projected_rows, shell_projection_stats = _project_payload_quantities_onto_weekly_menu_shell(
-                rows=_clone_sheet_rows(base_rows),
-                fields=fields,
-                payload_rows=raw_first_pass_rows,
-                template=template,
-            )
+            try:
+                projected_rows, shell_projection_stats = _project_payload_quantities_onto_weekly_menu_shell(
+                    rows=_clone_sheet_rows(base_rows),
+                    fields=fields,
+                    payload_rows=raw_first_pass_rows,
+                    template=template,
+                )
+            except _CanonicalOcrProjectionError as exc:
+                return _build_blocked_sheet_payload(
+                    order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
+                    fields=fields, header=_sheet_header_from_template(fields, template),
+                    blockers=[str(exc)], source=_canonical_blocked_sheet_source(fields=fields),
+                ), None
             rows = projected_rows
             mapped_count = _count_non_empty_quantity_cells(
                 rows=rows,
@@ -35231,18 +34394,26 @@ def _reparse_order_with_attempt(
                     candidate_returned_field_map[normalized_row_index] = normalized_fields
         latest_draft_for_reparse = captured_read_input.get("draft")
         preserve_current_quantity_baseline = apply_gate_service.has_clean_saved_draft(latest_draft_for_reparse)
+        quantity_projection_error = None
         if not preserve_current_quantity_baseline:
-            authoritative_quantity_rows, authoritative_quantity_projection = _build_reparse_authoritative_quantity_baseline_rows(
+            try:
+                authoritative_quantity_rows, authoritative_quantity_projection = _build_reparse_authoritative_quantity_baseline_rows(
+                    baseline=llm_reparse_baseline,
+                    template=template_to_use if isinstance(template_to_use, dict) else None,
+                )
+            except _CanonicalOcrProjectionError as exc:
+                quantity_projection_error = str(exc)
+        if quantity_projection_error:
+            merged_rows = []
+            llm_full_table_result = {"error": quantity_projection_error, "detail": {}}
+        else:
+            merged_rows, llm_full_table_result = _validate_and_merge_reparse_full_table_candidate(
                 baseline=llm_reparse_baseline,
-                template=template_to_use if isinstance(template_to_use, dict) else None,
+                candidate_rows=rows,
+                candidate_returned_row_indexes=candidate_returned_row_indexes,
+                candidate_returned_field_map=candidate_returned_field_map,
+                authoritative_quantity_rows=authoritative_quantity_rows,
             )
-        merged_rows, llm_full_table_result = _validate_and_merge_reparse_full_table_candidate(
-            baseline=llm_reparse_baseline,
-            candidate_rows=rows,
-            candidate_returned_row_indexes=candidate_returned_row_indexes,
-            candidate_returned_field_map=candidate_returned_field_map,
-            authoritative_quantity_rows=authoritative_quantity_rows,
-        )
         llm_full_table_merge_stats = dict(llm_full_table_result.get("detail") or {})
         if isinstance(authoritative_quantity_projection, dict) and authoritative_quantity_projection:
             llm_full_table_merge_stats["authoritative_quantity_projection"] = authoritative_quantity_projection
