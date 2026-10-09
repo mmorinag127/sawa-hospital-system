@@ -56,13 +56,32 @@ def _has_grid_metadata(payload: dict[str, Any]) -> bool:
 
 
 def _has_evidence_context(payload: dict[str, Any]) -> bool:
+    if _uses_canonical_contract(payload):
+        return True
     if isinstance(payload.get("evidence_manifest"), dict):
         return True
     return any(key in payload for key in EVIDENCE_CONTEXT_KEYS)
 
 
+def _uses_canonical_contract(payload: dict[str, Any]) -> bool:
+    from src.services.canonical_ocr_artifact_service import CONTRACT
+
+    manifest = payload.get("evidence_manifest")
+    overlay = payload.get("hakodate_overlay")
+    preprocessing = payload.get("hakodate_preprocessing")
+    return "hakodate_canonical_pipeline" in payload or (
+        isinstance(manifest, dict) and manifest.get("contract") == CONTRACT
+    ) or (
+        isinstance(overlay, dict) and overlay.get("producer") == "hakodate_best_method_pipeline"
+    ) or (
+        isinstance(preprocessing, dict) and preprocessing.get("source") == "hakodate_best_method_pipeline"
+    )
+
+
 def build_evidence_manifest(payload: dict[str, Any] | None) -> dict[str, Any]:
     normalized = payload if isinstance(payload, dict) else {}
+    if _uses_canonical_contract(normalized):
+        return _canonical_output_manifest(normalized)
     artifacts = {
         "corrected_pdf": bool(
             str(
@@ -90,13 +109,35 @@ def build_evidence_manifest(payload: dict[str, Any] | None) -> dict[str, Any]:
     return manifest
 
 
+def _canonical_output_manifest(payload: dict[str, Any]) -> dict[str, Any]:
+    from src.services import canonical_ocr_artifact_service as artifacts_service
+
+    pipeline = payload.get("hakodate_canonical_pipeline")
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
+    packet = pipeline.get("artifact_packet")
+    artifacts = {key: False for key in artifacts_service.REQUIRED_OUTPUTS}
+    errors = []
+    try:
+        artifacts_service.validate_payload(payload)
+        artifacts = {key: True for key in packet["outputs"]}
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        errors.append(str(exc))
+    missing = [key for key, present in artifacts.items() if not present]
+    manifest = {"version": 2, "contract": artifacts_service.CONTRACT,
+                "required_artifacts": list(artifacts_service.REQUIRED_OUTPUTS), "artifacts": artifacts,
+                "missing_artifacts": missing, "artifacts_complete": not missing and not errors,
+                "validation_errors": errors, "artifact_packet": packet}
+    manifest["digest"] = _digest(manifest)
+    return manifest
+
+
 def ensure_evidence_manifest(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return payload
     if not _has_evidence_context(payload):
         return payload
     manifest = payload.get("evidence_manifest")
-    if not isinstance(manifest, dict):
+    if _uses_canonical_contract(payload) or not isinstance(manifest, dict):
         manifest = build_evidence_manifest(payload)
     elif "digest" not in manifest:
         manifest = dict(manifest)

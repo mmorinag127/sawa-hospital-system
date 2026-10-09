@@ -348,6 +348,22 @@ def get_default_artifact_bucket() -> str | None:
     return os.getenv("OCR_ARTIFACT_BUCKET") or os.getenv("RAW_BUCKET")
 
 
+def save_canonical_artifact_bytes(job_id: str, name: str, data: bytes, content_type: str) -> str:
+    local_dir = (os.getenv("OCR_ARTIFACT_DIR") or "").strip()
+    bucket = (os.getenv("OCR_OUTPUT_BUCKET") or "").strip()
+    if local_dir and bucket:
+        raise ValueError("canonical_artifact_storage_ambiguous")
+    if not local_dir and not bucket:
+        raise ValueError("canonical_artifact_storage_required")
+    object_path = build_artifact_path(job_id, name)
+    if local_dir:
+        root = Path(local_dir)
+        if not root.is_absolute():
+            raise ValueError("canonical_artifact_directory_must_be_absolute")
+        return StorageService(root).save_bytes(object_path, data)
+    return save_bytes_to_gcs(bucket, object_path, data, content_type=content_type, pin_generation=True)
+
+
 def save_artifact_bytes_to_gcs(
     bucket: str, job_id: str, name: str, data: bytes, content_type: str | None = None
 ) -> str:

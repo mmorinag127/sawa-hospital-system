@@ -9279,6 +9279,8 @@ def _validate_hakodate_owned_artifacts(payload, expected_source):
         raise ValueError("hakodate_own_artifacts_incomplete")
     if any(not snapshots_equal(cell.get("source_receipt"), source) for cell in targets) or any(not snapshots_equal((record.get("engine_metadata") or {}).get("source_receipt"), source) for record in records):
         raise ValueError("hakodate_artifact_source_mismatch")
+    from src.services import canonical_ocr_artifact_service
+    canonical_ocr_artifact_service.validate_payload(payload)
 
 
 def _validate_selected_hakodate_artifacts(evidence, captured):
@@ -10167,12 +10169,11 @@ def _hakodate_canonical_payload_from_manifest_item(
         outputs = dict(result.outputs or {})
         regions_path = outputs.get("ocr_regions")
         records_path = outputs.get("records")
-        overlay_path = outputs.get("overlay")
         if not regions_path:
-            return None
+            raise ValueError("hakodate_canonical_regions_missing")
         regions = json.loads(Path(regions_path).read_text(encoding="utf-8"))
         if not isinstance(regions, list):
-            return None
+            raise ValueError("hakodate_canonical_representation_invalid")
         if any(not isinstance(region, dict) for region in regions):
             raise ValueError("hakodate_canonical_representation_invalid")
         _validate_hakodate_target_identities(regions)
@@ -10195,6 +10196,13 @@ def _hakodate_canonical_payload_from_manifest_item(
             raise ValueError("hakodate_own_recognizer_records_missing")
         owned_source = _hakodate_owned_source(runtime_item["configured_input"], runtime_item["selected_pdf_receipt"], synchronous_write_input)
         owned_source["expected_sheet_cells"] = deepcopy(expected_cells)
+        from src.services import canonical_ocr_artifact_service
+        artifact_packet = canonical_ocr_artifact_service.persist_outputs(
+            order_id=order_id, outputs=outputs, source_receipt=owned_source,
+            expected_sheet_cells=expected_cells, producer_version=HAKODATE_CANONICAL_PIPELINE_VERSION,
+            workspace=output_dir,
+        )
+        outputs = {key: receipt["uri"] for key, receipt in artifact_packet["outputs"].items()}
         evidence_source_records = digit_records
         for index, region in enumerate(evidence_source_records):
             accepted_candidate = region.get("recognizer_accepted_candidate")
@@ -10248,13 +10256,18 @@ def _hakodate_canonical_payload_from_manifest_item(
             run_id=f"{order_id}:hakodate-best-method",
             engine=str(result.ocr_engine or hakodate_cell_ocr_batch_service.DEFAULT_CELL_OCR_ENGINE),
             source_scope="hakodate_cell_crop_batch",
-            raw_payload_ref=outputs.get("ocr_regions"),
+            raw_payload_ref=outputs["records"],
             retain_empty_records=True,
         )
         _validate_hakodate_owned_artifacts(
             {
                 "hakodate_repair_source_receipt": owned_source,
-                "hakodate_canonical_pipeline": {"status": "ready", "version": HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": expected_cells},
+                "hakodate_canonical_pipeline": {
+                    "status": "ready", "version": HAKODATE_CANONICAL_PIPELINE_VERSION,
+                    "expected_sheet_cells": expected_cells, "requested_order_id": order_id,
+                    "outputs": outputs, "artifact_packet": artifact_packet,
+                },
+                "hakodate_overlay": {"uri": outputs["overlay"], "sheet_review_base_uri": outputs["sheet_review_base"]},
                 "hakodate_preprocessing": {"target_cell_map": target_cells},
                 "hakodate_ocr_evidence": {"records": evidence_records},
                 "hakodate_ocr_evidence_records": evidence_records,
@@ -10295,27 +10308,8 @@ def _hakodate_canonical_payload_from_manifest_item(
                 if isinstance(item, dict)
             ],
         )
-        overlay_uri = None
-        sheet_review_base_uri = None
-        if overlay_path and Path(overlay_path).exists():
-            bucket = get_default_output_bucket()
-            if bucket:
-                overlay_uri = save_artifact_bytes_to_gcs(
-                    bucket,
-                    f"OCR-{order_id}",
-                    f"hakodate-overlay-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{uuid4().hex[:8]}.png",
-                    Path(overlay_path).read_bytes(),
-                    content_type="image/png",
-                )
-                sheet_review_base_path = str(outputs.get("sheet_review_base") or "").strip()
-                if sheet_review_base_path and Path(sheet_review_base_path).exists():
-                    sheet_review_base_uri = save_artifact_bytes_to_gcs(
-                        bucket,
-                        f"OCR-{order_id}",
-                        f"hakodate-sheet-review-base-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{uuid4().hex[:8]}.png",
-                        Path(sheet_review_base_path).read_bytes(),
-                        content_type="image/png",
-                    )
+        overlay_uri = outputs["overlay"]
+        sheet_review_base_uri = outputs["sheet_review_base"]
         return {
             "hakodate_repair_source_receipt": owned_source,
             "hakodate_preprocessing": {
@@ -10362,6 +10356,7 @@ def _hakodate_canonical_payload_from_manifest_item(
                 "assigned_target_count": assigned_target_count,
                 "metrics": runtime_metrics,
                 "outputs": outputs,
+                "artifact_packet": artifact_packet,
             },
             "metrics": runtime_metrics,
         }
