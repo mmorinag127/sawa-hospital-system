@@ -90,7 +90,7 @@ module "cloudrun" {
     GCP_PROJECT_ID              = var.project_id
     RAW_BUCKET                  = "${var.project_id}-${local.env}-raw"
     OCR_OUTPUT_BUCKET           = "${var.project_id}-${local.env}-raw"
-    OCR_PIPELINE_STATE_URI       = "gs://${var.project_id}-${local.env}-raw/ocr/pipeline_state.json"
+    OCR_PIPELINE_STATE_URI      = "gs://${var.project_id}-${local.env}-raw/ocr/pipeline_state.json"
     TEMPLATE_BUCKET             = "${var.project_id}-${local.env}-templates"
     FACILITY_MASTER_PATH        = "/app/src/data/facility_master.template.json"
     CORS_ALLOW_ORIGINS          = ""

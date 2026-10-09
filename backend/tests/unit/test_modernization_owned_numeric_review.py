@@ -57,8 +57,9 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     assert (sheet["order_id"], sheet["facility_id"], sheet["week_id"]) == (ORDER, FACILITY, WEEK)
     assert sheet["physical_menu_row_ids"] == identity["physical_menu_row_ids"]
     identity_columns = [sheet["fields"].index(field) for field in ("date_mmdd", "daypart", "menu")]
+    public_dayparts = {"朝食": "朝", "昼食": "昼", "夕食": "夕"}
     expected_identity = [
-        [date.fromisoformat(day).strftime("%m/%d"), meal, menu]
+        [date.fromisoformat(day).strftime("%m/%d"), public_dayparts[meal], menu]
         for day, meal, menu in identity["rows"]
     ]
     assert [[row[index] for index in identity_columns] for row in sheet["rows"]] == expected_identity
