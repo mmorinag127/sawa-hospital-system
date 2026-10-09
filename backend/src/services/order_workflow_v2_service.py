@@ -1467,7 +1467,7 @@ def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> s
     if menu_defaults is not None:
         from src.services import menu_service
         facility_id, names, captured_defaults = menu_defaults
-        if captured_defaults != menu_service.resolve_menu_defaults(names, facility_id):
+        if captured_defaults != menu_service.resolve_menu_defaults_in_session(session, names, facility_id)[0]:
             session.rollback()
             return "materialization_menu_defaults_changed"
     workflow.revision = _workflow_revision(workflow) + 1
@@ -1607,7 +1607,7 @@ def get_quad_review(order_id: str, *, document_id: str | None = None) -> tuple[d
             geometry_digest = _get_order_service_module().geometry_source_digest(pdf_receipt, start_input["configured_input"], {key: start_input["order"].get(key) for key in ("facility_code", "week_code")}, physical_entries=start_input["physical_menu_entries"])
             if saved_override is not None:
                 try:
-                    _get_order_service_module()._normalize_operator_quad_override(saved_override, selected_pdf_receipt=pdf_receipt, configured_input=start_input["configured_input"], order_input_identity={key: start_input["order"].get(key) for key in ("facility_code", "week_code")})
+                    _get_order_service_module()._normalize_operator_quad_override(saved_override, selected_pdf_receipt=pdf_receipt, configured_input=start_input["configured_input"], order_input_identity={key: start_input["order"].get(key) for key in ("facility_code", "week_code")}, session=session)
                 except ValueError:
                     saved_override = None
                     saved_override_error = "quad_source_input_changed"
@@ -1723,7 +1723,7 @@ def save_quad_review_decision(
                 return None, "quad_source_input_changed"
             if not verify_selected_pdf_receipt(session, source_receipt.get("selected_pdf_receipt")):
                 return None, "quad_source_input_changed"
-            _get_order_service_module()._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], current_input["configured_input"], source_receipt["order_input_identity"])
+            _get_order_service_module()._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], current_input["configured_input"], source_receipt["order_input_identity"], session=session)
         except ValueError as exc:
             return None, str(exc)
         if normalized_decision == "approved_estimate" and normalized_quad != source_receipt.get("suggested_quad_px"):
@@ -1782,7 +1782,7 @@ def _validate_axis_receipt(session, order, workflow, source_receipt):
     if source_receipt.get("order_input_identity") != {key: current["order"].get(key) for key in ("facility_code", "week_code")} or source_receipt.get("selected_pdf_receipt") != capture_selected_pdf_receipt(session, order, selected) or not verify_selected_pdf_receipt(session, source_receipt.get("selected_pdf_receipt")):
         return "axis_source_input_changed"
     try:
-        _get_order_service_module()._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], current["configured_input"], source_receipt["order_input_identity"])
+        _get_order_service_module()._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], current["configured_input"], source_receipt["order_input_identity"], session=session)
     except ValueError as exc:
         return str(exc)
     return None
@@ -3570,7 +3570,7 @@ def _build_materialization_candidate_for_saved_sheet(
     original_meta = output_builder._build_ocr_menu_meta(_build_order_payload_for_outputs(order=order, lines=captured["input_versions"]["order_lines"]), configured["facility"], parsed_input=captured["evidence"]["payload_json"])
     names = list(dict.fromkeys(str(entry.get("menu_name") or "").strip() for entry in original_meta.get("entries", [])))
     captured["output_ocr_menu_entries"] = copy.deepcopy(original_meta.get("entries", []))
-    captured["output_ocr_menu_defaults"] = menu_service.resolve_menu_defaults(names, order.facility_code) if names else {}
+    captured["output_ocr_menu_defaults"] = menu_service.resolve_menu_defaults_in_session(session, names, order.facility_code)[0] if names else {}
     session.info["materialization_menu_defaults"] = (order.facility_code, names, copy.deepcopy(captured["output_ocr_menu_defaults"]))
     return order_service_module._build_materialization_candidate_from_draft_record(  # noqa: SLF001
         order.id,

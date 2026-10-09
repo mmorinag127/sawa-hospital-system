@@ -167,7 +167,7 @@ def _order_execution_input(session: Any, order: Any, *, lock: bool = False, orig
     if original_input is not None and (not snapshots_equal(original_input.get("original_template_projection"), original_projection)
             or not snapshots_equal(original_input.get("original_template_source_proof"), projection.validation_json["creation_source_proof"])):
         raise ValueError("original_template_projection_changed")
-    physical_menu_entries = _build_position_menu_entries_safe(order.week_code, order.facility_code)
+    physical_menu_entries = _build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)
     workflow = session.get(OrderWorkflowState, order.id, populate_existing=True, with_for_update=lock)
     lines_query = select(OrderLine).where(OrderLine.order_id == order.id).order_by(OrderLine.id).execution_options(populate_existing=True)
     if lock:
@@ -648,7 +648,7 @@ def lock_current_workflow_attempt(
     if not isinstance(captured, dict) or order is None or not captured_processing_config_matches(order.facility_code, captured.get("configured_input")):
         return False
     from src.services.order_service import _build_position_menu_entries_safe
-    if not snapshots_equal(captured.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code)):
+    if not snapshots_equal(captured.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)):
         return False
     owner = current_workflow_execution()
     if isinstance(owner, dict) and owner.get("job_id") == job_id:

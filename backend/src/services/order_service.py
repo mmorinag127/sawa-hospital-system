@@ -223,7 +223,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
             "draft": deepcopy(draft_sheet_service._serialize_draft(draft)) if draft is not None else None,
             "selected_pdf_receipt": pdf_receipt,
             "configured_input": _capture_selected_order_config(session, order),
-            "physical_menu_entries": _json_snapshot(_build_position_menu_entries_safe(order.week_code, order.facility_code)),
+            "physical_menu_entries": _json_snapshot(_build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)),
         }
 
 
@@ -238,14 +238,14 @@ def _synchronous_cache_write_fence(
     order = session.get(Order, order_id)
     if order is None or not config_service.captured_processing_config_matches(order.facility_code, write_input.get("configured_input")):
         return False
-    if not snapshots_equal(write_input.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code)):
+    if not snapshots_equal(write_input.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)):
         return False
     if "output_ocr_menu_defaults" in write_input:
         entries = write_input.get("output_ocr_menu_entries")
         if not isinstance(entries, list):
             return False
         names = list(dict.fromkeys(str(entry.get("menu_name") or "").strip() for entry in entries))
-        if not snapshots_equal(write_input["output_ocr_menu_defaults"], menu_service.resolve_menu_defaults(names, order.facility_code) if names else {}):
+        if not snapshots_equal(write_input["output_ocr_menu_defaults"], menu_service.resolve_menu_defaults_in_session(session, names, order.facility_code)[0] if names else {}):
             return False
     return lock_current_synchronous_cache_write(
         session,
@@ -293,7 +293,7 @@ def _authored_geometry_page(configured_input):
     return page
 
 
-def geometry_source_digest(selected_pdf_receipt, configured_input, order_input_identity, *, physical_entries=None):
+def geometry_source_digest(selected_pdf_receipt, configured_input, order_input_identity, *, physical_entries=None, session=None):
     if not isinstance(selected_pdf_receipt, dict) or not isinstance(configured_input, dict) or not isinstance(order_input_identity, dict):
         raise ValueError("geometry_source_proof_required")
     layout = (configured_input.get("facility") or {}).get("fax_template")
@@ -304,7 +304,12 @@ def geometry_source_digest(selected_pdf_receipt, configured_input, order_input_i
     week = order_input_identity.get("week_code")
     if not facility or not week:
         raise ValueError("geometry_source_identity_missing")
-    entries = deepcopy(physical_entries) if physical_entries is not None else _build_position_menu_entries_safe(week, facility)
+    if physical_entries is not None:
+        entries = deepcopy(physical_entries)
+    elif session is not None:
+        entries = _build_position_menu_entries_safe(week, facility, session=session)
+    else:
+        entries = _build_position_menu_entries_safe(week, facility)
     if not entries:
         raise ValueError("geometry_physical_menu_missing")
     physical_keys = hakodate_physical_menu_row_service.physical_row_keys_from_entries(entries)
@@ -313,12 +318,13 @@ def geometry_source_digest(selected_pdf_receipt, configured_input, order_input_i
     return hashlib.sha256(canonical_snapshot_json(inputs).encode()).hexdigest()
 
 
-def _validate_geometry_source(source, selected_pdf_receipt, configured_input, order_input_identity):
+def _validate_geometry_source(source, selected_pdf_receipt, configured_input, order_input_identity, *, session=None):
     if not isinstance(source, dict) or not source.get("geometry_source_digest") or not isinstance(source.get("physical_menu_entries"), list):
         raise ValueError("geometry_source_proof_required")
     if source["geometry_source_digest"] != geometry_source_digest(selected_pdf_receipt, configured_input, order_input_identity, physical_entries=source["physical_menu_entries"]):
         raise ValueError("geometry_source_input_changed")
-    if source["geometry_source_digest"] != geometry_source_digest(selected_pdf_receipt, configured_input, order_input_identity):
+    session_kwargs = {"session": session} if session is not None else {}
+    if source["geometry_source_digest"] != geometry_source_digest(selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs):
         raise ValueError("geometry_source_input_changed")
 
 
@@ -329,6 +335,7 @@ def _normalize_operator_quad_override(
     selected_pdf_receipt: dict[str, Any] | None = None,
     configured_input: dict[str, Any] | None = None,
     order_input_identity: dict[str, Any] | None = None,
+    session: Any = None,
 ) -> tuple[list[list[float]] | None, str | None]:
     if not isinstance(value, dict):
         return None, None
@@ -338,7 +345,8 @@ def _normalize_operator_quad_override(
         raise ValueError("quad_source_input_changed")
     if order_input_identity is None or not snapshots_equal(source.get("order_input_identity"), order_input_identity):
         raise ValueError("quad_source_input_changed")
-    _validate_geometry_source(source, selected_pdf_receipt, configured_input, order_input_identity)
+    session_kwargs = {"session": session} if session is not None else {}
+    _validate_geometry_source(source, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
     coordinate_space = value.get("coordinate_space")
     if render_width is not None and isinstance(coordinate_space, dict):
         mode = str(coordinate_space.get("mode") or "").strip()
@@ -372,18 +380,20 @@ def _normalize_operator_quad_override(
     return normalized, source
 
 
-def _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity):
+def _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, *, session=None):
     source = value.get("source_receipt")
     digest = hashlib.sha256(canonical_snapshot_json(configured_input).encode()).hexdigest()
     if not isinstance(source, dict) or selected_pdf_receipt is None or configured_input is None or not snapshots_equal(source.get("selected_pdf_receipt"), selected_pdf_receipt) or source.get("configured_input_digest") != digest or not snapshots_equal(source.get("order_input_identity"), order_input_identity):
         raise ValueError("axis_source_input_changed")
-    _validate_geometry_source(source, selected_pdf_receipt, configured_input, order_input_identity)
+    session_kwargs = {"session": session} if session is not None else {}
+    _validate_geometry_source(source, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
 
 
-def _normalize_operator_header_axis_override(value: object, *, selected_pdf_receipt=None, configured_input=None, order_input_identity=None) -> dict[str, Any] | None:
+def _normalize_operator_header_axis_override(value: object, *, selected_pdf_receipt=None, configured_input=None, order_input_identity=None, session=None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity)
+    session_kwargs = {"session": session} if session is not None else {}
+    _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
     coordinate_space = value.get("coordinate_space")
     if not isinstance(coordinate_space, dict):
         return None
@@ -418,10 +428,11 @@ def _normalize_operator_header_axis_override(value: object, *, selected_pdf_rece
     }
 
 
-def _normalize_operator_row_axis_override(value: object, *, selected_pdf_receipt=None, configured_input=None, order_input_identity=None) -> dict[str, Any] | None:
+def _normalize_operator_row_axis_override(value: object, *, selected_pdf_receipt=None, configured_input=None, order_input_identity=None, session=None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity)
+    session_kwargs = {"session": session} if session is not None else {}
+    _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
     coordinate_space = value.get("coordinate_space")
     if not isinstance(coordinate_space, dict):
         return None
@@ -1082,8 +1093,10 @@ def _apply_menu_matching(
     week_id: Optional[str],
     facility_id: Optional[str],
     min_ratio: float,
+    *, session: Any = None,
 ) -> list[dict]:
-    items = _collect_menu_items_for_week(week_id, facility_id, allow_unresolved=True)
+    session_kwargs = {"session": session} if session is not None else {}
+    items = _collect_menu_items_for_week(week_id, facility_id, allow_unresolved=True, **session_kwargs)
     if not items:
         return lines
     candidates = [item.get("name") for item in items if item.get("name")]
@@ -1190,7 +1203,7 @@ def _normalize_entry_date(value: object) -> date | None:
 def _load_menu_payloads_for_week(
     week_id: str | None,
     facility_id: str | None = None,
-    *, allow_unresolved: bool = False,
+    *, allow_unresolved: bool = False, session: Any = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     payloads: list[tuple[str, dict[str, Any]]] = []
     seen_months: set[str] = set()
@@ -1198,10 +1211,11 @@ def _load_menu_payloads_for_week(
         if not month_id or month_id in seen_months:
             continue
         seen_months.add(month_id)
+        session_kwargs = {"session": session} if session is not None else {}
         payload = (
-            menu_service.get_menu_for_facility(month_id, facility_id, allow_unresolved=allow_unresolved)
+            menu_service.get_menu_for_facility(month_id, facility_id, allow_unresolved=allow_unresolved, **session_kwargs)
             if facility_id
-            else menu_service.get_menu(month_id, allow_unresolved=allow_unresolved)
+            else menu_service.get_menu(month_id, allow_unresolved=allow_unresolved, **session_kwargs)
         )
         if isinstance(payload, dict):
             payloads.append((month_id, payload))
@@ -1211,11 +1225,12 @@ def _load_menu_payloads_for_week(
 def _collect_menu_items_for_week(
     week_id: str | None,
     facility_id: str | None = None,
-    *, allow_unresolved: bool = False,
+    *, allow_unresolved: bool = False, session: Any = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
-    for _month_id, payload in _load_menu_payloads_for_week(week_id, facility_id, allow_unresolved=allow_unresolved):
+    session_kwargs = {"session": session} if session is not None else {}
+    for _month_id, payload in _load_menu_payloads_for_week(week_id, facility_id, allow_unresolved=allow_unresolved, **session_kwargs):
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
             continue
@@ -1240,11 +1255,12 @@ def _collect_menu_items_for_week(
 def _collect_menu_entries_for_week(
     week_id: str | None,
     facility_id: str | None = None,
+    *, session: Any = None,
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, int, str]] = set()
     for month_id in _sheet_week_month_ids(week_id):
-        raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id)
+        raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id, session=session) if session is not None else menu_service.get_menu_entries_for_facility(month_id, facility_id)
         for entry in raw_entries:
             if not isinstance(entry, dict):
                 continue
@@ -1273,14 +1289,14 @@ def _collect_menu_entries_for_week(
     return filtered
 
 
-def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -> list[dict]:
+def _build_position_menu_entries(week_id: str, facility_id: str | None = None, *, session: Any = None) -> list[dict]:
     month_ids = _sheet_week_month_ids(week_id)
     if not month_ids:
         return []
     variants_by_physical_slot: dict[tuple[str, str, int], dict[str, dict]] = {}
     order_index = 0
     for month_id in month_ids:
-        raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id)
+        raw_entries = menu_service.get_menu_entries_for_facility(month_id, facility_id, session=session) if session is not None else menu_service.get_menu_entries_for_facility(month_id, facility_id)
         if not isinstance(raw_entries, list):
             continue
         for raw in raw_entries:
@@ -1341,7 +1357,9 @@ def _build_position_menu_entries(week_id: str, facility_id: str | None = None) -
     return _clip_entries_to_sheet_week_range(entries, week_id)
 
 
-def _build_position_menu_entries_safe(week_id: str, facility_id: str | None = None) -> list[dict]:
+def _build_position_menu_entries_safe(week_id: str, facility_id: str | None = None, *, session: Any = None) -> list[dict]:
+    if session is not None:
+        return _build_position_menu_entries(week_id, facility_id, session=session)
     return _build_position_menu_entries(week_id, facility_id)
 
 
@@ -5038,7 +5056,7 @@ def create_order_from_ingest(
             min_ratio = float(policy.get("menu_match_min_ratio", 0.72))
             week_id = effective_week_hint
             if week_id:
-                lines = _apply_menu_matching(lines, week_id, payload.facility_hint, min_ratio)
+                lines = _apply_menu_matching(lines, week_id, payload.facility_hint, min_ratio, session=session)
             lines = _ensure_unique_line_ids(lines)
             session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
             for line in lines:
@@ -5822,7 +5840,8 @@ def _is_blank_menu_value(value: object) -> bool:
     return False
 
 
-def _build_menu_snapshot(order: Order) -> dict:
+def _build_menu_snapshot(order: Order, *, session: Any = None) -> dict:
+    session_kwargs = {"session": session} if session is not None else {}
     return _build_menu_snapshot_from_lines(
         facility_code=order.facility_code,
         week_code=order.week_code,
@@ -5833,6 +5852,7 @@ def _build_menu_snapshot(order: Order) -> dict:
             }
             for line in (order.lines or [])
         ],
+        **session_kwargs,
     )
 
 
@@ -5841,6 +5861,7 @@ def _build_menu_snapshot_from_lines(
     facility_code: str | None,
     week_code: str | None,
     lines: list[dict[str, Any]] | None,
+    session: Any = None,
 ) -> dict:
     names = sorted(
         {
@@ -5851,13 +5872,13 @@ def _build_menu_snapshot_from_lines(
     )
     items: list[dict] = []
     if week_code:
-        items = _collect_menu_items_for_week(week_code, facility_code)
+        items = _collect_menu_items_for_week(week_code, facility_code, session=session) if session is not None else _collect_menu_items_for_week(week_code, facility_code)
     item_map: dict[str, list[dict]] = {}
     for item in items:
         name = str(item.get("name") or "").strip()
         if name:
             item_map.setdefault(name, []).append(item)
-    defaults = menu_service.resolve_menu_defaults(names, facility_code)
+    defaults = menu_service.resolve_menu_defaults_in_session(session, names, facility_code)[0] if session is not None else menu_service.resolve_menu_defaults(names, facility_code)
     line_seed_fields = {
         "daypart": "daypart",
         "menu_category": "category",
@@ -7254,9 +7275,10 @@ def confirm_order_authoritatively(order_id: str) -> tuple[dict[str, Any] | None,
                 facility_code=order.facility_code,
                 week_code=order.week_code,
                 lines=materialized_lines_payload,
+                session=session,
             )
             if materialized_lines_payload
-            else _build_menu_snapshot(order)
+            else _build_menu_snapshot(order, session=session)
         )
         existing_snapshot = (
             session.execute(
@@ -9721,8 +9743,9 @@ def _build_live_hakodate_manifest_item(
             selected_pdf_receipt=verified_input.selected_pdf_receipt,
             configured_input=quad_configured_input,
             order_input_identity={"facility_code": facility_id, "week_code": week_code},
+            session=session,
         )
-        axis_source = {"selected_pdf_receipt": verified_input.selected_pdf_receipt, "configured_input": quad_configured_input, "order_input_identity": {"facility_code": facility_id, "week_code": week_code}}
+        axis_source = {"selected_pdf_receipt": verified_input.selected_pdf_receipt, "configured_input": quad_configured_input, "order_input_identity": {"facility_code": facility_id, "week_code": week_code}, "session": session}
         header_axis_override = _normalize_operator_header_axis_override(workflow_meta.get("header_axis_override"), **axis_source)
         row_axis_override = _normalize_operator_row_axis_override(workflow_meta.get("row_axis_override"), **axis_source)
     if not document_uri:
@@ -34704,7 +34727,7 @@ def _reparse_order_with_attempt(
                 )
             )
         order.lines_updated_at = datetime.utcnow()
-        resolved_week_has_menu = bool(week_id and _build_position_menu_entries_safe(week_id, facility_id))
+        resolved_week_has_menu = bool(week_id and _build_position_menu_entries_safe(week_id, facility_id, session=session))
         update_week_code_to = (
             (_normalize_auto_week_value_for_order(order, week_id) or week_id)
             if week_id and resolved_week_has_menu

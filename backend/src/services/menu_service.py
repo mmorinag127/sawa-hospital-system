@@ -261,8 +261,8 @@ def _monthly_entry_diet_filter(column, diet_type: object):
     return column == normalized
 
 
-def _menu_schema_missing_items() -> list[str]:
-    inspector = inspect(engine)
+def _menu_schema_missing_items(connection=None) -> list[str]:
+    inspector = inspect(engine if connection is None else connection)
     tables = set(inspector.get_table_names())
     required: dict[str, set[str]] = {
         "menu_masters": {"condiments", "revision"},
@@ -281,19 +281,31 @@ def _menu_schema_missing_items() -> list[str]:
     return missing
 
 
-def _ensure_monthly_menu_item_identity_index() -> None:
-    inspector = inspect(engine)
+def _ensure_monthly_menu_item_identity_index(connection=None) -> None:
+    inspector = inspect(engine if connection is None else connection)
     if "monthly_menu_items" not in set(inspector.get_table_names()):
         return
     try:
-        with engine.connect() as connection:
+        if connection is not None:
             require_canonical_identity_schema(connection)
+        else:
+            with engine.connect() as schema_connection:
+                require_canonical_identity_schema(schema_connection)
     except MonthlyMenuIdentitySchemaError as exc:
         raise MenuSchemaNotMigrated(str(exc)) from None
 
 
-def ensure_menu_schema() -> None:
+def ensure_menu_schema(*, connection=None) -> None:
     global _MENU_SCHEMA_INITIALIZED
+    if connection is not None:
+        missing = _menu_schema_missing_items(connection)
+        if missing:
+            raise MenuSchemaNotMigrated(
+                "menu schema is not migrated; run database migrations before boot: "
+                + ", ".join(missing)
+            )
+        _ensure_monthly_menu_item_identity_index(connection)
+        return
     if _MENU_SCHEMA_INITIALIZED:
         return
     with _MENU_SCHEMA_LOCK:
@@ -3581,7 +3593,12 @@ def _canonicalize_resolved_menu_payload(
 
 
 @contextmanager
-def _menu_read_session():
+def _menu_read_session(session=None):
+    if session is not None:
+        with session.no_autoflush:
+            ensure_menu_schema(connection=session.connection())
+            yield session
+        return
     with session_scope() as session:
         connection = session.connection()
         if connection.dialect.name == "sqlite":
@@ -3592,9 +3609,10 @@ def _menu_read_session():
             yield session
 
 
-def _get_menu_for_facility_direct(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False) -> dict | None:
-    ensure_menu_schema()
-    with _menu_read_session() as session:
+def _get_menu_for_facility_direct(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False, session=None) -> dict | None:
+    if session is None:
+        ensure_menu_schema()
+    with (_menu_read_session(session) if session is not None else _menu_read_session()) as session:
         menu = session.get(MonthlyMenu, month_id)
         latest_upload_log = _get_latest_menu_upload_log(session, month_id)
         menu_payload = (
@@ -3769,9 +3787,10 @@ def _readonly_monthly_items_with_scope_ambiguity(
     return payloads
 
 
-def _get_menu_direct(month_id: str) -> dict | None:
-    ensure_menu_schema()
-    with _menu_read_session() as session:
+def _get_menu_direct(month_id: str, *, session=None) -> dict | None:
+    if session is None:
+        ensure_menu_schema()
+    with (_menu_read_session(session) if session is not None else _menu_read_session()) as session:
         menu = session.get(MonthlyMenu, month_id)
         latest_upload_log = _get_latest_menu_upload_log(session, month_id)
         menu_payload = (
@@ -3811,9 +3830,10 @@ def _is_blank(value: str | None) -> bool:
     return value is None or value.strip() == ""
 
 
-def get_menu_items_for_facility(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False) -> list[dict]:
-    ensure_menu_schema()
-    with _menu_read_session() as session:
+def get_menu_items_for_facility(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False, session=None) -> list[dict]:
+    if session is None:
+        ensure_menu_schema()
+    with (_menu_read_session(session) if session is not None else _menu_read_session()) as session:
         return _read_items_for_facility(session, month_id, facility_id, allow_unresolved=allow_unresolved)
 
 
@@ -3870,9 +3890,10 @@ def _read_items_for_facility(session, month_id: str, facility_id: str | None, *,
     return payload
 
 
-def get_menu_entries_for_facility(month_id: str, facility_id: str | None) -> list[dict]:
-    ensure_menu_schema()
-    with _menu_read_session() as session:
+def get_menu_entries_for_facility(month_id: str, facility_id: str | None, *, session=None) -> list[dict]:
+    if session is None:
+        ensure_menu_schema()
+    with (_menu_read_session(session) if session is not None else _menu_read_session()) as session:
         return _read_entries_for_facility(session, month_id, facility_id)
 
 
@@ -3936,15 +3957,16 @@ def _read_entries_for_facility(session, month_id: str, facility_id: str | None) 
     return resolved
 
 
-def get_menu_for_facility(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False) -> dict | None:
-    payload = _get_menu_for_facility_direct(month_id, facility_id, allow_unresolved=allow_unresolved)
+def get_menu_for_facility(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False, session=None) -> dict | None:
+    session_kwargs = {"session": session} if session is not None else {}
+    payload = _get_menu_for_facility_direct(month_id, facility_id, allow_unresolved=allow_unresolved, **session_kwargs)
     if payload is not None:
         return _normalize_menu_payload_items(payload)
     return None
 
 
-def get_menu(month_id: str, *, allow_unresolved: bool = False) -> dict | None:
-    payload = _get_menu_direct(month_id)
+def get_menu(month_id: str, *, allow_unresolved: bool = False, session=None) -> dict | None:
+    payload = _get_menu_direct(month_id, session=session) if session is not None else _get_menu_direct(month_id)
     if payload is not None:
         if not allow_unresolved:
             require_resolved_menu_items(payload["items"])
@@ -4164,7 +4186,9 @@ def resolve_menu_master_check(month_id: str, item_id: str, body: dict, *, _sessi
         raise ValueError("unknown action")
 
 
-def resolve_menu_defaults(names: list[str], facility_id: str | None = None) -> dict[str, dict]:
+def resolve_menu_defaults(names: list[str], facility_id: str | None = None, *, session=None) -> dict[str, dict]:
+    if session is not None:
+        return resolve_menu_defaults_in_session(session, names, facility_id)[0]
     ensure_menu_schema()
     with session_scope() as session:
         defaults = _build_master_defaults(session, names, facility_id)
@@ -4178,7 +4202,8 @@ def resolve_menu_defaults(names: list[str], facility_id: str | None = None) -> d
 def resolve_menu_defaults_in_session(session, names: list[str], facility_id: str | None = None, *, lock_sources: bool = False) -> tuple[dict[str, dict], list[tuple[str, int]]]:
     """Resolve the existing canonical defaults and their exact locked sources together."""
     sources: list[tuple[str, int]] = []
-    defaults, _ = _build_master_defaults_index(session, names, None, facility_id, lock_sources=lock_sources, source_revisions=sources)
+    with _menu_read_session(session):
+        defaults, _ = _build_master_defaults_index(session, names, None, facility_id, lock_sources=lock_sources, source_revisions=sources)
     return ({name: defaults.get(_normalize_menu_name(name or ""), {}) for name in names}, sorted(sources))
 
 
