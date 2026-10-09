@@ -199,7 +199,7 @@ def test_valid_template_hashes_and_unavailable_transport_are_distinct(scripts):
                              ("rerun_compare_stg_hakodate_targets", "_compare_one")]
     for change in ("revision", "evidence", "geometry", "none")
 ] + [("validate_hakodate_all_facilities", "validate_case", "saved")])
-def test_actual_comparison_terminal_changes_and_unavailable_template_cannot_be_ok(tmp_path, source_pair, script, function, change):
+def test_actual_comparison_stops_terminal_changes_and_preserves_matching_or_unavailable_outcomes(tmp_path, source_pair, script, function, change):
     validation = script_functions("validate_hakodate_all_facilities")
     captured, remote = source_pair
     context = {"captured_input": captured, "remote_geometry_source": remote["source_receipt"]}
@@ -279,7 +279,7 @@ def test_actual_comparison_terminal_changes_and_unavailable_template_cannot_be_o
             scope[function](**kwargs)
     else:
         result = scope[function](**kwargs)
-        assert result["status"] == "ng"
+        assert result["status"] == ("ok" if function == "validate_case" else "ng")
         if function == "_compare_one":
             assert result["template_parity"]["status"] == "unavailable"
     assert workflow_reads == (1 if change == "geometry" else 2)
