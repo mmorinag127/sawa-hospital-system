@@ -230,6 +230,10 @@ def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _has_failed_evidence_status(*values: object) -> bool:
+    return any(str(value or "").strip().lower() in {"failed", "error"} for value in values)
+
+
 def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict | None = None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {
@@ -240,7 +244,7 @@ def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict
     status = str(payload.get("status") or "").strip().lower()
     stage = str(payload.get("stage") or "").strip().lower()
     upstream_error = str(payload.get("error") or "").strip()
-    if status in {"failed", "error"} or stage in {"failed", "error"}:
+    if _has_failed_evidence_status(status, stage):
         detail = upstream_error or stage or status or "unknown"
         return {
             "persistable": False,
@@ -743,6 +747,8 @@ def evidence_run_is_selectable(row: OrderOcrEvidenceRun) -> bool:
             order_service._validate_hakodate_owned_artifacts(payload, original_source)
         except (ValueError, KeyError, TypeError):
             return False
+    if _has_failed_evidence_status(row.status, payload.get("status"), payload.get("stage")):
+        return False
     if (row.payload_json or {}).get("canonical_adoption_allowed") is False:
         return False
     if row.status in {"diagnostic_only", "repair_blocked"} or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"}:
