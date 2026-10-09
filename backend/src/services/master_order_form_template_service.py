@@ -65,6 +65,17 @@ def _copy_side(side) -> Side | None:
     return copy(side)
 
 
+def _set_body_end_border(ws: Worksheet, end_col: int, body_end_row: int) -> None:
+    thick = _style_side("thick")
+    # openpyxl restores merged edges from the anchor on save/reload. Both must agree.
+    for region in ws.merged_cells.ranges:
+        if (region.min_row >= BODY_START_ROW and region.max_row == body_end_row
+                and region.max_col <= end_col):
+            _set_border(ws.cell(region.min_row, region.min_col), bottom=thick)
+    for col in range(1, end_col + 1):
+        _set_border(ws.cell(body_end_row, col), bottom=thick)
+
+
 def _column_label(column: dict[str, Any]) -> str:
     for key in ("header", "display_name", "label", "name"):
         value = str(column.get(key) or "").strip()
@@ -947,8 +958,7 @@ def _write_week_menu_identity(
             "category": str(entry.get("category") or "").strip(),
             "name": str(entry["name"]).strip(),
         })
-    for col in range(1, 5):
-        _set_border(ws.cell(body_end_row, col), bottom=_style_side("thick"))
+    _set_body_end_border(ws, 4, body_end_row)
     return {
         "written_rows": len(physical_entries),
         "source_rows": source_rows,
@@ -1087,6 +1097,7 @@ def write_source_workbook_body(
     for column in sorted(body_merge_columns):
         for start, end, _daypart in result["body_spans"]:
             ws.merge_cells(start_row=start, start_column=column, end_row=end, end_column=column)
+    _set_body_end_border(ws, ws.max_column, result["body_end_row"])
     delta = result["body_end_row"] - source_end
     # openpyxl moves cells, but drawing anchors are independent of insert/delete_rows.
     for drawing in [*ws._images, *ws._charts]:
@@ -1326,6 +1337,8 @@ def build_facility_template_workbook(
         end_col=end_col,
         body_spans=week_menu_identity_result.get("body_spans"),
     )
+    if week_value:
+        _set_body_end_border(ws, end_col, body_end_row)
     _set_generated_widths(ws, generated_columns, end_col)
     ws.print_area = f"A1:{get_column_letter(end_col)}{print_end_row}"
     _append_schema_sheet(wb, facility_config=facility_config, generated_columns=generated_columns, end_col=end_col)

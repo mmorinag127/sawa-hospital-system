@@ -11,9 +11,12 @@ from copy import deepcopy
 from datetime import date, datetime
 from hashlib import sha256
 import json
+from pathlib import Path
+from shutil import copyfile
+from tempfile import TemporaryDirectory
 
 import fitz
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 import pytest
 
 from modernization_saved_sheet_export_fixtures import SavedSheetFixture
@@ -27,6 +30,7 @@ from src.services import config_service, menu_service, order_service as orders
 from src.services import hakodate_cell_ocr_batch_service as batch
 from src.services import hakodate_ocr_evidence_service as evidence
 from src.services import hakodate_step_review_pipeline_service as pipeline
+from src.services import master_order_form_template_service as master
 from src.services.storage_service import load_selected_pdf_bytes
 from src.services.workflow_attempt_guard_service import capture_selected_pdf_receipt
 from src.models.uploaded_pdf import UploadedPdf
@@ -53,19 +57,40 @@ def actual_plan(count=4, *, merged=True, notes=False, note_text="備考: 変更�
     fields = FIELDS + (["remarks"] if notes else [])
     rows = [["3/1", "朝", "主", f"選択献立{i}", "", "", "", ""]
             + ([note_text] if notes else []) for i in range(count)]
-    workbook = Workbook()
-    worksheet = workbook.active
-    for offset, row in enumerate(rows, 11):
-        for column, value in enumerate(row, 1):
-            worksheet.cell(offset, column, value)
-    if merged:
-        worksheet.merge_cells(start_row=11, end_row=10 + count, start_column=5, end_column=5)
     base = {"fields": fields, "rows": deepcopy(rows)}
-    plan = pipeline.canonical_logical_target_plan(
-        worksheet=worksheet, fax_template=authored_template(notes=notes), draft_sheet=base,
-    )
-    workbook.close()
+    template = authored_template(notes=notes)
+    if merged:
+        template["body_merge_policy"] = {"mode": "daypart", "columns": ["regular"], "required": True}
+    entries = [{"menu_date": "2026-03-01", "daypart": row[1], "category": row[2],
+                "name": row[3], "sort_order": index + 1} for index, row in enumerate(rows)]
+    canonical_base = deepcopy(base)
+    for row in canonical_base["rows"]:
+        row[0] = "2026-03-01"
+    original_master = master.MASTER_TEMPLATE_PATH.read_bytes()
+    with TemporaryDirectory(prefix="explicit-quantity-plan-") as directory:
+        copied_master = Path(directory) / "copied-master.xlsx"
+        copyfile(master.MASTER_TEMPLATE_PATH, copied_master)
+        output = Path(directory) / "generated.xlsx"
+        master.build_facility_template_xlsx(
+            facility_config={"facility_id": "F", "facility_name": "合成数量契約", "fax_template": template},
+            master_template_path=copied_master, output_path=output,
+            week_value="2026-03@2026-03-01~2026-03-07", week_menu_entries=entries,
+        )
+        workbook = load_workbook(output)
+        try:
+            plan = pipeline.canonical_logical_target_plan(
+                worksheet=workbook[master.FACILITY_TEMPLATE_SHEET_NAME],
+                fax_template=template, draft_sheet=canonical_base,
+            )
+        finally:
+            workbook.close()
+        assert copied_master.read_bytes() == original_master
+    assert master.MASTER_TEMPLATE_PATH.read_bytes() == original_master
     for region in plan:
+        # Full dates were validated above; preserve this producer unit's display-date contract.
+        region["date"] = rows[region["worksheet_row"] - 11][0]
+        for target in region["logical_targets"]:
+            target["date"] = rows[target["worksheet_row"] - 11][0]
         row, col = region["worksheet_row"], region["worksheet_col"]
         # Geometry belongs only to this local producer boundary, not an OCR receipt.
         region["bbox"] = [col * 10, row * 10, col * 10 + 8, row * 10 + 8]
