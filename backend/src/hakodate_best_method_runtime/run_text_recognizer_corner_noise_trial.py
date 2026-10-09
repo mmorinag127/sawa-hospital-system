@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from dataclasses import asdict
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,10 @@ from src.services.hakodate_step_review_pipeline_service import (  # noqa: E402
     _split_line_masks,
     _write_pdf_from_pages,
 )
-from src.services.yomitoku_text_recognizer_topk import YomitokuTextRecognizerTopKWrapper  # noqa: E402
+from src.services.yomitoku_text_recognizer_topk import (  # noqa: E402
+    YomitokuTextRecognizerTopKWrapper,
+    validate_recognizer_result,
+)
 
 
 DEFAULT_BASE = WORKSPACE / "tmp" / "outer_quad_eval_correct_20260426"
@@ -540,6 +544,9 @@ def run_text_recognizer_direct(
     sequence_top_k: int = 5,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     t0 = time.perf_counter()
+    if not isinstance(regions, list) or not isinstance(polygons, list) or len(regions) != len(polygons):
+        raise ValueError("recognizer_input_cardinality_invalid")
+    requested_polygons = deepcopy(polygons)
     if polygons:
         wrapper = YomitokuTextRecognizerTopKWrapper(
             recognizer,
@@ -548,10 +555,11 @@ def run_text_recognizer_direct(
             max_decode_steps=8,
         )
         results = wrapper.recognize(_bgr_from_pil(contact_sheet), points=polygons)
-        contents = list(results.get("contents") or [])
-        scores = [float(value) for value in results.get("scores") or []]
-        directions = list(results.get("directions") or [])
-        candidates_by_region = list(results.get("candidates") or [])
+        validate_recognizer_result(results, expected_points=requested_polygons)
+        contents = results["contents"]
+        scores = results["scores"]
+        directions = results["directions"]
+        candidates_by_region = results["candidates"]
     else:
         contents = []
         scores = []
@@ -564,10 +572,10 @@ def run_text_recognizer_direct(
     candidate_digit_prediction_count = 0
     candidate_digit_accept_count = 0
     for index, region in enumerate(regions):
-        raw_text = str(contents[index] if index < len(contents) else "").strip()
-        score = float(scores[index] if index < len(scores) else 0.0)
-        direction = str(directions[index] if index < len(directions) else "")
-        candidates = list(candidates_by_region[index] if index < len(candidates_by_region) else [])
+        raw_text = contents[index].strip()
+        score = float(scores[index])
+        direction = directions[index]
+        candidates = list(candidates_by_region[index])
         digits = _clean_text_for_number(raw_text)
         if digits:
             digit_prediction_count += 1

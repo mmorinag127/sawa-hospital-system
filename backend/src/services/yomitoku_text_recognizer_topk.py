@@ -3,11 +3,67 @@ from __future__ import annotations
 import heapq
 import math
 import unicodedata
+from copy import deepcopy
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any
 
 import numpy as np
 import torch
+
+
+def _validate_point_identity(points: Any, expected_points: Any) -> None:
+    try:
+        actual = np.asarray(points)
+        expected = np.asarray(expected_points)
+        valid = (
+            (np.issubdtype(actual.dtype, np.integer) or np.issubdtype(actual.dtype, np.floating))
+            and (np.issubdtype(expected.dtype, np.integer) or np.issubdtype(expected.dtype, np.floating))
+            and np.isfinite(actual).all()
+            and np.isfinite(expected).all()
+            and (actual.shape == (0,) or (actual.ndim == 3 and actual.shape[1:] == (4, 2)))
+            and np.array_equal(actual, expected)
+        )
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("recognizer_result_points_changed_or_invalid")
+
+
+def validate_recognizer_result(result: Any, *, expected_points: Any) -> None:
+    if not isinstance(result, dict):
+        raise ValueError("recognizer_result_invalid")
+    _validate_point_identity(result.get("points"), expected_points)
+    count = len(expected_points)
+    for key in ("contents", "scores", "directions", "candidates"):
+        values = result.get(key)
+        if (
+            not isinstance(values, (list, tuple, np.ndarray))
+            or (isinstance(values, np.ndarray) and values.ndim == 0)
+            or len(values) != count
+        ):
+            raise ValueError(f"recognizer_result_cardinality_invalid: {key}")
+    for text, score, direction, candidates in zip(
+        result["contents"], result["scores"], result["directions"], result["candidates"],
+    ):
+        if (
+            not isinstance(text, str)
+            or not isinstance(direction, str)
+            or isinstance(score, bool)
+            or not isinstance(score, Real)
+            or not math.isfinite(score)
+            or not isinstance(candidates, list)
+        ):
+            raise ValueError("recognizer_result_entry_invalid")
+        for candidate in candidates:
+            if (
+                not isinstance(candidate, dict)
+                or not isinstance(candidate.get("text"), str)
+                or isinstance(candidate.get("score"), bool)
+                or not isinstance(candidate.get("score"), Real)
+                or not math.isfinite(candidate["score"])
+            ):
+                raise ValueError("recognizer_result_candidate_invalid")
 
 
 @dataclass(frozen=True)
@@ -41,6 +97,11 @@ class YomitokuTextRecognizerTopKWrapper:
         self.max_decode_steps = max(1, int(max_decode_steps))
 
     def recognize(self, image_bgr: np.ndarray, *, points: list[list[list[int]]] | None) -> dict[str, Any]:
+        requested_points = deepcopy(points)
+        if requested_points is not None:
+            _validate_point_identity(points, requested_points)
+            if len(requested_points) == 0:
+                return {"contents": [], "scores": [], "directions": [], "candidates": [], "points": []}
         preprocess_result = self.recognizer.preprocess(image_bgr, points)
         if not isinstance(preprocess_result, tuple):
             raise TypeError("TextRecognizer.preprocess returned non-tuple result")
@@ -50,6 +111,7 @@ class YomitokuTextRecognizerTopKWrapper:
             dataloader, points = preprocess_result
         else:
             raise ValueError(f"TextRecognizer.preprocess returned {len(preprocess_result)} values")
+        _validate_point_identity(points, points if requested_points is None else requested_points)
         contents: list[str] = []
         scores: list[float] = []
         directions: list[str] = []
@@ -57,26 +119,44 @@ class YomitokuTextRecognizerTopKWrapper:
         offset = 0
         for data in dataloader:
             batch_points = points[offset : offset + len(data)]
+            if len(batch_points) != len(data):
+                raise ValueError("recognizer_result_batch_cardinality_invalid")
             probs = self._run_inference(data)
-            batch_contents, batch_scores, batch_directions = self.recognizer.postprocess(probs, batch_points)
-            contents.extend([str(value) for value in batch_contents])
-            scores.extend([float(value) for value in batch_scores])
-            directions.extend([str(value) for value in batch_directions])
+            if len(probs) != len(batch_points):
+                raise ValueError("recognizer_result_batch_cardinality_invalid")
+            postprocessed = self.recognizer.postprocess(probs, batch_points)
+            if not isinstance(postprocessed, (tuple, list)) or len(postprocessed) != 3:
+                raise ValueError("recognizer_postprocess_result_invalid")
+            batch_contents, batch_scores, batch_directions = postprocessed
+            batch_candidates = []
             for row in probs.detach().cpu():
-                candidates.append(
+                batch_candidates.append(
                     [
                         candidate.__dict__
                         for candidate in self._sequence_candidates(row)
                     ]
                 )
+            validate_recognizer_result(
+                {"contents": batch_contents, "scores": batch_scores, "directions": batch_directions,
+                 "candidates": batch_candidates, "points": batch_points},
+                expected_points=batch_points,
+            )
+            contents.extend(batch_contents)
+            scores.extend(float(value) for value in batch_scores)
+            directions.extend(batch_directions)
+            candidates.extend(batch_candidates)
             offset += len(data)
-        return {
+        if offset != len(points):
+            raise ValueError("recognizer_result_batch_cardinality_invalid")
+        result = {
             "contents": contents,
             "scores": scores,
             "directions": directions,
             "candidates": candidates,
             "points": points,
         }
+        validate_recognizer_result(result, expected_points=points if requested_points is None else requested_points)
+        return result
 
     def _run_inference(self, data: Any) -> torch.Tensor:
         run_inference = getattr(self.recognizer, "_run_inference", None)
