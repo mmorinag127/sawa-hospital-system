@@ -975,7 +975,14 @@ def _write_week_menu_identity(
                 ws.cell(start, 1).value = menu_date
                 ws.cell(start, 1).number_format = "m/d (aaa)"
             else:
-                ws.cell(start, 1).value = f"{menu_date.isoformat()} ({_weekday_label(menu_date)})"
+                cell = ws.cell(start, 1)
+                cell.value = menu_date
+                cell.number_format = "m/d\n(aaa)"
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.row_dimensions[start].height = max(
+                    float(ws.row_dimensions[start].height or ws.sheet_format.defaultRowHeight or 15),
+                    2 * float(cell.font.sz or 11) + 8,
+                )
         else:
             ws.merge_cells(start_row=start, start_column=1, end_row=end - 1, end_column=1)
             ws.cell(start, 1).value = menu_date

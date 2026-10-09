@@ -236,9 +236,12 @@ def _load_font(size_px: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | 
     return ImageFont.load_default()
 
 
-def _cell_text(value: object) -> str:
+def _cell_text(value: object, number_format: str | None = None) -> str:
     if value is None:
         return ""
+    if isinstance(value, (datetime, date)) and number_format == "m/d\n(aaa)":
+        weekday = "月火水木金土日"[value.weekday()]
+        return f"{value.month}/{value.day}\n({weekday})"
     if isinstance(value, datetime):
         return f"{value.month}/{value.day}"
     if isinstance(value, date):
@@ -414,7 +417,7 @@ def render_worksheet_to_image(
     )
 
     for rect, cell in text_jobs:
-        text = _cell_text(cell.value).strip()
+        text = _cell_text(cell.value, number_format=cell.number_format).strip()
         if not text:
             continue
         font_size_px = int(round(float(cell.font.sz or 11.0) * float(dpi) / 72.0))
