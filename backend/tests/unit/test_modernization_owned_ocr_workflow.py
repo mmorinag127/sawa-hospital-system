@@ -575,3 +575,61 @@ def test_public_version_snapshot_guard_accepts_exact_and_rejects_tampered_withou
             assert lock_selected_version_input(session, ORDER, tampered) is False
         assert captured == unchanged
     assert _owned_workflow_database_snapshot() == before
+
+
+def test_http_order_get_preserves_exact_current_and_historical_versions_without_writes(
+    owned_producer, monkeypatch,
+):
+    """In-process HTTP route/middleware with local AUTH_DISABLED mode only.
+
+    Not startup, formal-schema, app-lifecycle, production-auth or native OCR proof.
+    """
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    f = owned_producer
+    original_receipt = _add_owned_version_successor(f)
+    before = _owned_workflow_database_snapshot()
+    # Exercise the real request stack without the separate startup migration hook.
+    client = TestClient(app)
+    try:
+        response = client.get(f"/orders/{ORDER}")
+    finally:
+        client.close()
+    assert response.status_code == 200, response.text
+    public = response.json()
+    assert public["id"] == ORDER
+    _assert_public_version_snapshots(public)
+    assert public["document_id"] == f.receipt["document_id"]
+    assert public["current_version"]["document_id"] == f.receipt["document_id"]
+    historical = [
+        version for version in public["versions"]
+        if version["document_id"] == original_receipt["document_id"]
+    ]
+    assert len(historical) == 1
+    assert historical[0]["is_current"] is False
+    assert _owned_workflow_database_snapshot() == before
+
+
+def test_http_unknown_order_get_returns_404_without_borrowing_or_writes(
+    owned_producer, monkeypatch,
+):
+    """In-process HTTP route/middleware with local AUTH_DISABLED mode only.
+
+    Not startup, formal-schema, app-lifecycle or production authentication proof.
+    """
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    before = _owned_workflow_database_snapshot()
+    assert "UNIT-UNKNOWN-HTTP-ORDER" not in {row["id"] for row in before["orders"]}
+    client = TestClient(app)
+    try:
+        response = client.get("/orders/UNIT-UNKNOWN-HTTP-ORDER")
+    finally:
+        client.close()
+    assert response.status_code == 404, response.text
+    assert response.json() == {"detail": "order not found"}
+    assert _owned_workflow_database_snapshot() == before
