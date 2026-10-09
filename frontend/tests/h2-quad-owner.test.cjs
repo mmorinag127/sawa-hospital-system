@@ -22,6 +22,9 @@ function harness(){
     workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
+    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},
+    workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},
+    setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},
     workflowJobRef:{current:{orderId:'order-A',jobId:null,attemptId:null,state:'context_confirmed'}},
     quadAuth:()=>state.auth,quadReview:review,hasActiveSessionAuthHeader:()=>state.auth!==null,browserSessionKey:()=>state.auth,
     setBusyState:value=>{state.busy=value;},setSelectedDocumentIdState:()=>{},setQuadReview:value=>{state.review=value;},setManualQuadPoints:value=>{state.points=plain(value);},
@@ -38,13 +41,14 @@ function harness(){
     setSheetAutoEditResult:()=>{},setLocalAnomalyReview:()=>{},setSelectedAnomalyIndex:()=>{},setSelectedAutoEditIndex:()=>{},
     refreshAll:async current=>{if(current&&!current())throw Error('retired refresh');},loadFacilityTemplateStatus:async()=>{},
     discardSheetDraft:()=>{state.discard++;context.sheetEditGenerationRef.current++;},invalidateSheetPreSaveChecks:()=>{},
-    isPositiveWorkflowRevision:value=>Number.isInteger(value)&&value>0,workflowRevisionTokenFromRead:value=>({revision:value.revision,bootstrap:false}),setWorkflow:()=>{},
+    isPositiveWorkflowRevision:value=>Number.isInteger(value)&&value>0,workflowRevisionTokenFromRead:value=>({revision:value.revision,bootstrap:false}),setWorkflow:value=>{context.workflow=value;},
     formatApiError:(error,message)=>`${message}:${error.message}`,
     apiClient:{get:async(url,config)=>{state.calls.push({method:'GET',url,config});return{data:review};},
       put:async(url,body,config)=>{state.calls.push({method:'PUT',url,body,config});return{data:{workflow:{order_id:'order-A',revision:9}}};},
       post:async(url,body,config)=>{state.calls.push({method:'POST',url,body,config});return{data:{workflow:{order_id:'order-A',revision:10}}};}}
   };
-  for(const name of ['sameRecordedValue','sameQuadOverrideSource','setBusy','setSelectedDocumentId','editorVersion','beginWorkflowEditorEdit','finishWorkflowEditorEdit','canAdoptReadEditorInput','captureWorkflowInputVersion','workflowMutationConfig','workflowFromMutationResponse','adoptReadWorkflow','adoptOwnWorkflowCommandResponse','capturePageOwner','ownsPageContext','ownsPageInput','captureQuadOwner','ownsQuadContext','ownsQuadInput','captureAxisOwner','ownsAxisInput','executeWorkflowMutation','loadAxisReview','saveAxisAndRerun','loadHeaderAxisReview','loadRowAxisReview','runAction'])context[name]=(...args)=>actual(name,context)(...args);
+  // Ownership and adoption checks use production closures, not harness substitutes.
+  for(const name of ['sameRecordedValue','sameQuadOverrideSource','setBusy','setSelectedDocumentId','editorVersion','beginWorkflowEditorEdit','finishWorkflowEditorEdit','canAdoptReadEditorInput','captureWorkflowInputVersion','workflowMutationConfig','workflowFromMutationResponse','adoptReadWorkflow','adoptOwnWorkflowCommandResponse','capturePageOwner','ownsPageContext','ownsPageInput','outputEditorSignature','captureActionInput','ownsActionInput','createActionBoundary','retireOutput','captureQuadOwner','ownsQuadContext','ownsQuadInput','captureAxisOwner','ownsAxisInput','executeWorkflowMutation','loadAxisReview','saveAxisAndRerun','loadHeaderAxisReview','loadRowAxisReview','runAction'])context[name]=(...args)=>actual(name,context)(...args);
   const load=()=>actual('loadQuadReview',context)();
   const save=()=>actual('saveQuadAndRerun',context)('manual_override',receipt.suggested_quad_px);
   const seed=()=>{context.quadSourceRef.current={review,context:{...context.quadContextRef.current},generation:context.quadContextGenerationRef.current,auth:state.auth};state.review=review;};
@@ -326,7 +330,7 @@ function refreshHarness(){
   const h=harness();
   Object.assign(h.context,{refreshGenerationRef:{current:0},sheetDirtyRef:{current:false},pendingSheetCellEditsRef:{current:new Map()},
     workflowJobRef:{current:{orderId:'order-A',jobId:'recorded-job',attemptId:'recorded-attempt',state:'ocr_running'}},
-    setWorkflow:value=>{h.state.workflow=value;},setOrderDetail:value=>{h.state.order=value;},applyPreSaveState:()=>{},
+    setWorkflow:value=>{h.state.workflow=value;h.context.workflow=value;},setOrderDetail:value=>{h.state.order=value;},applyPreSaveState:()=>{},
     setOcrResults:value=>{h.state.ocr=value;},setInspection:value=>{h.state.inspection=value;},normalizeSheetPayload:value=>value,
     setSheetPayload:()=>{},setSheetJsonStale:()=>{},setContextForm:()=>{},setWeekDraft:()=>{},weekValueFromRange:()=>'',emptyContext:{facility_id:'',week_start:'',week_end:''}});
   h.context.refreshAll=(...args)=>actual('refreshAll',h.context)(...args);
