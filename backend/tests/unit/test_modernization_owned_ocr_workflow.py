@@ -317,11 +317,16 @@ def test_selected_real_artifacts_stop_after_owned_pdf_document_retirement(owned_
 def _queue_and_claim_owned_workflow_attempt(f, *, force=False):
     from src.services import workflow_ocr_delivery_service as delivery
 
+    order = order_service.get_order_by_id(ORDER)
+    assert order is not None
+    versions = [
+        version for version in order["versions"]
+        if version["document_id"] == f.receipt["document_id"]
+    ]
+    assert len(versions) == 1, versions
+    selected = versions[0]
+    input_reference = selected["storage_uri"]
     with db.session_scope() as session:
-        order = session.get(Order, ORDER)
-        input_reference, selected = order_service._resolve_order_document_selection(
-            session, order, f.receipt["document_id"],
-        )
         revision = session.get(OrderWorkflowState, ORDER).revision
     assert input_reference == str(f.pdf)
     assert selected["selected_version_input"]["document_id"] == f.receipt["document_id"]
