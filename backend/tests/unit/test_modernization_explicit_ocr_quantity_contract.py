@@ -142,8 +142,8 @@ def project(base, plan, records):
     return result, normalized, assigned, sheet
 
 
-@pytest.mark.parametrize("count", [4, 5, 6])
-@pytest.mark.parametrize("value", ["7", "0", ""])
+@pytest.mark.parametrize("count", [4, 5, 6, 3])
+@pytest.mark.parametrize("value", ["7", "0", "", "20"])
 def test_actual_authored_spans_double_conversion_and_batch_parity(count, value):
     base, plan = actual_plan(count)
     region = regular_region(plan)
