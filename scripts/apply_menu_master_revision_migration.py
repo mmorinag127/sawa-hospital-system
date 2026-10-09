@@ -11,6 +11,9 @@ from alembic.operations import Operations
 from sqlalchemy import create_engine
 import sqlalchemy as sa
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
 from src.services.monthly_menu_identity_schema import (
     MonthlyMenuIdentitySchemaError,
     require_canonical_identity_schema,
