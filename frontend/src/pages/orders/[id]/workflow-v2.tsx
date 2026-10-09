@@ -2451,6 +2451,7 @@ export default function OrderWorkflowV2Page() {
         loading: false,
         error: "",
       });
+      return true;
     } catch (err: any) {
       if (!current()) return;
       setFacilityTemplateStatus({
@@ -2805,14 +2806,17 @@ export default function OrderWorkflowV2Page() {
         setFacilityTemplateColumns(resolvedColumns);
         setFacilityTemplateColumnDraft(resolvedColumns);
         discardSheetDraft();
+        setVisibleStep(1);
+      });
+      const refreshed = await refreshAll(current, null, adopt);
+      if (!refreshed || !current()) return;
+      const templateLoaded = await loadFacilityTemplateStatus(facilityId,current);
+      if (!templateLoaded || !current()) return;
+      adopt(() => {
         setFacilityTemplateMessage(
           `施設区分列を保存しました。OCR結果を${Number(response.data?.ocr_results_cleared || 0)}件破棄したため、Step1からOCRを再実行してください。`,
         );
-        setVisibleStep(1);
       });
-      await refreshAll(current, null, adopt);
-      if (!current()) return;
-      await loadFacilityTemplateStatus(facilityId,current);
     } catch (err: any) {
       if (current()) setFacilityTemplateMessage(formatApiError(err, "施設区分列の保存に失敗しました"));
     } finally {
