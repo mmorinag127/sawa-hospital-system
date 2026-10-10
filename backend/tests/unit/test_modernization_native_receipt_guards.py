@@ -170,11 +170,11 @@ def test_native_saved_receipt_guards_without_recognition_regeneration(numeric_fa
     assert after_document_switch != baseline
     captured = order_service._capture_synchronous_cache_write_input(ORDER)
     assert captured is not None
-    with pytest.raises(ValueError, match="^hakodate_artifact_source_mismatch$"):
+    with pytest.raises(ValueError, match="^hakodate_original_expectation_changed$"):
         order_service._validate_selected_hakodate_artifacts(captured["evidence"], captured)
     rejected, error = workflow.build_sheet_from_selected_ocr(ORDER)
     assert rejected is None
-    assert error == "hakodate_artifact_source_mismatch"
+    assert error == "hakodate_original_expectation_changed"
     assert database_snapshot() == after_document_switch
     _assert_saved_original(f, evidence_id, draft_id, original_sheet)
     with db.session_scope() as session:
