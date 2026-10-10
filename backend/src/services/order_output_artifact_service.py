@@ -14,6 +14,32 @@ def payload_digest(payload: object) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+class BaggingReceiptInvalid(ValueError):
+    """A saved bagging candidate has no consistent materialization receipt."""
+
+
+def validate_bagging_receipt(payload: object) -> str:
+    if not isinstance(payload, dict) or not isinstance(payload.get("materialization_candidate"), dict):
+        raise BaggingReceiptInvalid("bagging_result_materialization_missing")
+    candidate = payload["materialization_candidate"]
+    configured = candidate.get("configured_input")
+    if (not isinstance(configured, dict)
+            or not isinstance(configured.get("facility"), dict)
+            or not isinstance(configured.get("policy"), dict)):
+        raise BaggingReceiptInvalid("bagging_result_configuration_missing")
+    digest = payload.get("materialization_digest")
+    if not isinstance(digest, str) or not digest.strip():
+        raise BaggingReceiptInvalid("bagging_result_materialization_digest_missing")
+    from src.services.order_workflow_v2_service import _canonical_payload_digest
+    try:
+        actual_digest = _canonical_payload_digest(candidate)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise BaggingReceiptInvalid("bagging_result_materialization_invalid") from exc
+    if digest != actual_digest:
+        raise BaggingReceiptInvalid("bagging_result_materialization_digest_mismatch")
+    return digest
+
+
 def save_bagging_result_artifact(
     session: Session,
     *,
@@ -141,6 +167,15 @@ def _valid_payload(artifact: Any, payload: object, *, expected_order_id: str, ch
     for key, column in required.items():
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip() or value != getattr(artifact, column):
+            return False
+    if is_output:
+        materialization_digest = payload.get("materialization_digest")
+        if not isinstance(materialization_digest, str) or not materialization_digest.strip():
+            return False
+    else:
+        try:
+            validate_bagging_receipt(payload)
+        except BaggingReceiptInvalid:
             return False
     optional = ["source_ocr_result_id", "template_version_id"]
     if is_output:

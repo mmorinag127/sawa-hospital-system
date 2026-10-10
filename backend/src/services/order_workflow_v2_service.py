@@ -3818,14 +3818,7 @@ def _bagging_result_has_excluded_materialization_lines(bagging_result: object) -
 
 
 def _build_output_bundle_payload(*, order: Order, bagging_result: dict[str, Any]) -> dict[str, Any]:
-    materialization_candidate = (
-        bagging_result.get("materialization_candidate")
-        if isinstance(bagging_result.get("materialization_candidate"), dict)
-        else None
-    )
-    materialization_digest = _normalize_id(bagging_result.get("materialization_digest")) or (
-        _canonical_payload_digest(materialization_candidate) if materialization_candidate is not None else None
-    )
+    materialization_digest = order_output_artifact_service.validate_bagging_receipt(bagging_result)
     return {
         "output_bundle_id": _new_id("OOB"),
         "order_id": order.id,
@@ -4063,9 +4056,9 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 materialization_candidate=materialization_candidate,
                 processing_input=bagging_start_input,
             )
-        except BaggingOutputUnresolved as exc:
+            output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
+        except (BaggingOutputUnresolved, order_output_artifact_service.BaggingReceiptInvalid) as exc:
             return None, str(exc)
-        output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
         from src.services import output_builder
         try:
             output_builder._validate_output_sources(materialization_candidate["output_source_snapshot"])
