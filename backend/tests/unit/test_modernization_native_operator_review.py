@@ -118,7 +118,7 @@ def test_real_low_score_hold_then_explicit_original_fax_operator_save(numeric_fa
     with db.session_scope() as session:
         state = session.get(OrderWorkflowState, ORDER)
         draft = session.get(OrderSheetDraft, state.draft_id)
-        assert draft.id == saved["saved_sheet_id"]
+        assert draft.id == saved["saved_sheet"]["saved_sheet_id"]
         assert draft.template_version_id == state.template_version_id == f.projection_id
         assert draft.base_evidence_run_id == state.evidence_run_id == evidence["id"]
         assert draft.edited_by == "synthetic-original-fax-operator"
