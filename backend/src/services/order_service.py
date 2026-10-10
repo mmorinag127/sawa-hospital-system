@@ -10270,20 +10270,21 @@ def _augment_hakodate_ocr_payload_artifacts(
     if not force_hakodate and isinstance(pipeline, dict) and pipeline.get("version") != HAKODATE_CANONICAL_PIPELINE_VERSION:
         next_payload["hakodate_canonical_pipeline"] = {"status": "blocked", "blockers": ["hakodate_canonical_version_required"]}
         return next_payload
-    if (
-        not force_hakodate
-        and _payload_has_current_hakodate_canonical_pipeline(next_payload)
-        and _payload_has_hakodate_target_cells(next_payload)
-        and _payload_has_hakodate_evidence_records(
-            next_payload,
-            order_id=order_id,
-        )
-    ):
-        receipt = selected_pdf_receipt if selected_pdf_receipt is not None else processing_start_pdf_receipt()
-        try:
+    try:
+        if (
+            not force_hakodate
+            and _payload_has_current_hakodate_canonical_pipeline(next_payload)
+            and _payload_has_hakodate_target_cells(next_payload)
+            and _payload_has_hakodate_evidence_records(
+                next_payload,
+                order_id=order_id,
+            )
+        ):
+            receipt = selected_pdf_receipt if selected_pdf_receipt is not None else processing_start_pdf_receipt()
             _validate_hakodate_owned_artifacts(next_payload, _hakodate_owned_source(configured_input, receipt, synchronous_write_input))
-        except ValueError as exc:
-            next_payload["hakodate_canonical_pipeline"] = {"status": "blocked", "blockers": [str(exc)]}
+            return next_payload
+    except ValueError as exc:
+        next_payload["hakodate_canonical_pipeline"] = {"status": "blocked", "blockers": [str(exc)]}
         return next_payload
     try:
         original_order = synchronous_write_input["input_versions"]["order"] if synchronous_write_input is not None else processing_start_read_input()["order"]
@@ -10322,10 +10323,10 @@ def _augment_hakodate_ocr_payload_artifacts(
         return next_payload
     for key in ("hakodate_preprocessing", "hakodate_target_cell_map", "hakodate_ocr_evidence", "hakodate_ocr_evidence_records"):
         next_payload.pop(key, None)
-    if not _payload_has_hakodate_target_cells(canonical_payload) or not _payload_has_hakodate_evidence_records(canonical_payload, order_id=order_id):
-        next_payload["hakodate_canonical_pipeline"] = {"status": "blocked", "blockers": ["hakodate_own_artifacts_incomplete"]}
-        return next_payload
     try:
+        if not _payload_has_hakodate_target_cells(canonical_payload) or not _payload_has_hakodate_evidence_records(canonical_payload, order_id=order_id):
+            next_payload["hakodate_canonical_pipeline"] = {"status": "blocked", "blockers": ["hakodate_own_artifacts_incomplete"]}
+            return next_payload
         _validate_hakodate_owned_artifacts(canonical_payload, _hakodate_owned_source(configured_input, receipt, synchronous_write_input))
     except ValueError as exc:
         next_payload["hakodate_canonical_pipeline"] = {"status": "blocked", "blockers": [str(exc)]}
@@ -29011,11 +29012,15 @@ def build_order_hakodate_assignment(
 
     requested_strategy = hakodate_assignment_service.normalize_quantity_assignment_strategy(strategy)
     repaired_own_result = False
-    if allow_artifact_repair and (
-        requested_strategy == "hakodate"
-        or not _payload_has_hakodate_target_cells(payload)
-        or not _payload_has_hakodate_evidence_records(payload, order_id=order_id)
-    ):
+    try:
+        needs_artifact_repair = allow_artifact_repair and (
+            requested_strategy == "hakodate"
+            or not _payload_has_hakodate_target_cells(payload)
+            or not _payload_has_hakodate_evidence_records(payload, order_id=order_id)
+        )
+    except ValueError as exc:
+        return None, str(exc)
+    if needs_artifact_repair:
         repaired_payload = _augment_hakodate_ocr_payload_artifacts(
             order_id=order_id,
             payload=payload,
