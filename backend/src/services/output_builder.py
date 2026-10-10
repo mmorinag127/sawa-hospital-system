@@ -5002,10 +5002,27 @@ def _daily_label_group_sort_key(group: dict) -> tuple[int, str]:
         return len(DAILY_LABEL_SHEET_ORDER), sheet_name
 
 
-def _line_to_label_bag(order_id: str, facility_code: str | None, line: dict) -> dict:
+def _daily_label_line_quantity(line: dict) -> tuple[Any, float | None]:
     qty = line.get("quantity_corrected")
     if qty is None:
         qty = line.get("quantity_original")
+    if qty is None:
+        return None, None
+    if isinstance(qty, bool):
+        raise ValueError("label_quantity_unresolved")
+    try:
+        value = float(qty)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("label_quantity_unresolved") from exc
+    if not math.isfinite(value):
+        raise ValueError("label_quantity_unresolved")
+    return qty, value
+
+
+def _line_to_label_bag(order_id: str, facility_code: str | None, line: dict) -> dict:
+    qty, _ = _daily_label_line_quantity(line)
+    if qty is None:
+        raise ValueError("label_quantity_unresolved")
     return {
         "order_id": order_id,
         "facility": facility_code,
@@ -5020,7 +5037,7 @@ def _line_to_label_bag(order_id: str, facility_code: str | None, line: dict) -> 
         "menu_unit_type": line.get("menu_unit_type"),
         "menu_qty_per_serving": line.get("menu_qty_per_serving"),
         "menu_temp_type": line.get("menu_temp_type"),
-        "quantity": qty if qty is not None else 0,
+        "quantity": qty,
     }
 
 
@@ -5037,18 +5054,13 @@ def _append_zero_quantity_label_bags(group: dict, ctx: dict, target_date: dt_dat
     }
     order_id = str(ctx.get("order_for_outputs", {}).get("id") or ctx.get("order", {}).get("id") or "")
     facility_code = str(ctx.get("order_for_outputs", {}).get("facility") or "").strip()
+    pending_bags: list[dict] = []
     for line in ctx.get("order_lines", []):
         line_date = _ensure_date(line.get("date"))
         if line_date != target_date:
             continue
-        qty = line.get("quantity_corrected")
-        if qty is None:
-            qty = line.get("quantity_original")
-        try:
-            qty_value = float(qty or 0)
-        except Exception:
-            qty_value = 0.0
-        if qty_value != 0:
+        _, qty_value = _daily_label_line_quantity(line)
+        if qty_value is None or qty_value != 0:
             continue
         key = (
             line_date,
@@ -5065,8 +5077,10 @@ def _append_zero_quantity_label_bags(group: dict, ctx: dict, target_date: dt_dat
             group.get("facility_config") if isinstance(group.get("facility_config"), dict) else None,
             facility_code,
         )
-        group.setdefault("bags", []).extend(zero_bags)
+        pending_bags.extend(zero_bags)
         existing_keys.add(key)
+    if pending_bags:
+        group.setdefault("bags", []).extend(pending_bags)
 
 
 def _append_zero_quantity_label_bags_for_order_context(bags: list[dict], ctx: dict, target_date: dt_date) -> list[dict]:
