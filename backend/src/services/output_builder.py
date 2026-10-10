@@ -6218,6 +6218,14 @@ def build_output_preview(order_id: str, output_type: str) -> Dict[str, Any]:
     raise ValueError(f"invalid output type: {output_type}")
 
 
+def _captured_delivery_facility_name(facility_config: dict) -> str:
+    key = "delivery_note_facility_name" if "delivery_note_facility_name" in facility_config else "facility_name"
+    value = facility_config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("accepted_" + key + "_invalid")
+    return value.strip()
+
+
 def build_delivery_preview(
     order_id: str,
     *,
@@ -6235,6 +6243,7 @@ def build_delivery_preview(
         require_invoice=True,
     )
     timings["prepare_context_ms"] = round((time.perf_counter() - context_started) * 1000, 1)
+    facility_name = _captured_delivery_facility_name(ctx["facility_config"])
     if target_date is not None:
         filtered_lines = [
             line
@@ -6311,6 +6320,7 @@ def build_delivery_preview(
         "rows": preview_rows,
         "columns": columns,
         "raw_rows": raw_rows,
+        "facility_name": facility_name,
         "timings": timings,
         "ocr_entry_count": len(ocr_entries),
         "ocr_table_raw_len": table_raw_len,

@@ -20,9 +20,7 @@ from src.services.output_builder import (
     build_label_workbook_for_order,
     build_weekly_weight_summary_workbook,
 )
-from src.db import session_scope
-from src.models.order import Order
-from src.services import order_form_service, facility_service, order_service, config_service
+from src.services import order_form_service, order_service
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -776,32 +774,6 @@ def _render_editable_daily_delivery_note_html(
     return html, {"total_orders": len(orders), "success_orders": len(order_ids), "error_orders": 0}
 
 
-def _delivery_facility_name(order_id: str) -> str:
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        facility_id = str(getattr(order, "facility_code", "") or "").strip() if order else ""
-    if not facility_id:
-        return ""
-    master = config_service.load_facility_master()
-    for entry in master.get("facilities", []) if isinstance(master, dict) else []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("facility_id") or "").strip() != facility_id:
-            continue
-        official_name = str(
-            entry.get("delivery_note_facility_name")
-            or entry.get("facility_name")
-            or entry.get("name")
-            or ""
-        ).strip()
-        if official_name:
-            return official_name
-    facility = facility_service.get_facility(facility_id)
-    if isinstance(facility, dict):
-        return str(facility.get("name") or facility.get("facility_name") or facility_id)
-    return facility_id
-
-
 def _preview_csv(path: str, encoding: str, limit: int) -> dict:
     with open(path, newline="", encoding=encoding, errors="replace") as f:
         reader = csv.reader(f)
@@ -896,7 +868,9 @@ def view_delivery_note_html(order_id: str, date: str | None = None):
         preview = build_delivery_preview(order_id, include_diagnostics=False, target_date=target_date)
         headers = preview.get("headers", [])
         rows = preview.get("rows", [])
-        facility_name = _delivery_facility_name(order_id)
+        facility_name = preview.get("facility_name")
+        if not isinstance(facility_name, str) or not facility_name.strip():
+            raise ValueError("accepted_facility_name_invalid")
         html = _render_editable_delivery_note_html(
             order_id,
             f"{order_id} 納品書",
