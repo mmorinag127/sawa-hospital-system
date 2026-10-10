@@ -5280,25 +5280,28 @@ def _weekly_weight_reference_layout_path() -> Path | None:
 def _normalize_weekly_weight_slot(value: Any) -> str:
     text = str(value or "").strip()
     compact = re.sub(r"\s+", "", text)
-    if not compact:
-        return ""
-    if compact in {"副1", "副①", "副一"} or "副①" in compact or "副1" in compact:
+    if compact in {"副1", "副①", "副一", "副菜1", "副菜①", "副菜一"}:
         return "副①"
-    if compact in {"副2", "副②", "副二"} or "副②" in compact or "副2" in compact:
+    if compact in {"副2", "副②", "副二", "副菜2", "副菜②", "副菜二"}:
         return "副②"
-    if "主" in compact and ("A" in compact.upper() or "Ａ" in compact):
+    if compact.upper() in {"主A", "主Ａ", "主菜A", "主菜Ａ"}:
         return "主Ａ"
-    if "主" in compact:
+    if compact in {"主", "主菜"}:
         return "主"
-    return text
+    raise ValueError("weekly_weight_category_unresolved")
 
 
 def _weekly_weight_slot_for_line(line: dict) -> str:
-    for key in ("menu_category", "slot_label", "category", "menu_slot", "_menu_slot_label"):
-        slot = _normalize_weekly_weight_slot(line.get(key))
-        if slot:
-            return slot
-    return ""
+    raw_daypart = str(line.get("daypart") or "").strip()
+    daypart = {"朝": "朝", "朝食": "朝", "昼": "昼", "昼食": "昼", "夕": "夕", "夕食": "夕"}.get(raw_daypart)
+    if daypart is None:
+        raise ValueError("weekly_weight_daypart_unresolved")
+    slot = _normalize_weekly_weight_slot(line.get("menu_category"))
+    if slot == "主":
+        slot = {"朝": "副①", "昼": "主Ａ", "夕": "主"}[daypart]
+    if slot not in dict(_WEEKLY_WEIGHT_DAYPART_SLOTS)[daypart]:
+        raise ValueError("weekly_weight_slot_unsupported")
+    return slot
 
 
 def _weekly_weight_format_amount(amounts: dict[str, float]) -> Any:
@@ -5623,8 +5626,6 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
                     continue
                 daypart = _normalize_output_daypart(line.get("daypart"))
                 slot = _weekly_weight_slot_for_line(line)
-                if not daypart or not slot:
-                    continue
                 row = rows.setdefault(
                     (current_date, daypart, slot),
                     {
@@ -5652,6 +5653,15 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
 def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | None = None) -> Path:
     rows_by_key = _weekly_weight_collect_rows(target_date, status=status)
     week_start = _weekly_weight_start(target_date)
+    render_keys = [
+        (week_start + timedelta(days=offset), daypart, slot)
+        for offset in range(7)
+        for daypart, slots in _WEEKLY_WEIGHT_DAYPART_SLOTS
+        for slot in slots
+    ]
+    if len(render_keys) != len(set(render_keys)) or set(rows_by_key) - set(render_keys):
+        raise ValueError("weekly_weight_rows_unconsumed")
+    remaining_keys = set(rows_by_key)
     workbook = _build_weekly_weight_workbook_shell(week_start)
     ws = workbook.worksheets[0]
     uses_reference_layout = bool(getattr(workbook, "_weekly_weight_reference_layout", False))
@@ -5663,7 +5673,10 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
         for daypart, slots in _WEEKLY_WEIGHT_DAYPART_SLOTS:
             part_start = row_idx
             for slot in slots:
-                payload = rows_by_key.get((current_date, daypart, slot), {})
+                key = (current_date, daypart, slot)
+                payload = rows_by_key.get(key, {})
+                if key in rows_by_key:
+                    remaining_keys.remove(key)
                 ws.cell(row=row_idx, column=3).value = slot
                 ws.cell(row=row_idx, column=4).value = payload.get("regular_menu") or payload.get("soft_mixer_menu") or None
                 ws.cell(row=row_idx, column=5).value = payload.get("regular_quantity") if payload else None
@@ -5680,6 +5693,8 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
             ws.cell(row=day_start, column=1).value = datetime(current_date.year, current_date.month, current_date.day)
         if not uses_reference_layout:
             ws.cell(row=day_start + 5, column=1).value = weekdays[current_date.weekday()]
+    if remaining_keys:
+        raise ValueError("weekly_weight_rows_unconsumed")
     output_path = OUTPUT_DIR / f"{_weekly_weight_sheet_title(week_start)} Weight.xlsx"
     workbook.save(output_path)
     try:
