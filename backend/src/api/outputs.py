@@ -27,6 +27,8 @@ from src.api.auth import require_role
 
 router = APIRouter()
 
+CSV_MEDIA_TYPE = "text/csv; charset=ms932"
+
 _PREVIEW_LIMIT_DEFAULT = 10
 _FINAL_DIET_LABELS = {
     "regular": "常食",
@@ -851,11 +853,11 @@ def download_labels(order_id: str, date: str | None = None):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"label csv build failed: {exc}") from exc
         logger.info("Output download", order_id=order_id, output="labels_csv", path=path)
-        return FileResponse(path, media_type="text/csv", filename=filename)
+        return FileResponse(path, media_type=CSV_MEDIA_TYPE, filename=filename)
     outputs = build_output_preview(order_id, "labels")
     path = outputs["labels"]
     logger.info("Output download", order_id=order_id, output="labels", path=path)
-    return FileResponse(path, media_type="text/csv", filename=f"{order_id}_labels.csv")
+    return FileResponse(path, media_type=CSV_MEDIA_TYPE, filename=f"{order_id}_labels.csv")
 
 
 @router.get("/labels.xlsx", dependencies=[Depends(require_role("operator"))])
@@ -966,7 +968,7 @@ def download_aggregate(order_id: str):
     outputs = build_output_preview(order_id, "aggregate")
     path = outputs["aggregate"]
     logger.info("Output download", order_id=order_id, output="aggregate", path=path)
-    return FileResponse(path, media_type="text/csv", filename=f"{order_id}_aggregate.csv")
+    return FileResponse(path, media_type=CSV_MEDIA_TYPE, filename=f"{order_id}_aggregate.csv")
 
 
 @router.get("/preview", dependencies=[Depends(require_role("operator"))])
@@ -1034,7 +1036,7 @@ def download_daily_bundle(
     file_format = str(summary.get("file_format") or "xlsx")
     filename = f"daily_outputs_{target_date.isoformat()}_{summary.get('bundle_type', bundle_type)}.{file_format}"
     media_type = {
-        "csv": "text/csv",
+        "csv": CSV_MEDIA_TYPE,
         "zip": "application/zip",
     }.get(file_format, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     return FileResponse(
