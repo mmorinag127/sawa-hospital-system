@@ -488,7 +488,8 @@ def test_job_owned_cache_canonicalization_uses_original_receipt(repair_order, su
         order = session.get(Order, order_id)
         captured = guard.capture_reparse_read_input(session, order)
         pdf = guard.capture_selected_pdf_receipt(session, order)
-        session.add(OcrJob(id=job_id, order_id=order_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": captured, "selected_pdf_receipt": pdf}))
+        template_version_id = order.template_version_id
+        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": captured, "selected_pdf_receipt": pdf}))
     if superseded:
         with session_scope() as session:
             job = session.get(OcrJob, job_id)
@@ -652,7 +653,8 @@ def test_real_evidence_writer_keeps_independent_expectation_on_selected_replay(r
         order = session.get(Order, order_id)
         start = guard.capture_reparse_read_input(session, order)
         pdf = guard.capture_selected_pdf_receipt(session, order)
-        session.add(OcrJob(id=job_id, order_id=order_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+        template_version_id = order.template_version_id
+        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
     tokens = [(variable, variable.set(val)) for variable, val in ((order_service._workflow_ocr_job_id, job_id), (order_service._workflow_ocr_order_id, order_id), (order_service._workflow_ocr_attempt_id, attempt), (order_service._workflow_ocr_revision, revision))]
     try:
         with guard.workflow_execution_context(job_id, order_id, attempt, revision):
@@ -663,7 +665,7 @@ def test_real_evidence_writer_keeps_independent_expectation_on_selected_replay(r
             targets, records = _owned_artifact_fixture(source, value)
             payload = {"hakodate_repair_source_receipt": deepcopy(source), "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": deepcopy(source["expected_sheet_cells"])}}
             _attach_provider_artifact_packet(payload)
-            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, status="ready" if value is not None else "diagnostic_only", producer_version="own-fixture/v1", source="own-recognizer", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
+            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, template_version_id=template_version_id, status="ready" if value is not None else "diagnostic_only", producer_version="own-fixture/v1", source="own-recognizer", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
             assert saved is not None
             if value is not None:
                 assert saved["artifact_manifest_json"]["original_hakodate_source"] == source
@@ -713,7 +715,8 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
         start = guard.capture_reparse_read_input(session, order)
         pdf = guard.capture_selected_pdf_receipt(session, order)
         job_id, attempt = str(uuid4()), str(uuid4())
-        session.add(OcrJob(id=job_id, order_id=order_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+        template_version_id = order.template_version_id
+        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
     verified = storage_service.load_selected_pdf_bytes(pdf["storage_uri"], pdf)
     draft = {"fields": ["date", "daypart", "menu"], "rows": [["2026-10-07", "昼", "own"]]}
     # External rendering/recognition are injected, not the production payload
@@ -734,7 +737,7 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
             assert payload["hakodate_ocr_evidence"]["records"] == payload["hakodate_ocr_evidence_records"]
             assert payload["hakodate_ocr_evidence"]["records"][0]["raw_text"] == "0"
             assert payload["hakodate_ocr_evidence"]["records"][0]["engine_metadata"]["recognizer_output"]["own_null"] is None
-            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, status="ready", source="own-recognizer", producer_version="own-fixture/v1", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
+            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, template_version_id=template_version_id, status="ready", source="own-recognizer", producer_version="own-fixture/v1", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
             assert saved is not None
     finally:
         for variable, token in reversed(variables):
@@ -805,12 +808,12 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
     from src.services import hakodate_cell_ocr_batch_service as batch, hakodate_preprocessing_pipeline_service as collector, hakodate_step_review_pipeline_service as pipeline, master_order_form_template_service as master, order_workflow_v2_service as workflow
     order_id, _, configured = repair_order
     week = "2026-10@2026-10-01~2026-10-03"
-    physical = [{"menu_date": f"2026-10-0{day}", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": f"own-{day}", "diet_type": "regular"} for day in (1, 2, 3)]
+    physical = [{"menu_date": f"2026-10-0{day}", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": f"own-{day}", "diet_type": "regular", "category": "主菜"} for day in (1, 2, 3)]
     merged = getattr(request, "param", False)
     if merged:
         configured["facility"]["fax_template"]["columns"][-1]["body_merge"] = "daypart"
         week = "2026-10@2026-10-01~2026-10-01"
-        physical = [{"menu_date": "2026-10-01", "daypart": "昼", "daypart_key": "lunch", "slot_index": slot, "name": f"own-{slot}", "diet_type": "regular"} for slot in range(3)]
+        physical = [{"menu_date": "2026-10-01", "daypart": "昼", "daypart_key": "lunch", "slot_index": slot, "name": f"own-{slot}", "diet_type": "regular", "category": category} for slot, category in enumerate(("主菜", "副菜1", "副菜2"))]
         _publish_repair_facility(configured, select_for_order=order_id)
     raw_physical = deepcopy(physical)
     def entries_for_month(month_id, *args, **kwargs):
@@ -912,7 +915,8 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
         pdf = guard.capture_selected_pdf_receipt(session, order)
         revision = session.get(OrderWorkflowState, order_id).revision
         job_id, attempt = str(uuid4()), str(uuid4())
-        session.add(OcrJob(id=job_id, order_id=order_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+        template_version_id = order.template_version_id
+        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
     if owner_kind == "nonworkflow":
         with session_scope() as session:
             session.get(OcrJob, job_id).metrics = {}
@@ -945,7 +949,7 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
             assert all(record["raw_text"] == ("0" if value == 0 else "") for record in records)
             assessment = order_service._classify_owned_evidence_payload(payload)
             assert assessment["persistable"] is (value == 0)
-            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, status="ready" if value == 0 else "diagnostic_only", source="own-recognizer", producer_version="fixture-external-recognizer/v1", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
+            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, template_version_id=template_version_id, status="ready" if value == 0 else "diagnostic_only", source="own-recognizer", producer_version="fixture-external-recognizer/v1", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
             assert saved is not None
             assert guard.snapshots_equal(saved["payload_json"]["_ocr_execution"]["processing_start_input"], start)
     finally:
@@ -1031,6 +1035,7 @@ def test_actual_master_roles_and_merged_logical_targets(repair_order):
 
 
 def test_original_base_uses_captured_template_menu_and_json_timestamp(connected_physical_pipeline, monkeypatch):
+    from src.services.hakodate_physical_menu_row_service import physical_row_ids_from_entries
     order_id, _, start, _, _ = connected_physical_pipeline
     monkeypatch.setattr(order_service, "_resolve_effective_sheet_template", lambda **kwargs: pytest.fail("late template selection"))
     monkeypatch.setattr(order_service, "_build_monthly_menu_diagnostics", lambda **kwargs: pytest.fail("late monthly source read"))
@@ -1041,7 +1046,8 @@ def test_original_base_uses_captured_template_menu_and_json_timestamp(connected_
     base, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, processing_read_input=start)
     assert error is None
     assert "qty.regular_x" in base["fields"] and "qty.soft_x" not in base["fields"]
-    assert base["physical_menu_row_ids"] == ["2026-10-01__lunch__0", "2026-10-02__lunch__0", "2026-10-03__lunch__0"]
+    assert base["physical_menu_row_ids"] == ["2026-10-01__昼__0", "2026-10-02__昼__0", "2026-10-03__昼__0"]
+    assert base["physical_menu_row_ids"] == physical_row_ids_from_entries(start["physical_menu_entries"])
     menu_index = base["fields"].index("menu")
     assert [row[menu_index] for row in base["rows"]] == ["own-1", "own-2", "own-3"]
 
