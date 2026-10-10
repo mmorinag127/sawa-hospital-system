@@ -1379,7 +1379,15 @@ def _build_position_menu_entries_from_order_lines(
 
 
 def _source_uses_weekly_menu_shell(source: str | None) -> bool:
-    return str(source or "").strip().startswith("weekly_menu")
+    return str(source or "").strip() in {
+        "weekly_menu",
+        "weekly_menu+ocr_payload",
+        "weekly_menu+payload_row",
+        "weekly_menu_skeleton",
+        "weekly_menu_blocked",
+        "hakodate_weekly_menu_template",
+        "forced_weekly_menu",
+    }
 
 
 def _resolve_sheet_payload_for_menu_entries(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -24500,7 +24508,7 @@ def _build_sheet_trace_rows(
 ) -> list[list[str]]:
     quantity_columns = set(quantity_index.values())
     source_token = "none"
-    if source.startswith("weekly_menu"):
+    if _source_uses_weekly_menu_shell(source):
         source_token = "weekly_menu"
     elif source.startswith("ocr_table"):
         source_token = "ocr_table"
