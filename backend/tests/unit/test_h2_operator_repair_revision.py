@@ -755,11 +755,9 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
     assert guard.snapshots_equal(start["physical_menu_entries"], physical)
     evidence = json.loads(guard.canonical_snapshot_json(saved))
     if change == "read_race":
+        owned_overlay_uri = evidence["payload_json"]["hakodate_overlay"]["uri"]
         with session_scope() as session:
-            row = session.get(OrderOcrEvidenceRun, saved["id"])
-            row.payload_json = {**row.payload_json, "hakodate_overlay": {"uri": "gs://fixture/own-overlay.png", "producer": "hakodate_best_method_pipeline", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "fingerprint": "own-provider-image"}}
             session.get(OrderWorkflowState, order_id).evidence_run_id = saved["id"]
-        monkeypatch.setattr(order_service, "_build_hakodate_weekly_menu_base_sheet", lambda *args, **kwargs: (deepcopy(draft), None))
         signed_calls = []
         def signed(uri):
             signed_calls.append(uri)
@@ -768,7 +766,7 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
             return "https://fixture/own-overlay.png"
         monkeypatch.setattr(order_service, "_signed_url_from_uri", signed)
         result = order_service.get_cached_hakodate_overlay_preview(order_id)
-        assert signed_calls == ["gs://fixture/own-overlay.png"]
+        assert signed_calls == [owned_overlay_uri]
         assert result["status"] == "blocked" and result["assignment"] is None
         assert result["blockers"] == ["synchronous_input_conflict"]
         return
@@ -1203,18 +1201,48 @@ def test_saved_draft_quantity_sibling_uses_same_original_identity():
         order_service._merge_current_draft_quantity_values_into_semantic_sheet(current, fresh, copy_shared_quantity_values=True)
 
 
-def test_current_context_refresh_stops_before_current_state_adoption(monkeypatch):
-    sheet = _slot_draft()
+def test_current_context_refresh_stops_before_current_state_adoption(repair_order, monkeypatch):
+    from src.models.order_sheet_draft import OrderSheetDraft
+
+    order_id, _, _ = repair_order
+    with session_scope() as session:
+        session.get(Order, order_id).week_code = "2026-10@2026-10-07~2026-10-07"
+        session.add(MonthlyMenuEntry(
+            id=str(uuid4()), monthly_menu_id="2026-10", menu_date=date(2026, 10, 7),
+            daypart="昼", slot_index=1, name="own-second", category="副菜1", diet_type="regular",
+        ))
+    captured = order_service._capture_synchronous_cache_write_input(order_id)
+    sheet, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=captured)
+    assert error is None and len(sheet["rows"]) == 2
+    quantity_index = sheet["fields"].index("qty.regular_x")
+    for row, value in zip(sheet["rows"], (0, None)):
+        row[quantity_index] = value
+    # A different column order requires real schema rebase; values and source
+    # identity stay attached to their fields, apart from the deliberate duplicate.
+    sheet["fields"].reverse()
+    sheet["header"].reverse()
+    for row in sheet["rows"]:
+        row.reverse()
     sheet["row_ids"][1] = sheet["row_ids"][0]
-    record = {"draft_sheet_json": sheet, "draft_state": "draft_ready", "blockers_json": []}
-    monkeypatch.setattr(order_service, "_capture_synchronous_cache_write_input", lambda *args: {"draft": deepcopy(record), "evidence": {"id": "own-evidence"}})
-    monkeypatch.setattr(order_service, "get_order_by_id", lambda *args, **kwargs: {"id": "own-order"})
-    monkeypatch.setattr(order_service, "_draft_record_is_authoritative_current_sheet", lambda draft: True)
-    monkeypatch.setattr(order_service, "_draft_record_requires_current_sheet_semantic_rebase", lambda *args, **kwargs: (True, _slot_draft()))
+    draft_id = str(uuid4())
+    with session_scope() as session:
+        session.add(OrderSheetDraft(
+            id=draft_id, order_id=order_id,
+            template_version_id=captured["input_versions"]["order"]["template_version_id"],
+            base_evidence_run_id=captured["evidence_run_id"], draft_sheet_json=sheet,
+            draft_state="draft_ready", blockers_json=[],
+            warnings_json=["operator_review_pending"], edited_by="operator",
+        ))
+        session.flush()
+        session.get(OrderWorkflowState, order_id).draft_id = draft_id
+    captured = order_service._capture_synchronous_cache_write_input(order_id)
+    record = captured["draft"]
+    assert order_service._draft_record_is_authoritative_current_sheet(record)
+    assert order_service._draft_record_requires_current_sheet_semantic_rebase(order_id, record, evidence_run_override=captured["evidence"])[0]
     monkeypatch.setattr(order_service, "_persist_sheet_draft_with_base_evidence", lambda **kwargs: pytest.fail("must not write draft"))
     monkeypatch.setattr(order_service.order_current_state_service, "persist_current_state", lambda **kwargs: pytest.fail("must not adopt current state"))
     with pytest.raises(ValueError, match="identity_duplicate"):
-        order_service.refresh_current_sheet_context("own-order")
+        order_service.refresh_current_sheet_context(order_id)
     assert record["draft_sheet_json"] == sheet
 
 
