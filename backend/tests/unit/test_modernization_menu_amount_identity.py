@@ -68,7 +68,7 @@ def _readonly(engine, order):
 
     def observe(connection, cursor, statement, parameters, context, executemany):
         statements.append(statement)
-        assert statement.lstrip().split(None, 1)[0].upper() in {"SELECT", "PRAGMA"}, statement
+        assert statement.strip() == "BEGIN" or statement.lstrip().split(None, 1)[0].upper() in {"SELECT", "PRAGMA"}, statement
 
     sa.event.listen(engine, "before_cursor_execute", observe)
     try:
