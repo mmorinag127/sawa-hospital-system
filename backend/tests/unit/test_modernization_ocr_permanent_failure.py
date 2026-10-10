@@ -622,3 +622,78 @@ def test_real_native_done_receipt_survives_duplicate_callback(numeric_fax, monke
     assert _owned_workflow_database_snapshot() == before
     with db.session_scope() as session:
         assert session.get(OcrJob, JOB).metrics["rerun_terminal_receipt"] == receipt
+
+
+def test_real_worker_escaped_rerun_failure_completes_same_attempt_and_acks(
+    saved_numeric, monkeypatch,
+):
+    """Synthetic rerun-call failure/OIDC; real route, claim, SQL completion and ACK.
+
+    Unlike a provider-internal failure, this escapes the entire rerun service
+    call before result persistence starts. No retry disposition is simulated.
+    """
+    f = saved_numeric
+    queued = queue(f, "ocr_rerun", force=True)
+    before = _owned_workflow_database_snapshot()
+    pdf_before, expected_before = f.pdf.read_bytes(), deepcopy(f.expected)
+    observed = []
+    fault = RuntimeError("pipeline crash")
+    prior_claim = delivery._claim_context.get()
+    prior_marker = delivery._terminal_attempt_context.get()
+
+    def escaped_rerun(order_id, **kwargs):
+        claim = delivery._claim_context.get()
+        assert claim is not None
+        assert order_id == claim["order_id"] == ORDER
+        assert kwargs == {
+            "job_id": JOB, "project_sheet": False, "refresh_workflow": False,
+            "selected_document_id": f.receipt["document_id"],
+        }
+        assert claim["job_id"] == JOB
+        assert claim["delivery_id"] == queued["delivery"]["id"]
+        assert claim["generation"] == queued["delivery"]["generation"]
+        assert claim["workflow_revision"] == queued["workflow"]["revision"]
+        assert claim["request_identity"]["selected_document_id"] == f.receipt["document_id"]
+        assert order_service._workflow_ocr_attempt_id.get() == claim["workflow_attempt_id"]
+        assert order_service._workflow_ocr_revision.get() == claim["workflow_revision"]
+        assert delivery.callback_failure_completion_allowed(JOB) is True
+        observed.append(deepcopy(claim))
+        raise fault
+
+    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", escaped_rerun)
+    assert invoke_worker_route(monkeypatch, queued) == {"acknowledged": True, "duplicate": False}
+    assert len(observed) == 1
+    assert delivery._claim_context.get() is prior_claim
+    assert delivery._terminal_attempt_context.get() is prior_marker
+    after = _owned_workflow_database_snapshot()
+    assert stable_data(after) == stable_data(before)
+    assert len(after[WorkflowOcrDelivery.__tablename__]) == len(before[WorkflowOcrDelivery.__tablename__])
+    with db.session_scope() as session:
+        job = session.get(OcrJob, JOB)
+        state = session.get(OrderWorkflowState, ORDER)
+        row = session.get(WorkflowOcrDelivery, queued["delivery"]["id"])
+        claim = observed[0]
+        receipt = job.metrics["rerun_terminal_receipt"]
+        assert receipt == row.result_receipt
+        assert receipt["order_id"] == row.order_id == claim["order_id"] == ORDER
+        assert receipt["job_id"] == row.job_id == claim["job_id"] == JOB
+        assert receipt["workflow_revision"] == row.workflow_revision == claim["workflow_revision"]
+        assert receipt["workflow_attempt_id"] == row.workflow_attempt_id == claim["workflow_attempt_id"]
+        assert receipt["workflow_delivery_owner"] == {
+            key: claim[key] for key in ("delivery_id", "generation", "claim_token")
+        }
+        assert row.delivery_generation == claim["generation"]
+        assert row.claim_token == claim["claim_token"]
+        assert receipt["status"] == job.status == "failed"
+        assert receipt["error"] == job.error_message == "RuntimeError: pipeline crash"
+        assert receipt["evidence_run_id"] is None
+        assert state.state == "ocr_failed"
+        assert state.revision == claim["workflow_revision"] + 1
+        assert state.blockers_json == [receipt["error"]]
+        assert job.metrics["processing_stage"] == "failed"
+        assert job.metrics["result_state"] == "hard_failed"
+        assert job.metrics.get("pending_receipt") is None
+        assert job.metrics.get("auto_recovery_count", 0) == 0
+        assert row.state == delivery.ACKNOWLEDGED and row.lease_expires_at is None
+        assert row.handoff_receipt is None
+    assert f.pdf.read_bytes() == pdf_before and f.expected == expected_before
