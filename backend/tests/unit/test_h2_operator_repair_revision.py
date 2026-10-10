@@ -548,7 +548,7 @@ def test_real_template_targets_to_assignment_and_owned_cache_gate(repair_order, 
     for target in targets:
         target.update(source="hakodate_best_method_pipeline", source_receipt=deepcopy(source))
     records = evidence_service.evidence_from_records(
-        [{"text": "0", "bbox": region["bbox"], "confidence": 1, "engine_metadata": {"sheet_cell": region["sheet_cell"], "source_receipt": deepcopy(source), "recognizer_output": deepcopy(region)}} for region in regions],
+        [{"text": "0", "bbox": region["bbox"], "confidence": 1, "engine_metadata": {"sheet_cell": region["sheet_cell"], "source_receipt": deepcopy(source), "recognizer_output": {**deepcopy(region), "raw_text": "0", "confidence": 1}}} for region in regions],
         run_id="own-recognizer", engine="fixture-recognizer", source_scope="hakodate_cell_crop_batch",
     )
     payload = {"hakodate_repair_source_receipt": source, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": expected}, "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_ocr_evidence_records": deepcopy(records)}
@@ -1355,6 +1355,8 @@ def test_actual_authored_producer_dirty_edits_reach_preservation_boundary(author
 @pytest.mark.parametrize("blank_quantities", [False, True])
 @pytest.mark.parametrize("connected_physical_pipeline", [True], indirect=True)
 def test_actual_facility_rebuild_rejects_invalid_identity_before_persist(authored_dirty_rebuild, fault, path, blank_quantities):
+    from src.models.order_sheet_draft import OrderSheetDraft
+
     order_id, captured, _, writes = authored_dirty_rebuild
     current = captured["draft"]["draft_sheet_json"]
     if fault == "missing_ids":
@@ -1373,6 +1375,8 @@ def test_actual_facility_rebuild_rejects_invalid_identity_before_persist(authore
         current["fields"].append("operator.extra")
         for row in current["rows"]:
             row.append(None)
+    with session_scope() as session:
+        session.get(OrderSheetDraft, captured["draft"]["id"]).draft_sheet_json = deepcopy(current)
     with pytest.raises(ValueError, match="saved_draft_row_identity_"):
         if path == "facility_rebuild":
             order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured, blank_quantities=blank_quantities)
@@ -1819,7 +1823,7 @@ def test_actual_daily_bundle_api_owned_files_and_all_orders(two_accepted_output_
         quantity_names = [column["name"] for column in own[0][2] if column.get("source") == "quantity"]
         assert sum(row.get(name) or 0 for row in own[0][1] for name in quantity_names) == 7
     for identity in order_ids:
-        ctx = output._prepare_output_context_for_bundle(identity, include_bags=True, include_ocr_menu_meta=False, include_expanded_copy=False)
+        ctx = output._prepare_output_context_for_bundle(identity, include_bags=True, include_ocr_menu_meta=False, include_expanded_copy=False, require_invoice=bundle_type == "delivery")
         expected = [0, None, None] if identity == order_ids[0] else [7, 0, None]
         assert [line["quantity_original"] for line in ctx["order_lines"]] == expected
     from datetime import date
