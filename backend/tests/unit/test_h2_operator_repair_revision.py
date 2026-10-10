@@ -1075,7 +1075,8 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
             target["metadata"][mutation] = "note"
         else:
             target["metadata"][mutation] = []
-        with pytest.raises(ValueError, match="semantics_changed"):
+        expected_error = "hakodate_logical_targets_required" if mutation == "logical_targets" else "hakodate_target_semantics_changed"
+        with pytest.raises(ValueError, match=f"^{expected_error}$"):
             order_service._validate_selected_hakodate_artifacts(tampered, current)
     record_tamper = deepcopy(evidence)
     for expression in (record_tamper["payload_json"]["hakodate_ocr_evidence"]["records"], record_tamper["payload_json"]["hakodate_ocr_evidence_records"]):
@@ -1084,33 +1085,49 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
         order_service._validate_selected_hakodate_artifacts(record_tamper, current)
 
 
-def test_actual_master_roles_and_merged_logical_targets(repair_order):
+def test_actual_master_roles_and_merged_logical_targets(isolated_formal_schema, monkeypatch, tmp_path):
     from src.services import master_order_form_template_service as master, hakodate_assignment_service as assignment, template_field_schema_service as schema, hakodate_cell_ocr_batch_service as batch
     from src.services.hakodate_step_review_pipeline_service import canonical_logical_target_plan, canonical_target_semantics, _post_menu_target_regions
     from src.services.workflow_attempt_guard_service import snapshots_equal
-    order_id, _, configured = repair_order
+    order_id, _, _ = _make_repair_order(monkeypatch, tmp_path, merged=True, extra_columns=[
+        {"column_id": "soft", "index": 4, "source_index": 4, "role": "quantity", "diet_type": "soft", "area_id": "x", "body_merge": "daypart"},
+        {"column_id": "remarks", "index": 5, "source_index": 5, "role": "remarks"},
+        {"column_id": "aux", "index": 6, "source_index": 6, "role": "aux"},
+    ])
+    with session_scope() as session:
+        for slot_index, category in ((1, "副菜1"), (2, "副菜2")):
+            session.add(MonthlyMenuEntry(
+                id=str(uuid4()), monthly_menu_id="2026-10", menu_date=date(2026, 10, 7),
+                daypart="昼", slot_index=slot_index, name=f"own-{slot_index}",
+                category=category, diet_type="regular",
+            ))
     start = order_service._capture_synchronous_cache_write_input(order_id)
-    facility = deepcopy(configured["facility"])
-    facility["fax_template"]["columns"].extend([{"column_id": "soft", "index": 4, "source_index": 4, "role": "quantity", "diet_type": "soft", "area_id": "x"}, {"column_id": "remarks", "index": 5, "source_index": 5, "role": "remarks"}, {"column_id": "aux", "index": 6, "source_index": 6, "role": "aux"}])
-    config_service._validate_authored_facility_config(facility, "own")
+    facility = start["configured_input"]["facility"]
     assert schema.canonical_field_name_from_template_column({"role": "remarks"}) == schema.canonical_field_name_from_template_column({"role": "note"}) == "remarks"
     assert schema.canonical_field_name_from_template_column({"role": "menu"}) == schema.canonical_field_name_from_template_column({"role": "menu_name"}) == "menu"
     workbook = master.build_facility_template_workbook(facility_config=facility, week_value=start["input_versions"]["order"]["week_code"], week_menu_entries=start["physical_menu_entries"])
     worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
     slots = assignment.canonical_generated_column_slots(facility["fax_template"], col_count=worksheet.max_column)
     assert [(slot["role"], slot["slot_name"]) for slot in slots[1:]] == [("quantity", "qty.regular_x"), ("quantity", "qty.soft_x"), ("note", "remarks"), ("aux", "aux.col_6")]
-    worksheet.merge_cells("E11:F11")
     draft = batch.original_physical_draft(physical_menu_entries=start["physical_menu_entries"], week_code=start["input_versions"]["order"]["week_code"])
     plan = canonical_logical_target_plan(worksheet=worksheet, fax_template=facility["fax_template"], draft_sheet=draft)
-    regions, _ = _post_menu_target_regions(worksheet=worksheet, fax_template=facility["fax_template"], draft_sheet=draft, column_edges=[float(index * 30) for index in range(worksheet.max_column + 1)], row_edges=[float(index * 20) for index in range(50)], menu_body_row_indexes=[32])
+    menu_row_indexes = [row["worksheet_row"] - master.BODY_START_ROW for row in master.validated_body_row_plan(worksheet)]
+    regions, _ = _post_menu_target_regions(worksheet=worksheet, fax_template=facility["fax_template"], draft_sheet=draft, column_edges=[float(index * 30) for index in range(worksheet.max_column + 1)], row_edges=[float(index * 20) for index in range(50)], menu_body_row_indexes=menu_row_indexes)
     assert snapshots_equal(canonical_target_semantics(plan), canonical_target_semantics(regions))
-    assert regions[0]["region_id"] == "E11:F11"
-    assert regions[0]["covered_sheet_cells"] == ["E11", "F11"]
-    assert [target["field"] for target in regions[0]["logical_targets"]] == ["qty.regular_x", "qty.soft_x"]
+    quantity_regions = [region for region in regions if region["role"] == "quantity"]
+    assert [region["region_id"] for region in quantity_regions] == ["E11:E13", "F11:F13"]
+    assert [region["covered_sheet_cells"] for region in quantity_regions] == [["E11", "E12", "E13"], ["F11", "F12", "F13"]]
+    assert [[target["field"] for target in region["logical_targets"]] for region in quantity_regions] == [["qty.regular_x"] * 3, ["qty.soft_x"] * 3]
+    assert [[target["menu_name"] for target in region["logical_targets"]] for region in quantity_regions] == [["own", "own-1", "own-2"]] * 2
+    assert {(region["role"], region["field"]) for region in regions if region["role"] != "quantity"} == {("note", "remarks"), ("aux", "aux.col_6")}
+    assert all(target["role"] == "quantity" and target["field"].startswith("qty.") for region in quantity_regions for target in region["logical_targets"])
     unknown = deepcopy(facility["fax_template"])
     unknown["columns"][-1]["role"] = "unknown_authored_role"
     with pytest.raises(ValueError, match="role_unresolved|columns_changed"):
         assignment.canonical_generated_column_slots(unknown, col_count=worksheet.max_column)
+    worksheet.merge_cells("E11:F11")
+    with pytest.raises(ValueError, match="^generated_body_merge_plan_changed$"):
+        canonical_logical_target_plan(worksheet=worksheet, fax_template=facility["fax_template"], draft_sheet=draft)
     workbook.close()
 
 
