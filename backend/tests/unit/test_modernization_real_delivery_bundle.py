@@ -111,8 +111,7 @@ def test_real_single_delivery_workbook_uses_captured_name_and_quantities(
     rows = workbook_rows(body)["Synthetic invoice"]
     assert rows[1][4] == candidate["configured_input"]["facility"]["facility_name"]
     values = {row[1]: row[2] for row in rows[2:] if row[1]}
-    assert values["選択献立0"] == 7
-    assert values["選択献立3"] is None  # Existing zero_as_empty rendering.
+    assert values == {"選択献立0": 7}  # zero_as_empty excludes zero/missing rows.
     assert all(row[0].date().isoformat() == str(candidate["lines"][0]["date"])[:10]
                for row in rows[2:] if row[1])
     assert sha256(template.read_bytes()).hexdigest() == template_hash
