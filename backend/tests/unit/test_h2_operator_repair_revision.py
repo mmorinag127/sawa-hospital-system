@@ -79,6 +79,55 @@ def _write_repair_policy(configured):
     )
 
 
+def _provider_output_files(workspace, *, records, regions, sheet_values):
+    import fitz
+    from PIL import Image
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    outputs = {}
+    for key in ("overlay", "overlay_png", "sheet_review_base", "contact_sheet"):
+        path = workspace / f"{key}.png"
+        with Image.new("RGB", (32, 32), "white") as image:
+            image.save(path)
+        outputs[key] = str(path)
+    with fitz.open() as document:
+        document.new_page(width=32, height=32)
+        path = workspace / "output.pdf"
+        document.save(path)
+        outputs["pdf"] = str(path)
+    for key, value in (("records", records), ("ocr_regions", regions), ("sheet_values", sheet_values)):
+        path = workspace / f"{key}.json"
+        path.write_text(json.dumps(order_service._json_snapshot(value), ensure_ascii=False), encoding="utf-8")
+        outputs[key] = str(path)
+    return outputs
+
+
+def _attach_provider_artifact_packet(payload):
+    from src.services import canonical_ocr_artifact_service as artifacts
+
+    source = payload["hakodate_repair_source_receipt"]
+    pipeline = payload["hakodate_canonical_pipeline"]
+    records = payload["hakodate_ocr_evidence"]["records"]
+    regions = payload["hakodate_preprocessing"]["target_cell_map"]
+    workspace = Path(os.environ["OCR_ARTIFACT_DIR"]).parent / "provider-workspaces" / uuid4().hex
+    outputs = _provider_output_files(
+        workspace, records=records, regions=regions,
+        sheet_values={region["sheet_cell"]: region.get("value") for region in regions},
+    )
+    packet = artifacts.persist_outputs(
+        order_id=source["selected_pdf_receipt"]["order_id"], outputs=outputs,
+        source_receipt=source, expected_sheet_cells=pipeline["expected_sheet_cells"],
+        producer_version=pipeline["version"], workspace=workspace,
+    )
+    outputs = {key: receipt["uri"] for key, receipt in packet["outputs"].items()}
+    pipeline.update(requested_order_id=packet["order_id"], outputs=outputs, artifact_packet=packet)
+    payload["hakodate_overlay"] = {"uri": outputs["overlay"], "sheet_review_base_uri": outputs["sheet_review_base"]}
+    for record in records:
+        record["raw_payload_ref"] = outputs["records"]
+    payload["hakodate_ocr_evidence_records"] = deepcopy(records)
+    artifacts.validate_payload(payload)
+
+
 def _publish_repair_facility(configured, *, select_for_order=None):
     master_path = Path(os.environ["FACILITY_MASTER_PATH"])
     master = json.loads(master_path.read_text(encoding="utf-8"))
@@ -129,6 +178,8 @@ def repair_order(isolated_formal_schema, monkeypatch, tmp_path):
     monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
     monkeypatch.delenv("K_SERVICE", raising=False)
     monkeypatch.setenv("FACILITY_MASTER_PATH", str(master_path))
+    monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
+    monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "owned-artifact-storage"))
     monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", tmp_path / "repair-policy.json")
     _write_repair_policy(configured)
     with session_scope() as session:
@@ -205,12 +256,20 @@ def test_current_repair_actual_cache_write_gate(repair_order, monkeypatch, outco
         proof = order_service._hakodate_owned_source(kw["configured_input"], kw["pdf_bytes_override"].selected_pdf_receipt, kw["synchronous_write_input"])
         cell = proof["expected_sheet_cells"][0]
         assert proof["expected_sheet_cells"] == ["E11"]
-        if outcome == "both_partial":
-            proof["expected_sheet_cells"].append("E12")
         result = {"own": 0, "hakodate_repair_source_receipt": deepcopy(proof), "hakodate_canonical_pipeline": {"expected_sheet_cells": [cell]}, "hakodate_preprocessing": {"target_cell_map": [{"row": 0, "sheet_cell": cell, "value": 0, "source_receipt": deepcopy(proof)}]}, "hakodate_ocr_evidence": {"records": [{"evidence_id": "own-provider-record", "source_scope": "hakodate_cell_crop_batch", "value": 0, "engine_metadata": {"sheet_cell": cell, "source_receipt": deepcopy(proof)}}]}}
         result["hakodate_canonical_pipeline"].update(status="ready", version=order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, expected_sheet_cells=deepcopy(proof["expected_sheet_cells"]))
         result["hakodate_preprocessing"]["target_cell_map"][0].update(worksheet_row=11, worksheet_col=5, bbox=[0, 0, 10, 10])
         result["hakodate_preprocessing"]["target_cell_map"], result["hakodate_ocr_evidence"]["records"] = _owned_artifact_fixture(proof)
+        _attach_provider_artifact_packet(result)
+        if outcome == "both_partial":
+            proof["expected_sheet_cells"].append("E12")
+            result["hakodate_repair_source_receipt"] = deepcopy(proof)
+            result["hakodate_canonical_pipeline"]["expected_sheet_cells"] = deepcopy(proof["expected_sheet_cells"])
+            for target in result["hakodate_preprocessing"]["target_cell_map"]:
+                target["source_receipt"] = deepcopy(proof)
+            for record in result["hakodate_ocr_evidence"]["records"]:
+                record["engine_metadata"]["source_receipt"] = deepcopy(proof)
+            result["hakodate_ocr_evidence_records"] = deepcopy(result["hakodate_ocr_evidence"]["records"])
         if outcome == "partial_artifact":
             del result["hakodate_ocr_evidence"]
         elif outcome == "wrong_page":
@@ -483,6 +542,7 @@ def test_real_template_targets_to_assignment_and_owned_cache_gate(repair_order, 
         run_id="own-recognizer", engine="fixture-recognizer", source_scope="hakodate_cell_crop_batch",
     )
     payload = {"hakodate_repair_source_receipt": source, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": expected}, "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_ocr_evidence_records": deepcopy(records)}
+    _attach_provider_artifact_packet(payload)
     if failure == "partial":
         targets.pop()
         records.pop()
@@ -548,6 +608,7 @@ def test_original_workbook_expectation_owned_write_preserves_zero_and_null(repai
     records = [{"evidence_id": str(uuid4()), "source_scope": "hakodate_cell_crop_batch", "raw_text": value, "engine_metadata": {"sheet_cell": cell, "source_receipt": deepcopy(source)}} for cell in source["expected_sheet_cells"]]
     targets, records = _owned_artifact_fixture(source, value)
     payload = {"hakodate_repair_source_receipt": deepcopy(source), "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": deepcopy(source["expected_sheet_cells"])}}
+    _attach_provider_artifact_packet(payload)
     order_service._validate_hakodate_owned_artifacts(payload, source)
     assert order_service._save_order_ocr_cache(order_id, payload, synchronous_write_input=start, augment_hakodate_artifacts=False, preserve_existing_artifacts=False, persist_evidence=False, refresh_workflow=False) is not None
     with session_scope() as session:
@@ -601,6 +662,7 @@ def test_real_evidence_writer_keeps_independent_expectation_on_selected_replay(r
             records = [{"evidence_id": str(uuid4()), "source_scope": "hakodate_cell_crop_batch", "raw_text": value, "normalized_value": "0" if value == 0 else "", "center": [5, 5], "engine_metadata": {"sheet_cell": cell, "source_receipt": deepcopy(source)}} for cell in source["expected_sheet_cells"]]
             targets, records = _owned_artifact_fixture(source, value)
             payload = {"hakodate_repair_source_receipt": deepcopy(source), "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": deepcopy(source["expected_sheet_cells"])}}
+            _attach_provider_artifact_packet(payload)
             saved = ocr_evidence_service.persist_evidence_run(order_id, payload, status="ready" if value is not None else "diagnostic_only", producer_version="own-fixture/v1", source="own-recognizer", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
             assert saved is not None
             if value is not None:
@@ -661,10 +723,8 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
     def recognizer(*, item, output_dir, **kwargs):
         assert item["original_expected_sheet_cells"] == ["E11"]
         region = {**deepcopy(item["original_target_semantics"][0]), "bbox": [0, 0, 10, 10]}
-        regions_path, records_path = output_dir / "regions.json", output_dir / "records.json"
-        regions_path.write_text(json.dumps([region]))
-        records_path.write_text(json.dumps([{**region, "ocr_text": "0", "recognizer_accepted_candidate": {"normalized_digits": "0"}, "own_null": None}]))
-        return SimpleNamespace(metrics={"expected_sheet_cells": ["E11"]}, expected_sheet_cells=("E11",), outputs={"ocr_regions": str(regions_path), "records": str(records_path)}, ocr_engine="fixture-recognizer"), None
+        outputs = _provider_output_files(output_dir, regions=[region], records=[{**region, "ocr_text": "0", "recognizer_accepted_candidate": {"normalized_digits": "0"}, "own_null": None}], sheet_values={"E11": "0"})
+        return SimpleNamespace(metrics={"expected_sheet_cells": ["E11"]}, expected_sheet_cells=("E11",), outputs=outputs, ocr_engine="fixture-recognizer"), None
     monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognizer)
     variables = [(var, var.set(value)) for var, value in ((order_service._workflow_ocr_job_id, job_id), (order_service._workflow_ocr_order_id, order_id), (order_service._workflow_ocr_attempt_id, attempt), (order_service._workflow_ocr_revision, revision))]
     try:
