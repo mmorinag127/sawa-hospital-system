@@ -3077,6 +3077,8 @@ def _find_best_monthly_item_for_entry(
     daypart: str | None = None,
     category: str | None = None,
 ) -> MonthlyMenuItem | None:
+    if not normalize_diet_type(diet_type):
+        return None
     return _find_existing_monthly_item(
         session,
         month_id,
