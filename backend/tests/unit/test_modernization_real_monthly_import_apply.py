@@ -7,11 +7,12 @@ Not user originals, full-schema PG, authentication or cloud/live proof.
 
 from copy import deepcopy
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
 from test_monthly_menu_saved_import import store as store
-from test_modernization_real_monthly_import_download import imported as imported, snapshot
+from test_modernization_real_monthly_import_download import imported as imported, snapshot, upload, synthetic_workbook
 
 
 def test_real_upload_review_apply_and_readback_preserve_source_and_exact_scope(imported):
@@ -72,7 +73,11 @@ def test_real_review_rejects_foreign_or_missing_authority_without_write(imported
     client, engine, receipt, content, archive, _root = imported
     month = "2026-11" if fault == "foreign-month" else "2026-10"
     body = {"resolutions": []}
+    other_path = None
     if fault == "foreign-month":
+        other = upload(client, "2026-11", synthetic_workbook(11))
+        other_path = Path(other["source"]["file_uri"])
+        other_bytes = other_path.read_bytes()
         body["input_revision"] = receipt["current_input_revision"]
     before = snapshot(engine)
     response = client.post(f"/monthly-menus/{month}/imports/{receipt['id']}/review",
@@ -80,3 +85,5 @@ def test_real_review_rejects_foreign_or_missing_authority_without_write(imported
     assert response.status_code == (404 if fault == "foreign-month" else 428), response.text
     assert snapshot(engine) == before
     assert archive.read_bytes() == content
+    if other_path is not None:
+        assert other_path.read_bytes() == other_bytes

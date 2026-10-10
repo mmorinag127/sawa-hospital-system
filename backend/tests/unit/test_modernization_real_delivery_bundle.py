@@ -157,9 +157,7 @@ def test_real_daily_bundle_modes_receive_exact_members_and_accepted_identity(
         assert delivery[0][0] == ("Date", "Menu", "Quantity")
         assert all(row[0].date() == day for row in delivery[0][1:])
         quantities = {row[1]: row[2] for row in delivery[0][1:]}
-        assert quantities == ({"選択献立0": 7} if mode == "delivery" else
-                              {"選択献立0": 7, "選択献立1": None,
-                               "選択献立2": None, "選択献立3": None})
+        assert quantities == {"選択献立0": 7}
         assert all(facility_name in name for name in sheets)
         if mode == "both":
             labels = [rows for name, rows in sheets.items() if name == "ラベル_" + facility_name]
