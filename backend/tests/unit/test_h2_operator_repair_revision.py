@@ -157,6 +157,10 @@ def _publish_repair_facility(configured, *, select_for_order=None):
 
 @pytest.fixture
 def repair_order(isolated_formal_schema, monkeypatch, tmp_path):
+    return _make_repair_order(monkeypatch, tmp_path)
+
+
+def _make_repair_order(monkeypatch, tmp_path, *, extra_columns=(), merged=False):
     order_id, document_id, evidence_id, message = [str(uuid4()) for _ in range(4)]
     import fitz
     with fitz.open() as pdf:
@@ -167,6 +171,9 @@ def repair_order(isolated_formal_schema, monkeypatch, tmp_path):
     path.write_bytes(body)
     configured = {"facility": {"facility_id": "fixture", "fax_template_id": "own", "fax_template": {"template_id": "own", "columns": [{"column_id": "date", "index": 0, "source_index": 0, "role": "date"}, {"column_id": "daypart", "index": 1, "source_index": 1, "role": "daypart"}, {"column_id": "menu", "index": 2, "source_index": 2, "role": "menu"}, {"column_id": "quantity", "index": 3, "source_index": 3, "role": "quantity", "diet_type": "regular", "area_id": "x"}]}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}
     configured["facility"]["fax_template"]["page"] = 1
+    if merged:
+        configured["facility"]["fax_template"]["columns"][-1]["body_merge"] = "daypart"
+    configured["facility"]["fax_template"]["columns"].extend(deepcopy(extra_columns))
     configured["facility"].update(facility_name="Synthetic October repair fixture", areas=None)
     config_service._validate_authored_facility_config(configured["facility"], "own")
     authored = {"version_id": "repair-October", "valid_from": "2026-10-01",
@@ -802,19 +809,47 @@ def test_shared_logical_plan_and_actual_geometry_use_identical_original_rows(rep
 
 
 @pytest.fixture
-def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
+def connected_physical_pipeline(isolated_formal_schema, monkeypatch, tmp_path, request):
+    merged = getattr(request, "param", False)
+    producers = []
+
+    class Factory:
+        value = None
+
+        def __call__(self, *, extra_columns=(), duplicate_names=False):
+            if self.value is not None:
+                raise RuntimeError("connected fixture already captured")
+            producer = _make_connected_physical_pipeline(
+                monkeypatch, tmp_path, merged=merged,
+                extra_columns=extra_columns, duplicate_names=duplicate_names,
+            )
+            producers.append(producer)
+            self.value = next(producer)
+            return self.value
+
+        def __iter__(self):
+            return iter(self.value if self.value is not None else self())
+
+    try:
+        yield Factory()
+    finally:
+        for producer in reversed(producers):
+            producer.close()
+
+
+def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, extra_columns=(), duplicate_names=False):
     import cv2
     import numpy as np
     from src.services import hakodate_cell_ocr_batch_service as batch, hakodate_preprocessing_pipeline_service as collector, hakodate_step_review_pipeline_service as pipeline, master_order_form_template_service as master, order_workflow_v2_service as workflow
-    order_id, _, configured = repair_order
+    order_id, _, configured = _make_repair_order(monkeypatch, tmp_path, extra_columns=extra_columns, merged=merged)
     week = "2026-10@2026-10-01~2026-10-03"
     physical = [{"menu_date": f"2026-10-0{day}", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": f"own-{day}", "diet_type": "regular", "category": "主菜"} for day in (1, 2, 3)]
-    merged = getattr(request, "param", False)
     if merged:
-        configured["facility"]["fax_template"]["columns"][-1]["body_merge"] = "daypart"
         week = "2026-10@2026-10-01~2026-10-01"
         physical = [{"menu_date": "2026-10-01", "daypart": "昼", "daypart_key": "lunch", "slot_index": slot, "name": f"own-{slot}", "diet_type": "regular", "category": category} for slot, category in enumerate(("主菜", "副菜1", "副菜2"))]
-        _publish_repair_facility(configured, select_for_order=order_id)
+    if duplicate_names:
+        for entry in physical:
+            entry["name"] = "same-menu"
     raw_physical = deepcopy(physical)
     def entries_for_month(month_id, *args, **kwargs):
         return deepcopy([entry for entry in raw_physical if str(entry["menu_date"])[:7] == month_id])
@@ -861,8 +896,10 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
         result["_verified_pdf_bytes"] = load_selected_pdf_bytes(item["fax_pdf"], item["selected_pdf_receipt"])
         return result
     monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", manifest)
-    yield order_id, receipt, start, item, tmp_path
-    workbook.close()
+    try:
+        yield order_id, receipt, start, item, tmp_path
+    finally:
+        workbook.close()
 
 
 def test_actual_header_row_and_normal_collector_share_partial_period_plan(connected_physical_pipeline):
@@ -1139,21 +1176,21 @@ def test_current_context_refresh_stops_before_current_state_adoption(monkeypatch
 @pytest.fixture
 def authored_dirty_rebuild(connected_physical_pipeline, monkeypatch, request):
     from src.models.order_sheet_draft import OrderSheetDraft
-    order_id, _, original, _, _ = connected_physical_pipeline
-    monthly_entries = deepcopy(original["physical_menu_entries"])
-    for entry in monthly_entries:
-        entry["name"] = entry["menu_name"] = "same-menu"
-    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", lambda *args, **kwargs: deepcopy(monthly_entries))
-    original = order_service._capture_synchronous_cache_write_input(order_id)
     edit = getattr(request, "param", None)
+    final_columns = [{"column_id": "remarks", "index": 4, "source_index": 4, "role": "remarks"}]
     if edit is not None:
-        authored = deepcopy(original["configured_input"])
-        authored["facility"]["fax_template"]["columns"].append({"column_id": "remarks", "index": 4, "source_index": 4, "role": "remarks"})
-        config_service._validate_authored_facility_config(authored["facility"], "own")
-        monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda *args: deepcopy(authored))
-        original = order_service._capture_synchronous_cache_write_input(order_id)
+        final_columns.append({"column_id": "aux", "index": 5, "source_index": 5, "role": "aux"})
+    order_id, _, _, _, _ = connected_physical_pipeline(extra_columns=final_columns, duplicate_names=True)
+    original = order_service._capture_synchronous_cache_write_input(order_id)
     old_sheet, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=original)
     assert error is None
+    # Only the dirty draft has the earlier field subset; its source version and
+    # evidence already own the final schema and remain untouched.
+    omitted_index = 4 if edit is None else 5
+    old_sheet["fields"].pop(omitted_index)
+    old_sheet["header"].pop(omitted_index)
+    for row in old_sheet["rows"]:
+        row.pop(omitted_index)
     quantity_index = old_sheet["fields"].index("qty.regular_x")
     for row, value in zip(old_sheet["rows"], [0, None, ""]):
         row[quantity_index] = value
@@ -1166,16 +1203,9 @@ def authored_dirty_rebuild(connected_physical_pipeline, monkeypatch, request):
                 row[old_sheet["fields"].index(field)] = "stale-operator-shell"
     draft_id = str(uuid4())
     with session_scope() as session:
-        session.add(OrderSheetDraft(id=draft_id, order_id=order_id, base_evidence_run_id=original["evidence_run_id"], draft_sheet_json=old_sheet, draft_state="draft_ready", blockers_json=[], warnings_json=["operator_review_pending"], edited_by="operator"))
+        session.add(OrderSheetDraft(id=draft_id, order_id=order_id, template_version_id=original["input_versions"]["order"]["template_version_id"], base_evidence_run_id=original["evidence_run_id"], draft_sheet_json=old_sheet, draft_state="draft_ready", blockers_json=[], warnings_json=["operator_review_pending"], edited_by="operator"))
         session.flush()
         session.get(OrderWorkflowState, order_id).draft_id = draft_id
-    authored = deepcopy(original["configured_input"])
-    if edit is None:
-        authored["facility"]["fax_template"]["columns"].append({"column_id": "remarks", "index": 4, "source_index": 4, "role": "remarks"})
-    else:
-        authored["facility"]["fax_template"]["columns"].append({"column_id": "aux", "index": 5, "source_index": 5, "role": "aux"})
-    config_service._validate_authored_facility_config(authored["facility"], "own")
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda *args: deepcopy(authored))
     captured = order_service._capture_synchronous_cache_write_input(order_id)
     assert captured["draft"]["id"] == draft_id
     assert not order_service.apply_gate_service.has_clean_saved_draft(captured["draft"])
@@ -1200,7 +1230,14 @@ def authored_dirty_rebuild(connected_physical_pipeline, monkeypatch, request):
         assert kwargs["use_saved_draft"] is False
         return order_service._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=captured)
     monkeypatch.setattr(order_service, "get_ocr_sheet", own_sheet)
-    monkeypatch.setattr(order_service, "_capture_synchronous_cache_write_input", lambda *args: captured)
+    actual_capture = order_service._capture_synchronous_cache_write_input
+
+    def capture_current(*args, **kwargs):
+        nonlocal captured
+        captured = actual_capture(*args, **kwargs)
+        return captured
+
+    monkeypatch.setattr(order_service, "_capture_synchronous_cache_write_input", capture_current)
     writes = []
     def before_persist(**kwargs):
         sheet = kwargs["draft_sheet_json"]
@@ -1544,7 +1581,7 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
         session.flush()
         session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=second_id, template_version_id=first_state.template_version_id, schema_version=source.schema_version, status=source.status, payload_json=deepcopy(source.payload_json), artifact_digest=source.artifact_digest))
         session.flush()
-        state = OrderWorkflowState(order_id=second_id, evidence_run_id=evidence_id, template_version_id=first_state.template_version_id, state="output_review")
+        state = OrderWorkflowState(order_id=second_id, evidence_run_id=evidence_id, template_version_id=first_state.template_version_id, state="bagging_ready")
         session.add(state)
         session.flush()
         start = order_service._capture_synchronous_cache_write_input(second_id, write_session=session)
