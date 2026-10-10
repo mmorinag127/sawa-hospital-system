@@ -2236,8 +2236,11 @@ def mark_ocr_run_queued(
             return _serialize_workflow(workflow), WORKFLOW_REVISION_CONFLICT
         meta = _workflow_meta(workflow)
 
-        def finalize_queue_blocker(blocker: str, job: OcrJob | None = None) -> tuple[dict[str, Any], str | None]:
-            _apply_template_lineage_blocker(workflow, blocker)
+        def finalize_queue_blocker(blocker: str, job: OcrJob | None = None, *, prerequisite: bool = False) -> tuple[dict[str, Any], str | None]:
+            if prerequisite:
+                workflow.state = "ocr_blocked"
+            else:
+                _apply_template_lineage_blocker(workflow, blocker)
             _write_workflow_meta(workflow, meta)
             revision_error = _finalize_workflow_mutation(session, workflow)
             if revision_error:
@@ -2279,7 +2282,7 @@ def mark_ocr_run_queued(
             None,
         )
         if prerequisite_blocker:
-            return finalize_queue_blocker(prerequisite_blocker)
+            return finalize_queue_blocker(prerequisite_blocker, prerequisite=True)
         ocr_job = session.get(OcrJob, normalized_job_id)
         workflow_attempt_id = _new_id("OCA") if input_reference is not None else None
         delivery_request_identity: dict[str, Any] | None = None
