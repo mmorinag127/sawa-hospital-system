@@ -773,7 +773,7 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
     image_path = tmp_path / "own-render.png"
     cv2.imwrite(str(image_path), image)
     draft = batch.original_physical_draft(physical_menu_entries=physical, week_code=week)
-    item = {"order_id": order_id, "facility_code": "fixture", "configured_input": deepcopy(configured), "template_id": "own", "fax_template_id": "own", "fax_pdf": start["selected_pdf_receipt"]["storage_uri"], "template_pdf": start["selected_pdf_receipt"]["storage_uri"], "step2_png": str(image_path), "template_xlsx": str(workbook_path), "template_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "week_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "template_axes_x": xs, "template_axes_y": ys, "template_bbox": [xs[0], ys[0], xs[-1], ys[-1]], "original_physical_draft": draft, "original_expected_sheet_cells": batch.expected_sheet_cells_from_target_regions(plan), "original_target_semantics": pipeline.canonical_target_semantics(plan), "selected_pdf_receipt": deepcopy(start["selected_pdf_receipt"])}
+    item = {"order_id": order_id, "facility_code": "fixture", "configured_input": deepcopy(configured), "template_id": "own", "fax_template_id": "own", "fax_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "template_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "step2_png": str(image_path), "template_xlsx": str(workbook_path), "template_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "week_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "template_axes_x": xs, "template_axes_y": ys, "template_bbox": [xs[0], ys[0], xs[-1], ys[-1]], "original_physical_draft": draft, "original_expected_sheet_cells": batch.expected_sheet_cells_from_target_regions(plan), "original_target_semantics": pipeline.canonical_target_semantics(plan), "selected_pdf_receipt": deepcopy(receipt["selected_pdf_receipt"])}
     axis = {"row_intersection_y_match": {"structural_match": {"body_day_boundary_indexes": [0, 1, 2, 3, 4, 7, 8, 9] if merged else list(range(8)), "detected_body_band_count": 9 if merged else 7}, "corrected_ys": ys}, "header_intersection_x_match": {"header_roi": [20, 20, 270, 80]}}
     # Inject only external raster/registration observations. Actual target plan,
     # row mapping, preprocessing, snap, runtime evaluation and adoption stay real.
@@ -969,7 +969,7 @@ def test_original_base_uses_captured_template_menu_and_json_timestamp(connected_
     config_now["facility"]["fax_template"]["columns"][-1]["diet_type"] = "soft"
     _publish_repair_facility(config_now)
     monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: [])
-    base, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=start)
+    base, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, processing_read_input=start)
     assert error is None
     assert "qty.regular_x" in base["fields"] and "qty.soft_x" not in base["fields"]
     assert base["physical_menu_row_ids"] == ["2026-10-01__lunch__0", "2026-10-02__lunch__0", "2026-10-03__lunch__0"]
@@ -1675,5 +1675,5 @@ def test_bundle_context_typeerror_does_not_retry_default_options(monkeypatch):
         raise TypeError("include_ocr_menu_meta rejected")
     monkeypatch.setattr(output, "_prepare_output_context", obsolete_contract)
     with pytest.raises(TypeError, match="include_ocr_menu_meta rejected"):
-        output._prepare_output_context_for_bundle("own", include_bags=False, include_ocr_menu_meta=False, include_expanded_copy=False)
-    assert calls == [("own", {"include_bags": False, "include_ocr_menu_meta": False, "include_expanded_copy": False, "timings": None})]
+        output._prepare_output_context_for_bundle("own", include_bags=False, include_ocr_menu_meta=False, include_expanded_copy=False, require_invoice=False)
+    assert calls == [("own", {"include_bags": False, "include_ocr_menu_meta": False, "include_expanded_copy": False, "timings": None, "require_invoice": False})]
