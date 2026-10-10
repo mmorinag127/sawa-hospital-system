@@ -69,7 +69,7 @@ def _owned_artifact_fixture(source, value=0):
     targets = evidence.target_cells_from_regions(regions)
     for target in targets:
         target.update(source_receipt=deepcopy(source), value=value)
-    records = [{"evidence_id": str(uuid4()), "source_scope": "hakodate_cell_crop_batch", "raw_text": value, "normalized_value": "0" if value == 0 else "", "center": [5, 5], "engine_metadata": {"sheet_cell": region["sheet_cell"], "source_receipt": deepcopy(source), "recognizer_output": deepcopy(region)}} for region in regions]
+    records = [{"evidence_id": str(uuid4()), "source_scope": "hakodate_cell_crop_batch", "raw_text": value, "normalized_value": "0" if value == 0 else "", "confidence": 1.0, "center": [5, 5], "engine_metadata": {"sheet_cell": region["sheet_cell"], "source_receipt": deepcopy(source), "recognizer_output": {**deepcopy(region), "raw_text": value, "confidence": 1.0}}} for region in regions]
     return targets, records
 
 
@@ -160,7 +160,7 @@ def repair_order(isolated_formal_schema, monkeypatch, tmp_path):
     return _make_repair_order(monkeypatch, tmp_path)
 
 
-def _make_repair_order(monkeypatch, tmp_path, *, extra_columns=(), merged=False):
+def _make_repair_order(monkeypatch, tmp_path, *, extra_columns=(), merged=False, invoice_template=None):
     order_id, document_id, evidence_id, message = [str(uuid4()) for _ in range(4)]
     import fitz
     with fitz.open() as pdf:
@@ -174,6 +174,8 @@ def _make_repair_order(monkeypatch, tmp_path, *, extra_columns=(), merged=False)
     if merged:
         configured["facility"]["fax_template"]["columns"][-1]["body_merge"] = "daypart"
     configured["facility"]["fax_template"]["columns"].extend(deepcopy(extra_columns))
+    if invoice_template is not None:
+        configured["facility"]["invoice_template"] = deepcopy(invoice_template)
     configured["facility"].update(facility_name="Synthetic October repair fixture", areas=None)
     config_service._validate_authored_facility_config(configured["facility"], "own")
     authored = {"version_id": "repair-October", "valid_from": "2026-10-01",
@@ -808,6 +810,45 @@ def test_shared_logical_plan_and_actual_geometry_use_identical_original_rows(rep
     workbook.close()
 
 
+def _register_synthetic_menu_amounts(physical):
+    from src.models.menu import MenuMaster, MonthlyMenuItem
+
+    # These amounts are the existing synthetic candidate's explicit 1 g/person,
+    # not inferred amounts or changes to a production menu master.
+    entries = [{"name": "own", "daypart": "昼", "category": "主菜", "diet_type": "regular"}, *physical]
+    with session_scope() as session:
+        for entry in physical:
+            session.add(MonthlyMenuEntry(
+                id=str(uuid4()), monthly_menu_id="2026-10",
+                menu_date=date.fromisoformat(entry["menu_date"]), daypart=entry["daypart"],
+                slot_index=entry["slot_index"], name=entry["name"],
+                category=entry["category"], diet_type=entry["diet_type"],
+            ))
+        masters = {}
+        identities = set()
+        for entry in entries:
+            name = entry["name"]
+            normalized = order_service.menu_service._normalize_menu_name(name)
+            if normalized not in masters:
+                master = MenuMaster(
+                    id=str(uuid4()), name=name, normalized_name=normalized,
+                    qty_per_serving=1, unit_type="g",
+                    daypart=entry["daypart"], category=entry["category"],
+                )
+                session.add(master)
+                session.flush()
+                masters[normalized] = master.id
+            identity = (normalized, entry["daypart"], entry["category"], entry["diet_type"])
+            if identity in identities:
+                continue
+            identities.add(identity)
+            session.add(MonthlyMenuItem(
+                id=str(uuid4()), monthly_menu_id="2026-10", name=name,
+                menu_master_id=masters[normalized], qty_per_serving=1, unit_type="g",
+                daypart=entry["daypart"], category=entry["category"], diet_type=entry["diet_type"],
+            ))
+
+
 @pytest.fixture
 def connected_physical_pipeline(isolated_formal_schema, monkeypatch, tmp_path, request):
     merged = getattr(request, "param", False)
@@ -816,12 +857,13 @@ def connected_physical_pipeline(isolated_formal_schema, monkeypatch, tmp_path, r
     class Factory:
         value = None
 
-        def __call__(self, *, extra_columns=(), duplicate_names=False):
+        def __call__(self, *, extra_columns=(), duplicate_names=False, invoice_template=None, register_menu_amounts=False):
             if self.value is not None:
                 raise RuntimeError("connected fixture already captured")
             producer = _make_connected_physical_pipeline(
                 monkeypatch, tmp_path, merged=merged,
                 extra_columns=extra_columns, duplicate_names=duplicate_names,
+                invoice_template=invoice_template, register_menu_amounts=register_menu_amounts,
             )
             producers.append(producer)
             self.value = next(producer)
@@ -837,11 +879,11 @@ def connected_physical_pipeline(isolated_formal_schema, monkeypatch, tmp_path, r
             producer.close()
 
 
-def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, extra_columns=(), duplicate_names=False):
+def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, extra_columns=(), duplicate_names=False, invoice_template=None, register_menu_amounts=False):
     import cv2
     import numpy as np
     from src.services import hakodate_cell_ocr_batch_service as batch, hakodate_preprocessing_pipeline_service as collector, hakodate_step_review_pipeline_service as pipeline, master_order_form_template_service as master, order_workflow_v2_service as workflow
-    order_id, _, configured = _make_repair_order(monkeypatch, tmp_path, extra_columns=extra_columns, merged=merged)
+    order_id, _, configured = _make_repair_order(monkeypatch, tmp_path, extra_columns=extra_columns, merged=merged, invoice_template=invoice_template)
     week = "2026-10@2026-10-01~2026-10-03"
     physical = [{"menu_date": f"2026-10-0{day}", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": f"own-{day}", "diet_type": "regular", "category": "主菜"} for day in (1, 2, 3)]
     if merged:
@@ -853,10 +895,13 @@ def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, ex
     raw_physical = deepcopy(physical)
     def entries_for_month(month_id, *args, **kwargs):
         return deepcopy([entry for entry in raw_physical if str(entry["menu_date"])[:7] == month_id])
-    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", entries_for_month)
+    if register_menu_amounts:
+        _register_synthetic_menu_amounts(raw_physical)
+    else:
+        monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", entries_for_month)
+        monkeypatch.setattr(order_service.menu_service, "get_menu", lambda month_id, *args, **kwargs: {"entries": entries_for_month(month_id)})
+        monkeypatch.setattr(order_service.menu_service, "get_menu_for_facility", lambda month_id, *args, **kwargs: {"entries": entries_for_month(month_id)})
     monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", order_service._build_position_menu_entries)
-    monkeypatch.setattr(order_service.menu_service, "get_menu", lambda month_id, *args, **kwargs: {"entries": entries_for_month(month_id)})
-    monkeypatch.setattr(order_service.menu_service, "get_menu_for_facility", lambda month_id, *args, **kwargs: {"entries": entries_for_month(month_id)})
     with session_scope() as session:
         order = session.get(Order, order_id)
         order.week_code = week
@@ -1384,7 +1429,14 @@ def test_same_columns_preserve_raw_operator_zero_null_blank(copy_shared):
 def accepted_output_writer(connected_physical_pipeline, monkeypatch, tmp_path):
     from src.models.order_sheet_draft import OrderSheetDraft
     from src.services import output_builder as output, order_workflow_v2_service as workflow, order_output_artifact_service as artifacts
-    order_id, _, original, _, _ = connected_physical_pipeline
+    invoice_template = {"columns": [
+        {"name": "Date", "source": "date"},
+        {"name": "Menu", "source": "menu_name"},
+        {"name": "Quantity", "source": "quantity", "diet_type": "regular", "area_id": "x"},
+    ]}
+    order_id, _, original, _, _ = connected_physical_pipeline(
+        invoice_template=invoice_template, register_menu_amounts=True,
+    )
     draft_id = str(uuid4())
     configured = original["configured_input"]
     with session_scope() as session:
@@ -1400,9 +1452,8 @@ def accepted_output_writer(connected_physical_pipeline, monkeypatch, tmp_path):
         session.add(OrderSheetDraft(id=draft_id, order_id=order_id, template_version_id=template_id, base_evidence_run_id=state.evidence_run_id, draft_sheet_json=base_sheet, draft_state="draft_ready"))
         session.flush()
         state.draft_id = draft_id
-    # The real bagging producer constructs the accepted output receipt. Only
-    # external menu-master values and file writers are adapters below.
-    monkeypatch.setattr(order_service.menu_service, "resolve_menu_defaults", lambda *args, **kwargs: {})
+    # The real bagging producer uses registered synthetic menu-master amounts;
+    # only file writers below remain external output adapters.
     candidate = {"configured_input": deepcopy(configured), "lines": [{"date": entry["menu_date"], "daypart": entry["daypart_key"], "menu_name": entry["menu_name"], "menu_category": "主菜", "diet_type": "regular", "area_id": "x", "quantity_original": value, "quantity_corrected": value, "source_row_index": index, "menu_qty_per_serving": 1, "menu_unit_type": "g"} for index, (entry, value) in enumerate(zip(base_input["physical_menu_entries"], (0, None, None)))]}
     with session_scope() as session:
         start = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
