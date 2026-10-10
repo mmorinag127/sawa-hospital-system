@@ -35,18 +35,18 @@ from src.services import uploaded_pdf_service, workflow_state_service
 from src.services import workflow_attempt_guard_service as guard
 
 
-@pytest.fixture
-def saved(selected_repair):
+@pytest.fixture(params=[7, 0], ids=["seven", "zero"])
+def saved(selected_repair, request):
     order_id, sheet, evidence = selected_repair
     sheet = deepcopy(sheet)
     index = sheet["fields"].index("qty.regular_x")
-    assert len(sheet["rows"]) >= 2
-    sheet["rows"][0][index] = 7
-    sheet["rows"][1][index] = 0
+    assert len(sheet["rows"]) == 1
+    sheet["rows"][0][index] = request.param
     identity = save(order_id, sheet)
     context = order_service.get_current_sheet_context(order_id)
     assert context["draft_id"] == identity
     assert context["draft_payload"]["rows"] == sheet["rows"]
+    assert context["draft_payload"]["rows"][0][index] == request.param
     return order_id, sheet, evidence, context
 
 
@@ -303,7 +303,16 @@ def test_uploaded_without_selected_sheet_remains_non_sheet_workflow(repair_order
     result = workflow_state_service.refresh_workflow_state(order_id, include_candidate_preview=False)
     assert result is not None
     assert result["draft_id"] is None
-    assert result["current_sheet_revision_id"] is None
+    with no_writes():
+        context = order_service.get_current_sheet_context(order_id)
+        assert context is not None
+        assert context["draft_id"] is None
+        assert context["authoritative_persisted_draft"] is False
+        assert context["has_persisted_draft"] is False
+        assert context["current_sheet_revision_id"] is not None
+        assert result["current_sheet_revision_id"] == context["current_sheet_revision_id"]
+        with db.session_scope() as session:
+            assert session.get(OrderWorkflowState, order_id).draft_id is None
 
 
 def test_blocked_week_keeps_blocker_and_readonly_database(repair_order):
