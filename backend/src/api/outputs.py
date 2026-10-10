@@ -843,8 +843,8 @@ def _parse_iso_date(value: str) -> dt_date:
 @router.get("/labels", dependencies=[Depends(require_role("operator"))])
 def download_labels(order_id: str, date: str | None = None):
     if date:
+        target_date = _parse_iso_date(date)
         try:
-            target_date = _parse_iso_date(date)
             path, filename = build_label_csv_for_order(order_id, target_date=target_date)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -860,8 +860,8 @@ def download_labels(order_id: str, date: str | None = None):
 
 @router.get("/labels.xlsx", dependencies=[Depends(require_role("operator"))])
 def download_labels_xlsx(order_id: str, date: str | None = None):
+    target_date = _parse_iso_date(date) if date else None
     try:
-        target_date = _parse_iso_date(date) if date else None
         path, filename = build_label_workbook_for_order(order_id, target_date=target_date)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -889,8 +889,8 @@ def download_delivery(order_id: str):
 
 @router.get("/delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
 def view_delivery_note_html(order_id: str, date: str | None = None):
+    target_date = _parse_iso_date(date) if date else None
     try:
-        target_date = _parse_iso_date(date) if date else None
         preview = build_delivery_preview(order_id, include_diagnostics=False, target_date=target_date)
         headers = preview.get("headers", [])
         rows = preview.get("rows", [])
