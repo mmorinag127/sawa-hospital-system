@@ -14,6 +14,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Dict, Any
 from xml.etree import ElementTree as ET
+from xml.parsers import expat
 from xml.sax.saxutils import escape as xml_escape
 from uuid import uuid4
 from sqlalchemy import select
@@ -22,8 +23,11 @@ import pandas as pd
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
+from openpyxl.cell._writer import write_cell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.styles.stylesheet import Stylesheet, write_stylesheet
+from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
+from openpyxl.xml.functions import xmlfile, tostring as openpyxl_tostring
 
 from src.db import session_scope
 from src.models.order import Order
@@ -4511,33 +4515,273 @@ def _xml_cell_with_value(attrs: str, value: Any) -> str:
     return f"<c{attrs}>{inner}</c>"
 
 
-def _replace_xml_cell_value(sheet_xml: str, coordinate: str, value: Any) -> str:
-    escaped_coordinate = re.escape(coordinate)
-    pattern = re.compile(
-        rf'<c(?P<attrs>[^>]*\br="{escaped_coordinate}"[^>]*)(?:/>|>.*?</c>)',
-        re.DOTALL,
-    )
+def _template_xml_spans(content: bytes) -> dict:
+    # Expat supplies structural byte offsets. Editing only those spans preserves
+    # namespace declarations, extension XML, comments and unrelated package data.
+    parser = expat.ParserCreate(namespace_separator="}")
+    stack: list[dict] = []
+    roots: list[dict] = []
 
-    def replace(match: re.Match[str]) -> str:
-        return _xml_cell_with_value(match.group("attrs"), value)
+    def tag_end(start: int) -> int:
+        quote = None
+        for index in range(start, len(content)):
+            char = content[index]
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in (34, 39):
+                quote = char
+            elif char == 62:
+                return index + 1
+        raise ValueError("template_xml_tag_unterminated")
 
-    next_xml, count = pattern.subn(replace, sheet_xml, count=1)
-    if count:
-        return next_xml
+    def start(name, attrs):
+        offset = parser.CurrentByteIndex
+        end = tag_end(offset)
+        node = {"tag": "{" + name if "}" in name else name, "attrs": attrs,
+                "start": offset, "open_end": end, "children": [],
+                "self_closed": content[offset:end].rstrip().endswith(b"/>")}
+        (stack[-1]["children"] if stack else roots).append(node)
+        stack.append(node)
 
-    row_match = re.search(
-        rf'(<row(?P<attrs>[^>]*\br="{re.escape(str(re.sub(r"^[A-Z]+", "", coordinate)))}"[^>]*)>)(?P<body>.*?)(</row>)',
-        sheet_xml,
-        re.DOTALL,
-    )
-    if row_match is None:
+    def end(_name):
+        node = stack.pop()
+        node["close_start"] = node["open_end"] if node["self_closed"] else parser.CurrentByteIndex
+        node["end"] = node["open_end"] if node["self_closed"] else tag_end(parser.CurrentByteIndex)
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.Parse(content, True)
+    if len(roots) != 1:
+        raise ValueError("template_xml_root_required")
+    return roots[0]
+
+
+def _template_xml_opening(content: bytes, node: dict, updates: dict[str, str | None]) -> bytes:
+    opening = content[node["start"]:node["open_end"]].decode("utf-8")
+    for name, value in updates.items():
+        if node["attrs"].get(name) == value:
+            continue
+        # Consume complete quoted attributes, never an attribute-like substring
+        # inside an unrelated extension attribute's value.
+        attributes = re.finditer(r"\s+([^\s=/>]+)\s*=\s*(?:\"[^\"]*\"|'[^']*')", opening)
+        match = next((item for item in attributes if item.group(1) == name), None)
+        if match is not None:
+            opening = opening[:match.start()] + opening[match.end():]
+        if value is not None:
+            index = opening.rfind("/>") if node["self_closed"] else opening.rfind(">")
+            escaped = xml_escape(value, {'"': "&quot;"})
+            opening = opening[:index] + f' {name}="{escaped}"' + opening[index:]
+    return opening.encode("utf-8")
+
+
+def _template_xml_insert(content: bytes, parent: dict, index: int, fragment: bytes) -> bytes:
+    if parent["self_closed"]:
+        opening = content[parent["start"]:parent["open_end"]]
+        name = opening[1:].split(None, 1)[0].split(b"/")[0].split(b">")[0]
+        replacement = opening[:-2] + b">" + fragment + b"</" + name + b">"
+        return content[:parent["start"]] + replacement + content[parent["end"]:]
+    return content[:index] + fragment + content[index:]
+
+
+def _generated_template_cell(ws, cell) -> ET.Element:
+    buffer = BytesIO()
+    with xmlfile(buffer) as writer:
+        write_cell(writer, ws, cell, cell.has_style)
+    result = ET.fromstring(buffer.getvalue())
+    for node in result.iter():
+        if not node.tag.startswith("{"):
+            node.tag = _xlsx_tag(node.tag)
+    return result
+
+
+def _replace_xml_cell_values(sheet_xml: str, updates: dict[int, tuple[dict, list[ET.Element]]]) -> str:
+    if not updates:
         return sheet_xml
-    new_cell = _xml_cell_with_value(f' r="{coordinate}"', value)
-    return (
-        sheet_xml[: row_match.end("body")]
-        + new_cell
-        + sheet_xml[row_match.end("body") :]
-    )
+    content = sheet_xml.encode("utf-8")
+    root = _template_xml_spans(content)
+    data = next((node for node in root["children"] if node["tag"] == _xlsx_tag("sheetData")), None)
+    if data is None:
+        raise ValueError("template_sheet_data_required")
+    rows = [node for node in data["children"] if node["tag"] == _xlsx_tag("row")]
+    indices = [int(node["attrs"]["r"]) for node in rows]
+    if indices != sorted(set(indices)):
+        raise ValueError("template_row_order_invalid")
+
+    def expand(opening: bytes, payload: bytes) -> bytes:
+        name = opening[1:].split(None, 1)[0].split(b"/")[0].split(b">")[0]
+        return opening[:-2] + b">" + payload + b"</" + name + b">"
+
+    def apply_edits(start: int, end: int, edits: list[tuple[int, int, bytes]]) -> bytes:
+        chunks = []
+        cursor = start
+        for left, right, replacement in sorted(edits, key=lambda edit: (edit[0], edit[1])):
+            if left < cursor or right < left or right > end:
+                raise ValueError("template_xml_edit_overlap")
+            chunks.extend((content[cursor:left], replacement))
+            cursor = right
+        chunks.append(content[cursor:end])
+        return b"".join(chunks)
+
+    def cell_fragment(cell: dict, generated: ET.Element) -> bytes:
+        opening = _template_xml_opening(content, cell, {"t": generated.get("t"), "s": generated.get("s")})
+        payload = b"".join(ET.tostring(child, encoding="utf-8") for child in generated)
+        if cell["self_closed"]:
+            return expand(opening, payload)
+        values = {_xlsx_tag(name) for name in ("f", "v", "is")}
+        removals = [(child["start"], child["end"], b"") for child in cell["children"] if child["tag"] in values]
+        inner = apply_edits(cell["open_end"], cell["close_start"], removals)
+        return opening + payload + inner + content[cell["close_start"]:cell["end"]]
+
+    # All offsets refer to the original sheet. Merge ordered updates into rows
+    # once, then join non-overlapping edits without reparsing per cell.
+    sheet_edits = []
+    row_cursor = 0
+    for row_idx, (row_attrs, generated_cells) in sorted(updates.items()):
+        generated_columns = [column_index_from_string(re.sub(r"\d+$", "", cell.attrib["r"]))
+                             for cell in generated_cells]
+        if generated_columns != sorted(set(generated_columns)) or any(
+            int(re.sub(r"^[A-Z]+", "", cell.attrib["r"])) != row_idx for cell in generated_cells
+        ):
+            raise ValueError("template_cell_order_invalid")
+        while row_cursor < len(rows) and indices[row_cursor] < row_idx:
+            row_cursor += 1
+        if row_cursor == len(rows) or indices[row_cursor] != row_idx:
+            element = ET.Element(_xlsx_tag("row"), {key: str(value) for key, value in row_attrs.items()})
+            element.set("r", str(row_idx))
+            element.extend(generated_cells)
+            index = rows[row_cursor]["start"] if row_cursor < len(rows) else (
+                rows[-1]["end"] if rows else data["open_end"])
+            sheet_edits.append((index, index, ET.tostring(element, encoding="utf-8")))
+            continue
+        row = rows[row_cursor]
+        cells = [node for node in row["children"] if node["tag"] == _xlsx_tag("c")]
+        columns = [column_index_from_string(re.sub(r"\d+$", "", node["attrs"]["r"])) for node in cells]
+        if columns != sorted(set(columns)) or any(
+            int(re.sub(r"^[A-Z]+", "", node["attrs"]["r"])) != row_idx for node in cells
+        ):
+            raise ValueError("template_cell_order_invalid")
+        if row["self_closed"]:
+            payload = b"".join(ET.tostring(cell, encoding="utf-8") for cell in generated_cells)
+            replacement = expand(content[row["start"]:row["open_end"]], payload)
+        else:
+            edits = []
+            cell_cursor = 0
+            for column, generated in zip(generated_columns, generated_cells, strict=True):
+                while cell_cursor < len(cells) and columns[cell_cursor] < column:
+                    cell_cursor += 1
+                if cell_cursor < len(cells) and columns[cell_cursor] == column:
+                    cell = cells[cell_cursor]
+                    edits.append((cell["start"], cell["end"], cell_fragment(cell, generated)))
+                else:
+                    index = cells[cell_cursor]["start"] if cell_cursor < len(cells) else (
+                        cells[-1]["end"] if cells else row["open_end"])
+                    edits.append((index, index, ET.tostring(generated, encoding="utf-8")))
+            replacement = apply_edits(row["start"], row["end"], edits)
+        sheet_edits.append((row["start"], row["end"], replacement))
+    if data["self_closed"]:
+        payload = b"".join(edit[2] for edit in sheet_edits)
+        replacement = expand(content[data["start"]:data["open_end"]], payload)
+        sheet_edits = [(data["start"], data["end"], replacement)]
+    return apply_edits(0, len(content), sheet_edits).decode("utf-8")
+
+
+def _append_template_styles(parts: dict[str, bytes], workbook: Workbook) -> None:
+    original = parts.get("xl/styles.xml")
+    if original is None:
+        raise ValueError("template_styles_required")
+    try:
+        source_root = ET.fromstring(original)
+        if source_root.tag != _xlsx_tag("styleSheet"):
+            raise ValueError("template_styles_namespace_invalid")
+        generated = ET.fromstring(openpyxl_tostring(write_stylesheet(workbook)))
+        source = Stylesheet.from_tree(source_root)
+        target = Stylesheet.from_tree(deepcopy(generated))
+    except (ET.ParseError, IndexError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("template_styles_invalid") from exc
+    custom_formats = [item.numFmtId for item in target.numFmts.numFmt]
+    if len(custom_formats) != len(set(custom_formats)):
+        raise ValueError("template_number_formats_ambiguous")
+    for style in [*target.cellXfs.xf, *target.cellStyleXfs.xf]:
+        for reference, count in ((style.fontId, len(target.fonts)), (style.fillId, len(target.fills)),
+                                 (style.borderId, len(target.borders)), (style.xfId, len(target.cellStyleXfs.xf))):
+            if reference is not None and not 0 <= reference < count:
+                raise ValueError("template_style_reference_invalid")
+        if style.numFmtId is not None and style.numFmtId >= 164 and style.numFmtId not in custom_formats:
+            raise ValueError("template_number_format_required")
+    if any(style.xfId is None or not 0 <= style.xfId < len(target.cellStyleXfs.xf)
+           for style in target.cellStyles.cellStyle):
+        raise ValueError("template_named_style_reference_invalid")
+    groups = ["numFmts", "fonts", "fills", "borders", "cellStyleXfs", "cellXfs", "cellStyles", "dxfs"]
+    for name in groups:
+        old, new = getattr(source, name), getattr(target, name)
+        child = {"numFmts": "numFmt", "cellStyleXfs": "xf", "cellXfs": "xf", "cellStyles": "cellStyle"}.get(name)
+        old = list(getattr(old, child)) if child and old is not None else list(old or [])
+        new = list(getattr(new, child)) if child and new is not None else list(new or [])
+        raw = _template_xml_spans(original)
+        matches = [node for node in raw["children"] if node["tag"] == _xlsx_tag(name)]
+        if len(matches) > 1:
+            raise ValueError("template_style_group_ambiguous:" + name)
+        existing = matches[0] if matches else None
+        if existing is not None and (
+            len(existing["children"]) != len(old)
+            or int(existing["attrs"].get("count", len(old))) != len(old)
+        ):
+            raise ValueError("template_style_count_invalid:" + name)
+        if new[:len(old)] != old or len(new) < len(old):
+            raise ValueError("template_style_prefix_changed:" + name)
+        if len(new) == len(old):
+            continue
+        generated_group = generated.find(_xlsx_tag(name))
+        if generated_group is None:
+            raise ValueError("template_style_group_required:" + name)
+        addition = b"".join(ET.tostring(node, encoding="utf-8") for node in list(generated_group)[len(old):])
+        if existing is None:
+            order = groups + ["tableStyles", "colors", "extLst"]
+            index = next((node["start"] for node in raw["children"]
+                          if node["tag"].split("}")[-1] in order
+                          and order.index(node["tag"].split("}")[-1]) > order.index(name)), raw["close_start"])
+            original = _template_xml_insert(original, raw, index, ET.tostring(generated_group, encoding="utf-8"))
+        else:
+            original = _template_xml_insert(original, existing, existing["close_start"], addition)
+            raw = _template_xml_spans(original)
+            existing = next(node for node in raw["children"] if node["tag"] == _xlsx_tag(name))
+            opening = _template_xml_opening(original, existing, {"count": str(len(new))})
+            original = original[:existing["start"]] + opening + original[existing["open_end"]:]
+    for path in _worksheet_paths_by_name(parts).values():
+        sheet = ET.fromstring(parts[path])
+        for node in sheet.iter():
+            attribute = "style" if node.tag == _xlsx_tag("col") else "s"
+            if node.tag in {_xlsx_tag("c"), _xlsx_tag("row"), _xlsx_tag("col")} and attribute in node.attrib:
+                if not 0 <= int(node.attrib[attribute]) < len(target.cellXfs.xf):
+                    raise ValueError("template_cell_style_reference_invalid")
+    parts["xl/styles.xml"] = original
+
+
+def _update_template_sheet_dimension(sheet_xml: str) -> str:
+    content = sheet_xml.encode("utf-8")
+    root = _template_xml_spans(content)
+    data = next(node for node in root["children"] if node["tag"] == _xlsx_tag("sheetData"))
+    coordinates = [cell["attrs"]["r"] for row in data["children"] if row["tag"] == _xlsx_tag("row")
+                   for cell in row["children"] if cell["tag"] == _xlsx_tag("c")]
+    if not coordinates:
+        return sheet_xml
+    bounds = [range_boundaries(coordinate) for coordinate in coordinates]
+    dimension = next((node for node in root["children"] if node["tag"] == _xlsx_tag("dimension")), None)
+    if dimension is not None:
+        bounds.append(range_boundaries(dimension["attrs"]["ref"]))
+    left, top = min(item[0] for item in bounds), min(item[1] for item in bounds)
+    right, bottom = max(item[2] for item in bounds), max(item[3] for item in bounds)
+    first, last = f"{get_column_letter(left)}{top}", f"{get_column_letter(right)}{bottom}"
+    reference = first if first == last else first + ":" + last
+    if dimension is not None:
+        if dimension["attrs"].get("ref") == reference:
+            return sheet_xml
+        opening = _template_xml_opening(content, dimension, {"ref": reference})
+        return (content[:dimension["start"]] + opening + content[dimension["open_end"]:]).decode("utf-8")
+    element = ET.Element(_xlsx_tag("dimension"), {"ref": reference})
+    position = next((node["start"] for node in root["children"] if node["tag"] != _xlsx_tag("sheetPr")), root["close_start"])
+    return _template_xml_insert(content, root, position, ET.tostring(element, encoding="utf-8")).decode("utf-8")
 
 
 def _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml: str, bottom_style_ids: set[int]) -> str:
@@ -4743,17 +4987,39 @@ def _patch_template_package_with_workbook_values(
                     if _is_delivery_static_artifact_value(original_value):
                         row_indices.add(original_row_idx)
         sheet_xml = parts[sheet_path].decode("utf-8")
+        original_cells = {cell.attrib["r"]: cell for cell in original_root.iter(_xlsx_tag("c"))}
+        updates = {}
         for row_idx in sorted(row_indices):
+            generated_cells = []
             for col_idx in range(1, ws.max_column + 1):
                 coordinate = f"{get_column_letter(col_idx)}{row_idx}"
-                sheet_xml = _replace_xml_cell_value(sheet_xml, coordinate, ws.cell(row=row_idx, column=col_idx).value)
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if isinstance(cell, MergedCell):
+                    continue
+                generated = _generated_template_cell(ws, cell)
+                if coordinate not in original_cells and not len(generated) and not cell.has_style:
+                    continue
+                generated_cells.append(generated)
+            if generated_cells:
+                row_attrs = dict(ws.row_dimensions[row_idx]) if row_idx in ws.row_dimensions else {}
+                updates[row_idx] = (row_attrs, generated_cells)
+        sheet_xml = _replace_xml_cell_values(sheet_xml, updates)
+        sheet_xml = _update_template_sheet_dimension(sheet_xml)
         for col_key, dim in ws.column_dimensions.items():
             col_idx = column_index_from_string(col_key)
             sheet_xml = _patch_sheet_column_width_xml_text(sheet_xml, col_idx, dim.width)
         sheet_xml = _patch_daily_delivery_evening_bottom_border_xml_text(sheet_xml, bottom_style_ids)
         parts[sheet_path] = sheet_xml.encode("utf-8")
     if workbook_xml_changed:
-        parts["xl/workbook.xml"] = ET.tostring(workbook_root, encoding="utf-8", xml_declaration=True)
+        content = parts["xl/workbook.xml"]
+        root = _template_xml_spans(content)
+        sheets = next(node for node in root["children"] if node["tag"] == _xlsx_tag("sheets"))
+        nodes = [node for node in sheets["children"] if node["tag"] == _xlsx_tag("sheet")]
+        for node, ws in reversed(list(zip(nodes, workbook.worksheets, strict=True))):
+            opening = _template_xml_opening(content, node, {"name": ws.title})
+            content = content[:node["start"]] + opening + content[node["open_end"]:]
+        parts["xl/workbook.xml"] = content
+    _append_template_styles(parts, workbook)
     _write_xlsx_parts(output_path, parts)
 
 
