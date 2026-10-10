@@ -116,7 +116,8 @@ def test_real_delivery_survives_process_exit_reclaims_and_acks_once(owned_failur
         request_path, response_path = f.root / f"{action}-request.json", f.root / f"{action}-response.json"
         request_path.write_text(json.dumps(request))
         env = os.environ.copy()
-        env["DB_URI"] = env["DATABASE_URL"] = str(f.engine.url)
+        for name in ("ALEMBIC_DB_URI", "DB_URI", "DATABASE_URL"):
+            env[name] = str(f.engine.url)
         env["PYTHONPATH"] = os.pathsep.join([str(Path(__file__).resolve().parents[2]),
             str(Path(__file__).resolve().parent), env.get("PYTHONPATH", "")])
         completed = subprocess.run([sys.executable, str(Path(__file__).resolve()),
