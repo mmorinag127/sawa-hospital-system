@@ -8,7 +8,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.db import session_scope
 from src.models.order_current_state import OrderCurrentState
-from src.services.workflow_attempt_guard_service import lock_current_execution_write, lock_actual_write_ownership
+from src.services.workflow_attempt_guard_service import (
+    lock_current_execution_write, lock_actual_write_ownership,
+    validate_current_sheet_input, CurrentSheetInputChanged,
+    CurrentSheetContext,
+    lock_order_execution_input,
+)
 
 _CURRENT_STATE_SNAPSHOT_VERSION = "v2"
 
@@ -40,7 +45,8 @@ def _parse_optional_iso_datetime(value: Any) -> Any:
 
 
 def _hydrate_current_state_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    hydrated = dict(payload)
+    hydrated = CurrentSheetContext(payload)
+    hydrated.input_receipt = hydrated.pop("_current_sheet_input_receipt", None)
     order_payload = hydrated.get("order_payload")
     if isinstance(order_payload, dict):
         next_order_payload = dict(order_payload)
@@ -84,7 +90,15 @@ def get_current_state_payload(order_id: str) -> dict[str, Any] | None:
     if str(state.get("snapshot_version") or "").strip() != _CURRENT_STATE_SNAPSHOT_VERSION:
         return None
     payload = state.get("state_json")
-    return _hydrate_current_state_payload(payload) if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    hydrated = _hydrate_current_state_payload(payload)
+    try:
+        with session_scope() as session:
+            validate_current_sheet_input(session, order_id, hydrated)
+    except CurrentSheetInputChanged:
+        return None
+    return hydrated
 
 
 def persist_current_state(
@@ -99,10 +113,14 @@ def persist_current_state(
     if not normalized_order_id or not isinstance(state_json, dict):
         return None
     safe_state = _json_safe(state_json)
+    safe_state["_current_sheet_input_receipt"] = _json_safe(getattr(state_json, "input_receipt", None))
     now = datetime.utcnow()
     with session_scope() as session:
-        if not lock_current_execution_write(session, normalized_order_id):
-            return None
+        validate_current_sheet_input(session, normalized_order_id, state_json, writing=True)
+        if (draft_id != state_json.get("draft_id")
+                or evidence_run_id != state_json.get("base_evidence_run_id")
+                or template_version_id != state_json.get("template_version_id")):
+            raise CurrentSheetInputChanged("current_sheet_persist_reference_mismatch")
         values = {
             "order_id": normalized_order_id,
             "template_version_id": str(template_version_id or "").strip() or None,
@@ -147,11 +165,16 @@ def persist_current_state(
 def delete_current_state(
     order_id: str, *, workflow_job_id: str | None = None,
     workflow_attempt_id: str | None = None, expected_workflow_revision: int | None = None,
+    source_context: dict[str, Any] | None = None,
 ) -> None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return
     with session_scope() as session:
+        if source_context is not None:
+            validate_current_sheet_input(session, normalized_order_id, source_context, writing=True)
+        elif lock_order_execution_input(session, normalized_order_id) is None:
+            return
         if workflow_job_id is not None or workflow_attempt_id is not None or expected_workflow_revision is not None:
             allowed = lock_actual_write_ownership(
                 session, job_id=workflow_job_id, order_id=normalized_order_id,

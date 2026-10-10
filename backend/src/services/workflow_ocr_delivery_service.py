@@ -54,9 +54,9 @@ def delivery_write():
         yield session
 
 
-def _locked(session, delivery_id):
+def _locked(session, delivery_id, *, read_only=False):
     return session.execute(select(WorkflowOcrDelivery).where(
-        WorkflowOcrDelivery.id == delivery_id).with_for_update()
+        WorkflowOcrDelivery.id == delivery_id).with_for_update(read=read_only)
         .execution_options(populate_existing=True)).scalar_one_or_none()
 
 
@@ -307,7 +307,7 @@ def _mark_result_persistence_started(job_id):
         marker["started"] = True
 
 
-def lock_claim_write(session, *, job_id, order_id, attempt, revision):
+def lock_claim_write(session, *, job_id, order_id, attempt, revision, read_only=False):
     """Run inside the actual result transaction after workflow/job locks."""
     claim = _claim_context.get()
     job = session.get(OcrJob, job_id)
@@ -315,7 +315,7 @@ def lock_claim_write(session, *, job_id, order_id, attempt, revision):
     if delivery_id is None:
         return claim is None
     if claim is None:
-        row = _locked(session, delivery_id)
+        row = _locked(session, delivery_id, read_only=read_only)
         return bool(row is not None and row.state in {CLAIMED, ACKNOWLEDGED}
             and row.order_id == order_id and row.job_id == job_id
             and row.workflow_attempt_id == attempt and row.workflow_revision == revision
@@ -331,11 +331,11 @@ def lock_claim_write(session, *, job_id, order_id, attempt, revision):
         WorkflowOcrDelivery.state == CLAIMED,
         WorkflowOcrDelivery.lease_expires_at > _now(),
     )
-    if session.get_bind().dialect.name == "sqlite":
+    if session.get_bind().dialect.name == "sqlite" and not read_only:
         return session.execute(update(WorkflowOcrDelivery).where(*conditions)
             .values(updated_at=WorkflowOcrDelivery.updated_at)).rowcount == 1
     return session.execute(select(WorkflowOcrDelivery.id).where(*conditions)
-        .with_for_update()).scalar_one_or_none() is not None
+        .with_for_update(read=read_only)).scalar_one_or_none() is not None
 
 
 def acknowledge_claim(delivery_id, generation, claim_token):

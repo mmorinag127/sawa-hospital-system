@@ -509,21 +509,26 @@ def is_uploaded_pdf_completion_ready(uploaded_pdf_id: str) -> bool:
         return _is_linked_order_ready(session, row)
 
 
-def lock_uploaded_pdf_lease(session, lease, *, terminal=False):
+def lock_uploaded_pdf_lease(session, lease, *, terminal=False, read_only=False):
     required = {"id", "lease_token", "lease_owner", "attempt_count", "message_id", "storage_uri",
                 "content_sha256", "received_at", "facility_hint", "week_hint", "facility_name",
                 "skip_ocr", "source_kind", "original_filename", "page_count"}
     if not isinstance(lease, dict) or not required.issubset(lease) or not lease.get("lease_token") or not lease.get("lease_owner"):
         return False
-    result = session.execute(update(UploadedPdf).where(
+    conditions = (
         UploadedPdf.id == lease["id"], UploadedPdf.status.in_(["processing", "completed"] if terminal else ["processing"]),
         UploadedPdf.lease_token == lease["lease_token"], UploadedPdf.lease_owner == lease["lease_owner"],
         UploadedPdf.attempt_count == lease["attempt_count"],
         UploadedPdf.message_id == lease["message_id"], UploadedPdf.storage_uri == lease["storage_uri"],
         UploadedPdf.content_sha256 == lease["content_sha256"],
-    ).values(status=UploadedPdf.status))
-    if result.rowcount != 1:
-        return False
+    )
+    if read_only:
+        if session.execute(select(UploadedPdf.id).where(*conditions).with_for_update(read=True)).scalar_one_or_none() is None:
+            return False
+    else:
+        result = session.execute(update(UploadedPdf).where(*conditions).values(status=UploadedPdf.status))
+        if result.rowcount != 1:
+            return False
     row = session.get(UploadedPdf, lease["id"], populate_existing=True)
     return row.received_at.isoformat() == lease.get("received_at") and all(getattr(row, key) == lease.get(key) for key in ("facility_hint", "week_hint", "facility_name", "skip_ocr", "source_kind", "original_filename", "page_count"))
 

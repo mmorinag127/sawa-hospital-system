@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from contextlib import nullcontext
 from datetime import date, datetime
 from typing import Any
 import re
@@ -12,8 +13,10 @@ from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services.workflow_attempt_guard_service import (
     current_nonworkflow_execution, current_workflow_execution,
-    lock_order_execution_input, advance_nonworkflow_order_input,
-    lock_current_execution_write,
+    advance_nonworkflow_order_input,
+    validate_current_sheet_input,
+    capture_current_sheet_input, bind_current_sheet_input,
+    CurrentSheetInputChanged,
 )
 from src.services.ocr_job_service import (
     describe_job_state,
@@ -839,9 +842,7 @@ def refresh_workflow_state(
         return None
     refresh_stack = _WORKFLOW_REFRESH_STACK.get()
     if normalized_order_id in refresh_stack:
-        current_state = get_workflow_state(normalized_order_id)
-        if current_state is not None:
-            return current_state
+        raise CurrentSheetInputChanged("workflow_projection_reentrant")
     current_sheet_context = _load_workflow_current_sheet_context(
         normalized_order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -893,6 +894,7 @@ def _build_workflow_state_projection(
     captured_workflow = current_workflow_execution()
     if captured_workflow is not None and (captured_workflow.get("attempt") is not None or captured_workflow.get("revision") is not None):
         persist = False
+    projection_input = capture_current_sheet_input(normalized_order_id)
     current_sheet_context = (
         current_sheet_context_override
         if isinstance(current_sheet_context_override, dict)
@@ -902,6 +904,36 @@ def _build_workflow_state_projection(
             force_refresh=force_refresh_current_sheet,
         )
     )
+    if projection_input.get("order_exists") is False and current_sheet_context is None:
+        return None
+    projection_context = current_sheet_context if isinstance(current_sheet_context, dict) else bind_current_sheet_input(
+        {"order_id": normalized_order_id, "sheet_unavailable": True}, projection_input,
+    )
+    with session_scope() as session:
+        order_input = validate_current_sheet_input(session, normalized_order_id, projection_context, writing=persist)
+        return _build_locked_workflow_state_projection(
+            normalized_order_id,
+            current_sheet_context=current_sheet_context,
+            projection_context=projection_context,
+            persist=persist,
+            include_candidate_preview=include_candidate_preview,
+            refresh_draft_from_semantic=refresh_draft_from_semantic,
+            projection_session=session,
+            order_input=order_input,
+        )
+
+
+def _build_locked_workflow_state_projection(
+    normalized_order_id: str,
+    *,
+    current_sheet_context: dict[str, Any] | None,
+    projection_context: dict[str, Any],
+    persist: bool,
+    include_candidate_preview: bool,
+    refresh_draft_from_semantic: bool,
+    projection_session: Any,
+    order_input: Any,
+) -> dict[str, Any] | None:
     order_payload = (
         current_sheet_context.get("order_payload")
         if isinstance(current_sheet_context, dict) and isinstance(current_sheet_context.get("order_payload"), dict)
@@ -970,6 +1002,7 @@ def _build_workflow_state_projection(
             normalized_order_id,
             candidate_evidence_run_id=candidate_evidence_run_id,
             current_sheet_context=current_sheet_context,
+            current_sheet_context_supplied=True,
         )
     candidate_preview_available = bool((candidate_sheet_state or {}).get("candidate_preview_available"))
     candidate_has_meaningful_diff = bool((candidate_sheet_state or {}).get("candidate_has_meaningful_diff"))
@@ -1007,6 +1040,7 @@ def _build_workflow_state_projection(
         normalized_order_id,
         list(candidate_resolution.get("critical_choices") or []),
         base_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
+        **({"write_session": projection_session} if persist else {}),
     )
     synced_decisions = [
         item
@@ -1106,13 +1140,8 @@ def _build_workflow_state_projection(
     }
     if persist:
         last_transition_at = datetime.utcnow()
-        with session_scope() as session:
-            order_input = lock_order_execution_input(session, normalized_order_id)
-            if order_input is None:
-                return None
+        with nullcontext(projection_session) as session:
             execution_input = current_nonworkflow_execution()
-            if not lock_current_execution_write(session, normalized_order_id):
-                return None
             row = session.get(OrderWorkflowState, normalized_order_id)
             if row is not None and _workflow_v2_meta(row.secondary_actions_json) is not None:
                 secondary = dict(row.secondary_actions_json or {})
@@ -1159,6 +1188,8 @@ def _build_workflow_state_projection(
             if execution_input is not None:
                 advance_nonworkflow_order_input(session, execution_input, order_input)
     else:
+        with nullcontext(projection_session) as session:
+            validate_current_sheet_input(session, normalized_order_id, projection_context)
         persisted_state = get_workflow_state(normalized_order_id)
         serialized = {
             "order_id": normalized_order_id,
@@ -1229,6 +1260,7 @@ def _build_workflow_state_projection(
         order_status=order_payload.get("status"),
         current_sheet_context=current_sheet_context,
         sheet_gate=apply_gate,
+        current_sheet_context_supplied=True,
     )
     serialized.update(review_summary)
     return serialized

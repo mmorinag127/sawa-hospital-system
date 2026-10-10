@@ -39,15 +39,15 @@ def _locked(session, delivery_id):
     return session.get(IngestDelivery, delivery_id, populate_existing=True, with_for_update=True)
 
 
-def _original(session, row):
+def _original(session, row, *, read_only=False):
     from src.services.ingest_job_service import payload_digest
-    job = session.get(IngestJob, row.job_id, populate_existing=True, with_for_update=True)
+    job = session.get(IngestJob, row.job_id, populate_existing=True, with_for_update={"read": True} if read_only else True)
     if job is None or job.generation != row.business_generation:
         return None
     if job.input_digest != row.input_digest or payload_digest(job.payload) != row.input_digest or not _same(job.payload, row.original_payload):
         raise ValueError("ingest_delivery_original_changed")
     if row.uploaded_identity is not None:
-        uploaded = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update=True)
+        uploaded = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update={"read": True} if read_only else True)
         from src.services.uploaded_pdf_service import _serialize_uploaded_pdf
         if uploaded is None or any(not _same(_serialize_uploaded_pdf(uploaded)[key], value)
                                    for key, value in row.uploaded_identity.items()):
@@ -208,9 +208,9 @@ def claim_delivery(delivery_id, generation):
                 "execute": job.status in {"pending", "processing"} and row.handoff_receipt is None}
 
 
-def fence_original_write(session, lease):
+def fence_original_write(session, lease, *, read_only=False):
     row = session.execute(select(IngestDelivery).where(IngestDelivery.job_id == lease["id"],
-        IngestDelivery.business_generation == lease["generation"]).with_for_update()).scalar_one_or_none()
+        IngestDelivery.business_generation == lease["generation"]).with_for_update(read=read_only)).scalar_one_or_none()
     if row is None:
         raise ValueError("ingest_delivery_original_intent_missing")
     if not _same(row.owner_lease, lease):
@@ -351,10 +351,10 @@ def acknowledge_claim(claim):
         return result
 
 
-def _require_uploaded_terminal(session, row, status):
+def _require_uploaded_terminal(session, row, status, *, read_only=False):
     if row.uploaded_identity is None:
         return
-    upload = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update=True)
+    upload = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update={"read": True} if read_only else True)
     owner = row.owner_lease.get("uploaded_lease") if isinstance(row.owner_lease, dict) else None
     if (upload is None or not isinstance(owner, dict) or upload.status != status
         or upload.lease_token != owner["lease_token"] or upload.attempt_count != owner["attempt_count"]):

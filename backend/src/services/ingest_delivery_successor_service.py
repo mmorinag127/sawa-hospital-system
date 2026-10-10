@@ -259,22 +259,24 @@ def accept(session, job, execution_input, evidence, receipt, order):
     return identity
 
 
-def _locked(session, identity):
-    session.execute(update(IngestDeliverySuccessor).where(IngestDeliverySuccessor.id == identity)
-        .values(state=IngestDeliverySuccessor.state))
-    return session.get(IngestDeliverySuccessor, identity, populate_existing=True, with_for_update=True)
+def _locked(session, identity, *, read_only=False):
+    if not read_only:
+        session.execute(update(IngestDeliverySuccessor).where(IngestDeliverySuccessor.id == identity)
+            .values(state=IngestDeliverySuccessor.state))
+    return session.get(IngestDeliverySuccessor, identity, populate_existing=True, with_for_update={"read": True} if read_only else True)
 
 
-def _predecessor(session, row):
-    delivery = session.get(parent.IngestDelivery, row.parent_delivery_id, with_for_update=True)
-    original_ingest = parent._original(session, delivery) if delivery is not None else None
+def _predecessor(session, row, *, read_only=False):
+    lock = {"read": True} if read_only else True
+    delivery = session.get(parent.IngestDelivery, row.parent_delivery_id, with_for_update=lock)
+    original_ingest = parent._original(session, delivery, read_only=read_only) if delivery is not None else None
     if original_ingest is None:
         raise ValueError("auto_llm_original_reservation_superseded")
     if original_ingest.status != "done":
         raise ValueError("auto_llm_predecessor_business_unsettled")
-    parent._require_uploaded_terminal(session, delivery, "completed")
-    job = session.get(OcrJob, row.predecessor_job_id, with_for_update=True)
-    evidence = session.get(OrderOcrEvidenceRun, row.original["evidence_id"], with_for_update=True)
+    parent._require_uploaded_terminal(session, delivery, "completed", read_only=read_only)
+    job = session.get(OcrJob, row.predecessor_job_id, with_for_update=lock)
+    evidence = session.get(OrderOcrEvidenceRun, row.original["evidence_id"], with_for_update=lock)
     if (job is None or job.status != "done" or not parent._same(
             (job.metrics or {}).get("first_pass_terminal_receipt"), row.original["predecessor_receipt"])
         or evidence is None or evidence.artifact_digest != row.original["evidence_digest"]
@@ -292,11 +294,11 @@ def owned(claim):
         _owner.reset(token)
 
 
-def fence(session, boundary, lease):
+def fence(session, boundary, lease, *, read_only=False):
     claim = _owner.get()
     if claim is None or boundary.get("ingest_successor_id") != claim["id"]:
         return False
-    row = _locked(session, claim["id"])
+    row = _locked(session, claim["id"], read_only=read_only)
     if (row is None or row.generation != claim["generation"] or row.claim_token != claim["token"]
         or row.state not in {"CLAIMED", "ACKNOWLEDGED"}
         or (row.state == "ACKNOWLEDGED" and row.handoff_receipt is None)
@@ -306,7 +308,7 @@ def fence(session, boundary, lease):
     if any(not parent._same(boundary.get(key), original.get(key)) for key in
         ("job_id", "execution_id", "start_orders", "selected_pdf_receipt", "input_reference", "job_order_id")):
         return False
-    _predecessor(session, row)
+    _predecessor(session, row, read_only=read_only)
     job = session.get(OcrJob, row.job_id)
     from src.services.ocr_job_service import REPARSE_REQUEST_FIELDS
     metrics = (job.metrics or {}) if job is not None else {}

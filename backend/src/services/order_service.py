@@ -11947,6 +11947,7 @@ def resolve_candidate_evidence_preview_contract(
     candidate_evidence_run: dict[str, Any] | None = None,
     candidate_evidence_run_id: str | None = None,
     current_sheet_context: dict[str, Any] | None = None,
+    current_sheet_context_supplied: bool = False,
 ) -> dict[str, Any]:
     normalized_order_id = str(order_id or "").strip()
     resolved_candidate_evidence_run_id = (
@@ -11974,7 +11975,7 @@ def resolve_candidate_evidence_preview_contract(
 
     current_context = (
         current_sheet_context
-        if isinstance(current_sheet_context, dict)
+        if current_sheet_context_supplied or isinstance(current_sheet_context, dict)
         else get_current_sheet_context(
             normalized_order_id,
             refresh_draft_from_semantic=True,
@@ -12522,11 +12523,12 @@ def candidate_sheet_state(
     *,
     candidate_evidence_run_id: str | None,
     current_sheet_context: dict[str, Any] | None = None,
+    current_sheet_context_supplied: bool = False,
 ) -> dict[str, Any]:
     normalized_candidate_evidence_run_id = str(candidate_evidence_run_id or "").strip() or None
     current_context = (
         current_sheet_context
-        if isinstance(current_sheet_context, dict)
+        if current_sheet_context_supplied or isinstance(current_sheet_context, dict)
         else get_current_sheet_context(
             order_id,
             refresh_draft_from_semantic=True,
@@ -12536,7 +12538,7 @@ def candidate_sheet_state(
     )
     current_sheet_revision_id = (
         _current_sheet_revision_id_from_payload(current_context)
-        or _current_sheet_revision_id(order_id=order_id)
+        or (None if current_sheet_context_supplied else _current_sheet_revision_id(order_id=order_id))
     )
     current_payload = (
         flatten_current_sheet_payload(order_id, current_context, include_meta=False)
@@ -12563,6 +12565,7 @@ def candidate_sheet_state(
         order_id,
         candidate_evidence_run_id=normalized_candidate_evidence_run_id,
         current_sheet_context=current_context,
+        current_sheet_context_supplied=True,
     )
     result["candidate_preview_available"] = bool(contract.get("previewable"))
     result["candidate_preview_error"] = str(contract.get("error") or "").strip() or None
@@ -13591,14 +13594,16 @@ def _build_current_sheet_context_uncached(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
+    from src.services.workflow_attempt_guard_service import capture_current_sheet_input, bind_current_sheet_input
+    publication_input = capture_current_sheet_input(normalized_order_id)
     stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
     if stopped:
-        return blocked_context
+        return _bind_blocked_current_sheet_context(normalized_order_id, blocked_context, publication_input)
     synchronous_write_input = (
         _capture_synchronous_cache_write_input(normalized_order_id) if allow_state_mutation else None
     )
     if allow_state_mutation and synchronous_write_input is None:
-        return _unresolved_order_week_context(normalized_order_id)
+        return _bind_blocked_current_sheet_context(normalized_order_id, _unresolved_order_week_context(normalized_order_id), publication_input)
     order_payload = get_order_by_id(normalized_order_id, allow_unresolved_menu_amount=True)
     latest_draft = (
         synchronous_write_input.get("draft") if isinstance(synchronous_write_input, dict)
@@ -13623,7 +13628,7 @@ def _build_current_sheet_context_uncached(
                 synchronous_write_input=synchronous_write_input,
             )
             if not isinstance(refreshed_record, dict):
-                return None
+                raise ValueError("current_sheet_materialization_rejected")
             identity_blockers = [item for item in (refreshed_record.get("blockers_json") or []) if isinstance(item, str) and item.startswith("saved_draft_row_identity_")]
             if identity_blockers:
                 raise ValueError(identity_blockers[0])
@@ -13727,7 +13732,7 @@ def _build_current_sheet_context_uncached(
         rows_payload=rows,
         row_ids=row_ids,
     )
-    return {
+    return bind_current_sheet_input({
         "order_id": normalized_order_id,
         "order_payload": order_payload,
         "draft_record": materialized_record,
@@ -13772,7 +13777,17 @@ def _build_current_sheet_context_uncached(
         "seed_source": seed_source,
         "enrichment_source": enrichment_source,
         "has_semantic_fields": bool(fields) and not _draft_fields_look_generic(fields),
-    }
+    }, publication_input)
+
+
+def _bind_blocked_current_sheet_context(order_id: str, context: dict[str, Any] | None, captured: dict[str, Any]) -> dict[str, Any] | None:
+    if context is None:
+        return None
+    from src.services.workflow_attempt_guard_service import bind_current_sheet_input, validate_current_sheet_input
+    bound = bind_current_sheet_input(context, captured)
+    with session_scope() as session:
+        validate_current_sheet_input(session, order_id, bound)
+    return bound
 
 
 def refresh_current_sheet_context(
@@ -13785,9 +13800,11 @@ def refresh_current_sheet_context(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
+    from src.services.workflow_attempt_guard_service import capture_current_sheet_input
+    boundary_input = capture_current_sheet_input(normalized_order_id)
     stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
     if stopped:
-        return blocked_context
+        return _bind_blocked_current_sheet_context(normalized_order_id, blocked_context, boundary_input)
     context = _build_current_sheet_context_uncached(
         normalized_order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
@@ -13804,15 +13821,31 @@ def refresh_current_sheet_context(
         backfill_from_revision=backfill_from_revision,
     ):
         if isinstance(context, dict):
-            order_current_state_service.persist_current_state(
+            persisted = order_current_state_service.persist_current_state(
                 order_id=normalized_order_id,
                 state_json=context,
                 draft_id=str(context.get("draft_id") or "").strip() or None,
                 evidence_run_id=str(context.get("base_evidence_run_id") or "").strip() or None,
                 template_version_id=str(context.get("template_version_id") or "").strip() or None,
             )
+            if persisted is None:
+                raise ValueError("current_sheet_publication_rejected")
         else:
-            order_current_state_service.delete_current_state(normalized_order_id)
+            from src.services.workflow_attempt_guard_service import bind_current_sheet_input
+            order_current_state_service.delete_current_state(
+                normalized_order_id,
+                source_context=bind_current_sheet_input({"order_id": normalized_order_id, "sheet_unavailable": True}, boundary_input),
+            )
+    if isinstance(context, dict):
+        from src.services.workflow_attempt_guard_service import validate_current_sheet_input
+        with session_scope() as session:
+            validate_current_sheet_input(session, normalized_order_id, context)
+    else:
+        from src.services.workflow_attempt_guard_service import bind_current_sheet_input, validate_current_sheet_input
+        with session_scope() as session:
+            validate_current_sheet_input(session, normalized_order_id, bind_current_sheet_input(
+                {"order_id": normalized_order_id, "sheet_unavailable": True}, boundary_input,
+            ))
     return context
 
 
@@ -13826,9 +13859,11 @@ def get_current_sheet_context(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
+    from src.services.workflow_attempt_guard_service import capture_current_sheet_input
+    boundary_input = capture_current_sheet_input(normalized_order_id)
     stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
     if stopped:
-        return blocked_context
+        return _bind_blocked_current_sheet_context(normalized_order_id, blocked_context, boundary_input)
     if _current_sheet_context_uses_canonical_snapshot(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
@@ -13840,14 +13875,23 @@ def get_current_sheet_context(
             order_id=normalized_order_id,
             refresh_draft_from_semantic=refresh_draft_from_semantic,
         ):
+            from src.services.workflow_attempt_guard_service import validate_current_sheet_input
+            with session_scope() as session:
+                validate_current_sheet_input(session, normalized_order_id, persisted_payload)
             return persisted_payload
-    return _build_current_sheet_context_uncached(
+    context = _build_current_sheet_context_uncached(
         normalized_order_id,
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
         backfill_from_revision=backfill_from_revision,
         allow_state_mutation=False,
     )
+    from src.services.workflow_attempt_guard_service import bind_current_sheet_input, validate_current_sheet_input
+    with session_scope() as session:
+        validate_current_sheet_input(session, normalized_order_id, context if isinstance(context, dict) else bind_current_sheet_input(
+            {"order_id": normalized_order_id, "sheet_unavailable": True}, boundary_input,
+        ))
+    return context
 
 
 def _list_latest_completed_ocr_outputs(
@@ -18273,6 +18317,7 @@ def get_order_review_summary(
     order_status: str | None = None,
     current_sheet_context: dict[str, Any] | None = None,
     sheet_gate: dict[str, Any] | None = None,
+    current_sheet_context_supplied: bool = False,
 ) -> dict[str, Any]:
     payload = cached_payload if isinstance(cached_payload, dict) else _load_order_ocr_cache(order_id)
     draft_state = _extract_order_draft_state(order_id, payload, lines_updated_at=lines_updated_at)
@@ -18384,7 +18429,7 @@ def get_order_review_summary(
     summary = {
         "current_sheet_revision_id": (
             str((current_sheet_context or {}).get("current_sheet_revision_id") or "").strip()
-            or _current_sheet_revision_id(order_id=order_id, payload=payload)
+            or (None if current_sheet_context_supplied else _current_sheet_revision_id(order_id=order_id, payload=payload))
         ),
         "ocr_review_state": review_state,
         "ocr_review_stage": review_stage,

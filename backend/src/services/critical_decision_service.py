@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import nullcontext
 from typing import Any
 from uuid import uuid4
 
@@ -69,6 +70,7 @@ def sync_pending_decisions(
     critical_choices: list[dict[str, Any]] | None,
     *,
     base_evidence_run_id: str | None = None,
+    write_session: Any = None,
 ) -> list[dict[str, Any]]:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -88,7 +90,7 @@ def sync_pending_decisions(
         for item in (critical_choices or [])
         if isinstance(item, dict) and str(item.get("decision_type") or "").strip()
     }
-    with session_scope() as session:
+    with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         order_input = lock_order_execution_input(session, normalized_order_id)
         if order_input is None or not lock_current_execution_write(session, normalized_order_id):
             raise ValueError("ocr_execution_owner_changed")

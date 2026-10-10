@@ -118,29 +118,34 @@ def fail_ingest_ocr_capture(lease, job_id, error):
         return True
 
 
-def lock_ingest_lease(session, lease, *, terminal=False):
+def lock_ingest_lease(session, lease, *, terminal=False, read_only=False):
     from src.services.workflow_attempt_guard_service import current_nonworkflow_execution
     boundary = current_nonworkflow_execution()
     if isinstance(boundary, dict) and boundary.get("ingest_successor_id"):
         from src.services.ingest_delivery_successor_service import fence
-        return fence(session, boundary, lease)
+        return fence(session, boundary, lease, read_only=read_only)
     if not isinstance(lease, dict) or type(lease.get("attempts")) is not int or lease["attempts"] < 1 or any(not lease.get(key) for key in ("id", "generation", "claim_id", "input_digest")):
         return False
     from src.services.ingest_delivery_service import fence_original_write
-    if not fence_original_write(session, lease):
+    if not fence_original_write(session, lease, read_only=read_only):
         return False
     uploaded = lease.get("uploaded_lease")
     if uploaded is not None:
         from src.services.uploaded_pdf_service import lock_uploaded_pdf_lease
-        if not lock_uploaded_pdf_lease(session, uploaded, terminal=terminal):
+        if not lock_uploaded_pdf_lease(session, uploaded, terminal=terminal, read_only=read_only):
             return False
     conditions = (IngestJob.id == lease["id"], IngestJob.generation == lease["generation"],
                   IngestJob.claim_id == lease["claim_id"], IngestJob.input_digest == lease["input_digest"],
                   IngestJob.attempts == lease["attempts"])
     states = ["processing", "done"] if terminal else ["processing"]
-    result = session.execute(update(IngestJob).where(*conditions, IngestJob.status.in_(states)).values(status=IngestJob.status))
-    if result.rowcount != 1:
-        return False
+    conditions = (*conditions, IngestJob.status.in_(states))
+    if read_only:
+        if session.execute(select(IngestJob.id).where(*conditions).with_for_update(read=True)).scalar_one_or_none() is None:
+            return False
+    else:
+        result = session.execute(update(IngestJob).where(*conditions).values(status=IngestJob.status))
+        if result.rowcount != 1:
+            return False
     job = session.get(IngestJob, lease["id"], populate_existing=True)
     return job is not None and payload_digest(job.payload) == lease["input_digest"]
 

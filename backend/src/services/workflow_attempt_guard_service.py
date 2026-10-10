@@ -139,6 +139,149 @@ def snapshots_equal(left: Any, right: Any) -> bool:
     return canonical_snapshot_json(left) == canonical_snapshot_json(right)
 
 
+class CurrentSheetInputChanged(ValueError):
+    pass
+
+
+class CurrentSheetContext(dict):
+    """Internal receipt travels with the mapping, never as an HTTP field."""
+
+    input_receipt: dict[str, Any]
+
+
+def begin_current_sheet_snapshot(session: Any) -> None:
+    if session.bind.dialect.name == "postgresql":
+        if not session.in_transaction():
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+    elif session.bind.dialect.name == "sqlite":
+        connection = session.connection()
+        if not connection.connection.in_transaction:
+            connection.exec_driver_sql("BEGIN")
+
+
+def _read_current_sheet_order(session: Any, order_id: str) -> Any:
+    begin_current_sheet_snapshot(session)
+    return lock_order_execution_input(session, order_id, read_only=True)
+
+
+def capture_current_sheet_input(order_id: str) -> dict[str, Any]:
+    from src.db import session_scope
+    with session_scope() as session:
+        order = _read_current_sheet_order(session, order_id)
+        if order is None:
+            if session.get(Order, order_id, populate_existing=True) is not None:
+                raise CurrentSheetInputChanged("current_sheet_input_ownership_rejected")
+            return {"order_exists": False}
+        if not _current_sheet_read_owner_matches(session, order_id):
+            raise CurrentSheetInputChanged("current_sheet_input_ownership_rejected")
+        captured = _current_sheet_execution_input(session, order)
+        _validate_current_sheet_boundary_input(order_id, captured)
+        return captured
+
+
+def _validate_current_sheet_boundary_input(order_id: str, captured: dict[str, Any]) -> None:
+    boundary = current_nonworkflow_execution()
+    if boundary is not None and not snapshots_equal(boundary.get("orders", {}).get(order_id), captured):
+        raise CurrentSheetInputChanged("current_sheet_execution_input_changed")
+
+
+def _current_sheet_read_owner_matches(session: Any, order_id: str) -> bool:
+    return lock_current_execution_write(session, order_id, read_only=True)
+
+
+def _current_sheet_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: Any = None) -> dict[str, Any]:
+    # No selected template is a legitimate pre-sheet workflow state, not a
+    # license to reconstruct a sheet from another source.
+    unavailable = "selected_template_missing"
+    if order.template_version_id:
+        try:
+            return _order_execution_input(
+                session, order, lock=lock,
+                original_input=None if isinstance(original_input, dict) and original_input.get("sheet_source_unavailable") else original_input,
+            )
+        except ValueError as exc:
+            if original_input is not None and not original_input.get("sheet_source_unavailable"):
+                raise
+            unavailable = str(exc)
+            if not unavailable:
+                raise
+    if unavailable:
+        from src.models.facility_template_version import FacilityTemplateVersion
+        def row_values(row):
+            return {column.key: getattr(row, column.key) for column in row.__table__.columns} if row is not None else None
+        workflow = session.get(OrderWorkflowState, order.id, populate_existing=True, with_for_update=lock)
+        lines = session.execute(select(OrderLine).where(OrderLine.order_id == order.id).order_by(OrderLine.id).execution_options(populate_existing=True)).scalars().all()
+        decisions = session.execute(select(OrderCriticalDecision).where(OrderCriticalDecision.order_id == order.id).order_by(OrderCriticalDecision.id).execution_options(populate_existing=True)).scalars().all()
+        return _json_snapshot({
+            "sheet_source_unavailable": unavailable,
+            "template": row_values(session.get(FacilityTemplateVersion, order.template_version_id, populate_existing=True)) if order.template_version_id else None,
+            "order": row_values(order), "workflow": row_values(workflow),
+            "draft": row_values(session.get(OrderSheetDraft, workflow.draft_id, populate_existing=True)) if workflow and workflow.draft_id else None,
+            "evidence": row_values(session.get(OrderOcrEvidenceRun, workflow.evidence_run_id, populate_existing=True)) if workflow and workflow.evidence_run_id else None,
+            "cache": row_values(session.get(OrderOcrCache, order.id, populate_existing=True)),
+            "document": row_values(session.get(OrderDocument, order.current_document_id, populate_existing=True)) if order.current_document_id else None,
+            "lines": [row_values(row) for row in lines], "decisions": [row_values(row) for row in decisions],
+        })
+
+
+def bind_current_sheet_input(context: dict[str, Any], captured: dict[str, Any]) -> dict[str, Any]:
+    import hashlib
+    result = CurrentSheetContext(deepcopy(context))
+    result.input_receipt = {
+        "input": deepcopy(captured),
+        "context_sha256": hashlib.sha256(canonical_snapshot_json(context).encode("utf-8")).hexdigest(),
+        "materialized_draft": (
+            deepcopy(context["source_draft_record"])
+            if isinstance(context.get("source_draft_record"), dict)
+            and context["source_draft_record"].get("id")
+            and context["source_draft_record"].get("id") != (captured.get("draft") or {}).get("id")
+            else None
+        ),
+    }
+    return result
+
+
+def validate_current_sheet_input(session: Any, order_id: str, context: Any, *, writing: bool = False) -> Any:
+    import hashlib
+    if not isinstance(context, dict):
+        raise CurrentSheetInputChanged("current_sheet_input_receipt_missing")
+    receipt = getattr(context, "input_receipt", None)
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("input"), dict):
+        raise CurrentSheetInputChanged("current_sheet_input_receipt_missing")
+    content = dict(context)
+    digest = hashlib.sha256(canonical_snapshot_json(content).encode("utf-8")).hexdigest()
+    if receipt.get("context_sha256") != digest or context.get("order_id") != order_id:
+        raise CurrentSheetInputChanged("current_sheet_context_receipt_mismatch")
+    begin_current_sheet_snapshot(session)
+    order = lock_order_execution_input(session, order_id) if writing else _read_current_sheet_order(session, order_id)
+    if order is None or not (
+        lock_current_execution_write(session, order_id) if writing else _current_sheet_read_owner_matches(session, order_id)
+    ):
+        raise CurrentSheetInputChanged("current_sheet_input_ownership_rejected")
+    captured = receipt["input"]
+    actual = _current_sheet_execution_input(session, order, lock=writing, original_input=captured)
+    _validate_current_sheet_boundary_input(order_id, actual)
+    if not snapshots_equal(captured, actual):
+        raise CurrentSheetInputChanged("current_sheet_input_changed")
+    if captured.get("sheet_source_unavailable") and not (
+        context.get("sheet_unavailable") is True
+        or (context.get("blockers") and context.get("draft_payload") is None)
+    ):
+        raise CurrentSheetInputChanged("current_sheet_source_unavailable")
+    # A semantic rebase may create a new, unselected draft. Verify that exact
+    # artifact as well as the selected inputs captured before generation.
+    source = receipt.get("materialized_draft")
+    if isinstance(source, dict) and source.get("id"):
+        from src.services.draft_sheet_service import _serialize_draft
+        draft = session.get(OrderSheetDraft, source["id"], populate_existing=True, with_for_update=writing)
+        if draft is None or draft.order_id != order_id:
+            raise CurrentSheetInputChanged("current_sheet_generated_draft_missing")
+        stored = _serialize_draft(draft)
+        if not snapshots_equal(stored, source):
+            raise CurrentSheetInputChanged("current_sheet_generated_draft_changed")
+    return order
+
+
 def _order_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: dict[str, Any] | None = None) -> dict[str, Any]:
     from src.services import canonical_facility_lineage as lineage
     from src.models.facility_template_version import FacilityTemplateVersion
@@ -201,20 +344,20 @@ def _order_execution_input(session: Any, order: Any, *, lock: bool = False, orig
     })
 
 
-def lock_order_execution_input(session: Any, order_id: str) -> Any:
+def lock_order_execution_input(session: Any, order_id: str, *, read_only: bool = False) -> Any:
     from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
     boundary = current_nonworkflow_execution()
     lease = boundary.get("ingest_lease") if isinstance(boundary, dict) else current_ingest_lease()
-    if lease is not None and not lock_ingest_lease(session, lease, terminal=True):
+    if lease is not None and not lock_ingest_lease(session, lease, terminal=True, read_only=read_only):
         return None
     # The parent row serializes the explicit absent-workflow case with bootstrap.
-    if session.bind.dialect.name == "sqlite":
+    if session.bind.dialect.name == "sqlite" and not read_only:
         claim = session.execute(update(Order).where(Order.id == order_id).values(status=Order.status))
         if claim.rowcount != 1:
             return None
     query = select(Order).where(Order.id == order_id).execution_options(populate_existing=True)
     if session.bind.dialect.name != "sqlite":
-        query = query.with_for_update()
+        query = query.with_for_update(read=read_only)
     return session.execute(query).scalar_one_or_none()
 
 
@@ -266,13 +409,13 @@ def capture_selected_pdf_receipt(session, order, selected=None, input_reference=
             "storage_uri": uri, "sha256": rows[0].content_sha256, "generation": generation}
 
 
-def verify_selected_pdf_receipt(session, receipt):
+def verify_selected_pdf_receipt(session, receipt, *, read_only=False):
     if not isinstance(receipt, dict) or not receipt.get("uploaded_pdf_id"):
         return False
-    document = session.get(OrderDocument, receipt.get("document_id"), populate_existing=True, with_for_update=True)
+    document = session.get(OrderDocument, receipt.get("document_id"), populate_existing=True, with_for_update={"read": True} if read_only else True)
     if not _document_belongs_to_order(session, document, receipt.get("order_id")) or (document.storage_uri, document.source_email_id) != (receipt.get("storage_uri"), receipt.get("message_id")):
         return False
-    row = session.get(UploadedPdf, receipt["uploaded_pdf_id"], populate_existing=True, with_for_update=True)
+    row = session.get(UploadedPdf, receipt["uploaded_pdf_id"], populate_existing=True, with_for_update={"read": True} if read_only else True)
     if row is None or (row.message_id, row.storage_uri, row.content_sha256) != (receipt.get("message_id"), receipt.get("storage_uri"), receipt.get("sha256")):
         return False
     from src.services.storage_service import verify_selected_pdf_source
@@ -460,10 +603,10 @@ def selected_version_snapshot(version):
     return _json_snapshot({column.key: getattr(version, column.key) for column in version.__table__.columns})
 
 
-def lock_selected_version_input(session, order_id, captured):
+def lock_selected_version_input(session, order_id, captured, *, read_only=False):
     if not isinstance(captured, dict) or captured.get("order_id") != order_id:
         return False
-    version = session.get(OrderVersion, captured.get("id"), populate_existing=True, with_for_update=True)
+    version = session.get(OrderVersion, captured.get("id"), populate_existing=True, with_for_update={"read": True} if read_only else True)
     return version is not None and snapshots_equal(selected_version_snapshot(version), captured)
 
 
@@ -493,7 +636,7 @@ def current_workflow_execution() -> dict[str, Any] | None:
     return _workflow_execution.get()
 
 
-def lock_current_execution_write(session: Any, order_id: str) -> bool:
+def lock_current_execution_write(session: Any, order_id: str, *, read_only: bool = False) -> bool:
     """Fence derived writes in the already captured execution, not a new read."""
     workflow = _workflow_execution.get()
     if workflow is not None and (workflow["job_id"] is not None or workflow["attempt"] is not None or workflow["revision"] is not None):
@@ -502,12 +645,14 @@ def lock_current_execution_write(session: Any, order_id: str) -> bool:
         return lock_actual_write_ownership(
             session, job_id=workflow["job_id"], order_id=order_id,
             workflow_attempt_id=workflow["attempt"], expected_workflow_revision=workflow["revision"],
+            read_only=read_only,
         )
     execution_input = current_nonworkflow_execution()
     if execution_input is not None:
         return lock_actual_write_ownership(
             session, job_id=execution_input.get("job_id"), order_id=order_id,
             workflow_attempt_id=None, expected_workflow_revision=None,
+            read_only=read_only,
         )
     return True
 
@@ -570,17 +715,18 @@ def lock_current_workflow_revision(
     *,
     order_id: str | None,
     expected_workflow_revision: int | None,
+    read_only: bool = False,
 ) -> bool:
     """Claim the workflow revision before any reusable OCR job lock."""
     if not order_id or type(expected_workflow_revision) is not int:
         return False
-    if lock_order_execution_input(session, order_id) is None:
+    if lock_order_execution_input(session, order_id, read_only=read_only) is None:
         return False
     workflow_conditions = (
         OrderWorkflowState.order_id == order_id,
         OrderWorkflowState.revision == expected_workflow_revision,
     )
-    if session.bind.dialect.name == "sqlite":
+    if session.bind.dialect.name == "sqlite" and not read_only:
         claim = session.execute(
             update(OrderWorkflowState)
             .where(*workflow_conditions)
@@ -588,7 +734,7 @@ def lock_current_workflow_revision(
         )
         return claim.rowcount == 1
     return session.execute(
-        select(OrderWorkflowState.order_id).where(*workflow_conditions).with_for_update()
+        select(OrderWorkflowState.order_id).where(*workflow_conditions).with_for_update(read=read_only)
     ).scalar_one_or_none() is not None
 
 
@@ -600,6 +746,7 @@ def lock_current_workflow_attempt(
     order_id: str | None,
     expected_workflow_revision: int | None,
     source_failure: str | None = None,
+    read_only: bool = False,
 ) -> bool:
     """Fence workflow-owned writes with the reusable OCR job row lock.
 
@@ -621,9 +768,10 @@ def lock_current_workflow_attempt(
         session,
         order_id=order_id,
         expected_workflow_revision=expected_workflow_revision,
+        read_only=read_only,
     ):
         return False
-    if session.bind.dialect.name == "sqlite":
+    if session.bind.dialect.name == "sqlite" and not read_only:
         # SQLite ignores FOR UPDATE. Conditional no-op UPDATEs take its writer
         # lock within the existing transaction without changing business values.
         job_claim = session.execute(
@@ -633,13 +781,14 @@ def lock_current_workflow_attempt(
         )
         if job_claim.rowcount != 1:
             return False
-    elif session.execute(select(OcrJob.id).where(*job_conditions).with_for_update()).scalar_one_or_none() is None:
+    elif session.execute(select(OcrJob.id).where(*job_conditions).with_for_update(read=read_only)).scalar_one_or_none() is None:
         return False
     job = session.get(OcrJob, job_id, populate_existing=True)
     from src.services.workflow_ocr_delivery_service import lock_claim_write
     if not lock_claim_write(
         session, job_id=job_id, order_id=order_id,
         attempt=workflow_attempt_id, revision=expected_workflow_revision,
+        read_only=read_only,
     ):
         return False
     captured = (job.metrics or {}).get("reparse_read_input")
@@ -651,14 +800,14 @@ def lock_current_workflow_attempt(
     if not snapshots_equal(captured.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)):
         return False
     owner = current_workflow_execution()
-    if isinstance(owner, dict) and owner.get("job_id") == job_id:
+    if not read_only and isinstance(owner, dict) and owner.get("job_id") == job_id:
         owner["configured_input"] = deepcopy(captured["configured_input"])
         owner["reparse_read_input"] = deepcopy(captured)
         owner["selected_pdf_receipt"] = deepcopy((job.metrics or {}).get("selected_pdf_receipt"))
     selected = (job.metrics or {}).get("selected_version_input")
     return (
-        (selected is None or lock_selected_version_input(session, order_id, selected))
-        and (is_selected_pdf_failure(source_failure) or verify_selected_pdf_receipt(session, (job.metrics or {}).get("selected_pdf_receipt")))
+        (selected is None or lock_selected_version_input(session, order_id, selected, read_only=read_only))
+        and (is_selected_pdf_failure(source_failure) or verify_selected_pdf_receipt(session, (job.metrics or {}).get("selected_pdf_receipt"), read_only=read_only))
     )
 
 
@@ -670,6 +819,7 @@ def lock_actual_write_ownership(
     workflow_attempt_id: str | None,
     expected_workflow_revision: int | None,
     source_failure: str | None = None,
+    read_only: bool = False,
 ) -> bool:
     """Lock the current owner before every workflow-adjacent actual write.
 
@@ -693,6 +843,7 @@ def lock_actual_write_ownership(
             order_id=order_id,
             expected_workflow_revision=expected_workflow_revision,
             source_failure=source_failure,
+            read_only=read_only,
         )
 
     boundary = current_nonworkflow_execution()
@@ -700,7 +851,7 @@ def lock_actual_write_ownership(
         return False
     if boundary.get("ingest_lease") is not None:
         from src.services.ingest_job_service import lock_ingest_lease
-        if not lock_ingest_lease(session, boundary["ingest_lease"], terminal=True):
+        if not lock_ingest_lease(session, boundary["ingest_lease"], terminal=True, read_only=read_only):
             return False
     if set(boundary.get("orders", {})) != {order_id}:
         return False
@@ -714,7 +865,8 @@ def lock_actual_write_ownership(
         return False
     if not original.get("expected_sheet_cells") or not original.get("expected_target_semantics") or not snapshots_equal(original.get("selected_pdf_receipt"), boundary.get("selected_pdf_receipt")):
         return False
-    _track_execution_input(session, boundary)
+    if not read_only:
+        _track_execution_input(session, boundary)
     if boundary.get("order_id") is not None and boundary["order_id"] != order_id:
         return False
     captured = boundary.get("orders", {}).get(order_id)
@@ -726,23 +878,24 @@ def lock_actual_write_ownership(
     workflow_meta = secondary.get("workflow_v2") if isinstance(secondary, dict) else None
     if isinstance(workflow_meta, dict) and workflow_meta.get("ocr_job_attempt_id") is not None:
         return False
-    order = lock_order_execution_input(session, order_id)
+    order = lock_order_execution_input(session, order_id, read_only=read_only)
     if order is None:
         return False
-    if boundary.get("selected_version_input") is not None and not lock_selected_version_input(session, order_id, boundary["selected_version_input"]):
+    if boundary.get("selected_version_input") is not None and not lock_selected_version_input(session, order_id, boundary["selected_version_input"], read_only=read_only):
         return False
     if captured.get("workflow_exists") is True:
         if not lock_current_workflow_revision(
             session, order_id=order_id,
             expected_workflow_revision=captured.get("workflow_revision"),
+            read_only=read_only,
         ):
             return False
     elif captured.get("workflow_exists") is not False or session.get(OrderWorkflowState, order_id) is not None:
         return False
-    if not snapshots_equal(_order_execution_input(session, order, lock=True, original_input=captured), captured):
+    if not snapshots_equal(_order_execution_input(session, order, lock=not read_only, original_input=captured), captured):
         return False
     job_conditions = (OcrJob.id == job_id,)
-    if session.bind.dialect.name == "sqlite":
+    if session.bind.dialect.name == "sqlite" and not read_only:
         claim = session.execute(
             update(OcrJob)
             .where(*job_conditions)
@@ -757,7 +910,7 @@ def lock_actual_write_ownership(
         current_owner = session.execute(
             select(OcrJob.id, OcrJob.metrics["workflow_attempt_id"].as_string())
             .where(*job_conditions)
-            .with_for_update()
+            .with_for_update(read=read_only)
         ).one_or_none()
         if current_owner is None:
             return False
@@ -773,7 +926,7 @@ def lock_actual_write_ownership(
         and job.input_reference == boundary.get("input_reference")
         and job.order_id == boundary.get("job_order_id")
         and stored_boundary.get("order_id") == boundary.get("order_id")
-        and (is_selected_pdf_failure(source_failure) or verify_selected_pdf_receipt(session, boundary.get("selected_pdf_receipt")))
+        and (is_selected_pdf_failure(source_failure) or verify_selected_pdf_receipt(session, boundary.get("selected_pdf_receipt"), read_only=read_only))
     )
 
 
