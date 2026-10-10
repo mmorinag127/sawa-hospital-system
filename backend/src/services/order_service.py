@@ -17724,18 +17724,24 @@ def _current_sheet_revision_id(
     order_id: str,
     payload: dict[str, Any] | None = None,
 ) -> str | None:
-    resolved_from_payload = _current_sheet_revision_id_from_payload(payload)
-    if resolved_from_payload:
-        return resolved_from_payload
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
-    persisted_current_payload = order_current_state_service.get_current_state_payload(normalized_order_id)
-    resolved_from_persisted_current = _current_sheet_revision_id_from_payload(persisted_current_payload)
-    if resolved_from_persisted_current:
-        return resolved_from_persisted_current
-    latest_draft = draft_sheet_service.get_selected_sheet_draft(normalized_order_id)
-    return _current_sheet_revision_id_from_payload(latest_draft)
+    context = get_current_sheet_context(
+        normalized_order_id,
+        refresh_draft_from_semantic=True,
+        upgrade_generic_from_sheet=True,
+        backfill_from_revision=False,
+    )
+    if not isinstance(context, dict) or not isinstance(context.get("draft_payload"), dict):
+        return None
+    return _current_sheet_revision_id_from_artifact(
+        draft_id=context.get("draft_id"),
+        fields=context.get("fields"),
+        header=context.get("header"),
+        rows_payload=context.get("rows"),
+        row_ids=context.get("row_ids"),
+    )
 
 
 def _current_sheet_revision_id_from_artifact(
