@@ -8,7 +8,6 @@ import re
 from sqlalchemy import select, update
 
 from src.db import session_scope
-from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services.workflow_attempt_guard_service import (
@@ -31,7 +30,6 @@ from src.services import (
     draft_sheet_service,
     ocr_evidence_service,
     position_column_mapping_service,
-    week_candidate_service,
 )
 
 _WORKFLOW_REFRESH_STACK: ContextVar[tuple[str, ...]] = ContextVar(
@@ -153,39 +151,9 @@ def _load_order_payload(order_id: str) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
-    try:
-        from src.services import order_service as _order_service
-    except Exception:
-        _order_service = None
-    if _order_service is not None:
-        canonical_payload = _order_service.get_order_by_id(normalized_order_id)
-        if isinstance(canonical_payload, dict):
-            return canonical_payload
-    with session_scope() as session:
-        order = session.get(Order, normalized_order_id)
-        if not order:
-            return None
-        week_selection = week_candidate_service.resolve_current_week_selection(
-            order.week_code,
-            received_at=order.received_at,
-            facility_id=str(order.facility_code or "").strip() or None,
-        )
-        week_month_id = str(week_selection.get("month_id") or order.week_code or "").strip() or None
-        week_value = (
-            str(week_selection.get("resolved_week_value") or "").strip()
-            or str(week_selection.get("stored_week_value") or "").strip()
-            or week_month_id
-        )
-        return {
-            "id": order.id,
-            "facility": order.facility_code,
-            "week": week_month_id,
-            "week_value": week_value,
-            "persisted_week_value": week_value,
-            "status": order.status,
-            "received_at": order.received_at,
-            "lines_updated_at": order.lines_updated_at,
-        }
+    from src.services import order_service as _order_service
+
+    return _order_service.get_order_by_id(normalized_order_id)
 
 
 def _latest_confirmed_snapshot_id(order_id: str) -> str | None:
@@ -250,18 +218,8 @@ def _build_menu_context(*, facility_code: str | None, week_code: str | None) -> 
             "entries_count": 0,
             "order_codes": [],
         }
-    try:
-        from src.services import order_service as _order_service
-    except Exception:
-        _order_service = None
-    if _order_service is None:
-        return {
-            "month_id": month_id,
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 0,
-            "order_codes": [],
-        }
+    from src.services import order_service as _order_service
+
     diagnostics = _order_service._build_monthly_menu_diagnostics(
         week_id=week,
         facility_id=facility,
@@ -505,36 +463,8 @@ def _load_workflow_current_sheet_context(
     refresh_draft_from_semantic: bool = True,
     force_refresh: bool = False,
 ) -> dict[str, Any] | None:
-    try:
-        from src.services import order_service as _order_service
-    except Exception:
-        _order_service = None
-    if _order_service is None:
-        latest_draft = draft_sheet_service.get_selected_sheet_draft(order_id)
-        if not isinstance(latest_draft, dict):
-            return None
-        draft_payload = (
-            latest_draft.get("draft_sheet_json")
-            if isinstance(latest_draft.get("draft_sheet_json"), dict)
-            else latest_draft
-        )
-        fields = list(draft_payload.get("fields") or []) if isinstance(draft_payload, dict) else []
-        return {
-            "order_id": order_id,
-            "draft_record": latest_draft,
-            "draft_payload": draft_payload,
-            "draft_id": str(latest_draft.get("id") or "").strip() or None,
-            "source": str((draft_payload or {}).get("source") or latest_draft.get("draft_state") or "draft").strip() or "draft",
-            "fields": fields,
-            "rows": list((draft_payload or {}).get("rows") or []),
-            "row_ids": list((draft_payload or {}).get("row_ids") or []),
-            "warnings": [str(item).strip() for item in (latest_draft.get("warnings_json") or []) if str(item).strip()],
-            "blockers": [str(item).strip() for item in (latest_draft.get("blockers_json") or []) if str(item).strip()],
-            "clean_saved_draft": apply_gate_service.has_clean_saved_draft(latest_draft),
-            "has_semantic_fields": bool(fields) and not all(re.fullmatch(r"col\d+", str(field or "").strip()) for field in fields),
-            "menu_diagnostics": {},
-            "resolved_week_id": None,
-        }
+    from src.services import order_service as _order_service
+
     if force_refresh:
         return _order_service.refresh_current_sheet_context(
             order_id,
@@ -1021,10 +951,8 @@ def _build_workflow_state_projection(
     acknowledged_candidate_evidence_run_id = (
         str((acknowledged_candidate_decision or {}).get("selected_value") or "").strip() or None
     )
-    try:
-        from src.services import order_service as _order_service
-    except Exception:
-        _order_service = None
+    from src.services import order_service as _order_service
+
     serialized_current_sheet_revision_id = (
         str((current_sheet_context or {}).get("current_sheet_revision_id") or "").strip()
         or None
@@ -1037,7 +965,7 @@ def _build_workflow_state_projection(
         "candidate_has_meaningful_diff": False,
         "candidate_preview_draft": None,
     }
-    if include_candidate_preview and _order_service is not None:
+    if include_candidate_preview:
         candidate_sheet_state = _order_service.candidate_sheet_state(
             normalized_order_id,
             candidate_evidence_run_id=candidate_evidence_run_id,
@@ -1289,23 +1217,18 @@ def _build_workflow_state_projection(
     )
     serialized["active_evidence_run_id"] = str((active_evidence_run or {}).get("id") or "").strip() or None
     serialized["reparse_state"] = reparse_state
-    try:
-        from src.services import order_service as _order_service
-    except Exception:
-        _order_service = None
-    if _order_service is not None:
-        effective_ocr_status = str((reparse_state or {}).get("status") or "").strip() or None
-        if effective_ocr_status == "idle" and isinstance(active_evidence_run, dict):
-            effective_ocr_status = "done"
-        review_summary = _order_service.get_order_review_summary(
-            normalized_order_id,
-            lines_updated_at=order_payload.get("lines_updated_at"),
-            ocr_status=effective_ocr_status,
-            cached_payload=evidence_payload if isinstance(evidence_payload, dict) else None,
-            ocr_metrics=(reparse_job.get("metrics") if isinstance(reparse_job, dict) else None),
-            order_status=order_payload.get("status"),
-            current_sheet_context=current_sheet_context,
-            sheet_gate=apply_gate,
-        )
-        serialized.update(review_summary)
+    effective_ocr_status = str((reparse_state or {}).get("status") or "").strip() or None
+    if effective_ocr_status == "idle" and isinstance(active_evidence_run, dict):
+        effective_ocr_status = "done"
+    review_summary = _order_service.get_order_review_summary(
+        normalized_order_id,
+        lines_updated_at=order_payload.get("lines_updated_at"),
+        ocr_status=effective_ocr_status,
+        cached_payload=evidence_payload if isinstance(evidence_payload, dict) else None,
+        ocr_metrics=(reparse_job.get("metrics") if isinstance(reparse_job, dict) else None),
+        order_status=order_payload.get("status"),
+        current_sheet_context=current_sheet_context,
+        sheet_gate=apply_gate,
+    )
+    serialized.update(review_summary)
     return serialized
