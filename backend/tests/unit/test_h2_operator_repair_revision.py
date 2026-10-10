@@ -1,7 +1,10 @@
 from copy import deepcopy
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import date, datetime
 from hashlib import sha256
+import json
+import os
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -15,7 +18,10 @@ from src.models.uploaded_pdf import UploadedPdf
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.order_ocr_cache import OrderOcrCache
+from src.models.facility import Facility
+from src.models.menu import MonthlyMenu, MonthlyMenuEntry
 from src.services import config_service, order_service
+from src.services import canonical_facility_lineage as lineage
 
 
 @pytest.mark.parametrize("period", [None, "", "2026-13", "2026-10@2026-10-11~2026-10-05"])
@@ -67,6 +73,39 @@ def _owned_artifact_fixture(source, value=0):
     return targets, records
 
 
+def _write_repair_policy(configured):
+    config_service.INGEST_POLICY_PATH.write_text(
+        json.dumps(configured["policy"], ensure_ascii=False), encoding="utf-8",
+    )
+
+
+def _publish_repair_facility(configured, *, select_for_order=None):
+    master_path = Path(os.environ["FACILITY_MASTER_PATH"])
+    master = json.loads(master_path.read_text(encoding="utf-8"))
+    facility = deepcopy(configured["facility"])
+    envelope = next(item for item in master["facilities"] if item["facility_id"] == facility["facility_id"])
+    version = next(item for item in envelope["versions"] if item["version_id"] == configured["selected_authored_version"]["version_id"])
+    version["facility"] = facility
+    envelope.update(facility)
+    master_path.write_text(json.dumps(master, ensure_ascii=False), encoding="utf-8")
+    if select_for_order is not None:
+        # Explicit setup selection before capture, not repair of an old receipt.
+        with session_scope() as session:
+            selected, _ = lineage.resolve(session, facility["facility_id"], date(2026, 10, 5))
+            _, projection = lineage.materialize(session, selected)
+            lineage.verify_projection(projection)
+            order = session.get(Order, select_for_order)
+            state = session.get(OrderWorkflowState, select_for_order)
+            order.template_version_id = projection.id
+            state.template_version_id = projection.id
+            session.get(OrderOcrEvidenceRun, state.evidence_run_id).template_version_id = projection.id
+        current = config_service.capture_authored_processing_config(
+            facility["facility_id"], selected_authored_version=version,
+        )
+        configured.clear()
+        configured.update(current)
+
+
 @pytest.fixture
 def repair_order(isolated_formal_schema, monkeypatch, tmp_path):
     order_id, document_id, evidence_id, message = [str(uuid4()) for _ in range(4)]
@@ -79,18 +118,44 @@ def repair_order(isolated_formal_schema, monkeypatch, tmp_path):
     path.write_bytes(body)
     configured = {"facility": {"facility_id": "fixture", "fax_template_id": "own", "fax_template": {"template_id": "own", "columns": [{"column_id": "date", "index": 0, "source_index": 0, "role": "date"}, {"column_id": "daypart", "index": 1, "source_index": 1, "role": "daypart"}, {"column_id": "menu", "index": 2, "source_index": 2, "role": "menu"}, {"column_id": "quantity", "index": 3, "source_index": 3, "role": "quantity", "diet_type": "regular", "area_id": "x"}]}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}
     configured["facility"]["fax_template"]["page"] = 1
+    configured["facility"].update(facility_name="Synthetic October repair fixture", areas=None)
     config_service._validate_authored_facility_config(configured["facility"], "own")
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda _: deepcopy(configured))
-    physical_menu = [{"menu_date": "2026-10-07", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": "own", "menu_name": "own"}]
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda week, facility: deepcopy(physical_menu))
+    authored = {"version_id": "repair-October", "valid_from": "2026-10-01",
+                "valid_to": "2026-10-31", "facility": deepcopy(configured["facility"])}
+    master_path = tmp_path / "repair-facilities.json"
+    master_path.write_text(json.dumps({"facilities": [
+        {**deepcopy(configured["facility"]), "versions": [authored]},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(master_path))
+    monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", tmp_path / "repair-policy.json")
+    _write_repair_policy(configured)
     with session_scope() as session:
-        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10@2026-10-05~2026-10-11", current_document_id=document_id, document_uri=str(path), message_id=message))
+        session.add(Facility(id="fixture", name=configured["facility"]["facility_name"]))
+        session.add(MonthlyMenu(id="2026-10", month_start=date(2026, 10, 1)))
+        session.flush()
+        session.add(MonthlyMenuEntry(
+            id=str(uuid4()), monthly_menu_id="2026-10", menu_date=date(2026, 10, 7),
+            daypart="昼", slot_index=0, name="own", category="主菜", diet_type="regular",
+        ))
+    with session_scope() as session:
+        selected, _ = lineage.resolve(session, "fixture", date(2026, 10, 5))
+        _, projection = lineage.materialize(session, selected)
+        receipt = lineage.verify_projection(projection)
+        assert receipt["authored_version"] == authored
+        projection_id = projection.id
+    configured = config_service.capture_authored_processing_config(
+        "fixture", selected_authored_version=authored,
+    )
+    with session_scope() as session:
+        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10@2026-10-05~2026-10-11", current_document_id=document_id, document_uri=str(path), message_id=message, received_at=datetime(2026, 10, 7), template_version_id=projection_id))
         session.add(OrderDocument(id=document_id, storage_uri=str(path), source_email_id=message))
         session.flush()
         session.add(UploadedPdf(id=str(uuid4()), message_id=message, storage_uri=str(path), original_filename="repair.pdf", content_sha256=sha256(body).hexdigest(), received_at=datetime(2026, 10, 7)))
-        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=order_id, schema_version="fixture", status="ready", payload_json={"own": 0}, artifact_digest="own"))
+        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=order_id, template_version_id=projection_id, schema_version="fixture", status="ready", payload_json={"own": 0}, artifact_digest="own"))
         session.flush()
-        state = OrderWorkflowState(order_id=order_id, evidence_run_id=evidence_id, state="ocr_review")
+        state = OrderWorkflowState(order_id=order_id, evidence_run_id=evidence_id, template_version_id=projection_id, state="ocr_review")
         session.add(state)
         session.flush()
         revision = state.revision
@@ -136,6 +201,7 @@ def test_current_repair_actual_cache_write_gate(repair_order, monkeypatch, outco
                 state.headline = "new operator edit"
         if outcome == "changed_config":
             configured["policy"]["quantity_rules"]["zero_as_empty"] = True
+            _write_repair_policy(configured)
         proof = order_service._hakodate_owned_source(kw["configured_input"], kw["pdf_bytes_override"].selected_pdf_receipt, kw["synchronous_write_input"])
         cell = proof["expected_sheet_cells"][0]
         assert proof["expected_sheet_cells"] == ["E11"]
@@ -227,7 +293,7 @@ def test_geometry_source_rejects_changed_authority(repair_order, monkeypatch, ch
     elif change == "week":
         identity["week_code"] = "2026-11"
     else:
-        monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: [{"menu_date": "2026-10-07", "daypart_key": "lunch", "slot_index": 1, "menu_name": "own"}])
+        monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: [{"menu_date": "2026-10-07", "daypart_key": "lunch", "slot_index": 1, "menu_name": "own"}])
     with pytest.raises(ValueError, match="geometry_source_input_changed"):
         order_service._validate_geometry_source(receipt, pdf, config, identity)
 
@@ -238,7 +304,7 @@ def test_actual_workbook_generation_uses_original_a_during_b_then_a(repair_order
     order_id, _, _ = repair_order
     original = [{"menu_date": "2026-10-07", "daypart": "lunch", "daypart_key": "lunch", "slot_index": 0, "name": "original-A", "menu_name": "original-A", "raw_zero": 0, "raw_null": None}]
     current = deepcopy(original)
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: deepcopy(current))
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: deepcopy(current))
     with session_scope() as session:
         session.get(Order, order_id).week_code = "2026-10@2026-10-04~2026-10-10"
     with session_scope() as session:
@@ -290,7 +356,7 @@ def test_axis_get_put_consume_get_keeps_original_proof(repair_order, monkeypatch
 def test_grid_detector_failure_actual_api_is_not_equal_column_success(repair_order, monkeypatch):
     order_id, _, configured = repair_order
     configured["facility"]["fax_template"]["grid_expected_columns"] = 4
-    monkeypatch.setattr(config_service, "get_authored_facility_config", lambda _: deepcopy(configured["facility"]))
+    _publish_repair_facility(configured, select_for_order=order_id)
     monkeypatch.setattr(order_service, "detect_table_grid", lambda *args, **kwargs: None)
     result, error, detail = order_service.detect_order_grid(order_id, grid_params={"grid_source": "pdf"})
     assert result is None
@@ -314,6 +380,7 @@ def test_actual_grid_uses_only_original_pdf_page(repair_order, monkeypatch, sour
     monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda *args: pytest.fail("stale overlay/cache source read"))
     if source == "wrong_page":
         configured["facility"]["fax_template"]["page"] = 2
+        _publish_repair_facility(configured, select_for_order=order_id)
     elif source == "changed_pdf":
         with session_scope() as session:
             uri = session.get(Order, order_id).document_uri
@@ -395,7 +462,7 @@ def test_real_template_targets_to_assignment_and_owned_cache_gate(repair_order, 
     from src.services import hakodate_ocr_evidence_service as evidence_service
     order_id, _, configured = repair_order
     physical = [{"menu_date": "2026-10-07", "daypart": "昼", "daypart_key": "lunch", "slot_index": index, "name": name, "menu_name": name} for index, name in enumerate(["A", "B"])]
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: deepcopy(physical))
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: deepcopy(physical))
     captured = order_service._capture_synchronous_cache_write_input(order_id)
     workbook = master.build_facility_template_workbook(facility_config=captured["configured_input"]["facility"], week_value=captured["input_versions"]["order"]["week_code"], week_menu_entries=captured["physical_menu_entries"])
     worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
@@ -448,6 +515,7 @@ def test_real_template_targets_to_assignment_and_owned_cache_gate(repair_order, 
         payload["hakodate_ocr_evidence"]["records"][0]["raw_text"] = "foreign"
     elif failure == "changed_current_config":
         configured["policy"]["quantity_rules"]["zero_as_empty"] = True
+        _write_repair_policy(configured)
     if failure and failure != "changed_current_config":
         with pytest.raises(ValueError):
             order_service._validate_hakodate_owned_artifacts(payload, order_service._hakodate_owned_source(captured["configured_input"], captured["selected_pdf_receipt"], captured))
@@ -572,11 +640,11 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
     from src.services import hakodate_cell_ocr_batch_service as batch, ocr_evidence_service, storage_service, workflow_attempt_guard_service as guard
 
     order_id, revision, configured = repair_order
-    physical = [{"menu_date": date(2026, 10, 7), "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": "own", "menu_name": "own"}]
-    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", lambda *args: deepcopy(physical))
+    physical = [{"menu_date": date(2026, 10, 7), "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": "own", "menu_name": "own", "diet_type": "regular"}]
+    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", lambda *args, **kwargs: deepcopy(physical))
     physical = order_service._build_position_menu_entries("2026-10@2026-10-05~2026-10-11", "fixture")
     assert physical[0]["menu_date"] == date(2026, 10, 7)
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: deepcopy(physical))
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: deepcopy(physical))
     with session_scope() as session:
         order = session.get(Order, order_id)
         start = guard.capture_reparse_read_input(session, order)
@@ -623,6 +691,7 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
         def signed(uri):
             signed_calls.append(uri)
             configured["policy"]["quantity_rules"]["zero_as_empty"] = True
+            _write_repair_policy(configured)
             return "https://fixture/own-overlay.png"
         monkeypatch.setattr(order_service, "_signed_url_from_uri", signed)
         result = order_service.get_cached_hakodate_overlay_preview(order_id)
@@ -673,12 +742,13 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
     from src.services import hakodate_cell_ocr_batch_service as batch, hakodate_preprocessing_pipeline_service as collector, hakodate_step_review_pipeline_service as pipeline, master_order_form_template_service as master, order_workflow_v2_service as workflow
     order_id, _, configured = repair_order
     week = "2026-10@2026-10-01~2026-10-03"
-    physical = [{"menu_date": f"2026-10-0{day}", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": f"own-{day}"} for day in (1, 2, 3)]
+    physical = [{"menu_date": f"2026-10-0{day}", "daypart": "昼", "daypart_key": "lunch", "slot_index": 0, "name": f"own-{day}", "diet_type": "regular"} for day in (1, 2, 3)]
     merged = getattr(request, "param", False)
     if merged:
         configured["facility"]["fax_template"]["columns"][-1]["body_merge"] = "daypart"
         week = "2026-10@2026-10-01~2026-10-01"
-        physical = [{"menu_date": "2026-10-01", "daypart": "昼", "daypart_key": "lunch", "slot_index": slot, "name": f"own-{slot}"} for slot in range(3)]
+        physical = [{"menu_date": "2026-10-01", "daypart": "昼", "daypart_key": "lunch", "slot_index": slot, "name": f"own-{slot}", "diet_type": "regular"} for slot in range(3)]
+        _publish_repair_facility(configured, select_for_order=order_id)
     monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", lambda *args, **kwargs: deepcopy(physical))
     monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", order_service._build_position_menu_entries)
     monkeypatch.setattr(order_service.menu_service, "get_menu", lambda *args: {"entries": deepcopy(physical)})
@@ -897,8 +967,8 @@ def test_original_base_uses_captured_template_menu_and_json_timestamp(connected_
     monkeypatch.setattr(order_service, "_build_monthly_menu_diagnostics", lambda **kwargs: pytest.fail("late monthly source read"))
     config_now = deepcopy(start["configured_input"])
     config_now["facility"]["fax_template"]["columns"][-1]["diet_type"] = "soft"
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda *args: deepcopy(config_now))
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: [])
+    _publish_repair_facility(config_now)
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: [])
     base, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=start)
     assert error is None
     assert "qty.regular_x" in base["fields"] and "qty.soft_x" not in base["fields"]
@@ -1200,23 +1270,15 @@ def test_same_columns_preserve_raw_operator_zero_null_blank(copy_shared):
 
 @pytest.fixture
 def accepted_output_writer(connected_physical_pipeline, monkeypatch, tmp_path):
-    from src.models.facility import Facility
-    from src.models.facility_template_version import FacilityTemplateVersion
     from src.models.order_sheet_draft import OrderSheetDraft
     from src.services import output_builder as output, order_workflow_v2_service as workflow, order_output_artifact_service as artifacts
     order_id, _, original, _, _ = connected_physical_pipeline
-    template_id, draft_id = str(uuid4()), str(uuid4())
+    draft_id = str(uuid4())
     configured = original["configured_input"]
     with session_scope() as session:
-        if session.get(Facility, "fixture") is None:
-            session.add(Facility(id="fixture", name="Own facility"))
-            session.flush()
-        session.add(FacilityTemplateVersion(id=template_id, facility_id="fixture", version="own-output", status="active", columns_json=configured["facility"]["fax_template"]["columns"], template_digest="own-output"))
-        session.flush()
         state = session.get(OrderWorkflowState, order_id)
-        state.template_version_id = template_id
-        session.get(OrderOcrEvidenceRun, state.evidence_run_id).template_version_id = template_id
-        session.flush()
+        template_id = session.get(Order, order_id).template_version_id
+        lineage.verify_projection(lineage.read_projection(session, template_id))
         base_input = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
         base_sheet, error = order_service._build_hakodate_weekly_menu_base_sheet(order_id, synchronous_write_input=base_input)
         assert error is None
@@ -1403,7 +1465,7 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
         source = session.get(OrderOcrEvidenceRun, first_state.evidence_run_id)
         # Two explicit orders of the same authored fixture PDF/facility/period;
         # second receipt IDs are produced independently, never copied/relabelled.
-        session.add(Order(id=second_id, facility_code=first.facility_code, week_code=first.week_code, received_at=first.received_at, current_document_id=first.current_document_id, document_uri=first.document_uri, message_id=first.message_id))
+        session.add(Order(id=second_id, facility_code=first.facility_code, week_code=first.week_code, received_at=first.received_at, current_document_id=first.current_document_id, document_uri=first.document_uri, message_id=first.message_id, template_version_id=first.template_version_id))
         session.flush()
         session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=second_id, template_version_id=first_state.template_version_id, schema_version=source.schema_version, status=source.status, payload_json=deepcopy(source.payload_json), artifact_digest=source.artifact_digest))
         session.flush()
