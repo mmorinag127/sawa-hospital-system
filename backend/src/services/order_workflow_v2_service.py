@@ -609,13 +609,13 @@ def _ocr_prerequisite_headline(error: str) -> str:
     return "OCR前提条件が未解決です。Step1の施設・週次・メニュー設定を確認してください"
 
 
-def _hakodate_weekly_menu_base_sheet_error(order_id: str) -> str | None:
+def _hakodate_weekly_menu_base_sheet_error(session: Any, order: Order) -> str | None:
     try:
         order_service = _get_order_service_module()
-        builder = getattr(order_service, "_build_hakodate_weekly_menu_base_sheet", None)
-        if not callable(builder):
-            return None
-        sheet, error = builder(order_id)
+        captured = capture_reparse_read_input(session, order)
+        sheet, error = order_service._build_hakodate_weekly_menu_base_sheet(order.id, processing_read_input=captured)
+    except ValueError as exc:
+        return str(exc).strip() or "ocr_prerequisite_check_failed"
     except Exception:
         return "ocr_prerequisite_check_failed"
     if error:
@@ -641,7 +641,7 @@ def _refresh_ocr_prerequisite_state(
     session: Any,
     order: Order,
     row: OrderWorkflowState,
-) -> None:
+) -> str | None:
     meta = _workflow_meta(row)
     if not _workflow_meta_has_confirmed_context(meta) or not _workflow_meta_has_resolved_template(meta):
         return
@@ -654,7 +654,7 @@ def _refresh_ocr_prerequisite_state(
     if row.state == "ocr_running" or row.primary_action == "wait_ocr":
         return
 
-    blocker = _hakodate_weekly_menu_base_sheet_error(order.id)
+    blocker = _hakodate_weekly_menu_base_sheet_error(session, order)
     current_blockers = [
         _normalize_id(item)
         for item in (row.blockers_json or [])
@@ -669,7 +669,7 @@ def _refresh_ocr_prerequisite_state(
         row.blockers_json = [blocker]
         row.warnings_json = []
         row.last_transition_at = _now()
-        return
+        return blocker
 
     if row.state == "ocr_blocked" or any(item in _OCR_PREREQUISITE_BLOCKERS for item in current_blockers) or (
         row.state == "ocr_failed" and _is_prerequisite_failure_job(ocr_job)
@@ -706,7 +706,7 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         if template_error:
             _apply_template_lineage_blocker(row, template_error)
             return _serialize_workflow(row), template_error
-        _refresh_ocr_prerequisite_state(session, order, row)
+        prerequisite_error = _refresh_ocr_prerequisite_state(session, order, row)
         revision_error = _finalize_workflow_mutation(session, row)
         if revision_error:
             return _serialize_workflow(row), revision_error
@@ -717,7 +717,7 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         ]
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
-        prerequisite_blocker = next(
+        prerequisite_blocker = prerequisite_error or next(
             (item for item in blockers if item in _OCR_PREREQUISITE_BLOCKERS),
             None,
         )
@@ -2268,13 +2268,13 @@ def mark_ocr_run_queued(
         template_version = session.get(FacilityTemplateVersion, template_version_id) if template_version_id else None
         if template_version is None:
             return finalize_queue_blocker("facility_template_unresolved")
-        _refresh_ocr_prerequisite_state(session, order, workflow)
+        prerequisite_error = _refresh_ocr_prerequisite_state(session, order, workflow)
         blockers = [
             _normalize_id(item)
             for item in (workflow.blockers_json or [])
             if _normalize_id(item)
         ]
-        prerequisite_blocker = next(
+        prerequisite_blocker = prerequisite_error or next(
             (item for item in blockers if item in _OCR_PREREQUISITE_BLOCKERS),
             None,
         )

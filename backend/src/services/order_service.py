@@ -28819,24 +28819,23 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
 
 
 def _build_hakodate_weekly_menu_base_sheet(order_id: str, *, synchronous_write_input: dict[str, Any] | None = None, processing_read_input: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if not order:
-            return None, "order_not_found"
-        facility_id = str(order.facility_code or "").strip() or None
-        week_id = str(order.week_code or "").strip() or None
-        received_at = order.received_at or datetime.utcnow()
+    original_input = synchronous_write_input if synchronous_write_input is not None else processing_read_input
+    if not isinstance(original_input, dict):
+        return None, "hakodate_captured_config_required"
     if synchronous_write_input is not None:
-        original_order = synchronous_write_input["input_versions"]["order"]
-        facility_id, week_id, received_at = original_order["facility_code"], original_order["week_code"], original_order["received_at"]
-    elif processing_read_input is not None:
-        original_order = processing_read_input["order"]
-        facility_id, week_id, received_at = original_order["facility_code"], original_order["week_code"], original_order["received_at"]
+        input_versions = original_input.get("input_versions")
+        original_order = input_versions.get("order") if isinstance(input_versions, dict) else None
+    else:
+        original_order = original_input.get("order")
+    if not isinstance(original_order, dict):
+        return None, "hakodate_captured_config_required"
+    if original_order.get("id") != order_id:
+        return None, "hakodate_original_expectation_required"
+    facility_id, week_id, received_at = original_order.get("facility_code"), original_order.get("week_code"), original_order.get("received_at")
     if not facility_id:
         return None, "facility_missing"
     if not week_id:
         return None, "week_unresolved"
-    original_input = synchronous_write_input or processing_read_input
     if isinstance(received_at, str):
         try:
             received_at = datetime.fromisoformat(received_at)
