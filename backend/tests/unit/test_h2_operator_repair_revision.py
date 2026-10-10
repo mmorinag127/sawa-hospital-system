@@ -466,10 +466,11 @@ def test_real_template_targets_to_assignment_and_owned_cache_gate(repair_order, 
     captured = order_service._capture_synchronous_cache_write_input(order_id)
     workbook = master.build_facility_template_workbook(facility_config=captured["configured_input"]["facility"], week_value=captured["input_versions"]["order"]["week_code"], week_menu_entries=captured["physical_menu_entries"])
     worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
-    draft = {"fields": ["date_mmdd", "daypart", "menu"], "rows": [["10/07", "昼", "A"], ["10/07", "昼", "B"]]}
+    draft = batch.original_physical_draft(physical_menu_entries=captured["physical_menu_entries"], week_code=captured["input_versions"]["order"]["week_code"])
+    menu_row_indexes = [row["worksheet_row"] - master.BODY_START_ROW for row in master.validated_body_row_plan(worksheet)]
     # Real geometry target producer and expectation freezer; recognizer values
     # are explicit provider-fixture outputs, never used to choose target count.
-    regions, _ = batch._post_menu_target_regions(worksheet=worksheet, column_edges=[float(i * 10) for i in range(worksheet.max_column + 1)], row_edges=[float(i * 10) for i in range(59)], fax_template=captured["configured_input"]["facility"]["fax_template"], draft_sheet=draft, menu_body_row_indexes=[32, 33])
+    regions, _ = batch._post_menu_target_regions(worksheet=worksheet, column_edges=[float(i * 10) for i in range(worksheet.max_column + 1)], row_edges=[float(i * 10) for i in range(59)], fax_template=captured["configured_input"]["facility"]["fax_template"], draft_sheet=draft, menu_body_row_indexes=menu_row_indexes)
     expected = batch.expected_sheet_cells_from_target_regions(regions)
     assert expected == ["E11", "E12"]
     source = order_service._hakodate_owned_source(captured["configured_input"], captured["selected_pdf_receipt"], captured)
@@ -715,15 +716,17 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
 
 def test_shared_logical_plan_and_actual_geometry_use_identical_original_rows(repair_order):
     from src.services import master_order_form_template_service as master
+    from src.services import hakodate_cell_ocr_batch_service as batch
     from src.services.hakodate_step_review_pipeline_service import canonical_logical_target_plan, _post_menu_target_regions
     order_id, _, _ = repair_order
     start = order_service._capture_synchronous_cache_write_input(order_id)
     workbook = master.build_facility_template_workbook(facility_config=start["configured_input"]["facility"], week_value=start["input_versions"]["order"]["week_code"], week_menu_entries=start["physical_menu_entries"])
     worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
-    draft = {"fields": ["date", "daypart", "menu"], "rows": [["2026-10-07", "昼", "own"]]}
+    draft = batch.original_physical_draft(physical_menu_entries=start["physical_menu_entries"], week_code=start["input_versions"]["order"]["week_code"])
+    menu_row_indexes = [row["worksheet_row"] - master.BODY_START_ROW for row in master.validated_body_row_plan(worksheet)]
     template = start["configured_input"]["facility"]["fax_template"]
     plan = canonical_logical_target_plan(worksheet=worksheet, fax_template=template, draft_sheet=draft)
-    regions, _ = _post_menu_target_regions(worksheet=worksheet, fax_template=template, draft_sheet=draft, column_edges=[float(index) for index in range(worksheet.max_column + 1)], row_edges=[float(index) for index in range(50)], menu_body_row_indexes=[32])
+    regions, _ = _post_menu_target_regions(worksheet=worksheet, fax_template=template, draft_sheet=draft, column_edges=[float(index) for index in range(worksheet.max_column + 1)], row_edges=[float(index) for index in range(50)], menu_body_row_indexes=menu_row_indexes)
     assert [item["sheet_cell"] for item in plan] == [item["sheet_cell"] for item in regions] == ["E11"]
     assert plan[0]["covered_sheet_cells"] == regions[0]["covered_sheet_cells"]
     missing_role = deepcopy(template)
@@ -749,15 +752,20 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
         week = "2026-10@2026-10-01~2026-10-01"
         physical = [{"menu_date": "2026-10-01", "daypart": "昼", "daypart_key": "lunch", "slot_index": slot, "name": f"own-{slot}", "diet_type": "regular"} for slot in range(3)]
         _publish_repair_facility(configured, select_for_order=order_id)
-    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", lambda *args, **kwargs: deepcopy(physical))
+    raw_physical = deepcopy(physical)
+    def entries_for_month(month_id, *args, **kwargs):
+        return deepcopy([entry for entry in raw_physical if str(entry["menu_date"])[:7] == month_id])
+    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", entries_for_month)
     monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", order_service._build_position_menu_entries)
-    monkeypatch.setattr(order_service.menu_service, "get_menu", lambda *args: {"entries": deepcopy(physical)})
-    monkeypatch.setattr(order_service.menu_service, "get_menu_for_facility", lambda *args: {"entries": deepcopy(physical)})
+    monkeypatch.setattr(order_service.menu_service, "get_menu", lambda month_id, *args, **kwargs: {"entries": entries_for_month(month_id)})
+    monkeypatch.setattr(order_service.menu_service, "get_menu_for_facility", lambda month_id, *args, **kwargs: {"entries": entries_for_month(month_id)})
     with session_scope() as session:
         order = session.get(Order, order_id)
         order.week_code = week
     with session_scope() as session:
         receipt, start = workflow._axis_source_receipt(session, session.get(Order, order_id), session.get(OrderWorkflowState, order_id))
+    physical = deepcopy(start["physical_menu_entries"])
+    configured = deepcopy(start["configured_input"])
     workbook = master.build_facility_template_workbook(facility_config=configured["facility"], week_value=week, week_menu_entries=physical)
     worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
     workbook_path = tmp_path / "own-structure.xlsx"
@@ -765,16 +773,17 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
     plan = batch.capture_original_target_plan(configured_input=configured, physical_menu_entries=physical, week_code=week)
     image = np.full((400, 400, 3), 255, dtype=np.uint8)
     xs = [float(20 + index * 50) for index in range(worksheet.max_column + 1)]
-    ys = [float(20 + index * 25) for index in range(12 if merged else 10)]
+    template_ys = [float(20 + index * 25) for index, _ in enumerate(master.validated_template_row_edges(worksheet))]
+    fax_ys = [float(20 + index * 25) for index in range(12 if merged else 10)]
     for x in xs:
         cv2.line(image, (int(x), 20), (int(x), 290), (0, 0, 0), 1)
-    for y in ys:
+    for y in fax_ys:
         cv2.line(image, (20, int(y)), (int(xs[-1]), int(y)), (0, 0, 0), 1)
     image_path = tmp_path / "own-render.png"
     cv2.imwrite(str(image_path), image)
     draft = batch.original_physical_draft(physical_menu_entries=physical, week_code=week)
-    item = {"order_id": order_id, "facility_code": "fixture", "configured_input": deepcopy(configured), "template_id": "own", "fax_template_id": "own", "fax_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "template_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "step2_png": str(image_path), "template_xlsx": str(workbook_path), "template_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "week_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "template_axes_x": xs, "template_axes_y": ys, "template_bbox": [xs[0], ys[0], xs[-1], ys[-1]], "original_physical_draft": draft, "original_expected_sheet_cells": batch.expected_sheet_cells_from_target_regions(plan), "original_target_semantics": pipeline.canonical_target_semantics(plan), "selected_pdf_receipt": deepcopy(receipt["selected_pdf_receipt"])}
-    axis = {"row_intersection_y_match": {"structural_match": {"body_day_boundary_indexes": [0, 1, 2, 3, 4, 7, 8, 9] if merged else list(range(8)), "detected_body_band_count": 9 if merged else 7}, "corrected_ys": ys}, "header_intersection_x_match": {"header_roi": [20, 20, 270, 80]}}
+    item = {"order_id": order_id, "facility_code": "fixture", "configured_input": deepcopy(configured), "template_id": "own", "fax_template_id": "own", "fax_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "template_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "step2_png": str(image_path), "template_xlsx": str(workbook_path), "template_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "week_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "template_axes_x": xs, "template_axes_y": template_ys, "template_bbox": [xs[0], template_ys[0], xs[-1], template_ys[-1]], "original_physical_draft": draft, "original_expected_sheet_cells": batch.expected_sheet_cells_from_target_regions(plan), "original_target_semantics": pipeline.canonical_target_semantics(plan), "selected_pdf_receipt": deepcopy(receipt["selected_pdf_receipt"])}
+    axis = {"row_intersection_y_match": {"structural_match": {"body_day_boundary_indexes": [0, 1, 2, 3, 4, 7, 8, 9] if merged else list(range(8)), "detected_body_band_count": 9 if merged else 7}, "corrected_ys": fax_ys}, "header_intersection_x_match": {"header_roi": [20, 20, 270, 80]}}
     # Inject only external raster/registration observations. Actual target plan,
     # row mapping, preprocessing, snap, runtime evaluation and adoption stay real.
     for module in (batch, collector):
@@ -782,7 +791,7 @@ def connected_physical_pipeline(repair_order, monkeypatch, tmp_path, request):
         monkeypatch.setattr(module, "render_pdf_page_to_bgr", lambda *args, **kwargs: image.copy())
         monkeypatch.setattr(module, "resolve_fixed_quad_px_for_manifest_item", lambda *args, **kwargs: ([[20, 20], [270, 20], [270, 290], [20, 290]], "explicit-fixture", {}))
         monkeypatch.setattr(module, "build_fixed_quad_template_registration", lambda **kwargs: (type("Registration", (), {"template_outer_grid_bbox_used": item["template_bbox"]})(), {}))
-        monkeypatch.setattr(module, "_align_axes", lambda **kwargs: (xs, ys, deepcopy(axis), None))
+        monkeypatch.setattr(module, "_align_axes", lambda **kwargs: (xs, fax_ys, deepcopy(axis), None))
     def manifest(**kwargs):
         from src.services.storage_service import load_selected_pdf_bytes
         result = deepcopy(item)
