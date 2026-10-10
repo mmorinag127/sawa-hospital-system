@@ -338,11 +338,21 @@ def test_real_unselected_materialized_draft_receipt_is_verified(saved, fault):
     captured = guard.capture_current_sheet_input(order_id)
     synchronous = order_service._capture_synchronous_cache_write_input(order_id)
     assert synchronous is not None
+    writer_evidence = synchronous["evidence"]
+    assert writer_evidence["id"] == evidence["id"] == context["base_evidence_run_id"]
+    assert writer_evidence["template_version_id"] == evidence["template_version_id"] == context["template_version_id"]
+    assert captured["evidence"]["id"] == writer_evidence["id"]
+    assert captured["evidence"]["template_version_id"] == writer_evidence["template_version_id"]
+    assert guard.snapshots_equal(captured, context.input_receipt["input"])
+    with db.session_scope() as session:
+        selected = session.get(OrderWorkflowState, order_id)
+        assert selected.evidence_run_id == writer_evidence["id"]
+        assert selected.template_version_id == writer_evidence["template_version_id"]
     # Real writer boundary used by semantic rebase. This bounded component does
     # not claim that this clean saved fixture requires a semantic schema rebase.
     generated = order_service._persist_sheet_draft_with_base_evidence(
         order_id=order_id, draft_sheet_json=deepcopy(sheet),
-        evidence_run_override=evidence, edited_by="synthetic-publication-materialization",
+        evidence_run_override=writer_evidence, edited_by="synthetic-publication-materialization",
         synchronous_write_input=synchronous,
     )
     assert generated is not None
