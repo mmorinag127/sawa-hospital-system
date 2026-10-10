@@ -14,6 +14,7 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.services.workflow_attempt_guard_service import (
     current_nonworkflow_execution, current_workflow_execution,
     advance_nonworkflow_order_input,
+    lock_order_execution_input,
     validate_current_sheet_input,
     capture_current_sheet_input, bind_current_sheet_input,
     CurrentSheetInputChanged,

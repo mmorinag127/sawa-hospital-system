@@ -190,10 +190,15 @@ def _current_sheet_read_owner_matches(session: Any, order_id: str) -> bool:
 
 
 def _current_sheet_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: Any = None) -> dict[str, Any]:
+    from src.services.sheet_week_service import normalize_sheet_week_value
     # No selected template is a legitimate pre-sheet workflow state, not a
     # license to reconstruct a sheet from another source.
-    unavailable = "selected_template_missing"
-    if order.template_version_id:
+    unavailable = (
+        "week_unresolved" if not normalize_sheet_week_value(order.week_code)
+        else "selected_template_missing" if not order.template_version_id
+        else None
+    )
+    if unavailable is None:
         try:
             return _order_execution_input(
                 session, order, lock=lock,
