@@ -1081,6 +1081,12 @@ def _captured_monthly_categories(menu_entries: list[dict]) -> dict:
         if key in slots and slots[key] != category:
             raise ValueError("delivery_monthly_slot_ambiguous")
         slots[key] = category
+    breakfast_mains = set()
+    for key, category in slots.items():
+        if key[1] == "朝" and category == "主菜":
+            breakfast_mains.add(key)
+    for key in breakfast_mains:
+        slots[key] = "副菜1"
     sides = {}
     for (menu_date, daypart, slot), category in slots.items():
         if category == "副菜" or category in {"副菜1", "副菜2", "副菜3"}:
@@ -1441,6 +1447,13 @@ def _apply_label_meal_slot_categories(lines: list[dict]) -> list[dict]:
             continue
         if line.get("_monthly_entry_override_applied"):
             raw = line.get("_monthly_entry_raw_category")
+            if (raw == "主菜" and _normalize_output_daypart(line.get("daypart")) == "朝"
+                    and "_monthly_entry_resolved_category" in line):
+                resolved = line.get("_monthly_entry_resolved_category")
+                if resolved != "副菜1":
+                    raise ValueError("delivery_monthly_slot_required")
+                slot_by_id[id(line)] = resolved
+                continue
             if _is_specific_delivery_category(raw) or raw == "主食":
                 slot_by_id[id(line)] = raw
                 continue

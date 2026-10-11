@@ -911,11 +911,6 @@ def _write_saved_sheet_rows_to_order_form(
     from src.services.order_service import _materialization_identity_rows, _resolve_structural_row_field_indexes
     from src.services.template_field_schema_service import canonical_field_name_from_template_column
 
-    identities, issues = _materialization_identity_rows(
-        fields=fields, rows_payload=rows, template=template, existing_week_code=week_code,
-    )
-    if issues or not identities:
-        raise ValueError("saved sheet row identity unresolved")
     targets = _worksheet_quantity_column_role_map(worksheet, template=template)
     date_index, daypart_index, menu_index, _quantity_indexes = _resolve_structural_row_field_indexes(fields)
     identity_indexes = {date_index, daypart_index, menu_index}
@@ -925,6 +920,11 @@ def _write_saved_sheet_rows_to_order_form(
     identity_indexes.update(category_indexes)
     if any(field not in targets for index, field in enumerate(fields) if index not in identity_indexes):
         raise ValueError("saved sheet canonical field unmapped")
+    identities, issues = _materialization_identity_rows(
+        fields=fields, rows_payload=rows, template=template, existing_week_code=week_code,
+    )
+    if issues or not identities:
+        raise ValueError("saved sheet row identity unresolved")
     configured = {
         canonical_field_name_from_template_column(column): column for column in template["columns"]
     }
