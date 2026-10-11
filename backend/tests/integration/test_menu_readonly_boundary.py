@@ -19,8 +19,10 @@ from src.models.facility import Facility, FacilityConfig
 from src.services import menu_service, order_serialization_service
 from src.models.order import Order, OrderLine
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import order_service, order_workflow_v2_service, output_builder, total_service
+from tests.integration import menu_readonly_inputs as canonical_inputs
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -104,6 +106,7 @@ def seed_order(name="Dish"):
         order = Order(id="operator-order", document_uri="owned-fixture.pdf", message_id="owned-fixture", week_code="2099-06", status="確定")
         session.add(order)
         session.flush()
+        canonical_inputs.bind_order(session, order)
         session.add(OrderLine(id="operator-line", order_id=order.id, line_id="source-line", date=date(2099, 6, 7),
                               daypart="朝食", menu_name=name, diet_type="regular", area_id="area-explicit",
                               quantity_original=11, quantity_corrected=13, change_note="operator correction"))
@@ -132,6 +135,8 @@ def test_operator_order_http_keeps_original_lines_and_strict_consumers_stop(read
         if state == "conflicting":
             session.add(MonthlyMenuItem(id="conflict", monthly_menu_id="2099-06", name="Dish", daypart="朝食", category="副菜",
                                         diet_type="regular", qty_per_serving=41, unit_type="g"))
+            session.add(MonthlyMenuEntry(id="conflict-entry", monthly_menu_id="2099-06",
+                menu_date=date(2099, 6, 7), name="Dish", daypart="朝食", category="副菜", diet_type="regular", slot_index=1))
     with TestClient(app) as client:
         before = snapshot(readonly_database)
         response = client.get("/orders/operator-order")
@@ -163,12 +168,18 @@ def test_operator_order_http_keeps_original_lines_and_strict_consumers_stop(read
 def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, monkeypatch, persisted, candidate_name):
     seed()
     seed_order(persisted)
-    adopted = candidate(candidate_name)
     with db.session_scope() as session:
-        session.add(OrderSheetDraft(id="draft", order_id="operator-order", draft_sheet_json={"fixture": "explicit"}))
-        session.flush()
-        session.add(OrderWorkflowState(order_id="operator-order", draft_id="draft", state="sheet_saved"))
-    monkeypatch.setattr(order_workflow_v2_service, "_build_materialization_candidate_for_saved_sheet", lambda **kwargs: adopted)
+        order = session.get(Order, "operator-order")
+        draft = canonical_inputs.save_source(session, order, candidate_name)
+        adopted = canonical_inputs.capture(session, order, draft)
+        assert adopted["lines"][0]["menu_name"] == candidate_name
+        original_candidate = candidate(candidate_name)
+        assert original_candidate["lines"][0]["quantity_original"] == 17
+        assert original_candidate["lines"][0]["quantity_corrected"] == 19
+        assert session.get(OrderOcrEvidenceRun, "operator-evidence").payload_json["tables"][0]["rows"][0][4] == 17
+        assert draft.draft_sheet_json["rows"][0][4] == 19
+        assert adopted["lines"][0]["quantity_original"] == 19
+        assert adopted["lines"][0]["quantity_corrected"] is None
     before = snapshot(readonly_database)
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
@@ -178,7 +189,7 @@ def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, mon
         if candidate_name == "Unknown":
             assert projection["affected_lines"][0]["menu_name"] == "Unknown"
     calls = []
-    def enrich(order):
+    def enrich(order, **kwargs):
         calls.append(order["lines"])
         raise RuntimeError("injected enrichment failure")
     monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", enrich)
@@ -198,24 +209,30 @@ def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, mon
 def test_resolved_enrichment_keeps_exact_output_and_quantities(readonly_database, monkeypatch):
     seed()
     seed_order("Old unresolved")
-    adopted = candidate()
+    with db.session_scope() as session:
+        order = session.get(Order, "operator-order")
+        draft = canonical_inputs.save_source(session, order)
+        adopted = canonical_inputs.capture(session, order, draft)
+        original_candidate = candidate()
+        assert original_candidate["lines"][0]["quantity_original"] == 17
+        assert original_candidate["lines"][0]["quantity_corrected"] == 19
+        assert session.get(OrderOcrEvidenceRun, "operator-evidence").payload_json["tables"][0]["rows"][0][4] == 17
+        assert draft.draft_sheet_json["rows"][0][4] == 19
+        assert adopted["lines"][0]["quantity_original"] == 19
+        assert adopted["lines"][0]["quantity_corrected"] is None
     from copy import deepcopy
     original = deepcopy(adopted)
+    producer_candidate = deepcopy(adopted)
     enriched = [dict(adopted["lines"][0], menu_qty_per_serving=37, menu_unit_type="g")]
     expected = [{"quantity": 19, "actual_amount": 703, "actual_unit_type": "g"}]
-    def enrich(payload):
-        assert payload["lines"] == original["lines"]
-        return enriched
-    def bags(payload, *, order_lines):
-        assert payload["lines"] == original["lines"]
-        assert order_lines == enriched
-        return expected
-    monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", enrich)
-    monkeypatch.setattr(output_builder, "build_bag_payload_for_outputs", bags)
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
         assert order_serialization_service.candidate_menu_amount_resolution(order, adopted)["status"] == "resolved"
-        assert order_workflow_v2_service._build_bag_rows_for_candidate(order=order, lines=adopted["lines"]) == expected
+        produced = order_workflow_v2_service._build_bag_rows_for_candidate(order=order,
+            lines=adopted["lines"], materialization_candidate=producer_candidate)
+        assert [{key: row[key] for key in expected[0]} for row in produced] == expected
+        assert producer_candidate["output_lines"][0]["menu_qty_per_serving"] == enriched[0]["menu_qty_per_serving"]
+        assert producer_candidate["output_lines"][0]["menu_unit_type"] == enriched[0]["menu_unit_type"]
     assert adopted == original
 
 
@@ -225,11 +242,11 @@ def test_workflow_broken_draft_is_readonly_explicit_stop(readonly_database, monk
     seed_order()
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
-        workflow = OrderWorkflowState(order_id=order.id, draft_id="absent", state="sheet_saved")
+        workflow = canonical_inputs.state(order, draft_id="absent")
         if kind != "missing":
             session.add(Order(id="different-order", document_uri="owned-other.pdf", message_id="owned-other", status="確定"))
             session.flush()
-            draft = OrderSheetDraft(id="draft", order_id="different-order", draft_sheet_json={})
+            draft = OrderSheetDraft(id="draft", order_id="different-order", template_version_id=order.template_version_id, draft_sheet_json={})
             if kind == "empty":
                 draft.order_id = order.id
             session.add(draft)
@@ -246,9 +263,9 @@ def test_step4_empty_candidate_keeps_existing_stop(readonly_database, monkeypatc
     seed()
     seed_order()
     with db.session_scope() as session:
-        session.add(OrderSheetDraft(id="draft", order_id="operator-order", draft_sheet_json={}))
-        session.flush()
-        session.add(OrderWorkflowState(order_id="operator-order", draft_id="draft", state="sheet_saved"))
+        order = session.get(Order, "operator-order")
+        draft = canonical_inputs.save_source(session, order)
+        draft.draft_sheet_json = {}
     monkeypatch.setattr(order_workflow_v2_service, "_build_materialization_candidate_for_saved_sheet", lambda **kwargs: {"lines": [], "error": "draft_lines_empty"})
     before = snapshot(readonly_database)
     assert order_workflow_v2_service.run_bagging("operator-order", expected_revision=_stored_workflow_revision("operator-order"))[1] == "draft_lines_empty"
@@ -315,6 +332,7 @@ def readonly_database(request, tmp_path, monkeypatch):
                 if getattr(module, "engine", None) is original:
                     monkeypatch.setattr(module, "engine", isolated)
         monkeypatch.setattr(menu_service, "_MENU_SCHEMA_INITIALIZED", False)
+        canonical_inputs.configure(tmp_path, monkeypatch)
         yield isolated
     finally:
         if isolated is not None:
@@ -642,8 +660,9 @@ def test_serializer_identity_and_irrelevant_unresolved_items(readonly_database, 
 @pytest.mark.parametrize("difference", [{"id": "different"}, {"menu_master_id": "other-master"}, {"facility_override": "other-facility"}, {"month_id": "2099-07"}])
 def test_same_amount_distinct_canonical_sources_stop(readonly_database, monkeypatch, difference):
     from types import SimpleNamespace
-    order = SimpleNamespace(lines=[SimpleNamespace(menu_name="Dish")], week_code="2099-06", facility_code=None)
-    item = {"id": "item", "month_id": "2099-06", "menu_master_id": "master", "name": "Dish", "qty_per_serving": 37, "unit_type": "g"}
+    order = SimpleNamespace(lines=[SimpleNamespace(menu_name="Dish", date=date(2099, 6, 7), daypart="朝食", diet_type="regular")], week_code="2099-06", facility_code=None)
+    item = {"id": "item", "month_id": "2099-06", "menu_master_id": "master", "name": "Dish", "qty_per_serving": 37, "unit_type": "g",
+            "daypart": "朝食", "diet_type": "regular", "menu_dates": ["2099-06-07"]}
     monkeypatch.setattr(order_serialization_service, "_collect_menu_items_for_week", lambda *args: [item, dict(item, **difference)])
     meta, resolution = order_serialization_service._resolve_menu_amounts(order)
     assert meta == {}
@@ -724,12 +743,16 @@ def test_explicit_diet_alias_resolves_without_defaulting_missing_diet(readonly_d
     from types import SimpleNamespace
     line = SimpleNamespace(menu_name="Dish", date=date(2099, 6, 7), daypart="朝食", diet_type="常食")
     item = {"id": "item", "month_id": "2099-06", "menu_master_id": "master", "name": "Dish",
-            "daypart": "朝食", "diet_type": None, "menu_dates": ["2099-06-07"],
+            "daypart": "朝食", "diet_type": "regular", "menu_dates": ["2099-06-07"],
             "qty_per_serving": 37, "unit_type": "g"}
     monkeypatch.setattr(order_serialization_service, "_collect_menu_items_for_week", lambda *args: [item])
     assert order_serialization_service._build_menu_amount_meta(
         SimpleNamespace(lines=[line], week_code="2099-06", facility_code=None)
     )[order_serialization_service._line_menu_identity(line)] == {"qty_per_serving": 37.0, "unit_type": "g"}
+    item["diet_type"] = None
+    with pytest.raises(menu_service.MenuReadUnresolved):
+        order_serialization_service._build_menu_amount_meta(
+            SimpleNamespace(lines=[line], week_code="2099-06", facility_code=None))
 
 
 def test_named_zero_quantity_remains_valid_with_explicit_identity(readonly_database, monkeypatch):
@@ -763,31 +786,35 @@ def test_get_item_requires_explicit_master_fk_and_keeps_missing_fk_readable(read
         item = session.get(MonthlyMenuItem, "item")
         item.menu_master_id = "master"
         item.qty_per_serving = None
+        session.get(MenuMaster, "master").qty_per_serving = 37
     assert menu_service.get_item("item")["qty_per_serving"] == 37
 
 
 def test_zero_quantity_builder_empty_bag_rows_are_preserved(readonly_database, monkeypatch):
     seed()
     seed_order()
-    monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", lambda payload: payload["lines"])
-    monkeypatch.setattr(output_builder, "build_bag_payload_for_outputs", lambda *args, **kwargs: [])
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
+        draft = canonical_inputs.save_source(session, order, quantity=0)
+        materialization = canonical_inputs.capture(session, order, draft)
         zero = candidate()["lines"]
         zero[0]["quantity_original"] = 0
         zero[0]["quantity_corrected"] = 0
-        assert order_workflow_v2_service._build_bag_rows_for_candidate(order=order, lines=zero) == []
+        assert order_workflow_v2_service._build_bag_rows_for_candidate(order=order, lines=zero,
+            materialization_candidate=materialization) == []
 
 
 def test_nonlist_bag_builder_result_is_an_explicit_stop(readonly_database, monkeypatch):
     seed()
     seed_order()
-    monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", lambda payload: payload["lines"])
     monkeypatch.setattr(output_builder, "build_bag_payload_for_outputs", lambda *args, **kwargs: {"invalid": True})
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
+        draft = canonical_inputs.save_source(session, order)
+        materialization = canonical_inputs.capture(session, order, draft)
         with pytest.raises(order_workflow_v2_service.BaggingOutputUnresolved, match="bagging_output_invalid"):
-            order_workflow_v2_service._build_bag_rows_for_candidate(order=order, lines=candidate()["lines"])
+            order_workflow_v2_service._build_bag_rows_for_candidate(order=order, lines=candidate()["lines"],
+                materialization_candidate=materialization)
 
 
 def test_operator_http_read_does_not_wait_for_or_change_another_writer(readonly_database):
@@ -811,10 +838,7 @@ def test_step4_http_enrichment_error_creates_no_artifacts(readonly_database, mon
     seed()
     seed_order("Old unresolved")
     with db.session_scope() as session:
-        session.add(OrderSheetDraft(id="draft", order_id="operator-order", draft_sheet_json={"fixture": "explicit"}))
-        session.flush()
-        session.add(OrderWorkflowState(order_id="operator-order", draft_id="draft", state="sheet_saved"))
-    monkeypatch.setattr(order_workflow_v2_service, "_build_materialization_candidate_for_saved_sheet", lambda **kwargs: candidate())
+        canonical_inputs.save_source(session, session.get(Order, "operator-order"))
     def fail_enrichment(*args, **kwargs):
         raise RuntimeError("injected enrichment failure")
     monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", fail_enrichment)
@@ -834,7 +858,9 @@ def test_explicit_ingest_projection_read_and_menu_save_preserve_source_lines(rea
               "menu_name": "Dish", "diet_type": "regular", "area_id": "explicit-area",
               "quantity_original": 11, "quantity_corrected": 13}
     payload = IngestEmailPayload(message_id="owned-explicit-registration", pdf_uri="owned-registration.pdf",
-                                 received_at=datetime(2099, 6, 7, 9), week_hint="2099-06@2099-06-07~2099-06-13")
+                                 received_at=datetime(2099, 6, 7, 9), week_hint=canonical_inputs.WEEK,
+                                 facility_hint=canonical_inputs.FACILITY,
+                                 facility_selection=canonical_inputs.lineage.resolve(None, canonical_inputs.FACILITY, canonical_inputs.DAY)[0])
     registered = order_service.create_order_from_ingest(payload, lines=[dict(source)])
     assert registered["menu_amount_resolution"]["blocker"] == "menu_amount_unresolved"
     for key, value in source.items():
