@@ -6932,6 +6932,8 @@ def test_extract_sheet_rows_from_payload_merges_blocks_and_collects_unstructured
 """.strip()
     }
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
     }
 

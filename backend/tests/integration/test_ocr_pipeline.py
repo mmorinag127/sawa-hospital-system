@@ -4032,6 +4032,8 @@ def test_build_llm_assist_prompt_uses_first_pass_rows_override_for_blank_anchor_
 
 def test_build_llm_assist_prompt_omits_noisy_markdown_when_block_drift_feedback_exists():
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -8890,6 +8892,8 @@ def test_extract_first_pass_rows_from_payload_keeps_yomitoku_baseline_without_ro
 
 def test_build_llm_assist_prompt_includes_yomitoku_context_and_generic_cell_issues():
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
