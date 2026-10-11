@@ -8,9 +8,17 @@ from datetime import date, datetime, timezone
 import pytest
 from sqlalchemy import update
 
-from tests.unit.test_canonical_facility_lineage import Session, selected
+from tests.unit.test_canonical_facility_lineage import Session, selected, authored
 from src.services import facility_template_version_service as templates
 from src.services import order_workflow_v2_service as workflow
+
+
+@pytest.fixture(autouse=True)
+def canonical_authored_source(monkeypatch, tmp_path):
+    path = tmp_path / "canonical-workflow-facilities.json"
+    path.write_text(json.dumps({"facilities": [{"facility_id": "F", "facility_name": "Reference",
+                                             "versions": [authored()]}]}), encoding="utf-8")
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(path))
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -30,7 +38,8 @@ def test_json_compatible_digest_matches_original_serialization():
 @pytest.mark.parametrize("boundary", ["context", "existing"])
 def test_missing_selected_id_stops_without_source_selection(monkeypatch, boundary):
     session = Session()
-    order = SimpleNamespace(id="own-order", facility_code="F", received_at=None)
+    order = SimpleNamespace(id="own-order", facility_code="F", received_at=None,
+                            template_version_id=None, week_code="2026-01@2026-01-15~2026-01-15")
     state = SimpleNamespace(template_version_id=None)
     meta = {"facility_id": "F", "week_start": "2026-01-15", "week_end": "2026-01-15",
             "effective_facility_config_date": "2026-01-15", "template_version_id": ""}
@@ -61,7 +70,8 @@ def test_existing_context_date_applicability(monkeypatch, day, allowed):
     selection, _ = selected(monkeypatch)
     session = Session()
     _, projection = templates.materialize_facility_version_lineage(session, selection)
-    order = SimpleNamespace(facility_code="F", received_at=None)
+    order = SimpleNamespace(facility_code="F", received_at=None,
+                            template_version_id=projection.id, week_code=f"{day[:7]}@{day}~{day}")
     state = SimpleNamespace(template_version_id=projection.id)
     meta = {"facility_id": "F", "week_start": day, "week_end": day}
     actual = workflow._require_workflow_template_version_from_context(session, order=order, workflow=state, meta=meta)
@@ -108,7 +118,8 @@ def test_canonical_workflow_boundaries(monkeypatch, boundary, change):
         physical["template_digest"] = "tampered"
     # A cached old ORM value must not override the physical producer row.
     session.cached[projection.id] = deepcopy(projection)
-    order = SimpleNamespace(id="own-order", facility_code="F", received_at=None)
+    order = SimpleNamespace(id="own-order", facility_code="F", received_at=None,
+                            template_version_id=projection.id, week_code="2026-01@2026-01-12~2026-01-18")
     state = SimpleNamespace(template_version_id=projection.id, state="template_version_required")
     meta = {"facility_id": "F", "facility_config_date": "2026-01-15",
             "week_start": "2026-01-12", "week_end": "2026-01-18"}
