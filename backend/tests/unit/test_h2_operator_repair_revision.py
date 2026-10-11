@@ -1660,23 +1660,44 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
     from src.services import order_workflow_v2_service as workflow, order_output_artifact_service as artifacts
     first_id, output, generated = accepted_output_writer
     options = getattr(request, "param", {})
+    with session_scope() as session:
+        first_read = output._capture_accepted_output_read(first_id, session)
+        first_template_id = session.get(Order, first_id).template_version_id
+        second_template_id = first_template_id
     if options.get("setting"):
-        with session_scope() as session:
-            facility_id = session.get(Order, first_id).facility_code
-            configured = deepcopy(order_service._capture_synchronous_cache_write_input(
-                first_id, write_session=session,
-            )["configured_input"])
+        configured = deepcopy(first_read["candidate"]["configured_input"])
+        facility_id = configured["facility"]["facility_id"]
+        assert facility_id == "fixture"
+        master_path = Path(os.environ["FACILITY_MASTER_PATH"])
+        master = json.loads(master_path.read_text(encoding="utf-8"))
+        envelopes = [item for item in master["facilities"] if item["facility_id"] == facility_id]
+        assert len(envelopes) == 1
+        envelope = envelopes[0]
+        versions = [item for item in envelope["versions"] if item["version_id"] == "repair-October"]
+        assert len(versions) == 1
+        version = versions[0]
+        assert version == configured["selected_authored_version"]
         if options["setting"] == "mapping":
             configured["facility"]["fax_template"]["columns"].append({"column_id": "soft", "index": 4, "source_index": 4, "role": "quantity", "diet_type": "soft"})
         else:
             configured["facility"]["label_profile"] = {"label_fields": ["menu_name", "quantity"]}
         config_service._validate_authored_facility_config(configured["facility"], "own")
-        def capture_changed_config(requested_facility_id, *, selected_authored_version=None):
-            assert requested_facility_id == facility_id
-            assert configured["facility"]["facility_id"] == facility_id
-            assert selected_authored_version == configured["selected_authored_version"]
-            return deepcopy(configured)
-        monkeypatch.setattr(config_service, "capture_authored_processing_config", capture_changed_config)
+        # Publish a new snapshot of the same dated authored version, not an
+        # overlapping version or a replacement for the first accepted receipt.
+        version["facility"] = deepcopy(configured["facility"])
+        envelope.update(deepcopy(configured["facility"]))
+        master_path.write_text(json.dumps(master, ensure_ascii=False), encoding="utf-8")
+        with session_scope() as session:
+            selected, _ = lineage.resolve(session, facility_id, date(2026, 10, 1))
+            _, projection = lineage.materialize(session, selected)
+            assert lineage.verify_projection(projection)["authored_version"] == version
+            second_template_id = projection.id
+        assert second_template_id != first_template_id
+        captured = config_service.capture_authored_processing_config(
+            facility_id, selected_authored_version=version,
+        )
+        assert captured["facility"] == configured["facility"]
+        assert captured["selected_authored_version"] == version
     second_values = options.get("values", (0, None, None))
     second_id, evidence_id, draft_id = "zz-second-owned-output", str(uuid4()), str(uuid4())
     with session_scope() as session:
@@ -1685,14 +1706,16 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
         source = session.get(OrderOcrEvidenceRun, first_state.evidence_run_id)
         # Two explicit orders of the same authored fixture PDF/facility/period;
         # second receipt IDs are produced independently, never copied/relabelled.
-        session.add(Order(id=second_id, facility_code=first.facility_code, week_code=first.week_code, received_at=first.received_at, current_document_id=first.current_document_id, document_uri=first.document_uri, message_id=first.message_id, template_version_id=first.template_version_id))
+        session.add(Order(id=second_id, facility_code=first.facility_code, week_code=first.week_code, received_at=first.received_at, current_document_id=first.current_document_id, document_uri=first.document_uri, message_id=first.message_id, template_version_id=second_template_id))
         session.flush()
-        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=second_id, template_version_id=first_state.template_version_id, schema_version=source.schema_version, status=source.status, payload_json=deepcopy(source.payload_json), artifact_digest=source.artifact_digest))
+        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=second_id, template_version_id=second_template_id, schema_version=source.schema_version, status=source.status, payload_json=deepcopy(source.payload_json), artifact_digest=source.artifact_digest))
         session.flush()
-        state = OrderWorkflowState(order_id=second_id, evidence_run_id=evidence_id, template_version_id=first_state.template_version_id, state="bagging_ready")
+        state = OrderWorkflowState(order_id=second_id, evidence_run_id=evidence_id, template_version_id=second_template_id, state="bagging_ready")
         session.add(state)
         session.flush()
         start = order_service._capture_synchronous_cache_write_input(second_id, write_session=session)
+        if options.get("setting"):
+            assert start["configured_input"] == captured
         sheet, error = order_service._build_hakodate_weekly_menu_base_sheet(second_id, synchronous_write_input=start)
         assert error is None
         qty_index = sheet["fields"].index("qty.regular_x")
@@ -1710,6 +1733,10 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
         artifacts.save_bagging_result_artifact(session, payload=order_service._json_snapshot(receipt))
         state.secondary_actions_json = {"workflow_v2": {"bagging_result_id": receipt["bagging_result_id"], "bagging_input_proof": {"bagging_result_id": receipt["bagging_result_id"], "materialization_digest": receipt["materialization_digest"], "owned_revision": state.revision, "start_input": order_service._json_snapshot({key: value for key, value in start.items() if key not in {"evidence", "draft"}})}}}
         assert workflow._finalize_workflow_mutation(session, state) is None
+        first_after = output._capture_accepted_output_read(first_id, session)
+        assert first_after["candidate"] == first_read["candidate"]
+        assert first_after["persisted_sources"] == first_read["persisted_sources"]
+        assert output._capture_accepted_output_read(second_id, session)["candidate"] == order_service._json_snapshot(receipt["materialization_candidate"])
         for order_id in (first_id, second_id):
             session.add(Bag(id=f"prior-{order_id}", order_id=order_id, quantity=0))
     return sorted([first_id, second_id]), output
