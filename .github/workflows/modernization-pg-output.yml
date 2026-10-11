@@ -43,7 +43,12 @@ jobs:
       - name: Install production dependencies and pytest
         run: python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest
       - name: Formal Alembic migration
-        run: python -m alembic -c backend/alembic.ini upgrade head
+        shell: bash
+        run: |
+          set -o pipefail
+          python backend/tests/integration/pg_output_migration_probe.py \
+            --evidence="${{ runner.temp }}/pg-output-boundary/migration-probe.json" \
+            2>&1 | tee "${{ runner.temp }}/pg-output-boundary/migration.log"
       - name: Real PG transaction boundaries
         shell: bash
         run: |
@@ -62,4 +67,6 @@ jobs:
             ${{ runner.temp }}/pg-output-boundary/git-sha.txt
             ${{ runner.temp }}/pg-output-boundary/pytest.log
             ${{ runner.temp }}/pg-output-boundary/results.xml
+            ${{ runner.temp }}/pg-output-boundary/migration-probe.json
+            ${{ runner.temp }}/pg-output-boundary/migration.log
           if-no-files-found: warn
