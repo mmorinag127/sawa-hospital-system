@@ -1,0 +1,65 @@
+name: Modernization PG output boundary
+on:
+  push:
+    branches:
+      - codex/modernization-pg-output-boundary-20261011
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pg-output-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sawa_modernization_output_test
+          POSTGRES_USER: sawa_output_test
+          POSTGRES_PASSWORD: isolated-test-only
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sawa_output_test -d sawa_modernization_output_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      MODERNIZATION_PG_TEST_URI: postgresql+psycopg2://sawa_output_test:isolated-test-only@127.0.0.1:5432/sawa_modernization_output_test
+      DB_URI: postgresql+psycopg2://sawa_output_test:isolated-test-only@127.0.0.1:5432/sawa_modernization_output_test
+      DATABASE_URL: postgresql+psycopg2://sawa_output_test:isolated-test-only@127.0.0.1:5432/sawa_modernization_output_test
+      ALEMBIC_DB_URI: postgresql+psycopg2://sawa_output_test:isolated-test-only@127.0.0.1:5432/sawa_modernization_output_test
+      PYTHONPATH: backend
+      AUTH_DISABLED: "true"
+      ORDERS_OUTPUT_DIR: ${{ runner.temp }}/pg-output-boundary/output
+      XDG_CACHE_HOME: ${{ runner.temp }}/pg-output-boundary/cache
+    steps:
+      - uses: actions/checkout@v6
+      - name: Record actual source SHA
+        run: |
+          mkdir -p "${{ runner.temp }}/pg-output-boundary"
+          git rev-parse HEAD > "${{ runner.temp }}/pg-output-boundary/git-sha.txt"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install production dependencies and pytest
+        run: python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest
+      - name: Formal Alembic migration
+        run: python -m alembic -c backend/alembic.ini upgrade head
+      - name: Real PG transaction boundaries
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -p no:cacheprovider \
+            backend/tests/integration/test_modernization_pg_output_boundary.py \
+            --basetemp="${{ runner.temp }}/pg-output-boundary/tests" \
+            --junitxml="${{ runner.temp }}/pg-output-boundary/results.xml" -v \
+            2>&1 | tee "${{ runner.temp }}/pg-output-boundary/pytest.log"
+      - name: Preserve boundary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modernization-pg-output-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/pg-output-boundary/git-sha.txt
+            ${{ runner.temp }}/pg-output-boundary/pytest.log
+            ${{ runner.temp }}/pg-output-boundary/results.xml
+          if-no-files-found: warn
