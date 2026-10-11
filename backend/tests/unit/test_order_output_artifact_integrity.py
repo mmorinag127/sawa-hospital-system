@@ -15,11 +15,24 @@ from src.services import order_output_artifact_service as artifacts
 
 @pytest.fixture
 def saved(isolated_formal_schema):
+    from src.services.order_workflow_v2_service import _canonical_payload_digest
+
+    # Synthetic artifact-only input, not a publishable order-output candidate.
+    candidate = {
+        "order_id": "order", "source_saved_sheet_id": "sheet",
+        "configured_input": {
+            "facility": {"id": "synthetic-artifact-facility"},
+            "policy": {"id": "synthetic-artifact-policy"},
+        },
+        "quantities": [0, None],
+    }
+    digest = _canonical_payload_digest(candidate)
     bag = {"bagging_result_id": "bag", "order_id": "order", "source_saved_sheet_id": "sheet",
-        "source_ocr_result_id": None, "template_version_id": None, "quantities": [0, None]}
+        "source_ocr_result_id": None, "template_version_id": None, "quantities": [0, None],
+        "materialization_candidate": candidate, "materialization_digest": digest}
     output = {"output_bundle_id": "output", "order_id": "order", "source_saved_sheet_id": "sheet",
         "source_bagging_result_id": "bag", "source_ocr_result_id": None, "template_version_id": None,
-        "materialization_digest": None, "status": "ready", "quantities": [0, None]}
+        "materialization_digest": digest, "status": "ready", "quantities": [0, None]}
     with session_scope() as session:
         session.add(Order(id="order", document_uri="fixture://input", message_id="message"))
         session.flush()
