@@ -1990,6 +1990,42 @@ def _accepted_bagging_start_input(meta, revision, candidate):
     return proof, start
 
 
+def _capture_accepted_output_read(order_id: str, session) -> dict:
+    """Persisted publication receipt only; never recapture processing inputs."""
+    from src.models.order import OrderLine
+    from src.models.order_version import OrderVersion
+    from src.models.document import OrderDocument
+    from src.models.uploaded_pdf import UploadedPdf
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    order = get_order_by_id(order_id, read_session=session)
+    if not order:
+        raise ValueError("order not found")
+    candidate = _accepted_output_candidate(order, write_session=session)
+    workflow = session.get(OrderWorkflowState, order_id)
+    sources = {}
+    queries = (
+        (Order, Order.id == order_id),
+        (OrderLine, OrderLine.order_id == order_id),
+        (OrderWorkflowState, OrderWorkflowState.order_id == order_id),
+        (OrderSheetDraft, OrderSheetDraft.id == workflow.draft_id),
+        (OrderOcrEvidenceRun, OrderOcrEvidenceRun.id == workflow.evidence_run_id),
+        (OrderOcrCache, OrderOcrCache.order_id == order_id),
+        (FacilityTemplateVersion, FacilityTemplateVersion.id == workflow.template_version_id),
+        (OrderVersion, OrderVersion.order_id == order_id),
+        (OrderDocument, OrderDocument.id == order.get("document_id")),
+        (UploadedPdf, UploadedPdf.current_order_id == order_id),
+        (OrderBaggingResult, OrderBaggingResult.order_id == order_id),
+        (OrderOutputBundle, OrderOutputBundle.order_id == order_id),
+        (OrderConfirmedSnapshot, OrderConfirmedSnapshot.id == workflow.confirmed_snapshot_id),
+    )
+    for model, predicate in queries:
+        table = model.__table__
+        rows = session.execute(select(table).where(predicate).order_by(*table.primary_key.columns)).mappings().all()
+        sources[table.name] = order_service._json_snapshot([dict(row) for row in rows])
+    return {"order": deepcopy(order), "candidate": candidate, "persisted_sources": sources}
+
+
 def _capture_output_adoption(order_id: str, session) -> dict:
     original = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
     if original is None:

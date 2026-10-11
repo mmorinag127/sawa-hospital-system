@@ -7985,11 +7985,27 @@ def _daily_override_transaction():
             yield session
 
 
+@contextmanager
+def _daily_override_read_transaction():
+    with session_scope() as session:
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.connection().exec_driver_sql("BEGIN")
+        elif dialect == "postgresql":
+            session.connection().exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        else:
+            raise ValueError("daily output read snapshot unsupported")
+        with daily_output_override_service.use_write_session(session):
+            yield session
+
+
 def _daily_override_snapshot(session, target_date, *, daypart, menu_name, menu_category=None):
-    from src.services.output_builder import _capture_output_adoption
-    summaries = list_orders_by_line_date(target_date, facility_id=None, status=None)
-    originals = [_capture_output_adoption(identity, session) for identity in
-                 sorted({str(row["id"]) for row in summaries})]
+    from src.services.output_builder import _capture_accepted_output_read
+    identities = session.execute(
+        select(Order.id).join(OrderLine, Order.id == OrderLine.order_id)
+        .where(OrderLine.date == target_date).distinct().order_by(Order.id)
+    ).scalars().all()
+    originals = [_capture_accepted_output_read(identity, session) for identity in identities]
     editor = _list_daily_output_override_editor_rows(
         target_date, daypart=daypart, menu_name=menu_name, menu_category=menu_category,
         original_adoptions=originals)
@@ -8007,7 +8023,7 @@ def _daily_override_snapshot(session, target_date, *, daypart, menu_name, menu_c
 
 
 def list_daily_output_override_editor_rows(target_date, *, daypart, menu_name, menu_category=None):
-    with _daily_override_transaction() as session:
+    with _daily_override_read_transaction() as session:
         editor, _ = _daily_override_snapshot(session, target_date, daypart=daypart,
                                              menu_name=menu_name, menu_category=menu_category)
         return editor
@@ -8044,7 +8060,21 @@ def _owned_daily_override_write(function):
                 if not any(row.get("override", {}).get("id") == identity
                            for row in editor["rows"] if isinstance(row.get("override"), dict)):
                     _override_conflict()
-            token = _daily_override_boundary.set((session, originals, editor))
+            from src.services.output_builder import _capture_output_adoption, _capture_accepted_output_read
+            write_originals = []
+            for read_original in originals:
+                order_id = read_original["order"]["id"]
+                try:
+                    write_original = _capture_output_adoption(order_id, session)
+                    if (not snapshots_equal(write_original["candidate"], read_original["candidate"])
+                            or not snapshots_equal(write_original["write_input"].get("configured_input"),
+                                                   read_original["candidate"]["configured_input"])
+                            or not snapshots_equal(_capture_accepted_output_read(order_id, session), read_original)):
+                        _override_conflict()
+                except ValueError:
+                    _override_conflict()
+                write_originals.append(write_original)
+            token = _daily_override_boundary.set((session, write_originals, editor))
             try:
                 return function(*args, **kwargs)
             except ValueError as exc:

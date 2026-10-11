@@ -26,7 +26,7 @@ from src.services import output_builder as output
 
 
 DAY = date(2026, 3, 1)
-QUERY = {"date": DAY.isoformat(), "daypart": "朝", "menu_name": "選択献立0", "menu_category": "主"}
+QUERY = {"date": DAY.isoformat(), "daypart": "朝", "menu_name": "選択献立0", "menu_category": "主菜"}
 ROOT = "/orders/daily-output-overrides"
 
 
