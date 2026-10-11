@@ -18,7 +18,7 @@ jobs:
           POSTGRES_USER: sawa_output_test
           POSTGRES_PASSWORD: isolated-test-only
         ports:
-          - 127.0.0.1:5432:5432
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U sawa_output_test -d sawa_modernization_output_test"
           --health-interval 5s --health-timeout 5s --health-retries 12
@@ -29,8 +29,8 @@ jobs:
       ALEMBIC_DB_URI: postgresql+psycopg2://sawa_output_test:isolated-test-only@127.0.0.1:5432/sawa_modernization_output_test
       PYTHONPATH: backend
       AUTH_DISABLED: "true"
-      ORDERS_OUTPUT_DIR: ${{ runner.temp }}/pg-output-boundary/output
-      XDG_CACHE_HOME: ${{ runner.temp }}/pg-output-boundary/cache
+      ORDERS_OUTPUT_DIR: ${{ github.workspace }}/.pg-output-boundary/output
+      XDG_CACHE_HOME: ${{ github.workspace }}/.pg-output-boundary/cache
     steps:
       - uses: actions/checkout@v6
       - name: Record actual source SHA
