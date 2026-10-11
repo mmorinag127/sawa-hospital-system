@@ -1662,13 +1662,21 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
     options = getattr(request, "param", {})
     if options.get("setting"):
         with session_scope() as session:
-            configured = config_service.capture_authored_processing_config(session.get(Order, first_id).facility_code)
+            facility_id = session.get(Order, first_id).facility_code
+            configured = deepcopy(order_service._capture_synchronous_cache_write_input(
+                first_id, write_session=session,
+            )["configured_input"])
         if options["setting"] == "mapping":
             configured["facility"]["fax_template"]["columns"].append({"column_id": "soft", "index": 4, "source_index": 4, "role": "quantity", "diet_type": "soft"})
         else:
             configured["facility"]["label_profile"] = {"label_fields": ["menu_name", "quantity"]}
         config_service._validate_authored_facility_config(configured["facility"], "own")
-        monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda _: deepcopy(configured))
+        def capture_changed_config(requested_facility_id, *, selected_authored_version=None):
+            assert requested_facility_id == facility_id
+            assert configured["facility"]["facility_id"] == facility_id
+            assert selected_authored_version == configured["selected_authored_version"]
+            return deepcopy(configured)
+        monkeypatch.setattr(config_service, "capture_authored_processing_config", capture_changed_config)
     second_values = options.get("values", (0, None, None))
     second_id, evidence_id, draft_id = "zz-second-owned-output", str(uuid4()), str(uuid4())
     with session_scope() as session:
