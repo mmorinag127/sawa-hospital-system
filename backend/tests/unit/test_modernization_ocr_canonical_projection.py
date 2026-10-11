@@ -149,7 +149,7 @@ def test_actual_producer_reparse_parity_no_markdown_identity_or_dates(producer):
     assert [row[3:] for row in raw_rows] == [["7", "0", ""], ["0", "", "7"], ["", "7", "0"]]
     assert raw_rows[1][0] == ""
     assert result.date_strings == ["2026/09/30", "2026/10/01"]
-    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected) == [date(2026, 9, 30), date(2026, 10, 1)]
+    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected, explicit_week=PERIOD) == [date(2026, 9, 30), date(2026, 10, 1)]
     assert len(calls) == 1 and payload == original
 
 
@@ -166,7 +166,7 @@ def test_declared_structured_absence_stops_actual_producer_and_reparse(producer,
     extract, _ = producer
     for operation in (lambda: extract(payload, template()),
                       lambda: orders._extract_sheet_rows_from_payload(payload, template()),
-                      lambda: orders._collect_sheet_dates_from_payload(payload, RECEIVED, template())):
+                      lambda: orders._collect_sheet_dates_from_payload(payload, RECEIVED, template(), explicit_week=PERIOD)):
         with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
             operation()
 
@@ -272,7 +272,7 @@ def test_owned_recognizer_dates_override_earlier_pipeline_and_missing_tables():
         "date_strings": ["2026/10/01"], "provider": "openai",
     }
     assert orders._extract_sheet_rows_from_payload_uncanonicalized(payload, selected) == payload["_reparse_recognizer_result"]["rows"]
-    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected) == [date(2026, 10, 1)]
+    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected, explicit_week=PERIOD) == [date(2026, 10, 1)]
     assert fax.date_strings_from_row_source(payload, selected) == ["2026/10/01", "2026/10/01"]
 
 
@@ -285,10 +285,10 @@ def test_date_field_not_first_two_and_explicit_semantic_blank_geometry(producer)
     result = producer[0](payload, selected)
     assert result.table_rows[0][2] == ""
     assert result.date_strings == ["2026/09/30"]
-    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected) == [date(2026, 9, 30)]
+    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected, explicit_week=PERIOD) == [date(2026, 9, 30)]
     payload["rows"][0][2] = "2026/10/01"
     payload["date_strings"] = []
-    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected) == [date(2026, 10, 1)]
+    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected, explicit_week=PERIOD) == [date(2026, 10, 1)]
 
 
 def test_structured_date_field_reordered_ignores_auxiliary_date_metadata(producer):
@@ -298,7 +298,7 @@ def test_structured_date_field_reordered_ignores_auxiliary_date_metadata(produce
     assert [row[0] for row in result.table_rows] == ["Canonical A", "Canonical B", "Canonical C"]
     assert [row[2] for row in result.table_rows] == ["2026/09/30", "", "2026/10/01"]
     assert result.date_strings == ["2026/09/30", "2026/10/01"]
-    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected) == [date(2026, 9, 30), date(2026, 10, 1)]
+    assert orders._collect_sheet_dates_from_payload(payload, RECEIVED, selected, explicit_week=PERIOD) == [date(2026, 9, 30), date(2026, 10, 1)]
 
 
 def test_nonbody_table_is_not_an_alternate_quantity_or_date_source(producer):
