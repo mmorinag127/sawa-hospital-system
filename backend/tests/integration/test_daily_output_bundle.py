@@ -144,49 +144,67 @@ def test_write_delivery_note_blocks_when_template_uri_missing(tmp_path):
         )
 
 
-def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, monkeypatch):
+def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, monkeypatch, isolated_formal_schema):
+    import re
+    import fitz
+    from sqlalchemy import event, select
+    from src import db
+    from src.models.order_output_artifact import OrderBaggingResult
+    from src.models.uploaded_pdf import UploadedPdf
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
-    context = _make_context("ORD-1", "FAC001", "そよかぜ", "献立A")
-    context["order"] = {"id": "ORD-1", "facility": "FAC001", "week": "2026-03"}
-    context["order_lines"] = [
-        {
-            "date": TARGET_DATE,
-            "daypart": "朝",
-            "menu_name": "献立A",
-            "diet_type": "regular",
-            "area_id": "common",
-            "quantity_original": 2,
-        }
-    ]
-    context["order_for_outputs"] = {**context["order"], "lines": context["order_lines"]}
-    context["bags"] = [
-        {
-            "date": TARGET_DATE,
-            "daypart": "朝",
-            "menu_name": "献立A",
-            "diet_type": "regular",
-            "area_id": "common",
-            "bag_type": "standard",
-            "quantity": 2,
-        }
-    ]
-    context["delivery_source_for_outputs"] = {**context["order"], "lines": context["bags"]}
-    monkeypatch.setattr(output_builder, "_prepare_output_context", lambda order_id: context)
+    template = tmp_path / "synthetic-delivery.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["日付", "区分", "献立", "常食common"])
+    workbook.save(template)
+    registered = accepted_bagging_order(monkeypatch, tmp_path, [{
+        "date": TARGET_DATE.isoformat(), "daypart": "朝", "menu_name": "献立A",
+        "diet_type": "regular", "area_id": "common", "quantity_original": 2,
+        "bag_type": "standard",
+    }], invoice_template={"template_uri": template.as_uri(), "include_menu_name": True,
+        "columns": [
+            {"name": "日付", "source": "date", "column_index": 1},
+            {"name": "区分", "source": "daypart", "column_index": 2},
+            {"name": "献立", "source": "menu_display", "column_index": 3},
+            {"name": "常食common", "source": "quantity", "diet_type": "regular",
+             "area_id": "common", "column_index": 4},
+        ]})
+    with db.session_scope() as session:
+        artifact = session.execute(select(OrderBaggingResult).where(
+            OrderBaggingResult.order_id == registered["id"])).scalar_one()
+        lines = artifact.payload_json["materialization_candidate"]["lines"]
+        assert len(lines) == 1
+        assert lines[0]["quantity_original"] == 2
+        assert lines[0]["quantity_corrected"] is None
+        upload = session.execute(select(UploadedPdf)).scalar_one()
+        with fitz.open(upload.storage_uri) as pdf:
+            text = "".join(page.get_text() for page in pdf)
+        for value in ("2026-03-22", "朝", "献立A", "regular / common / 2", upload.facility_hint):
+            assert value in text
 
-    def _blocked_session_scope():
-        raise AssertionError("download output path must not mutate canonical output rows")
+    def snapshot():
+        with db.session_scope() as session:
+            return {table.name: [dict(row) for row in session.execute(
+                select(table).order_by(*table.primary_key.columns)).mappings()]
+                for table in db.Base.metadata.sorted_tables}
 
-    def _fake_write_delivery_note(path, rows, columns, template_uri, include_menu_name, sheet_name=None, facility_name=None):
-        workbook = Workbook()
-        ws = workbook.active
-        ws["A1"] = "delivery"
-        workbook.save(path)
+    writes = []
+    def observe(_conn, _cursor, statement, _parameters, context, _executemany):
+        if (context.isinsert or context.isupdate or context.isdelete
+                or re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE)\b", statement, re.I)):
+            writes.append(statement)
 
-    monkeypatch.setattr(output_builder, "session_scope", _blocked_session_scope)
-    monkeypatch.setattr(output_builder.menu_service, "resolve_menu_defaults", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(output_builder, "_write_delivery_note", _fake_write_delivery_note)
-
-    outputs = output_builder.build_outputs("ORD-1")
+    before = snapshot()
+    event.listen(isolated_formal_schema, "before_cursor_execute", observe)
+    try:
+        outputs = {}
+        for kind in ("labels", "delivery", "aggregate"):
+            outputs.update(output_builder.build_output_preview(registered["id"], kind))
+        assert snapshot() == before
+        assert writes == []
+    finally:
+        event.remove(isolated_formal_schema, "before_cursor_execute", observe)
 
     assert pathlib.Path(outputs["labels"]).exists()
     assert pathlib.Path(outputs["delivery_note"]).exists()

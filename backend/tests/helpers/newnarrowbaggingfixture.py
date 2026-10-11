@@ -11,6 +11,7 @@ from src.db import session_scope
 from src.models.menu import MonthlyMenuEntry, MonthlyMenuItem, MenuMaster
 from src.models.uploaded_pdf import UploadedPdf
 from src.services import order_workflow_v2_service as workflow, menu_service
+from src.services.template_field_schema_service import canonical_field_name_from_template_column
 from tests.helpers.ingest_original import (
     authored_sources, configure_delivery, reserve_uploaded_original,
     register_authored_original, authored_pipeline_provider, process_uploaded_original,
@@ -26,6 +27,7 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     master = json.loads(master_path.read_text())
     configured = master["facilities"][0]
     authored_areas = {
+        "common": {"area_id": "common", "name": "Synthetic component common area"},
         "2F": {"area_id": "2F", "name": "Synthetic component second floor"},
         "3F": {"area_id": "3F", "name": "Synthetic component third floor"},
     }
@@ -131,8 +133,11 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     selected, error = workflow.select_ocr_result(registered["id"], results["results"][0]["ocr_result_id"],
                                                expected_revision=current["revision"])
     assert error is None, error
-    sheet = {"fields": ["date", "daypart", "menu", *[
-        f"qty.{diet}_{area}" for diet, area in quantities]],
+    quantity_fields = [canonical_field_name_from_template_column(column)
+                       for column in configured["fax_template"]["columns"][3:]]
+    assert all(quantity_fields)
+    assert len(set(quantity_fields)) == len(quantities)
+    sheet = {"fields": ["date", "daypart", "menu", *quantity_fields],
         "rows": [[day.isoformat(), row[1], row[2],
                   *[int(value) if value != "" else None for value in row[3:]]] for row in rows],
         "week_id": f"{day:%Y-%m}@{day.isoformat()}~{day.isoformat()}"}
