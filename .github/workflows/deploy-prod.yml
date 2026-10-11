@@ -31,6 +31,7 @@ env:
   REGION: asia-northeast2
   WEB_SERVICE: web-prod
   WORKER_SERVICE: worker-prod
+  FACILITY_MASTER_URI: ${{ vars.PROD_FACILITY_MASTER_URI }}
   WEB_URL: https://web-prod-avlnzjjrca-dt.a.run.app
   SHIFT_WEB_URL: https://shift-web-prod-avlnzjjrca-dt.a.run.app
   SCHOOL_LUNCH_WEB_URL: https://price-web-prod-avlnzjjrca-dt.a.run.app
@@ -73,6 +74,8 @@ jobs:
           test "$EVENT_NAME" = "workflow_dispatch"
           test "$ACTOR" = "$OWNER"
           test "$PRODUCTION_CONFIRMATION" = "DEPLOY_PRODUCTION"
+      - name: Validate canonical facility runtime source
+        run: PYTHONPATH=backend python3 scripts/check_canonical_facility_deploy.py
       - name: Assert production release source
         run: |
           set -euo pipefail

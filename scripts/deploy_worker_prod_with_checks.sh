@@ -32,6 +32,8 @@ ENSURE_GCLOUD_AUTH="${ENSURE_GCLOUD_AUTH:-$SCRIPT_DIR/ensure_prod_gcloud_auth.sh
 
 "$SCRIPT_DIR/require_ci_cd_deploy.sh" "${SERVICE}"
 
+CANONICAL_FACILITY_ENV_ARG="$(PYTHONPATH="${WORKSPACE_DIR}/backend" python3 "${SCRIPT_DIR}/check_canonical_facility_deploy.py")"
+
 resolve_service_url() {
   local service_name="$1"
   if [ -z "$service_name" ]; then
@@ -176,6 +178,7 @@ WORKER_ENV_ARGS=("--update-env-vars=TEMPLATE_BUCKET=${TEMPLATE_BUCKET}")
 if [[ -n "${WORKER_EXTRA_ENV_VARS}" ]]; then
   WORKER_ENV_ARGS+=("--update-env-vars=${WORKER_EXTRA_ENV_VARS}")
 fi
+WORKER_ENV_ARGS+=("${CANONICAL_FACILITY_ENV_ARG}")
 set +e
 DEPLOY_OUTPUT="$(
   gcloud run deploy "${SERVICE}" \

@@ -46,6 +46,7 @@ env:
   REGION: asia-northeast2
   WEB_SERVICE: web-stg
   WORKER_SERVICE: worker-stg
+  FACILITY_MASTER_URI: ${{ vars.STG_FACILITY_MASTER_URI }}
   WEB_URL: https://web-stg-avlnzjjrca-dt.a.run.app
   SHIFT_WEB_URL: https://shift-web-stg-avlnzjjrca-dt.a.run.app
   SCHOOL_LUNCH_WEB_URL: https://price-web-stg-avlnzjjrca-dt.a.run.app
@@ -121,6 +122,10 @@ jobs:
           else
             echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Validate canonical facility runtime source
+        if: steps.changes.outputs.backend_changed == 'true'
+        run: PYTHONPATH=backend python3 scripts/check_canonical_facility_deploy.py
 
   automation-bootstrap:
     needs: source-gate

@@ -101,7 +101,7 @@ module "cloudrun" {
     OCR_OUTPUT_BUCKET      = "${var.project_id}-${local.env}-raw"
     OCR_PIPELINE_STATE_URI = "gs://${var.project_id}-${local.env}-raw/ocr/pipeline_state.json"
     TEMPLATE_BUCKET        = "${var.project_id}-${local.env}-templates"
-    FACILITY_MASTER_PATH   = "/app/src/data/facility_master.template.json"
+    FACILITY_MASTER_URI    = var.facility_master_uri
     # Allow both the stable a.run.app URL and the regional run.app URL (canonical host redirect).
     CORS_ALLOW_ORIGINS       = "https://web-prod-avlnzjjrca-dt.a.run.app,https://web-prod-167795504375.asia-northeast2.run.app"
     TEMPLATE_COLLECTION      = "templates"

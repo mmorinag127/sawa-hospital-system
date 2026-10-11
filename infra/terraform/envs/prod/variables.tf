@@ -1,3 +1,13 @@
+variable "facility_master_uri" {
+  description = "Operator-selected canonical facility JSON GCS URI; validated by Actions and runtime source_location."
+  type        = string
+  nullable    = false
+  validation {
+    condition     = trimspace(var.facility_master_uri) != ""
+    error_message = "An explicit facility_master_uri is required."
+  }
+}
+
 variable "project_id" {
   type = string
 }
