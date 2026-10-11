@@ -289,7 +289,6 @@ def test_startup_uses_readonly_formal_head_before_any_business_initialization(fo
     monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: calls.append("menu"))
     monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda: calls.append("facility"))
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: calls.append("sync"))
-    monkeypatch.setattr(main, "start_uploaded_pdf_recovery_loop", lambda: calls.append("recovery"))
     before = _catalog_and_rows(engine)
     ddl = []
 
@@ -301,7 +300,7 @@ def test_startup_uses_readonly_formal_head_before_any_business_initialization(fo
     try:
         if state == "head":
             main._initialize_menu_schema()
-            assert calls == ["menu", "facility", "sync", "recovery"]
+            assert calls == ["menu", "facility", "sync"]
         else:
             with pytest.raises(RuntimeError, match="runtime blocked|catalog"):
                 main._initialize_menu_schema()
@@ -483,7 +482,7 @@ def test_postgres_routine_only_or_known_revision_stops_before_ddl(formal_databas
 
 
 @pytest.mark.parametrize("formal_database", ("postgresql",), indirect=True)
-@pytest.mark.parametrize("revision", (None, "0028"))
+@pytest.mark.parametrize("revision", (None, "0028", formal_head_revision()))
 @pytest.mark.parametrize("kind", ("shell", "range", "multirange", "base", "domain", "enum", "composite"))
 def test_postgres_standalone_types_stop_independently_before_ddl(formal_database, revision, kind):
     engine, config = formal_database
@@ -524,7 +523,10 @@ def test_postgres_standalone_types_stop_independently_before_ddl(formal_database
         read_catalog(connection)
     with pytest.raises(RuntimeError, match=message):
         command.upgrade(config, "head")
-    with engine.connect() as connection, pytest.raises(RuntimeError, match=message if revision else "formal migration head is required"):
+    with engine.connect() as connection, pytest.raises(
+        RuntimeError,
+        match=message if revision == formal_head_revision() else "formal migration head.*is required",
+    ):
         require_formal_head(connection)
     assert snapshot() == before
 
@@ -791,7 +793,7 @@ def test_observed_identity_variants_preserve_catalog(formal_database, variant):
         require_revision_catalog(connection, "0022")
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        require_revision_catalog(connection, "0028")
+        require_revision_catalog(connection, formal_head_revision())
         require_canonical_identity_schema(connection)
 
 
@@ -819,7 +821,7 @@ def test_raw_identity_variant_requires_preserved_nonidentity_shape(formal_databa
     else:
         command.upgrade(config, "head")
         with engine.connect() as connection:
-            require_revision_catalog(connection, "0028")
+            require_revision_catalog(connection, formal_head_revision())
             require_canonical_identity_schema(connection)
 
 
@@ -1177,6 +1179,6 @@ def test_sqlite_0027_to_0028_preserves_rows_json(tmp_path, monkeypatch):
     try:
         _verify_0028_transition(engine, config)
         with engine.connect() as connection:
-            _require_model_columns(connection)
+            require_revision_catalog(connection, "0028")
     finally:
         engine.dispose()
