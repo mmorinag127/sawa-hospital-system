@@ -2,7 +2,7 @@ import csv
 import pathlib
 import sys
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date as dt_date
 from datetime import datetime
 from io import BytesIO
@@ -696,6 +696,10 @@ def test_workflow_v2_materialization_prefers_saved_sheet_over_stale_bagging_cand
 
 def _workflow_v2_session(monkeypatch, *, workflow, draft, lookup_error: Exception | None = None):
     class FakeSession:
+        @property
+        def no_autoflush(self):
+            return nullcontext()
+
         def get(self, model, identity):
             if lookup_error is not None:
                 raise lookup_error
@@ -805,10 +809,15 @@ def test_workflow_v2_lines_blocks_mismatched_bagging_lineage_with_persisted_draf
         "workflow_v2": {"bagging_result": {"source_saved_sheet_id": "ODS-OLDER"}}
     }
     _workflow_v2_session(monkeypatch, workflow=workflow, draft=_saved_draft())
+
+    def enrich(_session, meta, *, expected_order_id):
+        assert expected_order_id == "ORD-CANONICAL"
+        return meta
+
     monkeypatch.setattr(
         output_builder.order_output_artifact_service,
         "enrich_workflow_meta_with_artifacts",
-        lambda _session, meta: meta,
+        enrich,
     )
 
     with pytest.raises(ValueError, match="source does not match saved sheet"):
@@ -882,7 +891,7 @@ def test_totals_blocks_persisted_workflow_without_draft_when_payload_omits_workf
     monkeypatch.setattr(total_service, "serialize_order", lambda _order: order_payload)
     monkeypatch.setattr(total_service.config_service, "load_ingest_policy", lambda: {"quantity_rules": {}})
 
-    with pytest.raises(ValueError, match="workflow-v2 saved sheet is missing"):
+    with pytest.raises(ValueError, match="accepted saved sheet missing"):
         total_service.build_totals(TARGET_DATE, TARGET_DATE)
 
 
@@ -908,7 +917,7 @@ def test_build_order_lines_for_outputs_requires_saved_sheet_for_output_review_st
     _workflow_v2_session(monkeypatch, workflow=None, draft=None)
     monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility: {})
 
-    with pytest.raises(ValueError, match="latest saved sheet is missing"):
+    with pytest.raises(ValueError, match="accepted saved sheet missing"):
         output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
 
 
