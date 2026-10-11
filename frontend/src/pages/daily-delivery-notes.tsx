@@ -155,6 +155,7 @@ type DailyOutputOverrideRow = {
 };
 
 type DailyOutputOverrideResponse = {
+  original_receipt?: Record<string, unknown> | null;
   date?: string | null;
   daypart?: string | null;
   menu_name?: string | null;
@@ -973,6 +974,7 @@ function DailyDeliveryNotesScreen() {
     setOverrideEditorMessage("");
     try {
       await apiClient.post("/orders/daily-output-overrides/upsert", {
+        original_receipt: overrideEditor.original_receipt,
         date: overrideEditor.date,
         facility_id: row.facility_id,
         menu_name: overrideEditor.menu_name,
@@ -1025,6 +1027,7 @@ function DailyDeliveryNotesScreen() {
     setOverrideEditorMessage("");
     try {
       await apiClient.post("/orders/daily-output-overrides/upsert-bulk", {
+        original_receipt: overrideEditor.original_receipt,
         date: overrideEditor.date,
         menu_name: overrideEditor.menu_name,
         daypart: overrideEditor.daypart,
@@ -1071,7 +1074,9 @@ function DailyDeliveryNotesScreen() {
     setOverrideEditorSavingKey(rowKey);
     setOverrideEditorMessage("");
     try {
-      await apiClient.delete(`/orders/daily-output-overrides/${overrideId}`);
+      await apiClient.delete(`/orders/daily-output-overrides/${overrideId}`, {
+        data: { original_receipt: overrideEditor.original_receipt },
+      });
       if (!own()) return;
       retireOutput();
       const [editorReloaded] = await Promise.all([openOverrideEditor({

@@ -15,6 +15,7 @@ import threading
 import unicodedata
 import tempfile
 import socket
+from functools import wraps
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -7815,12 +7816,13 @@ def _build_daily_output_variant_basis_label(unit_type: str, qty_per_serving: flo
     return _format_basis_label({unit: qty_per_serving} if unit else {"": qty_per_serving})
 
 
-def list_daily_output_override_editor_rows(
+def _list_daily_output_override_editor_rows(
     target_date: date,
     *,
     daypart: str,
     menu_name: str,
     menu_category: str | None = None,
+    original_adoptions: list[dict] | None = None,
 ) -> dict[str, Any]:
     normalized_daypart = daily_output_override_service.normalize_override_daypart(daypart)
     normalized_menu_name = daily_output_override_service.normalize_override_menu_name(menu_name)
@@ -7842,19 +7844,21 @@ def list_daily_output_override_editor_rows(
         ): item
         for item in overrides
     }
-    orders = list_orders_by_line_date(target_date, facility_id=None, status=None)
+    if original_adoptions is None:
+        raise ValueError("daily output editor originals missing")
+    originals_by_id = {item["order"]["id"]: item for item in original_adoptions}
+    orders = [item["order"] for item in original_adoptions]
     from src.services.output_builder import build_order_lines_for_outputs
 
     for order_summary in orders:
         order_id = str(order_summary.get("id") or "").strip()
         if not order_id:
             continue
-        order_payload = get_order_by_id(order_id)
+        order_payload = originals_by_id[order_id]["order"]
         if not isinstance(order_payload, dict):
             continue
         facility_code = str(order_payload.get("facility") or "").strip()
-        from src.services.output_builder import _accepted_output_candidate
-        accepted_candidate = _accepted_output_candidate(order_payload)
+        accepted_candidate = originals_by_id[order_id]["candidate"]
         facility_label = _resolve_facility_label_for_code(
             accepted_candidate["configured_input"]["facility"],
         )
@@ -7952,6 +7956,110 @@ def list_daily_output_override_editor_rows(
     }
 
 
+_daily_override_boundary = ContextVar("daily_override_boundary", default=None)
+
+
+def _override_conflict():
+    raise ValueError(json.dumps({"code": "daily_output_original_conflict", "detail": "表示後に対象注文または正本・単位設定が変更されました。開き直してください。"}, ensure_ascii=False))
+
+
+@contextmanager
+def _daily_override_transaction():
+    with session_scope() as session:
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        elif dialect == "postgresql":
+            from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
+            # Membership inserts/deletes must be excluded, not merely existing rows.
+            models = (Order, OrderLine, OrderWorkflowState, OrderSheetDraft,
+                      OrderOcrEvidenceRun, OrderOcrCache, OrderConfirmedSnapshot,
+                      OrderVersion, OrderDocument, OrderBaggingResult, OrderOutputBundle,
+                      Bag, DailyOutputPortionOverride)
+            preparer = session.get_bind().dialect.identifier_preparer
+            names = sorted({preparer.format_table(model.__table__) for model in models})
+            session.connection().exec_driver_sql("LOCK TABLE " + ", ".join(names) + " IN SHARE ROW EXCLUSIVE MODE")
+        else:
+            raise ValueError("daily output ownership locking unsupported")
+        with daily_output_override_service.use_write_session(session):
+            yield session
+
+
+def _daily_override_snapshot(session, target_date, *, daypart, menu_name, menu_category=None):
+    from src.services.output_builder import _capture_output_adoption
+    summaries = list_orders_by_line_date(target_date, facility_id=None, status=None)
+    originals = [_capture_output_adoption(identity, session) for identity in
+                 sorted({str(row["id"]) for row in summaries})]
+    editor = _list_daily_output_override_editor_rows(
+        target_date, daypart=daypart, menu_name=menu_name, menu_category=menu_category,
+        original_adoptions=originals)
+    overrides = daily_output_override_service.list_overrides(
+        output_date=target_date, menu_name=menu_name, daypart=daypart, menu_category=menu_category)
+    content = {"date": target_date.isoformat(), "daypart": editor["daypart"],
+               "menu_name": editor["menu_name"], "menu_category": editor["menu_category"],
+               "orders": _json_snapshot(originals), "overrides": overrides}
+    digest = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+    editor["original_receipt"] = {"date": content["date"], "daypart": content["daypart"],
+                                  "menu_name": content["menu_name"], "menu_category": content["menu_category"],
+                                  "order_ids": [item["order"]["id"] for item in originals], "digest": digest}
+    return editor, originals
+
+
+def list_daily_output_override_editor_rows(target_date, *, daypart, menu_name, menu_category=None):
+    with _daily_override_transaction() as session:
+        editor, _ = _daily_override_snapshot(session, target_date, daypart=daypart,
+                                             menu_name=menu_name, menu_category=menu_category)
+        return editor
+
+
+def _owned_daily_override_write(function):
+    @wraps(function)
+    def owned(*args, original_receipt=None, **kwargs):
+        if not isinstance(original_receipt, dict):
+            _override_conflict()
+        if (set(original_receipt) != {"date", "daypart", "menu_name", "menu_category", "order_ids", "digest"}
+            or not isinstance(original_receipt.get("digest"), str)
+            or not original_receipt.get("daypart") or not original_receipt.get("menu_name")):
+            _override_conflict()
+        target_date = _normalize_entry_date(original_receipt.get("date"))
+        if target_date is None:
+            _override_conflict()
+        with _daily_override_transaction() as session:
+            try:
+                editor, originals = _daily_override_snapshot(
+                    session, target_date, daypart=original_receipt.get("daypart"),
+                    menu_name=original_receipt.get("menu_name"), menu_category=original_receipt.get("menu_category"))
+            except ValueError:
+                _override_conflict()
+            if not snapshots_equal(editor["original_receipt"], original_receipt):
+                _override_conflict()
+            if "output_date" in kwargs and (kwargs["output_date"] != target_date
+                or kwargs.get("menu_name") != editor["menu_name"]
+                or daily_output_override_service.normalize_override_daypart(kwargs.get("daypart")) != editor["daypart"]
+                or daily_output_override_service.normalize_override_category(kwargs.get("menu_category")) != editor["menu_category"]):
+                _override_conflict()
+            if function.__name__ == "delete_daily_output_portion_override":
+                identity = args[0] if args else kwargs.get("override_id")
+                if not any(row.get("override", {}).get("id") == identity
+                           for row in editor["rows"] if isinstance(row.get("override"), dict)):
+                    _override_conflict()
+            token = _daily_override_boundary.set((session, originals, editor))
+            try:
+                return function(*args, **kwargs)
+            except ValueError as exc:
+                try:
+                    detail = json.loads(str(exc))
+                except (TypeError, ValueError):
+                    _override_conflict()
+                if not isinstance(detail, dict):
+                    _override_conflict()
+                raise
+            finally:
+                _daily_override_boundary.reset(token)
+    return owned
+
+
 def _rebuild_bags_for_override_scope(target_date: date, facility_id: str, *, write_session=None, original_adoptions: list[dict] | None = None) -> list[str]:
     return _rebuild_bags_for_override_scopes(target_date, [facility_id], write_session=write_session, original_adoptions=original_adoptions)
 
@@ -7959,6 +8067,13 @@ def _rebuild_bags_for_override_scope(target_date: date, facility_id: str, *, wri
 def _rebuild_bags_for_override_scopes(target_date: date, facility_ids: list[str], *, write_session=None, original_adoptions: list[dict] | None = None) -> list[str]:
     affected_order_ids: list[str] = []
     from src.services.output_builder import rebuild_bags
+
+    boundary = _daily_override_boundary.get()
+    if boundary is not None and write_session is None:
+        write_session = boundary[0]
+        wanted = {str(item["id"]) for facility_id in facility_ids
+                  for item in list_orders_by_line_date(target_date, facility_id=facility_id, status=None)}
+        original_adoptions = [item for item in boundary[1] if item["order"]["id"] in wanted]
 
     if write_session is None or not isinstance(original_adoptions, list) or not original_adoptions:
         raise ValueError("output original ownership input missing")
@@ -7991,11 +8106,11 @@ def _rebuild_bags_for_override_scopes(target_date: date, facility_ids: list[str]
 
 
 def _require_daily_output_override_binding() -> None:
-    # The multi-order original-version transport is a pending user decision.
-    # Do not commit an override before discovering missing rebuild ownership.
-    raise ValueError(json.dumps({"code": "daily_output_original_ownership_required", "detail": "multiorder original workflow/sheet/bagging input binding pending"}))
+    if _daily_override_boundary.get() is None:
+        _override_conflict()
 
 
+@_owned_daily_override_write
 def upsert_daily_output_portion_override(
     *,
     output_date: date,
@@ -8011,12 +8126,7 @@ def upsert_daily_output_portion_override(
     acknowledge_ambiguous: bool = False,
 ) -> dict[str, Any]:
     _require_daily_output_override_binding()
-    editor = list_daily_output_override_editor_rows(
-        output_date,
-        daypart=str(daypart or ""),
-        menu_name=menu_name,
-        menu_category=menu_category,
-    )
+    editor = _daily_override_boundary.get()[2]
     normalized_diet = daily_output_override_service.normalize_override_diet_type(diet_type) or "unknown"
     target_row = next(
         (
@@ -8069,6 +8179,7 @@ def upsert_daily_output_portion_override(
     }
 
 
+@_owned_daily_override_write
 def upsert_daily_output_portion_override_bulk(
     *,
     output_date: date,
@@ -8081,12 +8192,7 @@ def upsert_daily_output_portion_override_bulk(
     updated_by: str | None = None,
 ) -> dict[str, Any]:
     _require_daily_output_override_binding()
-    editor = list_daily_output_override_editor_rows(
-        output_date,
-        daypart=str(daypart or ""),
-        menu_name=menu_name,
-        menu_category=menu_category,
-    )
+    editor = _daily_override_boundary.get()[2]
     rows = list(editor.get("rows") or [])
     if not rows:
         raise ValueError(
@@ -8145,6 +8251,7 @@ def upsert_daily_output_portion_override_bulk(
     }
 
 
+@_owned_daily_override_write
 def delete_daily_output_portion_override(override_id: str) -> dict[str, Any] | None:
     _require_daily_output_override_binding()
     deleted = daily_output_override_service.delete_override(override_id)

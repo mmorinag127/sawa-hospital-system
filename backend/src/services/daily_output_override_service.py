@@ -3,14 +3,37 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
+from contextvars import ContextVar
+from contextlib import contextmanager
 import math
 import re
 
 from sqlalchemy import select, and_
 
-from src.db import session_scope
+from src.db import session_scope as _database_session_scope
 from src.models.output import DailyOutputPortionOverride
 from src.services.menu_vocabulary import normalize_diet_type
+
+_override_session = ContextVar("daily_output_override_session", default=None)
+
+
+@contextmanager
+def use_write_session(session):
+    token = _override_session.set(session)
+    try:
+        yield
+    finally:
+        _override_session.reset(token)
+
+
+@contextmanager
+def session_scope():
+    current = _override_session.get()
+    if current is not None:
+        yield current
+    else:
+        with _database_session_scope() as session:
+            yield session
 
 _GRAM_UNIT_ALIASES = {"g", "ｇ", "gram", "grams"}
 _CUT_UNIT_ALIASES = {"cut", "slice", "slices"}
@@ -304,6 +327,7 @@ def delete_override(override_id: str) -> dict[str, Any] | None:
             return None
         payload = _serialize_override(row)
         session.delete(row)
+        session.flush()
         return payload
 
 
@@ -346,6 +370,22 @@ def apply_overrides_to_lines(lines: list[dict[str, Any]], facility_id: str | Non
     }
     enriched: list[dict[str, Any]] = []
     for line in lines:
+        if line.get("_daily_output_override_applied"):
+            original = line.get("_daily_output_override_original")
+            if not isinstance(original, dict):
+                raise ValueError("daily output override original line receipt missing")
+            line = dict(line)
+            for key in ("menu_qty_per_serving", "menu_unit_type", "actual_unit_type", "actual_amount"):
+                value = original.get(key)
+                if not isinstance(value, dict) or type(value.get("present")) is not bool:
+                    raise ValueError("daily output override original line receipt invalid")
+                if value["present"]:
+                    line[key] = value.get("value")
+                else:
+                    line.pop(key, None)
+            for key in tuple(line):
+                if key.startswith("_daily_output_override_"):
+                    line.pop(key)
         line_date = _ensure_date(line.get("date"))
         if not line_date:
             enriched.append(line)
@@ -364,6 +404,10 @@ def apply_overrides_to_lines(lines: list[dict[str, Any]], facility_id: str | Non
             enriched.append(line)
             continue
         updated = dict(line)
+        updated["_daily_output_override_original"] = {
+            key: {"present": key in line, "value": line.get(key)}
+            for key in ("menu_qty_per_serving", "menu_unit_type", "actual_unit_type", "actual_amount")
+        }
         updated["menu_qty_per_serving"] = float(override.get("qty_per_serving") or 0.0)
         updated["menu_unit_type"] = serialize_override_unit_type(override.get("unit_type"))
         updated["actual_unit_type"] = updated["menu_unit_type"]

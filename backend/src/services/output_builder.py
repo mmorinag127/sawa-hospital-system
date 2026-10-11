@@ -6718,7 +6718,10 @@ def rebuild_bags(order_id: str, *, write_session=None, original_adoption: dict |
     if not facility_config:
         raise ValueError("accepted output facility configuration missing")
     order_lines = build_order_lines_for_outputs(order, accepted_candidate=accepted_candidate)
-    bags = build_bag_rows_for_outputs(order, order_lines=order_lines, facility_config=facility_config, accepted_candidate=accepted_candidate)
+    with daily_output_override_service.use_write_session(write_session):
+        order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
+    bags = build_bag_rows_for_outputs(order, order_lines=order_lines, facility_config=facility_config,
+                                     configured_input=accepted_candidate["configured_input"], accepted_candidate=accepted_candidate)
     payload = []
 
     with nullcontext(write_session) as session:

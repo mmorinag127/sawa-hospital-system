@@ -39,6 +39,7 @@ router = APIRouter()
 
 
 class DailyOutputOverrideUpsertBody(BaseModel):
+    original_receipt: dict | None = None
     date: str
     facility_id: str
     menu_name: str
@@ -52,6 +53,7 @@ class DailyOutputOverrideUpsertBody(BaseModel):
 
 
 class DailyOutputOverrideBulkUpsertBody(BaseModel):
+    original_receipt: dict | None = None
     date: str
     menu_name: str
     daypart: str | None = None
@@ -59,6 +61,10 @@ class DailyOutputOverrideBulkUpsertBody(BaseModel):
     unit_type: str
     qty_per_serving: float
     note: str | None = None
+
+
+class DailyOutputOverrideDeleteBody(BaseModel):
+    original_receipt: dict | None = None
 
 
 class WeekArchiveBody(BaseModel):
@@ -1040,6 +1046,7 @@ def upsert_daily_output_override(payload: DailyOutputOverrideUpsertBody):
             note=payload.note,
             updated_by="operator",
             acknowledge_ambiguous=bool(payload.acknowledge_ambiguous),
+            original_receipt=payload.original_receipt,
         )
     except ValueError as exc:
         detail = str(exc)
@@ -1064,6 +1071,7 @@ def upsert_daily_output_override_bulk(payload: DailyOutputOverrideBulkUpsertBody
             qty_per_serving=payload.qty_per_serving,
             note=payload.note,
             updated_by="operator",
+            original_receipt=payload.original_receipt,
         )
     except ValueError as exc:
         detail = str(exc)
@@ -1076,9 +1084,9 @@ def upsert_daily_output_override_bulk(payload: DailyOutputOverrideBulkUpsertBody
 
 
 @router.delete("/daily-output-overrides/{override_id}", dependencies=[Depends(require_role("operator"))])
-def delete_daily_output_override(override_id: str):
+def delete_daily_output_override(override_id: str, payload: DailyOutputOverrideDeleteBody | None = None):
     try:
-        deleted = order_service.delete_daily_output_portion_override(override_id)
+        deleted = order_service.delete_daily_output_portion_override(override_id, original_receipt=payload.original_receipt if payload is not None else None)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=json.loads(str(exc))) from exc
     if not deleted:
