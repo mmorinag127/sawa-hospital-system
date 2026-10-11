@@ -110,7 +110,42 @@ def bags(fixture, identifier):
 @pytest.mark.parametrize("bulk", [False, True])
 def test_real_single_bulk_and_delete_restore_original_bag_quantities(paired, bulk):
     first, second, client = paired
-    originals = {f.order_id: bags(f, f.order_id) for f in (first, second)}
+    originals = {}
+    for fixture in (first, second):
+        with fixture.session_scope() as session:
+            order = orders.get_order_by_id(fixture.order_id, read_session=session)
+            candidate = output._accepted_output_candidate(order, write_session=session)
+            assert [line["quantity_original"] for line in candidate["lines"]] == [7, 0]
+            original_rows = output.build_bag_rows_for_outputs(order, accepted_candidate=candidate)
+        assert len(original_rows) == 1
+        original = original_rows[0]
+        assert original["menu_name"] == "選択献立0"
+        assert original["quantity"] == 7
+        assert original["menu_qty_per_serving"] == 100
+        assert original["menu_unit_type"] == "g"
+        assert original["quantity"] * original["menu_qty_per_serving"] == 700
+        originals[fixture.order_id] = [(row["menu_name"], row["quantity"]) for row in original_rows]
+
+    def public_original_amounts():
+        response = client.get("/orders/daily-bags", params={"date": DAY.isoformat()})
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["order_count"] == 2
+        assert len(payload["groups"]) == 1
+        group = payload["groups"][0]
+        assert group["menu_name"] == "選択献立0"
+        assert len(group["diet_groups"]) == 1
+        diet = group["diet_groups"][0]
+        assert diet["diet_type"] == "regular"
+        assert diet["total_quantity"] == 14
+        assert diet["total_amounts"] == {"g": 1400}
+        refs = [ref for bag_type in diet["bag_type_groups"]
+                for breakdown in bag_type["breakdowns"] for ref in breakdown["order_refs"]]
+        assert sorted((ref["order_id"], ref["quantity"]) for ref in refs) == sorted(
+            (fixture.order_id, 7) for fixture in (first, second))
+        return diet["total_quantity"], diet["total_amounts"]
+
+    original_public_amounts = public_original_amounts()
     saved = {f.order_id: f.saved() for f in (first, second)}
     before = database_snapshot()
     original_files = {path: path.read_bytes() for path in (first.pdf, first.source, first.master_path)}
@@ -141,6 +176,7 @@ def test_real_single_bulk_and_delete_restore_original_bag_quantities(paired, bul
     for fixture in (first, second):
         assert bags(fixture, fixture.order_id) == originals[fixture.order_id]
         assert fixture.saved() == saved[fixture.order_id]
+    assert public_original_amounts() == original_public_amounts
     with first.session_scope() as session:
         assert session.scalars(select(DailyOutputPortionOverride)).all() == []
 
