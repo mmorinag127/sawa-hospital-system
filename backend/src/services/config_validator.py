@@ -476,10 +476,31 @@ def _validate_order_form_source_config(config: dict[str, Any], path: str, errors
             errors.append(f"{path}.order_form_month_sources[{month_id!r}] must be a non-empty string")
 
 
+def resolve_daily_label_comparable_diet_types(config: Any) -> list[str]:
+    if not isinstance(config, dict) or "daily_label_comparable_diet_types" not in config:
+        raise ValueError("daily_label_comparable_diet_types_required")
+    value = config["daily_label_comparable_diet_types"]
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError("daily_label_comparable_diet_types_invalid")
+    return [item.strip() for item in value]
+
+
+def _validate_daily_label_comparable_diet_types(config: dict, path: str, errors: list[str]) -> None:
+    if "daily_label_comparable_diet_types" not in config:
+        return
+    try:
+        resolve_daily_label_comparable_diet_types(config)
+    except ValueError as exc:
+        errors.append(f"{path}.{exc}")
+
+
 def validate_facility_config(config: Any) -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     config_dict = _ensure_dict(config, "config", errors)
+    # Template-only validation is not a facility display-settings boundary.
+    if "facility_id" in config_dict or "daily_label_comparable_diet_types" in config_dict:
+        _validate_daily_label_comparable_diet_types(config_dict, "config", errors)
     _validate_ocr_provider_config(config_dict, "config", errors)
     _validate_order_form_source_config(config_dict, "config", errors)
     pattern_id = config_dict.get("order_form_pattern_id")
@@ -545,6 +566,13 @@ def validate_facility_master(master: Any) -> dict:
             errors.append(f"facilities[{idx}].facility_id is required")
         if not fac.get("facility_name"):
             errors.append(f"facilities[{idx}].facility_name is required")
+        if not isinstance(fac.get("versions"), list) or not fac["versions"]:
+            _validate_daily_label_comparable_diet_types(fac, f"facilities[{idx}]", errors)
+        for version_index, version in enumerate(fac.get("versions", []) if isinstance(fac.get("versions"), list) else []):
+            if isinstance(version, dict) and isinstance(version.get("facility"), dict):
+                _validate_daily_label_comparable_diet_types(
+                    version["facility"], f"facilities[{idx}].versions[{version_index}].facility", errors,
+                )
         _validate_ocr_provider_config(fac, f"facilities[{idx}]", errors)
         _validate_order_form_source_config(fac, f"facilities[{idx}]", errors)
         fax_template_ids = fac.get("fax_template_ids")

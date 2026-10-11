@@ -186,9 +186,16 @@ const readEditableStringList = (value: unknown) => {
 };
 
 const readDailyLabelDietTypes = (facility?: FacilityEntry | null) => {
-  if (!facility || typeof facility !== "object") return [];
+  if (!facility || typeof facility !== "object") return null;
   const raw = (facility as Record<string, unknown>).daily_label_comparable_diet_types;
-  return Array.isArray(raw) ? readStringList(raw) : [];
+  return Array.isArray(raw) && raw.every((item) => typeof item === "string" && item.trim()) ? [...raw] as string[] : null;
+};
+
+const toggledDailyLabelDietTypes = (facility: FacilityEntry | null | undefined, dietType: string) => {
+  const values = readDailyLabelDietTypes(facility);
+  if (values === null) return null;
+  return values.some((value) => value.trim() === dietType.trim())
+    ? values.filter((value) => value.trim() !== dietType.trim()) : [...values, dietType];
 };
 
 const formatDeliveryNamePreview = (value: string) => {
@@ -599,14 +606,12 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   };
 
   const toggleDailyLabelDietType = (dietType: string) => {
-    const current = new Set(readDailyLabelDietTypes(selectedFacility));
-    if (current.has(dietType)) {
-      current.delete(dietType);
-    } else {
-      current.add(dietType);
+    const values = toggledDailyLabelDietTypes(selectedFacility, dietType);
+    if (values === null) {
+      setMessage("ラベル食種設定が未設定または不正です。正本の明示配列を確認してください。");
+      return;
     }
-    const ordered = DAILY_LABEL_DIET_OPTIONS.map((option) => option.value).filter((value) => current.has(value));
-    updateSelectedFacilityPatch({ daily_label_comparable_diet_types: ordered });
+    updateSelectedFacilityPatch({ daily_label_comparable_diet_types: values });
   };
 
   const updateSelectedField = (field: string, value: unknown) => {
@@ -1044,7 +1049,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
   const selectedFaxColumnTitle = selectedFaxColumn
     ? selectedFaxColumn.header || selectedFaxColumn.deliveryName || selectedFaxColumn.name || `列 ${selectedFaxColumn.index || selectedFaxColumnIndex + 1}`
     : "";
-  const labelPreviewItems = (facilityInfo?.dailyLabelDietTypes || []).map((dietType) => dietLabel(dietType));
+  const labelPreviewItems = (facilityInfo?.dailyLabelDietTypes || []).map((dietType) => dietLabel(dietType.trim()));
 
   if (!authenticated) return <main className="page">ログインを確認しています。</main>;
 
@@ -1782,15 +1787,24 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                 </div>
                 <div className="label-config-layout">
                   <div>
+                    {facilityInfo?.dailyLabelDietTypes == null && (
+                      <button
+                        type="button"
+                        disabled={!isEditing}
+                        onClick={() => updateSelectedFacilityPatch({ daily_label_comparable_diet_types: [] })}
+                      >
+                        区分表示なしを明示設定
+                      </button>
+                    )}
                     <div className="toggle-grid">
                       {DAILY_LABEL_DIET_OPTIONS.map((option) => {
-                        const checked = Boolean(facilityInfo?.dailyLabelDietTypes.includes(option.value));
+                        const checked = Boolean(facilityInfo?.dailyLabelDietTypes?.some((value) => value.trim() === option.value));
                         return (
                           <label key={option.value} className={`toggle-item ${checked ? "checked" : ""}`}>
                             <Checkbox
                               checked={checked}
                               onChange={() => toggleDailyLabelDietType(option.value)}
-                              disabled={!isEditing}
+                              disabled={!isEditing || facilityInfo?.dailyLabelDietTypes == null}
                             />
                             <span>{option.label}</span>
                           </label>
@@ -1798,7 +1812,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                       })}
                     </div>
                     <p className="detail-meta">
-                      施設で実際に分けて確認する食種だけ選んでください。未選択の場合はシステム既定値を使います。
+                      {facilityInfo?.dailyLabelDietTypes == null ? "未設定または不正な設定です。" : "正本に設定された食種を表示します。空の配列は区分表示なしです。"}
                     </p>
                   </div>
                   <div className="label-preview">
@@ -1814,7 +1828,7 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                             </span>
                           ))
                         ) : (
-                          <span className="label-chip muted">既定設定</span>
+                          <span className="label-chip muted">{facilityInfo?.dailyLabelDietTypes == null ? "未設定・要確認" : "区分表示なし"}</span>
                         )}
                       </div>
                       <p className="label-meta-line">温菜 / 1人前 / 2026年6月21日</p>

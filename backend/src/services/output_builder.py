@@ -120,25 +120,6 @@ DAILY_LABEL_SHEET_ORDER = [
     "ケアホーム長生苑",
 ]
 
-DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID = {
-    "FAC00001": {"no_meat", "no_fish"},
-    "FAC00002": {"no_meat", "no_fish"},
-    "FAC00003": {"soft", "mixer", "no_fish"},
-    "FAC00004": {"daycare", "staff", "no_meat", "no_fish", "no_fried", "forbidden_other"},
-    "FAC00006": {"soft", "mixer", "no_meat", "no_fish"},
-    "FAC00007": {"no_meat", "no_fish"},
-    "FAC00008": {"soft", "mixer"},
-    "FAC00009": {"soft", "mixer"},
-    "FAC00010": {"soft", "mixer"},
-    "FAC00011": {"no_meat", "no_fish"},
-    "FAC00012": {"no_meat", "no_fish"},
-    "FAC00013": {"diabetes", "no_fish"},
-    "FAC00014": {"staff", "no_meat", "no_fish", "sesame_allergy"},
-    "FAC00015": {"no_meat", "no_fish"},
-    "FAC00016": {"diabetes", "no_fish"},
-    "FAC636208": {"mixer", "no_meat", "no_fish"},
-}
-
 _EXPANDED_CELL_COPY_ENABLED_CACHE: dict[tuple[str, str], bool] = {}
 
 DEFAULT_LABEL_FIELDS = [
@@ -634,13 +615,7 @@ def _daily_label_category_suffix_for_bag(bag: dict) -> str:
         return "袋分け"
     if not diet_key or diet_key in {"regular", "standard"}:
         return ""
-    facility_id = str(bag.get("facility") or "").strip()
-    configured_diets = bag.get("daily_label_comparable_diet_types")
-    comparable_diets = (
-        {str(item).strip() for item in configured_diets if str(item).strip()}
-        if isinstance(configured_diets, list)
-        else DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID.get(facility_id, set())
-    )
+    comparable_diets = _daily_label_comparable_diet_types_for_facility(bag, None)
     if diet_key not in comparable_diets:
         return ""
     return {
@@ -659,23 +634,8 @@ def _daily_label_category_suffix_for_bag(bag: dict) -> str:
 
 
 def _daily_label_comparable_diet_types_for_facility(facility_config: dict | None, facility_id: str | None) -> list[str]:
-    if isinstance(facility_config, dict):
-        configured = facility_config.get("daily_label_comparable_diet_types")
-        if isinstance(configured, list):
-            return [str(item).strip() for item in configured if str(item).strip()]
-        override = facility_config.get("fax_template")
-        columns = override.get("columns") if isinstance(override, dict) else None
-        if isinstance(columns, list):
-            derived: set[str] = set()
-            for column in columns:
-                if not isinstance(column, dict) or str(column.get("role") or "").strip() != "quantity":
-                    continue
-                diet_key = _normalize_diet_key(column.get("diet_type"))
-                if diet_key and diet_key not in {"regular", "standard"}:
-                    derived.add(diet_key)
-            if derived:
-                return sorted(derived)
-    return sorted(DAILY_LABEL_COMPARABLE_DIETS_BY_FACILITY_ID.get(str(facility_id or "").strip(), set()))
+    from src.services.config_validator import resolve_daily_label_comparable_diet_types
+    return resolve_daily_label_comparable_diet_types(facility_config)
 
 
 def _apply_daily_label_facility_rules_to_bags(
@@ -684,13 +644,17 @@ def _apply_daily_label_facility_rules_to_bags(
     facility_id: str | None,
 ) -> list[dict]:
     bags = _bind_label_area_names(bags, facility_config)
-    comparable_diets = _daily_label_comparable_diet_types_for_facility(facility_config, facility_id)
-    if not comparable_diets:
+    if facility_config is None or (isinstance(facility_config, dict) and "daily_label_comparable_diet_types" not in facility_config):
+        for bag in bags:
+            diet_key = _daily_label_display_diet_key(bag)
+            if diet_key and diet_key not in {"regular", "standard", "regular_bag"}:
+                _daily_label_comparable_diet_types_for_facility(facility_config, facility_id)
         return bags
+    comparable_diets = _daily_label_comparable_diet_types_for_facility(facility_config, facility_id)
     updated_bags: list[dict] = []
     for bag in bags:
         updated = dict(bag)
-        updated["daily_label_comparable_diet_types"] = comparable_diets
+        updated["daily_label_comparable_diet_types"] = list(comparable_diets)
         updated_bags.append(updated)
     return updated_bags
 
@@ -5418,14 +5382,14 @@ def _append_zero_quantity_label_bags(group: dict, ctx: dict, target_date: dt_dat
         if key in existing_keys:
             continue
         zero_bag = _line_to_label_bag(order_id, facility_code, line)
-        zero_bags = _apply_daily_label_facility_rules_to_bags(
-            [zero_bag],
+        pending_bags.append(zero_bag)
+        existing_keys.add(key)
+    if pending_bags:
+        pending_bags = _apply_daily_label_facility_rules_to_bags(
+            pending_bags,
             group.get("facility_config") if isinstance(group.get("facility_config"), dict) else None,
             facility_code,
         )
-        pending_bags.extend(zero_bags)
-        existing_keys.add(key)
-    if pending_bags:
         group.setdefault("bags", []).extend(pending_bags)
 
 
