@@ -219,7 +219,7 @@ def test_daily_labels_format_expiry_date_in_japanese_style():
                 "menu_name": "豆腐ハンバーグ和風あん",
                 "menu_category": "主菜",
                 "diet_type": "regular",
-                "area_id": "2F",
+                "area_name": "Synthetic area", "area_id": "2F",
                 "quantity": 3,
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
@@ -277,7 +277,8 @@ def test_daily_labels_show_master_condiment_as_main_side_label(monkeypatch):
         {},
         {"zero_as_empty": True},
     )
-    bags = output_builder._apply_daily_label_facility_rules_to_bags(bags, {}, "FAC00009")
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(
+        bags, {"areas": [{"id": "2F", "name": "Synthetic area"}]}, "FAC00009")
     labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
 
     sauce_label = next(row for row in labels if row["商品名１"] == "ソース")
@@ -613,7 +614,7 @@ def test_monthly_entry_override_assigns_20260921_lunch_fourth_slot_as_side_three
     enriched = output_builder._apply_menu_entry_overrides(lines, entries)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F"}
             for line in enriched
         ],
         {},
@@ -724,7 +725,7 @@ def test_label_meal_slots_are_applied_after_menu_master_defaults(monkeypatch):
     enriched = output_builder._apply_label_meal_slot_categories(after_defaults)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F"}
             for line in enriched
         ],
         {},
@@ -782,8 +783,8 @@ def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit
     enriched = output_builder._apply_menu_overrides(lines, items)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_id": "2F"},
-            {**enriched[1], "facility": "FAC00009", "quantity": 4, "area_id": "2F"},
+            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F"},
+            {**enriched[1], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F"},
         ],
         {},
         None,
@@ -866,13 +867,13 @@ def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_
                 **soft_karei,
                 "facility": "FAC00009",
                 "quantity": 5,
-                "area_id": "2F",
+                "area_name": "Synthetic area", "area_id": "2F",
             },
             {
                 **mixer_tamago,
                 "facility": "FAC00009",
                 "quantity": 4,
-                "area_id": "2F",
+                "area_name": "Synthetic area", "area_id": "2F",
             },
         ],
         {},
@@ -951,8 +952,8 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
 
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_id": "2F"},
-            {**enriched[1], "facility": "FAC00009", "quantity": 5, "area_id": "2F"},
+            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F"},
+            {**enriched[1], "facility": "FAC00009", "quantity": 5, "area_name": "Synthetic area", "area_id": "2F"},
         ],
         {},
         None,

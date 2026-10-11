@@ -640,102 +640,58 @@ def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materializ
         raise AssertionError("expected draft materialization blocker")
 
 
-def test_workflow_v2_materialization_rebuilds_incomplete_bagging_candidate(monkeypatch):
-    order = {"id": "ORD-WF2", "facility": "FAC00003", "stored_week_value": "2026-06 (06/21-06/27)"}
-    workflow = SimpleNamespace(
-        state="output_review",
-        secondary_actions_json={"workflow_v2": {"bagging_result": {"materialization_candidate": {"lines": [{"menu_name": "old"}]}}}},
-    )
-    draft = SimpleNamespace(
-        id="ODS-1",
-        order_id="ORD-WF2",
-        template_version_id="T1",
-        base_evidence_run_id=None,
-        base_template_resolution_id=None,
-        base_menu_snapshot_id=None,
-        draft_sheet_json={},
-        draft_state="saved",
-        blockers_json=[],
-        warnings_json=[],
-    )
-    monkeypatch.setattr(
-        output_builder.order_output_artifact_service,
-        "enrich_workflow_meta_with_artifacts",
-        lambda session, meta: meta,
-    )
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_build_materialization_candidate_from_draft_record",
-        lambda *args, **kwargs: {"lines": [{"menu_name": "new-1"}, {"menu_name": "new-2"}]},
-    )
+def _accepted_materializer_read(monkeypatch, tmp_path, names, quantities, stale_lines, *, accessory_masters=None):
+    from copy import deepcopy
+    from src.db import session_scope
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_workflow_state import OrderWorkflowState
+    from tests.helpers.materializer_acceptance import accepted_materializer
 
-    candidate = output_builder._workflow_v2_materialization_candidate(  # noqa: SLF001
-        SimpleNamespace(get=lambda *args, **kwargs: None),
-        order,
-        workflow,
-        draft,
-    )
+    draft_id, bagging = accepted_materializer(monkeypatch, tmp_path, names, quantities,
+                                             accessory_masters=accessory_masters)
+    order = {"id": "ORD-WF2", "facility": "FAC00003",
+             "stored_week_value": "2026-06@2026-06-21~2026-06-27"}
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, order["id"])
+        draft = session.get(OrderSheetDraft, draft_id)
+        # A stale inline cache must not replace the accepted SQL artifact.
+        meta = deepcopy(state.secondary_actions_json)
+        meta["workflow_v2"]["bagging_result"] = {
+            "materialization_candidate": {"lines": stale_lines}}
+        state.secondary_actions_json = meta
+        candidate = output_builder._workflow_v2_materialization_candidate(
+            session, order, state, draft)
+        assert candidate == bagging["bagging_result"]["materialization_candidate"]
+        assert candidate["configured_input"]["facility"]["facility_id"] == "FAC00003"
+        return candidate
 
+
+def test_workflow_v2_materialization_rebuilds_incomplete_bagging_candidate(
+    monkeypatch, tmp_path, isolated_formal_schema,
+):
+    candidate = _accepted_materializer_read(
+        monkeypatch, tmp_path, ["new-1", "new-2"], [13, 14],
+        [{"menu_name": "old"}],
+    )
     assert [line["menu_name"] for line in candidate["lines"]] == ["new-1", "new-2"]
 
 
-def test_workflow_v2_materialization_prefers_saved_sheet_over_stale_bagging_candidate(monkeypatch):
-    order = {"id": "ORD-WF2", "facility": "FAC00003", "stored_week_value": "2026-06 (06/21-06/27)"}
-    workflow = SimpleNamespace(
-        state="output_review",
-        secondary_actions_json={
-            "workflow_v2": {
-                "bagging_result": {
-                    "materialization_candidate": {
-                        "lines": [
-                            {"menu_name": "old-main", "quantity": 1},
-                            {"menu_name": "old-side", "quantity": 1},
-                        ],
-                    },
-                },
-            },
-        },
+def test_workflow_v2_materialization_prefers_saved_sheet_over_stale_bagging_candidate(
+    monkeypatch, tmp_path, isolated_formal_schema,
+):
+    candidate = _accepted_materializer_read(
+        monkeypatch, tmp_path,
+        ["サワラの幽庵焼き 添)ｻﾂﾏ芋", "茄子と揚げの田舎煮"], [13, 14],
+        [{"menu_name": "old-main", "quantity": 1},
+         {"menu_name": "old-side", "quantity": 1}],
+        accessory_masters={"ｻﾂﾏ芋": {"qty_per_serving": 1, "unit_type": "g"}},
     )
-    draft = SimpleNamespace(
-        id="ODS-1",
-        order_id="ORD-WF2",
-        template_version_id="T1",
-        base_evidence_run_id=None,
-        base_template_resolution_id=None,
-        base_menu_snapshot_id=None,
-        draft_sheet_json={},
-        draft_state="saved",
-        blockers_json=[],
-        warnings_json=[],
-    )
-    monkeypatch.setattr(
-        output_builder.order_output_artifact_service,
-        "enrich_workflow_meta_with_artifacts",
-        lambda session, meta: meta,
-    )
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_build_materialization_candidate_from_draft_record",
-        lambda *args, **kwargs: {
-            "lines": [
-                {"menu_name": "サワラの幽庵焼き 添)ｻﾂﾏ芋", "quantity": 13},
-                {"menu_name": "茄子と揚げの田舎煮", "quantity": 14},
-            ],
-        },
-    )
-
-    candidate = output_builder._workflow_v2_materialization_candidate(  # noqa: SLF001
-        SimpleNamespace(get=lambda *args, **kwargs: None),
-        order,
-        workflow,
-        draft,
-    )
-
     assert [line["menu_name"] for line in candidate["lines"]] == [
         "サワラの幽庵焼き 添)ｻﾂﾏ芋",
         "茄子と揚げの田舎煮",
     ]
-    assert [line["quantity"] for line in candidate["lines"]] == [13, 14]
+    assert [line["quantity_original"] for line in candidate["lines"]] == [13, 14]
+    assert all(line["quantity_corrected"] is None for line in candidate["lines"])
 
 
 def _workflow_v2_session(monkeypatch, *, workflow, draft, lookup_error: Exception | None = None):
@@ -2622,6 +2578,18 @@ def test_saved_sheet_materialization_ignores_excluded_diet_columns_without_overw
         fields=fields,
         rows_payload=rows,
         received_at=datetime(2026, 6, 12, 9, 0, 0),
+        existing_week_code="2026-06@2026-06-21~2026-06-27",
+        date_policy={"week_id_policy": {"date_format": "MM/DD"}},
+        template={"columns": [
+            {"index": 0, "role": "date", "name": "date_mmdd"},
+            {"index": 1, "role": "daypart", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "name": "menu"},
+            {"index": 3, "role": "quantity", "name": "qty.regular_2f", "diet_type": "regular", "area_id": "2F"},
+            {"index": 4, "role": "quantity", "name": "qty.regular_3f", "diet_type": "regular", "area_id": "3F"},
+            {"index": 5, "role": "quantity", "name": "qty.soft_2f", "diet_type": "soft", "area_id": "2F"},
+            {"index": 6, "role": "quantity", "name": "qty.mixer_3f", "diet_type": "mixer", "area_id": "3F"},
+            {"index": 7, "role": "quantity", "name": "qty.no_fish_regular_3f", "diet_type": "no_fish", "area_id": "3F"},
+        ]},
     )
 
     by_source = {line["source_field"]: line for line in lines}
@@ -2652,6 +2620,20 @@ def test_saved_sheet_materialization_keeps_date_for_menu_name_field():
         fields=fields,
         rows_payload=rows,
         received_at=datetime(2026, 7, 7, 9, 0, 0),
+        existing_week_code="2026-07@2026-07-12~2026-07-18",
+        date_policy={"week_id_policy": {"date_format": "MM/DD"}},
+        template={"columns": [
+            {"index": 0, "role": "date", "name": "date"},
+            {"index": 1, "role": "daypart", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "name": "menu_name"},
+            {"index": 3, "role": "quantity", "name": "qty.regular_2f", "diet_type": "regular", "area_id": "2F"},
+            {"index": 4, "role": "quantity", "name": "qty.regular_3f", "diet_type": "regular", "area_id": "3F"},
+            {"index": 5, "role": "quantity", "name": "qty.soft_2f", "diet_type": "soft", "area_id": "2F"},
+            {"index": 6, "role": "quantity", "name": "qty.soft_3f", "diet_type": "soft", "area_id": "3F"},
+            {"index": 7, "role": "quantity", "name": "qty.mixer_2f", "diet_type": "mixer", "area_id": "2F"},
+            {"index": 8, "role": "quantity", "name": "qty.mixer_3f", "diet_type": "mixer", "area_id": "3F"},
+            {"index": 9, "role": "remarks", "name": "remarks"},
+        ]},
     )
 
     assert len(lines) == 6
