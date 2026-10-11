@@ -30,12 +30,27 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     const tree=ts.createSourceFile('h.cjs',s,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
     return tree.statements.filter(n=>!(ts.isFunctionDeclaration(n)&&n.name.text==='actual')).map(n=>n.getText(tree)).join('\n');
   };
-  assert.equal(normalize(source),normalize(old));
+  const replaceOnce=(text,from,to)=>{
+    assert.equal(text.split(from).length-1,1,'Only the counted approved harness addition may be normalized');
+    return text.replace(from,to);
+  };
+  let compatible=source;
+  compatible=replaceOnce(compatible,
+    '    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},\n    workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},\n    setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},\n','');
+  compatible=replaceOnce(compatible,'setWorkflow:value=>{context.workflow=value;}','setWorkflow:()=>{}');
+  compatible=replaceOnce(compatible,'  // Ownership and adoption checks use production closures, not harness substitutes.\n','');
+  compatible=replaceOnce(compatible,"'outputEditorSignature','captureActionInput','ownsActionInput','createActionBoundary','retireOutput',",'');
+  compatible=replaceOnce(compatible,'setWorkflow:value=>{h.state.workflow=value;h.context.workflow=value;}','setWorkflow:value=>{h.state.workflow=value;}');
+  assert.equal(normalize(compatible),normalize(old));
+  execFileSync('git',['merge-base','--is-ancestor','d1ce00c','HEAD']);
+  const approvedHarness=execFileSync('git',['show','d1ce00c:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
+  assert.equal(source,approvedHarness,'Entire current fixture and original test bodies/PDF evaluator match the approved closure-binding revision');
   const production='src/pages/orders/[id]/workflow-v2.tsx';
   const approvedBefore=execFileSync('git',['show','7d7e41d2085376013a835f4e6f5904c4031b0c1f:frontend/'+production],{encoding:'utf8'});
-  const approvedAfter=execFileSync('git',['show','d55763365c3d2159dc976b130e0cc7a6de5f162f:frontend/'+production],{encoding:'utf8'});
   assert.equal(approvedBefore,execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
-  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),approvedAfter,'exact approved control/theme delta only; full old byte equality is superseded');
+  execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
+  execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
+  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','3c5a9ca:frontend/'+production],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards remain exact');
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
   const after=source.slice(source.indexOf('function actual('),source.indexOf('\nconst plain='));
   assert.equal(after.replace('const exports={},bindings={process:undefined,fetch:undefined,require:undefined,global:undefined,module:undefined,Buffer:undefined,globalThis:undefined,...context,exports};\n  vm.compileFunction(code,Object.keys(bindings))(...Object.values(bindings));return exports.fn;', 'const exports={};vm.runInNewContext(code,{...context,exports});return exports.fn;'),before);

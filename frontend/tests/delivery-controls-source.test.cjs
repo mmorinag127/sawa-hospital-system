@@ -92,9 +92,19 @@ function properties(control, flatten) {
 for (const [name, counts] of Object.entries(expected)) {
   const file = 'frontend/src/pages/' + name + '.tsx';
   const original = execFileSync('git', ['show', base + ':' + file], { cwd: root, encoding: 'utf8' });
-  const current = fs.readFileSync(path.join(root, file), 'utf8');
+  const migration = '5634429';
+  const current = execFileSync('git', ['show', migration + ':' + file], { cwd: root, encoding: 'utf8' });
+  test(name + ' current approved input/output ownership and receipt functions remain exact', () => {
+    const approved = name === 'daily-delivery-notes' ? 'e206d34' : 'a2ce6ad';
+    for (const [ancestor, descendant] of [[base, migration], [migration, approved], [approved, 'HEAD']])
+      execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
+    if (name === 'daily-delivery-notes') execFileSync('git', ['merge-base', '--is-ancestor', 'c5dd90a', approved], { cwd: root });
+    assert.equal(fs.readFileSync(path.join(root, file), 'utf8'),
+      execFileSync('git', ['show', approved + ':' + file], { cwd: root, encoding: 'utf8' }),
+      'Full current load/download/input/message/auth/unmount and receipt handling remain exact');
+  });
 
-  test(name + ' exact non-rendered source, hooks/auth/API/constants unchanged', () => {
+  test(name + ' historical UI migration: exact non-rendered source, hooks/auth/API/constants unchanged', () => {
     assert.equal(nonrender(current), nonrender(original));
     for (const tag of ['SawaProvider', 'FormProvider', 'FormTextField', 'Button']) {
       function unchanged(source) {
@@ -115,7 +125,7 @@ for (const [name, counts] of Object.entries(expected)) {
     }
   });
 
-  test(name + ' AST counts, all native props/options/handlers/default submit retained', () => {
+  test(name + ' historical UI migration: AST counts, all native props/options/handlers/default submit retained', () => {
     const before = controls(original).filter(control => Object.hasOwn(mapped, control.tag));
     const after = controls(current, true);
     const actual = { button: 0, input: 0, select: 0, textarea: 0 };

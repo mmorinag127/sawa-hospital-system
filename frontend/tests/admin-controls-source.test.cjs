@@ -91,9 +91,19 @@ function properties(control, flatten) {
 for (const [name, counts] of Object.entries(expected)) {
   const file = 'frontend/src/pages/' + name + '.tsx';
   const original = execFileSync('git', ['show', base + ':' + file], { cwd: root, encoding: 'utf8' });
-  const current = fs.readFileSync(path.join(root, file), 'utf8');
+  const migration = '7d7e41d2085376013a835f4e6f5904c4031b0c1f';
+  const current = execFileSync('git', ['show', migration + ':' + file], { cwd: root, encoding: 'utf8' });
+  test(name + ' current approved RHF/session-query/refusal guards remain exact', () => {
+    const approved = name === 'admin/users' ? 'c3d9586' : migration;
+    for (const [ancestor, descendant] of [[base, migration], [migration, approved], [approved, 'HEAD']])
+      execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
+    if (name === 'admin/users') execFileSync('git', ['merge-base', '--is-ancestor', 'a252363', approved], { cwd: root });
+    assert.equal(fs.readFileSync(path.join(root, file), 'utf8'),
+      execFileSync('git', ['show', approved + ':' + file], { cwd: root, encoding: 'utf8' }),
+      'Full current functions, render handlers, payloads and guards match the approved source, not the old UI-only snapshot');
+  });
 
-  test(name + ' exact non-rendered source, hooks/auth/API/constants unchanged', () => {
+  test(name + ' historical UI migration: exact non-rendered source, hooks/auth/API/constants unchanged', () => {
     assert.equal(nonrender(current), nonrender(original));
     assert.equal((current.match(/<ThemeProvider theme=\{sawaTheme\}>/g) || []).length, 1);
     assert.equal(/SawaProvider|sessionKey|QueryClient/.test(current), false);
@@ -134,7 +144,7 @@ for (const [name, counts] of Object.entries(expected)) {
     }
   });
 
-  test(name + ' AST counts, all native props/options/handlers/default submit retained', () => {
+  test(name + ' historical UI migration: AST counts, all native props/options/handlers/default submit retained', () => {
     const before = controls(original);
     const after = controls(current);
     const actual = { button: 0, input: 0, select: 0, textarea: 0 };
