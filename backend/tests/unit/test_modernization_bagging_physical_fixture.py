@@ -26,7 +26,9 @@ def test_authored_physical_regular_is_unique_without_adding_order_quantities(
               "bag_type": "normal"}
              for diet, quantity in zip(diets, quantities, strict=True)]
     original = deepcopy(lines)
-    registered = accepted_bagging_order(monkeypatch, tmp_path, lines)
+    registered = accepted_bagging_order(
+        monkeypatch, tmp_path, lines, daily_label_comparable_diet_types=[],
+    )
     assert lines == original
     with session_scope() as session:
         order = session.get(Order, registered["id"])
