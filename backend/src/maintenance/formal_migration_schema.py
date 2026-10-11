@@ -84,8 +84,26 @@ def _sqlite_table_definition(sql):
     raise RuntimeError("catalog blocked: incomplete SQLite table definition")
 
 
+def _normalize_reflected_index_aliases(shape, dialect):
+    if dialect != "postgresql":
+        return shape
+    normalized = dict(shape)
+    indexes = []
+    for original in shape["indexes"]:
+        index = dict(original)
+        if "include_columns" in index:
+            options = index.get("dialect_options")
+            if (not isinstance(options, dict) or "postgresql_include" not in options
+                    or index["include_columns"] != options["postgresql_include"]):
+                raise RuntimeError("catalog blocked: PostgreSQL INCLUDE alias missing canonical value or conflicting")
+            del index["include_columns"]
+        indexes.append(index)
+    normalized["indexes"] = _ordered(indexes)
+    return normalized
+
+
 def table_shapes(snapshot, dialect):
-    """Normalize only ordering and SQLite SQL tokens; preserve literal values."""
+    """Normalize ordering, SQLite SQL tokens and verified PG INCLUDE aliases."""
     shapes = {}
     for name, attributes in snapshot["tables"].items():
         attributes = _clean(attributes)
@@ -107,6 +125,7 @@ def table_shapes(snapshot, dialect):
                 item["tokens"] = _clean(tokens)
             native.append(item)
         shapes[name]["native"] = _ordered(native)
+        shapes[name] = _normalize_reflected_index_aliases(shapes[name], dialect)
     return shapes
 
 
@@ -251,7 +270,7 @@ def require_revision_catalog(connection, revision):
     if catalog["views"] != expected["views"] or set(actual) != set(expected["tables"]):
         raise RuntimeError(f"catalog is partial or incompatible: revision {revision} table/view set mismatch")
     for name, reference in expected["tables"].items():
-        shape = contract["shapes"][reference]
+        shape = _normalize_reflected_index_aliases(contract["shapes"][reference], dialect)
         if actual[name] == shape:
             continue
         missing_columns = sorted({item["name"] for item in shape["columns"]} - {item["name"] for item in actual[name]["columns"]})
