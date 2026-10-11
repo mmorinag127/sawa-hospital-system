@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from src.api import auth as auth_module
-from test_portal_google_auth import _cleanup, _seed_user
+from tests.contract.test_portal_google_auth import _cleanup, _seed_user
 
 
 HUMAN_AUDIENCE = "hospital-contract.apps.googleusercontent.com"
