@@ -3234,6 +3234,8 @@ def test_build_quantity_only_repair_prompts_includes_focus_context():
 
 def test_build_llm_assist_prompt_uses_yomitoku_structured_rows_and_derived_issues():
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -8731,6 +8733,8 @@ def test_build_reparse_debug_payload_requires_explicit_cluster_fill_allow():
 
 def test_build_llm_assist_prompt_uses_yomitoku_rows_and_generic_cell_issues_without_roi_overlay():
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -9015,6 +9019,8 @@ def test_build_llm_assist_prompt_includes_merged_cell_span_preset_instructions()
 
 def test_build_llm_review_prompt_includes_baseline_tables_and_cell_issues():
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
