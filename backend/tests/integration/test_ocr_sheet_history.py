@@ -3152,9 +3152,31 @@ def test_apply_payload_quantities_numeric_only_ignores_low_purity_quantity_colum
     assert all(row["values"][5] == "" for row in rows)
 
 
-def test_extract_sheet_rows_from_payload_supports_escaped_newlines():
-    facility_cfg = config_service.get_facility_config("FAC00001") or {}
-    template = facility_cfg.get("fax_template") or {}
+def test_extract_sheet_rows_from_payload_supports_escaped_newlines(tmp_path, monkeypatch):
+    columns = [
+        {"index": 0, "source_index": 0, "role": "date", "name": "日付"},
+        {"index": 1, "source_index": 1, "role": "daypart", "name": "区分"},
+        {"index": 2, "source_index": 2, "role": "menu", "name": "メニュー"},
+    ]
+    for index, (diet, area, name) in enumerate([
+        ("regular", "2F", "常食2F"), ("regular", "3F", "常食3F"),
+        ("soft", "2F", "軟菜2F"), ("soft", "3F", "軟菜3F"),
+        ("mixer", "2F", "ミキサー2F"), ("mixer", "3F", "ミキサー3F"),
+    ], start=3):
+        columns.append({"index": index, "source_index": index, "role": "quantity",
+                        "diet_type": diet, "area_id": area, "name": name})
+    columns.append({"index": 9, "source_index": 9, "role": "remarks", "name": "備考"})
+    source = tmp_path / "synthetic-escaped-component.json"
+    source.write_text(json.dumps({"facilities": [{
+        "facility_id": "FAC00001", "facility_name": "Synthetic escaped component",
+        "fax_template_id": "synthetic-escaped-component",
+        "fax_template": {"template_id": "synthetic-escaped-component", "columns": columns},
+    }]}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(source))
+    facility_cfg = config_service.get_facility_config("FAC00001")
+    template = facility_cfg["fax_template"]
     payload = {
         "table_raw": (
             "| 日付 | 区分 | メニュー | 常食2F | 常食3F | 軟菜2F | 軟菜3F | ミキサー2F | ミキサー3F | 備考 |\\n"
