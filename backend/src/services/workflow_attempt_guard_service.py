@@ -24,6 +24,7 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.models.order_critical_decision import OrderCriticalDecision
 from src.models.uploaded_pdf import UploadedPdf
 from src.db import session_scope
+from src.services.canonical_facility_store import CanonicalStoreError
 
 
 _nonworkflow_execution: ContextVar[dict[str, Any] | None] = ContextVar("nonworkflow_execution", default=None)
@@ -204,7 +205,7 @@ def _current_sheet_execution_input(session: Any, order: Any, *, lock: bool = Fal
                 session, order, lock=lock,
                 original_input=None if isinstance(original_input, dict) and original_input.get("sheet_source_unavailable") else original_input,
             )
-        except ValueError as exc:
+        except (ValueError, CanonicalStoreError) as exc:
             if original_input is not None and not original_input.get("sheet_source_unavailable"):
                 raise
             unavailable = str(exc)
