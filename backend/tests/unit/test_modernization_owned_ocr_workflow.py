@@ -67,6 +67,7 @@ class OwnedProducer:
         monkeypatch.setattr(facility_template_version_service, "engine", self.engine)
         for name in ("FACILITY_MASTER_URI", "OCR_OUTPUT_BUCKET", "RAW_BUCKET", "K_SERVICE"):
             monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("OCR_ARTIFACT_DIR", str(root / "owned-published"))
         monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
         monkeypatch.setenv("HF_DATASETS_OFFLINE", "1")
