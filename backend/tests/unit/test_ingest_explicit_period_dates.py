@@ -70,6 +70,9 @@ def _template(first_seen=False):
 def test_real_parser_date_cells_use_period_without_quantity_changes(quantity, expected):
     lines = parse_order_lines([["02/20", "昼", "Menu A", quantity]], _template(),
         LATE_RECEIPT, {"zero_as_empty": False}, date_policy=POLICY, explicit_week=WEEK)
+    if expected is None:
+        assert lines == []
+        return
     assert len(lines) == 1
     assert lines[0]["date"] == date(2026, 2, 20)
     assert lines[0]["quantity_original"] == expected

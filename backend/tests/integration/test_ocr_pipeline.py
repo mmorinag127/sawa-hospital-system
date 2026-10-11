@@ -1052,6 +1052,7 @@ def test_parse_order_lines_strict_numeric_keeps_zero_and_rejects_noise():
             "strict_numeric_quantity_cell": True,
             "max_quantity_abs": 150,
         },
+        explicit_week="2026-02@2026-02-15~2026-02-15",
     )
     assert len(lines) == 1
     assert lines[0]["menu_name"] == "Menu A"
@@ -1079,6 +1080,7 @@ def test_parse_order_lines_non_strict_still_parses_mixed_numeric_text():
         template,
         datetime(2026, 2, 15, 9, 0, 0),
         {"zero_as_empty": False},
+        explicit_week="2026-02@2026-02-15~2026-02-15",
     )
     assert len(lines) == 1
     assert lines[0]["quantity_original"] == 23
@@ -1113,6 +1115,7 @@ def test_parse_order_lines_allow_blank_structure_rows_keeps_quantity_only_rows()
             "strict_numeric_quantity_cell": True,
             "allow_blank_structure_rows": True,
         },
+        explicit_week="2026-02@2026-02-15~2026-02-15",
     )
     assert len(lines) == 2
     assert [int(line["quantity_original"]) for line in lines] == [20, 11]
@@ -1155,6 +1158,7 @@ def test_parse_order_lines_rows_are_body_only_ignores_template_header_rows():
             "allow_blank_structure_rows": True,
             "rows_are_body_only": True,
         },
+        explicit_week="2026-02@2026-02-15~2026-02-15",
     )
     assert [int(line["quantity_original"]) for line in lines] == [42, 42, 42, 43]
     assert [line["source_row_index"] for line in lines] == [2, 3, 4, 5]

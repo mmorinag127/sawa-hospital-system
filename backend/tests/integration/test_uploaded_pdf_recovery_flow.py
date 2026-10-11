@@ -136,11 +136,11 @@ def test_owned_delivery_business_failure_is_terminal_after_stale_lease(monkeypat
         row = session.get(UploadedPdf, uploaded_pdf_id)
         row.storage_uri, row.content_sha256 = uri, digest
     reserve_uploaded_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
-    register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
-    before = ingest_job_service.get_ingest_job_snapshot(message_id)
-
     ready_ids = list_ready_uploaded_pdf_ids(limit=10)
     assert uploaded_pdf_id in ready_ids
+    register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
+    before = ingest_job_service.get_ingest_job_snapshot(message_id)
+    assert uploaded_pdf_id not in list_ready_uploaded_pdf_ids(limit=10)
 
     from src.services.ocr_job_service import OwnPipelineLineageError
     calls = []

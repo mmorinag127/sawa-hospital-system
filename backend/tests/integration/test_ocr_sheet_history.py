@@ -4435,6 +4435,7 @@ def test_parse_order_lines_does_not_fill_forward_blank_menu_name_in_large_cell_m
         template,
         datetime(2026, 4, 8, 9, 0, 0),
         quantity_rules={"zero_as_empty": False},
+        explicit_week="2026-04@2026-04-08~2026-04-08",
     )
 
     menu_names = [line.get("menu_name") for line in lines]
