@@ -6,7 +6,9 @@ from tests.helpers.monthly_override_fixture import (
 )
 
 
-def _label_menu_values_for_bags(bags):
+def _label_menu_values_for_bags(bags, *, comparable_diets=None):
+    if comparable_diets is not None:
+        bags = [{**bag, "daily_label_comparable_diet_types": list(comparable_diets)} for bag in bags]
     labels, _fields, label_format = output_builder._build_label_rows(bags, {}, None)
     assert label_format == "jp"
     return [row.get("メニュー") for row in labels]
@@ -37,7 +39,7 @@ def test_daily_labels_preserve_facility_specific_daycare_and_staff_categories():
                 "menu_qty_per_serving": 130,
                 "menu_unit_type": "g",
             },
-        ]
+        ], comparable_diets=["daycare", "staff"],
     )
 
     assert "主菜（通所）" in menus
@@ -59,7 +61,7 @@ def test_daily_labels_use_source_diet_for_diabetes_after_regular_output_mapping(
                 "menu_qty_per_serving": 70,
                 "menu_unit_type": "g",
             }
-        ]
+        ], comparable_diets=["diabetes"],
     )
 
     assert menus == ["副菜①（糖尿）"]
@@ -81,6 +83,7 @@ def test_daily_labels_derive_comparable_soft_from_facility_quantity_columns():
             }
         ],
         {
+            "daily_label_comparable_diet_types": ["soft"],
             "fax_template": {
                 "columns": [
                     {"role": "quantity", "diet_type": "soft", "area_id": "X"},
@@ -163,7 +166,7 @@ def test_daily_labels_separate_soft_and_mixer_categories():
                 "menu_qty_per_serving": 40,
                 "menu_unit_type": "g",
             },
-        ]
+        ], comparable_diets=["soft", "mixer"],
     )
 
     assert "副菜②（軟菜）" in menus
@@ -184,7 +187,7 @@ def test_daily_labels_do_not_mark_facility_unsupported_staff_category():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
             }
-        ]
+        ], comparable_diets=[],
     )
 
     assert menus == ["主菜"]
@@ -360,7 +363,8 @@ def test_garnish_label_uses_parent_category_and_diet_suffix(isolated_formal_sche
         {"zero_as_empty": True},
     )
     bags = output_builder._apply_daily_label_facility_rules_to_bags(
-        bags, {"areas": [{"id": "2F", "name": "Synthetic area"}]}, "FAC00009")
+        bags, {"areas": [{"id": "2F", "name": "Synthetic area"}],
+               "daily_label_comparable_diet_types": ["soft"]}, "FAC00009")
     labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
 
     assert labels[0]["商品名１"] == "おろしｿｰｽ"
@@ -396,7 +400,8 @@ def test_existing_garnish_row_inherits_previous_menu_category():
         {},
         {"zero_as_empty": True},
     )
-    bags = output_builder._apply_daily_label_facility_rules_to_bags(bags, {}, "FAC00009")
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(
+        bags, {"daily_label_comparable_diet_types": ["soft"]}, "FAC00009")
     labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
 
     assert labels[0]["商品名１"] == "ﾎｰﾚﾝ草"
@@ -503,7 +508,7 @@ def test_label_meal_slots_are_assigned_by_daypart_menu_order(isolated_formal_sch
     enriched = output_builder._apply_label_meal_slot_categories(bound)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F"}
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F", "daily_label_comparable_diet_types": ["mixer"]}
             for line in enriched
         ],
         {},
@@ -821,8 +826,8 @@ def test_monthly_menu_item_can_override_mixer_unit_without_changing_regular_unit
     enriched = output_builder._apply_menu_overrides(lines, items)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F"},
-            {**enriched[1], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F"},
+            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F", "daily_label_comparable_diet_types": ["mixer"]},
+            {**enriched[1], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F", "daily_label_comparable_diet_types": ["mixer"]},
         ],
         {},
         None,
@@ -903,12 +908,14 @@ def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_
         [
             {
                 **soft_karei,
+                "daily_label_comparable_diet_types": [],
                 "facility": "FAC00009",
                 "quantity": 5,
                 "area_name": "Synthetic area", "area_id": "2F",
             },
             {
                 **mixer_tamago,
+                "daily_label_comparable_diet_types": [],
                 "facility": "FAC00009",
                 "quantity": 4,
                 "area_name": "Synthetic area", "area_id": "2F",
@@ -990,8 +997,8 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
 
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F"},
-            {**enriched[1], "facility": "FAC00009", "quantity": 5, "area_name": "Synthetic area", "area_id": "2F"},
+            {**enriched[0], "facility": "FAC00009", "quantity": 4, "area_name": "Synthetic area", "area_id": "2F", "daily_label_comparable_diet_types": []},
+            {**enriched[1], "facility": "FAC00009", "quantity": 5, "area_name": "Synthetic area", "area_id": "2F", "daily_label_comparable_diet_types": []},
         ],
         {},
         None,
@@ -1038,7 +1045,7 @@ def test_bag_level_monthly_menu_item_qty_overrides_stale_materialized_amounts(mo
                 registered, old_candidate = _actual_bagging_candidate(owned_patch, owned_path, [{
                     "date": day, "daypart": daypart, "menu_name": name, "diet_type": diet,
                     "area_id": area, "quantity_original": quantity, "bag_type": "normal",
-                }], menu_qty_per_serving=100, menu_unit_type="g", accessory_masters={"おろしｿｰｽ": {"qty_per_serving": 12, "unit_type": "g"}})
+                }], menu_qty_per_serving=100, menu_unit_type="g", accessory_masters={"おろしｿｰｽ": {"qty_per_serving": 12, "unit_type": "g"}}, daily_label_comparable_diet_types=[])
                 with session_scope() as session:
                     facility = session.get(Order, registered["id"]).facility_code
                     item = session.execute(select(MonthlyMenuItem).where(
@@ -1080,6 +1087,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_name": "豚肉の生姜炒め",
                 "menu_category": "主菜",
                 "diet_type": "mixer",
+                "daily_label_comparable_diet_types": ["soft", "mixer"],
                 "area_id": "2F",
                 "quantity": 2,
                 "menu_qty_per_serving": 100,
@@ -1122,6 +1130,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_name": "豚肉の生姜炒め",
                 "menu_category": "主菜",
                 "diet_type": "soft",
+                "daily_label_comparable_diet_types": ["soft", "mixer"],
                 "area_id": "2F",
                 "quantity": 3,
                 "menu_qty_per_serving": 100,
@@ -1150,6 +1159,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_name": "豚肉の生姜炒め",
                 "menu_category": "主菜",
                 "diet_type": "mixer",
+                "daily_label_comparable_diet_types": ["soft", "mixer"],
                 "area_id": "3F",
                 "quantity": 2,
                 "menu_qty_per_serving": 100,
@@ -1164,6 +1174,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_name": "豚肉の生姜炒め",
                 "menu_category": "主菜",
                 "diet_type": "soft",
+                "daily_label_comparable_diet_types": ["soft", "mixer"],
                 "area_id": "3F",
                 "quantity": 2,
                 "menu_qty_per_serving": 100,
@@ -1203,14 +1214,14 @@ def _actual_bagging_candidate(monkeypatch, tmp_path, lines, **authored):
 
 
 def test_output_diet_type_override_maps_diabetes_to_regular(monkeypatch, tmp_path, isolated_formal_schema):
-    registered, candidate = _actual_bagging_candidate(monkeypatch, tmp_path, [{"date": "2026-05-10", "daypart": "朝", "menu_name": "ごぼうと竹輪の煮物", "diet_type": "diabetes", "area_id": "X", "quantity_original": 4, "bag_type": "normal"}], output_diet_types={"diabetes": "regular"})
+    registered, candidate = _actual_bagging_candidate(monkeypatch, tmp_path, [{"date": "2026-05-10", "daypart": "朝", "menu_name": "ごぼうと竹輪の煮物", "diet_type": "diabetes", "area_id": "X", "quantity_original": 4, "bag_type": "normal"}], output_diet_types={"diabetes": "regular"}, daily_label_comparable_diet_types=[])
     lines = output_builder.build_order_lines_for_outputs({"id": registered["id"]}, accepted_candidate=candidate)
     assert lines[0]["diet_type"] == "regular"
     assert lines[0]["source_diet_type"] == "diabetes"
 
 
 def test_output_diet_type_is_unchanged_without_facility_override(monkeypatch, tmp_path, isolated_formal_schema):
-    registered, candidate = _actual_bagging_candidate(monkeypatch, tmp_path, [{"date": "2026-05-10", "daypart": "朝", "menu_name": "ごぼうと竹輪の煮物", "diet_type": "diabetes", "area_id": "X", "quantity_original": 4, "bag_type": "normal"}])
+    registered, candidate = _actual_bagging_candidate(monkeypatch, tmp_path, [{"date": "2026-05-10", "daypart": "朝", "menu_name": "ごぼうと竹輪の煮物", "diet_type": "diabetes", "area_id": "X", "quantity_original": 4, "bag_type": "normal"}], daily_label_comparable_diet_types=[])
     lines = output_builder.build_order_lines_for_outputs({"id": registered["id"]}, accepted_candidate=candidate)
     assert lines[0]["diet_type"] == "diabetes"
     assert "source_diet_type" not in lines[0]
@@ -1238,7 +1249,8 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
             }
         }
     configured = publish_configuration(monkeypatch, tmp_path, day="2026-07-12",
-        columns=facility_config["fax_template_override"]["columns"])
+        columns=facility_config["fax_template_override"]["columns"],
+        daily_label_comparable_diet_types=["soft", "mixer"])
     entries = [
             {
                 "menu_date": "2026-07-12",

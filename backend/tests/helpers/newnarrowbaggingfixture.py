@@ -18,7 +18,7 @@ from tests.helpers.ingest_original import (
 )
 
 
-def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None):
+def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None):
     day = date.fromisoformat(lines[0]["date"])
     facility = f"bagging-component-{uuid4().hex}"
     configure_delivery(monkeypatch)
@@ -26,6 +26,8 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     master_path = tmp_path / "authored-facilities.json"
     master = json.loads(master_path.read_text())
     configured = master["facilities"][0]
+    if daily_label_comparable_diet_types is not None:
+        configured["daily_label_comparable_diet_types"] = deepcopy(daily_label_comparable_diet_types)
     authored_areas = {
         "common": {"area_id": "common", "name": "Synthetic component common area"},
         "2F": {"area_id": "2F", "name": "Synthetic component second floor"},
