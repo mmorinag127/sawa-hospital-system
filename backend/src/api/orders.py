@@ -1030,8 +1030,17 @@ def get_daily_output_overrides(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _require_daily_output_original_receipt(original_receipt):
+    if original_receipt is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "daily_output_original_ownership_required"},
+        )
+
+
 @router.post("/daily-output-overrides/upsert", dependencies=[Depends(require_role("operator"))])
 def upsert_daily_output_override(payload: DailyOutputOverrideUpsertBody):
+    _require_daily_output_original_receipt(payload.original_receipt)
     target_date = _parse_iso_date(payload.date)
     try:
         return order_service.upsert_daily_output_portion_override(
@@ -1060,6 +1069,7 @@ def upsert_daily_output_override(payload: DailyOutputOverrideUpsertBody):
 
 @router.post("/daily-output-overrides/upsert-bulk", dependencies=[Depends(require_role("operator"))])
 def upsert_daily_output_override_bulk(payload: DailyOutputOverrideBulkUpsertBody):
+    _require_daily_output_original_receipt(payload.original_receipt)
     target_date = _parse_iso_date(payload.date)
     try:
         return order_service.upsert_daily_output_portion_override_bulk(
@@ -1085,6 +1095,7 @@ def upsert_daily_output_override_bulk(payload: DailyOutputOverrideBulkUpsertBody
 
 @router.delete("/daily-output-overrides/{override_id}", dependencies=[Depends(require_role("operator"))])
 def delete_daily_output_override(override_id: str, payload: DailyOutputOverrideDeleteBody | None = None):
+    _require_daily_output_original_receipt(payload.original_receipt if payload is not None else None)
     try:
         deleted = order_service.delete_daily_output_portion_override(override_id, original_receipt=payload.original_receipt if payload is not None else None)
     except ValueError as exc:
