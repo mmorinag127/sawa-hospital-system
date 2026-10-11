@@ -833,13 +833,14 @@ def map_own_ingest_result(payload, pdf_bytes, pipeline_result, mapping_input):
     extracted.tokens = tokens
     extracted.grid = grid
     _dump_ocr_debug(payload, extracted)
-    parsed_dates = [parse_date_string(raw, payload.received_at, policy=mapping_input["policy"]) for raw in extracted.date_strings]
+    parsed_dates = [parse_date_string(raw, payload.received_at, policy=mapping_input["policy"], explicit_week=payload.week_hint) for raw in extracted.date_strings]
     parsed_dates = [date for date in parsed_dates if date]
     lines = parse_order_lines(
         extracted.table_rows, template, payload.received_at, mapping_input["policy"].get("quantity_rules", {}),
         default_date=min(parsed_dates) if parsed_dates else None,
         tokens=tokens, grid=grid.__dict__ if grid else None, pdf_bytes=pdf_bytes,
         date_policy=mapping_input["policy"],
+        explicit_week=payload.week_hint,
     )
     raw = extracted.recognizer_payload
     result = deepcopy(raw) if isinstance(raw, dict) else {}

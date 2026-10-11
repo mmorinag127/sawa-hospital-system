@@ -25,8 +25,18 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     master_path = tmp_path / "authored-facilities.json"
     master = json.loads(master_path.read_text())
     configured = master["facilities"][0]
+    authored_areas = {
+        "2F": {"area_id": "2F", "name": "Synthetic component second floor"},
+        "3F": {"area_id": "3F", "name": "Synthetic component third floor"},
+    }
     columns = configured["fax_template"]["columns"][:3]
     quantities = list(dict.fromkeys((line["diet_type"], line["area_id"]) for line in lines))
+    configured["areas"] = []
+    for area in dict.fromkeys(area for _, area in quantities):
+        if area in {None, "", "X"}:
+            continue
+        assert area in authored_areas, ("explicit synthetic area definition required", area)
+        configured["areas"].append(deepcopy(authored_areas[area]))
     for index, (diet, area) in enumerate(quantities, 3):
         columns.append({"index": index, "source_index": index, "role": "quantity",
                         "name": f"qty.{diet}_{area}",

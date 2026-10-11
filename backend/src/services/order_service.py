@@ -1410,57 +1410,9 @@ def _resolve_sheet_payload_for_menu_entries(payload: dict[str, Any] | None) -> d
     return payload
 
 
-def _extract_entry_date_from_sheet_cell(value: object, received_at: datetime, *, date_policy: dict | None = None) -> date | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    parsed = parse_date_string(text, received_at, policy=date_policy)
-    if parsed:
-        return parsed
-    return _normalize_entry_date(text)
-
-
-_WEEKDAY_HINT_MAP = {
-    "月": 0,
-    "火": 1,
-    "水": 2,
-    "木": 3,
-    "金": 4,
-    "土": 5,
-    "日": 6,
-}
-
-
-def _extract_weekday_hint(value: object) -> int | None:
-    if value is None:
-        return None
-    text = str(value)
-    if not text.strip():
-        return None
-    match = re.search(r"[（(]\s*([月火水木金土日])\s*[)）]", text)
-    if not match:
-        return None
-    return _WEEKDAY_HINT_MAP.get(match.group(1))
-
-
-def _infer_following_date_from_weekday_hint(
-    previous_date: date | None,
-    raw_value: object,
-) -> date | None:
-    if not isinstance(previous_date, date):
-        return None
-    weekday_hint = _extract_weekday_hint(raw_value)
-    if weekday_hint is None:
-        return None
-    if previous_date.weekday() == weekday_hint:
-        return previous_date
-    for delta in range(1, 8):
-        candidate = previous_date + timedelta(days=delta)
-        if candidate.weekday() == weekday_hint:
-            return candidate
-    return None
+def _extract_entry_date_from_sheet_cell(value: object, received_at: datetime, *, date_policy: dict | None = None, explicit_week: str | None = None) -> date | None:
+    return parse_date_string(value.isoformat() if isinstance(value, date) else value,
+        received_at, policy=date_policy, explicit_week=explicit_week)
 
 
 def _build_position_menu_entries_from_ocr_payload(
@@ -1468,12 +1420,15 @@ def _build_position_menu_entries_from_ocr_payload(
     payload: dict[str, Any] | None,
     template: dict[str, Any],
     received_at: datetime,
+    explicit_week: str | None = None,
 ) -> list[dict]:
+    explicit_week = require_explicit_ingest_week(explicit_week)
     def _fallback_structured_entries() -> list[dict]:
         return _build_position_menu_entries_from_structured_tables(
             payload=source_payload,
             template=template,
             received_at=received_at,
+            explicit_week=explicit_week,
         )
 
     source_payload = _resolve_sheet_payload_for_menu_entries(payload)
@@ -1532,10 +1487,9 @@ def _build_position_menu_entries_from_ocr_payload(
     else:
         fill_missing_date_with_first_seen = large_cell_mode
 
-    date_candidates = _collect_sheet_dates_from_payload(source_payload, received_at, template)
+    date_candidates = _collect_sheet_dates_from_payload(source_payload, received_at, template, explicit_week=explicit_week)
     default_date = min(date_candidates) if date_candidates else None
     first_date_in_table: date | None = None
-    latest_resolved_date: date | None = None
     carry_forward: dict[str, Any] = {role: None for role in fill_forward_roles}
     carry_forward_daypart_date: date | None = None
     raw_entries: list[dict[str, Any]] = []
@@ -1554,13 +1508,9 @@ def _build_position_menu_entries_from_ocr_payload(
             else ""
         )
         menu_name = str(raw_menu_name or "").strip()
-        menu_date = _extract_entry_date_from_sheet_cell(raw_date, received_at)
-        if menu_date is None:
-            menu_date = _infer_following_date_from_weekday_hint(latest_resolved_date, raw_date)
+        menu_date = _extract_entry_date_from_sheet_cell(raw_date, received_at, explicit_week=explicit_week)
         raw_daypart_token = str(raw_daypart or "").strip()
         daypart = _canonical_daypart_key(raw_daypart_token) or None
-        if isinstance(menu_date, date):
-            latest_resolved_date = menu_date
 
         base = {
             "date": menu_date,
@@ -1784,7 +1734,9 @@ def _build_position_menu_entries_from_structured_tables(
     payload: dict[str, Any] | None,
     template: dict[str, Any],
     received_at: datetime,
+    explicit_week: str | None = None,
 ) -> list[dict]:
+    explicit_week = require_explicit_ingest_week(explicit_week)
     if not isinstance(payload, dict):
         return []
     fields = _row_fields_from_template(template)
@@ -1795,7 +1747,7 @@ def _build_position_menu_entries_from_structured_tables(
     if not tables:
         return []
 
-    default_dates = _collect_sheet_dates_from_payload(payload, received_at, template)
+    default_dates = _collect_sheet_dates_from_payload(payload, received_at, template, explicit_week=explicit_week)
     default_date = min(default_dates) if default_dates else None
     entries: list[dict[str, Any]] = []
     seen_identities: set[tuple[str, str, str]] = set()
@@ -1835,11 +1787,12 @@ def _build_position_menu_entries_from_structured_tables(
             row_date: date | None = None
             row_daypart = ""
             remaining: list[str] = []
-            for cell in structural_cells:
+            for cell_index, cell in enumerate(structural_cells):
                 if not cell:
                     continue
-                if row_date is None:
-                    parsed_date = _extract_entry_date_from_sheet_cell(cell, received_at)
+                is_date_field = cell_index < len(fields) and fields[cell_index].startswith("date")
+                if row_date is None and is_date_field:
+                    parsed_date = _extract_entry_date_from_sheet_cell(cell, received_at, explicit_week=explicit_week)
                     if parsed_date:
                         row_date = parsed_date
                         continue
@@ -2073,6 +2026,7 @@ def _merge_missing_weekly_menu_entries_from_ocr_payload(
             payload=payload,
             template=template,
             received_at=received_at,
+            explicit_week=require_explicit_ingest_week(week_id),
         ),
         week_id,
     )
@@ -2277,6 +2231,7 @@ def _build_reparse_position_menu_entries(
     received_at: datetime,
     template: dict[str, Any],
 ) -> list[dict]:
+    week_id = require_explicit_ingest_week(week_id)
     lines_for_scope = list(lines or [])
     payload_dates: set[date] = {
         item for item in (extra_payload_dates or set()) if isinstance(item, date)
@@ -2286,11 +2241,11 @@ def _build_reparse_position_menu_entries(
     if isinstance(parsed_output, dict):
         payload_dates = {
             item
-            for item in _collect_sheet_dates_from_payload(parsed_output, received_at, template)
+            for item in _collect_sheet_dates_from_payload(parsed_output, received_at, template, explicit_week=require_explicit_ingest_week(week_id))
             if isinstance(item, date)
         }
     payload_dates |= _collect_sheet_dates_from_rows(
-        rows, received_at=received_at, fields=_get_row_fields(template),
+        rows, received_at=received_at, fields=_get_row_fields(template), explicit_week=require_explicit_ingest_week(week_id),
     )
     observed_payload_dates = {
         item for item in payload_dates if isinstance(item, date)
@@ -6108,7 +6063,7 @@ def _build_materialization_candidate_from_draft_record(
         if isinstance(line.get("date"), date)
     ]
     derived_week_id = (
-        month_id_from_dates(line_dates, effective_received_at, policy) if line_dates else None
+        month_id_from_dates(line_dates, effective_received_at, policy, explicit_week=existing_week_code) if line_dates else None
     )
     draft_week_id = str(
         draft_sheet.get("resolved_week_id") or draft_sheet.get("week_id") or ""
@@ -22203,7 +22158,9 @@ def _collect_dates_from_sheet_rows(
     *,
     fields: list[str],
     received_at: datetime,
+    explicit_week: str | None = None,
 ) -> set[date]:
+    require_explicit_ingest_week(explicit_week)
     if not rows or not fields:
         return set()
     date_idx = next((idx for idx, field in enumerate(fields) if field.startswith("date")), None)
@@ -22214,7 +22171,9 @@ def _collect_dates_from_sheet_rows(
         values = row.get("values")
         if not isinstance(values, list) or date_idx >= len(values):
             continue
-        parsed = parse_date_string(str(values[date_idx] or ""), received_at)
+        raw = values[date_idx]
+        parsed = parse_date_string(raw.isoformat() if isinstance(raw, date) else raw,
+            received_at, explicit_week=explicit_week)
         if parsed:
             dates.add(parsed)
     return dates
@@ -22222,7 +22181,9 @@ def _collect_dates_from_sheet_rows(
 
 def _collect_sheet_dates_from_rows(
     rows: list[list[Any]] | None, *, received_at: datetime, fields: list[str],
+    explicit_week: str | None = None,
 ) -> set[date]:
+    require_explicit_ingest_week(explicit_week)
     dates: set[date] = set()
     date_indexes = [index for index, field in enumerate(fields) if field.startswith("date")]
     for row in rows or []:
@@ -22231,7 +22192,8 @@ def _collect_sheet_dates_from_rows(
         for index in date_indexes:
             if index >= len(row):
                 continue
-            parsed = parse_date_string(str(row[index] or "").strip(), received_at)
+            raw = row[index]
+            parsed = parse_date_string(raw.isoformat() if isinstance(raw, date) else raw, received_at, explicit_week=explicit_week)
             if parsed:
                 dates.add(parsed)
     return dates
@@ -22289,45 +22251,22 @@ def _sheet_month_distance(from_month_id: str | None, to_month_id: str | None) ->
 
 def _collect_sheet_dates_from_payload(
     payload: dict[str, Any], received_at: datetime, template: dict[str, Any],
+    *, explicit_week: str | None = None,
 ) -> list[date]:
+    require_explicit_ingest_week(explicit_week)
     dates: list[date] = []
     seen: set[str] = set()
-    latest_resolved_date: date | None = None
 
     def _push(raw: object) -> None:
-        nonlocal latest_resolved_date
-        if raw is None:
-            return
-        parsed: date | None = None
-        if isinstance(raw, date):
-            parsed = raw
-        else:
-            text = str(raw).strip()
-            if not text:
-                return
-            parsed = parse_date_string(text, received_at)
-            if not parsed:
-                match_full = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", text)
-                if match_full:
-                    try:
-                        parsed = date(
-                            int(match_full.group(1)),
-                            int(match_full.group(2)),
-                            int(match_full.group(3)),
-                        )
-                    except Exception:
-                        parsed = None
-            if not parsed:
-                parsed = _infer_following_date_from_weekday_hint(latest_resolved_date, text)
+        parsed = parse_date_string(raw.isoformat() if isinstance(raw, date) else raw,
+            received_at, explicit_week=explicit_week)
         if not parsed:
             return
         key = parsed.isoformat()
         if key in seen:
-            latest_resolved_date = parsed
             return
         seen.add(key)
         dates.append(parsed)
-        latest_resolved_date = parsed
 
     for raw in fax_extractor.date_strings_from_row_source(payload, template):
         _push(raw)
@@ -24303,6 +24242,7 @@ def _build_sheet_lines_from_ocr_payload(
     facility_id: str | None,
     quantity_rules: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    explicit_week = require_explicit_ingest_week(week_id)
     sheet_rows = _extract_first_pass_rows_from_payload(payload, template)
     if not sheet_rows:
         sheet_rows = _extract_sheet_rows_from_payload(payload, template)
@@ -24315,7 +24255,7 @@ def _build_sheet_lines_from_ocr_payload(
         else dict(policy.get("quantity_rules", {}))
     )
     effective_quantity_rules["rows_are_body_only"] = True
-    date_candidates = _collect_sheet_dates_from_payload(payload, received_at, template)
+    date_candidates = _collect_sheet_dates_from_payload(payload, received_at, template, explicit_week=explicit_week)
     default_date = min(date_candidates) if date_candidates else None
     lines = parse_order_lines(
         sheet_rows,
@@ -24327,6 +24267,7 @@ def _build_sheet_lines_from_ocr_payload(
         grid=None,
         pdf_bytes=None,
         date_policy=policy,
+        explicit_week=explicit_week,
     )
     if not lines:
         return []
@@ -27575,7 +27516,7 @@ def get_ocr_sheet(
     payload_dates = (
         {
             item
-            for item in _collect_sheet_dates_from_payload(ocr_payload, received_at, template)
+            for item in _collect_sheet_dates_from_payload(ocr_payload, received_at, template, explicit_week=require_explicit_ingest_week(resolved_week_id))
             if isinstance(item, date)
         }
         if isinstance(ocr_payload, dict)
@@ -32772,7 +32713,7 @@ def _reparse_order_with_attempt(
         captured_read_input = _captured_reparse_read_input(order_id, write_session=session)
         if captured_read_input is None:
             return None, "reparse_start_input_missing"
-        existing_week_code = captured_read_input["order"].get("week_code")
+        existing_week_code = require_explicit_ingest_week(captured_read_input["order"].get("week_code"))
         captured_received_at = captured_read_input["order"].get("received_at")
         if not captured_received_at:
             return None, "reparse_start_input_missing"
@@ -33149,7 +33090,7 @@ def _reparse_order_with_attempt(
                 )
             pipeline_anchor_dates = {
                 item
-                for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at, template_to_use)
+                for item in _collect_sheet_dates_from_payload(pipeline_output_payload, received_at, template_to_use, explicit_week=require_explicit_ingest_week(existing_week_code))
                 if isinstance(item, date)
             }
             if position_entries_for_existing_week and not stable_existing_anchor_scope:
@@ -33900,7 +33841,7 @@ def _reparse_order_with_attempt(
     if date_strings:
         parsed_dates = []
         for raw in date_strings:
-            parsed = parse_date_string(raw, received_at, policy=policy)
+            parsed = parse_date_string(raw, received_at, policy=policy, explicit_week=require_explicit_ingest_week(existing_week_code))
             if parsed:
                 parsed_dates.append(parsed)
         if parsed_dates:
@@ -34051,6 +33992,7 @@ def _reparse_order_with_attempt(
         grid=grid.__dict__ if grid else None,
         pdf_bytes=llm_input_pdf_bytes if main_provider in {"openai", "gemini"} else pdf_bytes,
         date_policy=policy,
+        explicit_week=require_explicit_ingest_week(existing_week_code),
     ) if not preparse_validation_error else []
     if not isinstance(pipeline_output_payload, dict) and pipeline_output_ref:
         pipeline_output_payload = _load_pipeline_output_with_retry(pipeline_output_ref)
@@ -34230,7 +34172,7 @@ def _reparse_order_with_attempt(
         for line in week_resolution_lines
         if isinstance(line.get("date"), date)
     ]
-    derived_week_id = month_id_from_dates(line_dates, received_at, policy) if line_dates else None
+    derived_week_id = month_id_from_dates(line_dates, received_at, policy, explicit_week=existing_week_code) if line_dates else None
     week_payload = parsed_output_for_debug if isinstance(parsed_output_for_debug, dict) else None
     week_id = _resolve_reparse_own_week(
         captured_week=existing_week_code,
@@ -34244,7 +34186,7 @@ def _reparse_order_with_attempt(
     if isinstance(week_payload, dict):
         pipeline_payload_dates = {
             item
-            for item in _collect_sheet_dates_from_payload(week_payload, received_at, template_to_use)
+            for item in _collect_sheet_dates_from_payload(week_payload, received_at, template_to_use, explicit_week=require_explicit_ingest_week(existing_week_code))
             if isinstance(item, date)
         }
     reparse_position_entries = _build_reparse_position_menu_entries(

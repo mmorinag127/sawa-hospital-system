@@ -27,7 +27,6 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service, menu_service, sheet_week_service, master_order_form_template_service
 from src.services import canonical_facility_store
-from src.services.ingest_policy import parse_date_string
 from src.services.storage_service import (
     get_default_output_bucket,
     load_bytes_from_uri,
@@ -1151,21 +1150,6 @@ def _verify_monthly_output_sources(
         raise canonical_facility_store.CanonicalStoreError("facility_master_revision_conflict", status_code=409)
     if _read_saved_sheet_source_workbook(facility, month_id) != source:
         raise ValueError("monthly order form source workbook changed")
-
-
-def _dates_from_saved_sheet(fields: list[Any], rows: list[Any], received_at: datetime) -> list[date]:
-    field_indexes = _sheet_field_indexes(fields)
-    date_idx = _first_field_index(field_indexes, ("date", "menu_date", "日付"))
-    if date_idx is None:
-        return []
-    dates: list[date] = []
-    for row in rows:
-        if not isinstance(row, list):
-            continue
-        parsed = parse_date_string(str(_sheet_cell(row, date_idx) or ""), received_at)
-        if parsed:
-            dates.append(parsed)
-    return dates
 
 
 def _resolve_week_range_for_saved_sheet(

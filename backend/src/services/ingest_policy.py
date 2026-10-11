@@ -4,17 +4,6 @@ from typing import Iterable, Optional
 
 from src.services.config_service import load_ingest_policy
 
-DATE_FORMAT_MAP = {
-    "MM/DD": "%m/%d",
-    "YYYY/MM/DD": "%Y/%m/%d",
-    "YYYY-MM-DD": "%Y-%m-%d",
-}
-
-
-def _normalize_format(fmt: str) -> str:
-    return DATE_FORMAT_MAP.get(fmt, "%m/%d")
-
-
 _FULLWIDTH_TRANS = str.maketrans(
     {
         "\uff10": "0",
@@ -41,52 +30,6 @@ def _normalize_date_string(value: str) -> str:
     return cleaned
 
 
-def _extract_date_candidate(value: str, include_year: bool) -> str:
-    if include_year:
-        match = re.search(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", value)
-        if match:
-            return match.group(0)
-    match = re.search(r"\d{1,2}[/-]\d{1,2}", value)
-    if match:
-        return match.group(0)
-    return value
-
-
-def _parse_date(date_str: str, fmt: str, default_year: int) -> Optional[date]:
-    if not date_str:
-        return None
-    if not isinstance(date_str, str):
-        date_str = str(date_str)
-    cleaned = date_str.strip()
-    if not cleaned:
-        return None
-    normalized_input = _normalize_date_string(cleaned)
-    normalized = _normalize_format(fmt)
-    try:
-        include_year = "%Y" in normalized
-        normalized_input = _extract_date_candidate(normalized_input, include_year)
-        if "%Y" in normalized:
-            return datetime.strptime(normalized_input, normalized).date()
-        with_year = f"{default_year}/{normalized_input}"
-        return datetime.strptime(with_year, f"%Y/{normalized}").date()
-    except ValueError:
-        return None
-
-
-def _adjust_year(parsed: date, received_at: datetime, fmt: str) -> date:
-    normalized = _normalize_format(fmt)
-    if "%Y" in normalized:
-        return parsed
-    candidates = [parsed]
-    for delta in (-1, 1):
-        try:
-            candidates.append(parsed.replace(year=parsed.year + delta))
-        except ValueError:
-            continue
-    received_date = received_at.date()
-    return min(candidates, key=lambda candidate: abs((candidate - received_date).days))
-
-
 def require_explicit_ingest_week(value: object) -> str:
     from src.services.sheet_week_service import parse_sheet_week_value
 
@@ -100,37 +43,59 @@ def require_explicit_ingest_week(value: object) -> str:
     return value.strip()
 
 
-def parse_date_string(date_str: str, received_at: datetime, *, policy: Optional[dict] = None) -> Optional[date]:
-    if policy is None:
-        policy = load_ingest_policy()
-    week_policy = policy.get("week_id_policy", {})
-    date_format = week_policy.get("date_format", "MM/DD")
-    parsed = _parse_date(date_str, date_format, received_at.year)
-    if parsed:
-        return _adjust_year(parsed, received_at, date_format)
-    return None
+def parse_date_string(date_str: str, received_at: datetime, *, policy: Optional[dict] = None, explicit_week: str | None = None) -> Optional[date]:
+    require_explicit_ingest_week(explicit_week)
+    if explicit_week is not None:
+        from src.services.sheet_week_service import parse_sheet_week_value
+
+        _, start, end = parse_sheet_week_value(require_explicit_ingest_week(explicit_week))
+        if date_str is None or not str(date_str).strip():
+            return None
+        text = _normalize_date_string(str(date_str).strip())
+        full_dates = list(re.finditer(r"(?<![\d/-])(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?![\d/-])", text))
+        short_text = text
+        for match in reversed(full_dates):
+            short_text = short_text[:match.start()] + " " * (match.end() - match.start()) + short_text[match.end():]
+        short_dates = list(re.finditer(r"(?<![\d/-])(\d{1,2})[/-](\d{1,2})(?![\d/-])", short_text))
+        if len(full_dates) + len(short_dates) != 1:
+            raise ValueError("ingest_date_unresolved_in_selected_period")
+        if full_dates:
+            try:
+                parsed = date(*(int(value) for value in full_dates[0].groups()))
+            except ValueError as exc:
+                raise ValueError("ingest_date_outside_selected_period") from exc
+            if not start <= parsed <= end:
+                raise ValueError("ingest_date_outside_selected_period")
+            return parsed
+        month, day = (int(value) for value in short_dates[0].groups())
+        matches = []
+        for year in range(start.year, end.year + 1):
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            if start <= candidate <= end:
+                matches.append(candidate)
+        if len(matches) != 1:
+            raise ValueError("ingest_date_unresolved_in_selected_period")
+        return matches[0]
 
 
 def week_id_from_dates(
     date_strings: Iterable[object],
     received_at: datetime,
     policy: Optional[dict] = None,
+    *, explicit_week: str | None = None,
 ) -> Optional[str]:
+    require_explicit_ingest_week(explicit_week)
     policy = load_ingest_policy() if policy is None else policy
     week_policy = policy.get("week_id_policy", {})
-    date_format = week_policy.get("date_format", "MM/DD")
     week_format = week_policy.get("week_format", "WEK%GW%V")
 
     dates: list[date] = []
     for raw in date_strings:
-        if isinstance(raw, date):
-            dates.append(raw)
-            continue
-        if raw is None:
-            continue
-        parsed = _parse_date(raw, date_format, received_at.year)
-        if parsed:
-            parsed = _adjust_year(parsed, received_at, date_format)
+        parsed = parse_date_string(raw.isoformat() if isinstance(raw, date) else raw,
+            received_at, policy=policy, explicit_week=explicit_week)
         if parsed:
             dates.append(parsed)
     if not dates:
@@ -144,23 +109,17 @@ def month_id_from_dates(
     date_strings: Iterable[object],
     received_at: datetime,
     policy: Optional[dict] = None,
+    *, explicit_week: str | None = None,
 ) -> Optional[str]:
+    require_explicit_ingest_week(explicit_week)
     policy = load_ingest_policy() if policy is None else policy
     month_policy = policy.get("month_id_policy", {})
-    week_policy = policy.get("week_id_policy", {})
-    date_format = month_policy.get("date_format") or week_policy.get("date_format", "MM/DD")
     month_format = month_policy.get("month_format", "%Y-%m")
 
     dates: list[date] = []
     for raw in date_strings:
-        if isinstance(raw, date):
-            dates.append(raw)
-            continue
-        if raw is None:
-            continue
-        parsed = _parse_date(raw, date_format, received_at.year)
-        if parsed:
-            parsed = _adjust_year(parsed, received_at, date_format)
+        parsed = parse_date_string(raw.isoformat() if isinstance(raw, date) else raw,
+            received_at, policy=policy, explicit_week=explicit_week)
         if parsed:
             dates.append(parsed)
     if not dates:

@@ -3,7 +3,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Optional
 
-from src.services.ingest_policy import parse_date_string, load_ingest_policy
+from src.services.ingest_policy import parse_date_string, load_ingest_policy, require_explicit_ingest_week
 
 
 def _parse_number(
@@ -498,7 +498,12 @@ def parse_order_lines(
     grid: Optional[dict] = None,
     pdf_bytes: bytes | None = None,
     date_policy: Optional[dict] = None,
+    explicit_week: str | None = None,
 ) -> list[dict[str, Any]]:
+    explicit_week = require_explicit_ingest_week(explicit_week)
+    if default_date is not None:
+        default_date = parse_date_string(default_date.isoformat(), received_at,
+            policy=date_policy, explicit_week=explicit_week)
     date_policy = load_ingest_policy() if date_policy is None else date_policy
     quantity_rules = quantity_rules or {}
     zero_as_empty = quantity_rules.get("zero_as_empty", True)
@@ -604,7 +609,7 @@ def parse_order_lines(
                 if idx is None or idx >= len(row):
                     continue
                 cell = _normalize_cell(row[idx], normalize_whitespace)
-                parsed = parse_date_string(cell, received_at, policy=date_policy)
+                parsed = parse_date_string(cell, received_at, policy=date_policy, explicit_week=explicit_week)
                 if parsed:
                     first_date_in_table = parsed
                     break
@@ -646,7 +651,7 @@ def parse_order_lines(
             cell = _normalize_cell(row[idx], normalize_whitespace)
             role = col.get("role")
             if role == "date":
-                base["date"] = parse_date_string(cell, received_at, policy=date_policy)
+                base["date"] = parse_date_string(cell, received_at, policy=date_policy, explicit_week=explicit_week)
             elif role == "daypart":
                 base["daypart"] = _canonical_daypart(cell) or None
             elif role == "menu_name":
