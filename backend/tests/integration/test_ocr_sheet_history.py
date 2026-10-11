@@ -4810,7 +4810,9 @@ def test_count_source_row_alignment_penalty_cells_counts_shifted_rows():
         "qty.regular_x",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                             "diet_type": "regular", "area_id": "X"}]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     base_rows = [
         {
             "row_id": "r0",
@@ -4909,7 +4911,9 @@ def test_apply_order_line_quantities_does_not_fallback_date_menu_when_daypart_fi
         "qty.regular_2f",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                             "diet_type": "regular", "area_id": "2F"}]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     rows = [
         {
             "row_id": "r0",
@@ -4984,7 +4988,9 @@ def test_apply_order_line_quantities_preserves_zero_value():
         "qty.regular_2f",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                             "diet_type": "regular", "area_id": "2F"}]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     rows = [
         {
             "row_id": "r0",
