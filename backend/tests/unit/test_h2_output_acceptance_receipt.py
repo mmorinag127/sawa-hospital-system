@@ -7,6 +7,61 @@ from src.services import output_builder
 from src.services.order_workflow_v2_service import _canonical_payload_digest
 
 
+def _save_component_receipt(candidate, *, order_id="own", sheet_id="sheet-own", template_id="template-own", artifact=None):
+    from copy import deepcopy
+    from src.db import session_scope
+    from src.models.facility import Facility
+    from src.models.facility_template_version import FacilityTemplateVersion
+    from src.models.order import Order
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from src.services import order_output_artifact_service as artifacts
+
+    # Explicit artifact-consumer component records, not canonical order-flow proof.
+    with session_scope() as session:
+        session.add(Facility(id="fixture", name="Synthetic acceptance fixture"))
+        session.flush()
+        session.add(FacilityTemplateVersion(id=template_id, facility_id="fixture", version="synthetic-acceptance",
+            columns_json=[], template_digest=_canonical_payload_digest({"component": "acceptance"})))
+        session.flush()
+        session.add(Order(id=order_id, facility_code="fixture", document_uri="fixture://acceptance", message_id="acceptance-message"))
+        session.flush()
+        session.add(OrderOcrEvidenceRun(id="evidence-own", order_id=order_id, template_version_id=template_id,
+            schema_version="synthetic-component", payload_json={"own": 0}, artifact_digest=_canonical_payload_digest({"own": 0})))
+        session.flush()
+        session.add(OrderSheetDraft(id=sheet_id, order_id=order_id, template_version_id=template_id,
+            base_evidence_run_id="evidence-own", draft_sheet_json={"rows": []}))
+        session.flush()
+        payload = deepcopy(artifact) if artifact is not None else {
+            "bagging_result_id": "bag-own", "order_id": order_id,
+            "source_saved_sheet_id": sheet_id, "source_ocr_result_id": None,
+            "template_version_id": template_id, "materialization_candidate": deepcopy(candidate),
+            "materialization_digest": _canonical_payload_digest(candidate),
+        }
+        artifacts.save_bagging_result_artifact(session, payload=payload)
+    state = SimpleNamespace(state="bagging_ready", secondary_actions_json={"workflow_v2": {"bagging_result_id": payload["bagging_result_id"]}})
+    draft = SimpleNamespace(id=sheet_id, template_version_id=template_id)
+    return {"id": order_id}, state, draft, payload
+
+
+def _read_component_receipt(order, state, draft):
+    from src.db import session_scope
+    with session_scope() as session:
+        return output_builder._workflow_v2_materialization_candidate(session, order, state, draft)
+
+
+def _replace_component_receipt(payload):
+    from copy import deepcopy
+    from src.db import session_scope
+    from src.models.order_output_artifact import OrderBaggingResult
+    from src.services import order_output_artifact_service as artifacts
+
+    with session_scope() as session:
+        row = session.get(OrderBaggingResult, payload["bagging_result_id"])
+        row.payload_json = deepcopy(payload)
+        row.payload_digest = artifacts.payload_digest(payload)
+
+
 def test_first_bagging_producer_then_consumer_uses_same_captured_output(isolated_formal_schema):
     from copy import deepcopy
     from datetime import datetime
@@ -15,7 +70,7 @@ def test_first_bagging_producer_then_consumer_uses_same_captured_output(isolated
 
     order = Order(id="own-first-bagging", facility_code="fixture", week_code="2026-10", received_at=datetime(2026, 10, 7))
     draft = SimpleNamespace(id="sheet-own", template_version_id="template-own", base_evidence_run_id="evidence-own")
-    configured = {"facility": {"facility_id": "fixture", "packaging_policy": {}, "label_profile": {}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}
+    configured = {"facility": {"facility_id": "fixture", "facility_name": "Synthetic acceptance fixture", "packaging_policy": {}, "label_profile": {}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}
     candidate = {"configured_input": deepcopy(configured), "lines": [{"date": "2026-10-07", "daypart": "lunch", "menu_name": "own", "diet_type": "regular", "quantity_original": 0, "quantity_corrected": 0, "menu_qty_per_serving": 1, "menu_unit_type": "g"}]}
     candidate["lines"][0]["menu_category"] = "主菜"
     # No prior artifact exists. Actual common enrichment and bag-row allocation run.
@@ -24,9 +79,8 @@ def test_first_bagging_producer_then_consumer_uses_same_captured_output(isolated
     assert artifact["materialization_digest"] == _canonical_payload_digest(candidate)
     assert candidate["configured_input"] == configured
     assert candidate["lines"][0]["quantity_original"] == 0
-    state = SimpleNamespace(secondary_actions_json={"workflow_v2": {"bagging_result": artifact}})
-    with patch.object(output_builder.order_output_artifact_service, "enrich_workflow_meta_with_artifacts", side_effect=lambda session, meta: meta):
-        accepted = output_builder._workflow_v2_materialization_candidate(None, {}, state, draft)
+    owned_order, state, saved_draft, _ = _save_component_receipt(candidate, order_id=order.id, artifact=artifact)
+    accepted = _read_component_receipt(owned_order, state, saved_draft)
     configured["facility"]["bagging_exceptions"] = [{"type": "quantity_multiplier", "multiplier": 99}]
     expected_bags = output_builder.build_bag_rows_for_outputs({"id": order.id, "facility": "fixture", "week": "2026-10"}, accepted_candidate=accepted)
     with patch.object(output_builder, "_accepted_output_candidate", return_value=accepted), patch("src.services.config_service.get_facility_config", side_effect=AssertionError("changed master read")):
@@ -38,24 +92,21 @@ def test_first_bagging_producer_then_consumer_uses_same_captured_output(isolated
         output_builder.build_bag_rows_for_outputs({"id": order.id}, order_lines=foreign_lines, accepted_candidate=accepted)
 
 
-def test_output_consumes_exact_accepted_candidate_without_config_recapture():
+def test_output_consumes_exact_accepted_candidate_without_config_recapture(isolated_formal_schema):
     candidate = {"configured_input": {"facility": {"unknown": None}, "policy": {"zero": 0}}, "lines": [{"quantity": 0}]}
-    artifact = {"source_saved_sheet_id": "sheet-own", "template_version_id": "template-own", "materialization_candidate": candidate,
-                "materialization_digest": _canonical_payload_digest(candidate)}
-    workflow = SimpleNamespace(secondary_actions_json={"workflow_v2": {"bagging_result": artifact}})
-    draft = SimpleNamespace(id="sheet-own", template_version_id="template-own")
-    with patch.object(output_builder.order_output_artifact_service, "enrich_workflow_meta_with_artifacts", side_effect=lambda session, meta: meta), patch("src.services.config_service.capture_authored_processing_config", side_effect=AssertionError("late config read")):
-        result = output_builder._workflow_v2_materialization_candidate(None, {}, workflow, draft)
+    order, workflow, draft, artifact = _save_component_receipt(candidate)
+    with patch("src.services.config_service.capture_authored_processing_config", side_effect=AssertionError("late config read")):
+        result = _read_component_receipt(order, workflow, draft)
     assert result == candidate
     assert result is not candidate
     assert result["lines"][0]["quantity"] == 0
 
 
 @pytest.mark.parametrize("change", ["missing", "wrong_sheet", "wrong_digest", "missing_policy", "missing_template"])
-def test_output_missing_or_inconsistent_acceptance_receipt_stops(change):
+def test_output_missing_or_inconsistent_acceptance_receipt_stops(isolated_formal_schema, change):
     candidate = {"configured_input": {"facility": {}, "policy": {}}, "lines": [{"quantity": 0}]}
-    artifact = {"source_saved_sheet_id": "sheet-own", "template_version_id": "template-own", "materialization_candidate": candidate,
-                "materialization_digest": _canonical_payload_digest(candidate)}
+    order, workflow, draft, artifact = _save_component_receipt(candidate)
+    candidate = artifact["materialization_candidate"]
     if change == "missing":
         artifact = None
     elif change == "wrong_sheet":
@@ -67,10 +118,18 @@ def test_output_missing_or_inconsistent_acceptance_receipt_stops(change):
     else:
         del candidate["configured_input"]["policy"]
         artifact["materialization_digest"] = _canonical_payload_digest(candidate)
-    workflow = SimpleNamespace(secondary_actions_json={"workflow_v2": {"bagging_result": artifact}})
-    draft = SimpleNamespace(id="sheet-own", template_version_id="template-own")
-    with patch.object(output_builder.order_output_artifact_service, "enrich_workflow_meta_with_artifacts", side_effect=lambda session, meta: meta), pytest.raises(ValueError):
-        output_builder._workflow_v2_materialization_candidate(None, {}, workflow, draft)
+    from src.db import session_scope
+    from src.models.order_output_artifact import OrderBaggingResult
+    from src.services import order_output_artifact_service as artifacts
+    with session_scope() as session:
+        row = session.get(OrderBaggingResult, "bag-own")
+        if artifact is None:
+            session.delete(row)
+        else:
+            row.payload_json = artifact
+            row.payload_digest = artifacts.payload_digest(artifact)
+    with pytest.raises(ValueError):
+        _read_component_receipt(order, workflow, draft)
 
 
 def test_actual_delivery_authoritative_empty_does_not_read_current(monkeypatch):
@@ -282,17 +341,15 @@ def test_required_numeric_label_amount_without_unit_stops():
         output_builder._label_payload_jp({"quantity": 7, "menu_qty_per_serving": 0, "menu_unit_type": None})
 
 
-def test_actual_delivery_context_duplicate_preserves_producer_first(monkeypatch):
-    from copy import deepcopy
+def test_actual_delivery_context_duplicate_preserves_producer_first(isolated_formal_schema, monkeypatch):
     entries = [{"date": "2026-10-07", "menu_name": "own", "quantity_map": {"regular": 0}}, {"date": "2026-10-07", "menu_name": "own", "quantity_map": {"regular": 99}}]
     candidate = {"configured_input": {"facility": {"fax_template": {"columns": []}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}, "output_lines": [], "output_ocr_menu_entries": entries, "output_ocr_menu_defaults": {}, "lines": []}
     candidate["configured_input"]["facility"]["invoice_template"] = {"columns": [{"name": "menu_name", "source": "menu_name"}]}
-    artifact = {"source_saved_sheet_id": "own-sheet", "template_version_id": "own-template", "materialization_candidate": candidate, "materialization_digest": _canonical_payload_digest(candidate)}
-    state = SimpleNamespace(secondary_actions_json={"workflow_v2": {"bagging_result": artifact}})
-    sheet = SimpleNamespace(id="own-sheet", template_version_id="own-template")
-    monkeypatch.setattr(output_builder.order_output_artifact_service, "enrich_workflow_meta_with_artifacts", lambda session, meta: meta)
+    owned_order, state, sheet, artifact = _save_component_receipt(candidate, sheet_id="own-sheet", template_id="own-template")
+    candidate = artifact["materialization_candidate"]
     def accepted(order):
-        return output_builder._workflow_v2_materialization_candidate(None, order, state, sheet)
+        assert order["id"] == owned_order["id"]
+        return _read_component_receipt(order, state, sheet)
     monkeypatch.setattr(output_builder, "_accepted_output_candidate", accepted)
     monkeypatch.setattr(output_builder, "get_order_by_id", lambda oid: {"id": oid, "facility": "fixture", "week": "2026-10"})
     monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda *args: pytest.fail("consumer current master"))
@@ -303,11 +360,13 @@ def test_actual_delivery_context_duplicate_preserves_producer_first(monkeypatch)
     assert delivery[0]["menu_name"] == "own"
     candidate["output_ocr_menu_entries"] = []
     artifact["materialization_digest"] = _canonical_payload_digest(candidate)
+    _replace_component_receipt(artifact)
     empty_context = output_builder._prepare_output_context("own", include_bags=False)
     assert empty_context["ocr_menu_meta"]["entries"] == []
     assert output_builder._build_delivery_rows(empty_context["order_for_outputs"], empty_context["invoice_template"], empty_context["quantity_rules"], empty_context["facility_config"], empty_context["ocr_menu_meta"]) == []
     del candidate["configured_input"]["facility"]["invoice_template"]
     artifact["materialization_digest"] = _canonical_payload_digest(candidate)
+    _replace_component_receipt(artifact)
     label_context = output_builder._prepare_output_context("own", include_bags=False, require_invoice=False)
     assert label_context["invoice_template"] is None
     with pytest.raises(ValueError, match="accepted_invoice_template_required"):
