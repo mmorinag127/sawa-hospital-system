@@ -1,0 +1,65 @@
+name: Modernization Linux frontend image proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/modernization-image-ci-20261012]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-image:
+    if: >-
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/codex/modernization-image-ci-20261012'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build actual frontend image and verify vendored dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/tmp/image-ci"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/build.log") 2>&1
+          git rev-parse HEAD > "$evidence/source-sha.txt"
+          image="sawa-frontend-proof:${GITHUB_SHA}"
+          trap 'code=$?; printf "%s\n" "$code" > "$evidence/exit-code.txt"; docker image inspect "$image" > "$evidence/image-inspect.json" 2> "$evidence/image-inspect-error.txt" || true; exit "$code"' EXIT
+          docker version > "$evidence/docker-version.txt"
+          context="$(./scripts/prepare_web_deploy_source.sh image-ci "$RUNNER_TEMP/image-ci-source")"
+          ./scripts/validate_web_deploy_source.sh "$context"
+          cp "$context/.codex-deploy-source.json" "$evidence/deploy-source.json"
+          cmp frontend/Dockerfile "$context/Dockerfile"
+          cmp frontend/package.json "$context/package.json"
+          cmp frontend/package-lock.json "$context/package-lock.json"
+          diff -r frontend/vendor "$context/vendor"
+          sha256sum "$context/Dockerfile" "$context/package.json" "$context/package-lock.json" "$context"/vendor/* > "$evidence/input-sha256.txt"
+          DOCKER_BUILDKIT=1 docker build --progress=plain \
+            --build-arg NEXT_PUBLIC_API_BASE_URL=/api/hospital \
+            --build-arg "NEXT_PUBLIC_GIT_SHA=$GITHUB_SHA" \
+            --label "sawa.git_sha=$GITHUB_SHA" \
+            -t "$image" -f "$context/Dockerfile" "$context"
+          # No application server, auth, database, ports or container network.
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --entrypoint node "$image" \
+            -e 'const p=JSON.parse(require("fs").readFileSync("/app/node_modules/@sawa/ui/package.json","utf8")); if(process.platform!=="linux" || process.versions.node.split(".")[0]!=="20" || p.name!=="@sawa/ui") process.exit(1); console.log(JSON.stringify({platform:process.platform,node:process.version,dependency:p.name,version:p.version}));' \
+            > "$evidence/container-dependency.json"
+          container="$(docker create --network none "$image")"
+          trap 'code=$?; docker rm "$container" >/dev/null 2>&1 || true; printf "%s\n" "$code" > "$evidence/exit-code.txt"; docker image inspect "$image" > "$evidence/image-inspect.json" 2> "$evidence/image-inspect-error.txt" || true; exit "$code"' EXIT
+          docker cp "$container:/app/node_modules/@sawa/ui" "$evidence/installed-ui"
+          vendor="$(python3 -c 'import json; print(json.load(open("frontend/package.json"))["dependencies"]["@sawa/ui"].removeprefix("file:"))')"
+          mkdir "$evidence/authored-ui"
+          tar -xzf "$context/$vendor" -C "$evidence/authored-ui"
+          diff -r "$evidence/authored-ui/package" "$evidence/installed-ui" > "$evidence/vendor-parity.txt"
+      - name: Preserve image proof even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-image-proof-${{ github.sha }}-${{ github.run_attempt }}
+          path: tmp/image-ci/
+          if-no-files-found: error
+          retention-days: 14
