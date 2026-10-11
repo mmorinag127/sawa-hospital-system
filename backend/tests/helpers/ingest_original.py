@@ -112,24 +112,49 @@ def register_authored_original(uploaded_pdf_id, *, effective_date):
         receipt = session.get(IngestJob, uploaded["message_id"])
         assert receipt is not None
         assert snapshots_equal(receipt.payload["facility_selection"], selection)
-    payload = parse_ingest_payload(uploads.build_ingest_payload(uploaded))
+    payload = parse_ingest_payload(uploads.build_ingest_payload(uploaded, facility_selection=selection))
     return register_authored_payload(payload, effective_date=effective_date)
 
 
 def register_authored_payload(payload, *, effective_date, registration_job_id=None):
     """Register explicit component inputs through actual registration/lineage APIs."""
-    from src.services import canonical_facility_lineage, order_service, facility_service
+    from src.services import order_service
+    from src.services.workflow_attempt_guard_service import snapshots_equal
     from src.models.order import Order
-    registered = order_service.create_order_from_ingest(payload, lines=None,
-        ocr_attempts=0, document_status="processing", error_message="ocr_pending",
-        registration_job_id=registration_job_id)
-    with session_scope() as session:
-        facility_service.ensure_facility_materialized(session, payload.facility_hint)
-        selected, _ = canonical_facility_lineage.resolve(session, payload.facility_hint, effective_date)
-        _, projection = canonical_facility_lineage.materialize(session, selected)
-        order = session.get(Order, registered["id"])
-        order.template_version_id = projection.id
-    return registered
+
+    selection = payload.facility_selection
+    assert isinstance(selection, dict)
+    assert selection["effective_date"] == effective_date.isoformat()
+
+    def register(lease):
+        assert lease["id"] == payload.message_id
+        assert not lease.get("claim_refusal")
+        assert snapshots_equal(lease["payload"]["facility_selection"], selection)
+        registered = order_service.create_order_from_ingest(payload, lines=None,
+            ocr_attempts=0, document_status="processing", error_message="ocr_pending",
+            registration_job_id=registration_job_id)
+        with session_scope() as session:
+            order = session.get(Order, registered["id"])
+            assert order is not None
+            assert order.template_version_id == selection["facility_template_version_id"]
+        return registered
+
+    lease = ingest.current_ingest_lease()
+    if lease is not None:
+        return register(lease)
+
+    original = ingest.get_ingest_job_snapshot(payload.message_id)
+    assert original is not None
+    delivery_id, generation = delivery.delivery_for_job(
+        original["id"], original["generation"], original["input_digest"],
+    )
+    claim = delivery.claim_delivery(delivery_id, generation)
+    assert claim["duplicate"] is False
+    assert claim["execute"] is True
+    lease = claim["lease"]
+    assert lease is not None
+    with delivery.claim_context(claim), ingest.ingest_execution_context(lease):
+        return register(lease)
 
 
 def authored_pipeline_provider(monkeypatch, *, table_rows):
