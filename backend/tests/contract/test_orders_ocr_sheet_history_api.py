@@ -545,8 +545,8 @@ def test_orders_week_options_and_save_api_flow():
     original_datetime = order_service.datetime
     order_service.datetime = _FrozenDateTime
 
-    order = _create_seed_order("msg-api-week-001")
     try:
+        order = _create_seed_order("msg-api-week-001")
         options_res = client.get(f"/orders/{order['id']}/week-options")
         assert options_res.status_code == 200
         options = options_res.json().get("options") or []
@@ -913,8 +913,8 @@ def test_order_detail_promotes_plain_month_week_to_selected_weekly_range():
     original_datetime = order_service.datetime
     order_service.datetime = _FrozenDateTime
 
-    order = _create_seed_order("msg-api-week-display-001")
     try:
+        order = _create_seed_order("msg-api-week-display-001")
         save_res = client.post(f"/orders/{order['id']}/week", json={"week": "2026-01"})
         assert save_res.status_code == 200
 
