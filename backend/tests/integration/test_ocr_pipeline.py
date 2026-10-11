@@ -1724,7 +1724,9 @@ def test_legacy_menu_position_mapping_safe_wrapper_is_disabled(monkeypatch):
 def test_build_position_entries_for_lines_scopes_single_payload_date_when_line_dates_missing(monkeypatch):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
 
-    def _fake_weekly_entries(_week_id: str):
+    def _fake_weekly_entries(_week_id: str, facility_id: str | None):
+        assert _week_id == "2026-02"
+        assert facility_id is None
         entries = []
         for day in range(1, 29):
             menu_date = date(2026, 2, day)
@@ -1761,7 +1763,9 @@ def test_build_position_entries_for_lines_scopes_single_payload_date_when_line_d
 def test_build_position_entries_for_lines_does_not_expand_sparse_source_row_span(monkeypatch):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
 
-    def _fake_weekly_entries(_week_id: str):
+    def _fake_weekly_entries(_week_id: str, facility_id: str | None):
+        assert _week_id == "2026-02"
+        assert facility_id is None
         entries = []
         for day in range(1, 29):
             menu_date = date(2026, 2, day)
@@ -1797,7 +1801,9 @@ def test_build_position_entries_for_lines_does_not_expand_sparse_source_row_span
 def test_build_position_entries_for_lines_expands_dense_source_row_span(monkeypatch):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
 
-    def _fake_weekly_entries(_week_id: str):
+    def _fake_weekly_entries(_week_id: str, facility_id: str | None):
+        assert _week_id == "2026-02"
+        assert facility_id is None
         entries = []
         for day in range(1, 29):
             menu_date = date(2026, 2, day)
