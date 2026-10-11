@@ -26,31 +26,12 @@ from src.models.facility_template_version import FacilityTemplateVersion
 from src.services import order_output_artifact_service as artifacts
 from src.services.output_history_service import list_output_history, OutputHistoryNotFound
 from src.services.order_workflow_v2_service import WORKFLOW_V2_META_KEY
+from modernization_history_input_fixture import seed_history_inputs
 
 
 @pytest.fixture
-def history(isolated_formal_schema):
-    with session_scope() as session:
-        for owner in ("synthetic-order", "other-order"):
-            session.add(Order(id=owner, document_uri="fixture://not-an-ocr-pdf", message_id=owner))
-            session.flush()
-            session.add(OrderSheetDraft(id=f"{owner}-sheet", order_id=owner, draft_sheet_json={"rows": []}))
-            session.flush()
-            bag = {"bagging_result_id": f"{owner}-bag", "order_id": owner,
-                   "source_saved_sheet_id": f"{owner}-sheet", "source_ocr_result_id": None,
-                   "template_version_id": None, "quantities": [0, None, 6, 9]}
-            artifacts.save_bagging_result_artifact(session, payload=bag)
-            for index, key in enumerate(("old", "current", "newest")):
-                payload = {"output_bundle_id": f"{owner}-{key}", "order_id": owner,
-                           "source_saved_sheet_id": f"{owner}-sheet", "source_bagging_result_id": bag["bagging_result_id"],
-                           "source_ocr_result_id": None, "template_version_id": None, "materialization_digest": None,
-                           "quantities": [0, None, 6, 9], "file_path": "fixture://must-not-leak"}
-                row = artifacts.save_output_bundle_artifact(session, payload=payload)
-                row.created_at = datetime(2026, 2, 15, 9, 0, index, 123456)
-            session.add(OrderWorkflowState(order_id=owner, revision=7, state="output_review",
-                draft_id=f"{owner}-sheet", template_version_id=None, blockers_json=[],
-                secondary_actions_json={WORKFLOW_V2_META_KEY: {
-                    "output_bundle_id": f"{owner}-current", "bagging_result_id": bag["bagging_result_id"]}}))
+def history(isolated_formal_schema, tmp_path, monkeypatch):
+    seed_history_inputs(isolated_formal_schema, tmp_path, monkeypatch)
     # SQLAlchemy's version mapper assigns the persisted initial revision.
     # Capture it once; subsequent reads never refresh this expected baseline.
     with session_scope() as session:
@@ -158,8 +139,7 @@ def test_historical_metadata_blank_or_whitespace_not_silently_dropped(history, f
             session.add(OrderBaggingResult(id=" ", order_id="synthetic-order", source_saved_sheet_id="synthetic-order-sheet",
                 payload_json={}, payload_digest=artifacts.payload_digest({})))
         elif field == "template_version_id":
-            session.add(Facility(id="synthetic-facility", name="Synthetic fixture facility"))
-            session.flush()
+            assert session.get(Facility, "synthetic-facility").name == "Synthetic fixture facility"
             session.add(FacilityTemplateVersion(id=" ", facility_id="synthetic-facility", version="synthetic-v1",
                 status="draft", columns_json=[], template_digest="synthetic-authored-digest"))
         session.flush()
@@ -219,8 +199,7 @@ def test_malformed_persisted_timestamp_explicitly_stops_instead_of_guessing(hist
 
 def test_current_template_mismatch_refuses_otherwise_valid_current_artifact(history):
     with session_scope() as session:
-        session.add(Facility(id="synthetic-facility", name="Synthetic fixture facility"))
-        session.flush()
+        assert session.get(Facility, "synthetic-facility").name == "Synthetic fixture facility"
         session.add(FacilityTemplateVersion(id="synthetic-template", facility_id="synthetic-facility",
             version="synthetic-v1", status="draft", columns_json=[], template_digest="synthetic-authored-digest"))
         session.flush()
@@ -366,11 +345,32 @@ def test_facility_documentation_body_preserves_raw_extras_cas_and_service_valida
 
 
 @pytest.mark.parametrize("action", ["row", "bulk", "delete"])
-def test_public_daily_override_binding_still_explicitly_blocks_not_callback_acceptance(action):
+def test_public_daily_override_binding_still_explicitly_blocks_not_callback_acceptance(action, isolated_formal_schema, monkeypatch):
     from src.services import order_service
     body = {"output_date": date(2026, 2, 15), "daypart": "昼食", "menu_name": "synthetic-menu",
             "menu_category": "主菜", "unit_type": "g", "qty_per_serving": 0}
-    with pytest.raises(ValueError, match="daily_output_original_ownership_required"):
-        if action == "row": order_service.upsert_daily_output_portion_override(**body, facility_id="synthetic-facility", diet_type="regular")
-        elif action == "bulk": order_service.upsert_daily_output_portion_override_bulk(**body)
-        else: order_service.delete_daily_output_portion_override("synthetic-override")
+    original_body = deepcopy(body)
+    statements = []
+
+    def observe(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Missing ownership receipt must stop before transaction or rebuild callback")
+
+    monkeypatch.setattr(order_service, "_daily_override_transaction", forbidden)
+    monkeypatch.setattr(order_service, "_rebuild_bags_for_override_scopes", forbidden)
+    event.listen(isolated_formal_schema, "before_cursor_execute", observe)
+    try:
+        with pytest.raises(ValueError) as failure:
+            if action == "row": order_service.upsert_daily_output_portion_override(**body, facility_id="synthetic-facility", diet_type="regular")
+            elif action == "bulk": order_service.upsert_daily_output_portion_override_bulk(**body)
+            else: order_service.delete_daily_output_portion_override("synthetic-override")
+        assert json.loads(str(failure.value)) == {
+            "code": "daily_output_original_conflict",
+            "detail": "表示後に対象注文または正本・単位設定が変更されました。開き直してください。",
+        }
+        assert statements == []
+        assert body == original_body
+    finally:
+        event.remove(isolated_formal_schema, "before_cursor_execute", observe)
