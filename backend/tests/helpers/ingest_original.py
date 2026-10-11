@@ -62,6 +62,8 @@ def process_uploaded_original(uploaded_pdf_id):
 
 def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="lunch"):
     """Explicit component JSON/menu/PDF inputs, never operator scenario proof."""
+    from src.models.facility import Facility
+
     facility = {
         "facility_id": facility_id, "facility_name": "Authored component facility",
         "areas": [], "fax_template_id": "authored-component",
@@ -82,6 +84,12 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
     monkeypatch.setenv("FACILITY_MASTER_PATH", str(master))
     monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", policy)
     with session_scope() as session:
+        parent = session.get(Facility, facility["facility_id"])
+        if parent is None:
+            session.add(Facility(id=facility["facility_id"], name=facility["facility_name"]))
+            session.flush()
+        else:
+            assert parent.name == facility["facility_name"]
         month = menu_date.strftime("%Y-%m")
         session.add(MonthlyMenu(id=month, month_start=menu_date.replace(day=1)))
         session.add(MonthlyMenuEntry(id="authored-physical-row", monthly_menu_id=month,

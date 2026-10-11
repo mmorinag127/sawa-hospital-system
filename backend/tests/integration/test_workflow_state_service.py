@@ -152,6 +152,8 @@ def test_refresh_workflow_state_persists_current_state_snapshot() -> None:
 
 def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row(monkeypatch, tmp_path) -> None:
     from datetime import date
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.ingest_facility_selection_service import capture_selection
     from src.services.manual_upload_service import ManualUploadSavedFile
     from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
     from src.workers import ingest_worker
@@ -171,9 +173,11 @@ def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row(monkeyp
     saved = ManualUploadSavedFile(message_id="msg-workflow-v2-owned-row-001",
         pdf_uri=uri, content_sha256=digest, original_filename="original.pdf",
         received_at=datetime(2026, 3, 22, 9, 0, 0))
+    selection = capture_selection("FAC00001", "2026-03-22", read_snapshot().revision,
+        "authored-original", "2026-03@2026-03-22~2026-03-28")
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
         week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
-        skip_ocr=False, source_kind="manual_upload")
+        skip_ocr=False, source_kind="manual_upload", facility_selection=selection)
     reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
     order = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
     with session_scope() as session:

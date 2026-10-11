@@ -84,6 +84,8 @@ def _sample_payload(quantity: str = "3") -> dict:
 @pytest.fixture
 def registration_only_order(monkeypatch, tmp_path):
     from datetime import date
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.ingest_facility_selection_service import capture_selection
     from src.services.manual_upload_service import ManualUploadSavedFile
     from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
     from tests.helpers.ingest_original import (
@@ -102,9 +104,11 @@ def registration_only_order(monkeypatch, tmp_path):
             menu_date=date(2026, 3, 22), daypart="breakfast")
         saved = ManualUploadSavedFile(message_id=message_id, pdf_uri=uri, content_sha256=digest,
             original_filename="original.pdf", received_at=datetime(2026, 3, 22, 9, 0, 0))
+        selection = capture_selection("FAC00001", "2026-03-22", read_snapshot().revision,
+            "authored-original", "2026-03@2026-03-22~2026-03-28")
         uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
             week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
-            skip_ocr=False, source_kind="manual_upload")
+            skip_ocr=False, source_kind="manual_upload", facility_selection=selection)
         receipt = reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
         assert receipt["id"] == saved.message_id
         order = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
@@ -499,6 +503,8 @@ def test_get_document_does_not_use_cache_only_ocr_artifact_as_current_source():
 
 def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence(monkeypatch, tmp_path):
     from datetime import date
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.ingest_facility_selection_service import capture_selection
     from src.models.order import OrderLine
     from src.services.manual_upload_service import ManualUploadSavedFile
     from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
@@ -518,10 +524,12 @@ def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence(monk
         message_id="msg-draft-endpoint-build", pdf_uri=uri, content_sha256=digest,
         original_filename="original.pdf", received_at=datetime(2026, 3, 22, 9, 0, 0),
     )
+    selection = capture_selection("FAC00001", "2026-03-22", read_snapshot().revision,
+        "authored-original", "2026-03@2026-03-22~2026-03-28")
     uploaded, _ = create_uploaded_pdf_from_upload(
         saved=saved, facility_hint="FAC00001",
         week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
-        skip_ocr=False, source_kind="manual_upload",
+        skip_ocr=False, source_kind="manual_upload", facility_selection=selection,
     )
     receipt = reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
     assert receipt["id"] == saved.message_id
@@ -597,6 +605,8 @@ def test_get_draft_sheet_endpoint_prefers_semantic_shell_over_raw_evidence_when_
 
 def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkeypatch, tmp_path):
     from datetime import date
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.ingest_facility_selection_service import capture_selection
     from src.models.order import OrderLine
     from src.services.manual_upload_service import ManualUploadSavedFile
     from src.services.uploaded_pdf_service import create_uploaded_pdf_from_upload
@@ -616,10 +626,12 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
         message_id="msg-evidence-inline-ingest", pdf_uri=uri, content_sha256=digest,
         original_filename="original.pdf", received_at=datetime(2026, 3, 22, 10, 0, 0),
     )
+    selection = capture_selection("FAC00001", "2026-03-22", read_snapshot().revision,
+        "authored-original", "2026-03@2026-03-22~2026-03-28")
     uploaded, _ = create_uploaded_pdf_from_upload(
         saved=saved, facility_hint="FAC00001",
         week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
-        skip_ocr=False, source_kind="manual_upload",
+        skip_ocr=False, source_kind="manual_upload", facility_selection=selection,
     )
     receipt = reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
     assert receipt["id"] == saved.message_id

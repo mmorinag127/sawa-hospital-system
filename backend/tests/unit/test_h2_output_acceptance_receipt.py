@@ -248,7 +248,7 @@ def test_actual_delivery_consumers_empty_quantity_mapping_stop_before_output_wri
                 output_builder.build_outputs(order["id"], write_session=session, original_adoption=original)
         return
     line = {"date": "2026-10-07", "menu_name": "own", "diet_type": "regular", "quantity_original": 7, "quantity_corrected": 7}
-    candidate = {"configured_input": {"facility": {"facility_id": "fixture", "fax_template": {"columns": []}, "invoice_template": {"columns": []}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}, "lines": [line], "output_lines": [line], "output_menu_entries": [], "output_ocr_menu_entries": [], "output_ocr_menu_defaults": {}}
+    candidate = {"configured_input": {"facility": {"facility_id": "fixture", "facility_name": "Synthetic acceptance fixture", "fax_template": {"columns": []}, "invoice_template": {"columns": []}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}, "lines": [line], "output_lines": [line], "output_menu_entries": [], "output_ocr_menu_entries": [], "output_ocr_menu_defaults": {}}
     candidate["configured_input"]["facility"]["invoice_template"] = {"columns": [{"name": "menu_name", "source": "menu_name"}]}
     monkeypatch.setattr(output_builder, "get_order_by_id", lambda oid: {"id": oid, "facility": "fixture", "week": "2026-10"})
     monkeypatch.setattr(output_builder, "_accepted_output_candidate", lambda order: candidate)
