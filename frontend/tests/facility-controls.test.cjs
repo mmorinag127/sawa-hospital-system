@@ -7,9 +7,25 @@ const ts = require('typescript');
 const root = path.join(__dirname, '../..');
 const file = 'frontend/src/pages/facility-master.tsx';
 const base = execFileSync('git', ['show', 'cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:' + file], { cwd: root, encoding: 'utf8' });
-const current = fs.readFileSync(path.join(root, file), 'utf8');
+const current = execFileSync('git', ['show', 'bf85488b3b19f13e57aac1ebee7c8e5ee723c6b5:' + file], { cwd: root, encoding: 'utf8' });
 const parse = text => ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const printer = ts.createPrinter();
+test('approved label source bytes and migration ancestry remain exact', () => {
+  const lineage = [
+    'cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1',
+    'bf85488b3b19f13e57aac1ebee7c8e5ee723c6b5',
+    '684e11d64160fe249db7898b870412fb29083974',
+    '1e1ff1c553acf26ccb1cbeb3c1d825fe98971893',
+    'HEAD',
+  ];
+  for (let index = 1; index < lineage.length; index += 1) {
+    execFileSync('git', ['merge-base', '--is-ancestor', lineage[index - 1], lineage[index]], { cwd: root });
+  }
+  const working = fs.readFileSync(path.join(root, file));
+  const approved = execFileSync('git', ['show', lineage[3] + ':' + file], { cwd: root });
+  assert.deepEqual(working, approved);
+  assert.equal((working.toString('utf8').match(/<(input|select|textarea|button)\b/g) || []).length, 0);
+});
 test('non-rendered AST including handlers, effects, state and serialization is unchanged', () => {
   const collect = text => {
     const source = parse(text);
