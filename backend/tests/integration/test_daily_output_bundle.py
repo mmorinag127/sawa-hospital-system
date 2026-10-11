@@ -1940,6 +1940,7 @@ def test_daily_label_jp_keeps_units_servings_and_facility_floor_suffix():
                 "menu_qty_per_serving": 70,
                 "menu_temp_type": "温菜",
                 "quantity": 3,
+                "area_name": "２階",
             }
         ],
         {},
@@ -1969,6 +1970,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 40,
                 "menu_temp_type": "温菜",
                 "quantity": 9,
+                "area_name": "２階",
             },
             {
                 "facility": "FAC00008",
@@ -1982,6 +1984,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 100,
                 "menu_temp_type": "温菜",
                 "quantity": 9,
+                "area_name": "２階",
             },
             {
                 "facility": "FAC00008",
@@ -1995,6 +1998,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 100,
                 "menu_temp_type": "温菜",
                 "quantity": 6,
+                "area_name": "３階",
             },
             {
                 "facility": "FAC00008",
@@ -2008,6 +2012,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 40,
                 "menu_temp_type": "温菜",
                 "quantity": 6,
+                "area_name": "３階",
             },
         ],
         {},

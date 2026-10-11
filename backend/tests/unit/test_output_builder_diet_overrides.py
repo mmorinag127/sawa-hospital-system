@@ -1045,6 +1045,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 12}],
+                "area_name": "２階",
             },
             {
                 "facility": "FAC00009",
@@ -1058,6 +1059,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 40,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 13}],
+                "area_name": "２階",
             },
             {
                 "facility": "FAC00009",
@@ -1071,6 +1073,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 12}],
+                "area_name": "３階",
             },
             {
                 "facility": "FAC00009",
@@ -1084,6 +1087,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 12}],
+                "area_name": "２階",
             },
             {
                 "facility": "FAC00009",
@@ -1097,6 +1101,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 12}],
+                "area_name": "２階",
             },
             {
                 "facility": "FAC00009",
@@ -1110,6 +1115,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 12}],
+                "area_name": "３階",
             },
             {
                 "facility": "FAC00009",
@@ -1123,6 +1129,7 @@ def test_daily_labels_sort_by_menu_before_floor_and_keep_diet_order():
                 "menu_qty_per_serving": 100,
                 "menu_unit_type": "g",
                 "_source_refs": [{"source_row_index": 12}],
+                "area_name": "３階",
             },
         ],
         {},

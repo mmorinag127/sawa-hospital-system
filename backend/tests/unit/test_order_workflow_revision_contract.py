@@ -345,7 +345,10 @@ def test_shared_attempt_guard_claims_workflow_before_job_on_both_database_backen
     assert attempt_guard.index("lock_current_workflow_revision(") < attempt_guard.index(
         "job_claim = session.execute("
     )
-    assert ".with_for_update()" in attempt_guard
+    assert "select(OcrJob.id).where(*job_conditions).with_for_update(read=read_only)" in attempt_guard
+    assert 'if session.bind.dialect.name == "sqlite" and not read_only:' in attempt_guard
+    assert "update(OcrJob)\n            .where(*job_conditions)\n            .values(status=OcrJob.status)" in attempt_guard
+    assert "if job_claim.rowcount != 1:\n            return False" in attempt_guard
 
 
 def test_neighboring_select_and_sheet_blocker_paths_finalize_their_own_revision():
