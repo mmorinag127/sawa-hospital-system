@@ -565,20 +565,47 @@ def _format_servings(quantity: float | int | None) -> str:
     return f"{_format_number(quantity)}人前"
 
 
-def _label_area_suffix(area_id: Any, facility_id: Any = None) -> str:
-    text = str(area_id or "").strip()
-    normalized = _normalize_area_id(text)
-    facility = str(facility_id or "").strip()
-    if facility in {"FAC00008", "FAC00009", "FAC00010"}:
-        if normalized == "2F":
-            return "２階"
-        if normalized == "3F":
-            return "３階"
-    if normalized == "2F":
-        return "花"
-    if normalized == "3F":
-        return "月"
-    return ""
+def _label_area_suffix(area_id: Any, area_name: Any = None) -> str:
+    if _normalize_area_id(area_id) in {None, "X"}:
+        return ""
+    if not isinstance(area_name, str) or not area_name.strip():
+        raise ValueError("label_area_name_required: ラベルのエリア正本名を確認してください")
+    return area_name
+
+
+def _bind_label_area_names(bags: list[dict], facility_config: dict | None) -> list[dict]:
+    names: dict[str, str] = {}
+    areas = facility_config.get("areas") if isinstance(facility_config, dict) else None
+    if areas is not None and not isinstance(areas, list):
+        raise ValueError("label_area_mapping_invalid: 施設のエリア正本を確認してください")
+    for area in areas or []:
+        if not isinstance(area, dict):
+            raise ValueError("label_area_mapping_invalid: 施設のエリア正本を確認してください")
+        if "area_id" in area and "id" in area and area["area_id"] != area["id"]:
+            raise ValueError("label_area_mapping_ambiguous: 施設のエリア正本が一意ではありません")
+        identity = _normalize_area_id(area.get("area_id") if "area_id" in area else area.get("id"))
+        if identity in {None, "X"}:
+            continue
+        name = area.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("label_area_name_required: 施設のエリア正本名を確認してください")
+        if identity in names:
+            raise ValueError("label_area_mapping_ambiguous: 施設のエリア正本が一意ではありません")
+        names[identity] = name
+    aliases = _build_area_alias_map(facility_config) if isinstance(facility_config, dict) else {}
+    result: list[dict] = []
+    for bag in bags:
+        updated = dict(bag)
+        identity = _normalize_area_id(bag.get("area_id"))
+        if identity in {None, "X"}:
+            updated["area_name"] = ""
+        else:
+            canonical = aliases.get(identity)
+            if canonical not in names:
+                raise ValueError("label_area_identity_unresolved: 注文のエリアを施設正本で確認してください")
+            updated["area_name"] = names[canonical]
+        result.append(updated)
+    return result
 
 
 def _daily_label_display_diet_key(bag: dict) -> str:
@@ -656,6 +683,7 @@ def _apply_daily_label_facility_rules_to_bags(
     facility_config: dict | None,
     facility_id: str | None,
 ) -> list[dict]:
+    bags = _bind_label_area_names(bags, facility_config)
     comparable_diets = _daily_label_comparable_diet_types_for_facility(facility_config, facility_id)
     if not comparable_diets:
         return bags
@@ -795,7 +823,7 @@ def _format_menu_unit(qty: float | int | None, unit_type: str | None) -> str | N
 
 def _build_label_details(bag: dict) -> str:
     parts: list[str] = []
-    area = bag.get("area_id")
+    area = _label_area_suffix(bag.get("area_id"), bag.get("area_name"))
     if area:
         parts.append(str(area))
     unit_str = _format_menu_unit(bag.get("menu_qty_per_serving"), bag.get("menu_unit_type"))
@@ -2435,6 +2463,7 @@ def _serialize_bag_payload_rows(rows: list[dict]) -> list[dict]:
             "menu_category": bag.get("menu_category"),
             "diet_type": bag.get("diet_type"),
             "area_id": bag.get("area_id"),
+            "area_name": bag.get("area_name"),
             "bag_type": bag.get("bag_type"),
             "quantity": bag.get("quantity"),
             "source_refs": bag.get("_source_refs") or bag.get("source_refs") or [],
@@ -2578,7 +2607,7 @@ def _label_payload_jp(bag: dict, label_profile: dict | None = None) -> dict:
     if menu_value and product_name and str(menu_value).strip() == str(product_name).strip():
         menu_value = ""
     total_amount = _daily_label_amount_cell(total_qty, unit)
-    area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("facility"))
+    area_suffix = _label_area_suffix(bag.get("area_id"), bag.get("area_name"))
     time_value = str(bag.get("daypart") or "").strip()
     if area_suffix:
         time_value = f"{time_value}{area_suffix}".strip()
