@@ -1475,7 +1475,7 @@ def test_same_columns_preserve_raw_operator_zero_null_blank(copy_shared):
 
 
 @pytest.fixture
-def accepted_output_writer(connected_physical_pipeline, monkeypatch, tmp_path):
+def accepted_output_writer(connected_physical_pipeline, monkeypatch, tmp_path, request):
     from src.models.order_sheet_draft import OrderSheetDraft
     from src.services import output_builder as output, order_workflow_v2_service as workflow, order_output_artifact_service as artifacts
     invoice_template = {"columns": [
@@ -1501,18 +1501,23 @@ def accepted_output_writer(connected_physical_pipeline, monkeypatch, tmp_path):
         session.add(OrderSheetDraft(id=draft_id, order_id=order_id, template_version_id=template_id, base_evidence_run_id=state.evidence_run_id, draft_sheet_json=base_sheet, draft_state="draft_ready"))
         session.flush()
         state.draft_id = draft_id
-    # The real bagging producer uses registered synthetic menu-master amounts;
-    # only file writers below remain external output adapters.
-    candidate = {"configured_input": deepcopy(configured), "lines": [{"date": entry["menu_date"], "daypart": entry["daypart_key"], "menu_name": entry["menu_name"], "menu_category": "主菜", "diet_type": "regular", "area_id": "x", "quantity_original": value, "quantity_corrected": value, "source_row_index": index, "menu_qty_per_serving": 1, "menu_unit_type": "g"} for index, (entry, value) in enumerate(zip(base_input["physical_menu_entries"], (0, None, None)))]}
-    with session_scope() as session:
-        start = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
-        start.update(output_ocr_menu_entries=[], output_ocr_menu_defaults={})
-        receipt = workflow._build_bagging_result_payload(order=session.get(Order, order_id), saved_sheet=session.get(OrderSheetDraft, draft_id), materialization_candidate=candidate, processing_input=start)
-        receipt = order_service._json_snapshot(receipt)
-        artifacts.save_bagging_result_artifact(session, payload=receipt)
-        state = session.get(OrderWorkflowState, order_id)
-        state.secondary_actions_json = {"workflow_v2": {"bagging_result_id": receipt["bagging_result_id"], "bagging_input_proof": {"bagging_result_id": receipt["bagging_result_id"], "materialization_digest": receipt["materialization_digest"], "owned_revision": state.revision, "start_input": order_service._json_snapshot({key: value for key, value in start.items() if key not in {"evidence", "draft"}})}}}
-        assert workflow._finalize_workflow_mutation(session, state) is None
+    if getattr(request, "param", None) == "real_producer":
+        with session_scope() as session:
+            revision = session.get(OrderWorkflowState, order_id).revision
+        result, error = workflow.run_bagging(order_id, expected_revision=revision)
+        assert error is None and result
+    else:
+        # Legacy consumer fixtures deliberately include null-quantity lines.
+        candidate = {"configured_input": deepcopy(configured), "lines": [{"date": entry["menu_date"], "daypart": entry["daypart_key"], "menu_name": entry["menu_name"], "menu_category": "主菜", "diet_type": "regular", "area_id": "x", "quantity_original": value, "quantity_corrected": value, "source_row_index": index, "menu_qty_per_serving": 1, "menu_unit_type": "g"} for index, (entry, value) in enumerate(zip(base_input["physical_menu_entries"], (0, None, None)))]}
+        with session_scope() as session:
+            start = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
+            start.update(output_ocr_menu_entries=[], output_ocr_menu_defaults={})
+            receipt = workflow._build_bagging_result_payload(order=session.get(Order, order_id), saved_sheet=session.get(OrderSheetDraft, draft_id), materialization_candidate=candidate, processing_input=start)
+            receipt = order_service._json_snapshot(receipt)
+            artifacts.save_bagging_result_artifact(session, payload=receipt)
+            state = session.get(OrderWorkflowState, order_id)
+            state.secondary_actions_json = {"workflow_v2": {"bagging_result_id": receipt["bagging_result_id"], "bagging_input_proof": {"bagging_result_id": receipt["bagging_result_id"], "materialization_digest": receipt["materialization_digest"], "owned_revision": state.revision, "start_input": order_service._json_snapshot({key: value for key, value in start.items() if key not in {"evidence", "draft"}})}}}
+            assert workflow._finalize_workflow_mutation(session, state) is None
     monkeypatch.setattr(output, "OUTPUT_DIR", tmp_path / "outputs")
     generated = []
     def external_writer(path, *args, **kwargs):
@@ -1799,6 +1804,7 @@ def test_output_rejects_preexisting_stale_bagging_lineage(accepted_output_writer
 
 
 @pytest.mark.parametrize("change", [None, "snapshot", "saved_sheet"])
+@pytest.mark.parametrize("accepted_output_writer", ["real_producer"], indirect=True)
 def test_actual_final_confirm_receipt_to_output_writer(accepted_output_writer, change):
     from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
     from src.models.order_sheet_draft import OrderSheetDraft
@@ -1831,6 +1837,58 @@ def test_actual_final_confirm_receipt_to_output_writer(accepted_output_writer, c
         output.build_outputs(order_id)
     if change is not None:
         assert generated == []
+
+
+@pytest.mark.parametrize("accepted_output_writer", ["real_producer"], indirect=True)
+def test_real_final_confirm_fixture_preserves_blank_sheet_and_zero_candidate(accepted_output_writer):
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.services import order_workflow_v2_service as workflow
+    order_id, _, generated = accepted_output_writer
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, order_id)
+        sheet = session.get(OrderSheetDraft, state.draft_id).draft_sheet_json
+        column = sheet["fields"].index("qty.regular_x")
+        assert [row[column] for row in sheet["rows"]] == [0, None, None]
+        bagging = workflow._current_bagging_result(session, state)
+        candidate = bagging["materialization_candidate"]
+        assert [line["quantity_original"] for line in candidate["lines"]] == [0]
+        assert [line["quantity_corrected"] for line in candidate["lines"]] == [None]
+        assert candidate["lines"][0]["menu_name"] == "own-1"
+        assert candidate["lines"][0]["date"] == "2026-10-01"
+        assert candidate["output_lines"][0]["menu_qty_per_serving"] == 1
+        assert candidate["output_lines"][0]["menu_unit_type"] == "g"
+        assert state.secondary_actions_json["workflow_v2"]["bagging_input_proof"]["bagging_result_id"] == bagging["bagging_result_id"]
+    assert generated == []
+
+
+@pytest.mark.parametrize("accepted_output_writer", ["real_producer"], indirect=True)
+@pytest.mark.parametrize("fault", ["malformed_quantity", "missing_amount"])
+def test_real_final_confirm_fixture_producer_rejects_invalid_source(accepted_output_writer, fault):
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.menu import MonthlyMenuItem, MenuMaster
+    from src.services import order_workflow_v2_service as workflow
+    order_id, _, generated = accepted_output_writer
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, order_id)
+        before = deepcopy(state.secondary_actions_json)
+        revision = state.revision
+        if fault == "malformed_quantity":
+            draft = session.get(OrderSheetDraft, state.draft_id)
+            sheet = deepcopy(draft.draft_sheet_json)
+            sheet["rows"][0][sheet["fields"].index("qty.regular_x")] = "not-a-quantity"
+            draft.draft_sheet_json = sheet
+        else:
+            for model in (MonthlyMenuItem, MenuMaster):
+                for item in session.query(model).filter(model.name == "own-1").all():
+                    item.qty_per_serving = None
+    result, error = workflow.run_bagging(order_id, expected_revision=revision)
+    assert result is None
+    assert error == ("sheet_ocr_review_required" if fault == "malformed_quantity" else "menu_amount_unresolved")
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, order_id)
+        assert state.secondary_actions_json == before
+        assert state.revision == revision
+    assert generated == []
 
 
 @pytest.mark.parametrize("two_accepted_output_orders", [{"setting": "mapping"}, {"setting": "profile"}], indirect=True)
