@@ -61,7 +61,18 @@ def clone_selected_input(fixture):
         session.expire_all()
         orders._record_current_order_version(session, session.get(Order, other.order_id),
                                              session.get(OrderDocument, "SECOND-DOC"))
-    assert other.saved() == fixture.saved()
+    original_saved = fixture.saved()
+    cloned_saved = other.saved()
+    assert (fixture.order_id, fixture.evidence_id, fixture.draft_id) == (
+        "ORD-SAVED-SELECTED", "OCR-SELECTED", "DRAFT-SELECTED")
+    assert (other.order_id, other.evidence_id, other.draft_id) == (
+        "ORD-SECOND-SYNTHETIC", "OCR-SECOND-SYNTHETIC", "DRAFT-SECOND-SYNTHETIC")
+    assert cloned_saved["base_evidence_run_id"] == other.evidence_id
+    assert original_saved["base_evidence_run_id"] == fixture.evidence_id
+    assert cloned_saved["fields"] == original_saved["fields"]
+    assert cloned_saved["rows"] == original_saved["rows"]
+    assert [row[4] for row in cloned_saved["rows"]] == ["7", "", "", "0"]
+    assert cloned_saved == replace(original_saved)
     return other
 
 
