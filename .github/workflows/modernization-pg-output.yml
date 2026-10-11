@@ -70,3 +70,87 @@ jobs:
             ${{ runner.temp }}/pg-output-boundary/migration-probe.json
             ${{ runner.temp }}/pg-output-boundary/migration.log
           if-no-files-found: warn
+  formal-pg-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: backend
+      AUTH_DISABLED: "true"
+      DB_URI: sqlite:///${{ github.workspace }}/.formal-pg-chain/runtime.sqlite
+      DATABASE_URL: sqlite:///${{ github.workspace }}/.formal-pg-chain/runtime.sqlite
+      ALEMBIC_DB_URI: sqlite:///${{ github.workspace }}/.formal-pg-chain/runtime.sqlite
+      ORDERS_OUTPUT_DIR: ${{ github.workspace }}/.formal-pg-chain/output
+      XDG_CACHE_HOME: ${{ github.workspace }}/.formal-pg-chain/cache
+    steps:
+      - uses: actions/checkout@v6
+      - name: Record source and owned paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.formal-pg-chain"
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/.formal-pg-chain/git-sha.txt"
+          alias="/tmp/sawa-formal-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "C2_FORMAL_PG_URI=postgresql+psycopg2://runner@/postgres?host=$alias&port=55483" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install production dependencies and pytest
+        run: python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest
+      - name: Start exclusively owned Unix socket PG16
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /usr/lib/postgresql/16/bin/initdb
+          test -x /usr/lib/postgresql/16/bin/pg_ctl
+          /usr/lib/postgresql/16/bin/initdb --version
+          /usr/lib/postgresql/16/bin/pg_ctl --version
+          root="$GITHUB_WORKSPACE/tmp/hospital-v1-catalog-20261007/pg16"
+          alias="/tmp/sawa-formal-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$root"
+          test ! -e "$alias"
+          test ! -L "$alias"
+          mkdir -p "$root/socket"
+          ln -s "$root/socket" "$alias"
+          printf '%s\n' "$alias" > "$GITHUB_WORKSPACE/.formal-pg-chain/socket-alias.txt"
+          /usr/lib/postgresql/16/bin/initdb -D "$root/pgdata" -U runner -A trust \
+            2>&1 | tee "$GITHUB_WORKSPACE/.formal-pg-chain/initdb.log"
+          /usr/lib/postgresql/16/bin/pg_ctl -D "$root/pgdata" \
+            -l "$GITHUB_WORKSPACE/.formal-pg-chain/postgres.log" \
+            -o "-p 55483 -k $alias -c listen_addresses=''" -w start \
+            2>&1 | tee "$GITHUB_WORKSPACE/.formal-pg-chain/start.log"
+      - name: Existing formal PostgreSQL cases only (partial suite)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -p no:cacheprovider \
+            backend/tests/integration/test_formal_alembic_fresh_chain.py -k postgresql \
+            --basetemp="$GITHUB_WORKSPACE/.formal-pg-chain/tests" \
+            --junitxml="$GITHUB_WORKSPACE/.formal-pg-chain/results.xml" -v \
+            2>&1 | tee "$GITHUB_WORKSPACE/.formal-pg-chain/pytest.log"
+      - name: Stop only owned PG16
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/tmp/hospital-v1-catalog-20261007/pg16"
+          alias="/tmp/sawa-formal-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if test -f "$root/pgdata/postmaster.pid"; then
+            /usr/lib/postgresql/16/bin/pg_ctl -D "$root/pgdata" -m fast -w stop \
+              2>&1 | tee "$GITHUB_WORKSPACE/.formal-pg-chain/stop.log"
+          fi
+          if test -f "$GITHUB_WORKSPACE/.formal-pg-chain/socket-alias.txt"; then
+            test "$(cat "$GITHUB_WORKSPACE/.formal-pg-chain/socket-alias.txt")" = "$alias"
+            test -L "$alias"
+            test "$(readlink "$alias")" = "$root/socket"
+            unlink "$alias"
+          fi
+      - name: Preserve formal PG partial-suite evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modernization-formal-pg-chain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/.formal-pg-chain/git-sha.txt
+            ${{ github.workspace }}/.formal-pg-chain/*.log
+            ${{ github.workspace }}/.formal-pg-chain/results.xml
+          if-no-files-found: warn
