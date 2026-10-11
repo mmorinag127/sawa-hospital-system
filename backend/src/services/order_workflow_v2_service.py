@@ -32,6 +32,7 @@ from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
 from src.services import order_output_artifact_service, ocr_evidence_service
 from src.services.order_serialization_service import menu_amount_resolution, candidate_menu_amount_resolution, MENU_AMOUNT_UNRESOLVED
+from src.services.recorded_hospital_job_status import _recorded_hospital_job_status
 from src.services.menu_service import MenuReadUnresolved
 from src.services.pdf_render import render_pdf_to_png_bytes
 from src.services.workflow_attempt_guard_service import (
@@ -951,6 +952,24 @@ def _finalize_workflow_blocker(
     return _finalize_workflow_mutation(session, workflow)
 
 
+def _recorded_workflow_job_status(
+    row: OrderWorkflowState, meta: dict[str, Any], job: OcrJob | None,
+) -> dict[str, Any] | None:
+    if job is None or not job.id or not row.order_id:
+        return None
+    if meta.get("ocr_job_id") != job.id or job.order_id != row.order_id:
+        return None
+    if job.metrics is not None and not isinstance(job.metrics, dict):
+        return None
+    metrics = job.metrics if isinstance(job.metrics, dict) else {}
+    expected_attempt = meta.get("ocr_job_attempt_id")
+    recorded_attempt = metrics.get("workflow_attempt_id")
+    if type(expected_attempt) is not type(recorded_attempt) or expected_attempt != recorded_attempt:
+        return None
+    record = ocr_job_service._job_to_dict(job)
+    return _recorded_hospital_job_status(record, ocr_job_service.describe_job_state(record))
+
+
 def _serialize_workflow(
     row: OrderWorkflowState,
     *,
@@ -990,6 +1009,7 @@ def _serialize_workflow(
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
         "ocr_job": _serialize_ocr_job(ocr_job),
+        "common_job_status": _recorded_workflow_job_status(row, meta, ocr_job),
         "blockers": list(row.blockers_json or []),
         "warnings": list(row.warnings_json or []),
         "updated_at": _serialize_datetime(row.last_transition_at),

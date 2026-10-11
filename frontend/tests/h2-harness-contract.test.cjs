@@ -50,7 +50,23 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   assert.equal(approvedBefore,execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
-  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','3c5a9ca:frontend/'+production],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards remain exact');
+  let restored=fs.readFileSync(path.join(__dirname,'..',production),'utf8');
+  const additions=[
+    ['import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";', 'import { sawaTheme } from "@sawa/ui";'],
+    ['  common_job_status?: JobStatusRecord | null;\n', ''],
+    ['    order_id?: string | null;\n', ''],
+    [`  const commonJobStatus = workflow?.order_id === orderId
+    && workflow?.ocr_job?.order_id === orderId
+    && Boolean(workflow?.ocr_job?.ocr_job_id)
+    && workflow?.common_job_status?.domain === "hospital"
+    && workflow.common_job_status.jobId === workflow.ocr_job.ocr_job_id
+    && workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null)
+    ? workflow.common_job_status : null;
+`, ''],
+    ['          {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}\n', ''],
+  ];
+  for(const [addition,original] of additions) restored=replaceOnce(restored,addition,original);
+  assert.equal(restored,execFileSync('git',['show','3c5a9ca:frontend/'+production],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards remain exact');
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
   const after=source.slice(source.indexOf('function actual('),source.indexOf('\nconst plain='));
   assert.equal(after.replace('const exports={},bindings={process:undefined,fetch:undefined,require:undefined,global:undefined,module:undefined,Buffer:undefined,globalThis:undefined,...context,exports};\n  vm.compileFunction(code,Object.keys(bindings))(...Object.values(bindings));return exports.fn;', 'const exports={};vm.runInNewContext(code,{...context,exports});return exports.fn;'),before);

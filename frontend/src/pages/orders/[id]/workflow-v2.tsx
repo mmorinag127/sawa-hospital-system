@@ -1,6 +1,6 @@
 import { Button, Input, NativeSelect } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
-import { sawaTheme } from "@sawa/ui";
+import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";
 import { type KeyboardEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
@@ -30,6 +30,7 @@ const orderIdFromWorkflowPath = (asPath: string): string => {
 
 type WorkflowV2 = {
   order_id: string;
+  common_job_status?: JobStatusRecord | null;
   revision?: number | null;
   source?: string | null;
   state: string;
@@ -65,6 +66,7 @@ type WorkflowV2 = {
   } | null;
   ocr_job?: {
     ocr_job_id?: string | null;
+    order_id?: string | null;
     workflow_attempt_id?: string | null;
     status?: string | null;
     created_at?: string | null;
@@ -1846,6 +1848,13 @@ export default function OrderWorkflowV2Page() {
   if (menuAmountUnresolved && !workflowBlockers.includes(menuAmountBlocker)) {
     workflowBlockers.push(menuAmountBlocker);
   }
+  const commonJobStatus = workflow?.order_id === orderId
+    && workflow?.ocr_job?.order_id === orderId
+    && Boolean(workflow?.ocr_job?.ocr_job_id)
+    && workflow?.common_job_status?.domain === "hospital"
+    && workflow.common_job_status.jobId === workflow.ocr_job.ocr_job_id
+    && workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null)
+    ? workflow.common_job_status : null;
   const ocrJobErrorMessage = String(
     workflow?.ocr_job?.error_user_message
       || workflow?.ocr_job?.error_detail
@@ -4133,6 +4142,7 @@ export default function OrderWorkflowV2Page() {
           <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
           ) : null}

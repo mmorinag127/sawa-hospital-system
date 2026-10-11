@@ -35,28 +35,16 @@ test('missing or invalid outer config is never optional override absence', () =>
     assert.throws(() => requireFaxTemplateOverride(value), /config must be an object/);
   }
 });
-test('actual geometry save validates snapshot before override spread and retains CAS', () => {
-  const page = fs.readFileSync(path.join(__dirname, '../src/pages/orders/[id].tsx'), 'utf8');
-  const parsed = ts.createSourceFile('orders.tsx', page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  assert.equal(parsed.parseDiagnostics.length, 0);
-  const start = page.indexOf('const expectedRevision = requireFacilitySnapshot(snapshot, facility);', page.indexOf('setTableBoxSaving(true)'));
-  const end = page.indexOf('const savedOverride = requireFaxTemplateOverride(res.data.config);', start);
-  const save = page.slice(start, end);
-  assert.ok(start >= 0 && end > start);
-  assert.ok(save.includes('...requireFaxTemplateOverride(nextConfig)'));
-  assert.ok(save.includes('expected_revision: expectedRevision'));
-  assert.ok(save.includes('if (!current()) return;'));
-});
-test('retired columns function AST remains exactly the base declaration', () => {
+function liveDeclaration(name) {
   const root = path.join(__dirname, '../..');
-  const file = 'frontend/src/pages/orders/[id].tsx';
-  const base = execFileSync('git', ['show', 'de49f34c625a3ee82684e778f16c2c9d90053a69:' + file], { cwd: root, encoding: 'utf8' });
+  const file = 'frontend/src/pages/orders/[id]/workflow-v2.tsx';
+  const base = execFileSync('git', ['show', '4d0e6319d3e84e392389755041a89a872ff97d29:' + file], { cwd: root, encoding: 'utf8' });
   const declaration = text => {
     const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     assert.equal(parsed.parseDiagnostics.length, 0);
     let found;
     const visit = node => {
-      if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'saveFacilityTemplateColumns') found = node;
+      if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === name) found = node;
       ts.forEachChild(node, visit);
     };
     visit(parsed);
@@ -64,4 +52,18 @@ test('retired columns function AST remains exactly the base declaration', () => 
     return ts.createPrinter().printNode(ts.EmitHint.Unspecified, found, parsed);
   };
   assert.equal(declaration(fs.readFileSync(path.join(root, file), 'utf8')), declaration(base));
+  return declaration(base);
+}
+test('live geometry handler retains exact PDF source receipt, ownership and revision CAS', () => {
+  const save = liveDeclaration('saveQuadAndRerun');
+  assert.ok(save.includes('receipt.workflow_revision'));
+  assert.ok(save.includes('geometry_source_digest'));
+  assert.ok(save.includes('workflowMutationConfig(captured)'));
+  assert.ok(save.includes('ownsQuadInput(own)'));
+});
+test('live facility columns handler retains exact canonical facility and command ownership', () => {
+  const save = liveDeclaration('saveFacilityTemplateColumns');
+  assert.ok(save.includes('contextFacilityResolution.status !== "ready"'));
+  assert.ok(save.includes('ownsPageInput(own)'));
+  assert.ok(save.includes('executeWorkflowMutation("templateColumns"'));
 });

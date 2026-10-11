@@ -16,7 +16,26 @@ test('current approved output owner/history/action AI/feedback/PDF refusal funct
   const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'HEAD'];
   for (let i = 1; i < lineage.length; i++)
     cp.execFileSync('git', ['merge-base', '--is-ancestor', lineage[i - 1], lineage[i]], { cwd: root });
-  assert.equal(fs.readFileSync(path.join(root, filename), 'utf8'),
+  let restored = fs.readFileSync(path.join(root, filename), 'utf8');
+  const additions = [
+    ['import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";', 'import { sawaTheme } from "@sawa/ui";'],
+    ['  common_job_status?: JobStatusRecord | null;\n', ''],
+    ['    order_id?: string | null;\n', ''],
+    [`  const commonJobStatus = workflow?.order_id === orderId
+    && workflow?.ocr_job?.order_id === orderId
+    && Boolean(workflow?.ocr_job?.ocr_job_id)
+    && workflow?.common_job_status?.domain === "hospital"
+    && workflow.common_job_status.jobId === workflow.ocr_job.ocr_job_id
+    && workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null)
+    ? workflow.common_job_status : null;
+`, ''],
+    ['          {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}\n', ''],
+  ];
+  for (const [addition, original] of additions) {
+    assert.equal(restored.split(addition).length - 1, 1, 'only the exact additive recorded-status change');
+    restored = restored.replace(addition, original);
+  }
+  assert.equal(restored,
     cp.execFileSync('git', ['show', '3c5a9ca:' + filename], { cwd: root, encoding: 'utf8' }),
     'Full current functions, protected grid, render callbacks, receipt and owner guards remain exact');
 });
