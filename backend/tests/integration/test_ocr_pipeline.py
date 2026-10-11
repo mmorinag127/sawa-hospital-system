@@ -3331,6 +3331,8 @@ def test_build_llm_assist_prompt_includes_auto_fallback_context():
 
 def test_build_llm_assist_prompt_includes_quantity_subgrid_second_pass_context():
     template = {
+        "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                     "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
