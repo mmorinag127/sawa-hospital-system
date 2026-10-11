@@ -54,7 +54,7 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest -p no:cacheprovider \
-            backend/tests/integration/test_modernization_pg_output_boundary.py \
+            backend/tests/integration/pg_output_boundary_cases.py \
             --basetemp="${{ runner.temp }}/pg-output-boundary/tests" \
             --junitxml="${{ runner.temp }}/pg-output-boundary/results.xml" -v \
             2>&1 | tee "${{ runner.temp }}/pg-output-boundary/pytest.log"
