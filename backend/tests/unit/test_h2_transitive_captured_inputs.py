@@ -14,6 +14,8 @@ from src.models.uploaded_pdf import UploadedPdf
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import config_service, order_service, order_workflow_v2_service as workflow
+from tests.helpers.captured_input_fixture import authored_input, PERIOD
+from src.services.template_field_schema_service import canonical_field_name_from_template_column
 
 
 def test_actual_configured_input_upload_preserves_values_and_generation(monkeypatch):
@@ -29,7 +31,7 @@ def test_actual_configured_input_upload_preserves_values_and_generation(monkeypa
     receipt = ocr_pipeline_service._upload_configured_input(bucket="own-bucket", object_name="own.pdf", configured_input=configured)
     assert names == ["own.pdf.configured.json"]
     assert json.loads(uploaded[0][0]) == configured
-    assert uploaded[0][1] == {"content_type": "application/json"}
+    assert uploaded[0][1] == {"content_type": "application/json", "if_generation_match": 0}
     assert receipt == {"bucket": "own-bucket", "object_name": names[0], "generation": "23", "sha256": sha256(uploaded[0][0]).hexdigest()}
     blob.generation = None
     with pytest.raises(ValueError, match="configured_input_generation_missing"):
@@ -45,21 +47,19 @@ def test_real_bagging_artifact_confirm_uses_original_inputs(isolated_formal_sche
     body = b"own-bagging-source"
     path.write_bytes(body)
     configured = {"facility": {"facility_id": "fixture", "fax_template": {"template_id": "own", "columns": []}}, "policy": {"quantity_rules": {}}}
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda _: deepcopy(configured))
-    # Output allocation is orthogonal; candidate computation, fences, ORM artifacts and adoption remain real.
-    monkeypatch.setattr(workflow, "_build_bag_rows_for_candidate", lambda **_: [])
-    monkeypatch.setattr(workflow, "candidate_menu_amount_resolution", lambda *_: {"status": "resolved"})
-    sheet = {"fields": ["date", "daypart", "menu", "qty.regular"], "rows": [["2026-10-07", "lunch", "own", 0]], "week_id": "2026-10"}
+    projection_id, policy_path = authored_input(monkeypatch, tmp_path, configured, "fixture")
+    quantity_field = canonical_field_name_from_template_column(configured["facility"]["fax_template"]["columns"][3])
+    sheet = {"fields": ["date", "daypart", "menu", quantity_field], "rows": [["2026-10-07", "lunch", "own", 0]], "week_id": PERIOD}
     with session_scope() as session:
-        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10", current_document_id=document_id, document_uri=str(path), message_id=message, received_at=datetime(2026, 10, 7)))
+        session.add(Order(id=order_id, facility_code="fixture", template_version_id=projection_id, week_code=PERIOD, current_document_id=document_id, document_uri=str(path), message_id=message, received_at=datetime(2026, 10, 7)))
         session.add(OrderDocument(id=document_id, storage_uri=str(path), source_email_id=message))
         session.flush()
         session.add(UploadedPdf(id=str(uuid4()), message_id=message, content_sha256=sha256(body).hexdigest(), storage_uri=str(path), original_filename="bagging.pdf", received_at=datetime(2026, 10, 7)))
-        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=order_id, schema_version="fixture", payload_json={"quantity": 0}, artifact_digest="own"))
+        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=order_id, template_version_id=projection_id, schema_version="fixture", payload_json={"quantity": 0}, artifact_digest="own"))
         session.flush()
-        session.add(OrderSheetDraft(id=draft_id, order_id=order_id, base_evidence_run_id=evidence_id, draft_sheet_json=sheet, draft_state="saved"))
+        session.add(OrderSheetDraft(id=draft_id, order_id=order_id, template_version_id=projection_id, base_evidence_run_id=evidence_id, draft_sheet_json=sheet, draft_state="saved"))
         session.flush()
-        session.add(OrderWorkflowState(order_id=order_id, evidence_run_id=evidence_id, draft_id=draft_id, state="sheet_saved"))
+        session.add(OrderWorkflowState(order_id=order_id, template_version_id=projection_id, evidence_run_id=evidence_id, draft_id=draft_id, state="sheet_saved"))
     with session_scope() as session:
         revision = session.get(OrderWorkflowState, order_id).revision
     accepted, error = workflow.run_bagging(order_id, expected_revision=revision)
@@ -76,6 +76,7 @@ def test_real_bagging_artifact_confirm_uses_original_inputs(isolated_formal_sche
         path.write_bytes(b"replaced")
     elif change == "config":
         configured["policy"]["quantity_rules"]["minimum"] = 1
+        policy_path.write_text(json.dumps(configured["policy"]))
     elif change in {"draft", "proof"}:
         with session_scope() as session:
             if change == "draft":
@@ -106,20 +107,20 @@ def test_real_reservation_mapper_commit_and_runner_receipt(isolated_formal_schem
     path.write_bytes(original)
     configured = {"facility": {"facility_id": "fixture", "fax_template": {"template_id": "fixture-template", "unknown": None}},
                   "policy": {"quantity_rules": {"minimum": 0}}}
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda _: deepcopy(configured))
+    projection_id, _ = authored_input(monkeypatch, tmp_path, configured, "fixture")
     now = datetime(2026, 10, 7)
     with session_scope() as session:
-        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10", current_document_id=document_id,
+        session.add(Order(id=order_id, facility_code="fixture", template_version_id=projection_id, week_code=PERIOD, current_document_id=document_id,
                           document_uri=str(path), message_id=message, received_at=now))
         session.add(OrderDocument(id=document_id, storage_uri=str(path), source_email_id=message, received_at=now))
         session.flush()
         session.add(UploadedPdf(id=str(uuid4()), message_id=message, content_sha256=sha256(original).hexdigest(),
                                 storage_uri=str(path), original_filename="source.pdf", received_at=now,
                                 current_order_id=order_id, current_document_id=document_id))
-        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=order_id, schema_version="fixture", status="ready",
+        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=order_id, template_version_id=projection_id, schema_version="fixture", status="ready",
                                        source="fixture", payload_json={"quantity": 0}, artifact_digest="fixture-digest"))
         session.flush()
-        session.add(OrderWorkflowState(order_id=order_id, evidence_run_id=evidence_id, state="ocr_selected"))
+        session.add(OrderWorkflowState(order_id=order_id, template_version_id=projection_id, evidence_run_id=evidence_id, state="ocr_selected"))
     with session_scope() as session:
         initial_revision = session.get(OrderWorkflowState, order_id).revision
     sheet = {"quantity": 0}
@@ -188,9 +189,9 @@ def test_actual_owned_pipeline_gate_and_recovery_block_failed_stages(isolated_fo
     body = b"own-pipeline-body"
     path.write_bytes(body)
     configured = {"facility": {"facility_id": "fixture", "fax_template": {"template_id": "own"}}, "policy": {}}
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda _: deepcopy(configured))
+    projection_id, _ = authored_input(monkeypatch, tmp_path, configured, "fixture")
     with session_scope() as session:
-        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10", current_document_id=document_id, document_uri=str(path), message_id=message))
+        session.add(Order(id=order_id, facility_code="fixture", template_version_id=projection_id, week_code=PERIOD, received_at=datetime(2026, 10, 7), current_document_id=document_id, document_uri=str(path), message_id=message))
         session.add(OrderDocument(id=document_id, storage_uri=str(path), source_email_id=message))
         session.flush()
         session.add(UploadedPdf(id=str(uuid4()), message_id=message, content_sha256=sha256(body).hexdigest(), storage_uri=str(path), original_filename="pipeline.pdf", received_at=datetime(2026, 10, 7)))
@@ -229,13 +230,19 @@ def test_actual_owned_pipeline_gate_and_recovery_block_failed_stages(isolated_fo
 
 
 def test_materialization_uses_captured_policy_and_blocks_changed_adoption(monkeypatch):
-    configured = {"facility": {"facility_id": "fixture", "fax_template": {"columns": []}},
+    template = {"columns": [
+        {"index": 0, "role": "date", "name": "date"},
+        {"index": 1, "role": "daypart", "name": "daypart"},
+        {"index": 2, "role": "menu", "name": "menu"},
+        {"index": 3, "role": "quantity", "diet_type": "regular", "area_id": None},
+    ]}
+    configured = {"facility": {"facility_id": "fixture", "fax_template": template},
                   "policy": {"quantity_rules": {"minimum": 0}, "menu_match_min_ratio": 0}}
-    draft = {"id": "own-draft", "draft_sheet_json": {"fields": ["qty"], "rows": [[0]], "week_id": "2026-10"}}
+    field = canonical_field_name_from_template_column(template["columns"][3])
+    draft = {"id": "own-draft", "draft_sheet_json": {"fields": ["date", "daypart", "menu", field], "rows": [["2026-10-07", "morning", "fixture", 0]], "week_id": PERIOD}}
     monkeypatch.setattr(config_service, "load_ingest_policy", lambda: pytest.fail("late cached policy"))
     monkeypatch.setattr(order_service, "_resolve_effective_sheet_template", lambda **_: pytest.fail("late cached template"))
     seen = []
-    monkeypatch.setattr(order_service, "_apply_expanded_cell_copy_to_materialization_rows_payload", lambda **kwargs: kwargs["rows_payload"])
     monkeypatch.setattr(order_service, "_draft_sheet_supports_direct_materialization", lambda **_: True)
     def build(**kwargs):
         seen.append(kwargs)
@@ -243,7 +250,7 @@ def test_materialization_uses_captured_policy_and_blocks_changed_adoption(monkey
     monkeypatch.setattr(order_service, "_build_materialization_lines_from_sheet_rows", build)
     monkeypatch.setattr(order_service, "_build_materialization_quantity_guard_detail", lambda **_: None)
     candidate = order_service._build_materialization_candidate_from_draft_record("own", draft_record=draft, facility_id="fixture",
-                    existing_week_code="2026-10", received_at=datetime(2026, 10, 7), configured_input=configured)
+                    existing_week_code=PERIOD, received_at=datetime(2026, 10, 7), configured_input=configured)
     assert seen and candidate["configured_input"] == configured
     assert seen[0]["date_policy"] == configured["policy"]
     assert candidate["lines"][0]["quantity_original"] == 0

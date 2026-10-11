@@ -8,6 +8,8 @@ import pytest
 from src.services import order_service, order_workflow_v2_service as workflow, storage_service
 from src.services.workflow_attempt_guard_service import nonworkflow_execution_context
 from src.services import config_service
+from datetime import datetime
+from tests.helpers.captured_input_fixture import authored_input, PERIOD
 
 
 @contextmanager
@@ -63,7 +65,7 @@ def test_missing_recognition_declaration_never_substitutes_raw(selected):
 @pytest.mark.parametrize("expected", [None, 6])
 def test_sync_stale_or_missing_token_calls_no_provider(monkeypatch, expected):
     monkeypatch.setattr(workflow, "session_scope", fake_session)
-    monkeypatch.setattr(workflow, "_get_workflow_readonly", lambda *_: SimpleNamespace(revision=7))
+    monkeypatch.setattr(workflow, "_get_workflow_readonly", lambda *_: SimpleNamespace(revision=7, secondary_actions_json={}))
     monkeypatch.setattr(order_service, "_capture_synchronous_cache_write_input", lambda _: {"workflow_revision": 7})
     monkeypatch.setattr(workflow.workflow_v2_sheet_review_service, "propose_auto_sheet_edits", lambda **_: pytest.fail("provider must not run"))
     result, error = workflow.propose_sheet_auto_edit(order_id="own", sheet={"quantity": 0}, expected_revision=expected)
@@ -71,15 +73,23 @@ def test_sync_stale_or_missing_token_calls_no_provider(monkeypatch, expected):
     assert error == (workflow.WORKFLOW_REVISION_REQUIRED if expected is None else workflow.WORKFLOW_REVISION_CONFLICT)
 
 
-def test_sync_proposal_uses_start_pdf_and_rejects_changed_end_input(monkeypatch, selected):
+def test_sync_proposal_uses_start_pdf_and_rejects_changed_end_input(monkeypatch, selected, isolated_formal_schema, tmp_path):
     path, data, receipt = selected
+    from src.db import session_scope
+    from src.models.order import Order
+    from src.models.order_workflow_state import OrderWorkflowState
+    configured = {"facility": {"fax_template": {"template_id": "own"}}, "policy": {"quantity_rules": {}}}
+    projection_id, _ = authored_input(monkeypatch, tmp_path, configured, "own")
+    with session_scope() as session:
+        session.add(Order(id="own", facility_code="own", template_version_id=projection_id,
+                          week_code=PERIOD, document_uri=str(path), message_id="own-message", received_at=datetime(2026, 10, 7)))
+        session.add(OrderWorkflowState(order_id="own", template_version_id=projection_id, state="context_confirmed"))
+        session.flush()
+        session.get(OrderWorkflowState, "own").revision = 7
+        session.flush()
     start = {"workflow_revision": 7, "selected_pdf_receipt": receipt}
     calls = []
     monkeypatch.setattr(order_service, "_capture_synchronous_cache_write_input", lambda _: deepcopy(start))
-    monkeypatch.setattr(workflow, "session_scope", fake_session)
-    monkeypatch.setattr(workflow, "_get_workflow_readonly", lambda *_: SimpleNamespace(revision=7))
-    monkeypatch.setattr(workflow, "_get_order_or_error", lambda *_: (SimpleNamespace(id="own", document_uri=str(path)), None))
-    monkeypatch.setattr(workflow, "_get_workflow", lambda *_: None)
     checks = iter([True, False])
     monkeypatch.setattr(order_service, "_synchronous_cache_write_fence", lambda *_: next(checks))
     def render(**kwargs):
@@ -117,13 +127,29 @@ def test_async_stale_token_never_calls_provider_or_write(monkeypatch):
     assert job["start_input"]["workflow_revision"] == 7
 
 
-def test_owned_policy_and_template_do_not_follow_changed_current_cache(monkeypatch):
+def test_owned_policy_and_template_do_not_follow_changed_current_cache(monkeypatch, tmp_path, isolated_formal_schema, selected):
     config = {"facility": {"facility_id": "own", "fax_template": {"quantity": 0, "unknown": None}},
               "policy": {"quantity_rules": {"minimum": 0}, "date_policy": "captured"}}
-    execution = {"order_id": "own-order", "orders": {"own-order": {"configured_input": deepcopy(config)}}}
+    from src.db import session_scope
+    from src.models.order import Order
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.document import OrderDocument
+    from src.models.uploaded_pdf import UploadedPdf
+    from src.services import ocr_job_service as jobs
+    from src.services.workflow_attempt_guard_service import capture_nonworkflow_execution
+    projection_id, _ = authored_input(monkeypatch, tmp_path, config, "own")
+    path, data, _ = selected
+    with session_scope() as session:
+        session.add(Order(id="own-order", facility_code="own", week_code=PERIOD, template_version_id=projection_id,
+                          document_uri=str(path), current_document_id="own-document", message_id="own-message", received_at=datetime(2026, 10, 7)))
+        session.add(OrderDocument(id="own-document", storage_uri=str(path), source_email_id="own-message"))
+        session.add(UploadedPdf(id="own-pdf", message_id="own-message", storage_uri=str(path), content_sha256=sha256(data).hexdigest(), original_filename="own.pdf", received_at=datetime(2026, 10, 7)))
+        session.add(OrderWorkflowState(order_id="own-order", template_version_id=projection_id, state="context_confirmed"))
+    jobs.create_job("own-job", input_reference=str(path), order_id="own-order")
+    jobs.update_job("own-job", status="running")
+    execution = capture_nonworkflow_execution("own-job", order_id="own-order", input_reference=str(path))
     monkeypatch.setattr(config_service, "_load_cached_ingest_policy", lambda: pytest.fail("late current policy"))
     monkeypatch.setattr(config_service, "load_facility_master", lambda: pytest.fail("late current template"))
-    monkeypatch.setattr(config_service, "_validate_authored_facility_config", lambda value, _: value)
     with nonworkflow_execution_context(execution):
         assert config_service.load_ingest_policy() == config["policy"]
         assert config_service.get_authored_facility_config("own") == config["facility"]
@@ -146,7 +172,7 @@ def test_quad_replaced_pdf_denies_adoption(monkeypatch, selected, decision):
                "selected_pdf_receipt": pdf, "suggested_quad_px": quad}
     receipt["physical_menu_entries"] = deepcopy(start["physical_menu_entries"])
     receipt["geometry_source_digest"] = order_service.geometry_source_digest(pdf, start["configured_input"], start["order"], physical_entries=start["physical_menu_entries"])
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: deepcopy(physical))
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, session=None: deepcopy(physical))
     monkeypatch.setattr(workflow, "session_scope", fake_session)
     monkeypatch.setattr(workflow, "_get_order_or_error", lambda *_: (order, None))
     monkeypatch.setattr(workflow, "_get_workflow", lambda *_: state)
@@ -222,7 +248,7 @@ def test_api_sync_async_forward_same_explicit_if_match(monkeypatch, wait):
 
 
 @pytest.mark.parametrize("decision", ["approved_estimate", "manual_override"])
-def test_valid_quad_own_source_adoption_preserves_zero_coordinates(isolated_formal_schema, monkeypatch, selected, decision):
+def test_valid_quad_own_source_adoption_preserves_zero_coordinates(isolated_formal_schema, monkeypatch, selected, decision, tmp_path):
     from src.db import session_scope
     from src.models.order import Order
     from src.models.document import OrderDocument
@@ -238,14 +264,18 @@ def test_valid_quad_own_source_adoption_preserves_zero_coordinates(isolated_form
     ]}}, "policy": {"quantity_rules": {"zero_as_empty": False}}}
     config_service._validate_authored_facility_config(configured["facility"], "own")
     physical = [{"menu_date": "2026-10-07", "daypart": "lunch", "slot_index": 0, "name": "own"}]
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda *args: deepcopy(configured))
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: deepcopy(physical))
+    projection_id, _ = authored_input(monkeypatch, tmp_path, configured, "own")
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, session=None: deepcopy(physical))
     with session_scope() as session:
-        order = Order(id="own", facility_code="own", week_code="2026-10@2026-10-05~2026-10-11", current_document_id="own-document", document_uri=str(path), message_id="own-message")
+        order = Order(id="own", facility_code="own", template_version_id=projection_id, week_code=PERIOD, received_at=datetime(2026, 10, 7), current_document_id="own-document", document_uri=str(path), message_id="own-message")
         session.add(order)
         session.add(OrderDocument(id="own-document", storage_uri=str(path), source_email_id="own-message"))
-        session.add(UploadedPdf(id="own-pdf", storage_uri=str(path), message_id="own-message", original_filename="own.pdf", content_sha256=sha256(data).hexdigest()))
-        session.add(OrderWorkflowState(order_id="own", revision=7, state="context_confirmed"))
+        session.add(UploadedPdf(id="own-pdf", received_at=datetime(2026, 10, 7), storage_uri=str(path), message_id="own-message", original_filename="own.pdf", content_sha256=sha256(data).hexdigest()))
+        session.add(OrderWorkflowState(order_id="own", template_version_id=projection_id, revision=7, state="context_confirmed"))
+        session.flush()
+        # The ORM initializes inserts at revision 1; author the original test's
+        # explicit revision 7 as a persisted update before capturing it.
+        session.get(OrderWorkflowState, "own").revision = 7
         session.flush()
         start = capture_reparse_read_input(session, order)
         pdf = capture_selected_pdf_receipt(session, order)
