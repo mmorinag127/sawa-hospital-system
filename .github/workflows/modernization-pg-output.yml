@@ -118,12 +118,12 @@ jobs:
             -l "$GITHUB_WORKSPACE/.formal-pg-chain/postgres.log" \
             -o "-p 55483 -k $alias -c listen_addresses=''" -w start \
             2>&1 | tee "$GITHUB_WORKSPACE/.formal-pg-chain/start.log"
-      - name: Existing formal PostgreSQL cases only (partial suite)
+      - name: Existing formal migration module (all cases)
         shell: bash
         run: |
           set -o pipefail
           python -m pytest -p no:cacheprovider \
-            backend/tests/integration/test_formal_alembic_fresh_chain.py -k postgresql \
+            backend/tests/integration/test_formal_alembic_fresh_chain.py \
             --basetemp="$GITHUB_WORKSPACE/.formal-pg-chain/tests" \
             --junitxml="$GITHUB_WORKSPACE/.formal-pg-chain/results.xml" -v \
             2>&1 | tee "$GITHUB_WORKSPACE/.formal-pg-chain/pytest.log"
@@ -144,11 +144,12 @@ jobs:
             test "$(readlink "$alias")" = "$root/socket"
             unlink "$alias"
           fi
-      - name: Preserve formal PG partial-suite evidence
+      - name: Preserve formal migration module evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: modernization-formal-pg-chain-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
           path: |
             ${{ github.workspace }}/.formal-pg-chain/git-sha.txt
             ${{ github.workspace }}/.formal-pg-chain/*.log
