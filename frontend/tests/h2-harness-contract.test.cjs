@@ -52,6 +52,10 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
   let restored=fs.readFileSync(path.join(__dirname,'..',production),'utf8');
   const additions=[
+    // Only the exact route identity replacement and empty-owner stop are normalized.
+    ["  const orderId = router.isReady && typeof router.query.id === \"string\" && router.query.id !== \"[id]\"\n    ? router.query.id : \"\";", "  const orderId = useMemo(() => {\n    if (typeof router.query.id === \"string\" && router.query.id && router.query.id !== \"[id]\") {\n      return router.query.id;\n    }\n    if (typeof window !== \"undefined\") {\n      const fromLocation = orderIdFromWorkflowPath(window.location.pathname);\n      if (fromLocation && fromLocation !== \"[id]\") return fromLocation;\n    }\n    return orderIdFromWorkflowPath(router.asPath || \"\");\n  }, [router.asPath, router.query.id]);"],
+    ["type WorkflowV2 = {", "const orderIdFromWorkflowPath = (asPath: string): string => {\n  const pathname = (asPath || \"\").split(\"?\")[0]?.split(\"#\")[0] || \"\";\n  const match = pathname.match(/^\\/orders\\/([^/]+)\\/workflow-v2\\/?$/);\n  if (!match?.[1]) return \"\";\n  try {\n    return decodeURIComponent(match[1]);\n  } catch {\n    return match[1];\n  }\n};\n\ntype WorkflowV2 = {"],
+    ["  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current\n    && Boolean(own.context.orderId)\n", "  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current\n"],
     ['import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";', 'import { sawaTheme } from "@sawa/ui";'],
     ['  common_job_status?: JobStatusRecord | null;\n', ''],
     ['    order_id?: string | null;\n', ''],

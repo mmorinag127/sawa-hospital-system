@@ -24,7 +24,7 @@ function transport() {
   return { api, calls, on(method, url, handler) { handlers.set(`${method} ${url}`, handler); } };
 }
 
-async function mount(file, { api, props = {}, probe, route, component } = {}) {
+async function mount(file, { api, props = {}, probe, route, routerState, component } = {}) {
   const requirePackage = createRequire(path.join(frontend, 'package.json'));
   const { JSDOM } = requirePackage('jsdom');
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: `http://localhost${route || '/'}`, pretendToBeVisual: true });
@@ -93,7 +93,9 @@ async function mount(file, { api, props = {}, probe, route, component } = {}) {
   }
   try {
     const packages = await modules(frontend); React = packages.shared.get('react'); act = React.act;
-    nav = navigation(React, route); loader = sourceLoader(frontend, packages, nav, api);
+    nav = navigation(React, route);
+    if (routerState) Object.assign(nav.router, routerState);
+    loader = sourceLoader(frontend, packages, nav, api);
     root = requirePackage('react-dom/client').createRoot(document.getElementById('root'));
     Boundary = loader.load('src/components/NavigationBoundary.tsx').NavigationBoundary;
     Component = component ? component(loader, React) : loader.load(file, probe).default;

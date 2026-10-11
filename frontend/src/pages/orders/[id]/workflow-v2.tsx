@@ -17,17 +17,6 @@ import {
   normalizeWeekValue,
 } from "../../../features/orders/orderDetailUtils";
 
-const orderIdFromWorkflowPath = (asPath: string): string => {
-  const pathname = (asPath || "").split("?")[0]?.split("#")[0] || "";
-  const match = pathname.match(/^\/orders\/([^/]+)\/workflow-v2\/?$/);
-  if (!match?.[1]) return "";
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
-  }
-};
-
 type WorkflowV2 = {
   order_id: string;
   common_job_status?: JobStatusRecord | null;
@@ -1271,16 +1260,8 @@ const anomalyReviewWithoutWarning = (
 
 export default function OrderWorkflowV2Page() {
   const router = useRouter();
-  const orderId = useMemo(() => {
-    if (typeof router.query.id === "string" && router.query.id && router.query.id !== "[id]") {
-      return router.query.id;
-    }
-    if (typeof window !== "undefined") {
-      const fromLocation = orderIdFromWorkflowPath(window.location.pathname);
-      if (fromLocation && fromLocation !== "[id]") return fromLocation;
-    }
-    return orderIdFromWorkflowPath(router.asPath || "");
-  }, [router.asPath, router.query.id]);
+  const orderId = router.isReady && typeof router.query.id === "string" && router.query.id !== "[id]"
+    ? router.query.id : "";
   const activeOrderIdRef = useRef(orderId);
   activeOrderIdRef.current = orderId;
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
@@ -1435,6 +1416,7 @@ export default function OrderWorkflowV2Page() {
     auth:quadAuth(), inputGeneration:workingInputGenerationRef.current,
   });
   const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current
+    && Boolean(own.context.orderId)
     && own.auth!==null && own.auth===quadAuth() && own.generation===quadContextGenerationRef.current
     && own.context.orderId===quadContextRef.current.orderId && own.context.documentId===quadContextRef.current.documentId
     && own.context.route===quadContextRef.current.route;
