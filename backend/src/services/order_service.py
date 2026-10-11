@@ -93,6 +93,9 @@ from src.services.fax_parser import parse_order_lines
 from src.services.ingest_policy import parse_date_string, month_id_from_dates, require_explicit_ingest_week
 from src.services import sheet_week_service
 from src.services.template_field_schema_service import (
+    authored_quantity_identity,
+    resolve_quantity_field_identities,
+    quantity_field_identities_for_fields,
     build_template_field_schema_contract,
     classify_aux_header_semantic,
     normalize_aux_semantic_display_value,
@@ -6001,7 +6004,7 @@ def _build_materialization_candidate_from_draft_record(
     # Materialization and its guard must use the original saved quantities.
     effective_rows_payload = rows_payload
     quantity_issues = _materialization_quantity_cell_issues(
-        fields=draft_sheet.get("fields"), rows_payload=rows_payload,
+        fields=draft_sheet.get("fields"), rows_payload=rows_payload, template=template,
     )
     if quantity_issues:
         return {
@@ -6075,6 +6078,7 @@ def _build_materialization_candidate_from_draft_record(
         fields=draft_sheet.get("fields"),
         rows_payload=effective_rows_payload,
         candidate_lines=candidate_lines,
+        template=template,
     )
     if isinstance(materialization_guard, dict):
         logger.error(
@@ -6205,16 +6209,16 @@ def _materialization_row_metadata_values(
 
 
 def _materialization_quantity_cell_issues(
-    *, fields: object, rows_payload: object,
+    *, fields: object, rows_payload: object, template: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(fields, list) or not isinstance(rows_payload, list):
         return []
     normalized_fields = [str(field if field is not None else "").strip() for field in fields]
+    identities = quantity_field_identities_for_fields(template, normalized_fields)
     quantity_columns = {}
     for index, field in enumerate(normalized_fields):
-        diet, area = _quantity_meta_from_field(field)
-        if field.startswith("qty.") or (diet and area):
-            quantity_columns[index] = bool(diet and area)
+        if field in identities:
+            quantity_columns[index] = True
     normalized_rows = [
         _normalize_materialization_row_values(fields=normalized_fields, row=row)
         for row in rows_payload
@@ -6276,7 +6280,7 @@ def _materialization_identity_rows(
     indexes = _resolve_structural_row_field_indexes(normalized_fields)[:3]
     if (not all(normalized_fields) or len(set(normalized_fields)) != len(normalized_fields)
             or _draft_fields_look_generic(normalized_fields) or any(index is None for index in indexes)
-            or not _build_sheet_quantity_index(normalized_fields, include_excluded=False)):
+            or not _build_sheet_quantity_index(normalized_fields, template=template, include_excluded=False)):
         issue(None, None, fields, "sheet_template_field_invalid")
         return [], issues
     date_idx, daypart_idx, menu_idx = indexes
@@ -6365,14 +6369,14 @@ def _build_materialization_lines_from_sheet_rows(
     )
     if identity_issues:
         raise ValueError("sheet_identity_review_required")
-    if _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload):
+    if _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload, template=template):
         raise ValueError("sheet_ocr_review_required")
     normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return []
 
     date_idx, daypart_idx, menu_idx, _ = _resolve_structural_row_field_indexes(normalized_fields)
-    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template, include_excluded=False)
     if menu_idx is None or not quantity_index:
         return []
 
@@ -6458,7 +6462,7 @@ def _regular_override_priority(diet_type: object) -> int:
 def _build_change_override_group_key(line: dict[str, Any]) -> tuple[object, ...] | None:
     if not isinstance(line, dict):
         return None
-    diet_key = _normalize_sheet_diet(line.get("diet_type"))
+    diet_key = line.get("diet_type")
     if diet_key not in {"regular", "change_1", "change_2"}:
         return None
     source_row_raw = line.get("source_row_index")
@@ -6471,7 +6475,7 @@ def _build_change_override_group_key(line: dict[str, Any]) -> tuple[object, ...]
         _normalize_bag_summary_date(line.get("date")),
         _normalize_daypart_key(line.get("daypart")),
         _normalize_sheet_text(line.get("menu_name")),
-        _normalize_sheet_area(line.get("area_id")) or "X",
+        authored_quantity_identity(line.get("diet_type"), line.get("area_id"))[1],
         _normalize_sheet_text(line.get("bag_type")).lower(),
     )
 
@@ -6533,17 +6537,16 @@ def _apply_change_override_priority_to_lines(
 
 
 def _apply_change_override_priority_to_quantity_summary(
-    summary: dict[tuple[int, str, str], float],
-) -> dict[tuple[int, str, str], float]:
+    summary: dict[tuple[int, str, str | None], float],
+) -> dict[tuple[int, str, str | None], float]:
     if not summary:
         return {}
 
-    regular_like: dict[tuple[int, str], dict[str, float]] = {}
-    normalized: dict[tuple[int, str, str], float] = {}
+    regular_like: dict[tuple[int, str | None], dict[str, float]] = {}
+    normalized: dict[tuple[int, str, str | None], float] = {}
 
     for (row_index, diet_key, area_key), qty in summary.items():
-        normalized_diet = _normalize_sheet_diet(diet_key) or str(diet_key or "").strip()
-        normalized_area = _normalize_sheet_area(area_key) or "X"
+        normalized_diet, normalized_area = authored_quantity_identity(diet_key, area_key)
         if normalized_diet in {"regular", "change_1", "change_2"}:
             bucket = regular_like.setdefault((row_index, normalized_area), {})
             bucket[normalized_diet] = float(qty)
@@ -6569,6 +6572,7 @@ def _draft_sheet_supports_direct_materialization(
     *,
     fields: object,
     rows_payload: object,
+    template: dict[str, Any] | None = None,
 ) -> bool:
     if not isinstance(fields, list) or not isinstance(rows_payload, list) or not rows_payload:
         return False
@@ -6576,7 +6580,7 @@ def _draft_sheet_supports_direct_materialization(
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return False
     _, _, menu_idx, _ = _resolve_structural_row_field_indexes(normalized_fields)
-    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template, include_excluded=False)
     return menu_idx is not None and bool(quantity_index)
 
 
@@ -6584,17 +6588,18 @@ def _build_sheet_source_row_quantity_summary(
     *,
     fields: object,
     rows_payload: object,
-) -> dict[tuple[int, str, str], float]:
+    template: dict[str, Any] | None = None,
+) -> dict[tuple[int, str, str | None], float]:
     if not isinstance(fields, list) or not isinstance(rows_payload, list):
         return {}
     normalized_fields = [str(field or "").strip() for field in fields if str(field or "").strip()]
     if not normalized_fields or _draft_fields_look_generic(normalized_fields):
         return {}
-    quantity_index = _build_sheet_quantity_index(normalized_fields, include_excluded=False)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template, include_excluded=False)
     if not quantity_index:
         return {}
 
-    summary: dict[tuple[int, str, str], float] = {}
+    summary: dict[tuple[int, str, str | None], float] = {}
     for row_index, row in enumerate(rows_payload):
         values = _normalize_materialization_row_values(fields=normalized_fields, row=row)
         if not values:
@@ -6612,8 +6617,13 @@ def _build_sheet_source_row_quantity_summary(
 
 def _build_materialized_source_row_quantity_summary(
     lines: list[dict[str, Any]] | None,
-) -> dict[tuple[int, str, str], float]:
-    summary: dict[tuple[int, str, str], float] = {}
+    *, template: dict[str, Any] | None = None,
+) -> dict[tuple[int, str, str | None], float]:
+    identities = set(resolve_quantity_field_identities(template).values())
+    # Existing change-column priority materializes the selected change as regular.
+    identities.update(("regular", area) for diet, area in tuple(identities)
+                      if diet in {"change_1", "change_2"})
+    summary: dict[tuple[int, str, str | None], float] = {}
     for line in lines or []:
         if not isinstance(line, dict):
             continue
@@ -6624,10 +6634,9 @@ def _build_materialized_source_row_quantity_summary(
             source_row_index = None
         if source_row_index is None or source_row_index < 0:
             continue
-        diet_key = _normalize_sheet_diet(line.get("diet_type"))
-        area_key = _normalize_sheet_area(line.get("area_id"))
-        if not diet_key or not area_key:
-            continue
+        diet_key, area_key = authored_quantity_identity(line.get("diet_type"), line.get("area_id"))
+        if (diet_key, area_key) not in identities:
+            raise ValueError("quantity_template_identity_unknown")
         if _is_excluded_aggregation_diet(diet_key):
             continue
         qty = line.get("quantity_corrected")
@@ -6647,24 +6656,27 @@ def _build_materialization_quantity_guard_detail(
     fields: object,
     rows_payload: object,
     candidate_lines: list[dict[str, Any]] | None,
+    template: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    quantity_issues = _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload)
+    quantity_issues = _materialization_quantity_cell_issues(fields=fields, rows_payload=rows_payload, template=template)
     if quantity_issues:
         return {
             "error": "sheet_ocr_review_required", "cell_issues": quantity_issues,
             "mismatch_count": len(quantity_issues), "mismatches": quantity_issues,
         }
     expected = _apply_change_override_priority_to_quantity_summary(
-        _build_sheet_source_row_quantity_summary(fields=fields, rows_payload=rows_payload)
+        _build_sheet_source_row_quantity_summary(fields=fields, rows_payload=rows_payload, template=template)
     )
     if not expected:
         return None
     actual = _apply_change_override_priority_to_quantity_summary(
-        _build_materialized_source_row_quantity_summary(candidate_lines)
+        _build_materialized_source_row_quantity_summary(candidate_lines, template=template)
     )
 
     mismatches: list[dict[str, Any]] = []
-    for row_index, diet_key, area_key in sorted(set(expected) | set(actual)):
+    for row_index, diet_key, area_key in sorted(
+        set(expected) | set(actual), key=lambda key: (key[0], key[1], key[2] is not None, key[2] or ""),
+    ):
         expected_qty = expected.get((row_index, diet_key, area_key), 0.0)
         actual_qty = actual.get((row_index, diet_key, area_key), 0.0)
         if abs(expected_qty - actual_qty) <= 1e-6:
@@ -9576,7 +9588,10 @@ def _hakodate_best_method_draft_sheet(order_id: str, *, synchronous_write_input:
         return base_sheet
     fields = [str(field or "").strip() for field in (base_sheet.get("fields") or [])]
     rows = [list(row) for row in (base_sheet.get("rows") or []) if isinstance(row, list)]
-    quantity_index = _build_sheet_quantity_index(fields)
+    original_input = synchronous_write_input if synchronous_write_input is not None else processing_input
+    configured = original_input.get("configured_input") if isinstance(original_input, dict) else None
+    template = (configured.get("facility") or {}).get("fax_template") if isinstance(configured, dict) else None
+    quantity_index = _build_sheet_quantity_index(fields, template=template)
     if not fields or not rows or not quantity_index:
         return base_sheet
     date_idx = fields.index("date_mmdd") if "date_mmdd" in fields else (fields.index("date") if "date" in fields else -1)
@@ -9607,8 +9622,8 @@ def _hakodate_best_method_draft_sheet(order_id: str, *, synchronous_write_input:
             continue
         col_idx = _resolve_quantity_column_index(
             quantity_index=quantity_index,
-            diet_key=_normalize_sheet_diet(line.get("diet_type")),
-            area_key=_normalize_sheet_area(line.get("area_id")),
+            diet_key=line.get("diet_type"),
+            area_key=line.get("area_id"),
         )
         if col_idx is None:
             continue
@@ -12317,7 +12332,7 @@ def _build_canonical_bootstrap_sheet(
         return blocked_payload, None
 
     fields, field_index = _build_sheet_fields_and_indexes(template)
-    field_error = _validate_sheet_template_fields(fields)
+    field_error = _validate_sheet_template_fields(fields, template=template)
     header = _sheet_header_from_template(fields, template)
     if field_error:
         blocked_payload = _build_blocked_sheet_payload(
@@ -12400,7 +12415,7 @@ def _build_canonical_bootstrap_sheet(
         )
         return blocked_payload, None
 
-    quantity_index = _build_sheet_quantity_index(fields)
+    quantity_index = _build_sheet_quantity_index(fields, template=template)
     rows = _clone_sheet_rows(structured_rows)
     mapped_mode = "blank"
     mapped_count = 0
@@ -13360,13 +13375,11 @@ def force_overwrite_current_sheet_with_weekly_menu(
     if not entries:
         return None, "weekly_menu_missing"
     fields = [str(field).strip() for field in (sheet_payload.get("fields") or []) if str(field).strip()]
+    configured = synchronous_write_input.get("configured_input")
+    template = (configured.get("facility") or {}).get("fax_template") if isinstance(configured, dict) else None
+    if not isinstance(template, dict):
+        return None, "template_unresolved"
     if not fields:
-        _facility_config, template = _load_current_sheet_facility_template(
-            facility_id,
-            order_id=order_id,
-        )
-        if not isinstance(template, dict):
-            return None, "template_unresolved"
         fields, _field_index = _build_sheet_fields_and_indexes(template)
         header = _sheet_header_from_template(fields, template)
     else:
@@ -13418,7 +13431,7 @@ def force_overwrite_current_sheet_with_weekly_menu(
             "rows": _build_sheet_trace_rows(
                 rows=structured_rows,
                 fields=fields,
-                quantity_index=_build_sheet_quantity_index(fields),
+                quantity_index=_build_sheet_quantity_index(fields, template=template),
                 source="forced_weekly_menu",
                 mapped_mode="forced_weekly_menu",
                 quantity_value_source=None,
@@ -15798,7 +15811,7 @@ def _normalize_sheet_warning_list(values: object) -> list[str]:
 def _build_sheet_rows_from_order_lines(
     *,
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     order_lines: list[dict[str, Any]],
 ) -> tuple[list[list[str]], list[str]]:
     rows: list[list[str]] = []
@@ -15814,8 +15827,8 @@ def _build_sheet_rows_from_order_lines(
         qty_text = _field_value_to_str(qty_value)
         quantity_col_idx = _resolve_quantity_column_index(
             quantity_index=quantity_index,
-            diet_key=_normalize_sheet_diet(line.get("diet_type")),
-            area_key=_normalize_sheet_area(line.get("area_id")),
+            diet_key=line.get("diet_type"),
+            area_key=line.get("area_id"),
         )
         for col_idx, field in enumerate(fields):
             if field == "date_mmdd":
@@ -21967,24 +21980,30 @@ def _build_sheet_fields_and_indexes(template: dict[str, Any]) -> tuple[list[str]
 def _build_sheet_quantity_index(
     fields: list[str],
     *,
+    template: dict[str, Any] | None = None,
     include_excluded: bool = True,
-) -> dict[tuple[str, str], int]:
-    quantity_index: dict[tuple[str, str], int] = {}
+) -> dict[tuple[str, str | None], int]:
+    quantity_index: dict[tuple[str, str | None], int] = {}
+    identities = quantity_field_identities_for_fields(template, fields)
     for idx, field in enumerate(fields):
-        diet, area = _quantity_meta_from_field(field)
-        if not diet or not area:
+        if field not in identities:
             continue
+        diet, area = identities[field]
         if not include_excluded and _is_excluded_aggregation_diet(diet):
             continue
         quantity_index[(diet, area)] = idx
     return quantity_index
 
 
-def _validate_sheet_template_fields(fields: list[str]) -> str | None:
+def _validate_sheet_template_fields(fields: list[str], *, template: dict[str, Any] | None = None) -> str | None:
     if not fields:
         return "sheet_fields_not_found"
     seen: set[str] = set()
     quantity_columns = 0
+    try:
+        identities = quantity_field_identities_for_fields(template, fields)
+    except ValueError as exc:
+        return str(exc)
     for field in fields:
         token = str(field or "").strip()
         if not token:
@@ -21998,8 +22017,7 @@ def _validate_sheet_template_fields(fields: list[str]) -> str | None:
             continue
         if _is_hakodate_spacer_sheet_field(token):
             continue
-        diet, area = _quantity_meta_from_field(token)
-        if not diet or not area:
+        if token not in identities:
             return "sheet_template_field_invalid"
         quantity_columns += 1
     if quantity_columns <= 0:
@@ -22704,12 +22722,14 @@ _BLOCK_TOTAL_DISPLAY_EXCLUDED_DIETS = {
 
 def _block_total_display_contributor_indexes(
     fields: list[str] | None,
+    *, template: dict[str, Any] | None = None,
 ) -> list[int]:
     contributor_indexes: list[int] = []
     normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
+    identities = quantity_field_identities_for_fields(template, normalized_fields)
     for idx, field in enumerate(normalized_fields):
-        diet, _area = _quantity_meta_from_field(field)
-        if not diet or diet in _BLOCK_TOTAL_DISPLAY_EXCLUDED_DIETS:
+        identity = identities.get(field)
+        if identity is None or identity[0] in _BLOCK_TOTAL_DISPLAY_EXCLUDED_DIETS:
             continue
         contributor_indexes.append(idx)
     return contributor_indexes
@@ -23002,7 +23022,7 @@ def _overlay_structured_block_total_cells_onto_sheet_row_lists(
     derived_assignment_count = 0
     derived_assignments: list[dict[str, Any]] = []
     preserved_assignments: list[dict[str, Any]] = []
-    contributor_indexes = _block_total_display_contributor_indexes(normalized_fields)
+    contributor_indexes = _block_total_display_contributor_indexes(normalized_fields, template=template)
     for canonical_date, date_blocks in blocks_by_date.items():
         assigned_values = assigned_by_date.get(canonical_date) if isinstance(assigned_by_date.get(canonical_date), dict) else {}
         for col_idx in block_total_columns:
@@ -23638,7 +23658,7 @@ def _project_payload_display_cells_onto_sheet_row_lists(
         fields=normalized_fields,
         header=header,
     )
-    quantity_index = _build_sheet_quantity_index(normalized_fields)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template)
     if not quantity_index:
         return normalized_rows, {}
     quantity_columns = sorted(set(quantity_index.values()))
@@ -24370,7 +24390,7 @@ def _apply_order_line_quantities_to_sheet_rows(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     order_lines: list[Any],
 ) -> None:
     def _line_value(line: Any, key: str):
@@ -24408,10 +24428,7 @@ def _apply_order_line_quantities_to_sheet_rows(
             qty_float = float(qty)
         except Exception:
             continue
-        diet_key = _normalize_sheet_diet(line_diet_type)
-        area_key = _normalize_sheet_area(line_area_id)
-        if not diet_key or not area_key:
-            continue
+        diet_key, area_key = authored_quantity_identity(line_diet_type, line_area_id)
         col_idx = _resolve_quantity_column_index(
             quantity_index=quantity_index,
             diet_key=diet_key,
@@ -24446,7 +24463,7 @@ def _apply_order_line_quantities_to_sheet_rows(
 def _count_non_empty_quantity_cells(
     *,
     rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
 ) -> int:
     if not rows or not quantity_index:
         return 0
@@ -24465,7 +24482,7 @@ def _count_non_empty_quantity_cells(
 def _count_non_empty_quantity_rows(
     *,
     rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
 ) -> int:
     if not rows or not quantity_index:
         return 0
@@ -24488,7 +24505,7 @@ def _count_non_empty_quantity_rows(
 def _count_non_empty_quantity_columns(
     *,
     rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
 ) -> int:
     if not rows or not quantity_index:
         return 0
@@ -24507,7 +24524,7 @@ def _count_non_empty_quantity_columns(
 def _count_non_empty_quantity_cells_for_row_indexes(
     *,
     rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     row_indexes: set[int],
 ) -> int:
     if not rows or not quantity_index or not row_indexes:
@@ -24531,7 +24548,7 @@ def _count_source_row_alignment_penalty_cells(
     base_rows: list[dict[str, Any]],
     rows_by_source_index: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     order_lines: list[Any],
 ) -> int:
     if not base_rows or not rows_by_source_index or not fields or not quantity_index or not order_lines:
@@ -24555,9 +24572,10 @@ def _count_source_row_alignment_penalty_cells(
             float(qty)
         except Exception:
             continue
-        diet_key = _normalize_sheet_diet(_line_value(line, "diet_type"))
-        area_key = _normalize_sheet_area(_line_value(line, "area_id"))
-        if not diet_key or not area_key:
+        diet_key, area_key = authored_quantity_identity(
+            _line_value(line, "diet_type"), _line_value(line, "area_id"),
+        )
+        if not diet_key:
             continue
         col_idx = _resolve_quantity_column_index(
             quantity_index=quantity_index,
@@ -24647,7 +24665,7 @@ def _build_sheet_trace_rows(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     source: str,
     mapped_mode: str,
     quantity_value_source: str | None = None,
@@ -24707,7 +24725,7 @@ def _build_sheet_quantity_cell_metadata_rows(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     mapped_mode: str,
     quantity_value_source: str | None = None,
     shell_projection_stats: dict[str, Any] | None = None,
@@ -25267,7 +25285,7 @@ def _collect_missing_weekly_menu_dates(
 def _collect_unmapped_quantity_lines(
     *,
     order_lines: list[Any],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
 
@@ -25286,9 +25304,10 @@ def _collect_unmapped_quantity_lines(
             qty_float = float(qty)
         except Exception:
             continue
-        diet_key = _normalize_sheet_diet(_line_value(line, "diet_type"))
-        area_key = _normalize_sheet_area(_line_value(line, "area_id"))
-        if not diet_key or not area_key:
+        diet_key, area_key = authored_quantity_identity(
+            _line_value(line, "diet_type"), _line_value(line, "area_id"),
+        )
+        if not diet_key:
             issues.append(
                 {
                     "date": str(_line_value(line, "date") or ""),
@@ -25321,23 +25340,14 @@ def _collect_unmapped_quantity_lines(
 
 def _resolve_quantity_column_index(
     *,
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     diet_key: str | None,
     area_key: str | None,
 ) -> int | None:
-    if not diet_key:
-        return None
-    if area_key:
-        direct = quantity_index.get((diet_key, area_key))
-        if direct is not None:
-            return direct
-    fallback = quantity_index.get((diet_key, "X"))
-    if fallback is not None:
-        return fallback
-    same_diet_indexes = [idx for (diet, _area), idx in quantity_index.items() if diet == diet_key]
-    if len(same_diet_indexes) == 1:
-        return same_diet_indexes[0]
-    return None
+    identity = authored_quantity_identity(diet_key, area_key)
+    if identity not in quantity_index:
+        raise ValueError("quantity_template_identity_unknown")
+    return quantity_index[identity]
 
 
 def _clone_sheet_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -25485,7 +25495,7 @@ def _parse_explicit_span_quantity_cell(value: object) -> tuple[float, int] | Non
 def _apply_payload_quantities_by_row_index(
     *,
     rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     payload_rows: list[list[str]],
 ) -> None:
     if not rows or not quantity_index or not payload_rows:
@@ -25696,7 +25706,7 @@ def _build_payload_row_mapping_by_menu_priority(
     rows: list[dict[str, Any]],
     fields: list[str],
     payload_rows: list[list[str]],
-    quantity_index: dict[tuple[str, str], int] | None = None,
+    quantity_index: dict[tuple[str, str | None], int] | None = None,
     template: dict[str, Any] | None = None,
 ) -> tuple[dict[int, int], dict[str, int], dict[int, str]]:
     return _build_canonical_payload_row_mapping(rows=rows, fields=fields, payload_rows=payload_rows, template=template)
@@ -26202,7 +26212,7 @@ def _apply_payload_cells_by_menu_priority(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     payload_rows: list[list[str]],
     payload_unstructured_qty: list[str] | None = None,
     allow_heuristics: bool = True,
@@ -26363,7 +26373,7 @@ def _apply_payload_quantities_numeric_only(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     payload_rows: list[list[str]],
     payload_unstructured_qty: list[str] | None = None,
     allow_heuristics: bool = False,
@@ -26518,7 +26528,7 @@ def _project_payload_quantities_onto_sheet_row_lists(
     ]
     if not normalized_rows or not normalized_fields or not normalized_payload_rows:
         return normalized_rows, {}
-    quantity_index = _build_sheet_quantity_index(normalized_fields)
+    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template)
     if not quantity_index:
         return normalized_rows, {}
     quantity_columns = sorted(set(quantity_index.values()))
@@ -26833,7 +26843,7 @@ def _apply_order_line_quantities_by_source_row_index(
     *,
     rows: list[dict[str, Any]],
     fields: list[str],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     order_lines: list[Any],
 ) -> None:
     def _line_value(line: Any, key: str):
@@ -26866,9 +26876,10 @@ def _apply_order_line_quantities_by_source_row_index(
             qty_float = float(qty)
         except Exception:
             continue
-        diet_key = _normalize_sheet_diet(_line_value(line, "diet_type"))
-        area_key = _normalize_sheet_area(_line_value(line, "area_id"))
-        if not diet_key or not area_key:
+        diet_key, area_key = authored_quantity_identity(
+            _line_value(line, "diet_type"), _line_value(line, "area_id"),
+        )
+        if not diet_key:
             continue
         col_idx = _resolve_quantity_column_index(
             quantity_index=quantity_index,
@@ -26902,7 +26913,7 @@ def _apply_order_line_quantities_by_source_row_index(
 def _summarize_order_line_source_row_mapping(
     *,
     base_rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str], int],
+    quantity_index: dict[tuple[str, str | None], int],
     order_lines: list[Any],
 ) -> dict[str, int]:
     def _line_value(line: Any, key: str):
@@ -26930,9 +26941,10 @@ def _summarize_order_line_source_row_mapping(
             float(qty)
         except Exception:
             continue
-        diet_key = _normalize_sheet_diet(_line_value(line, "diet_type"))
-        area_key = _normalize_sheet_area(_line_value(line, "area_id"))
-        if not diet_key or not area_key:
+        diet_key, area_key = authored_quantity_identity(
+            _line_value(line, "diet_type"), _line_value(line, "area_id"),
+        )
+        if not diet_key:
             continue
         col_idx = _resolve_quantity_column_index(
             quantity_index=quantity_index,
@@ -27103,7 +27115,7 @@ def build_recoverable_ocr_sheet_payload(
     if not facility_config:
         return None, template_error or error_code
     fields, field_index = _build_sheet_fields_and_indexes(template) if isinstance(template, dict) else ([], {})
-    field_error = _validate_sheet_template_fields(fields)
+    field_error = _validate_sheet_template_fields(fields, template=template)
     fallback_source = _canonical_blocked_sheet_source(
         fields=fields,
         template_error=template_error,
@@ -27111,7 +27123,7 @@ def build_recoverable_ocr_sheet_payload(
     )
     if field_error and isinstance(template, dict):
         return None, error_code
-    quantity_index = _build_sheet_quantity_index(fields)
+    quantity_index = _build_sheet_quantity_index(fields, template=template)
     latest_revision = (
         None
     )
@@ -27376,11 +27388,11 @@ def get_ocr_sheet(
     )
 
     fields, field_index = _build_sheet_fields_and_indexes(template)
-    field_error = _validate_sheet_template_fields(fields)
+    field_error = _validate_sheet_template_fields(fields, template=template)
     header = _sheet_header_from_template(fields, template)
     if field_error:
         return None, field_error
-    quantity_index = _build_sheet_quantity_index(fields)
+    quantity_index = _build_sheet_quantity_index(fields, template=template)
     try:
         template_authoritative_quantity_ready = _template_authoritative_quantity_mapping_ready(
             ocr_payload, template, fields,
@@ -29009,7 +29021,7 @@ def _build_hakodate_weekly_menu_base_sheet(order_id: str, *, synchronous_write_i
     except ValueError as exc:
         return None, str(exc)
     fields, field_index = _build_sheet_fields_and_indexes(template)
-    field_error = _validate_sheet_template_fields(fields)
+    field_error = _validate_sheet_template_fields(fields, template=template)
     if field_error:
         return None, field_error
     header = _sheet_header_from_template(fields, template)

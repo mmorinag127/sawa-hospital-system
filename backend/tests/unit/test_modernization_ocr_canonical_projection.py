@@ -377,7 +377,7 @@ def test_soft_and_mixer_only_never_invent_regular_physical_rows(store):
 def bound_projection(target, source, selected=None, *, overlay=True):
     return orders._apply_payload_quantities_numeric_only(
         rows=target, fields=FIELDS,
-        quantity_index=orders._build_sheet_quantity_index(FIELDS),
+        quantity_index=orders._build_sheet_quantity_index(FIELDS, template=selected or template()),
         payload_rows=source, allow_heuristics=False,
         overlay_structural_fields_from_sheet_rows=overlay,
         allow_row_index_fallback=False, template=selected or template(),

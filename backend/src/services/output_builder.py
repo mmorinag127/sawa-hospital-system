@@ -3261,7 +3261,8 @@ def _extract_ocr_entries_from_structured_payload(
     if not isinstance(payload, dict):
         return []
     if not isinstance(template, dict):
-        return []
+        raise ValueError("quantity_template_source_required")
+    order_service.resolve_quantity_field_identities(template)
     rows = order_service._extract_sheet_rows_from_payload(payload, template)
     if not rows:
         return []
@@ -3288,12 +3289,13 @@ def _extract_ocr_entries_from_structured_payload(
     if note_idx is None:
         note_idx = field_index.get("note")
 
-    quantity_fields: list[tuple[int, str, str]] = []
+    quantity_fields: list[tuple[int, str, str | None, str]] = []
+    identities = order_service.quantity_field_identities_for_fields(template, fields)
     for idx, field in enumerate(fields):
-        diet, area = order_service._quantity_meta_from_field(field)
-        if not diet or not area:
+        if field not in identities:
             continue
-        quantity_fields.append((idx, diet, area))
+        diet, area = identities[field]
+        quantity_fields.append((idx, diet, area, field))
 
     current_date: dt_date | None = None
     current_daypart = ""
@@ -3331,15 +3333,15 @@ def _extract_ocr_entries_from_structured_payload(
         if idx in issues_by_row:
             payload_entry["ocr_issues"] = issues_by_row[idx]
             payload_entry["needs_review"] = True
-        for col_idx, diet, area in quantity_fields:
+        for col_idx, diet, area, field in quantity_fields:
             if col_idx >= len(row):
                 continue
             qty = _parse_ocr_quantity(row[col_idx])
             if qty is None:
                 continue
-            key = _entry_quantity_key(diet, area)
-            if key:
-                quantity_map[key] = qty
+            canonical_field = field.lower()
+            key = canonical_field[4:] if canonical_field.startswith("qty.") else canonical_field
+            quantity_map[key] = qty
             legacy_field = _legacy_entry_quantity_field(diet, area)
             if legacy_field:
                 payload_entry[legacy_field] = qty
@@ -3361,7 +3363,7 @@ def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None, *, pa
         table_raw = parsed.get("table_raw")
         if not isinstance(table_raw, str) or not table_raw.strip():
             return {}
-        entries = _parse_ocr_table_rows(table_raw, year_hint)
+        raise ValueError("canonical_ocr_quantity_source_required")
     meta: dict[tuple[dt_date, str], dict] = {}
     normalized_entries: list[dict] = []
     for idx, entry in enumerate(entries):

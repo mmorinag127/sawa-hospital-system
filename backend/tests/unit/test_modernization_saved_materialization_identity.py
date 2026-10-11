@@ -99,7 +99,8 @@ def test_public_explicit_date_formats_keep_quantities_zero_blank_and_source_indi
     ]
     assert result["synchronous_write_input"]["draft_id"] == saved.draft_id
     assert orders._build_materialization_quantity_guard_detail(
-        fields=FIELDS, rows_payload=original["rows"], candidate_lines=result["lines"]) is None
+        fields=FIELDS, rows_payload=original["rows"], candidate_lines=result["lines"],
+        template=saved.authored["fax_template"]) is None
 
 
 @pytest.mark.parametrize("roles,continuation", [

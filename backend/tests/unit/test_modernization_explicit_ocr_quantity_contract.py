@@ -530,7 +530,7 @@ def test_public_candidate_real_capture_original_saved_quantities(public_saved, e
         assert result["line_count"] == 1
         assert [(line["source_row_index"], line["source_col_index"], line["source_field"], line["quantity_original"]) for line in result["lines"]] == [(0, 4, "qty.regular_x", 7)]
         assert result["synchronous_write_input"]["draft_id"] == public_saved.draft_id
-        assert orders._build_materialization_quantity_guard_detail(fields=FIELDS, rows_payload=original["rows"], candidate_lines=result["lines"]) is None
+        assert orders._build_materialization_quantity_guard_detail(fields=FIELDS, rows_payload=original["rows"], candidate_lines=result["lines"], template=public_saved.authored["fax_template"]) is None
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -540,10 +540,10 @@ def test_public_candidate_zero_not_backfilled_and_raw_guard_original(public_save
     assert result["error"] is None
     assert [(line["source_row_index"], line["quantity_original"]) for line in result["lines"]] == [(0, 7), (3, 0)]
     assert public_saved.saved() == original
-    assert orders._build_materialization_quantity_guard_detail(fields=FIELDS, rows_payload=original["rows"], candidate_lines=result["lines"]) is None
+    assert orders._build_materialization_quantity_guard_detail(fields=FIELDS, rows_payload=original["rows"], candidate_lines=result["lines"], template=public_saved.authored["fax_template"]) is None
     invented = deepcopy(result["lines"])
     invented.append({**invented[0], "source_row_index": 1})
-    guard = orders._build_materialization_quantity_guard_detail(fields=FIELDS, rows_payload=original["rows"], candidate_lines=invented)
+    guard = orders._build_materialization_quantity_guard_detail(fields=FIELDS, rows_payload=original["rows"], candidate_lines=invented, template=public_saved.authored["fax_template"])
     assert guard["mismatch_count"] == 1 and guard["mismatches"][0]["source_row_index"] == 1
 
 
