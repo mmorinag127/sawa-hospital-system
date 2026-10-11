@@ -16841,6 +16841,11 @@ def _validate_and_merge_reparse_full_table_candidate(
         for idx, field in enumerate(fields)
         if _is_llm_full_table_mergeable_display_field(field)
     }
+    preserved_display_field_indexes = {
+        idx
+        for idx, semantic in _resolve_helper_column_semantics(fields=fields, header=header).items()
+        if semantic in {"slot_label", "block_total"}
+    }
     authoritative_quantity_requested = authoritative_quantity_rows is not None
     normalized_authoritative_quantity_rows: list[list[str]] = []
     authoritative_quantity_resets: list[dict[str, Any]] = []
@@ -16911,6 +16916,18 @@ def _validate_and_merge_reparse_full_table_candidate(
                     )
                 continue
             if col_index in mergeable_display_field_indexes:
+                if col_index in preserved_display_field_indexes and baseline_value:
+                    if baseline_value != candidate_value:
+                        ignored_shell_drift.append(
+                            {
+                                "row_index": row_index,
+                                "row_id": row_id,
+                                "field": field,
+                                "old_text": baseline_value,
+                                "new_text": candidate_value,
+                            }
+                        )
+                    continue
                 merged_rows[row_index][col_index] = candidate_value
                 if baseline_value != candidate_value:
                     display_changes.append(
