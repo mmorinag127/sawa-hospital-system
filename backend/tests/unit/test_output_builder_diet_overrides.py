@@ -1,6 +1,9 @@
 import pytest
 
 from src.services import order_service, output_builder
+from tests.helpers.monthly_override_fixture import (
+    authored_entries, captured_overrides, publish_configuration, publish_sources, produce,
+)
 
 
 def _label_menu_values_for_bags(bags):
@@ -288,7 +291,7 @@ def test_daily_labels_show_master_condiment_as_main_side_label(monkeypatch):
     assert sauce_label["内容詳細"] == "5g"
 
 
-def test_morning_monthly_entry_main_and_side_slots_become_side_one_and_two():
+def test_morning_monthly_entry_main_and_side_slots_become_side_one_and_two(isolated_formal_schema):
     lines = [
         {
             "date": "2026-06-08",
@@ -324,12 +327,16 @@ def test_morning_monthly_entry_main_and_side_slots_become_side_one_and_two():
         },
     ]
 
-    enriched = output_builder._apply_menu_entry_overrides(lines, entries)
+    entries = [{**entry, "diet_type": "regular"} for entry in entries]
+    enriched = captured_overrides(lines, entries,
+        week="2026-06@2026-06-08~2026-06-08", source_indexes=[0, 1], physical_amount=(1, "g"))
 
     assert [line["menu_category"] for line in enriched] == ["副菜1", "副菜2"]
 
 
-def test_garnish_label_uses_parent_category_and_diet_suffix():
+def test_garnish_label_uses_parent_category_and_diet_suffix(isolated_formal_schema):
+    # Explicit synthetic accessory amount, not a customer/master default.
+    publish_sources([], accessories=[{"name": "おろしｿｰｽ", "qty_per_serving": 1, "unit_type": "g"}])
     lines = output_builder._apply_garnish_lines(
         [
             {
@@ -344,13 +351,16 @@ def test_garnish_label_uses_parent_category_and_diet_suffix():
         ]
     )
     garnish = next(line for line in lines if line["menu_name"] == "おろしｿｰｽ")
+    sources = output_builder._capture_output_sources("2026-06@2026-06-09~2026-06-09", "FAC00009")
+    garnish = output_builder._apply_menu_master_defaults([garnish], "FAC00009", sources=sources)[0]
     garnish = output_builder._apply_garnish_defaults([garnish])[0]
     bags = output_builder._build_bags(
         {"id": "ORD-garnish-label", "facility": "FAC00009", "lines": [garnish]},
         {},
         {"zero_as_empty": True},
     )
-    bags = output_builder._apply_daily_label_facility_rules_to_bags(bags, {}, "FAC00009")
+    bags = output_builder._apply_daily_label_facility_rules_to_bags(
+        bags, {"areas": [{"id": "2F", "name": "Synthetic area"}]}, "FAC00009")
     labels, _fields, _label_format = output_builder._build_label_rows(bags, {}, None)
 
     assert labels[0]["商品名１"] == "おろしｿｰｽ"
@@ -393,7 +403,7 @@ def test_existing_garnish_row_inherits_previous_menu_category():
     assert labels[0]["メニュー"] == "主菜 添え（軟菜）"
 
 
-def test_label_meal_slots_are_assigned_by_daypart_menu_order():
+def test_label_meal_slots_are_assigned_by_daypart_menu_order(isolated_formal_schema):
     lines = [
         {
             "date": "2026-06-14",
@@ -478,10 +488,22 @@ def test_label_meal_slots_are_assigned_by_daypart_menu_order():
         },
     ]
 
-    enriched = output_builder._apply_label_meal_slot_categories(lines)
+    entries = authored_entries([
+        ("2026-06-14", "朝", 1, "ジャーマンポテト", "副菜", "regular"),
+        ("2026-06-14", "朝", 2, "カリフラワーとツナのサラダ", "副菜", "regular"),
+        ("2026-06-14", "昼", 0, "鶏肉の塩麹焼き", "主菜", "regular"),
+        ("2026-06-14", "昼", 1, "茄子の味噌炒め", "副菜", "regular"),
+        ("2026-06-14", "昼", 2, "白菜のお浸し", "副菜", "regular"),
+        ("2026-06-14", "夕", 0, "鮭の照焼き", "主菜", "regular"),
+        ("2026-06-14", "夕", 1, "玉子焼き", "副菜", "regular"),
+        ("2026-06-14", "夕", 2, "小松菜の和え物", "副菜", "regular"),
+    ])
+    bound = captured_overrides(lines, entries,
+        week="2026-06@2026-06-14~2026-06-14", source_indexes=[0, 1, 2, 3, 3, 4, 5, 6, 7], physical_amount=(1, "g"))
+    enriched = output_builder._apply_label_meal_slot_categories(bound)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F"}
             for line in enriched
         ],
         {},
@@ -504,7 +526,7 @@ def test_label_meal_slots_are_assigned_by_daypart_menu_order():
     assert komatsuna["メニュー"] == "副菜②"
 
 
-def test_label_meal_slots_assign_fourth_lunch_item_as_side_three():
+def test_label_meal_slots_assign_fourth_lunch_item_as_side_three(isolated_formal_schema):
     lines = [
         {
             "date": "2026-09-21",
@@ -544,10 +566,18 @@ def test_label_meal_slots_assign_fourth_lunch_item_as_side_three():
         },
     ]
 
-    enriched = output_builder._apply_label_meal_slot_categories(lines)
+    entries = authored_entries([
+        ("2026-09-21", "昼", 0, "行事食主菜", "主菜", "regular"),
+        ("2026-09-21", "昼", 1, "行事食副菜一", "副菜", "regular"),
+        ("2026-09-21", "昼", 2, "行事食副菜二", "副菜", "regular"),
+        ("2026-09-21", "昼", 3, "行事食副菜三", "副菜", "regular"),
+    ])
+    bound = captured_overrides(lines, entries,
+        week="2026-09@2026-09-21~2026-09-21", source_indexes=[0, 1, 2, 3], physical_amount=(1, "g"))
+    enriched = output_builder._apply_label_meal_slot_categories(bound)
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F"}
             for line in enriched
         ],
         {},
@@ -630,7 +660,7 @@ def test_monthly_entry_override_assigns_20260921_lunch_fourth_slot_as_side_three
     }
 
 
-def test_label_meal_slots_skip_parent_prefixed_garnish_category():
+def test_label_meal_slots_skip_parent_prefixed_garnish_category(isolated_formal_schema):
     lines = [
         {
             "date": "2026-06-21",
@@ -670,10 +700,18 @@ def test_label_meal_slots_skip_parent_prefixed_garnish_category():
         },
     ]
 
-    enriched = output_builder._apply_label_meal_slot_categories(lines)
+    entries = authored_entries([
+        ("2026-06-21", "昼", 0, "主菜確認メニュー", "主菜", "regular"),
+        ("2026-06-21", "昼", 1, "茄子と揚げの田舎煮", "副菜", "regular"),
+        ("2026-06-21", "昼", 2, "ピーマンと人参のお浸し", "副菜", "regular"),
+    ])
+    # The standalone accessory is intentionally not a physical monthly row.
+    bound = captured_overrides([lines[0], *lines[2:]], entries,
+        week="2026-06@2026-06-21~2026-06-21", source_indexes=[0, 1, 2], physical_amount=(1, "g"))
+    enriched = output_builder._apply_label_meal_slot_categories([bound[0], lines[1], *bound[1:]])
     labels, _fields, _label_format = output_builder._build_label_rows(
         [
-            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_id": "2F"}
+            {**line, "facility": "FAC00009", "quantity": line["quantity_original"], "area_name": "Synthetic area", "area_id": "2F"}
             for line in enriched
         ],
         {},
@@ -1180,11 +1218,8 @@ def test_output_diet_type_is_unchanged_without_facility_override(monkeypatch, tm
 
 
 
-def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypatch):
-    monkeypatch.setattr(
-        output_builder.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
+def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypatch, tmp_path, isolated_formal_schema):
+    facility_config = {
             "fax_template_override": {
                 "columns": [
                     {
@@ -1201,18 +1236,10 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     },
                 ]
             }
-        },
-    )
-    monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_collect_menu_entries_for_week",
-        lambda *_args, **_kwargs: [
+        }
+    configured = publish_configuration(monkeypatch, tmp_path, day="2026-07-12",
+        columns=facility_config["fax_template_override"]["columns"])
+    entries = [
             {
                 "menu_date": "2026-07-12",
                 "daypart": "夕食",
@@ -1254,12 +1281,8 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                 "category": "副菜",
                 "diet_type": "regular",
             },
-        ],
-    )
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_collect_menu_items_for_week",
-        lambda *_args, **_kwargs: [
+        ]
+    items = [
             {
                 "name": "チキン南蛮　添）ｷｬﾍﾞﾂ",
                 "unit_type": "count",
@@ -1287,10 +1310,10 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                 "category": "副菜",
                 "diet_type": "regular",
             },
-        ],
-    )
+        ]
+    publish_sources(entries, items=items, physical_amount=(1, "g"))
 
-    lines = output_builder.build_order_lines_for_outputs(
+    lines = produce(
         {
             "id": "ORD-test",
             "facility": "FAC00009",
@@ -1304,7 +1327,7 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     "diet_type": "regular",
                     "area_id": "2F",
                     "quantity_original": 4,
-                    "source_row_index": 0,
+                    "source_row_index": 1,
                 },
                 {
                     "date": "2026-07-13",
@@ -1314,7 +1337,7 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     "diet_type": "soft",
                     "area_id": "2F",
                     "quantity_original": 3,
-                    "source_row_index": 0,
+                    "source_row_index": 1,
                 },
                 {
                     "date": "2026-07-13",
@@ -1324,7 +1347,7 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     "diet_type": "mixer",
                     "area_id": "3F",
                     "quantity_original": 2,
-                    "source_row_index": 0,
+                    "source_row_index": 1,
                 },
                 {
                     "date": "2026-07-13",
@@ -1334,7 +1357,7 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     "diet_type": "regular",
                     "area_id": "2F",
                     "quantity_original": 4,
-                    "source_row_index": 1,
+                    "source_row_index": 2,
                 },
                 {
                     "date": "2026-07-13",
@@ -1344,10 +1367,10 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
                     "diet_type": "regular",
                     "area_id": "2F",
                     "quantity_original": 4,
-                    "source_row_index": 2,
+                    "source_row_index": 3,
                 },
             ],
-        }
+        }, configured_input=configured,
     )
 
     assert lines[0]["menu_name"] == "チキン南蛮"
@@ -1378,7 +1401,8 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
             "week_value": "2026-07@2026-07-12~2026-07-18",
         },
         order_lines=lines,
-        facility_config={"fax_template_override": {"columns": []}},
+        facility_config=configured["facility"],
+        configured_input=configured,
     )
     labels, _fields, label_format = output_builder._build_label_rows(bags, {}, None)
     assert label_format == "jp"
@@ -1403,25 +1427,9 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
     assert broccoli_label["メニュー"] == "副菜②"
 
 
-def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
-    # Explicit producer component with source-read doubles, not an accepted receipt.
-    def produce(order):
-        return output_builder.build_order_lines_for_outputs(order, producer_candidate={
-            "lines": order["lines"], "configured_input": {
-                "facility": {"fax_template": {"columns": []}}, "policy": {}},
-        })
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
-    monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
-    monkeypatch.setattr(output_builder, "_collect_current_menu_items_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        output_builder,
-        "_collect_current_menu_entries_for_week",
-        lambda *_args, **_kwargs: [
+def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch, tmp_path, isolated_formal_schema):
+    configured = publish_configuration(monkeypatch, tmp_path, day="2026-07-13")
+    publish_sources([
             {
                 "menu_date": "2026-07-13",
                 "daypart": "夕食",
@@ -1430,8 +1438,7 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
                 "category": "主菜",
                 "diet_type": "regular",
             }
-        ],
-    )
+        ], physical_amount=(1, "g"))
 
     base_order = {
         "id": "ORD-test",
@@ -1455,7 +1462,7 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
                         "source_row_index": 99,
                     }
                 ],
-            }
+            }, configured_input=configured,
         )
     with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
         produce(
@@ -1473,7 +1480,7 @@ def test_monthly_entry_override_blocks_unresolved_source_row(monkeypatch):
                         "source_row_index": 0,
                     }
                 ],
-            }
+            }, configured_input=configured,
         )
 
 
@@ -1640,7 +1647,7 @@ def test_captured_physical_same_diet_duplicate_and_ambiguous_choice_stop():
         output_builder._resolve_monthly_entry_by_source_row({"source_row_index": 0, "diet_type": "soft_mixer"}, rows)
 
 
-def test_label_slot_categories_ignore_excluded_split_monthly_lines():
+def test_label_slot_categories_ignore_excluded_split_monthly_lines(isolated_formal_schema):
     lines = [
         {
             "date": "2026-07-13",
@@ -1702,7 +1709,15 @@ def test_label_slot_categories_ignore_excluded_split_monthly_lines():
         },
     ]
 
-    enriched = output_builder._apply_label_meal_slot_categories(lines)
+    entries = authored_entries([
+        ("2026-07-13", "夕", 0, "焼きチキン南蛮", "主菜", "regular"),
+        ("2026-07-13", "夕", 1, "チキン南蛮", "主菜", "regular"),
+        ("2026-07-13", "夕", 2, "豆腐の煮物", "副菜", "regular"),
+        ("2026-07-13", "夕", 3, "ブロッコリーｺﾞﾏﾄﾞﾚ和え", "副菜", "regular"),
+    ])
+    bound = captured_overrides(lines, entries,
+        week="2026-07@2026-07-13~2026-07-13", source_indexes=[0, 0, 1, 1, 2, 3], physical_amount=(1, "g"))
+    enriched = output_builder._apply_label_meal_slot_categories(bound)
 
     assert enriched[1]["menu_category"] == "主菜"
     assert enriched[2]["menu_category"] == "主菜"
@@ -1710,19 +1725,9 @@ def test_label_slot_categories_ignore_excluded_split_monthly_lines():
     assert enriched[5]["menu_category"] == "副菜2"
 
 
-def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch):
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: {"fax_template_override": {"columns": []}})
-    monkeypatch.setattr(output_builder.order_service, "_expanded_cell_same_daypart_copy_enabled", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(output_builder.order_service, "_week_sheet_name_from_week_value", lambda _value: "")
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder, "_resolve_current_menu_defaults", lambda _names, _facility_id: {})
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, _facility_id: lines)
-    monkeypatch.setattr(output_builder, "_collect_current_menu_items_for_week", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        output_builder,
-        "_collect_current_menu_entries_for_week",
-        lambda *_args, **_kwargs: [
+def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch, tmp_path, isolated_formal_schema):
+    configured = publish_configuration(monkeypatch, tmp_path, day="2026-07-13")
+    publish_sources([
             {
                 "menu_date": "2026-07-13",
                 "daypart": "夕食",
@@ -1731,15 +1736,14 @@ def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypat
                 "category": "副菜",
                 "diet_type": "regular",
             }
-        ],
-    )
+        ], physical_amount=(1, "g"))
     base_order = {
         "id": "ORD-test",
         "facility": "FAC00009",
         "week_value": "2026-07@2026-07-12~2026-07-18",
     }
 
-    soft_lines = output_builder.build_order_lines_for_outputs(
+    soft_lines = produce(
         {
             **base_order,
             "lines": [
@@ -1754,12 +1758,12 @@ def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypat
                     "source_row_index": 0,
                 }
             ],
-        }
+        }, configured_input=configured,
     )
     assert soft_lines[0]["menu_name"] == "豆腐の煮物"
 
     with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
-        output_builder.build_order_lines_for_outputs(
+        produce(
             {
                 **base_order,
                 "lines": [
@@ -1774,10 +1778,10 @@ def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypat
                         "source_row_index": 0,
                     }
                 ],
-            }
+            }, configured_input=configured,
         )
     with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
-        output_builder.build_order_lines_for_outputs(
+        produce(
             {
                 **base_order,
                 "lines": [
@@ -1792,20 +1796,12 @@ def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypat
                         "source_row_index": "not-a-row",
                     }
                 ],
-            }
+            }, configured_input=configured,
         )
 
 
-def test_position_menu_entries_collapse_diet_specific_rows_to_physical_menu_rows(monkeypatch):
-    monkeypatch.setattr(order_service, "_sheet_week_month_ids", lambda _week_id: ["2026-07"])
-    monkeypatch.setattr(
-        order_service,
-        "_load_menu_payloads_for_week",
-        lambda *_args, **_kwargs: [
-            (
-                "2026-07",
-                {
-                    "entries": [
+def test_position_menu_entries_collapse_diet_specific_rows_to_physical_menu_rows(isolated_formal_schema):
+    publish_sources([
                         {
                             "menu_date": "2026-07-13",
                             "daypart": "夕食",
@@ -1831,11 +1827,7 @@ def test_position_menu_entries_collapse_diet_specific_rows_to_physical_menu_rows
                             "category": "副菜",
                             "diet_type": "regular",
                         },
-                    ]
-                },
-            )
-        ],
-    )
+    ])
 
     entries = order_service._build_position_menu_entries("2026-07@2026-07-12~2026-07-18", "FAC00009")
 
