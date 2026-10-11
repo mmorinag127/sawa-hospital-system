@@ -1788,13 +1788,13 @@ function FacilityMasterScreen({ authenticated }: { authenticated: boolean }) {
                 <div className="label-config-layout">
                   <div>
                     {facilityInfo?.dailyLabelDietTypes == null && (
-                      <button
+                      <Button
                         type="button"
                         disabled={!isEditing}
                         onClick={() => updateSelectedFacilityPatch({ daily_label_comparable_diet_types: [] })}
                       >
                         区分表示なしを明示設定
-                      </button>
+                      </Button>
                     )}
                     <div className="toggle-grid">
                       {DAILY_LABEL_DIET_OPTIONS.map((option) => {

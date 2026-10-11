@@ -15,6 +15,7 @@ def test_breakfast_label_changes_only_category_display(daypart, diet):
         "menu_category": "主菜",
         "menu_name": "試験献立",
         "diet_type": diet,
+        "daily_label_comparable_diet_types": [],
         "quantity": 2,
         "menu_qty_per_serving": 100,
         "menu_unit_type": "g",
