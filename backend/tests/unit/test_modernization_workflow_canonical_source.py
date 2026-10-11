@@ -13,6 +13,7 @@ from sqlalchemy import event
 from src.db import session_scope
 from src.services import order_current_state_service, order_service
 from src.services import workflow_state_service as workflow
+from src.services.workflow_attempt_guard_service import capture_current_sheet_input, bind_current_sheet_input
 from tests.unit.test_h2_operator_repair_revision import repair_order  # noqa: F401
 
 
@@ -105,7 +106,10 @@ def test_public_projection_entries_stop_before_draft_read_or_write(monkeypatch, 
 @pytest.mark.parametrize("preview", [False, True])
 def test_shared_candidate_review_import_stops_before_projection_writes(repair_order, monkeypatch, error_type, preview):
     order_id, _, _ = repair_order
-    context = {"order_payload": order_service.get_order_by_id(order_id)}
+    context = bind_current_sheet_input(
+        {"order_id": order_id, "order_payload": order_service.get_order_by_id(order_id)},
+        capture_current_sheet_input(order_id),
+    )
     assert isinstance(context["order_payload"], dict)
     _forbid_projection_writes(monkeypatch)
     monkeypatch.setattr(order_service, "candidate_sheet_state", _forbidden)
@@ -205,11 +209,13 @@ def test_owned_projection_observes_real_candidate_and_review_delegation(repair_o
     order_id, _, _ = repair_order
     order = order_service.get_order_by_id(order_id)
     context = {
+        "order_id": order_id,
         "order_payload": order,
         "menu_diagnostics": order_service._build_monthly_menu_diagnostics(
             week_id=order["week_value"], facility_id=order["facility"],
         ),
     }
+    context = bind_current_sheet_input(context, capture_current_sheet_input(order_id))
     candidate_calls, review_calls = [], []
     candidate = order_service.candidate_sheet_state
     review = order_service.get_order_review_summary
@@ -237,7 +243,10 @@ def test_owned_projection_observes_real_candidate_and_review_delegation(repair_o
     if preview:
         args, kwargs, candidate_result = candidate_calls[0]
         assert args == (order_id,)
-        assert kwargs == {"candidate_evidence_run_id": None, "current_sheet_context": context}
+        assert kwargs == {
+            "candidate_evidence_run_id": None, "current_sheet_context": context,
+            "current_sheet_context_supplied": True,
+        }
         assert result["candidate_sheet_state"] == {
             key: candidate_result[key] for key in (
                 "current_sheet_revision_id", "candidate_evidence_run_id",
@@ -251,6 +260,7 @@ def test_owned_projection_observes_real_candidate_and_review_delegation(repair_o
         "lines_updated_at": order["lines_updated_at"], "ocr_status": "done",
         "cached_payload": evidence["payload_json"], "ocr_metrics": None,
         "order_status": order["status"], "current_sheet_context": context,
+        "current_sheet_context_supplied": True,
         "sheet_gate": result["apply_gate"],
     }
     assert all(result[key] == value for key, value in review_result.items())

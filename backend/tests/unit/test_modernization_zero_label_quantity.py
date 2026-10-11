@@ -158,7 +158,10 @@ def test_date_filter_and_duplicate_keys_preserve_existing_bag_metadata():
     ])
     before, ctx_before = deepcopy(group), deepcopy(ctx)
     output._append_zero_quantity_label_bags(group, ctx, DAY)
-    assert group["bags"] == [before["bags"][0], output._line_to_label_bag("COMPONENT-ORDER", "F", next_line)]
+    expected_new = output._line_to_label_bag("COMPONENT-ORDER", "F", next_line)
+    expected_new["area_name"] = ""
+    assert group["bags"] == [before["bags"][0], expected_new]
+    assert group["bags"][1]["area_name"] == ""
     assert ctx == ctx_before
 
 

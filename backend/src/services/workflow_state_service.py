@@ -892,6 +892,8 @@ def _build_workflow_state_projection(
     force_refresh_current_sheet: bool = False,
     persist: bool = True,
 ) -> dict[str, Any] | None:
+    from src.services import order_service as _order_service
+
     captured_workflow = current_workflow_execution()
     if captured_workflow is not None and (captured_workflow.get("attempt") is not None or captured_workflow.get("revision") is not None):
         persist = False
@@ -914,6 +916,7 @@ def _build_workflow_state_projection(
         order_input = validate_current_sheet_input(session, normalized_order_id, projection_context, writing=persist)
         return _build_locked_workflow_state_projection(
             normalized_order_id,
+            canonical_order_service=_order_service,
             current_sheet_context=current_sheet_context,
             projection_context=projection_context,
             persist=persist,
@@ -927,6 +930,7 @@ def _build_workflow_state_projection(
 def _build_locked_workflow_state_projection(
     normalized_order_id: str,
     *,
+    canonical_order_service: Any,
     current_sheet_context: dict[str, Any] | None,
     projection_context: dict[str, Any],
     persist: bool,
@@ -984,8 +988,6 @@ def _build_locked_workflow_state_projection(
     acknowledged_candidate_evidence_run_id = (
         str((acknowledged_candidate_decision or {}).get("selected_value") or "").strip() or None
     )
-    from src.services import order_service as _order_service
-
     serialized_current_sheet_revision_id = (
         str((current_sheet_context or {}).get("current_sheet_revision_id") or "").strip()
         or None
@@ -999,7 +1001,7 @@ def _build_locked_workflow_state_projection(
         "candidate_preview_draft": None,
     }
     if include_candidate_preview:
-        candidate_sheet_state = _order_service.candidate_sheet_state(
+        candidate_sheet_state = canonical_order_service.candidate_sheet_state(
             normalized_order_id,
             candidate_evidence_run_id=candidate_evidence_run_id,
             current_sheet_context=current_sheet_context,
@@ -1252,7 +1254,7 @@ def _build_locked_workflow_state_projection(
     effective_ocr_status = str((reparse_state or {}).get("status") or "").strip() or None
     if effective_ocr_status == "idle" and isinstance(active_evidence_run, dict):
         effective_ocr_status = "done"
-    review_summary = _order_service.get_order_review_summary(
+    review_summary = canonical_order_service.get_order_review_summary(
         normalized_order_id,
         lines_updated_at=order_payload.get("lines_updated_at"),
         ocr_status=effective_ocr_status,
