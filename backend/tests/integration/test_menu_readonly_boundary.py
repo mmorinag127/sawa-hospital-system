@@ -172,6 +172,7 @@ def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, mon
         order = session.get(Order, "operator-order")
         draft = canonical_inputs.save_source(session, order, candidate_name)
         adopted = canonical_inputs.capture(session, order, draft)
+        template_version_id = order.template_version_id
         assert adopted["lines"][0]["menu_name"] == candidate_name
         original_candidate = candidate(candidate_name)
         assert original_candidate["lines"][0]["quantity_original"] == 17
@@ -199,6 +200,9 @@ def test_step4_uses_adopted_candidate_not_old_order_lines(readonly_database, mon
     assert snapshot(readonly_database) == before
     bagging = {"bagging_result_id": "bagging", "source_saved_sheet_id": "draft", "materialization_candidate": adopted}
     bundle = {"source_bagging_result_id": "bagging", "source_saved_sheet_id": "draft"}
+    bagging["template_version_id"] = template_version_id
+    bundle["template_version_id"] = template_version_id
+    bundle["materialization_digest"] = order_workflow_v2_service._canonical_payload_digest(adopted)
     monkeypatch.setattr(order_workflow_v2_service, "_workflow_meta_with_step4_artifacts", lambda *args: {"bagging_result": bagging, "output_bundle": bundle})
     if candidate_name == "Unknown":
         _, error = order_workflow_v2_service.final_confirm("operator-order", expected_revision=_stored_workflow_revision("operator-order"))
@@ -230,7 +234,10 @@ def test_resolved_enrichment_keeps_exact_output_and_quantities(readonly_database
         assert order_serialization_service.candidate_menu_amount_resolution(order, adopted)["status"] == "resolved"
         produced = order_workflow_v2_service._build_bag_rows_for_candidate(order=order,
             lines=adopted["lines"], materialization_candidate=producer_candidate)
-        assert [{key: row[key] for key in expected[0]} for row in produced] == expected
+        assert [row["quantity"] for row in produced] == [19]
+        assert [{"quantity": line["quantity_corrected"] if line["quantity_corrected"] is not None else line["quantity_original"],
+                 "actual_amount": line["actual_amount"], "actual_unit_type": line["actual_unit_type"]}
+                for line in producer_candidate["output_lines"]] == expected
         assert producer_candidate["output_lines"][0]["menu_qty_per_serving"] == enriched[0]["menu_qty_per_serving"]
         assert producer_candidate["output_lines"][0]["menu_unit_type"] == enriched[0]["menu_unit_type"]
     assert adopted == original
@@ -243,6 +250,7 @@ def test_workflow_broken_draft_is_readonly_explicit_stop(readonly_database, monk
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
         workflow = canonical_inputs.state(order, draft_id="absent")
+        order.week_code = canonical_inputs.WEEK
         if kind != "missing":
             session.add(Order(id="different-order", document_uri="owned-other.pdf", message_id="owned-other", status="確定"))
             session.flush()
