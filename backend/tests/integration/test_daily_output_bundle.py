@@ -2212,9 +2212,8 @@ def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
     monkeypatch.setattr(
         output_builder.menu_service,
         "resolve_menu_defaults",
-        lambda menu_names, facility_id: {"主菜A": {"condiments": ["キャベツ"]}},
+        lambda menu_names, facility_id: pytest.fail("captured entry_defaults must not reread current defaults"),
     )
-    output_builder._cached_menu_defaults.cache_clear()  # noqa: SLF001
 
     rows = output_builder._build_delivery_rows(  # noqa: SLF001
         {
@@ -2242,7 +2241,7 @@ def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
         },
         {"zero_as_empty": True},
         {"facility_name": "グループホームそよかぜ"},
-        {},
+        {"entry_defaults": {"主菜A": {"condiments": ["キャベツ"]}}},
         allow_ocr_menu_meta=False,
     )
 
@@ -2252,8 +2251,8 @@ def test_delivery_rows_show_condiment_next_to_main_menu(monkeypatch):
 
 
 def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
-    monkeypatch.setattr(output_builder.menu_service, "resolve_menu_defaults", lambda menu_names, facility_id: {})
-    output_builder._cached_menu_defaults.cache_clear()  # noqa: SLF001
+    monkeypatch.setattr(output_builder.menu_service, "resolve_menu_defaults",
+                        lambda menu_names, facility_id: pytest.fail("captured entry_defaults must not reread current defaults"))
 
     rows = output_builder._build_delivery_rows(  # noqa: SLF001
         {
@@ -2323,7 +2322,7 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
         },
         {"zero_as_empty": True},
         {"facility_name": "グループホームそよかぜ"},
-        {},
+        {"entry_defaults": {}},
         allow_ocr_menu_meta=False,
     )
 
