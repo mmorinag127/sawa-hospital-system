@@ -1900,12 +1900,7 @@ def _accepted_output_candidate(order: dict, *, write_session=None) -> dict:
             raise ValueError("accepted saved sheet mismatch")
         if not draft.template_version_id or workflow.template_version_id != draft.template_version_id:
             raise ValueError("accepted template identity missing or mismatched")
-        try:
-            candidate = _workflow_v2_materialization_candidate(session, order, workflow, draft)
-        except ValueError as exc:
-            error = ValueError("saved-sheet acceptance receipt mismatch")
-            error.detail = str(exc)
-            raise error from exc
+        candidate = _workflow_v2_materialization_candidate(session, order, workflow, draft)
         _validate_accepted_read_receipt(session, order_id, workflow, draft, candidate)
         return candidate
 

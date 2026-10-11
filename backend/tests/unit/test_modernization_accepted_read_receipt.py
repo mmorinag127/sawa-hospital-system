@@ -218,7 +218,7 @@ def test_direct_database_sheet_or_source_drift_is_rejected(accepted_receipt, fau
     ("revision", "output original bagging proof missing"),
     ("start-sheet", "output original bagging input mismatch"),
     ("proof-digest", "output original bagging proof mismatch"),
-    ("candidate-digest", "saved-sheet acceptance receipt mismatch"),
+    ("candidate-digest", "workflow-v2 output bundle source mismatch"),
 ])
 def test_bagging_receipt_drift_stops_without_recapture(owned_bagging, fault, error, monkeypatch):
     fixture = owned_bagging
