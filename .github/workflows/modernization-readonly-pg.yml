@@ -1,0 +1,50 @@
+name: Hospital readonly SQLite and owned PG16 (non-deploy)
+on:
+  push:
+    branches:
+      - codex/modernization-readonly-pg-ci-20261012
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  readonly-boundary:
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/codex/modernization-readonly-pg-ci-20261012' && github.event.repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Record actual source SHA
+        run: |
+          mkdir -p "$RUNNER_TEMP/readonly-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/readonly-evidence/git-sha.txt"
+      - name: Install production dependencies and pytest
+        run: python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest
+      - name: Existing readonly module, all SQLite and PostgreSQL cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/run_readonly_pg_tests.py --source "$GITHUB_WORKSPACE" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            2>&1 | tee "$RUNNER_TEMP/readonly-evidence/runner.log"
+      - name: Preserve evidence including failures and shutdown
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hospital-readonly-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/readonly-evidence/git-sha.txt
+            ${{ runner.temp }}/readonly-evidence/runner.log
+            /tmp/sawa-ro-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.log
+            /tmp/sawa-ro-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            /tmp/sawa-ro-${{ github.run_id }}-${{ github.run_attempt }}/evidence/results.xml
+            /tmp/sawa-ro-${{ github.run_id }}-${{ github.run_attempt }}/evidence/git-sha.txt
+          if-no-files-found: warn
