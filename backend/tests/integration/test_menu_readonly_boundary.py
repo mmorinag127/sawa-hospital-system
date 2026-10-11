@@ -228,16 +228,21 @@ def test_resolved_enrichment_keeps_exact_output_and_quantities(readonly_database
     original = deepcopy(adopted)
     producer_candidate = deepcopy(adopted)
     enriched = [dict(adopted["lines"][0], menu_qty_per_serving=37, menu_unit_type="g")]
-    expected = [{"quantity": 19, "actual_amount": 703, "actual_unit_type": "g"}]
+    expected_labels = [{"内容量": "703g", "内容詳細": "37g", "": "19人前"}]
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
         assert order_serialization_service.candidate_menu_amount_resolution(order, adopted)["status"] == "resolved"
         produced = order_workflow_v2_service._build_bag_rows_for_candidate(order=order,
             lines=adopted["lines"], materialization_candidate=producer_candidate)
         assert [row["quantity"] for row in produced] == [19]
-        assert [{"quantity": line["quantity_corrected"] if line["quantity_corrected"] is not None else line["quantity_original"],
-                 "actual_amount": line["actual_amount"], "actual_unit_type": line["actual_unit_type"]}
-                for line in producer_candidate["output_lines"]] == expected
+        order_payload = order_workflow_v2_service._build_order_payload_for_outputs(
+            order=order, lines=producer_candidate["output_lines"])
+        label_bags = output_builder.build_bag_rows_for_outputs(
+            order_payload, order_lines=producer_candidate["output_lines"],
+            configured_input=producer_candidate["configured_input"])
+        assert [bag["quantity"] for bag in label_bags] == [19]
+        labels = [output_builder._label_payload_jp(bag) for bag in label_bags]
+        assert [{key: label[key] for key in expected_labels[0]} for label in labels] == expected_labels
         assert producer_candidate["output_lines"][0]["menu_qty_per_serving"] == enriched[0]["menu_qty_per_serving"]
         assert producer_candidate["output_lines"][0]["menu_unit_type"] == enriched[0]["menu_unit_type"]
     assert adopted == original
