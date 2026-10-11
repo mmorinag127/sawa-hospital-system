@@ -1004,7 +1004,8 @@ def test_bag_level_monthly_menu_item_qty_overrides_stale_materialized_amounts(mo
                 with session_scope() as session:
                     facility = session.get(Order, registered["id"]).facility_code
                     item = session.execute(select(MonthlyMenuItem).where(
-                        MonthlyMenuItem.facility_override == facility)).scalar_one()
+                        MonthlyMenuItem.facility_override == facility,
+                        MonthlyMenuItem.diet_type == diet)).scalar_one()
                     item.qty_per_serving = 2
                     item.unit_type = "count"
                 state, error = workflow.get_workflow_readonly(registered["id"])

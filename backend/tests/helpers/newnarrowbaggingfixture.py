@@ -61,6 +61,16 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     with fitz.open() as pdf:
         page = pdf.new_page()
         page.insert_text((40, 40), f"Synthetic component / {facility} / {day.isoformat()}")
+        y = 75
+        for line in lines:
+            if y > 780:
+                page = pdf.new_page()
+                y = 40
+            page.insert_text((30, y),
+                f"{line['date']} {line['daypart']} {line['menu_name']} "
+                f"{line['diet_type']} / {line['area_id']} / {line['quantity_original']}",
+                fontname="japan", fontsize=9)
+            y += 25
         body = pdf.tobytes()
     from pathlib import Path
     Path(path).write_bytes(body)
@@ -83,7 +93,9 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
             session.add(MenuMaster(id=master_id, name=menu_name, normalized_name=menu_service._normalize_menu_name(menu_name),
                 qty_per_serving=menu_qty_per_serving, unit_type=menu_unit_type, category=menu_category,
                 condiments=["ソース"] if group[0]["bag_type"] == "condiment" else []))
-            for diet in dict.fromkeys(line["diet_type"] for line in group):
+            # Physical regular identity is authored separately from requested
+            # logical quantities. It never adds a regular order column/value.
+            for diet in dict.fromkeys(["regular", *[line["diet_type"] for line in group]]):
                 session.add(MonthlyMenuEntry(id=str(uuid4()), monthly_menu_id=day.strftime("%Y-%m"),
                     menu_date=day, name=menu_name, daypart=canonical_daypart, diet_type=diet,
                     category=menu_category, facility_override=facility, slot_index=slot))
