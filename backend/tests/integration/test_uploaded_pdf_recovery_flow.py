@@ -76,7 +76,7 @@ def test_owned_delivery_marks_completed_and_links_entities(monkeypatch, tmp_path
     with session_scope() as session:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         row.storage_uri, row.content_sha256 = uri, digest
-    receipt = reserve_uploaded_original(uploaded_pdf_id)
+    receipt = reserve_uploaded_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     assert receipt["id"] == message_id
     register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
@@ -107,7 +107,7 @@ def test_owned_runner_uses_canonical_order_ocr_job_id(monkeypatch, tmp_path):
     with session_scope() as session:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         row.storage_uri, row.content_sha256 = uri, digest
-    reserve_uploaded_original(uploaded_pdf_id)
+    reserve_uploaded_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     registered = register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
     assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"
@@ -135,7 +135,7 @@ def test_owned_delivery_business_failure_is_terminal_after_stale_lease(monkeypat
     with session_scope() as session:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         row.storage_uri, row.content_sha256 = uri, digest
-    reserve_uploaded_original(uploaded_pdf_id)
+    reserve_uploaded_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     before = ingest_job_service.get_ingest_job_snapshot(message_id)
 
@@ -180,7 +180,7 @@ def test_owned_first_pass_finalizes_without_implicit_latest_evidence_adoption(mo
     with session_scope() as session:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         row.storage_uri, row.content_sha256 = uri, digest
-    reserve_uploaded_original(uploaded_pdf_id)
+    reserve_uploaded_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     registered = register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
     assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"
@@ -207,7 +207,7 @@ def test_owned_first_pass_duplicate_keeps_evidence_and_original_receipt(monkeypa
     with session_scope() as session:
         row = session.get(UploadedPdf, uploaded_pdf_id)
         row.storage_uri, row.content_sha256 = uri, digest
-    reserve_uploaded_original(uploaded_pdf_id)
+    reserve_uploaded_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     registered = register_authored_original(uploaded_pdf_id, effective_date=date(2026, 2, 20))
     authored_pipeline_provider(monkeypatch, table_rows=[["02/20", "昼", "Menu A", "2"]])
     assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"

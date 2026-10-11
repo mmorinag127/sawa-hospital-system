@@ -174,7 +174,7 @@ def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row(monkeyp
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
         week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
-    reserve_uploaded_original(uploaded["id"])
+    reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
     order = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
     with session_scope() as session:
         row = session.get(OrderWorkflowState, order["id"])

@@ -105,7 +105,7 @@ def registration_only_order(monkeypatch, tmp_path):
         uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
             week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
             skip_ocr=False, source_kind="manual_upload")
-        receipt = reserve_uploaded_original(uploaded["id"])
+        receipt = reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
         assert receipt["id"] == saved.message_id
         order = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
         with session_scope() as session:
@@ -523,7 +523,7 @@ def test_legacy_draft_sheet_endpoint_is_disabled_after_evidence_persistence(monk
         week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
         skip_ocr=False, source_kind="manual_upload",
     )
-    receipt = reserve_uploaded_original(uploaded["id"])
+    receipt = reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
     assert receipt["id"] == saved.message_id
     registered = register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
     authored_pipeline_provider(monkeypatch, table_rows=[["03/22", "朝", "Menu A", "5"]])
@@ -621,7 +621,7 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
         week_hint="2026-03@2026-03-22~2026-03-28", facility_name=None,
         skip_ocr=False, source_kind="manual_upload",
     )
-    receipt = reserve_uploaded_original(uploaded["id"])
+    receipt = reserve_uploaded_original(uploaded["id"], effective_date=date(2026, 3, 22))
     assert receipt["id"] == saved.message_id
     register_authored_original(uploaded["id"], effective_date=date(2026, 3, 22))
     authored_pipeline_provider(monkeypatch, table_rows=[["03/22", "朝", "Menu A", "7"]])

@@ -33,11 +33,20 @@ def configure_delivery(monkeypatch):
             monkeypatch.setenv(dispatch.PREFIX + role + key, value)
 
 
-def reserve_uploaded_original(uploaded_pdf_id):
+def _authored_selection(uploaded, effective_date):
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.ingest_facility_selection_service import capture_selection
+    snapshot = read_snapshot()
+    return capture_selection(uploaded["facility_hint"], effective_date.isoformat(),
+                             snapshot.revision, "authored-original", uploaded["week_hint"])
+
+
+def reserve_uploaded_original(uploaded_pdf_id, *, effective_date):
     """Copy the physical authored upload through the production payload producer."""
     uploaded = uploads.get_uploaded_pdf(uploaded_pdf_id)
     assert uploaded is not None
-    return ingest.create_ingest_receipt(uploads.build_ingest_payload(uploaded))
+    selection = _authored_selection(uploaded, effective_date)
+    return ingest.create_ingest_receipt(uploads.build_ingest_payload(uploaded, facility_selection=selection))
 
 
 def process_uploaded_original(uploaded_pdf_id):
@@ -89,7 +98,20 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
 def register_authored_original(uploaded_pdf_id, *, effective_date):
     """New authored fixture registration and canonical selection before execution."""
     from src.workers.ingest_mail_adapter import parse_ingest_payload
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    from src.models.ingest_job import IngestJob
     uploaded = uploads.get_uploaded_pdf(uploaded_pdf_id)
+    assert uploaded is not None
+    selection = _authored_selection(uploaded, effective_date)
+    original = ingest.get_ingest_job_snapshot(uploaded["message_id"])
+    if original is None:
+        ingest.create_ingest_receipt(uploads.build_ingest_payload(uploaded, facility_selection=selection))
+        original = ingest.get_ingest_job_snapshot(uploaded["message_id"])
+    assert original is not None
+    with session_scope() as session:
+        receipt = session.get(IngestJob, uploaded["message_id"])
+        assert receipt is not None
+        assert snapshots_equal(receipt.payload["facility_selection"], selection)
     payload = parse_ingest_payload(uploads.build_ingest_payload(uploaded))
     return register_authored_payload(payload, effective_date=effective_date)
 

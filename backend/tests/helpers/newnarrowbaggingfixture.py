@@ -86,7 +86,7 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
             content_sha256=sha256(body).hexdigest(), original_filename="synthetic.pdf",
             received_at=datetime.combine(day, datetime.min.time()), facility_hint=facility,
             week_hint=f"{day:%Y-%m}@{day.isoformat()}~{day.isoformat()}", status="pending"))
-    reserve_uploaded_original(upload_id)
+    reserve_uploaded_original(upload_id, effective_date=day)
     registered = register_authored_original(upload_id, effective_date=day)
     current, error = workflow.get_workflow_readonly(registered["id"])
     assert error is None, error
