@@ -50,7 +50,7 @@ def test_workflow_only_owner_feature_push_or_manual_without_cloud_permissions():
     steps = job['steps']
     assert steps[0] == {'uses': 'actions/checkout@v6', 'with': {'persist-credentials': False}}
     assert steps[1] == {'uses': 'actions/setup-python@v6', 'with': {'python-version': '3.12'}}
-    assert steps[3]['run'] == 'python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest'
+    assert steps[3]['run'] == 'python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest httpx2'
     assert 'set -euo pipefail' in steps[4]['run']
     assert 'python scripts/run_readonly_pg_tests.py' in steps[4]['run']
     assert steps[-1]['if'] == 'always()'
