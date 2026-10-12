@@ -3,22 +3,54 @@ import pathlib
 import json
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
-from src.db import session_scope  # noqa: E402
+from src.db import Base, session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
 from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
-from src.services import config_service, facility_service, facility_template_version_service  # noqa: E402
+from src.services import canonical_facility_store, config_service, facility_service, facility_template_version_service  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _reload_config_cache_after_test():
-    yield
+def owned_master(tmp_path, monkeypatch):
+    source = ROOT / "src/data/facility_master.template.json"
+    path = tmp_path / source.name
+    path.write_bytes(source.read_bytes())
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(path))
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    yield path
     config_service.reload_configs()
+
+
+def _revision(client, path="/facility-master"):
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.json()["source"] == "canonical_json"
+    return response.json()["revision"]
+
+
+def _database_rows():
+    with session_scope() as session:
+        return {table.name: [dict(row) for row in session.execute(
+            select(table).order_by(*table.primary_key.columns)).mappings()]
+            for table in Base.metadata.sorted_tables}
+
+
+def _assert_cas_refused(client, method, path, body, master_path, stale_revision=None):
+    before = master_path.read_bytes(), _database_rows()
+    attempts = [(body, 428, "facility_master_expected_revision_required")]
+    if stale_revision is not None:
+        attempts.append(({**body, "expected_revision": stale_revision}, 409, "facility_master_revision_conflict"))
+    for payload, status, error in attempts:
+        response = client.request(method, path, json=payload)
+        assert response.status_code == status
+        assert response.json()["detail"]["error"] == error
+        assert (master_path.read_bytes(), _database_rows()) == before
 
 
 def _clear_facilities():
@@ -44,17 +76,25 @@ def _ensure_active_template_version_for_facility(facility_id: str):
         )
 
 
-def test_facility_config_update_contract():
+def test_facility_config_update_contract(owned_master):
     _clear_facilities()
     client = TestClient(app)
+    body = {"name": "Alpha Facility", "areas": [{"id": "ARE001", "name": "Unit A"}]}
+    _assert_cas_refused(client, "POST", "/facilities", body, owned_master)
+    revision = _revision(client)
     res = client.post(
         "/facilities",
-        json={"name": "Alpha Facility", "areas": [{"id": "ARE001", "name": "Unit A"}]},
+        json={**body, "expected_revision": revision},
     )
     assert res.status_code == 201
-    facility_id = res.json()["id"]
+    facility_id = res.json()["facility"]["id"]
+    assert res.json()["facility"]["name"] == body["name"]
+    assert res.json()["facility"]["areas"] == body["areas"]
+    _assert_cas_refused(client, "POST", "/facilities", body, owned_master, revision)
     config = {"label_profile_override": {"storage_mode": "frozen"}}
-    update = client.put(f"/facilities/{facility_id}/config", json=config)
+    _assert_cas_refused(client, "PUT", f"/facilities/{facility_id}/config", {"config": config}, owned_master, revision)
+    update = client.put(f"/facilities/{facility_id}/config", json={
+        "config": config, "expected_revision": _revision(client, f"/facilities/{facility_id}")})
     assert update.status_code == 200
     fetched = client.get(f"/facilities/{facility_id}")
     assert fetched.status_code == 200
@@ -75,7 +115,7 @@ def test_facility_list_exposes_master_facilities_without_db_sync():
         assert session.query(Facility).count() == 0
 
 
-def test_user_added_master_facility_is_available_for_order_step1_options(monkeypatch, tmp_path):
+def test_user_added_master_facility_is_available_for_order_step1_options(owned_master):
     _clear_facilities()
     source = config_service.load_facility_master()
     next_master = {
@@ -92,9 +132,7 @@ def test_user_added_master_facility_is_available_for_order_step1_options(monkeyp
             },
         ],
     }
-    master_path = tmp_path / "facility_master.template.json"
-    master_path.write_text(json.dumps(next_master, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_service, "FACILITY_MASTER_PATH", master_path)
+    owned_master.write_text(json.dumps(next_master, ensure_ascii=False), encoding="utf-8")
     config_service.reload_configs()
     client = TestClient(app)
 
@@ -110,13 +148,9 @@ def test_user_added_master_facility_is_available_for_order_step1_options(monkeyp
     assert payload["resolved_config"]["facility_id"] == "FAC99991"
 
 
-def test_facility_master_save_materializes_new_facility_rows(monkeypatch, tmp_path):
+def test_facility_master_save_materializes_new_facility_rows(owned_master):
     _clear_facilities()
     source = config_service.load_facility_master()
-    master_path = tmp_path / "facility_master.template.json"
-    master_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_service, "FACILITY_MASTER_PATH", master_path)
-    config_service.reload_configs()
     client = TestClient(app)
 
     next_master = {
@@ -131,11 +165,15 @@ def test_facility_master_save_materializes_new_facility_rows(monkeypatch, tmp_pa
             },
         ],
     }
-    saved = client.put("/facility-master", json=next_master)
+    body = {"facility_master": next_master}
+    _assert_cas_refused(client, "PUT", "/facility-master", body, owned_master)
+    revision = _revision(client)
+    saved = client.put("/facility-master", json={**body, "expected_revision": revision})
     listed = client.get("/facilities")
     fetched = client.get("/facilities/FAC99992")
 
     assert saved.status_code == 200
+    _assert_cas_refused(client, "PUT", "/facility-master", body, owned_master, revision)
     assert listed.status_code == 200
     assert any(item["id"] == "FAC99992" and item["name"] == "ケアホーム長生苑" for item in listed.json()["facilities"])
     assert fetched.status_code == 200
@@ -147,13 +185,9 @@ def test_facility_master_save_materializes_new_facility_rows(monkeypatch, tmp_pa
         assert [area.name for area in facility.areas] == ["2F"]
 
 
-def test_facility_master_save_materializes_facility_config(monkeypatch, tmp_path):
+def test_facility_master_save_materializes_facility_config():
     _clear_facilities()
     source = config_service.load_facility_master()
-    master_path = tmp_path / "facility_master.template.json"
-    master_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_service, "FACILITY_MASTER_PATH", master_path)
-    config_service.reload_configs()
     client = TestClient(app)
 
     next_master = {
@@ -169,11 +203,11 @@ def test_facility_master_save_materializes_facility_config(monkeypatch, tmp_path
             },
         ],
     }
-    saved = client.put("/facility-master", json=next_master)
+    saved = client.put("/facility-master", json={"facility_master": next_master, "expected_revision": _revision(client)})
     fetched = client.get("/facilities/FAC99993")
 
     assert saved.status_code == 200
-    assert saved.json()["source"] == "db"
+    assert saved.json()["source"] == "canonical_json"
     assert fetched.status_code == 200
     payload = fetched.json()
     assert payload["config"]["fax_template_id"] == "fax_fac00002_v1"
@@ -191,13 +225,13 @@ def test_facility_get_does_not_create_template_version_from_resolved_config():
         session.add(Facility(id=facility_id, name="Read No Create Facility"))
         session.add(FacilityConfig(facility_id=facility_id, config_json={"fax_template_id": "fax_layout_regular_forbidden_v1"}))
     client = TestClient(app)
+    before = _database_rows()
 
     fetched = client.get(f"/facilities/{facility_id}")
 
-    assert fetched.status_code == 200
-    resolved = fetched.json().get("resolved_config") or {}
-    assert "fax_template_id" not in resolved
-    assert resolved.get("facility_template_version") is None
+    assert fetched.status_code == 404
+    assert fetched.json()["detail"]["error"] == "facility_not_found"
+    assert _database_rows() == before
     with session_scope() as session:
         versions = (
             session.query(FacilityTemplateVersion)
@@ -233,10 +267,14 @@ def test_operator_override_columns_preserve_master_body_merge_policy():
             )
         )
 
-    resolved = config_service.get_facility_config(facility_id)
+    fetched = TestClient(app).get(f"/facilities/{facility_id}")
+    assert fetched.status_code == 200
+    resolved = fetched.json()["resolved_config"]
 
     assert resolved is not None
-    assert resolved["fax_template"]["body_merge_policy"] == master_facility["fax_template_override"]["body_merge_policy"]
+    assert resolved["fax_template_override"]["body_merge_policy"] == master_facility["fax_template_override"]["body_merge_policy"]
+    assert resolved == master_facility
+    assert "fax_template" not in resolved
 
 
 def test_facility_template_registration_materializes_master_facility():
@@ -260,14 +298,14 @@ def test_active_template_version_import_does_not_sync_master_for_missing_facilit
     _clear_facilities()
 
     with session_scope() as session:
-        version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-            session,
-            facility_id="FAC00002",
-            facility_config=config_service.get_facility_config("FAC00002"),
-            created_by="test-read-boundary",
-        )
-
-        assert version is None
+        with pytest.raises(canonical_facility_store.CanonicalStoreError, match="legacy_current_config_lineage_stamp_disabled") as exc:
+            facility_template_version_service.ensure_active_template_version_from_resolved_config(
+                session,
+                facility_id="FAC00002",
+                facility_config=config_service.get_facility_by_id("FAC00002"),
+                created_by="test-read-boundary",
+            )
+        assert exc.value.status_code == 409
         assert session.query(Facility).count() == 0
         assert session.query(FacilityTemplateVersion).count() == 0
 
@@ -275,9 +313,9 @@ def test_active_template_version_import_does_not_sync_master_for_missing_facilit
 def test_facility_scoped_fax_template_registration_contract():
     _clear_facilities()
     client = TestClient(app)
-    res = client.post("/facilities", json={"name": "Template Missing Facility", "areas": []})
+    res = client.post("/facilities", json={"name": "Template Missing Facility", "areas": [], "expected_revision": _revision(client)})
     assert res.status_code == 201
-    facility_id = res.json()["id"]
+    facility_id = res.json()["facility"]["id"]
 
     options = client.get("/facilities/fax-template-options")
     assert options.status_code == 200
@@ -292,7 +330,8 @@ def test_facility_scoped_fax_template_registration_contract():
 
     direct_template_update = client.put(
         f"/facilities/{facility_id}/config",
-        json={"fax_template_id": "fax_layout_regular_forbidden_v1", "fax_template_override": {"columns": []}},
+        json={"config": {"fax_template_id": "fax_layout_regular_forbidden_v1", "fax_template_override": {"columns": []}},
+              "expected_revision": _revision(client, f"/facilities/{facility_id}")},
     )
     assert direct_template_update.status_code == 400
     assert (
@@ -324,7 +363,7 @@ def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
     resolved = payload.get("resolved_config") or {}
     override = resolved.get("fax_template_override") or {}
     assert override.get("columns_authoritative") is True
-    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    columns = override.get("columns") or []
     assert [column.get("header") for column in columns[:10]] == [
         "日付",
         "区分",
@@ -453,7 +492,7 @@ def test_facility_master_columns_define_source_indexes_without_runtime_enrichmen
     assert missing == []
 
 
-def test_facility_config_does_not_enrich_missing_source_indexes_from_source_workbook():
+def test_facility_config_does_not_enrich_missing_source_indexes_from_source_workbook(owned_master):
     _clear_facilities()
     facility_id = "FAC_SOURCE_INDEX_BLOCK"
     with session_scope() as session:
@@ -483,8 +522,16 @@ def test_facility_config_does_not_enrich_missing_source_indexes_from_source_work
             )
         )
 
-    resolved = config_service.get_facility_config(facility_id)
-    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    before = owned_master.read_bytes(), _database_rows()
+    with pytest.raises(ValueError, match="^facility_not_found$"):
+        config_service.get_facility_config(facility_id)
+    response = TestClient(app).get(f"/facilities/{facility_id}")
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "facility_not_found"
+    assert (owned_master.read_bytes(), _database_rows()) == before
+    with session_scope() as session:
+        stored = session.get(FacilityConfig, facility_id).config_json
+    columns = stored["fax_template_override"]["columns"]
     assert [column.get("source_index") for column in columns[:4]] == [None, None, None, None]
     validation = facility_template_version_service.validate_template_columns(columns)
     assert "template_source_index_missing" in validation["errors"]
@@ -520,7 +567,10 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
     fetched = client.get("/facilities/FAC00003")
 
     assert fetched.status_code == 200
-    columns = ((fetched.json().get("resolved_config") or {}).get("fax_template") or {}).get("columns") or []
+    resolved = fetched.json()["resolved_config"]
+    assert resolved == config_service.get_facility_by_id("FAC00003")
+    assert "fax_template" not in resolved
+    columns = resolved["fax_template_override"]["columns"]
     assert [column.get("header") for column in columns] == [
         "日付",
         "区分",
