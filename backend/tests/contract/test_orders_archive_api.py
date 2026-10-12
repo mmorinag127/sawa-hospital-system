@@ -10,25 +10,26 @@ sys.path.append(str(ROOT))
 from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.ocr_job import OcrJob  # noqa: E402
+from src.models.order import Order  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import order_service  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
 client = TestClient(app)
 
 
 def _create_order(*, message_id: str, week_hint: str, status: str = "要確認", facility_hint: str = "FAC00001") -> dict:
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 4, 6, 9, 0, 0),
-        facility_hint=facility_hint,
-        week_hint=week_hint,
-    )
-    order = order_service.create_order_from_ingest(payload, lines=None)
-    order_service.set_status(str(order.get("id") or ""), status)
-    return order
+    with session_scope() as session:
+        session.add(Order(
+            id=message_id,
+            message_id=message_id,
+            document_uri="file://dummy.pdf",
+            received_at=datetime(2026, 4, 6, 9, 0, 0),
+            facility_code=facility_hint,
+            week_code=week_hint,
+            status=status,
+        ))
+    return {"id": message_id, "status": status}
 
 
 def test_archive_week_endpoint_allows_pending_orders() -> None:

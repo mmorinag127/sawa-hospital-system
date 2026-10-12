@@ -16,6 +16,7 @@ def test_full_page_evidence_assigns_without_cell_crop_requirement() -> None:
     targets = [
         {
             "target_cell_id": "qty-E11",
+            "role": "quantity",
             "sheet_cell": "E11",
             "worksheet_row": 11,
             "worksheet_col": 5,
@@ -43,6 +44,7 @@ def test_evidence_outside_target_cells_cannot_create_sheet_cell() -> None:
     targets = [
         {
             "target_cell_id": "qty-E11",
+            "role": "quantity",
             "sheet_cell": "E11",
             "worksheet_row": 11,
             "worksheet_col": 5,
@@ -72,6 +74,7 @@ def test_conflicting_evidence_blocks_assignment() -> None:
     targets = [
         {
             "target_cell_id": "qty-E11",
+            "role": "quantity",
             "sheet_cell": "E11",
             "worksheet_row": 11,
             "worksheet_col": 5,
@@ -97,6 +100,7 @@ def test_missing_center_is_unassigned() -> None:
     targets = [
         {
             "target_cell_id": "qty-E11",
+            "role": "quantity",
             "sheet_cell": "E11",
             "worksheet_row": 11,
             "worksheet_col": 5,
@@ -127,6 +131,7 @@ def test_sheet_output_uses_assigned_evidence_not_legacy_ocr_rows() -> None:
         target_cells=[
             {
                 "target_cell_id": "qty-E11",
+                "role": "quantity",
                 "sheet_cell": "E11",
                 "worksheet_row": 11,
                 "worksheet_col": 5,
@@ -135,6 +140,7 @@ def test_sheet_output_uses_assigned_evidence_not_legacy_ocr_rows() -> None:
             },
             {
                 "target_cell_id": "qty-F11",
+                "role": "quantity",
                 "sheet_cell": "F11",
                 "worksheet_row": 11,
                 "worksheet_col": 6,
@@ -171,6 +177,7 @@ def test_sheet_output_expands_merged_region_logical_targets() -> None:
         target_cells=[
             {
                 "target_cell_id": "merged-E11-E12",
+                "role": "quantity",
                 "sheet_cell": "E11",
                 "worksheet_row": 11,
                 "worksheet_col": 5,
@@ -181,6 +188,7 @@ def test_sheet_output_expands_merged_region_logical_targets() -> None:
                 "logical_targets": [
                     {
                         "sheet_cell": "E11",
+                        "role": "quantity",
                         "worksheet_row": 11,
                         "worksheet_col": 5,
                         "field": "qty.regular",
@@ -191,6 +199,7 @@ def test_sheet_output_expands_merged_region_logical_targets() -> None:
                     },
                     {
                         "sheet_cell": "E12",
+                        "role": "quantity",
                         "worksheet_row": 12,
                         "worksheet_col": 5,
                         "field": "qty.regular",
@@ -235,6 +244,7 @@ def test_sheet_output_blocks_unassigned_evidence_and_conflicts() -> None:
         target_cells=[
             {
                 "target_cell_id": "qty-E11",
+                "role": "quantity",
                 "sheet_cell": "E11",
                 "worksheet_row": 11,
                 "worksheet_col": 5,
