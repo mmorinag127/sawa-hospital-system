@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import os
+from contextlib import contextmanager
+from copy import deepcopy
 
 from fastapi.testclient import TestClient
+import pytest
+from sqlalchemy import event, select
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 import src.api.orders as orders_api  # noqa: E402
+from src import db  # noqa: E402
 from src.main import app  # noqa: E402
+from tests.contract.auth_support import hospital_admin, hospital_operator  # noqa: E402, F401
 
 
 def test_workflow_v2_facility_template_columns_is_the_only_write_endpoint(monkeypatch) -> None:
@@ -308,50 +315,127 @@ def test_workflow_v2_header_axis_review_endpoints(monkeypatch) -> None:
     assert saved["corrected_xs"] == [11.0, 22.0]
 
 
-def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
-    client = TestClient(app)
-
+@contextmanager
+def _legacy_workflow_boundary(monkeypatch):
+    """Real auth reads are allowed; legacy services and SQL writes are not."""
     def fail_legacy_helper(*_args, **_kwargs):
         raise AssertionError("legacy current workflow helper must not run")
 
-    monkeypatch.setattr(orders_api.order_service, "ensure_hakodate_evidence_draft_current", fail_legacy_helper)
-    monkeypatch.setattr(orders_api.order_service, "get_order_workflow_state", fail_legacy_helper)
-    monkeypatch.setattr(orders_api.order_service, "list_order_critical_decisions", fail_legacy_helper)
-    monkeypatch.setattr(orders_api.order_service, "get_ocr_pages", fail_legacy_helper)
-    monkeypatch.setattr(orders_api.order_service, "get_ocr_sheet", fail_legacy_helper)
-    monkeypatch.setattr(orders_api.order_service, "get_candidate_draft_preview", fail_legacy_helper)
-    for name in ("choose_critical_decision", "switch_draft_to_latest_evidence",
-                 "apply_submitted_ocr_sheet", "confirm_order"):
+    for name in (
+        "ensure_hakodate_evidence_draft_current", "get_order_workflow_state",
+        "list_order_critical_decisions", "get_ocr_pages", "get_ocr_sheet",
+        "get_candidate_draft_preview", "choose_critical_decision", "switch_draft_to_latest_evidence",
+        "apply_submitted_ocr_sheet", "confirm_order", "confirm_order_authoritatively",
+        "get_current_sheet_context", "save_ocr_sheet_exact", "persist_sheet_draft",
+        "force_overwrite_current_sheet_with_weekly_menu", "force_overwrite_current_sheet_with_facility_schema",
+        "review_ocr_table_with_llm", "apply_patch_candidate_to_draft", "_load_pipeline_output_with_retry",
+    ):
         monkeypatch.setattr(orders_api.order_service, name, fail_legacy_helper)
-    monkeypatch.setattr(orders_api, "_dispatch_workflow_ocr_delivery", fail_legacy_helper)
-    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", fail_legacy_helper)
+    for name in ("_dispatch_workflow_ocr_delivery", "_run_ocr_rerun_background",
+                 "_enqueue_order_reparse_job", "_enqueue_workflow_v2_evidence_rerun"):
+        monkeypatch.setattr(orders_api, name, fail_legacy_helper)
 
-    endpoints = [
-        ("get", "/orders/ORDcontract/draft-sheet"),
-        ("get", "/orders/ORDcontract/workflow-state"),
-        ("get", "/orders/ORDcontract/critical-decisions"),
-        ("post", "/orders/ORDcontract/critical-decisions/facility"),
-        ("post", "/orders/ORDcontract/critical-decisions/week"),
-        ("post", "/orders/ORDcontract/critical-decisions/template"),
-        ("get", "/orders/ORDcontract/ocr-pages"),
-        ("get", "/orders/ORDcontract/ocr-sheet"),
-        ("get", "/orders/ORDcontract/draft-sheet/candidate-preview"),
-        ("post", "/orders/ORDcontract/draft-sheet"),
-        ("post", "/orders/ORDcontract/draft-sheet/switch-evidence"),
-        ("post", "/orders/ORDcontract/draft-sheet/keep-current"),
-        ("post", "/orders/ORDcontract/confirm"),
-        ("post", "/orders/ORDcontract/ocr-rerun"),
-        ("post", "/orders/ORDcontract/ocr-apply"),
-    ]
+    def snapshot():
+        with db.session_scope() as session:
+            return {table.name: deepcopy([dict(row) for row in session.execute(
+                select(table).order_by(*table.primary_key.columns)).mappings()])
+                for table in db.Base.metadata.sorted_tables}
 
-    for method, path in endpoints:
-        response = client.post(path, json={}) if method == "post" else client.get(path)
+    statements = []
+    def observe(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    before = snapshot()
+    event.listen(db.engine, "before_cursor_execute", observe)
+    try:
+        yield
+    finally:
+        event.remove(db.engine, "before_cursor_execute", observe)
+    assert all(statement.lstrip().upper().startswith("SELECT ") for statement in statements)
+    assert snapshot() == before
+
+
+_LEGACY_DETAIL = {
+    "error": "legacy_order_workflow_disabled",
+    "message": "注文処理は workflow-v2 に移行しました。この旧 order workflow endpoint は使用できません。",
+    "replacement": "workflow-v2",
+}
+
+
+@pytest.mark.parametrize("method,path,endpoint,kwargs", [
+    pytest.param("GET", "/orders/ORDcontract/draft-sheet", "draft-sheet", {}, id="draft-get"),
+    pytest.param("GET", "/orders/ORDcontract/draft-sheet", "draft-sheet", {"params": {"compact": 1}}, id="draft-compact"),
+    pytest.param("GET", "/orders/ORDcontract/workflow-state", "workflow-state", {}, id="workflow-state"),
+    pytest.param("GET", "/orders/ORDcontract/critical-decisions", "critical-decisions", {}, id="decisions-get"),
+    pytest.param("POST", "/orders/ORDcontract/critical-decisions/facility", "critical-decisions", {"json": {}}, id="decision-facility"),
+    pytest.param("POST", "/orders/ORDcontract/critical-decisions/week", "critical-decisions", {"json": {}}, id="decision-week"),
+    pytest.param("POST", "/orders/ORDcontract/critical-decisions/template", "critical-decisions", {"json": {}}, id="decision-template"),
+    pytest.param("GET", "/orders/ORDcontract/ocr-pages", "ocr-pages", {}, id="pages"),
+    pytest.param("GET", "/orders/ORDcontract/ocr-sheet", "ocr-sheet", {}, id="sheet"),
+    pytest.param("GET", "/orders/ORDcontract/draft-sheet/candidate-preview", "draft-sheet/candidate-preview", {}, id="candidate-preview"),
+    pytest.param("POST", "/orders/ORDcontract/draft-sheet", "draft-sheet", {"json": {}}, id="draft-post"),
+    pytest.param("POST", "/orders/ORDcontract/draft-sheet/switch-evidence", "draft-sheet/switch-evidence", {"json": {}}, id="switch-evidence"),
+    pytest.param("POST", "/orders/ORDcontract/draft-sheet/keep-current", "draft-sheet/keep-current", {"json": {}}, id="keep-current"),
+    pytest.param("POST", "/orders/ORDcontract/confirm", "confirm", {"json": {}}, id="confirm"),
+    pytest.param("POST", "/orders/ORDcontract/ocr-rerun", "ocr-rerun", {"json": {}}, id="rerun"),
+    pytest.param("POST", "/orders/ORDcontract/ocr-apply", "ocr-apply", {"json": {}}, id="apply-empty"),
+    pytest.param("POST", "/orders/ORDcontract/ocr-apply", "ocr-apply", {"json": {
+        "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+        "rows": [["02/15", "朝", "Menu B", "6", "api"]], "ui_mode": "sheet",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        "row_ids": ["row-api-no-fac-1"],
+    }}, id="apply-authored-sheet"),
+    pytest.param("POST", "/orders/ORDcontract/ocr-sheet-save", "ocr-sheet-save", {"json": {}}, id="sheet-save"),
+    pytest.param("POST", "/orders/ORDcontract/facility", "facility", {"json": {}}, id="facility"),
+    pytest.param("POST", "/orders/ORDcontract/week", "week", {"json": {"week": "2026-01@2026-02-01~2026-02-07"}}, id="week-invalid"),
+    pytest.param("PUT", "/orders/ORDcontract/facility-template-columns", "facility-template-columns", {"json": {"columns": [
+        {"index": 0, "role": "date", "header": "日付", "name": "date"},
+        {"index": 1, "role": "quantity", "header": "常食2F", "name": "qty.regular_2f", "diet_type": "regular", "area_id": "2F"},
+    ]}}, id="template-columns"),
+    pytest.param("PUT", "/orders/ORDcontract/lines", "lines", {"json": {"lines": [{
+        "line_id": "line-contract-lunch-updated", "date": "2099-11-15", "daypart": "昼", "menu_name": "昼メニュー",
+        "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 20,
+    }]}}, id="lines"),
+    pytest.param("POST", "/orders/ORDcontract/reparse", "reparse", {"json": {"ocr_provider": "gemini"}}, id="reparse"),
+    pytest.param("POST", "/orders/ORDcontract/reparse", "reparse", {"json": {"ocr_provider": "gemini", "stale_action": "wait"}}, id="reparse-wait"),
+    pytest.param("POST", "/orders/ORDcontract/draft-sheet/force-weekly-menu", "draft-sheet/force-weekly-menu", {}, id="force-weekly"),
+    pytest.param("POST", "/orders/ORDcontract/draft-sheet/force-weekly-menu", "draft-sheet/force-weekly-menu", {"json": {"blank_quantities": True}}, id="force-weekly-blank"),
+    pytest.param("POST", "/orders/ORDcontract/draft-sheet/force-facility-schema", "draft-sheet/force-facility-schema", {"json": {"blank_quantities": True}}, id="force-schema"),
+    pytest.param("POST", "/orders/ORDpatch/draft-sheet/apply-patch-candidate", "draft-sheet/apply-patch-candidate", {"json": {"candidate_id": "OPCtest"}}, id="patch-candidate"),
+    pytest.param("POST", "/orders/ORDmissing/draft-sheet/apply-patch-candidate", "draft-sheet/apply-patch-candidate", {"json": {"candidate_id": "OPCmissing"}}, id="patch-missing"),
+    pytest.param("POST", "/orders/ORDcontract/ocr-review", "ocr-review", {"json": {"ocr_provider": "gemini", "ocr_prompt": "verify baseline against pdf", "pdf_variant": "corrected"}}, id="review-prompt"),
+    pytest.param("POST", "/orders/ORDmissing/ocr-review", "ocr-review", {"json": {}}, id="review-missing"),
+    pytest.param("POST", "/orders/ORDdummy/ocr-review", "ocr-review", {"json": {}}, id="review-empty"),
+    pytest.param("POST", "/orders/ORDdummy/ocr-review", "ocr-review", {"json": {"ocr_provider": "pipeline"}}, id="review-invalid-provider"),
+    pytest.param("POST", "/orders/ORDdummy/ocr-review", "ocr-review", {"json": {"pdf_variant": "auto"}}, id="review-invalid-variant"),
+])
+def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch, hospital_operator, method, path, endpoint, kwargs) -> None:
+    assert os.environ["AUTH_DISABLED"] == "false"
+    with _legacy_workflow_boundary(monkeypatch):
+        response = TestClient(app).request(method, path, headers=hospital_operator.headers, **kwargs)
         assert response.status_code == 410
-        detail = response.json()["detail"]
-        assert detail["error"] == "legacy_order_workflow_disabled"
-        endpoint = path.removeprefix("/orders/ORDcontract/")
-        assert detail["endpoint"] == ("critical-decisions" if endpoint.startswith("critical-decisions/") else endpoint)
-        assert detail["replacement"] == "workflow-v2"
+        assert response.json() == {"detail": {**_LEGACY_DETAIL, "endpoint": endpoint}}
+        assert hospital_operator.verifier.called
+
+
+@pytest.mark.parametrize("role", ["operator", "admin"])
+def test_legacy_template_columns_requires_registered_operator_or_admin(monkeypatch, request, role):
+    actor = request.getfixturevalue("hospital_" + role)
+    assert os.environ["AUTH_DISABLED"] == "false"
+    client = TestClient(app)
+    columns = [
+        {"index": 0, "role": "date", "header": "日付", "name": "date"},
+        {"index": 1, "role": "quantity", "header": "常食2F", "name": "qty.regular_2f", "diet_type": "regular", "area_id": "2F"},
+    ]
+    with _legacy_workflow_boundary(monkeypatch):
+        response = client.put("/orders/ORDcontract/facility-template-columns", json={"columns": columns}, headers=actor.headers)
+        assert response.status_code == 410
+        assert response.json() == {"detail": {**_LEGACY_DETAIL, "endpoint": "facility-template-columns"}}
+        assert actor.verifier.called
+        for headers in ({}, {"Authorization": "Basic b3BlcmF0b3I6b3BlcmF0b3Itc2VjcmV0"}, {"Authorization": "Bearer invalid-google-token"}):
+            denied = client.put("/orders/ORDcontract/facility-template-columns", json={"columns": columns}, headers=headers)
+            assert denied.status_code == 401
+            assert denied.json() == {"detail": "Unauthorized"}
 
 
 def test_workflow_v2_split_step4_endpoints_are_retired() -> None:
