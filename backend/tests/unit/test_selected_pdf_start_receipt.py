@@ -166,7 +166,7 @@ def test_historical_authoritative_digest_without_generation_is_not_backfilled(mo
 
 def test_signed_pdf_link_preserves_generation_without_object_name_query(monkeypatch):
     calls = []
-    monkeypatch.setattr(order_service, "generate_signed_url", lambda bucket, path, **kw: calls.append((bucket, path, kw)) or "signed")
+    monkeypatch.setattr(storage_service, "generate_signed_url", lambda bucket, path, expires_in_seconds=3600, *, query_parameters=None, **kw: calls.append((bucket, path, kw)) or "signed")
     assert order_service._signed_url_from_uri("gs://source/own.pdf?generation=7") == "signed"
     assert calls == [("source", "own.pdf", {"generation": "7"})]
 
