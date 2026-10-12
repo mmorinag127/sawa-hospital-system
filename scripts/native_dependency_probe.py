@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import traceback
 
@@ -88,6 +89,30 @@ def download_models(cache, output):
         save(output, recorded)
 
 
+def descriptor_path(fd, *, directory=False):
+    """Resolve this live descriptor, never a cached/reusable descriptor number."""
+    before = os.fstat(fd)
+    if directory and not stat.S_ISDIR(before.st_mode):
+        raise ValueError('dir_fd is not a directory')
+    if sys.platform == 'linux':
+        raw = os.readlink(f'/proc/self/fd/{fd}')
+    elif sys.platform == 'darwin':
+        import fcntl
+
+        # Darwin SDK sys/fcntl.h: F_GETPATH=50, buffer size MAXPATHLEN=1024.
+        raw = os.fsdecode(fcntl.fcntl(fd, 50, bytes(1024)).split(b'\0', 1)[0])
+    else:
+        raise ValueError('descriptor paths unsupported on this platform')
+    if not Path(raw).is_absolute():
+        raise ValueError('descriptor has no physical filesystem path')
+    path = Path(raw).resolve(strict=True)
+    physical, after = path.stat(), os.fstat(fd)
+    identity = lambda item: (item.st_dev, item.st_ino, stat.S_IFMT(item.st_mode))
+    if identity(before) != identity(physical) or identity(before) != identity(after):
+        raise ValueError('descriptor physical identity changed')
+    return path
+
+
 def audit(event, args):
     def refuse(reason):
         violation = {'event': event, 'reason': reason}
@@ -104,13 +129,34 @@ def audit(event, args):
                 violation['address']['port'] = address[1]
         raise RuntimeError(reason)
 
-    def owned(path):
-        if isinstance(path, int):
-            return
-        if os.fsdecode(path) == os.devnull:
-            return
-        if not Path(os.fsdecode(path)).resolve().is_relative_to(OUT):
-            refuse('write outside owned native evidence root: ' + os.fsdecode(path))
+    def owned(path, dir_fd=-1, *, follow_final=True, write_sink=False):
+        original = str(path) if isinstance(path, int) else os.fsdecode(path)
+        try:
+            if isinstance(path, int):
+                resolved = descriptor_path(path)
+            else:
+                resolved = Path(os.fsdecode(path))
+                if not resolved.is_absolute() and dir_fd not in (None, -1):
+                    base = descriptor_path(dir_fd, directory=True)
+                    if not base.is_relative_to(OUT):
+                        raise ValueError('dir_fd outside owned native evidence root')
+                    resolved = base / resolved
+                # Entry mutations do not follow the final symlink. Trailing slash
+                # and dot components require directory resolution by the OS.
+                if follow_final or original.endswith(('/', '/.', '/..')) or original in ('.', '..'):
+                    resolved = resolved.resolve()
+                else:
+                    resolved = resolved.parent.resolve() / resolved.name
+        except (OSError, ValueError, RuntimeError) as exc:
+            refuse('unresolved native write ownership: ' + original + ': ' + str(exc))
+        # Only opening the existing null device for writing is a permitted sink;
+        # it is not an exemption for chmod, removal, linking, or other mutations.
+        if (write_sink and resolved == Path(os.devnull)
+                and (isinstance(path, int) or original == os.devnull)):
+            return resolved
+        if not resolved.is_relative_to(OUT):
+            refuse('write outside owned native evidence root: ' + original)
+        return resolved
 
     if event in ('socket.connect', 'socket.getaddrinfo', 'socket.sendto', 'socket.bind',
                  'subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'):
@@ -124,14 +170,27 @@ def audit(event, args):
         _path, mode, flags = args
         if ((mode and any(x in mode for x in 'wax+'))
                 or flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)):
-            owned(_path)
-    elif event in ('os.remove', 'os.rmdir', 'os.mkdir', 'os.chmod', 'os.truncate'):
+            # CPython's open audit event omits dir_fd: a relative os.open path
+            # cannot safely be attributed to cwd rather than an unknown dir_fd.
+            if not isinstance(_path, int) and not Path(os.fsdecode(_path)).is_absolute():
+                refuse('relative open write has no auditable dir_fd')
+            owned(_path, write_sink=True)
+    elif event in ('os.remove', 'os.rmdir'):
+        owned(args[0], args[1], follow_final=False)
+    elif event in ('os.mkdir', 'os.chmod'):
+        owned(args[0], args[2], follow_final=event == 'os.chmod')
+    elif event == 'os.truncate':
         owned(args[0])
     elif event in ('os.rename', 'os.link'):
-        owned(args[0])
-        owned(args[1])
+        source = owned(args[0], args[2], follow_final=False)
+        owned(args[1], args[3], follow_final=False)
+        # link's audit event omits follow_symlinks. Validate both interpretations
+        # of a symlink source, not just the directory entry being linked.
+        if event == 'os.link' and source.is_symlink():
+            owned(source)
     elif event == 'os.symlink':
-        owned(args[1])
+        destination = owned(args[1], args[2], follow_final=False)
+        owned(destination.parent / os.fsdecode(args[0]))
 
 
 def finish():

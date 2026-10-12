@@ -316,6 +316,9 @@ def run(source, root):
     save(evidence / 'run.json', summary)
     runtimes = {}
     try:
+        require_command([sys.executable, '-B', source / 'scripts/native_dependency_audit_checks.py',
+                         '--output', evidence / 'fd-audit-checks'], cwd=source, env=env,
+                        evidence=evidence / 'fd-audit-process', timeout=120)
         if not FONT.is_file() or FONT.resolve() != FONT:
             raise ValueError(f'explicit runner Noto CJK font missing or aliased: {FONT}')
         require_command(['dpkg-query', '-W', '-f=${Version}', 'fonts-noto-cjk'],
