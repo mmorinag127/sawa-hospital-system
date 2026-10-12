@@ -147,8 +147,8 @@ if [[ "${RUN_LOCAL_REGRESSION}" == "1" ]]; then
       tests/integration/test_workflow_state_service.py::test_refresh_workflow_state_does_not_mutate_saved_sheet_blockers_on_read \
       tests/integration/test_ocr_sheet_history.py::test_set_facility_keeps_saved_sheet_until_operator_resolves_context_change \
       tests/integration/test_ocr_sheet_history.py::test_set_facility_does_not_mutate_clean_saved_sheet_header_when_fields_match \
-      tests/integration/test_ocr_sheet_history.py::test_force_overwrite_current_sheet_with_weekly_menu_can_blank_quantities \
-      tests/integration/test_ocr_sheet_history.py::test_force_overwrite_current_sheet_with_facility_schema_blanks_quantities_and_survives_refresh \
+      tests/unit/test_historical_forced_sheet_read.py::test_stored_historical_sheet_keeps_quantities_metadata_and_menu_on_read \
+      tests/contract/test_orders_workflow_v2_api.py::test_legacy_current_workflow_endpoints_are_hard_410 \
       tests/unit/test_order_workflow_v2_service.py::test_mark_ocr_run_queued_requires_context_and_clears_downstream \
       tests/unit/test_order_workflow_v2_service.py::test_mark_ocr_run_completed_preserves_context_and_does_not_select_result \
       tests/unit/test_order_workflow_v2_service.py::test_sheet_source_uses_only_selected_ocr_payload \

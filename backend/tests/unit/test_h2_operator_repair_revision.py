@@ -37,7 +37,6 @@ def test_original_week_unresolved_stops_sheet_cache_and_weekly_write_before_sour
     monkeypatch.setattr(order_current_state_service, "delete_current_state", lambda *a, **kw: pytest.fail("unresolved period must not delete state"))
     assert order_service.get_ocr_sheet(order_id) == (None, "week_unresolved")
     assert order_service.build_recoverable_ocr_sheet_payload(order_id, "week_unresolved") == (None, "week_unresolved")
-    assert order_service.force_overwrite_current_sheet_with_weekly_menu(order_id) == (None, "week_unresolved")
     for read in (order_service.get_current_sheet_context, order_service.refresh_current_sheet_context):
         blocked = read(order_id)
         assert blocked["blockers"] == ["week_unresolved"]
@@ -1345,7 +1344,14 @@ def authored_dirty_rebuild(connected_physical_pipeline, monkeypatch, request):
     return order_id, captured, old_sheet, writes
 
 
-@pytest.mark.parametrize("authored_dirty_rebuild", [{"remarks": value, "path": path, "blank_quantities": blank} for value in ("", None, 0, "operator-current-text") for path, blank in (("rebase", False), ("facility_rebuild", False), ("weekly_overwrite", False), ("facility_rebuild", True), ("weekly_overwrite", True))], indirect=True)
+@pytest.mark.parametrize(
+    "authored_dirty_rebuild",
+    [{"remarks": value, "path": path, "blank_quantities": blank}
+     for value in ("", None, 0, "operator-current-text")
+     for path, blank in (("rebase", False), ("facility_rebuild", False), ("facility_rebuild", True))],
+    indirect=True,
+    ids=[f"authored_dirty_rebuild{i}" for i in (0, 1, 3, 5, 6, 8, 10, 11, 13, 15, 16, 18)],
+)
 @pytest.mark.parametrize("connected_physical_pipeline", [True], indirect=True)
 def test_actual_write_callers_preserve_explicit_remarks(authored_dirty_rebuild, request):
     edit = request.node.callspec.params["authored_dirty_rebuild"]
@@ -1357,16 +1363,13 @@ def test_actual_write_callers_preserve_explicit_remarks(authored_dirty_rebuild, 
     assert [row[index] for row in fresh["rows"]] == ["fresh-old-remarks"] * 3
     if path == "rebase":
         result = order_service._rebase_draft_record_to_facility_schema(order_id, captured["draft"], edited_by="current-sheet-refresh", synchronous_write_input=captured)
-    elif path == "facility_rebuild":
-        result = order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured, blank_quantities=blank_quantities)
     else:
-        result, error = order_service.force_overwrite_current_sheet_with_weekly_menu(order_id, blank_quantities=blank_quantities)
-        assert error is None
+        result = order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured, blank_quantities=blank_quantities)
     assert result and len(writes) == 1
     assert captured["draft"]["draft_sheet_json"] == original
 
 
-@pytest.mark.parametrize("path", ["rebase", "facility_rebuild", "weekly_overwrite"])
+@pytest.mark.parametrize("path", ["rebase", "facility_rebuild"])
 @pytest.mark.parametrize("connected_physical_pipeline", [True], indirect=True)
 def test_actual_authored_producer_dirty_edits_reach_preservation_boundary(authored_dirty_rebuild, path):
     order_id, captured, original, writes = authored_dirty_rebuild
@@ -1374,11 +1377,8 @@ def test_actual_authored_producer_dirty_edits_reach_preservation_boundary(author
         required, fresh = order_service._draft_record_requires_current_sheet_semantic_rebase(order_id, captured["draft"], evidence_run_override=captured["evidence"])
         assert required and "remarks" in fresh["fields"]
         result = order_service._rebase_draft_record_to_facility_schema(order_id, captured["draft"], edited_by="current-sheet-refresh", synchronous_write_input=captured)
-    elif path == "facility_rebuild":
-        result = order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured)
     else:
-        result, error = order_service.force_overwrite_current_sheet_with_weekly_menu(order_id)
-        assert error is None
+        result = order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured)
     assert result and len(writes) == 1
     assert captured["draft"]["draft_sheet_json"] == original
     assert len(set(original["physical_menu_row_ids"])) == 3
@@ -1388,7 +1388,7 @@ def test_actual_authored_producer_dirty_edits_reach_preservation_boundary(author
 
 
 @pytest.mark.parametrize("fault", ["missing_ids", "duplicate", "missing_rows", "empty_rows", "foreign", "short_row", "unknown_edit"])
-@pytest.mark.parametrize("path", ["facility_rebuild", "weekly_overwrite"])
+@pytest.mark.parametrize("path", ["facility_rebuild"])
 @pytest.mark.parametrize("blank_quantities", [False, True])
 @pytest.mark.parametrize("connected_physical_pipeline", [True], indirect=True)
 def test_actual_facility_rebuild_rejects_invalid_identity_before_persist(authored_dirty_rebuild, fault, path, blank_quantities):
@@ -1415,10 +1415,7 @@ def test_actual_facility_rebuild_rejects_invalid_identity_before_persist(authore
     with session_scope() as session:
         session.get(OrderSheetDraft, captured["draft"]["id"]).draft_sheet_json = deepcopy(current)
     with pytest.raises(ValueError, match="saved_draft_row_identity_"):
-        if path == "facility_rebuild":
-            order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured, blank_quantities=blank_quantities)
-        else:
-            order_service.force_overwrite_current_sheet_with_weekly_menu(order_id, blank_quantities=blank_quantities)
+        order_service._rebuild_current_sheet_for_facility_schema(order_id, edited_by="operator", synchronous_write_input=captured, blank_quantities=blank_quantities)
     assert writes == []
 
 
