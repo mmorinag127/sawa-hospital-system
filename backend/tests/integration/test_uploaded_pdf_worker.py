@@ -44,6 +44,16 @@ def delivery_configuration(monkeypatch):
     configure_delivery(monkeypatch)
 
 
+def _captured_upload_selection(facility_id, effective_date, version_id, week_hint):
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.ingest_facility_selection_service import capture_selection
+
+    snapshot = read_snapshot()
+    return capture_selection(
+        facility_id, effective_date.isoformat(), snapshot.revision, version_id, week_hint,
+    )
+
+
 def test_worker_service_aliases_resolve_real_modules():
     assert ingest_worker.order_service is order_service
     source = pathlib.Path(ingest_worker.__file__).read_text()
@@ -158,6 +168,8 @@ def test_pre_registered_original_component_owned_delivery_completes(monkeypatch,
     saved = ManualUploadSavedFile(message_id=saved.message_id, pdf_uri=uri,
         content_sha256=digest, original_filename=saved.original_filename, received_at=saved.received_at)
     uploaded_pdf, _ = create_uploaded_pdf_from_upload(
+        facility_selection=_captured_upload_selection(
+            "FAC00001", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         saved=saved,
         facility_hint="FAC00001",
         week_hint="2026-04@2026-04-05~2026-04-11",
@@ -203,6 +215,8 @@ def test_owned_delivery_business_failure_is_terminal_after_stale_upload(monkeypa
     saved = ManualUploadSavedFile(message_id=saved.message_id, pdf_uri=uri,
         content_sha256=digest, original_filename=saved.original_filename, received_at=saved.received_at)
     uploaded_pdf, _ = create_uploaded_pdf_from_upload(
+        facility_selection=_captured_upload_selection(
+            "FAC00002", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         saved=saved,
         facility_hint="FAC00002",
         week_hint="2026-04@2026-04-05~2026-04-11",
@@ -263,6 +277,8 @@ def test_interrupted_transport_reuses_original_business_lease_and_budget(monkeyp
         pdf_uri=uri, content_sha256=digest, original_filename="transport-interruption.pdf",
         received_at=datetime(2026, 4, 6, 10, 0, 0))
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00002",
+        facility_selection=_captured_upload_selection(
+            "FAC00002", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
     register_authored_original(uploaded["id"], effective_date=date(2026, 4, 6))
@@ -311,6 +327,8 @@ def test_original_projection_capture_validates_physical_source(monkeypatch, tmp_
     saved = ManualUploadSavedFile(message_id="upload:sha256:projection-capture", pdf_uri=uri,
         content_sha256=digest, original_filename="projection-capture.pdf", received_at=datetime(2026, 4, 6, 10))
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00002",
+        facility_selection=_captured_upload_selection(
+            "FAC00002", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
     registered = register_authored_original(uploaded["id"], effective_date=date(2026, 4, 6))
@@ -409,6 +427,8 @@ def test_owned_nonpersistable_first_pass_is_terminal_without_lines(monkeypatch, 
     saved = ManualUploadSavedFile(message_id="upload:sha256:empty-first-pass", pdf_uri=uri,
         content_sha256=digest, original_filename="empty-first-pass.pdf", received_at=datetime(2026, 4, 6, 10))
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
+        facility_selection=_captured_upload_selection(
+            "FAC00001", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
     registered = register_authored_original(uploaded["id"], effective_date=date(2026, 4, 6))
@@ -466,6 +486,8 @@ def test_actual_owned_advance_preserves_immutable_original_template(monkeypatch,
     saved = ManualUploadSavedFile(message_id="upload:sha256:original-advance", pdf_uri=uri,
         content_sha256=digest, original_filename="original-advance.pdf", received_at=datetime(2026, 4, 6, 10))
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
+        facility_selection=_captured_upload_selection(
+            "FAC00001", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
     registered = register_authored_original(uploaded["id"], effective_date=date(2026, 4, 6))
@@ -553,6 +575,8 @@ def test_operator_restart_preserves_original_payload_and_runs_owned_delivery(mon
     saved = ManualUploadSavedFile(message_id=saved.message_id, pdf_uri=uri, content_sha256=digest,
         original_filename=saved.original_filename, received_at=saved.received_at)
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00003",
+        facility_selection=_captured_upload_selection(
+            "FAC00003", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
     original = ingest_job_service.get_ingest_job_snapshot(saved.message_id)
