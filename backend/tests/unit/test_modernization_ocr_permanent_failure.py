@@ -389,8 +389,9 @@ def install_provider_failure(monkeypatch, mode, fault):
     return observed
 
 
-def test_real_dispatch_lookup_failure_keeps_pending_identity_and_saved_quantities(saved_numeric, monkeypatch):
-    """Actual queue/API/dispatcher/SQL; only Cloud Tasks lookup is a transport double."""
+@pytest.mark.parametrize("failure", ["constructor", "lookup"])
+def test_real_dispatch_lookup_failure_keeps_pending_identity_and_saved_quantities(saved_numeric, monkeypatch, failure):
+    """Actual queue/API/dispatcher/SQL; only Cloud Tasks initialization/lookup is doubled."""
     f = saved_numeric
     queued = queue(f, "ocr_rerun", force=True)
     before = _owned_workflow_database_snapshot()
@@ -398,25 +399,42 @@ def test_real_dispatch_lookup_failure_keeps_pending_identity_and_saved_quantitie
     pending = next(row for row in before[WorkflowOcrDelivery.__tablename__]
                    if row["id"] == queued["delivery"]["id"])
     fault = api_errors.ServiceUnavailable("synthetic task lookup unavailable")
+    if failure == "constructor":
+        fault = DefaultCredentialsError("synthetic workflow client initialization unavailable")
     calls = []
+    constructor_calls = []
 
     def get_task(*, request):
         calls.append(deepcopy(request))
         raise fault
 
-    monkeypatch.setattr(tasks_v2, "CloudTasksClient", lambda: SimpleNamespace(get_task=get_task))
+    def client(*args, **kwargs):
+        constructor_calls.append((args, kwargs))
+        if failure == "constructor":
+            raise fault
+        return SimpleNamespace(get_task=get_task)
+
+    monkeypatch.setattr(tasks_v2, "CloudTasksClient", client)
     with pytest.raises(orders.HTTPException) as raised:
         orders._dispatch_workflow_ocr_delivery(queued["delivery"])
     assert raised.value.status_code == 503
     assert raised.value.detail == {
         "error": "workflow_ocr_delivery_dispatch_failed", "delivery_id": pending["id"],
     }
-    assert str(raised.value.__cause__) == "workflow_ocr_delivery_lookup_unknown"
-    assert raised.value.__cause__.__cause__ is fault
-    assert calls == [{"name": pending["task_name"], "response_view": tasks_v2.Task.View.FULL}]
+    assert constructor_calls == [((), {})]
+    if failure == "constructor":
+        assert raised.value.__cause__ is fault and fault.__cause__ is None
+        assert calls == []
+    else:
+        assert str(raised.value.__cause__) == "workflow_ocr_delivery_lookup_unknown"
+        assert raised.value.__cause__.__cause__ is fault
+        assert calls == [{"name": pending["task_name"], "response_view": tasks_v2.Task.View.FULL}]
     expected = deepcopy(before)
     next(row for row in expected[WorkflowOcrDelivery.__tablename__]
          if row["id"] == pending["id"])["dispatch_error"] = "workflow_ocr_delivery_lookup_unknown"
+    if failure == "constructor":
+        next(row for row in expected[WorkflowOcrDelivery.__tablename__]
+             if row["id"] == pending["id"])["dispatch_error"] = str(fault)
     assert _owned_workflow_database_snapshot() == expected
     with db.session_scope() as session:
         row = session.get(WorkflowOcrDelivery, pending["id"])

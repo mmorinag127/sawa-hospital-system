@@ -549,8 +549,8 @@ def dispatch(identity, generation):
         from google.cloud import tasks_v2
         from google.api_core.exceptions import AlreadyExists
         import base64
-        client = tasks_v2.CloudTasksClient()
         try:
+            client = tasks_v2.CloudTasksClient()
             lookup = transport.inspect_task(client, contract)
             if lookup == "missing" and state == "PENDING":
                 task = deepcopy(contract)

@@ -90,9 +90,9 @@ def dispatch(delivery_id, generation):
     observed = delivery.prepare_dispatch(delivery_id, generation)
     if observed is None:
         return {"action": "noop"}
-    client = tasks_v2.CloudTasksClient()
     contract = observed["task_contract"]
     try:
+        client = tasks_v2.CloudTasksClient()
         state = inspect_task(client, contract)
         if state == "missing" and observed["state"] == delivery.PENDING:
             task = deepcopy(contract)

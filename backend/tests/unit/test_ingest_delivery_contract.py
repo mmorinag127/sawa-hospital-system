@@ -77,6 +77,45 @@ def intent(factory):
         return row.id, row.generation, deepcopy(row.task_contract)
 
 
+def _database_snapshot(factory):
+    with factory() as session:
+        return {table.name: deepcopy([dict(row) for row in session.execute(
+            select(table).order_by(*table.primary_key.columns)).mappings()])
+            for table in models.Base.metadata.sorted_tables}
+
+
+def test_dispatch_constructor_failure_records_error_without_changing_original(store, payload, monkeypatch):
+    from google.auth.exceptions import DefaultCredentialsError
+    from google.cloud import tasks_v2
+
+    ingest.create_ingest_receipt(payload)
+    identity, generation, _ = intent(store)
+    before = _database_snapshot(store)
+    fault = DefaultCredentialsError("synthetic ingest client initialization unavailable")
+    calls = []
+
+    def fail_client(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise fault
+
+    monkeypatch.setattr(tasks_v2, "CloudTasksClient", fail_client)
+    started = datetime.utcnow()
+    with pytest.raises(DefaultCredentialsError) as raised:
+        dispatch.dispatch(identity, generation)
+    finished = datetime.utcnow()
+    assert raised.value is fault and raised.value.__cause__ is None
+    assert calls == [((), {})]
+    after = _database_snapshot(store)
+    current = next(row for row in after[IngestDelivery.__tablename__] if row["id"] == identity)
+    expected = deepcopy(before)
+    pending = next(row for row in expected[IngestDelivery.__tablename__] if row["id"] == identity)
+    assert pending["state"] == "PENDING" and pending["generation"] == generation
+    assert started <= current["updated_at"] <= finished
+    pending.update(visit_count=pending["visit_count"] + 1,
+        updated_at=current["updated_at"], last_error=str(fault))
+    assert after == expected
+
+
 def test_direct_acceptance_and_intent_rollback_together(store, payload, monkeypatch):
     def refuse(*args):
         raise RuntimeError("intent_storage_refused")
@@ -595,6 +634,44 @@ def test_disabled_actual_producer_has_no_successor(store, successor_producer, mo
     successor_producer["produce"]()
     with store() as session:
         assert session.execute(select(IngestDeliverySuccessor)).first() is None
+
+
+def test_successor_constructor_failure_records_error_without_changing_parent(store, successor_producer, monkeypatch):
+    from google.auth.exceptions import DefaultCredentialsError
+    from google.cloud import tasks_v2
+    from src.models.ingest_delivery_successor import IngestDeliverySuccessor
+
+    successor_producer["produce"]()
+    claim = successor_producer["claim"]
+    with delivery.claim_context(claim):
+        assert ingest.complete_ingest_job(claim["lease"]["id"], lease=claim["lease"])
+        assert delivery.acknowledge_claim(claim) == "business_done"
+    before = _database_snapshot(store)
+    pending = before[IngestDeliverySuccessor.__tablename__][0]
+    identity, generation = pending["id"], pending["generation"]
+    assert pending["state"] == "PENDING"
+    fault = DefaultCredentialsError("synthetic successor client initialization unavailable")
+    calls = []
+
+    def fail_client(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise fault
+
+    monkeypatch.setattr(tasks_v2, "CloudTasksClient", fail_client)
+    started = datetime.utcnow()
+    with pytest.raises(DefaultCredentialsError) as raised:
+        successor_producer["service"].dispatch(identity, generation)
+    finished = datetime.utcnow()
+    assert raised.value is fault and raised.value.__cause__ is None
+    assert calls == [((), {})]
+    after = _database_snapshot(store)
+    current = next(row for row in after[IngestDeliverySuccessor.__tablename__] if row["id"] == identity)
+    expected = deepcopy(before)
+    pending = next(row for row in expected[IngestDeliverySuccessor.__tablename__] if row["id"] == identity)
+    assert started <= current["updated_at"] <= finished
+    pending.update(visit_count=pending["visit_count"] + 1,
+        updated_at=current["updated_at"], last_error=str(fault))
+    assert after == expected
 
 
 @pytest.mark.parametrize("outcome", ["done", "failed", "empty", "storage"])
