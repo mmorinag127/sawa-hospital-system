@@ -110,36 +110,6 @@ def _template_staff_forbidden_sesame() -> dict:
 
 def _template_staff_forbidden_sesame_with_aux() -> dict:
     return {
-        "columns": [
-            {"index": 0, "role": "date", "header": "日付"},
-            {"index": 1, "role": "daypart", "header": "区分"},
-            {"index": 2, "role": "aux", "header": "補助区分"},
-            {"index": 3, "role": "menu_name", "header": "献立"},
-            {"index": 4, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
-            {"index": 5, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
-            {"index": 6, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
-            {"index": 7, "role": "quantity", "header": "肉卵魚禁", "diet_type": "forbidden_other", "area_id": "X"},
-            {"index": 8, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
-            {"index": 9, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
-            {"index": 10, "role": "note", "header": "備考欄"},
-        ],
-        "main_ocr_row_fields": [
-            "date_mmdd",
-            "daypart",
-            "menu",
-            "qty.regular_x",
-            "qty.staff_x",
-            "qty.no_meat_x",
-            "qty.forbidden_other_x",
-            "qty.no_fish_x",
-            "qty.sesame_allergy_x",
-            "remarks",
-        ],
-    }
-
-
-def _template_staff_forbidden_sesame_with_aux() -> dict:
-    return {
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",

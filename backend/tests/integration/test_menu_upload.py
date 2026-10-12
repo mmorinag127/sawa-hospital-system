@@ -71,7 +71,7 @@ def test_menu_upload_records_menu():
             _create_resolution("MenuB"),
         ],
     )
-    items = menu_service.get_menu_items("2025-12")
+    items = menu_service.get_menu_items("2025-12", allow_unresolved=True)
     assert len(items) == 2
     assert all(item.get("menu_master_id") for item in items)
 
@@ -87,7 +87,7 @@ def test_menu_upload_records_menu():
         master.unit_type = "g"
         master.qty_per_serving = 80
 
-    merged = menu_service.get_menu_items("2025-12")
+    merged = menu_service.get_menu_items("2025-12", allow_unresolved=True)
     index = {item["name"]: item for item in merged}
     assert index[first_name]["unit_type"] == "g"
     assert index[first_name]["qty_per_serving"] == 80
@@ -201,7 +201,7 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
     menu_service.create_menu("2026-06", b"dummy", "menu.xlsx")
 
     items = sorted(
-        menu_service.get_menu_items("2026-06"),
+        menu_service.get_menu_items("2026-06", allow_unresolved=True),
         key=lambda item: ({"朝食": 0, "昼食": 1, "夕食": 2}.get(item["daypart"], 99), item["category"] or ""),
     )
     assert len(items) == 2
@@ -224,7 +224,7 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
         },
     ) == "updated"
 
-    refreshed = {item["id"]: item for item in menu_service.get_menu_items("2026-06")}
+    refreshed = {item["id"]: item for item in menu_service.get_menu_items("2026-06", allow_unresolved=True)}
     assert refreshed[morning["id"]]["qty_per_serving"] == 75
     assert refreshed[lunch["id"]]["qty_per_serving"] == 40
 
@@ -601,7 +601,7 @@ def test_get_menu_uses_latest_upload_time_as_display_name():
         "file.csv",
         menu_master_resolutions=[_create_resolution("MenuA")],
     )
-    payload = menu_service.get_menu("2025-12")
+    payload = menu_service.get_menu("2025-12", allow_unresolved=True)
     assert payload is not None
     menu = payload["menu"]
     assert menu["id"] == "2025-12"
@@ -649,13 +649,13 @@ def test_create_menu_scope_upload_replaces_only_target_scope(monkeypatch):
         menu_master_resolutions=[_create_resolution("ScopedA"), _create_resolution("ScopedB")],
     )
 
-    payload = menu_service.get_menu("2026-03")
+    payload = menu_service.get_menu("2026-03", allow_unresolved=True)
     assert payload is not None
     base_entries = payload["entries"]
     assert any(entry["name"] == "BaseA" and not entry.get("facility_override") for entry in base_entries)
     assert not any(entry["name"] == "ScopedA" for entry in base_entries)
 
-    scoped_payload = menu_service.get_menu_for_facility("2026-03", "FAC00008")
+    scoped_payload = menu_service.get_menu_for_facility("2026-03", "FAC00008", allow_unresolved=True)
     assert scoped_payload is not None
     scoped_entries = scoped_payload["entries"]
     assert any(entry["name"] == "ScopedA" and entry.get("facility_override") == "FAC00008" for entry in scoped_entries)
@@ -1087,7 +1087,7 @@ def test_create_menu_normalizes_temp_type_from_japanese(monkeypatch):
         "temp.xlsx",
         menu_master_resolutions=[_create_resolution("筑前煮")],
     )
-    payload = menu_service.get_menu("2026-03")
+    payload = menu_service.get_menu("2026-03", allow_unresolved=True)
 
     assert payload is not None
     assert payload["items"][0]["temp_type"] == "hot"
@@ -1320,7 +1320,7 @@ def test_get_menu_exposes_menu_master_missing_and_diff_checks():
             ]
         )
 
-    payload = menu_service.get_menu("2026-03")
+    payload = menu_service.get_menu("2026-03", allow_unresolved=True)
 
     assert payload is not None
     master_checks = payload["master_checks"]
@@ -1378,7 +1378,7 @@ def test_get_menu_ignores_daypart_and_category_variants_in_master_checks():
             ]
         )
 
-    payload = menu_service.get_menu("2026-04")
+    payload = menu_service.get_menu("2026-04", allow_unresolved=True)
 
     assert payload is not None
     master_checks = payload["master_checks"]
@@ -1557,7 +1557,7 @@ def test_resolve_menu_master_check_can_link_existing_create_update_month_only_an
         assert item_category_only is not None
         assert item_category_only.master_resolution_mode is None
 
-    payload = menu_service.get_menu("2026-03")
+    payload = menu_service.get_menu("2026-03", allow_unresolved=True)
     assert payload is not None
     issues = {issue["item_id"]: issue for issue in payload["master_checks"]["issues"]}
     assert "MMI_MONTH_ONLY" not in issues
@@ -1675,7 +1675,7 @@ def test_monthly_menu_item_update_normalizes_count_and_cut_units():
         "menu.csv",
         menu_master_resolutions=[_create_resolution("白身魚フライ", unit_type="count", qty_per_serving=1)],
     )
-    item = menu_service.get_menu_items("2026-03")[0]
+    item = menu_service.get_menu_items("2026-03", allow_unresolved=True)[0]
 
     result = menu_service.update_item_status(
         "2026-03",
@@ -1687,7 +1687,7 @@ def test_monthly_menu_item_update_normalizes_count_and_cut_units():
     )
     assert result == "updated"
 
-    updated_items = menu_service.get_menu_items("2026-03")
+    updated_items = menu_service.get_menu_items("2026-03", allow_unresolved=True)
     assert updated_items[0]["unit_type"] == "cut"
     assert updated_items[0]["qty_per_serving"] == 1
 
@@ -1885,12 +1885,12 @@ def test_upsert_entry_exceptions_creates_facility_scoped_override_entries():
     assert payload["items"][0]["facility_override"] == "FACEX001"
     assert payload["items"][0]["name"] == "鮭の塩焼き"
 
-    scoped_payload = menu_service.get_menu_for_facility("2026-06", "FACEX001")
+    scoped_payload = menu_service.get_menu_for_facility("2026-06", "FACEX001", allow_unresolved=True)
     assert scoped_payload is not None
     scoped_entries = {(entry["menu_date"], entry["daypart"], entry["slot_index"]): entry for entry in scoped_payload["entries"]}
     assert scoped_entries[("2026-06-03", "昼食", 1)]["name"] == "鮭の塩焼き"
 
-    base_payload = menu_service.get_menu_for_facility("2026-06", "FACEX002")
+    base_payload = menu_service.get_menu_for_facility("2026-06", "FACEX002", allow_unresolved=True)
     assert base_payload is not None
     base_entries = {(entry["menu_date"], entry["daypart"], entry["slot_index"]): entry for entry in base_payload["entries"]}
     assert base_entries[("2026-06-03", "昼食", 1)]["name"] == "鶏の照焼き"
@@ -2048,7 +2048,7 @@ def test_monthly_menu_upload_allows_cut_units_and_reports_bagging_gap_after_uplo
         ],
     )
 
-    payload = menu_service.get_menu("2026-07")
+    payload = menu_service.get_menu("2026-07", allow_unresolved=True)
     assert payload is not None
     item = payload["items"][0]
     assert item["unit_type"] == "cut"
@@ -2089,7 +2089,7 @@ def test_monthly_menu_upload_allows_existing_master_bagging_gap_and_reports_afte
         require_menu_master_review=True,
     )
 
-    payload = menu_service.get_menu("2026-07")
+    payload = menu_service.get_menu("2026-07", allow_unresolved=True)
     assert payload is not None
     item = payload["items"][0]
     assert item["menu_master_id"] == "MNU_EXISTING_CUT"
@@ -2147,7 +2147,7 @@ def test_monthly_menu_lists_existing_condiment_bagging_gaps():
             )
         )
 
-    payload = menu_service.get_menu("2026-08")
+    payload = menu_service.get_menu("2026-08", allow_unresolved=True)
     assert payload is not None
     issues = payload["master_checks"]["issues"]
     assert len(issues) == 1
@@ -2167,7 +2167,7 @@ def test_monthly_menu_lists_existing_condiment_bagging_gaps():
             )
         )
 
-    payload = menu_service.get_menu("2026-08")
+    payload = menu_service.get_menu("2026-08", allow_unresolved=True)
     assert payload is not None
     assert payload["master_checks"]["issues"] == []
 
@@ -2207,7 +2207,7 @@ def test_monthly_menu_upload_reports_condiment_bagging_gap_after_upload(monkeypa
         require_menu_master_review=True,
     )
 
-    payload = menu_service.get_menu("2026-09")
+    payload = menu_service.get_menu("2026-09", allow_unresolved=True)
     assert payload is not None
     assert payload["master_checks"]["issues"][0]["reason"] == "bagging_settings_missing"
     assert payload["master_checks"]["issues"][0]["condiment_issues"][0]["condiment_name"] == "ソース"
