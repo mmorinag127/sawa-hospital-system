@@ -3,6 +3,8 @@ import pathlib
 import sys
 from datetime import datetime, timedelta
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
@@ -11,6 +13,8 @@ from src.models.order_workflow_state import OrderWorkflowState  # noqa: E402
 from src.services import config_service, critical_decision_service, draft_sheet_service, order_current_state_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
 
 def _structured_cells(rows: list[list[str]]) -> list[dict[str, object]]:

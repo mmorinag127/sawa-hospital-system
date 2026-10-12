@@ -10843,68 +10843,6 @@ def _draft_requires_authoritative_aux_rebase(
     return False
 
 
-def _draft_requires_authoritative_quantity_rebase(
-    current_sheet: dict[str, Any] | None,
-    fresh_sheet: dict[str, Any] | None,
-) -> bool:
-    if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
-        return False
-    if not _fresh_sheet_has_authoritative_weekly_shell(fresh_sheet):
-        return False
-    current_fields = [str(field).strip() for field in (current_sheet.get("fields") or []) if str(field).strip()]
-    fresh_fields = [str(field).strip() for field in (fresh_sheet.get("fields") or []) if str(field).strip()]
-    if not _fields_compatible_for_authoritative_weekly_shell_rebase(current_fields, fresh_fields):
-        return False
-    quantity_fields = [
-        field
-        for field in fresh_fields
-        if field.startswith("qty.") and field in current_fields
-    ]
-    if not quantity_fields:
-        return False
-    current_rows = _sanitize_semantic_sheet_rows(
-        rows_payload=current_sheet.get("rows"),
-        fields=current_fields,
-    )
-    fresh_rows = _sanitize_semantic_sheet_rows(
-        rows_payload=fresh_sheet.get("rows"),
-        fields=fresh_fields,
-    )
-    if not current_rows or not fresh_rows:
-        return False
-    current_index = {field: idx for idx, field in enumerate(current_fields)}
-    fresh_index = {field: idx for idx, field in enumerate(fresh_fields)}
-    current_by_key: dict[tuple[str, str, str], list[str]] = {}
-    for row in current_rows:
-        row_key = _sheet_row_identity_key(current_fields, row)
-        if row_key is None:
-            continue
-        current_by_key[row_key] = row
-    for fresh_row in fresh_rows:
-        row_key = _sheet_row_identity_key(fresh_fields, fresh_row)
-        if row_key is None or row_key not in current_by_key:
-            continue
-        current_row = current_by_key[row_key]
-        for field in quantity_fields:
-            current_idx = current_index.get(field)
-            fresh_idx = fresh_index.get(field)
-            if current_idx is None or fresh_idx is None:
-                continue
-            current_value = (
-                _field_value_to_str(current_row[current_idx]).strip()
-                if current_idx < len(current_row)
-                else ""
-            )
-            fresh_value = (
-                _field_value_to_str(fresh_row[fresh_idx]).strip()
-                if fresh_idx < len(fresh_row)
-                else ""
-            )
-            if current_value != fresh_value:
-                return True
-    return False
-
-
 def _draft_requires_authoritative_schema_upgrade(
     current_sheet: dict[str, Any] | None,
     fresh_sheet: dict[str, Any] | None,
@@ -11326,124 +11264,16 @@ def get_hakodate_overlay_preview(order_id: str) -> dict[str, Any]:
     )
 
 
-def _build_initial_draft_from_sheet_payload(
-    order_id: str,
-    sheet_payload: dict[str, Any] | None,
-) -> Optional[dict[str, Any]]:
-    if not isinstance(sheet_payload, dict):
-        return None
-    fields = [str(field).strip() for field in (sheet_payload.get("fields") or []) if str(field).strip()]
-    blockers = [str(item).strip() for item in (sheet_payload.get("blockers") or []) if str(item).strip()]
-    warnings = [str(item).strip() for item in (sheet_payload.get("warnings") or []) if str(item).strip()]
-    rows = _sanitize_semantic_sheet_rows(
-        rows_payload=_sanitize_revision_rows(rows_payload=sheet_payload.get("rows"), fields=fields),
-        fields=fields,
-    )
-    allow_blocked_empty_payload = (
-        not rows
-        and bool(fields)
-        and bool(
-            set(blockers)
-            | {
-                warning
-                for warning in warnings
-                if warning in {
-                    "menu_entries_missing",
-                    "monthly_menu_object_missing",
-                    "monthly_menu_facility_scope_missing",
-                    "template_unresolved",
-                    "template_resolution_blocked",
-                    "ocr_evidence_recovery_required",
-                }
-            }
-        )
-    ) or (bool(blockers) and not fields and not rows)
-    if (not fields or not rows) and not allow_blocked_empty_payload:
-        return None
-    row_ids = deepcopy(sheet_payload.get("row_ids"))
-    header = [str(cell or "").strip() for cell in (sheet_payload.get("header") or [])]
-    if len(header) < len(fields):
-        header.extend([_field_label(field) for field in fields[len(header) :]])
-    source = str(sheet_payload.get("source") or "ocr_sheet").strip() or "ocr_sheet"
-    return {
-        "order_id": order_id,
-        "source": source,
-        "fields": fields,
-        "header": header[: len(fields)],
-        "rows": rows,
-        "row_ids": row_ids,
-        **({"physical_menu_row_ids": deepcopy(sheet_payload["physical_menu_row_ids"])} if "physical_menu_row_ids" in sheet_payload else {}),
-        **({"physical_menu_row_count": sheet_payload["physical_menu_row_count"]} if "physical_menu_row_count" in sheet_payload else {}),
-        "blockers": blockers,
-        "warnings": warnings,
-        "week_id": str(sheet_payload.get("week_id") or "").strip() or None,
-        "resolved_week_id": str(
-            sheet_payload.get("resolved_week_id") or sheet_payload.get("week_id") or ""
-        ).strip() or None,
-        "draft_state": str(
-            sheet_payload.get("draft_state")
-            or ("draft_blocked" if blockers else "draft_ready")
-        ).strip()
-        or ("draft_blocked" if blockers else "draft_ready"),
-        "base_template_resolution_id": str(sheet_payload.get("base_template_resolution_id") or "").strip() or None,
-        "menu_diagnostics": (
-            dict(sheet_payload.get("menu_diagnostics"))
-            if isinstance(sheet_payload.get("menu_diagnostics"), dict)
-            else None
-        ),
-        "row_diagnostics": list(sheet_payload.get("row_diagnostics") or [])
-        if isinstance(sheet_payload.get("row_diagnostics"), list)
-        else [],
-        "seed_source": str(sheet_payload.get("seed_source") or "").strip() or None,
-        "enrichment_source": str(sheet_payload.get("enrichment_source") or "").strip() or None,
-    }
-
-
 def _build_best_available_semantic_draft_with_error(
     order_id: str,
     *,
     use_saved_draft: bool = True,
     evidence_run_override: dict[str, Any] | None = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    sheet_payload, sheet_error = get_ocr_sheet(
-        order_id,
-        use_saved_draft=use_saved_draft,
+    return get_ocr_sheet(
+        order_id, use_saved_draft=use_saved_draft,
         evidence_run_override=evidence_run_override,
     )
-    candidates: list[dict[str, Any]] = []
-    if isinstance(sheet_payload, dict):
-        candidates.append(sheet_payload)
-    if sheet_error in _RECOVERABLE_OCR_SHEET_ERRORS:
-        recovered, recover_error = build_recoverable_ocr_sheet_payload(
-            order_id,
-            sheet_error,
-            use_saved_draft=use_saved_draft,
-            evidence_run_override=evidence_run_override,
-        )
-        if recover_error is None and isinstance(recovered, dict):
-            candidates.append(recovered)
-    for candidate in candidates:
-        draft_payload = _build_initial_draft_from_sheet_payload(order_id, candidate)
-        if not isinstance(draft_payload, dict):
-            continue
-        if not _draft_fields_look_generic(draft_payload.get("fields")):
-            return draft_payload, None
-        blocker_tokens = {
-            str(item).strip()
-            for item in (draft_payload.get("blockers") or [])
-            if str(item).strip()
-        }
-        warning_tokens = {
-            str(item).strip()
-            for item in (draft_payload.get("warnings") or [])
-            if str(item).strip()
-        }
-        if blocker_tokens & {"template_unresolved"} or warning_tokens & {
-            "template_unresolved",
-            "template_resolution_blocked",
-        }:
-            return draft_payload, None
-    return None, sheet_error or "candidate_preview_unavailable"
 
 
 def _build_best_available_semantic_draft(
@@ -11452,11 +11282,13 @@ def _build_best_available_semantic_draft(
     use_saved_draft: bool = True,
     evidence_run_override: dict[str, Any] | None = None,
 ) -> Optional[dict[str, Any]]:
-    draft_payload, _error = _build_best_available_semantic_draft_with_error(
+    draft_payload, error = _build_best_available_semantic_draft_with_error(
         order_id,
         use_saved_draft=use_saved_draft,
         evidence_run_override=evidence_run_override,
     )
+    if error:
+        raise ValueError(error)
     return draft_payload
 
 
@@ -11995,40 +11827,10 @@ def _build_canonical_bootstrap_sheet(
 
 
 def build_initial_sheet_draft(order_id: str) -> Optional[dict]:
-    # Canonical unpersisted current state must be resolved through the same
-    # sheet/read paths that drive Step2 and operator-visible OCR review.
-    # Otherwise `current_sheet_context` can drift from `get_ocr_sheet`.
-    draft_payload, draft_error = get_ocr_sheet(
-        order_id,
-        use_saved_draft=False,
-    )
-    if isinstance(draft_payload, dict):
-        return draft_payload
-    if draft_error in _RECOVERABLE_OCR_SHEET_ERRORS:
-        recovered_payload, recover_error = build_recoverable_ocr_sheet_payload(
-            order_id,
-            draft_error,
-            use_saved_draft=False,
-        )
-        if recover_error is None and isinstance(recovered_payload, dict):
-            return recovered_payload
-    order_payload = get_order_by_id(order_id, allow_unresolved_menu_amount=True)
-    facility_id = str((order_payload or {}).get("facility") or "").strip() or None
-    resolved_week_id = (
-        str((order_payload or {}).get("persisted_week_value") or "").strip()
-        or str((order_payload or {}).get("week_value") or "").strip()
-        or str((order_payload or {}).get("week") or "").strip()
-        or None
-    )
-    if draft_error:
-        return _build_blocked_sheet_payload(
-            order_id=order_id,
-            facility_id=facility_id,
-            week_id=resolved_week_id,
-            blockers=[draft_error],
-            source="weekly_menu_blocked",
-        )
-    return None
+    payload, error = get_ocr_sheet(order_id, use_saved_draft=False)
+    if error:
+        raise ValueError(error)
+    return payload
 
 
 def _build_transient_draft_record(
@@ -12490,11 +12292,21 @@ def _rebase_draft_record_to_facility_schema(
         order_id,
         draft_record,
         evidence_run_override=synchronous_write_input["evidence"],
+        synchronous_write_input=synchronous_write_input,
     )
-    if not rebase_required or not isinstance(rebuilt_sheet, dict):
+    if not rebase_required:
         return draft_record
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(draft_record)
     try:
+        _explicit_draft_row_identities(draft_sheet_json, draft_sheet_json.get("rows") or [])
+        _explicit_draft_row_identities({"row_ids": draft_sheet_json.get("row_ids")}, draft_sheet_json.get("rows") or [])
+        if rebuilt_sheet is None:
+            rebuilt_sheet = _build_fresh_semantic_sheet_for_draft_rebase(
+                order_id, draft_record, evidence_run_override=synchronous_write_input["evidence"],
+                synchronous_write_input=synchronous_write_input,
+            )
+        if not isinstance(rebuilt_sheet, dict):
+            return None
         rebased_sheet = _merge_saved_draft_into_semantic_sheet(
             draft_sheet_json,
             rebuilt_sheet,
@@ -12582,11 +12394,18 @@ def _rebuild_current_sheet_for_facility_schema(
         synchronous_write_input["evidence"] if isinstance(synchronous_write_input, dict)
         else _resolve_draft_record_base_evidence_run(current_draft_before_rebuild)
     )
-    rebuilt_sheet = _build_best_available_semantic_draft(
-        order_id,
-        use_saved_draft=False,
-        evidence_run_override=evidence_run_override,
-    )
+    if isinstance(synchronous_write_input, dict) and isinstance(quantity_preservation_draft, dict):
+        rebuilt_sheet = _build_fresh_semantic_sheet_for_draft_rebase(
+            order_id, quantity_preservation_draft,
+            evidence_run_override=evidence_run_override,
+            synchronous_write_input=synchronous_write_input,
+        )
+    else:
+        rebuilt_sheet = _build_best_available_semantic_draft(
+            order_id,
+            use_saved_draft=False,
+            evidence_run_override=evidence_run_override,
+        )
     if not isinstance(rebuilt_sheet, dict):
         return None
     draft_sheet_to_persist = _merge_current_draft_quantity_values_into_semantic_sheet(
@@ -12644,16 +12463,38 @@ def _build_fresh_semantic_sheet_for_draft_rebase(
     draft_record: dict[str, Any] | None,
     *,
     evidence_run_override: dict[str, Any] | None = None,
+    synchronous_write_input: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if evidence_run_override is None:
-        evidence_run_override = _resolve_draft_record_base_evidence_run(draft_record)
-    if not isinstance(evidence_run_override, dict):
-        return None
-    rebuilt_sheet = _build_best_available_semantic_draft(
-        order_id,
-        use_saved_draft=False,
-        evidence_run_override=evidence_run_override,
+    # Structural rebase is not OCR adoption: only the identity-checked merge may
+    # supply quantities and remarks from the captured operator draft.
+    if synchronous_write_input is None:
+        from src.services.workflow_attempt_guard_service import capture_current_sheet_input, bind_current_sheet_input, validate_current_sheet_input
+        captured = capture_current_sheet_input(order_id)
+        if captured.get("sheet_source_unavailable"):
+            raise ValueError(captured["sheet_source_unavailable"])
+        with session_scope() as session:
+            current = session.get(OrderSheetDraft, (captured.get("draft") or {}).get("id"))
+            if current is None or draft_sheet_service._serialize_draft(current) != draft_record:
+                raise ValueError("current_sheet_input_changed")
+            if evidence_run_override is not None:
+                evidence = session.get(OrderOcrEvidenceRun, (captured.get("evidence") or {}).get("id"))
+                if evidence is None or ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True) != evidence_run_override:
+                    raise ValueError("synchronous_evidence_conflict")
+        rebuilt_sheet, error = _build_hakodate_weekly_menu_base_sheet(order_id, processing_read_input=captured)
+        if error:
+            raise ValueError(error)
+        with session_scope() as session:
+            validate_current_sheet_input(session, order_id, bind_current_sheet_input(rebuilt_sheet, captured))
+        return rebuilt_sheet
+    if not _synchronous_draft_input_matches(synchronous_write_input, draft_record):
+        raise ValueError("synchronous_input_missing")
+    if evidence_run_override is not None and evidence_run_override != synchronous_write_input["evidence"]:
+        raise ValueError("synchronous_evidence_conflict")
+    rebuilt_sheet, error = _build_hakodate_weekly_menu_base_sheet(
+        order_id, synchronous_write_input=synchronous_write_input,
     )
+    if error:
+        raise ValueError(error)
     return rebuilt_sheet if isinstance(rebuilt_sheet, dict) else None
 
 
@@ -12662,6 +12503,7 @@ def _draft_record_requires_current_sheet_semantic_rebase(
     draft_record: dict[str, Any] | None,
     *,
     evidence_run_override: dict[str, Any] | None = None,
+    synchronous_write_input: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     if not isinstance(draft_record, dict):
         return False, None
@@ -12676,8 +12518,11 @@ def _draft_record_requires_current_sheet_semantic_rebase(
         return False, None
     if str(draft_sheet_json.get("source") or "").strip() == "hakodate_ocr_evidence_sheet":
         return False, None
+    if apply_gate_service.has_clean_saved_draft(draft_record):
+        return False, None
     rebuilt_sheet = _build_fresh_semantic_sheet_for_draft_rebase(
         order_id, draft_record, evidence_run_override=evidence_run_override,
+        synchronous_write_input=synchronous_write_input,
     )
     if not isinstance(rebuilt_sheet, dict):
         return False, None
@@ -12687,18 +12532,11 @@ def _draft_record_requires_current_sheet_semantic_rebase(
     current_blockers = _dedupe_str_tokens(draft_record.get("blockers_json") or [])
     if draft_state == "auto_apply_blocked" or current_blockers:
         return False, rebuilt_sheet
-    if apply_gate_service.has_clean_saved_draft(draft_record):
-        return False, rebuilt_sheet
     schema_rebase_required = _draft_requires_authoritative_schema_upgrade(
         draft_sheet_json,
         rebuilt_sheet,
     )
     if schema_rebase_required:
-        return True, rebuilt_sheet
-    if not apply_gate_service.has_clean_saved_draft(draft_record) and _draft_requires_authoritative_quantity_rebase(
-        draft_sheet_json,
-        rebuilt_sheet,
-    ):
         return True, rebuilt_sheet
     return False, rebuilt_sheet
 
@@ -12719,6 +12557,9 @@ def _persisted_current_state_is_reusable(
         return False
     latest_draft_id = str((latest_draft or {}).get("id") or "").strip()
     if not latest_draft_id or latest_draft_id != draft_id:
+        return False
+    saved_payload = latest_draft.get("draft_sheet_json") or {}
+    if any(not snapshots_equal(payload.get(key), saved_payload.get(key)) for key in ("fields", "rows", "row_ids")):
         return False
     latest_draft_template_version_id = str((latest_draft or {}).get("template_version_id") or "").strip() or None
     persisted_template_version_id = str(payload.get("template_version_id") or "").strip() or None
@@ -12796,19 +12637,27 @@ def _resolve_current_sheet_context_week_id(
     return None
 
 
+def _blocked_current_sheet_context(order_id: str, reason: str) -> dict[str, Any]:
+    return {
+        "order_id": order_id, "resolved_week_id": None,
+        "draft_id": None,
+        "current_sheet_revision_id": _current_sheet_revision_id_from_artifact(
+            fields=[], header=[], rows_payload=[], row_ids=[],
+        ),
+        "fields": [], "header": [], "rows": [], "row_ids": [],
+        "blockers": [reason], "warnings": [],
+        "draft_record": {"blockers_json": [reason]},
+        "draft_payload": None, "has_persisted_draft": False,
+        "authoritative_persisted_draft": False, "clean_saved_draft": False,
+    }
+
+
 def _unresolved_order_week_context(order_id: str) -> dict[str, Any] | None:
     with session_scope() as session:
         order = session.get(Order, order_id)
         if order is None or _normalize_sheet_week_value(order.week_code):
             return None
-    return {
-        "order_id": order_id, "resolved_week_id": None,
-        "fields": [], "header": [], "rows": [], "row_ids": [],
-        "blockers": ["week_unresolved"], "warnings": [],
-        "draft_record": {"blockers_json": ["week_unresolved"]},
-        "draft_payload": None, "has_persisted_draft": False,
-        "authoritative_persisted_draft": False, "clean_saved_draft": False,
-    }
+    return _blocked_current_sheet_context(order_id, "week_unresolved")
 
 
 def _current_sheet_template_read_boundary(order_id: str) -> tuple[bool, dict[str, Any] | None]:
@@ -12821,14 +12670,7 @@ def _current_sheet_template_read_boundary(order_id: str) -> tuple[bool, dict[str
         reason = str(exc)
         if reason == "order_not_found":
             return True, None
-        return True, {
-            "order_id": order_id, "resolved_week_id": None,
-            "fields": [], "header": [], "rows": [], "row_ids": [],
-            "blockers": [reason], "warnings": [],
-            "draft_record": {"blockers_json": [reason]},
-            "draft_payload": None, "has_persisted_draft": False,
-            "authoritative_persisted_draft": False, "clean_saved_draft": False,
-        }
+        return True, _blocked_current_sheet_context(order_id, reason)
     return False, None
 
 
@@ -12848,6 +12690,12 @@ def _build_current_sheet_context_uncached(
     stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
     if stopped:
         return _bind_blocked_current_sheet_context(normalized_order_id, blocked_context, publication_input)
+    if publication_input.get("sheet_source_unavailable"):
+        return _bind_blocked_current_sheet_context(
+            normalized_order_id,
+            _blocked_current_sheet_context(normalized_order_id, publication_input["sheet_source_unavailable"]),
+            publication_input,
+        )
     synchronous_write_input = (
         _capture_synchronous_cache_write_input(normalized_order_id) if allow_state_mutation else None
     )
@@ -12868,6 +12716,7 @@ def _build_current_sheet_context_uncached(
             evidence_run_override=(
                 synchronous_write_input["evidence"] if isinstance(synchronous_write_input, dict) else None
             ),
+            synchronous_write_input=synchronous_write_input,
         )
         if rebase_required and allow_state_mutation:
             refreshed_record = _rebase_draft_record_to_facility_schema(
@@ -12883,7 +12732,12 @@ def _build_current_sheet_context_uncached(
                 raise ValueError(identity_blockers[0])
             current_record = refreshed_record
     if current_record is None:
-        initial = build_initial_sheet_draft(normalized_order_id)
+        try:
+            initial = build_initial_sheet_draft(normalized_order_id)
+        except ValueError as exc:
+            return _bind_blocked_current_sheet_context(
+                normalized_order_id, _blocked_current_sheet_context(normalized_order_id, str(exc)), publication_input,
+            )
         if isinstance(initial, dict):
             current_record = _build_transient_draft_record(normalized_order_id, initial)
     if not isinstance(current_record, dict):
@@ -12914,15 +12768,8 @@ def _build_current_sheet_context_uncached(
         draft_payload.get("source") or current_record.get("draft_state") or "draft"
     ).strip() or "draft"
     fields = [str(field).strip() for field in (draft_payload.get("fields") or []) if str(field).strip()]
-    rows = _sanitize_semantic_sheet_rows(
-        rows_payload=draft_payload.get("rows"),
-        fields=fields,
-    ) if isinstance(draft_payload.get("rows"), list) else []
-    row_ids = [
-        str(item).strip()
-        for item in (draft_payload.get("row_ids") or [])
-        if str(item).strip()
-    ] if isinstance(draft_payload.get("row_ids"), list) else []
+    rows = deepcopy(draft_payload.get("rows")) if isinstance(draft_payload.get("rows"), list) else []
+    row_ids = deepcopy(draft_payload.get("row_ids")) if isinstance(draft_payload.get("row_ids"), list) else []
     warnings = _dedupe_str_tokens(
         list(draft_payload.get("warnings") or []) + list(current_record.get("warnings_json") or [])
     )
@@ -14026,11 +13873,13 @@ def switch_draft_to_latest_evidence(
             else None
         )
     else:
-        draft_payload = _build_best_available_semantic_draft(
+        draft_payload, draft_error = _build_best_available_semantic_draft_with_error(
             order_id,
             use_saved_draft=False,
             evidence_run_override=latest_evidence,
         )
+        if draft_error:
+            return None, draft_error
     if not isinstance(draft_payload, dict):
         return None, "switch_draft_unavailable"
 
@@ -14500,7 +14349,7 @@ def flatten_current_sheet_payload(
         current_sheet_context=current_sheet_context,
     )
     if not isinstance(workflow, dict) or not isinstance(workflow.get("apply_gate"), dict):
-        workflow = get_order_workflow_state(order_id, refresh=False)
+        raise ValueError("current_sheet_apply_gate_unavailable")
     evidence = _resolve_active_ocr_evidence_run(order_id)
     apply_gate = workflow.get("apply_gate") if isinstance(workflow, dict) else None
     canonical_order_week_id = (
@@ -25634,207 +25483,10 @@ def build_recoverable_ocr_sheet_payload(
     evidence_run_override: dict[str, Any] | None = None,
     allow_current_surface_short_circuit: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    if _unresolved_order_week_context(order_id) is not None:
-        return None, "week_unresolved"
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if not order:
-            return None, "order_not_found"
-        facility_id = order.facility_code
-        week_id = _resolve_order_current_sheet_week_value(order) or order.week_code
-        lines_updated_at = order.lines_updated_at
-    if not facility_id:
-        return None, error_code
-
-    override_payload = evidence_run_override.get("payload_json") if isinstance(evidence_run_override, dict) else None
-    if isinstance(override_payload, dict):
-        cached_payload = evidence_manifest_service.ensure_evidence_manifest(dict(override_payload))
-    else:
-        cached_payload = _load_order_ocr_cache(order_id)
-    current_surface_payload = None
-    current_draft_record = None
-    if allow_current_surface_short_circuit:
-        current_sheet_context = (
-            get_current_sheet_context(
-                order_id,
-                refresh_draft_from_semantic=True,
-                upgrade_generic_from_sheet=True,
-                backfill_from_revision=False,
-            )
-            if use_saved_draft
-            else None
-        )
-        current_surface_payload, current_draft_record = _authoritative_surface_payload_from_current_sheet_context(
-            order_id,
-            current_sheet_context,
-        )
-        if isinstance(current_surface_payload, dict):
-            return (
-                _augment_sheet_review_payload(
-                    order_id=order_id,
-                    payload=current_surface_payload,
-                    lines_updated_at=lines_updated_at,
-                    ocr_payload=cached_payload,
-                    ocr_metrics=cached_payload.get("metrics") if isinstance(cached_payload, dict) else None,
-                    draft_sheet=current_draft_record if isinstance(current_draft_record, dict) else None,
-                    position_fallback_semantics_ready=position_column_mapping_service.payload_uses_ready_position_fallback(
-                        cached_payload
-                    ),
-                ),
-                None,
-            )
-    latest_saved_draft = draft_sheet_service.get_selected_sheet_draft(order_id) if use_saved_draft else None
-    latest_draft = latest_saved_draft if _draft_record_is_authoritative_current_sheet(latest_saved_draft) else None
-    draft_payload = (
-        latest_draft.get("draft_sheet_json")
-        if isinstance(latest_draft, dict) and isinstance(latest_draft.get("draft_sheet_json"), dict)
-        else latest_draft
-        if isinstance(latest_draft, dict)
-        else None
-    )
-    diagnostics_payload = (
-        latest_saved_draft.get("draft_sheet_json")
-        if isinstance(latest_saved_draft, dict) and isinstance(latest_saved_draft.get("draft_sheet_json"), dict)
-        else latest_saved_draft
-        if isinstance(latest_saved_draft, dict)
-        else draft_payload
-        if isinstance(draft_payload, dict)
-        else None
-    )
-    draft_menu_diagnostics = (
-        dict(diagnostics_payload.get("menu_diagnostics"))
-        if isinstance(diagnostics_payload, dict) and isinstance(diagnostics_payload.get("menu_diagnostics"), dict)
-        else {}
-    )
-    computed_menu_diagnostics = _build_monthly_menu_diagnostics(
-        week_id=week_id,
-        facility_id=facility_id,
-    )
-    menu_diagnostics = (
-        draft_menu_diagnostics
-        if list(draft_menu_diagnostics.get("order_codes") or [])
-        else computed_menu_diagnostics
-    )
-    canonical_menu_error = _canonical_menu_diagnostic_code(
-        menu_diagnostics,
-        fallback_code=error_code,
-    )
-    normalized_error = (
-        canonical_menu_error
-        if str(error_code or "").strip() in _MENU_DIAGNOSTIC_CANONICAL_PRIORITY
-        and list(menu_diagnostics.get("order_codes") or [])
-        else str(error_code or "").strip()
-    )
-    draft_template_id = str((latest_draft or {}).get("base_template_resolution_id") or "").strip() or None
-    cached_payload = _augment_payload_with_candidate_resolution(order_id, cached_payload)
-    facility_config, template, effective_template_id, template_error = _resolve_effective_sheet_template(
-        order_id=order_id,
-        facility_id=facility_id,
-        ocr_payload=cached_payload,
-        draft_template_id=draft_template_id,
-        allow_workflow_resolution=True,
-        log_context="Facility config lookup failed",
-    )
-    if not facility_config:
-        return None, template_error or error_code
-    fields, field_index = _build_sheet_fields_and_indexes(template) if isinstance(template, dict) else ([], {})
-    field_error = _validate_sheet_template_fields(fields, template=template)
-    fallback_source = _canonical_blocked_sheet_source(
-        fields=fields,
-        template_error=template_error,
-        field_error=field_error,
-    )
-    if field_error and isinstance(template, dict):
-        return None, error_code
-    quantity_index = _build_sheet_quantity_index(fields, template=template)
-    latest_revision = (
-        None
-    )
-    clean_saved_draft = apply_gate_service.has_clean_saved_draft(latest_draft)
-    position_fallback_semantics_ready = position_column_mapping_service.payload_uses_ready_position_fallback(
-        cached_payload,
-        template=template,
-    )
-    fallback_payload: dict[str, Any] = {
-        "order_id": order_id,
-        "facility_id": facility_id,
-        "week_id": week_id,
-        "resolved_week_id": week_id,
-        "fields": fields,
-        "header": _sheet_header_from_template(fields, template) if isinstance(template, dict) else [],
-        "rows": [],
-        "row_ids": [],
-        "quantity_column_count": len(quantity_index),
-        "source": fallback_source,
-        "legacy_available": True,
-        "warnings": [
-            str(item).strip()
-            for item in [normalized_error, template_error, "template_resolution_blocked" if template_error == "template_unresolved" else None]
-            if str(item or "").strip()
-        ],
-        "blockers": [str(template_error).strip()] if str(template_error or "").strip() == "template_unresolved" else [],
-        "draft_state": "draft_blocked" if str(template_error or "").strip() == "template_unresolved" else "draft_ready",
-        "base_template_resolution_id": effective_template_id,
-        "base_evidence_run_id": str((evidence_run_override or {}).get("id") or "").strip() or None,
-        "menu_diagnostics": dict(menu_diagnostics),
-        "cell_issues": [],
-        "issue_summary": {"review_required_cell_count": 0, "issue_codes": []},
-        "trace": {"rows": [], "mapped_mode": "unavailable"},
-        "recovery_source": "none",
-        "sheet_projection": _sheet_projection_status_payload(
-            source=fallback_source,
-            warnings=[
-                str(item).strip()
-                for item in [normalized_error, template_error, "template_resolution_blocked" if template_error == "template_unresolved" else None]
-                if str(item or "").strip()
-            ],
-            payload_mapping_block_reason=template_error,
-            payload_rows_present=False,
-        ),
-    }
-    payload = fallback_payload
-    if isinstance(cached_payload, dict):
-        evidence_missing = _ocr_evidence_missing_artifacts(cached_payload)
-        template_blockers = _template_resolution_blockers(cached_payload)
-        warnings = list(payload.get("warnings") or [])
-        if (
-            evidence_missing
-            and _sheet_uses_strict_evidence_context(cached_payload)
-            and "ocr_evidence_recovery_required" not in warnings
-        ):
-            warnings.append("ocr_evidence_recovery_required")
-            payload["evidence_missing_artifacts"] = evidence_missing
-        if template_blockers and "template_resolution_blocked" not in warnings:
-            warnings.append("template_resolution_blocked")
-            payload["template_resolution_blockers"] = template_blockers
-        if template_error == "template_unresolved" and "template_unresolved" not in warnings:
-            warnings.append("template_unresolved")
-            payload["template_resolution_blockers"] = list(payload.get("template_resolution_blockers") or []) or ["template_unresolved"]
-        payload["warnings"] = apply_gate_service.filter_stale_issue_tokens(
-            _replace_menu_blocker_tokens(
-                warnings,
-                canonical_code=canonical_menu_error,
-            ),
-            source=str(payload.get("source") or "").strip(),
-            clean_saved_draft=clean_saved_draft,
-            position_fallback_semantics_ready=position_fallback_semantics_ready,
-        )
-    else:
-        payload["warnings"] = _replace_menu_blocker_tokens(
-            list(payload.get("warnings") or []),
-            canonical_code=canonical_menu_error,
-        )
-    return (
-        _augment_sheet_review_payload(
-            order_id=order_id,
-            payload=payload,
-            lines_updated_at=lines_updated_at,
-            ocr_payload=cached_payload,
-            ocr_metrics=cached_payload.get("metrics") if isinstance(cached_payload, dict) else None,
-            draft_sheet=latest_draft if isinstance(latest_draft, dict) else None,
-            position_fallback_semantics_ready=position_fallback_semantics_ready,
-        ),
-        None,
+    # Compatibility arguments cannot authorize reconstruction from another source.
+    return get_ocr_sheet(
+        order_id, use_saved_draft=use_saved_draft,
+        evidence_run_override=evidence_run_override,
     )
 
 
@@ -25846,834 +25498,47 @@ def get_ocr_sheet(
     prefer_order_lines: bool = True,
     synchronous_write_input: dict[str, Any] | None = None,
 ):
+    with session_scope() as session:
+        if session.get(Order, order_id) is None:
+            return None, "order_not_found"
     if _unresolved_order_week_context(order_id) is not None:
         return None, "week_unresolved"
-    if (
-        synchronous_write_input is None and use_saved_draft
-        and evidence_run_override is None and _workflow_ocr_job_id.get() is None
-    ):
-        synchronous_write_input = _capture_synchronous_cache_write_input(order_id)
-    lines_updated_at: datetime | None = None
-    order_status: str | None = None
-    evidence_only_step2 = _evidence_only_step2_enabled()
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if not order:
-            return None, "order_not_found"
-        facility_id = order.facility_code
-        lines_updated_at = order.lines_updated_at
-        order_status = order.status
-        if not facility_id:
-            return None, "facility_missing"
-        week_id = order.week_code
-        if not _normalize_sheet_week_value(week_id):
-            return None, "week_unresolved"
-        received_at = order.received_at or datetime.utcnow()
-        order_lines = (
-            [
-                {
-                    "id": line.id,
-                    "line_id": line.line_id,
-                    "date": line.date,
-                    "daypart": line.daypart,
-                    "menu_name": line.menu_name,
-                    "diet_type": line.diet_type,
-                    "area_id": line.area_id,
-                    "bag_type": line.bag_type,
-                    "quantity_original": line.quantity_original,
-                    "quantity_corrected": line.quantity_corrected,
-                    "change_note": line.change_note,
-                }
-                for line in (order.lines or [])
-            ]
-            if prefer_order_lines
-            else []
-        )
-
-    ocr_payload: dict[str, Any] | None = None
-    override_payload = evidence_run_override.get("payload_json") if isinstance(evidence_run_override, dict) else None
-    if isinstance(override_payload, dict):
-        ocr_payload = evidence_manifest_service.ensure_evidence_manifest(dict(override_payload))
-    else:
-        payload, evidence_error = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
-        if not isinstance(payload, dict):
-            return None, evidence_error or "selected_ocr_required"
-        if isinstance(payload, dict):
-            ocr_payload = payload
-    ocr_payload = _augment_payload_with_candidate_resolution(order_id, ocr_payload)
-    position_fallback_semantics_ready = position_column_mapping_service.payload_uses_ready_position_fallback(
-        ocr_payload,
-    )
-    position_fallback_partial = position_column_mapping_service.payload_uses_partial_position_fallback(
-        ocr_payload
-    )
-    if (
-        use_saved_draft and evidence_run_override is None
-        and isinstance(synchronous_write_input, dict) and _workflow_ocr_job_id.get() is None
-    ):
-        hakodate_current_draft, hakodate_draft_error = ensure_hakodate_evidence_draft_current(
-            order_id,
-            edited_by="auto-hakodate-evidence-ocr-sheet",
+    try:
+        if use_saved_draft and evidence_run_override is None:
+            context = get_current_sheet_context(order_id)
+            if not isinstance(context, dict):
+                return None, "sheet_unavailable"
+            if context.get("draft_payload") is None:
+                return None, next(iter(context.get("blockers") or []), "sheet_unavailable")
+            payload, _record = _authoritative_surface_payload_from_current_sheet_context(order_id, context)
+            if payload is None:
+                return None, "sheet_unavailable"
+            gate = payload.get("apply_gate")
+            if not isinstance(gate, dict) or any(type(gate.get(key)) is not bool for key in ("can_apply", "can_confirm")):
+                return None, "current_sheet_apply_gate_unavailable"
+            payload.update({key: gate[key] for key in ("can_apply", "can_confirm")})
+            payload["apply_blocker_details"] = _review_reason_details(payload["apply_blockers"], severity="blocker")
+            payload["confirm_blocker_details"] = _review_reason_details(payload["confirm_blockers"], severity="blocker")
+            payload["confirm_warning_details"] = _review_reason_details(payload["confirm_warnings"], severity="warning")
+            from src.services.workflow_attempt_guard_service import validate_current_sheet_input
+            with session_scope() as session:
+                validate_current_sheet_input(session, order_id, context)
+            if synchronous_write_input is not None:
+                captured = _capture_synchronous_cache_write_input(order_id)
+                if captured is None or any(
+                    not snapshots_equal(value, synchronous_write_input.get(key))
+                    for key, value in captured.items()
+                ):
+                    return None, "synchronous_input_conflict"
+            return payload, None if payload is not None else "sheet_unavailable"
+        from src.services.order_workflow_v2_service import build_sheet_from_ocr_evidence
+        projected, error = build_sheet_from_ocr_evidence(
+            order_id, evidence_run_override=evidence_run_override,
             synchronous_write_input=synchronous_write_input,
         )
-        if hakodate_draft_error in {
-            "synchronous_input_missing", "synchronous_input_conflict", "synchronous_evidence_conflict",
-            "switch_draft_failed", "hakodate_current_sheet_sync_failed",
-        }:
-            return None, hakodate_draft_error
-        if hakodate_draft_error and hakodate_draft_error not in {"already_current", "hakodate_ocr_evidence_missing"}:
-            return build_recoverable_ocr_sheet_payload(
-                order_id,
-                hakodate_draft_error,
-                use_saved_draft=use_saved_draft,
-                evidence_run_override=evidence_run_override,
-                allow_current_surface_short_circuit=False,
-            )
-        if _draft_payload_has_hakodate_evidence_projection(hakodate_current_draft):
-            hakodate_payload = dict((hakodate_current_draft or {}).get("draft_sheet_json") or {})
-            hakodate_payload.setdefault("order_id", order_id)
-            hakodate_payload.setdefault("source", "hakodate_ocr_evidence_sheet")
-            hakodate_payload.setdefault("quantity_assignment_strategy", "hakodate")
-            hakodate_payload["draft_id"] = (hakodate_current_draft or {}).get("id")
-            hakodate_payload["base_evidence_run_id"] = (hakodate_current_draft or {}).get("base_evidence_run_id")
-            return (
-                _augment_sheet_review_payload(
-                    order_id=order_id,
-                    payload=hakodate_payload,
-                    lines_updated_at=lines_updated_at,
-                    ocr_payload=ocr_payload,
-                    ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
-                    draft_sheet=hakodate_current_draft if isinstance(hakodate_current_draft, dict) else None,
-                    position_fallback_semantics_ready=position_fallback_semantics_ready,
-                ),
-                None,
-            )
-    current_sheet_context = (
-        get_current_sheet_context(
-            order_id,
-            refresh_draft_from_semantic=True,
-            upgrade_generic_from_sheet=True,
-            backfill_from_revision=False,
-        )
-        if use_saved_draft
-        else None
-    )
-    current_surface_payload, context_sheet_record = _authoritative_surface_payload_from_current_sheet_context(
-        order_id,
-        current_sheet_context,
-    )
-    if isinstance(current_surface_payload, dict):
-        return (
-            _augment_sheet_review_payload(
-                order_id=order_id,
-                payload=current_surface_payload,
-                lines_updated_at=lines_updated_at,
-                ocr_payload=ocr_payload,
-                ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
-                draft_sheet=context_sheet_record if isinstance(context_sheet_record, dict) else None,
-                position_fallback_semantics_ready=position_fallback_semantics_ready,
-            ),
-            None,
-        )
-    if not isinstance(ocr_payload, dict):
-        return build_recoverable_ocr_sheet_payload(
-            order_id,
-            "ocr_evidence_recovery_required",
-            use_saved_draft=use_saved_draft,
-            evidence_run_override=evidence_run_override,
-            allow_current_surface_short_circuit=False,
-        )
-    latest_draft_for_template = draft_sheet_service.get_selected_sheet_draft(order_id) if use_saved_draft else None
-    if not _draft_record_is_authoritative_current_sheet(latest_draft_for_template):
-        latest_draft_for_template = None
-    draft_template_id = str((latest_draft_for_template or {}).get("base_template_resolution_id") or "").strip() or None
-
-    facility_config, template, effective_template_id, template_error = _resolve_effective_sheet_template(
-        order_id=order_id,
-        facility_id=facility_id,
-        ocr_payload=ocr_payload,
-        draft_template_id=draft_template_id,
-        allow_workflow_resolution=True,
-        log_context="Facility config lookup failed",
-    )
-    if not facility_config:
-        return None, template_error or "facility_not_found"
-    if not isinstance(template, dict):
-        return build_recoverable_ocr_sheet_payload(
-            order_id,
-            template_error or "template_unresolved",
-            use_saved_draft=use_saved_draft,
-            evidence_run_override=evidence_run_override,
-        )
-    position_fallback_semantics_ready = position_column_mapping_service.payload_uses_ready_position_fallback(
-        ocr_payload,
-        template=template,
-    )
-
-    fields, field_index = _build_sheet_fields_and_indexes(template)
-    field_error = _validate_sheet_template_fields(fields, template=template)
-    header = _sheet_header_from_template(fields, template)
-    if field_error:
-        return None, field_error
-    quantity_index = _build_sheet_quantity_index(fields, template=template)
-    try:
-        template_authoritative_quantity_ready = _template_authoritative_quantity_mapping_ready(
-            ocr_payload, template, fields,
-        )
+        return (deepcopy(projected["sheet"]), None) if projected is not None else (None, error)
     except ValueError as exc:
-        if str(exc) != "sheet_canonical_mismatch":
-            raise
-        return _build_blocked_sheet_payload(
-            order_id=order_id, facility_id=facility_id, week_id=week_id,
-            fields=fields, header=header, blockers=[str(exc)],
-            source=_canonical_blocked_sheet_source(fields=fields),
-            base_template_resolution_id=effective_template_id,
-            base_evidence_run_id=str((evidence_run_override or {}).get("id") or "").strip() or None,
-        ), None
-
-    context_draft_record = (
-        current_sheet_context.get("draft_record")
-        if isinstance(current_sheet_context, dict)
-        and bool(current_sheet_context.get("has_persisted_draft"))
-        and isinstance(current_sheet_context.get("draft_record"), dict)
-        else None
-    )
-    raw_latest_draft = (
-        context_draft_record
-        if isinstance(context_draft_record, dict)
-        else draft_sheet_service.get_selected_sheet_draft(order_id)
-        if use_saved_draft
-        else None
-    )
-    if not _draft_record_is_authoritative_current_sheet(raw_latest_draft):
-        raw_latest_draft = None
-    clean_saved_draft = (
-        bool(current_sheet_context.get("clean_saved_draft"))
-        if isinstance(current_sheet_context, dict) and isinstance(raw_latest_draft, dict)
-        else apply_gate_service.has_clean_saved_draft(raw_latest_draft)
-    )
-    latest_draft = raw_latest_draft if use_saved_draft and clean_saved_draft else None
-    revision_lookup_payload = _load_order_ocr_cache(order_id)
-    raw_latest_revision = _select_order_sheet_revision(
-        order_id=order_id,
-        payload=revision_lookup_payload if isinstance(revision_lookup_payload, dict) else None,
-        exact_only=False,
-    )
-    latest_revision = raw_latest_revision if _is_authoritative_applied_sheet_revision(raw_latest_revision) else None
-    evidence_missing = _ocr_evidence_missing_artifacts(ocr_payload)
-    template_blockers = _template_resolution_blockers(ocr_payload)
-    # Step2 should still prefer a semantic sheet when weekly/menu/template data are
-    # sufficient to build one. Missing evidence artifacts or unresolved template
-    # resolution remain warnings/blockers for apply/confirm, but they should not
-    # force an immediate fallback to raw OCR rows.
-    ocr_metrics = _resolve_sheet_suppression_metrics(
-        order_id=order_id,
-        ocr_payload=ocr_payload,
-    )
-    suppress_order_lines_reason = _sheet_order_lines_suppression_reason(
-        order_status=order_status,
-        order_lines=order_lines,
-        ocr_metrics=ocr_metrics if isinstance(ocr_metrics, dict) else None,
-    )
-
-    resolved_week_id = _resolve_sheet_week_id(
-        current_week_id=week_id,
-        received_at=received_at,
-        order_lines=order_lines,
-        ocr_payload=ocr_payload,
-        facility_id=facility_id,
-    )
-    if not resolved_week_id:
-        return None, "week_unresolved"
-    menu_diagnostics = _build_monthly_menu_diagnostics(
-        week_id=resolved_week_id,
-        facility_id=facility_id,
-    )
-    has_weekly_menu_entries = "menu_entries_missing" not in list(menu_diagnostics.get("order_codes") or [])
-
-    if not isinstance(ocr_payload, dict):
-        # Weekly menu master missing: build editable rows from this order's OCR table.
-        if not has_weekly_menu_entries:
-            payload, _ = _get_ocr_output_without_legacy_edits(order_id, persist_cache=False)
-            if isinstance(payload, dict):
-                ocr_payload = payload
-
-    # Quantities shown on the OCR review sheet must come from OCR payloads,
-    # Gemini reparse output, or explicit user edits. Confirmed order lines are
-    # not an admissible quantity source for current-sheet materialization.
-    sheet_lines: list[dict[str, Any]] = []
-    sheet_lines_source = "suppressed"
-    if isinstance(ocr_payload, dict):
-        try:
-            payload_sheet_lines = _build_sheet_lines_from_ocr_payload(
-                payload=ocr_payload,
-                template=template,
-                received_at=received_at,
-                week_id=resolved_week_id,
-                facility_id=facility_id,
-            )
-        except _CanonicalOcrProjectionError as exc:
-            return _build_blocked_sheet_payload(
-                order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
-                fields=fields, header=header, blockers=[str(exc)],
-                source=_canonical_blocked_sheet_source(fields=fields),
-                base_template_resolution_id=effective_template_id,
-                base_evidence_run_id=str((evidence_run_override or {}).get("id") or "").strip() or None,
-                menu_diagnostics=menu_diagnostics,
-            ), None
-        if payload_sheet_lines:
-            sheet_lines = payload_sheet_lines
-            sheet_lines_source = "ocr_payload"
-
-    entries, entry_source = _build_sheet_menu_entries(
-        order_id=order_id,
-        week_id=resolved_week_id,
-        facility_id=facility_id,
-        order_lines=order_lines,
-        ocr_payload=ocr_payload,
-        template=template,
-        received_at=received_at,
-    )
-    if not entries:
-        if evidence_only_step2 and isinstance(latest_revision, dict):
-            return build_recoverable_ocr_sheet_payload(
-                order_id,
-                "menu_entries_missing",
-                use_saved_draft=use_saved_draft,
-                evidence_run_override=evidence_run_override,
-            )
-        return None, "menu_entries_missing"
-
-    payload_rows: list[list[str]] = []
-    raw_first_pass_rows: list[list[str]] = []
-    payload_unstructured_qty: list[str] = []
-    payload_has_structured_table_rows = False
-    if isinstance(ocr_payload, dict):
-        payload_rows = _extract_sheet_rows_from_payload(ocr_payload, template)
-        raw_first_pass_rows = _extract_first_pass_rows_from_payload(ocr_payload, template)
-        payload_unstructured_qty = _extract_payload_unstructured_quantity_candidates(ocr_payload)
-        table_rows_payload = ocr_payload.get("table_rows")
-        payload_has_structured_table_rows = isinstance(table_rows_payload, list) and bool(table_rows_payload)
-
-    confirmed_line_dates = {
-        line.get("date")
-        for line in order_lines
-        if isinstance(line, dict) and isinstance(line.get("date"), date)
-    }
-    line_dates = {
-        line.get("date")
-        for line in sheet_lines
-        if isinstance(line, dict) and isinstance(line.get("date"), date)
-    }
-    payload_dates = (
-        {
-            item
-            for item in _collect_sheet_dates_from_payload(ocr_payload, received_at, template, explicit_week=require_explicit_ingest_week(resolved_week_id))
-            if isinstance(item, date)
-        }
-        if isinstance(ocr_payload, dict)
-        else set()
-    )
-
-    rows, source = _build_rows_from_menu_entries(
-        entries=entries,
-        fields=fields,
-        field_index=field_index,
-        header=header,
-        line_dates=confirmed_line_dates,
-        source=entry_source,
-        payload_dates=payload_dates,
-        payload_row_count=len(payload_rows),
-        scope_anchor_date=received_at.date(),
-    )
-    if not rows:
-        if evidence_only_step2 and isinstance(latest_revision, dict):
-            return build_recoverable_ocr_sheet_payload(
-                order_id,
-                "menu_entries_missing",
-                use_saved_draft=use_saved_draft,
-                evidence_run_override=evidence_run_override,
-            )
-        return None, "menu_entries_missing"
-
-    if source.startswith("ocr_table") and payload_rows:
-        rows, payload_daypart_overlay_count = _overlay_payload_dayparts_onto_sheet_rows(
-            rows=rows,
-            fields=fields,
-            payload_rows=payload_rows,
-        )
-        if payload_daypart_overlay_count > 0 and source == "ocr_table":
-            source = "ocr_table+ocr_payload"
-        elif payload_daypart_overlay_count > 0 and source == "ocr_table_reconstructed":
-            source = "ocr_table_reconstructed+ocr_payload"
-
-    if source == "weekly_menu":
-        missing_week_dates = _collect_missing_weekly_menu_dates(
-            entries=entries,
-            rows=rows,
-            line_dates=confirmed_line_dates,
-        )
-        if missing_week_dates:
-            logger.warning(
-                "Sheet weekly menu dates incomplete",
-                order_id=order_id,
-                facility_id=facility_id,
-                week_id=resolved_week_id,
-                missing_dates=[item.isoformat() for item in missing_week_dates],
-            )
-            return None, "sheet_week_dates_incomplete"
-    base_rows = _clone_sheet_rows(rows)
-    mapped_count = 0
-    mapped_mode = "identity"
-    rows = _clone_sheet_rows(base_rows)
-    sheet_warnings: list[str] = []
-    shell_projection_stats: dict[str, Any] = {}
-    payload_mapping_block_reason = _sheet_payload_mapping_block_reason(
-        source=source,
-        ocr_payload=ocr_payload,
-        template=template,
-        evidence_missing=evidence_missing,
-        template_blockers=template_blockers,
-    )
-    payload_mapping_hard_blocked = payload_mapping_block_reason == "unresolved_template"
-    payload_mapping_low_confidence = payload_mapping_block_reason == "numeric_review_required"
-    payload_rescue_allowed = not payload_mapping_hard_blocked
-    if payload_mapping_hard_blocked and sheet_lines_source == "ocr_payload":
-        sheet_lines = []
-        sheet_lines_source = "suppressed"
-
-    def _append_sheet_warning(code: str) -> None:
-        token = str(code or "").strip()
-        if token and token not in sheet_warnings:
-            sheet_warnings.append(token)
-
-    menu_diagnostic_codes = list(menu_diagnostics.get("order_codes") or [])
-    if "monthly_menu_object_missing" in menu_diagnostic_codes:
-        _append_sheet_warning("monthly_menu_object_missing")
-    if "monthly_menu_facility_scope_missing" in menu_diagnostic_codes:
-        _append_sheet_warning("monthly_menu_facility_scope_missing")
-    if "monthly_menu_lookup_failed" in menu_diagnostic_codes:
-        _append_sheet_warning("monthly_menu_lookup_failed")
-    if "menu_entries_missing" in menu_diagnostic_codes:
-        _append_sheet_warning("sheet_weekly_menu_missing")
-    if suppress_order_lines_reason:
-        _append_sheet_warning(suppress_order_lines_reason)
-    if payload_mapping_low_confidence and payload_rows:
-        _append_sheet_warning("sheet_payload_mapping_low_confidence")
-    elif payload_mapping_hard_blocked:
-        _append_sheet_warning("sheet_payload_mapping_blocked_unresolved_template")
-
-    # Weekly menu + template is the primary source of truth for structure.
-    # Current-sheet quantities may only come from identity-aligned OCR/Gemini/user
-    # lines. Row-index/source-row/payload rescue paths are forbidden here.
-    if _source_uses_weekly_menu_shell(source):
-        if raw_first_pass_rows:
-            try:
-                projected_rows, shell_projection_stats = _project_payload_quantities_onto_weekly_menu_shell(
-                    rows=_clone_sheet_rows(base_rows),
-                    fields=fields,
-                    payload_rows=raw_first_pass_rows,
-                    template=template,
-                )
-            except _CanonicalOcrProjectionError as exc:
-                return _build_blocked_sheet_payload(
-                    order_id=order_id, facility_id=facility_id, week_id=resolved_week_id,
-                    fields=fields, header=_sheet_header_from_template(fields, template),
-                    blockers=[str(exc)], source=_canonical_blocked_sheet_source(fields=fields),
-                ), None
-            rows = projected_rows
-            mapped_count = _count_non_empty_quantity_cells(
-                rows=rows,
-                quantity_index=quantity_index,
-            )
-            mapped_mode = "raw_ocr_block"
-            mapped_row_count = _count_non_empty_quantity_rows(
-                rows=rows,
-                quantity_index=quantity_index,
-            )
-            mapped_column_count = _count_non_empty_quantity_columns(
-                rows=rows,
-                quantity_index=quantity_index,
-            )
-            if (
-                int(shell_projection_stats.get("unresolved_date_group_count") or 0) > 0
-                or int(shell_projection_stats.get("overflow_row_count") or 0) > 0
-            ):
-                _append_sheet_warning("sheet_quantity_column_unmapped")
-        elif sheet_lines_source in {"order_lines", "ocr_payload"} and sheet_lines:
-            unmapped_quantity_lines = _collect_unmapped_quantity_lines(
-                order_lines=sheet_lines,
-                quantity_index=quantity_index,
-            )
-
-            rows_by_identity = _clone_sheet_rows(base_rows)
-            _apply_order_line_quantities_to_sheet_rows(
-                rows=rows_by_identity,
-                fields=fields,
-                quantity_index=quantity_index,
-                order_lines=sheet_lines,
-            )
-            identity_count = _count_non_empty_quantity_cells(
-                rows=rows_by_identity,
-                quantity_index=quantity_index,
-            )
-
-            rows_by_source_index = _clone_sheet_rows(base_rows)
-            _apply_order_line_quantities_by_source_row_index(
-                rows=rows_by_source_index,
-                fields=fields,
-                quantity_index=quantity_index,
-                order_lines=sheet_lines,
-            )
-            source_index_count = _count_non_empty_quantity_cells(
-                rows=rows_by_source_index,
-                quantity_index=quantity_index,
-            )
-            source_row_summary = _summarize_order_line_source_row_mapping(
-                base_rows=base_rows,
-                quantity_index=quantity_index,
-                order_lines=sheet_lines,
-            )
-            mapped_count = identity_count
-            mapped_mode = "identity"
-            rows = rows_by_identity
-            if (
-                source_index_count >= identity_count
-                and (
-                    int(source_row_summary.get("mismatched_source_row_count") or 0) > 0
-                    or int(source_row_summary.get("missing_source_row_count") or 0) > 0
-                    or int(source_row_summary.get("invalid_identity_line_count") or 0) > 0
-                )
-            ):
-                logger.info(
-                    "Rejected source-row sheet mapping on current-sheet quantity path",
-                    order_id=order_id,
-                    facility_id=facility_id,
-                    week_id=resolved_week_id,
-                    source=source,
-                    identity_count=identity_count,
-                    source_row_count=source_index_count,
-                    **source_row_summary,
-                )
-            mapped_row_count = _count_non_empty_quantity_rows(
-                rows=rows,
-                quantity_index=quantity_index,
-            )
-            mapped_column_count = _count_non_empty_quantity_columns(
-                rows=rows,
-                quantity_index=quantity_index,
-            )
-            if unmapped_quantity_lines:
-                _append_sheet_warning("sheet_quantity_column_unmapped")
-        else:
-            rows_by_identity = _clone_sheet_rows(base_rows)
-            _apply_order_line_quantities_to_sheet_rows(
-                rows=rows_by_identity,
-                fields=fields,
-                quantity_index=quantity_index,
-                order_lines=sheet_lines,
-            )
-            mapped_count = _count_non_empty_quantity_cells(
-                rows=rows_by_identity,
-                quantity_index=quantity_index,
-            )
-            mapped_mode = "identity"
-            rows = rows_by_identity
-    else:
-        rows_by_identity = _clone_sheet_rows(base_rows)
-        _apply_order_line_quantities_to_sheet_rows(
-            rows=rows_by_identity,
-            fields=fields,
-            quantity_index=quantity_index,
-            order_lines=sheet_lines,
-        )
-        identity_count = _count_non_empty_quantity_cells(
-            rows=rows_by_identity,
-            quantity_index=quantity_index,
-        )
-
-        rows_by_source_index = _clone_sheet_rows(base_rows)
-        _apply_order_line_quantities_by_source_row_index(
-            rows=rows_by_source_index,
-            fields=fields,
-            quantity_index=quantity_index,
-            order_lines=sheet_lines,
-        )
-        source_index_count = _count_non_empty_quantity_cells(
-            rows=rows_by_source_index,
-            quantity_index=quantity_index,
-        )
-        source_row_summary = _summarize_order_line_source_row_mapping(
-            base_rows=base_rows,
-            quantity_index=quantity_index,
-            order_lines=sheet_lines,
-        )
-        mapped_count = identity_count
-        mapped_mode = "identity"
-        rows = rows_by_identity
-        if (
-            source_index_count >= identity_count
-            and (
-                int(source_row_summary.get("mismatched_source_row_count") or 0) > 0
-                or int(source_row_summary.get("missing_source_row_count") or 0) > 0
-                or int(source_row_summary.get("invalid_identity_line_count") or 0) > 0
-            )
-        ):
-            logger.info(
-                "Rejected source-row sheet mapping on current-sheet quantity path",
-                order_id=order_id,
-                facility_id=facility_id,
-                week_id=resolved_week_id,
-                source=source,
-                identity_count=identity_count,
-                source_row_count=source_index_count,
-                **source_row_summary,
-            )
-
-    if mapped_count == 0 and (sheet_lines or payload_rows):
-        logger.warning(
-            "Sheet quantity mapping failed",
-            order_id=order_id,
-            facility_id=facility_id,
-            week_id=resolved_week_id,
-            source=source,
-            mapped_mode=mapped_mode,
-            has_payload_rows=bool(payload_rows),
-            has_sheet_lines=bool(sheet_lines),
-        )
-        _append_sheet_warning("sheet_quantity_column_unmapped")
-    elif position_fallback_partial and not template_authoritative_quantity_ready:
-        _append_sheet_warning("sheet_quantity_column_unmapped")
-
-    # If we are not using payload-row mapping, validate order-line column compatibility.
-    if sheet_lines_source == "order_lines" and sheet_lines and mapped_mode != "payload_row":
-        unmapped_quantity_lines = _collect_unmapped_quantity_lines(
-            order_lines=sheet_lines,
-            quantity_index=quantity_index,
-        )
-        if unmapped_quantity_lines:
-            logger.warning(
-                "Sheet quantity column unmapped",
-                order_id=order_id,
-                facility_id=facility_id,
-                week_id=resolved_week_id,
-                issue_count=len(unmapped_quantity_lines),
-                sample=unmapped_quantity_lines[:5],
-            )
-            _append_sheet_warning("sheet_quantity_column_unmapped")
-
-    if payload_rows:
-        rows = _overlay_payload_aux_cells_onto_sheet_rows(
-            rows=rows,
-            fields=fields,
-            header=_sheet_header_from_template(fields, template),
-            payload_rows=payload_rows,
-            raw_payload=ocr_payload if isinstance(ocr_payload, dict) else None,
-            template=template,
-        )
-
-    if _source_uses_weekly_menu_shell(source) and (
-        mapped_mode in {"payload_row", "raw_ocr_block"} or sheet_lines_source == "ocr_payload"
-    ):
-        if not source.endswith("+ocr_payload"):
-            source = f"{source}+ocr_payload"
-    if source == "ocr_table" and mapped_mode == "payload_row":
-        source = "ocr_table+ocr_payload"
-    if source == "ocr_table_reconstructed" and mapped_mode == "payload_row":
-        source = "ocr_table_reconstructed+ocr_payload"
-    if (
-        _source_uses_weekly_menu_shell(source)
-        and suppress_order_lines_reason
-        and not sheet_lines
-        and bool(payload_rows)
-    ):
-        if not source.endswith("+ocr_payload"):
-            source = f"{source}+ocr_payload"
-
-    if source in {"ocr_table", "ocr_table+ocr_payload", "ocr_table+historical_daypart"}:
-        rows = _normalize_sheet_rows_for_display(rows)
-
-    projection_diagnostics = _evaluate_sheet_structural_projection_corruption(
-        rows=rows,
-        fields=fields,
-        source=source,
-    )
-    if (
-        isinstance(projection_diagnostics, dict)
-        and projection_diagnostics.get("projection_corrupted") is True
-    ):
-        _append_sheet_warning("sheet_structural_projection_corrupted")
-
-    cell_issues = _map_payload_cell_issues_to_sheet_rows(
-        payload=ocr_payload,
-        template=template,
-        rows=rows,
-        fields=fields,
-    )
-    if cell_issues:
-        _append_sheet_warning("sheet_ocr_review_required")
-
-    trace_rows = _build_sheet_trace_rows(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        source=source,
-        mapped_mode=mapped_mode,
-        quantity_value_source=sheet_lines_source if sheet_lines_source in {"order_lines", "ocr_payload"} else None,
-    )
-    cell_confidence_rows, cell_provenance_rows = _build_sheet_quantity_cell_metadata_rows(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        mapped_mode=mapped_mode,
-        quantity_value_source=sheet_lines_source if sheet_lines_source in {"order_lines", "ocr_payload"} else None,
-        shell_projection_stats=shell_projection_stats,
-    )
-    ocr_numeric_cell_items, ocr_numeric_cell_summary = (
-        _build_weekly_menu_numeric_cell_items(
-            rows=rows,
-            fields=fields,
-            payload_rows=(
-                raw_first_pass_rows
-                if raw_first_pass_rows
-                else payload_rows if sheet_lines_source == "ocr_payload" else []
-            ),
-            template=template,
-            shell_projection_stats=shell_projection_stats,
-            cell_provenance_rows=cell_provenance_rows,
-        )
-        if _source_uses_weekly_menu_shell(source)
-        and (raw_first_pass_rows or (payload_rows and sheet_lines_source == "ocr_payload"))
-        else ([], _empty_ocr_numeric_cell_summary())
-    )
-    header = _sheet_header_from_template(fields, template)
-    physical_ids = None
-    if any("physical_menu_row_id" in row for row in rows):
-        if not all("physical_menu_row_id" in row for row in rows):
-            raise ValueError("saved_draft_row_identity_incompatible")
-        physical_ids = [row["physical_menu_row_id"] for row in rows]
-        _explicit_draft_row_identities({"physical_menu_row_ids": physical_ids}, rows)
-    payload = {
-        "order_id": order_id,
-        "facility_id": facility_id,
-        "week_id": resolved_week_id,
-        "resolved_week_id": resolved_week_id,
-        "fields": fields,
-        "header": header,
-        "rows": [row.get("values", []) for row in rows],
-        "row_ids": [str(row.get("row_id") or "") for row in rows],
-        **({"physical_menu_row_ids": physical_ids, "physical_menu_row_count": len(physical_ids)} if physical_ids is not None else {}),
-        "quantity_column_count": len(quantity_index),
-        "source": source,
-        "seed_source": _split_sheet_source(source)[0],
-        "enrichment_source": _split_sheet_source(source)[1],
-        "legacy_available": True,
-        "warnings": list(sheet_warnings),
-        "menu_diagnostics": menu_diagnostics,
-        "row_diagnostics": [],
-        "projection_diagnostics": projection_diagnostics or {},
-        "cell_issues": cell_issues,
-        "issue_summary": {
-            "review_required_cell_count": len(cell_issues),
-            "issue_codes": sorted(
-                {
-                    str(issue.get("issue_code") or "").strip()
-                    for issue in cell_issues
-                    if str(issue.get("issue_code") or "").strip()
-                }
-            ),
-        },
-        "trace": {
-            "rows": trace_rows,
-            "mapped_mode": mapped_mode,
-        },
-        "cell_confidence_rows": cell_confidence_rows,
-        "cell_provenance_rows": cell_provenance_rows,
-        "ocr_numeric_cell_items": ocr_numeric_cell_items,
-        "ocr_numeric_cell_summary": ocr_numeric_cell_summary,
-    }
-    if (
-        evidence_missing
-        and _sheet_uses_strict_evidence_context(ocr_payload)
-        and "ocr_evidence_recovery_required" not in payload["warnings"]
-    ):
-        payload["warnings"].append("ocr_evidence_recovery_required")
-        payload["evidence_missing_artifacts"] = evidence_missing
-    if template_blockers and "template_resolution_blocked" not in payload["warnings"]:
-        payload["warnings"].append("template_resolution_blocked")
-        payload["template_resolution_blockers"] = template_blockers
-    if evidence_only_step2 and (isinstance(latest_draft, dict) or isinstance(latest_revision, dict)):
-        rebuilt = (
-            _build_sheet_payload_from_draft(
-                order_id=order_id,
-                draft=latest_draft,
-            )
-            if isinstance(latest_draft, dict)
-            else _build_sheet_payload_from_revision(
-                order_id=order_id,
-                revision=latest_revision,
-            )
-        )
-        if isinstance(rebuilt, dict):
-            rebuilt = _prefer_non_generic_sheet_payload(payload, rebuilt)
-        if isinstance(rebuilt, dict):
-            clean_saved_draft = isinstance(latest_draft, dict) and apply_gate_service.has_clean_saved_draft(latest_draft)
-            base_warnings = [] if clean_saved_draft else list(payload.get("warnings") or [])
-            merged_warnings = [
-                str(item).strip()
-                for item in base_warnings + list(rebuilt.get("warnings") or [])
-                if str(item).strip()
-            ]
-            deduped_warnings: list[str] = []
-            for warning in merged_warnings:
-                if warning not in deduped_warnings:
-                    deduped_warnings.append(warning)
-            rebuilt["warnings"] = apply_gate_service.filter_stale_issue_tokens(
-                deduped_warnings,
-                source=str(rebuilt.get("source") or payload.get("source") or "").strip(),
-                clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=position_fallback_semantics_ready,
-            )
-            if evidence_missing:
-                rebuilt["evidence_missing_artifacts"] = evidence_missing
-            if template_blockers:
-                rebuilt["template_resolution_blockers"] = template_blockers
-            base_cell_issues = list(payload.get("cell_issues") or [])
-            rebuilt_cell_issues = list(rebuilt.get("cell_issues") or [])
-            if base_cell_issues and not rebuilt_cell_issues:
-                rebuilt["cell_issues"] = base_cell_issues
-                rebuilt["issue_summary"] = dict(payload.get("issue_summary") or {})
-            payload = rebuilt
-    payload["warnings"] = apply_gate_service.filter_stale_issue_tokens(
-        list(payload.get("warnings") or []),
-        source=str(payload.get("source") or "").strip(),
-        clean_saved_draft=isinstance(latest_draft, dict) and apply_gate_service.has_clean_saved_draft(latest_draft),
-        position_fallback_semantics_ready=position_fallback_semantics_ready,
-    )
-    if (
-        position_fallback_partial
-        and not template_authoritative_quantity_ready
-        and "sheet_quantity_column_unmapped" not in payload["warnings"]
-    ):
-        payload["warnings"].append("sheet_quantity_column_unmapped")
-    payload["sheet_projection"] = _sheet_projection_status_payload(
-        source=str(payload.get("source") or "").strip(),
-        warnings=list(payload.get("warnings") or []),
-        payload_mapping_block_reason=payload_mapping_block_reason,
-        payload_rows_present=bool(payload_rows),
-    )
-    return (
-        _augment_sheet_review_payload(
-            order_id=order_id,
-            payload=payload,
-            lines_updated_at=lines_updated_at,
-            ocr_payload=ocr_payload,
-            ocr_metrics=ocr_payload.get("metrics") if isinstance(ocr_payload, dict) else None,
-            draft_sheet=latest_draft if isinstance(latest_draft, dict) else None,
-            position_fallback_semantics_ready=position_fallback_semantics_ready,
-        ),
-        None,
-    )
+        return None, str(exc)
 
 
 def export_ocr_sheet_label(
@@ -26687,20 +25552,6 @@ def export_ocr_sheet_label(
         return None, error
     if not isinstance(sheet, dict):
         return None, "sheet_missing"
-    payload = _load_order_ocr_cache(order_id)
-    exact_revision = _select_order_sheet_revision(
-        order_id=order_id,
-        payload=payload,
-        exact_only=True,
-    )
-    if isinstance(exact_revision, dict):
-        sheet_from_revision = _build_sheet_payload_from_revision(
-            order_id=order_id,
-            revision=exact_revision,
-        )
-        if isinstance(sheet_from_revision, dict):
-            sheet = sheet_from_revision
-
     if output_path is not None:
         resolved_path = Path(output_path)
     else:

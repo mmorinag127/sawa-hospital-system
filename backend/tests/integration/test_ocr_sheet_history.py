@@ -3,6 +3,8 @@ import pathlib
 import json
 from datetime import date, datetime
 
+import pytest
+
 from sqlalchemy import delete
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -22,6 +24,8 @@ from src.services import fax_extractor  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData, rows_from_markdown  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
 
 def _seed_monthly_menu_2026_01() -> None:
