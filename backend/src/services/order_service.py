@@ -16426,7 +16426,6 @@ def _load_order_sheet_revisions(
     payload: dict[str, Any] | None,
     limit: int = 20,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    cached_revisions: list[dict[str, Any]] = []
     cached_raw_output: dict[str, Any] | None = None
     if isinstance(payload, dict):
         edited = payload.get("_edited_ocr")
@@ -16434,95 +16433,28 @@ def _load_order_sheet_revisions(
             raw_output = edited.get("raw_output")
             if isinstance(raw_output, dict):
                 cached_raw_output = raw_output
-            revisions = edited.get("revisions")
-            if isinstance(revisions, list):
-                cached_revisions = [item for item in revisions if isinstance(item, dict)]
-            latest = edited.get("latest")
-            if isinstance(latest, dict):
-                latest_id = str(latest.get("revision_id") or "").strip()
-                if latest_id and not any(str(item.get("revision_id") or "").strip() == latest_id for item in cached_revisions):
-                    cached_revisions.append(latest)
-    try:
-        persisted_revisions = ocr_revision_store.list_revisions(order_id, limit=limit)
-        if persisted_revisions:
-            return list(reversed(persisted_revisions)), cached_raw_output
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Persisted OCR revision history lookup failed", order_id=order_id, error=str(exc))
-    if cached_revisions:
-        deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for revision in sorted(
-            cached_revisions,
-            key=lambda item: str(item.get("edited_at") or ""),
-            reverse=False,
-        ):
-            revision_id = str(revision.get("revision_id") or "").strip()
-            if revision_id and revision_id in seen:
-                continue
-            if revision_id:
-                seen.add(revision_id)
-            deduped.append(revision)
-        return deduped[: max(1, limit)], cached_raw_output
-    return [], cached_raw_output
+    persisted_revisions = ocr_revision_store.list_revisions(order_id, limit=limit)
+    return list(reversed(persisted_revisions)), cached_raw_output
 
 
-def _build_ocr_history_fallback_from_evidence_run(
-    evidence_run: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(evidence_run, dict):
-        return None
-    evidence_id = str(evidence_run.get("id") or "").strip()
-    if not evidence_id:
-        return None
-    payload = evidence_run.get("payload_json")
-    if not isinstance(payload, dict):
-        return None
-    structured_tables = payload.get("tables")
-    page_tables = payload.get("pages")
-    row_count = 0
-    if isinstance(structured_tables, list):
-        for table in structured_tables:
-            if not isinstance(table, dict):
-                continue
-            rows = table.get("rows")
-            if isinstance(rows, list):
-                row_count += len(rows)
-    elif isinstance(page_tables, list):
-        for page in page_tables:
-            if not isinstance(page, dict):
-                continue
-            tables = page.get("tables")
-            if not isinstance(tables, list):
-                continue
-            for table in tables:
-                if not isinstance(table, dict):
-                    continue
-                rows = table.get("rows")
-                if isinstance(rows, list):
-                    row_count += len(rows)
+def _load_ocr_history_diagnostics(order_id: str) -> dict[str, Any]:
+    # These stores explain OCR activity, but neither is a revision archive.
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order_id)
+        payload = cache.payload if cache is not None else None
+        evidence = session.execute(
+            select(OrderOcrEvidenceRun)
+            .where(OrderOcrEvidenceRun.order_id == order_id, OrderOcrEvidenceRun.status != "repair_blocked")
+            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        record = {column.name: getattr(evidence, column.name) for column in OrderOcrEvidenceRun.__table__.columns} if evidence is not None else None
     return {
-        "revision_id": evidence_id,
-        "edited_at": str(evidence_run.get("created_at") or "").strip() or None,
-        "ui_mode": "evidence",
-        "row_count": row_count,
-        "changed": False,
-        "sheet_save_only": False,
-        "sheet_save_mode": "evidence_run",
-        "source": str(evidence_run.get("source") or "").strip() or "evidence_run",
-        "status": str(evidence_run.get("status") or "").strip() or None,
-        "schema_version": str(evidence_run.get("schema_version") or "").strip() or None,
-        "producer_version": str(evidence_run.get("producer_version") or "").strip() or None,
-        "artifact_digest": str(evidence_run.get("artifact_digest") or "").strip() or None,
-        "capabilities": evidence_run.get("capabilities_json")
-        if isinstance(evidence_run.get("capabilities_json"), dict)
-        else {},
-        "degraded_reasons": evidence_run.get("degraded_reasons_json")
-        if isinstance(evidence_run.get("degraded_reasons_json"), list)
-        else [],
-        "rows": [],
-        "row_ids": [],
-        "header": [],
-        "fields": [],
+        "cache": {"source": "order_ocr_cache", "payload": payload},
+        "latest_evidence": {
+            "source": "order_ocr_evidence_runs",
+            "record": record,
+        },
     }
 
 
@@ -27067,22 +26999,22 @@ def export_ocr_sheet_label(
 
 
 def get_ocr_edit_history(order_id: str):
-    payload = _load_order_ocr_cache(order_id)
-    revisions, raw_output = _load_order_sheet_revisions(order_id=order_id, payload=payload, limit=20)
-    latest_evidence = None
-    if not revisions:
-        latest_evidence = get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
-        if isinstance(latest_evidence, dict):
-            evidence_payload = latest_evidence.get("payload_json")
-            synthetic_revision = _build_ocr_history_fallback_from_evidence_run(latest_evidence)
-            if isinstance(synthetic_revision, dict):
-                revisions = [synthetic_revision]
-                if not isinstance(raw_output, dict) and isinstance(evidence_payload, dict):
-                    raw_output = evidence_payload
-    if not revisions and not isinstance(raw_output, dict) and not isinstance(payload, dict):
-        latest_evidence = latest_evidence or get_latest_ocr_evidence_run(order_id, backfill_from_cache=False)
-        if not isinstance(latest_evidence, dict) and not isinstance(get_order_by_id(order_id, allow_unresolved_menu_amount=True), dict):
-            return None, "order_not_found"
+    try:
+        with session_scope() as session:
+            if session.get(Order, order_id) is None:
+                return None, "order_not_found"
+        diagnostics = _load_ocr_history_diagnostics(order_id)
+        revisions, raw_output = _load_order_sheet_revisions(
+            order_id=order_id, payload=diagnostics["cache"]["payload"], limit=20,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OCR history load failed", order_id=order_id, error=str(exc))
+        return None, "ocr_history_load_failed"
+    raw_output_source = "order_ocr_cache._edited_ocr.raw_output" if raw_output is not None else None
+    latest_evidence = diagnostics["latest_evidence"]["record"]
+    if not revisions and raw_output is None and isinstance(latest_evidence, dict):
+        raw_output = latest_evidence.get("payload_json")
+        raw_output_source = "order_ocr_evidence_runs.payload_json"
     latest = revisions[-1] if revisions else None
     reparse_job = get_latest_order_job(order_id)
     reparse_state = None
@@ -27109,6 +27041,8 @@ def get_ocr_edit_history(order_id: str):
         "latest": latest,
         "revisions": revisions,
         "raw_output": raw_output,
+        "raw_output_source": raw_output_source,
+        "diagnostics": diagnostics,
         "reparse_state": reparse_state,
         "latest_reparse_attempt": latest_reparse_attempt,
     }, None
@@ -27182,8 +27116,14 @@ def get_order_history(order_id: str, limit: int = 100):
                 "created_at": order_payload.get("lines_updated_at"),
             }
         )
-    payload = _load_order_ocr_cache(order_id)
-    revisions, _ = _load_order_sheet_revisions(order_id=order_id, payload=payload, limit=min(normalized_limit, 100))
+    try:
+        diagnostics = _load_ocr_history_diagnostics(order_id)
+        revisions, _ = _load_order_sheet_revisions(
+            order_id=order_id, payload=diagnostics["cache"]["payload"], limit=min(normalized_limit, 100),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Order history load failed", order_id=order_id, error=str(exc))
+        return None, "order_history_load_failed"
     for revision in revisions:
         if not isinstance(revision, dict):
             continue
@@ -27206,7 +27146,7 @@ def get_order_history(order_id: str, limit: int = 100):
                 "facility": order_payload.get("facility_code") if order_payload else None,
                 "week": order_payload.get("week_code") if order_payload else None,
                 "metadata": {
-                    "source": "synthetic",
+                    "source": "order_ocr_revisions",
                     "ui_mode": revision.get("ui_mode"),
                     "row_count": revision.get("row_count"),
                     "changed": revision.get("changed"),
@@ -27227,6 +27167,7 @@ def get_order_history(order_id: str, limit: int = 100):
     return {
         "order_id": order_id,
         "items": items,
+        "diagnostics": diagnostics,
     }, None
 
 
