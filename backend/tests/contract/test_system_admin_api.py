@@ -1,6 +1,6 @@
 import pathlib
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -12,6 +12,7 @@ from src.main import app  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.ingest_job import IngestJob  # noqa: E402
 from src.models.ocr_job import OcrJob  # noqa: E402
+from src.models.order import Order, OrderLine  # noqa: E402
 from src.models.shipping_tracking import ShippingTrackingLog  # noqa: E402
 from src.models.uploaded_pdf import UploadedPdf  # noqa: E402
 from src.models.user import AuditLog  # noqa: E402
@@ -20,17 +21,9 @@ from src.services import ingest_job_service  # noqa: E402
 from src.services.ingest_job_service import create_ingest_job  # noqa: E402
 from src.services.ocr_pipeline_state_store import save_pipeline_error, save_pipeline_request  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
 def _create_seed_order(message_id: str) -> dict:
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 2, 20, 9, 0, 0),
-        facility_hint="FAC00001",
-        week_hint=None,
-    )
     lines = [
         {
             "date": "2026-02-20",
@@ -42,7 +35,23 @@ def _create_seed_order(message_id: str) -> dict:
             "quantity_original": 2,
         }
     ]
-    return order_service.create_order_from_ingest(payload, lines=lines)
+    with session_scope() as session:
+        session.add(Order(
+            id=message_id,
+            message_id=message_id,
+            document_uri="file://dummy.pdf",
+            received_at=datetime(2026, 2, 20, 9, 0, 0),
+            facility_code="FAC00001",
+            week_code=None,
+        ))
+        session.flush()
+        for index, line in enumerate(lines, start=1):
+            session.add(OrderLine(
+                id=f"{message_id}-line-{index}",
+                order_id=message_id,
+                **{**line, "date": date.fromisoformat(line["date"])},
+            ))
+    return {"id": message_id}
 
 
 def test_system_status_and_admin_endpoints(hospital_admin):
