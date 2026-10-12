@@ -31,6 +31,7 @@ from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregat
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
 from src.services import order_output_artifact_service, ocr_evidence_service
+from src.services.canonical_facility_store import CanonicalStoreError
 from src.services.order_serialization_service import menu_amount_resolution, candidate_menu_amount_resolution, MENU_AMOUNT_UNRESOLVED
 from src.services.recorded_hospital_job_status import _recorded_hospital_job_status
 from src.services.menu_service import MenuReadUnresolved
@@ -2084,109 +2085,37 @@ def confirm_context(
     normalized_week_code = _format_week_code_from_range(normalized_week_start, normalized_week_end)
     if not normalized_week_code:
         return None, "week_range_invalid"
-    facility_config = config_service.get_facility_config(normalized_facility_id)
-    if not facility_config:
-        return None, "facility_not_found"
     requested_template_id = _normalize_id(template_id)
-    normalized_template_id = requested_template_id or _normalize_id(facility_config.get("fax_template_id"))
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
         existing_workflow = _get_workflow(session, order.id)
+        if existing_workflow is None and _expected_workflow_revision.get() != 0:
+            raise _WorkflowRevisionError(WORKFLOW_REVISION_CONFLICT)
+
+        selection, template_version, template_error = facility_template_version_service.resolve_facility_config_for_date(
+            session,
+            facility_id=normalized_facility_id,
+            effective_date=normalized_week_start,
+        )
+        if template_error:
+            return None, template_error
+        if requested_template_id and _normalize_id(template_version.template_id) != requested_template_id:
+            return None, "template_version_mismatch"
+
+        # Materialize the selected receipt while the locked session is still clean.
+        try:
+            _, template_version = facility_template_version_service.materialize_facility_version_lineage(session, selection)
+        except CanonicalStoreError as exc:
+            session.rollback()
+            return None, exc.detail["error"]
+
         row = existing_workflow or _get_or_create_workflow(session, order.id)
         order.facility_code = normalized_facility_id
         order.week_code = normalized_week_code
         current_meta = _workflow_meta(row)
         expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
-        active_before, active_before_error = facility_template_version_service.resolve_single_active_template_version(
-            session,
-            normalized_facility_id,
-            effective_date=normalized_week_start,
-        )
-        active_source = str(getattr(active_before, "source", "") or "").strip()
-        active_template_id = _normalize_id(getattr(active_before, "template_id", None))
-        sync_active_version = (
-            active_before is None
-            or (
-                active_before_error is None
-                and active_template_id != normalized_template_id
-                and active_source in {"facility-api-get", "legacy-resolved-config-import", "workflow-v2-context-confirm"}
-            )
-        )
-        if sync_active_version and (not requested_template_id or requested_template_id == normalized_template_id):
-            facility_template_version_service.ensure_active_template_version_from_resolved_config(
-                session,
-                facility_id=normalized_facility_id,
-                facility_config=facility_config,
-                created_by="workflow-v2-context-confirm",
-            )
-        template_version, template_error = facility_template_version_service.resolve_single_active_template_version(
-            session,
-            normalized_facility_id,
-            effective_date=normalized_week_start,
-        )
-        if template_error:
-            row.state = "facility_template_unresolved"
-            row.headline = (
-                "施設テンプレートが複数有効です。管理画面で一つに確定してください"
-                if template_error == "facility_template_ambiguous"
-                else "施設テンプレートが未登録です"
-            )
-            row.primary_action = "register_facility_template"
-            row.template_version_id = None
-            row.evidence_run_id = None
-            row.draft_id = None
-            row.confirmed_snapshot_id = None
-            row.blockers_json = [template_error]
-            row.warnings_json = []
-            row.last_transition_at = _now()
-            _write_workflow_meta(
-                row,
-                {
-                    "facility_id": normalized_facility_id,
-                    "week_start": normalized_week_start,
-                    "week_end": normalized_week_end,
-                    "week_code": normalized_week_code,
-                    "effective_facility_config_date": normalized_week_start,
-                    "template_id": None,
-                    "template_version_id": None,
-                    "template_source": None,
-                    "expanded_cell_copy_mode": expanded_cell_copy_mode,
-                    "bagging_result_id": None,
-                    "output_bundle_id": None,
-                },
-            )
-            return None, template_error
-        if requested_template_id and _normalize_id(template_version.template_id) != requested_template_id:
-            row.state = "template_version_mismatch"
-            row.headline = "選択されたテンプレートと施設の有効テンプレートが一致しません"
-            row.primary_action = "register_facility_template"
-            row.template_version_id = None
-            row.evidence_run_id = None
-            row.draft_id = None
-            row.confirmed_snapshot_id = None
-            row.blockers_json = ["template_version_mismatch"]
-            row.warnings_json = []
-            row.last_transition_at = _now()
-            _write_workflow_meta(
-                row,
-                {
-                    "facility_id": normalized_facility_id,
-                    "week_start": normalized_week_start,
-                    "week_end": normalized_week_end,
-                    "week_code": normalized_week_code,
-                    "effective_facility_config_date": normalized_week_start,
-                    "template_id": requested_template_id or None,
-                    "template_version_id": None,
-                    "template_source": None,
-                    "expanded_cell_copy_mode": expanded_cell_copy_mode,
-                    "bagging_result_id": None,
-                    "output_bundle_id": None,
-                },
-            )
-            return None, "template_version_mismatch"
-
         if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
             _delete_all_ocr_and_downstream_after_template_change(session, order.id)
 
@@ -2209,7 +2138,7 @@ def confirm_context(
                 "week_end": normalized_week_end,
                 "week_code": normalized_week_code,
                 "effective_facility_config_date": normalized_week_start,
-                "template_id": _normalize_id(template_version.template_id) or normalized_template_id or None,
+                "template_id": _normalize_id(template_version.template_id) or None,
                 "template_version_id": template_version.id,
                 "template_version_digest": template_version.template_digest,
                 "template_source": "facility_template_version",
