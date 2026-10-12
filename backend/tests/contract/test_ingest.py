@@ -1,28 +1,34 @@
+"""Authored PDF/JSON component contracts; no live FAX or native recognition claim."""
 import sys
 import pathlib
-import asyncio
-import time
-from datetime import date, datetime
+from copy import deepcopy
+from datetime import date, datetime, timedelta
+from hashlib import sha256
 
 import fitz
 import pytest
 from fastapi.testclient import TestClient
+from google.api_core.exceptions import NotFound
+from google.cloud import tasks_v2
+from sqlalchemy import select
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
-from src.services import order_service  # noqa: E402
+from src import db  # noqa: E402
+from src.services import order_service, manual_upload_service  # noqa: E402
 from src.api import ingest as ingest_api  # noqa: E402
-from src.api import auth as auth_api  # noqa: E402
 from src.services.manual_upload_service import ManualUploadSavedFile  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.document import OrderDocument  # noqa: E402
 from src.models.ingest_job import IngestJob  # noqa: E402
+from src.models.ingest_delivery import IngestDelivery  # noqa: E402
+from src.models.ocr_job import OcrJob  # noqa: E402
+from src.models.uploaded_pdf import UploadedPdf  # noqa: E402
 from src.models.order import Order  # noqa: E402
-from src.services.uploaded_pdf_service import claim_uploaded_pdf, mark_uploaded_pdf_completed  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from src.services.uploaded_pdf_service import claim_uploaded_pdf  # noqa: E402
+from tests.contract.auth_support import hospital_operator  # noqa: E402, F401
 from tests.helpers.ingest_original import (  # noqa: E402
     _authored_selection,
     configure_delivery, authored_sources, register_authored_original,
@@ -31,37 +37,134 @@ from tests.helpers.ingest_original import (  # noqa: E402
 from src.services import ingest_job_service as retry_ingest_jobs  # noqa: E402
 from src.services import uploaded_pdf_service as retry_uploads  # noqa: E402
 from src.services import ingest_delivery_service as retry_delivery  # noqa: E402
+from src.services import ocr_job_service as ocr_jobs  # noqa: E402
+from src.services.canonical_facility_store import read_snapshot  # noqa: E402
+from src.workers import ingest_worker  # noqa: E402
 
 
 def _operator_header() -> dict[str, str]:
-    return {"Authorization": "Bearer test-google-operator-token"}
+    raise AssertionError("registered hospital operator fixture required")
 
 
 @pytest.fixture(autouse=True)
-def _registered_google_operator(monkeypatch):
-    monkeypatch.setattr(
-        auth_api,
-        "_verify_google_token",
-        lambda token, request: "operator@example.com",
-    )
-    monkeypatch.setattr(
-        auth_api,
-        "_load_active_user_roles",
-        lambda: {"operator@example.com": "operator"},
-    )
-    monkeypatch.setattr(auth_api, "_has_system_access", lambda account, system: system == "hospital")
+def _registered_google_operator(isolated_formal_schema, hospital_operator, monkeypatch):
+    # Preserve callers of the local header helper; real roles/grants stay in SQL.
+    monkeypatch.setattr(sys.modules[__name__], "_operator_header", lambda: hospital_operator.headers)
+    transport = _CloudTasks()
+    monkeypatch.setattr(tasks_v2, "CloudTasksClient", lambda: transport)
+    return transport
 
 
-def _two_page_pdf_bytes() -> bytes:
-    doc = fitz.open()
-    try:
-        first = doc.new_page()
-        first.insert_text((72, 72), "FAX page one")
-        second = doc.new_page()
-        second.insert_text((72, 72), "FAX page two")
-        return doc.tobytes(garbage=3, deflate=True)
-    finally:
-        doc.close()
+def _database_snapshot():
+    with session_scope() as session:
+        return {table.name: deepcopy([dict(row) for row in session.execute(
+            select(table).order_by(*table.primary_key.columns)).mappings()])
+            for table in db.Base.metadata.sorted_tables}
+
+
+class _CloudTasks:
+    """Only the external task transport is doubled; dispatch and intents are real."""
+    def __init__(self):
+        self.tasks = {}
+        self.lookups = []
+        self.created = []
+
+    def get_task(self, *, request):
+        self.lookups.append(request["name"])
+        assert request["response_view"] == tasks_v2.Task.View.FULL
+        if request["name"] not in self.tasks:
+            raise NotFound("authored task absent")
+        return self.tasks[request["name"]]
+
+    def create_task(self, *, request):
+        task = tasks_v2.Task(request["task"])
+        assert task.name.startswith(request["parent"] + "/tasks/")
+        self.created.append(task.name)
+        self.tasks[task.name] = task
+        return task
+
+
+class _UploadCase:
+    def __init__(self, client, form, menu_date, transport):
+        self.client, self.form, self.menu_date, self.transport = client, form, menu_date, transport
+
+    def pdf(self, label="authored", pages=1):
+        with fitz.open() as doc:
+            for index in range(pages):
+                page = doc.new_page()
+                page.insert_text((72, 72), "\n".join([
+                    "Synthetic ingest contract, not a live FAX",
+                    self.form["facility_hint"], self.form["week_hint"],
+                    f"{label} page {index + 1}",
+                    f"{self.menu_date:%m/%d} lunch Menu A 2",
+                ]))
+            content = doc.tobytes(garbage=3, deflate=True)
+        with fitz.open(stream=content, filetype="pdf") as checked:
+            assert len(checked) == pages
+            for index, page in enumerate(checked):
+                text = page.get_text()
+                assert self.form["facility_hint"] in text
+                assert self.form["week_hint"] in text
+                assert f"{label} page {index + 1}" in text
+                assert f"{self.menu_date:%m/%d} lunch Menu A 2" in text
+        return content
+
+    def upload(self, files, **overrides):
+        return self.client.post("/ingest/upload", files=files,
+            data={**self.form, **overrides}, headers=_operator_header())
+
+    def finish(self, item):
+        assert process_uploaded_original(item["uploaded_pdf_id"])["result"] == "business_done"
+        uploaded = retry_uploads.get_uploaded_pdf(item["uploaded_pdf_id"])
+        assert uploaded["status"] == "completed"
+        original = retry_ingest_jobs.get_ingest_job_snapshot(item["ingest_job_id"])
+        assert original["status"] == "done"
+        identity, generation = retry_delivery.delivery_for_job(
+            original["id"], original["generation"], original["input_digest"])
+        with session_scope() as session:
+            intent = session.get(IngestDelivery, identity)
+            assert intent.generation == generation and intent.state == "ACKNOWLEDGED"
+            assert intent.terminal_receipt
+            order = session.get(Order, uploaded["current_order_id"])
+            document = session.get(OrderDocument, uploaded["current_document_id"])
+            assert order and document
+            assert order.current_document_id == document.id
+            assert document.source_email_id == item["message_id"]
+            assert document.storage_uri == item["pdf_uri"]
+            assert order.facility_code == self.form["facility_hint"]
+            assert order.week_code == self.form["week_hint"]
+            assert order.template_version_id
+        return uploaded
+
+
+@pytest.fixture
+def upload_case(monkeypatch, tmp_path, _registered_google_operator):
+    client = TestClient(app)
+    sources = {}
+
+    def build(facility="FAC001", menu_date=date(2026, 2, 15),
+              week="2026-02@2026-02-15~2026-02-21"):
+        configure_delivery(monkeypatch)
+        # The shared blank PDF is unused. Actual upload PDFs are authored/checked above.
+        authored_sources(monkeypatch, tmp_path, facility_id=facility, menu_date=menu_date)
+        for path in (tmp_path / "authored-facilities.json", tmp_path / "authored-policy.json"):
+            sources[path] = path.read_bytes()
+        monkeypatch.delenv("RAW_BUCKET", raising=False)
+        monkeypatch.setattr(manual_upload_service, "_local_storage_base", lambda: tmp_path / "uploads")
+        transport = _registered_google_operator
+        authored_pipeline_provider(monkeypatch,
+            table_rows=[[f"{menu_date:%m/%d}", "昼", "Menu A", "2"]])
+        return _UploadCase(client, {
+            "facility_hint": facility, "week_hint": week,
+            "effective_date": menu_date.isoformat(),
+            "expected_canonical_revision": read_snapshot().revision,
+            "selected_version_id": "authored-original",
+            "received_at": datetime.combine(menu_date, datetime.min.time()).isoformat(),
+        }, menu_date, transport)
+
+    yield build
+    client.close()
+    assert {path: path.read_bytes() for path in sources} == sources
 
 
 def _placeholder_pdf_bytes() -> bytes:
@@ -74,38 +177,23 @@ def _placeholder_pdf_bytes() -> bytes:
         doc.close()
 
 
-def test_ingest_upload_requires_operator_auth(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-
-    unauthorized = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("upload.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-    )
+def test_ingest_upload_requires_operator_auth(upload_case):
+    case = upload_case()
+    files = {"pdf_file": ("upload.pdf", case.pdf(), "application/pdf")}
+    before = _database_snapshot()
+    unauthorized = case.client.post("/ingest/upload", files=files, data=case.form)
     assert unauthorized.status_code == 401
-
-    authorized = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("upload.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
+    assert _database_snapshot() == before
+    assert case.transport.created == []
+    authorized = case.upload(files)
     assert authorized.status_code == 202
     assert authorized.json()["accepted"] is True
+    case.finish(authorized.json())
 
 
-def test_ingest_upload_single_response_keeps_legacy_fields_and_items(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    order_service.clear_all()
-    client = TestClient(app)
-
-    res = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("single.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_single_response_keeps_legacy_fields_and_items(upload_case):
+    case = upload_case()
+    res = case.upload({"pdf_file": ("single.pdf", case.pdf(), "application/pdf")})
     assert res.status_code == 202
     body = res.json()
     assert body["accepted"] is True
@@ -124,6 +212,8 @@ def test_ingest_upload_single_response_keeps_legacy_fields_and_items(monkeypatch
     assert body["current_stage"] == body["items"][0]["current_stage"]
     assert body["page_number"] == 1
     assert body["total_pages"] == 1
+    assert body["order_id"] is None  # Acceptance is not synchronous registration.
+    case.finish(body)
 
 
 def test_ingest_upload_requires_facility_and_week_context(monkeypatch):
@@ -176,18 +266,9 @@ def test_ingest_week_options_returns_upload_week_choices(monkeypatch):
     assert calls == [("2026-02", "FAC001")]
 
 
-def test_ingest_upload_splits_two_page_pdf_into_two_items(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    order_service.clear_all()
-    client = TestClient(app)
-
-    res = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("multi.pdf", _two_page_pdf_bytes(), "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_splits_two_page_pdf_into_two_items(upload_case):
+    case = upload_case()
+    res = case.upload({"pdf_file": ("multi.pdf", case.pdf(pages=2), "application/pdf")})
     assert res.status_code == 202
     body = res.json()
     assert body["count"] == 2
@@ -196,280 +277,122 @@ def test_ingest_upload_splits_two_page_pdf_into_two_items(monkeypatch):
     assert all(item["total_pages"] == 2 for item in body["items"])
     assert body["items"][0]["message_id"] != body["items"][1]["message_id"]
     assert all(":split:" in item["message_id"] for item in body["items"])
+    orders = []
+    for index, item in enumerate(body["items"], 1):
+        with fitz.open(item["pdf_uri"]) as saved:
+            assert len(saved) == 1
+            assert f"authored page {index}" in saved[0].get_text()
+        orders.append(case.finish(item)["current_order_id"])
+    assert len(set(orders)) == 2
 
 
-def test_ingest_upload_multiple_files_preserves_request_order_under_parallel_processing(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-
-    async def _fake_handle_uploaded_pdf(**kwargs):
-        pdf_file = kwargs["pdf_file"]
-        filename = str(pdf_file.filename or "")
-        if filename == "first.pdf":
-            await asyncio.sleep(0.05)
-            item_id = "msg-first"
-        else:
-            await asyncio.sleep(0.01)
-            item_id = "msg-second"
-        return {
-            "accepted": True,
-            "filename": filename,
-            "message_id": item_id,
-            "items": [
-                {
-                    "accepted": True,
-                    "filename": filename,
-                    "message_id": item_id,
-                    "page_number": 1,
-                    "total_pages": 1,
-                }
-            ],
-        }
-
-    monkeypatch.setattr(ingest_api, "_handle_uploaded_pdf", _fake_handle_uploaded_pdf)
-
-    res = client.post(
-        "/ingest/upload",
-        files=[
-            ("pdf_files", ("first.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
-            ("pdf_files", ("second.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
-        ],
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_multiple_files_preserves_request_order(upload_case):
+    case = upload_case()
+    res = case.upload([
+        ("pdf_files", ("first.pdf", case.pdf("first"), "application/pdf")),
+        ("pdf_files", ("second.pdf", case.pdf("second"), "application/pdf")),
+    ])
     assert res.status_code == 202
     body = res.json()
     assert [item["filename"] for item in body["items"]] == ["first.pdf", "second.pdf"]
-    assert [item["message_id"] for item in body["items"]] == ["msg-first", "msg-second"]
+    assert len({item["message_id"] for item in body["items"]}) == 2
+    for label, item in zip(("first", "second"), body["items"]):
+        with fitz.open(item["pdf_uri"]) as saved:
+            assert f"{label} page 1" in saved[0].get_text()
+        case.finish(item)
 
 
-def test_ingest_upload_rejects_non_pdf(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-
-    res = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("upload.txt", b"hello world", "text/plain")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_rejects_non_pdf(upload_case):
+    case = upload_case()
+    before = _database_snapshot()
+    res = case.upload({"pdf_file": ("upload.txt", b"hello world", "text/plain")})
     assert res.status_code == 400
     assert res.json()["detail"] == "pdf_file must be a PDF"
+    assert _database_snapshot() == before
+    assert case.transport.created == []
 
 
-def test_ingest_upload_rejects_placeholder_pdf(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-
-    res = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("first.pdf", _placeholder_pdf_bytes(), "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_rejects_placeholder_pdf(upload_case):
+    case = upload_case()
+    before = _database_snapshot()
+    res = case.upload({"pdf_file": ("first.pdf", _placeholder_pdf_bytes(), "application/pdf")})
     assert res.status_code == 400
     assert res.json()["detail"] == "pdf_file appears to be a placeholder/test PDF"
+    assert _database_snapshot() == before
+    assert case.transport.created == []
 
 
-def test_ingest_upload_creates_order_and_blocks_duplicate(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-    saved = ManualUploadSavedFile(
-        message_id="upload:sha256:test-order",
-        pdf_uri="gs://bucket/order.pdf",
-        content_sha256="sha-order",
-        original_filename="order.pdf",
-        received_at=ingest_api._parse_optional_datetime(None),
-    )
-    uploaded_pdf_results = iter(
-        [
-            (
-                {
-                    "id": "UPL-1",
-                    "message_id": saved.message_id,
-                    "status": "pending",
-                    "current_stage": "uploaded",
-                },
-                False,
-            ),
-            (
-                {
-                    "id": "UPL-1",
-                    "message_id": saved.message_id,
-                    "status": "pending",
-                    "current_stage": "uploaded",
-                },
-                True,
-            ),
-        ]
-    )
-    job_results = iter([("job-1", True), ("job-1", False)])
-    enqueued_uploaded_pdf_ids: list[str] = []
-
-    monkeypatch.setattr(ingest_api, "save_uploaded_pdf", lambda **kwargs: saved)
-    monkeypatch.setattr(
-        ingest_api,
-        "create_uploaded_pdf_from_upload",
-        lambda **kwargs: next(uploaded_pdf_results),
-    )
-    monkeypatch.setattr(ingest_api, "create_ingest_job", lambda payload, force=False: next(job_results))
-    monkeypatch.setattr(
-        ingest_api,
-        "enqueue_uploaded_pdf_async",
-        lambda uploaded_pdf_id: enqueued_uploaded_pdf_ids.append(uploaded_pdf_id),
-    )
-    monkeypatch.setattr(
-        ingest_api,
-        "_find_latest_order_id_by_message_id",
-        lambda message_id: "ORD-existing" if message_id == saved.message_id else None,
-    )
-    files = {"pdf_file": ("order.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n", "application/pdf")}
-
-    first = client.post(
-        "/ingest/upload",
-        files=files,
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
+def test_ingest_upload_creates_order_and_blocks_duplicate(upload_case):
+    case = upload_case()
+    files = {"pdf_file": ("order.pdf", case.pdf(), "application/pdf")}
+    first = case.upload(files)
     assert first.status_code == 202
     first_body = first.json()
     assert first_body["duplicate_blocked"] is False
-    assert first_body["uploaded_pdf_id"] == "UPL-1"
     assert first_body["message_id"].startswith("upload:sha256:")
-    first_order_id = first_body.get("order_id")
+    assert first_body["order_id"] is None
+    registered = case.finish(first_body)
+    first_order_id = registered["current_order_id"]
     assert isinstance(first_order_id, str) and first_order_id
-
-    second = client.post(
-        "/ingest/upload",
-        files=files,
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
+    before = _database_snapshot()
+    started = datetime.utcnow()
+    second = case.upload(files)
+    finished = datetime.utcnow()
     assert second.status_code == 202
     second_body = second.json()
     assert second_body["message_id"] == first_body["message_id"]
+    assert second_body["uploaded_pdf_id"] == first_body["uploaded_pdf_id"]
     assert second_body["duplicate_blocked"] is True
     assert second_body["order_id"] in {"", None}
-    assert second_body["existing_order_id"] == first_order_id == "ORD-existing"
-    assert enqueued_uploaded_pdf_ids == ["UPL-1"]
+    assert second_body["existing_order_id"] == first_order_id
+    assert len(case.transport.created) == 1
+    after = _database_snapshot()
+    observed = next(row for row in after[UploadedPdf.__tablename__] if row["id"] == first_body["uploaded_pdf_id"])
+    expected = deepcopy(before)
+    original = next(row for row in expected[UploadedPdf.__tablename__] if row["id"] == observed["id"])
+    assert started <= observed["updated_at"] <= finished
+    original["updated_at"] = observed["updated_at"]
+    assert after == expected
+    assert process_uploaded_original(first_body["uploaded_pdf_id"])["duplicate"] is True
 
 
-def test_ingest_upload_persists_split_pdf_total_page_count(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-    saved_files = [
-        ManualUploadSavedFile(
-            message_id="upload:sha256:page-1:split:group:1of2",
-            pdf_uri="gs://bucket/page-1.pdf",
-            content_sha256="sha-page-1",
-            original_filename="order__page-01-of-02.pdf",
-            received_at=ingest_api._parse_optional_datetime(None),
-            page_number=1,
-            total_pages=2,
-            split_group_id="group",
-        ),
-        ManualUploadSavedFile(
-            message_id="upload:sha256:page-2:split:group:2of2",
-            pdf_uri="gs://bucket/page-2.pdf",
-            content_sha256="sha-page-2",
-            original_filename="order__page-02-of-02.pdf",
-            received_at=ingest_api._parse_optional_datetime(None),
-            page_number=2,
-            total_pages=2,
-            split_group_id="group",
-        ),
-    ]
-    observed_page_counts: list[int | None] = []
-
-    def fake_create_uploaded_pdf_from_upload(**kwargs):
-        observed_page_counts.append(kwargs.get("page_count"))
-        return (
-            {
-                "id": f"UPL-{len(observed_page_counts)}",
-                "message_id": kwargs["saved"].message_id,
-                "status": "pending",
-                "current_stage": "uploaded",
-            },
-            False,
-        )
-
-    monkeypatch.setattr(ingest_api, "save_uploaded_pdf", lambda **kwargs: saved_files)
-    monkeypatch.setattr(ingest_api, "create_uploaded_pdf_from_upload", fake_create_uploaded_pdf_from_upload)
-    monkeypatch.setattr(ingest_api, "create_ingest_job", lambda payload, force=False: (payload["message_id"], True))
-    monkeypatch.setattr(ingest_api, "enqueue_uploaded_pdf_async", lambda uploaded_pdf_id: None)
-    monkeypatch.setattr(ingest_api, "_find_latest_order_id_by_message_id", lambda message_id: None)
-
-    res = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("order.pdf", b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_persists_split_pdf_total_page_count(upload_case):
+    case = upload_case()
+    res = case.upload({"pdf_file": ("order.pdf", case.pdf(pages=2), "application/pdf")})
     assert res.status_code == 202
+    items = res.json()["items"]
+    with session_scope() as session:
+        observed_page_counts = [session.get(UploadedPdf, item["uploaded_pdf_id"]).page_count for item in items]
     assert observed_page_counts == [2, 2]
     assert res.json()["count"] == 2
+    for item in items:
+        case.finish(item)
 
 
-def test_ingest_upload_exposes_existing_order_preview_for_facility_week_match(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    order_service.clear_all()
-    client = TestClient(app)
-    monkeypatch.setattr(ingest_api, "enqueue_uploaded_pdf_async", lambda uploaded_pdf_id: None)
-
-    seed = order_service.create_order_from_ingest(
-        IngestEmailPayload(
-            message_id="msg-existing-preview",
-            pdf_uri="file://existing-preview.pdf",
-            received_at=datetime(2026, 2, 15, 10, 0, 0),
-            facility_hint="FAC001",
-            week_hint="2026-02@2026-02-15~2026-02-21",
-        )
-    )
-    assert seed is not None
-
-    res = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("preview_0215_.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_exposes_existing_order_preview_for_facility_week_match(upload_case):
+    case = upload_case()
+    first = case.upload({"pdf_file": ("existing.pdf", case.pdf("existing"), "application/pdf")})
+    assert first.status_code == 202
+    seed = case.finish(first.json())
+    res = case.upload({"pdf_file": ("preview_0215_.pdf", case.pdf("preview"), "application/pdf")})
     assert res.status_code == 202
     body = res.json()
     preview = body["existing_order_preview"]
-    assert preview["order_id"] == seed["id"]
+    assert preview["order_id"] == seed["current_order_id"]
     assert preview["match_reason"] == "facility_week"
     assert preview["facility_code"] == "FAC001"
     assert preview["week_code"] == "2026-02@2026-02-15~2026-02-21"
     assert body["intake_decision"] == "reuse_existing_order"
+    assert case.finish(body)["current_order_id"] == seed["current_order_id"]
 
 
-def test_ingest_upload_contract_creates_order(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    order_service.clear_all()
-    client = TestClient(app)
-    pdf_path = tmp_path / "file1.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4\n%EOF\n")
-
-    with pdf_path.open("rb") as handle:
-        res = client.post(
-            "/ingest/upload",
-            files={"pdf_file": ("file1.pdf", handle.read(), "application/pdf")},
-            data={"facility_hint": "FAC00001", "week_hint": "WEK2025W52"},
-            headers=_operator_header(),
-        )
-
+def test_ingest_upload_contract_creates_order(upload_case):
+    # WEK2025W52 is retired invalid syntax; explicitly authored ISO week 52 dates.
+    case = upload_case("FAC00001", date(2025, 12, 22), "2025-12@2025-12-22~2025-12-28")
+    res = case.upload({"pdf_file": ("file1.pdf", case.pdf(), "application/pdf")})
     assert res.status_code == 202
-    orders = []
-    for _ in range(20):
-        orders = order_service.list_orders()
-        if orders:
-            break
-        time.sleep(0.05)
+    case.finish(res.json())
+    orders = order_service.list_orders()
     assert len(orders) == 1
     assert orders[0]["status"] == "要確認"
     assert orders[0]["facility"] == "FAC00001"
@@ -483,71 +406,13 @@ def test_ingest_upload_contract_creates_order(tmp_path, monkeypatch):
         assert document.status in {"processing", "processed", "success", "error"}
 
 
-def test_ingest_upload_accepts_multiple_pdfs_and_returns_per_file_items(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-    saved_calls: list[tuple[str, bytes]] = []
-    enqueue_calls: list[dict] = []
-    created_uploaded_pdfs: list[str] = []
-    order_ids = {
-        "msg-first": "ORD-first",
-        "msg-second": "ORD-second",
-    }
-
-    def _fake_save_uploaded_pdf(*, pdf_bytes: bytes, original_filename: str, received_at):
-        saved_calls.append((original_filename, pdf_bytes))
-        suffix = "first" if original_filename == "first.pdf" else "second"
-        return ManualUploadSavedFile(
-            message_id=f"msg-{suffix}",
-            pdf_uri=f"gs://bucket/{original_filename}",
-            content_sha256=f"sha-{suffix}",
-            original_filename=original_filename,
-            received_at=received_at,
-        )
-
-    def _fake_create_ingest_job(payload: dict, force: bool = False):
-        enqueue_calls.append({"payload": payload, "force": force})
-        suffix = payload["message_id"].split("-")[-1]
-        return (f"job-{suffix}", True)
-
-    monkeypatch.setattr(ingest_api, "save_uploaded_pdf", _fake_save_uploaded_pdf)
-    monkeypatch.setattr(
-        ingest_api,
-        "create_uploaded_pdf_from_upload",
-        lambda *, saved, **kwargs: (
-            {
-                "id": f"UPL-{saved.message_id}",
-                "message_id": saved.message_id,
-                "status": "pending",
-                "current_stage": "uploaded",
-            },
-            False,
-        ),
-    )
-    monkeypatch.setattr(ingest_api, "create_ingest_job", _fake_create_ingest_job)
-    monkeypatch.setattr(
-        ingest_api,
-        "enqueue_uploaded_pdf_async",
-        lambda uploaded_pdf_id: created_uploaded_pdfs.append(uploaded_pdf_id),
-    )
-    monkeypatch.setattr(
-        ingest_api,
-        "_find_latest_order_id_by_message_id",
-        lambda message_id: order_ids.get(message_id),
-    )
-
-    files = [
-        ("pdf_files", ("first.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
-        ("pdf_files", ("second.pdf", b"%PDF-1.4\n1 0 obj\n%%EOF\n", "application/pdf")),
-    ]
-
-    res = client.post(
-        "/ingest/upload",
-        files=files,
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_upload_accepts_multiple_pdfs_and_returns_per_file_items(upload_case):
+    case = upload_case()
+    pdfs = [case.pdf("first"), case.pdf("second")]
+    res = case.upload([
+        ("pdf_files", (name, data, "application/pdf"))
+        for name, data in zip(("first.pdf", "second.pdf"), pdfs)
+    ])
     assert res.status_code == 202
     body = res.json()
     assert body["accepted"] is True
@@ -558,130 +423,56 @@ def test_ingest_upload_accepts_multiple_pdfs_and_returns_per_file_items(monkeypa
     assert body["items"][1]["filename"] == "second.pdf"
     assert body["items"][0]["duplicate_blocked"] is False
     assert body["items"][1]["duplicate_blocked"] is False
-    assert body["items"][0]["order_id"] == "ORD-first"
-    assert body["items"][1]["order_id"] == "ORD-second"
-    assert body["items"][0]["uploaded_pdf_id"] == "UPL-msg-first"
-    assert body["items"][1]["uploaded_pdf_id"] == "UPL-msg-second"
-    assert [name for name, _ in saved_calls] == ["first.pdf", "second.pdf"]
-    assert len(enqueue_calls) == 2
-    assert enqueue_calls[0]["payload"]["message_id"] == "msg-first"
-    assert enqueue_calls[1]["payload"]["message_id"] == "msg-second"
-    assert created_uploaded_pdfs == ["UPL-msg-first", "UPL-msg-second"]
+    assert len({item["uploaded_pdf_id"] for item in body["items"]}) == 2
+    assert len(case.transport.created) == 2
+    for item, content in zip(body["items"], pdfs):
+        assert pathlib.Path(item["pdf_uri"]).read_bytes() == content
+        payload = retry_ingest_jobs.get_ingest_payload(item["ingest_job_id"])
+        assert payload["message_id"] == item["message_id"]
+        assert payload["content_sha256"] == sha256(content).hexdigest()
+        assert item["order_id"] is None
+        case.finish(item)
 
 
-def test_ingest_upload_multiple_pdfs_preserves_duplicate_detection_per_file(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
-    call_index = {"value": 0}
-
-    def _fake_save_uploaded_pdf(*, pdf_bytes: bytes, original_filename: str, received_at):
-        call_index["value"] += 1
-        idx = call_index["value"]
-        return ManualUploadSavedFile(
-            message_id=f"msg-{idx}",
-            pdf_uri=f"gs://bucket/{original_filename}",
-            content_sha256=f"sha-{idx}",
-            original_filename=original_filename,
-            received_at=received_at,
-        )
-
-    job_results = iter(
-        [
-            ("job-1", True),
-            ("job-2", True),
-            ("job-3", False),
-            ("job-4", True),
-        ]
-    )
-    uploaded_pdf_results = iter(
-        [
-            ({"id": "UPL-1", "message_id": "msg-1", "status": "pending", "current_stage": "uploaded"}, False),
-            ({"id": "UPL-2", "message_id": "msg-2", "status": "pending", "current_stage": "uploaded"}, False),
-            ({"id": "UPL-3", "message_id": "msg-3", "status": "pending", "current_stage": "uploaded"}, True),
-            ({"id": "UPL-4", "message_id": "msg-4", "status": "pending", "current_stage": "uploaded"}, False),
-        ]
-    )
-    enqueued_uploaded_pdf_ids: list[str] = []
-
-    monkeypatch.setattr(ingest_api, "save_uploaded_pdf", _fake_save_uploaded_pdf)
-    monkeypatch.setattr(
-        ingest_api,
-        "create_uploaded_pdf_from_upload",
-        lambda **kwargs: next(uploaded_pdf_results),
-    )
-    monkeypatch.setattr(ingest_api, "create_ingest_job", lambda payload, force=False: next(job_results))
-    monkeypatch.setattr(
-        ingest_api,
-        "enqueue_uploaded_pdf_async",
-        lambda uploaded_pdf_id: enqueued_uploaded_pdf_ids.append(uploaded_pdf_id),
-    )
-    monkeypatch.setattr(
-        ingest_api,
-        "_find_latest_order_id_by_message_id",
-        lambda message_id: {
-            "msg-1": "ORD-1",
-            "msg-2": "ORD-2",
-            "msg-3": "ORD-1",
-            "msg-4": "ORD-4",
-        }.get(message_id),
-    )
-
-    first_batch = [
-        ("pdf_files", ("dup.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
-        ("pdf_files", ("new.pdf", b"%PDF-1.4\n1 0 obj\n%%EOF\n", "application/pdf")),
-    ]
-    first = client.post(
-        "/ingest/upload",
-        files=first_batch,
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
+def test_ingest_upload_multiple_pdfs_preserves_duplicate_detection_per_file(upload_case):
+    case = upload_case()
+    duplicate_pdf = case.pdf("duplicate")
+    first = case.upload([
+        ("pdf_files", ("dup.pdf", duplicate_pdf, "application/pdf")),
+        ("pdf_files", ("new.pdf", case.pdf("new"), "application/pdf")),
+    ])
     assert first.status_code == 202
     first_items = first.json()["items"]
-    dup_order_id = first_items[0]["order_id"]
-
-    second_batch = [
-        ("pdf_files", ("dup-again.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")),
-        ("pdf_files", ("third.pdf", b"%PDF-1.4\n2 0 obj\n%%EOF\n", "application/pdf")),
-    ]
-    second = client.post(
-        "/ingest/upload",
-        files=second_batch,
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+    dup_order_id = case.finish(first_items[0])["current_order_id"]
+    case.finish(first_items[1])
+    second = case.upload([
+        ("pdf_files", ("dup-again.pdf", duplicate_pdf, "application/pdf")),
+        ("pdf_files", ("third.pdf", case.pdf("third"), "application/pdf")),
+    ])
     assert second.status_code == 202
     body = second.json()
     assert body["count"] == 2
     assert body["items"][0]["duplicate_blocked"] is True
     assert body["items"][0]["existing_order_id"] == dup_order_id
+    assert body["items"][0]["uploaded_pdf_id"] == first_items[0]["uploaded_pdf_id"]
     assert body["items"][1]["duplicate_blocked"] is False
-    assert body["items"][1]["order_id"] == "ORD-4"
-    assert enqueued_uploaded_pdf_ids == ["UPL-1", "UPL-2", "UPL-4"]
+    assert len(case.transport.created) == 3
+    assert body["items"][1]["uploaded_pdf_id"] not in {x["uploaded_pdf_id"] for x in first_items}
+    case.finish(body["items"][1])
 
 
-def test_ingest_uploads_endpoints_expose_uploaded_pdf_rows(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    order_service.clear_all()
-    client = TestClient(app)
-
-    upload = client.post(
-        "/ingest/upload",
-        files={"pdf_file": ("visible.pdf", b"%PDF-1.4\n%EOF\n", "application/pdf")},
-        data={"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
-        headers=_operator_header(),
-    )
-
+def test_ingest_uploads_endpoints_expose_uploaded_pdf_rows(upload_case):
+    case = upload_case()
+    upload = case.upload({"pdf_file": ("visible.pdf", case.pdf(), "application/pdf")})
     assert upload.status_code == 202
     uploaded_pdf_id = upload.json()["uploaded_pdf_id"]
-
-    listing = client.get("/ingest/uploads", headers=_operator_header())
+    case.finish(upload.json())
+    before = _database_snapshot()
+    listing = case.client.get("/ingest/uploads", headers=_operator_header())
     assert listing.status_code == 200
     items = listing.json()["items"]
     assert any(item["id"] == uploaded_pdf_id for item in items)
-
-    detail = client.get(f"/ingest/uploads/{uploaded_pdf_id}", headers=_operator_header())
+    detail = case.client.get(f"/ingest/uploads/{uploaded_pdf_id}", headers=_operator_header())
     assert detail.status_code == 200
     row = detail.json()
     assert row["id"] == uploaded_pdf_id
@@ -689,47 +480,40 @@ def test_ingest_uploads_endpoints_expose_uploaded_pdf_rows(monkeypatch):
     assert row["status"] in {"completed", "retry_wait", "manual_review", "processing", "pending"}
     assert "linked_order" in row
     assert "supersede_summary" in row
+    assert row["linked_order"]["id"] == row["current_order_id"]
+    assert _database_snapshot() == before
 
 
-def test_ingest_uploads_list_backfills_legacy_manual_upload_jobs(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    order_service.clear_all()
+def test_ingest_uploads_list_does_not_backfill_legacy_manual_upload_jobs():
     client = TestClient(app)
-
     with session_scope() as session:
-        session.add(
-            IngestJob(
-                id="upload:sha256:legacy-visible",
-                status="pending",
-                payload={
-                    "message_id": "upload:sha256:legacy-visible",
-                    "pdf_uri": "gs://bucket/manual-uploads/2026/04/06/legacy-visible.pdf",
-                    "received_at": "2026-04-06T00:04:43.617807",
-                    "facility_hint": "FAC00001",
-                    "week_hint": "2026-04@2026-04-05~2026-04-11",
-                    "facility_name": "施設A",
-                    "skip_ocr": False,
-                    "source_kind": "manual_upload",
-                    "original_filename": "legacy-visible.pdf",
-                    "content_sha256": "sha-legacy-visible",
-                },
-                attempts=0,
-            )
-        )
-
+        session.add(IngestJob(
+            id="upload:sha256:legacy-visible", status="pending", attempts=0,
+            payload={
+                "message_id": "upload:sha256:legacy-visible",
+                "pdf_uri": "gs://bucket/manual-uploads/2026/04/06/legacy-visible.pdf",
+                "received_at": "2026-04-06T00:04:43.617807",
+                "facility_hint": "FAC00001", "week_hint": "2026-04@2026-04-05~2026-04-11",
+                "facility_name": "施設A", "skip_ocr": False, "source_kind": "manual_upload",
+                "original_filename": "legacy-visible.pdf", "content_sha256": "sha-legacy-visible",
+            }))
+    before = _database_snapshot()
     listing = client.get("/ingest/uploads", headers=_operator_header())
     assert listing.status_code == 200
-    items = listing.json()["items"]
-    row = next(item for item in items if item["message_id"] == "upload:sha256:legacy-visible")
-    assert row["original_filename"] == "legacy-visible.pdf"
-    assert row["storage_uri"] == "gs://bucket/manual-uploads/2026/04/06/legacy-visible.pdf"
-    assert row["status"] == "pending"
-    assert row["current_stage"] == "uploaded"
+    assert not any(item["message_id"] == "upload:sha256:legacy-visible" for item in listing.json()["items"])
+    assert _database_snapshot() == before
+    with session_scope() as session:
+        job = session.get(IngestJob, "upload:sha256:legacy-visible")
+        assert job.payload["original_filename"] == "legacy-visible.pdf"
+        assert job.payload["pdf_uri"] == "gs://bucket/manual-uploads/2026/04/06/legacy-visible.pdf"
+        assert job.status == "pending" and job.attempts == 0
+        assert session.execute(select(IngestDelivery)).scalars().all() == []
 
 
 def _observe_retry_dispatch(monkeypatch, processed_uploaded_pdf_ids, restarted_job_ids):
-    """Record scheduler entry only; preserve the actual transactional restart."""
+    """Wrap real restart and dispatch; only the Cloud Tasks transport is doubled."""
     restart = retry_ingest_jobs.restart_ingest_job
+    dispatch = ingest_api.enqueue_uploaded_pdf_async
 
     def observed_restart(job_id, *, write_session=None):
         assert write_session is not None
@@ -738,10 +522,12 @@ def _observe_retry_dispatch(monkeypatch, processed_uploaded_pdf_ids, restarted_j
         return restart(job_id, write_session=write_session)
 
     monkeypatch.setattr(retry_ingest_jobs, "restart_ingest_job", observed_restart)
-    monkeypatch.setattr(
-        ingest_api, "enqueue_uploaded_pdf_async",
-        lambda uploaded_pdf_id: processed_uploaded_pdf_ids.append(uploaded_pdf_id),
-    )
+
+    def observed_dispatch(uploaded_pdf_id):
+        processed_uploaded_pdf_ids.append(uploaded_pdf_id)
+        return dispatch(uploaded_pdf_id)
+
+    monkeypatch.setattr(ingest_api, "enqueue_uploaded_pdf_async", observed_dispatch)
 
 
 def _assert_retry_original_reset(saved, before, previous_delivery, original_payload):
@@ -904,37 +690,124 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch, tmp
     _assert_retry_original_reset(processing, before, previous_delivery, original_payload)
 
 
-def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(monkeypatch):
-    monkeypatch.setenv("AUTH_DISABLED", "false")
-    client = TestClient(app)
+@pytest.mark.parametrize("limit", [20, 1])
+def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(upload_case, monkeypatch, limit):
+    case = upload_case()
+    waiting = case.upload({"pdf_file": ("waiting.pdf", case.pdf("waiting", pages=4), "application/pdf")})
+    assert waiting.status_code == 202
+    waiting_items = waiting.json()["items"]
+    provider = ingest_worker.run_ocr_pipeline
+    provider_calls = []
 
-    enqueued_ingest_ids: list[str] = []
-    enqueued_uploaded_ids: list[str] = []
+    def pending_provider(**kwargs):
+        provider_calls.append(kwargs["job_id"])
+        output = provider(**kwargs)
+        return {**output, "status": "pending"}
 
-    monkeypatch.setattr(ingest_api, "reset_stale_processing", lambda limit=20: ["ingest-stale-1"])
-    monkeypatch.setattr(ingest_api, "list_pending_jobs", lambda limit=20: ["ingest-stale-1", "ingest-pending-1"])
-    monkeypatch.setattr(ingest_api, "enqueue_ingest_job_async", lambda job_id: enqueued_ingest_ids.append(job_id))
-    monkeypatch.setattr(ingest_api, "list_ready_uploaded_pdf_ids", lambda limit=20: ["UPL-1", "UPL-2"])
-    monkeypatch.setattr(ingest_api, "enqueue_uploaded_pdf_async", lambda uploaded_pdf_id: enqueued_uploaded_ids.append(uploaded_pdf_id))
-    monkeypatch.setattr(ingest_api, "run_ocr_job_recovery_once", lambda limit=20: 3)
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", pending_provider)
+    for item in waiting_items[:3]:
+        assert process_uploaded_original(item["uploaded_pdf_id"])["result"] == "durable_handoff"
 
-    res = client.post(
-        "/ingest/recover-ready",
-        headers=_operator_header(),
-    )
+    def failed_provider(**kwargs):
+        raise ocr_jobs.OwnPipelineLineageError("authored hard failure")
 
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", failed_provider)
+    failed_item = waiting_items[3]
+    assert process_uploaded_original(failed_item["uploaded_pdf_id"])["result"] == "business_failed"
+    failed_before = retry_ingest_jobs.get_ingest_job_snapshot(failed_item["ingest_job_id"])
+    assert failed_before["failure_kind"] == "business"
+    monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", pending_provider)
+
+    # Provider output is not available yet; real recovery resubmits the captured PDF.
+    def missing_output(uri):
+        assert uri.startswith("gs://authored-component/output/")
+        raise FileNotFoundError(uri)
+
+    monkeypatch.setattr(ingest_worker, "load_bytes_from_uri", missing_output)
+    ready = case.upload({"pdf_file": ("ready.pdf", case.pdf("ready", pages=2), "application/pdf")})
+    assert ready.status_code == 202
+    ready_items = ready.json()["items"]
+    originals = [retry_ingest_jobs.get_ingest_job_snapshot(x["ingest_job_id"]) for x in ready_items]
+    identity, generation = retry_delivery.delivery_for_job(
+        originals[0]["id"], originals[0]["generation"], originals[0]["input_digest"])
+    claim = retry_delivery.claim_delivery(identity, generation)
+    assert claim["execute"] is True
+    past = datetime.utcnow() - timedelta(hours=2)
+    with session_scope() as session:
+        session.get(IngestJob, originals[0]["id"]).started_at = past
+        session.get(UploadedPdf, ready_items[0]["uploaded_pdf_id"]).lease_expires_at = past
+        for row in session.execute(select(OcrJob).where(OcrJob.status == "awaiting_output")).scalars():
+            row.metrics = {**row.metrics, "next_recovery_at": past.isoformat()}
+    candidates = retry_ingest_jobs.list_ocr_recovery_candidates(20)
+    assert len(candidates) == 3
+    captured = {row["id"]: deepcopy(row["metrics"]["nonworkflow_execution"]) for row in candidates}
+    assert all(value["ingest_lease"]["generation"] and value["ingest_lease"]["input_digest"]
+        and value["selected_pdf_receipt"] for value in captured.values())
+    before = _database_snapshot()
+    pending_ids = retry_ingest_jobs.list_pending_jobs(limit)
+    ready_ids = retry_uploads.list_ready_uploaded_pdf_ids(limit)
+    ingest_ids = list(dict.fromkeys([originals[0]["id"], *pending_ids]))
+    task_names = {}
+    for item in ready_items:
+        original = retry_ingest_jobs.get_ingest_job_snapshot(item["ingest_job_id"])
+        identity, _ = retry_delivery.delivery_for_job(original["id"], original["generation"], original["input_digest"])
+        with session_scope() as session:
+            task_names[item["ingest_job_id"]] = session.get(IngestDelivery, identity).task_contract["name"]
+    case.transport.lookups.clear()
+    provider_calls.clear()
+    started = datetime.utcnow()
+    res = case.client.post(f"/ingest/recover-ready?limit={limit}", headers=_operator_header())
+    finished = datetime.utcnow()
     assert res.status_code == 202
     body = res.json()
     assert body == {
-        "accepted": True,
-        "limit": 20,
-        "ingest_reset": 1,
-        "ingest_enqueued": 2,
-        "uploaded_enqueued": 2,
-        "ocr_recovered": 3,
+        "accepted": True, "limit": limit, "ingest_reset": 1,
+        "ingest_enqueued": len(ingest_ids), "uploaded_enqueued": len(ready_ids),
+        "ocr_recovered": min(limit, 3),
     }
-    assert enqueued_ingest_ids == ["ingest-stale-1", "ingest-pending-1"]
-    assert enqueued_uploaded_ids == ["UPL-1", "UPL-2"]
+    if limit == 20:
+        assert body == {"accepted": True, "limit": 20, "ingest_reset": 1,
+            "ingest_enqueued": 2, "uploaded_enqueued": 2, "ocr_recovered": 3}
+    expected_lookups = [task_names[job_id] for job_id in ingest_ids]
+    expected_lookups += [task_names[next(x["ingest_job_id"] for x in ready_items if x["uploaded_pdf_id"] == uid)]
+        for uid in ready_ids]
+    assert case.transport.lookups == expected_lookups
+    assert len(provider_calls) == min(limit, 3)
+    assert retry_ingest_jobs.get_ingest_job_snapshot(failed_item["ingest_job_id"]) == failed_before
+    after = _database_snapshot()
+    expected = deepcopy(before)
+    for original in expected[IngestDelivery.__tablename__]:
+        visits = expected_lookups.count(original["task_contract"]["name"])
+        if visits:
+            current = next(row for row in after[IngestDelivery.__tablename__] if row["id"] == original["id"])
+            assert started <= current["updated_at"] <= finished
+            original.update(visit_count=original["visit_count"] + visits, updated_at=current["updated_at"])
+    recovered_upload_ids = {captured[job_id]["ingest_lease"]["uploaded_lease"]["id"] for job_id in provider_calls}
+    for original in expected[UploadedPdf.__tablename__]:
+        if original["id"] in recovered_upload_ids:
+            current = next(row for row in after[UploadedPdf.__tablename__] if row["id"] == original["id"])
+            assert started <= current["updated_at"] <= finished
+            original["updated_at"] = current["updated_at"]
+    for original in expected[OcrJob.__tablename__]:
+        if original["id"] in provider_calls:
+            current = next(row for row in after[OcrJob.__tablename__] if row["id"] == original["id"])
+            assert started <= current["updated_at"] <= finished
+            assert started <= datetime.fromisoformat(current["metrics"]["stage_updated_at"]) <= finished
+            interval = ingest_worker.get_auto_recovery_interval_seconds()
+            assert started + timedelta(seconds=interval) <= datetime.fromisoformat(current["metrics"]["next_recovery_at"]) <= finished + timedelta(seconds=interval)
+            original["updated_at"] = current["updated_at"]
+            original["metrics"].update(
+                auto_recovery_count=original["metrics"].get("auto_recovery_count", 0) + 1,
+                next_recovery_at=current["metrics"]["next_recovery_at"],
+                stage_updated_at=current["metrics"]["stage_updated_at"],
+            )
+    assert after == expected
+    with session_scope() as session:
+        for job_id, capture in captured.items():
+            row = session.get(OcrJob, job_id)
+            assert row.metrics["nonworkflow_execution"] == capture
+            assert row.status == "awaiting_output"
+            assert row.metrics.get("auto_recovery_count", 0) == (1 if job_id in provider_calls else 0)
 
 
 def test_retry_uploaded_pdf_allows_completed_row_with_missing_week(monkeypatch, tmp_path, isolated_formal_schema):
