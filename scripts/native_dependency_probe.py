@@ -90,7 +90,18 @@ def download_models(cache, output):
 
 def audit(event, args):
     def refuse(reason):
-        AUDIT['violations'].append({'event': event, 'reason': reason})
+        violation = {'event': event, 'reason': reason}
+        AUDIT['violations'].append(violation)
+        # Omit source lines/locals and address text; retain the actual caller chain.
+        violation['stack'] = [{'file': frame.filename, 'line': frame.lineno, 'function': frame.name}
+                              for frame in traceback.extract_stack()[:-1]]
+        if event.startswith('socket.'):
+            family = args[2] if event == 'socket.getaddrinfo' else getattr(args[0], 'family', None)
+            address = args[:2] if event == 'socket.getaddrinfo' else args[-1]
+            violation['socket_family'] = getattr(family, 'name', str(family))
+            violation['address'] = {'kind': type(address).__name__, 'value': '<redacted>'}
+            if isinstance(address, tuple) and len(address) > 1 and type(address[1]) is int:
+                violation['address']['port'] = address[1]
         raise RuntimeError(reason)
 
     def owned(path):

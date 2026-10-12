@@ -274,6 +274,13 @@ def phase_environment(source, phase, models, font):
                     source / 'backend/tests/unit', source / 'scripts', source / 'ocr_pipeline'))),
                 'GOOGLE_APPLICATION_CREDENTIALS': str(phase / 'no-credentials.json'),
                 'GCE_METADATA_HOST': '127.0.0.1:9'})
+    # These services create output directories at import time, before fixtures run.
+    for key in ('ORDER_FORM_OUTPUT_DIR', 'FAX_ORDER_FORM_OUTPUT_DIR',
+                'FAX_SOURCE_TEMPLATE_MATERIALIZED_DIR', 'SHIPPING_OUTPUT_DIR',
+                'OCR_TRAINING_EXPORT_DIR', 'SYSTEM_EXPORT_DIR', 'SHIPPING_EXPORT_DIR'):
+        directory = phase / 'outputs' / key.lower()
+        directory.mkdir()
+        env[key] = str(directory)
     return env
 
 
