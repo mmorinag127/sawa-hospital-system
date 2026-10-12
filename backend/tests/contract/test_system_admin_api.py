@@ -21,6 +21,7 @@ from src.services import ingest_job_service  # noqa: E402
 from src.services.ingest_job_service import create_ingest_job  # noqa: E402
 from src.services.ocr_pipeline_state_store import save_pipeline_error, save_pipeline_request  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
+from tests.unit.test_ingest_facility_selection_capture import captured  # noqa: E402, F401
 
 
 def _create_seed_order(message_id: str) -> dict:
@@ -252,7 +253,7 @@ def test_system_status_and_health_include_uploaded_pdf_backlog(hospital_operator
     assert (health_payload.get("uploaded_pdfs") or {}).get("pending_count") == 1
 
 
-def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch, hospital_operator):
+def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch, captured, hospital_operator):
     order_service.clear_all()
     monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "10")
     now = datetime.utcnow()
@@ -261,6 +262,7 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch, hospita
         session.query(OcrJob).delete()
     create_ingest_job(
         {
+            **captured[1],
             "message_id": "msg-backlog-pending",
             "pdf_uri": "file://pending.pdf",
             "received_at": now.isoformat(),
@@ -268,6 +270,7 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch, hospita
     )
     create_ingest_job(
         {
+            **captured[1],
             "message_id": "msg-backlog-processing",
             "pdf_uri": "file://processing.pdf",
             "received_at": now.isoformat(),
@@ -355,7 +358,7 @@ def test_health_backlog_returns_real_ingest_and_ocr_metrics(monkeypatch, hospita
     assert int(ocr.get("stale_oldest_seconds") or 0) > 0
 
 
-def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch):
+def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch, captured):
     order_service.clear_all()
     monkeypatch.setenv("INGEST_JOB_AUTO_RECOVERY_WINDOW_HOURS", "24")
     monkeypatch.setenv("INGEST_JOB_AUTO_RECOVERY_MAX_ATTEMPTS", "3")
@@ -364,6 +367,7 @@ def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch
         session.query(IngestJob).delete()
     create_ingest_job(
         {
+            **captured[1],
             "message_id": "msg-recent-pending",
             "pdf_uri": "file://recent.pdf",
             "received_at": now.isoformat(),
@@ -372,6 +376,7 @@ def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch
     )
     create_ingest_job(
         {
+            **captured[1],
             "message_id": "msg-old-pending",
             "pdf_uri": "file://old.pdf",
             "received_at": now.isoformat(),
@@ -380,6 +385,7 @@ def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch
     )
     create_ingest_job(
         {
+            **captured[1],
             "message_id": "msg-exhausted-error",
             "pdf_uri": "file://exhausted.pdf",
             "received_at": now.isoformat(),
@@ -399,6 +405,7 @@ def test_ingest_auto_recovery_excludes_blocked_jobs_from_queue_depth(monkeypatch
         old_job.updated_at = now - timedelta(days=10)
         exhausted_job.status = "error"
         exhausted_job.attempts = 3
+        exhausted_job.generation_attempts = 3
         exhausted_job.last_error = "template_resolution_failed"
         exhausted_job.created_at = now - timedelta(minutes=5)
         exhausted_job.updated_at = now - timedelta(minutes=5)

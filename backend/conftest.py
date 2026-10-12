@@ -15,6 +15,9 @@ from src import db as runtime_db
 import src.models  # noqa: F401
 
 
+_TESTS_ROOT = (Path(__file__).resolve().parent / "tests").resolve()
+
+
 # Keep the existing test suite behavior stable while production defaults fail closed.
 os.environ.setdefault("AUTH_DISABLED", "true")
 os.environ.setdefault("OPERATOR_USER", "operator")
@@ -107,10 +110,15 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
         # Existing services hold imported engine aliases; session_scope uses this module's globals.
         monkeypatch.setattr(runtime_db, "SessionLocal", sessionmaker(isolated, autoflush=False, autocommit=False, future=True))
         for module in tuple(sys.modules.values()):
+            if module is None or getattr(module, "engine", None) is not engine:
+                continue
             name = getattr(module, "__name__", "")
-            if module is not None and (name.startswith("src.") or module is request.module):
-                if getattr(module, "engine", None) is engine:
-                    monkeypatch.setattr(module, "engine", isolated)
+            eligible = name.startswith("src.") or module is request.module
+            if not eligible and getattr(module, "__file__", None):
+                source = Path(module.__file__).resolve()
+                eligible = source != _TESTS_ROOT and source.is_relative_to(_TESTS_ROOT)
+            if eligible:
+                monkeypatch.setattr(module, "engine", isolated)
         monkeypatch.setitem(sys.modules, "src.db", runtime_db)
         import src
         monkeypatch.setattr(src, "db", runtime_db)
