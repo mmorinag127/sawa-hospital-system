@@ -3,6 +3,7 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+from test_modernization_owned_ocr_workflow import owned_producer  # noqa: F401
 
 from src.services import hakodate_cell_ocr_batch_service
 from src.services.hakodate_cell_ocr_batch_service import (
@@ -111,13 +112,17 @@ def test_assign_yomitoku_words_to_contact_regions_keeps_slot_identity() -> None:
     regions = [
         {
             "region_id": "E11",
+            "bbox": [0, 0, 100, 50],
             "ocr_contact_slot": [0, 0, 100, 50],
-            "logical_targets": [{"sheet_cell": "E11"}],
+            "logical_targets": [{"sheet_cell": "E11", "worksheet_row": 11,
+                                 "worksheet_col": 5, "role": "quantity", "field": "qty.regular"}],
         },
         {
             "region_id": "F11",
+            "bbox": [100, 0, 200, 50],
             "ocr_contact_slot": [100, 0, 200, 50],
-            "logical_targets": [{"sheet_cell": "F11"}],
+            "logical_targets": [{"sheet_cell": "F11", "worksheet_row": 11,
+                                 "worksheet_col": 6, "role": "quantity", "field": "qty.no_meat"}],
         },
     ]
     words = [
@@ -211,6 +216,8 @@ def test_sheet_value_grid_from_assignments_builds_cell_and_row_views() -> None:
             "worksheet_col": 5,
             "value_text": "12",
             "value_normalized": "12",
+            "role": "quantity",
+            "field": "qty.regular",
             "field_label": "常食",
             "menu_name": "大豆のトマト煮",
             "source_region_id": "E11",
@@ -221,6 +228,8 @@ def test_sheet_value_grid_from_assignments_builds_cell_and_row_views() -> None:
             "worksheet_col": 7,
             "value_text": "3",
             "value_normalized": "3",
+            "role": "quantity",
+            "field": "qty.no_meat",
             "field_label": "肉禁",
             "menu_name": "大豆のトマト煮",
             "source_region_id": "G11",
@@ -248,6 +257,7 @@ def test_validate_cell_ocr_mapping_proves_region_to_sheet_value_propagation() ->
     regions = [
         {
             "region_id": "E11",
+            "bbox": [0, 0, 80, 60],
             "ocr_contact_slot": [0, 0, 80, 60],
             "ocr_text": "12",
             "ocr_normalized": "12",
@@ -258,6 +268,8 @@ def test_validate_cell_ocr_mapping_proves_region_to_sheet_value_propagation() ->
                     "sheet_cell": "E11",
                     "worksheet_row": 11,
                     "worksheet_col": 5,
+                    "role": "quantity",
+                    "field": "qty.regular",
                 }
             ],
         }
@@ -282,6 +294,7 @@ def test_validate_cell_ocr_mapping_rejects_stale_parsed_text() -> None:
     regions = [
         {
             "region_id": "E11",
+            "bbox": [0, 0, 80, 60],
             "ocr_contact_slot": [0, 0, 80, 60],
             "ocr_text": "99",
             "ocr_normalized": "99",
@@ -292,6 +305,8 @@ def test_validate_cell_ocr_mapping_rejects_stale_parsed_text() -> None:
                     "sheet_cell": "E11",
                     "worksheet_row": 11,
                     "worksheet_col": 5,
+                    "role": "quantity",
+                    "field": "qty.regular",
                 }
             ],
         }
@@ -309,20 +324,22 @@ def test_validate_cell_ocr_mapping_rejects_stale_parsed_text() -> None:
     assert any("raw OCR words do not reparse" in error for error in validation["errors"])
 
 
-def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, tmp_path) -> None:
-    fax_pdf = tmp_path / "fax.pdf"
-    template_pdf = tmp_path / "template.pdf"
-    step2_png = tmp_path / "step2.png"
-    fax_pdf.write_bytes(b"%PDF-fax")
-    template_pdf.write_bytes(b"%PDF-template")
-    step2_png.write_bytes(b"png")
-    item = {
-        "facility_code": "FAC_TEST",
-        "order_id": "ORD_TEST",
-        "fax_pdf": str(fax_pdf),
-        "template_pdf": str(template_pdf),
-        "step2_png": str(step2_png),
-    }
+def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, tmp_path, owned_producer) -> None:
+    """Real owned capture; the existing runtime double proves dispatch, not OCR."""
+    from test_modernization_owned_ocr_workflow import FACILITY, ORDER
+    from src.models.order import Order
+    from src.services import order_service, workflow_attempt_guard_service as guard
+    from src.services.storage_service import load_selected_pdf_bytes
+
+    with owned_producer.sessions() as session:
+        assert session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        captured = guard.capture_reparse_read_input(session, session.get(Order, ORDER))
+    item = order_service._build_live_hakodate_manifest_item(
+        order_id=ORDER, facility_id=FACILITY, output_dir=tmp_path,
+        review_start_input=captured,
+        pdf_bytes_override=load_selected_pdf_bytes(str(owned_producer.pdf), owned_producer.receipt),
+    )
+    expected_cells = item["original_expected_sheet_cells"]
     calls = []
 
     def fake_best_method_runtime(**kwargs):
@@ -330,7 +347,9 @@ def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, t
         return (
             {
                 "engine": "opencv_knn_leave_one_out_k5",
+                "expected_sheet_cells": expected_cells,
                 "metrics": {
+                    "expected_sheet_cells": expected_cells,
                     "numeric_eval_cell_count": 10,
                     "pred_nonempty_count": 3,
                 },
@@ -374,12 +393,22 @@ def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, t
     ]
 
 
-def test_fax_template_for_manifest_item_uses_selected_template_id(monkeypatch) -> None:
+def _component_captured_config(template_id):
+    """Authored helper input only, not evidence of the production capture path."""
+    return {"policy": {}, "facility": {
+        "fax_template_id": template_id,
+        "fax_template": {"template_id": template_id, "page": 1, "columns": [
+            {"index": 4, "source_index": 4, "role": "quantity", "diet_type": "regular"},
+        ]},
+    }}
+
+
+def test_fax_template_for_manifest_item_uses_captured_selected_template(monkeypatch) -> None:
     calls = []
 
     def fake_get_facility_config_for_template(facility_id, template_id):
         calls.append((facility_id, template_id))
-        return {"fax_template": {"template_id": template_id, "columns": [{"source_index": 4}]}}
+        raise AssertionError("captured input must not consult the current master")
 
     monkeypatch.setattr(
         hakodate_cell_ocr_batch_service.config_service,
@@ -387,21 +416,25 @@ def test_fax_template_for_manifest_item_uses_selected_template_id(monkeypatch) -
         fake_get_facility_config_for_template,
     )
 
+    captured = _component_captured_config("fax_layout_floor_2f3f_v1")
     template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(  # noqa: SLF001
         {
             "facility_code": "FAC00010",
             "fax_template_id": "fax_layout_floor_2f3f_v1",
+            "configured_input": captured,
         },
         "FAC00010",
     )
 
-    assert calls == [("FAC00010", "fax_layout_floor_2f3f_v1")]
-    assert template == {"template_id": "fax_layout_floor_2f3f_v1", "columns": [{"source_index": 4}]}
+    assert calls == []
+    assert template == captured["facility"]["fax_template"]
+    assert template["template_id"] == "fax_layout_floor_2f3f_v1"
+    assert template["columns"][0]["source_index"] == 4
 
 
-def test_fax_template_for_manifest_item_prefers_embedded_template(monkeypatch) -> None:
+def test_fax_template_for_manifest_item_ignores_competing_embedded_template(monkeypatch) -> None:
     def fail_get_facility_config_for_template(_facility_id, _template_id):  # pragma: no cover
-        raise AssertionError("embedded fax_template should not hit config lookup")
+        raise AssertionError("captured fax_template should not hit config lookup")
 
     monkeypatch.setattr(
         hakodate_cell_ocr_batch_service.config_service,
@@ -409,12 +442,36 @@ def test_fax_template_for_manifest_item_prefers_embedded_template(monkeypatch) -
         fail_get_facility_config_for_template,
     )
 
+    captured = _component_captured_config("embedded")
     template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(  # noqa: SLF001
-        {"fax_template": {"template_id": "embedded"}},
+        {"fax_template": {"template_id": "competing-legacy"}, "configured_input": captured},
         "FAC00010",
     )
 
-    assert template == {"template_id": "embedded"}
+    assert template == captured["facility"]["fax_template"]
+    assert template["template_id"] == "embedded"
+
+
+@pytest.mark.parametrize("invalid", ["missing", "policy", "template_id"])
+def test_fax_template_for_manifest_item_refuses_invalid_capture_without_fallback(monkeypatch, invalid):
+    def fail_lookup(*args):
+        raise AssertionError("invalid capture must not fall back to the current master")
+
+    monkeypatch.setattr(hakodate_cell_ocr_batch_service.config_service,
+                        "get_facility_config_for_template", fail_lookup)
+    captured = _component_captured_config("embedded")
+    item = {"fax_template_id": "embedded", "fax_template": captured["facility"]["fax_template"],
+            "configured_input": captured}
+    error = "hakodate_captured_config_required"
+    if invalid == "missing":
+        del item["configured_input"]
+    elif invalid == "policy":
+        del captured["policy"]
+    else:
+        item["fax_template_id"] = "competing-legacy"
+        error = "authored_fax_template_id_mismatch"
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(item, "FAC00010")
 
 
 def test_local_yomitoku_word_parser_normalizes_absolute_boxes() -> None:
