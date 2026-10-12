@@ -311,6 +311,7 @@ def test_interrupted_transport_reuses_original_business_lease_and_budget(monkeyp
 @pytest.mark.parametrize("fault", [None, "historical", "key_order", "bool_literal", "int_literal", "float_literal", "null_literal", "unknown_field", "missing_version", "duplicate_version", "tampered_version", "missing", "wrong_id", "facility", "digest", "version", "source_proof", "proof_revision", "legacy_active", "template", "projection_bool", "projection_float", "policy_bool"])
 def test_original_projection_capture_validates_physical_source(monkeypatch, tmp_path, fault):
     from copy import deepcopy
+    from src.models.facility import Facility
     from src.models.facility_template_version import FacilityTemplateVersion
     from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     from src.services import canonical_facility_lineage as lineage, config_service
@@ -323,7 +324,21 @@ def test_original_projection_capture_validates_physical_source(monkeypatch, tmp_
     raw_values = {"confirmed": True, "ratio": 1.0, "count": 1, "optional": None, "blank": ""}
     authored_master["facilities"][0]["raw_operator_values"] = deepcopy(raw_values)
     authored_master["facilities"][0]["versions"][0]["facility"]["raw_operator_values"] = deepcopy(raw_values)
+    if fault == "wrong_id":
+        other = deepcopy(authored_master["facilities"][0])
+        other["facility_id"] = "WRONG"
+        other["versions"][0]["facility"]["facility_id"] = "WRONG"
+        authored_master["facilities"].append(other)
     master_path.write_text(json.dumps(authored_master))
+    if fault in ("wrong_id", "facility"):
+        with session_scope() as session:
+            session.add(Facility(id="WRONG", name="Authored distinct component facility"))
+        if fault == "wrong_id":
+            with session_scope() as session:
+                other_selection, _ = lineage.resolve(session, "WRONG", date(2026, 4, 6))
+                _, other_projection = lineage.materialize(session, other_selection)
+                other_projection_id = other_projection.id
+                assert lineage.verify_projection(other_projection)["facility_id"] == "WRONG"
     saved = ManualUploadSavedFile(message_id="upload:sha256:projection-capture", pdf_uri=uri,
         content_sha256=digest, original_filename="projection-capture.pdf", received_at=datetime(2026, 4, 6, 10))
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00002",
@@ -381,7 +396,8 @@ def test_original_projection_capture_validates_physical_source(monkeypatch, tmp_
         if fault == "missing":
             order.template_version_id = None
         elif fault == "wrong_id":
-            order.template_version_id = "CFVwrong-explicit-original"
+            assert other_projection_id != projection.id
+            order.template_version_id = other_projection_id
         elif fault == "facility":
             projection.facility_id = "WRONG"
         elif fault == "digest":
@@ -411,10 +427,27 @@ def test_original_projection_capture_validates_physical_source(monkeypatch, tmp_
             policy["ocr_retry_limit"] = True
             policy_path.write_text(json.dumps(policy))
         session.flush()
-        with pytest.raises((ValueError, lineage.CanonicalStoreError)):
+        if fault in ("wrong_id", "facility"):
+            from sqlalchemy import select
+            from src.db import Base
+            assert session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+            def snapshot():
+                return {table.name: deepcopy([dict(row) for row in session.execute(
+                    select(table).order_by(*table.primary_key.columns)).mappings()])
+                    for table in Base.metadata.sorted_tables}
+            sql_before = snapshot()
+            source_before = master_path.read_bytes()
+        with pytest.raises((ValueError, lineage.CanonicalStoreError)) as rejection:
             _order_execution_input(session, order, lock=True, original_input=before)
         assert before["order"]["template_version_id"] == before["original_template_projection"]["id"]
         assert session.query(OrderOcrEvidenceRun).count() == 0
+        if fault in ("wrong_id", "facility"):
+            assert str(rejection.value) == {
+                "wrong_id": "original_template_configured_source_mismatch",
+                "facility": "canonical_lineage_digest_mismatch",
+            }[fault]
+            assert snapshots_equal(snapshot(), sql_before)
+            assert master_path.read_bytes() == source_before
 
 
 @pytest.mark.parametrize("result_kind", ["empty", "nonpersistable"])
@@ -535,24 +568,47 @@ def test_actual_owned_advance_preserves_immutable_original_template(monkeypatch,
         assert snapshots_equal(projection.config_json["raw_operator_values"], raw)
 
 
-def test_fresh_upload_owned_runner_stops_missing_explicit_original_version(monkeypatch, tmp_path):
+def test_registered_upload_with_damaged_original_version_stops_before_provider(monkeypatch, tmp_path):
     from src.models.facility_template_version import FacilityTemplateVersion
     from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     from src.models.order import OrderLine
+    from src.services.workflow_attempt_guard_service import _order_execution_input, snapshots_equal
+    from tests.unit.test_modernization_workflow_surface_parity import database_snapshot
 
     uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC00001", menu_date=date(2026, 4, 6))
     saved = ManualUploadSavedFile(message_id="upload:sha256:fresh-missing-version", pdf_uri=uri,
         content_sha256=digest, original_filename="fresh-missing-version.pdf", received_at=datetime(2026, 4, 6, 10))
     uploaded, _ = create_uploaded_pdf_from_upload(saved=saved, facility_hint="FAC00001",
+        facility_selection=_captured_upload_selection(
+            "FAC00001", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11", facility_name=None,
         skip_ocr=False, source_kind="manual_upload")
     original = ingest_job_service.get_ingest_job_snapshot(saved.message_id)
+    original_payload = ingest_job_service.get_ingest_payload(saved.message_id)
+    registered = register_authored_original(uploaded["id"], effective_date=date(2026, 4, 6))
+    with session_scope() as session:
+        order = session.get(Order, registered["id"])
+        projection = session.get(FacilityTemplateVersion, order.template_version_id)
+        assert projection is not None
+        assert order.template_version_id == original_payload["facility_selection"]["facility_template_version_id"]
+        # Deliberately damaged registered state, not an accepted versionless upload.
+        order.template_version_id = None
+        session.flush()
+        session.delete(projection)
+    damaged = database_snapshot()
+    source_bytes = {path: path.read_bytes() for path in (
+        pathlib.Path(uri), tmp_path / "authored-facilities.json", tmp_path / "authored-policy.json")}
+    with session_scope() as session:
+        assert session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        with pytest.raises(ValueError, match="^original_template_projection_missing$"):
+            _order_execution_input(session, session.get(Order, registered["id"]), lock=True)
+    assert snapshots_equal(database_snapshot(), damaged)
     monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", lambda **kwargs: pytest.fail("missing explicit version must stop before provider"))
     result = process_uploaded_original(uploaded["id"])
     assert result["result"] == "business_failed"
     terminal = get_uploaded_pdf(uploaded["id"])
     assert terminal["status"] == "failed"
-    assert "original_template_projection_missing" in terminal["last_error_message"]
+    assert "ingest_order_facility_selection_changed" in terminal["last_error_message"]
     assert terminal["next_retry_at"] is None
     assert uploaded["id"] not in list_ready_uploaded_pdf_ids(limit=10)
     with session_scope() as session:
@@ -565,6 +621,30 @@ def test_fresh_upload_owned_runner_stops_missing_explicit_original_version(monke
     assert after["input_digest"] == original["input_digest"]
     assert after["generation"] == original["generation"]
     assert after["generation_attempts"] == 1
+    assert ingest_job_service.get_ingest_payload(saved.message_id) == original_payload
+    assert all(path.read_bytes() == content for path, content in source_bytes.items())
+    completed = database_snapshot()
+    for table in damaged.keys() - {"ingest_jobs", "ingest_deliveries", "uploaded_pdfs", "uploaded_pdf_attempts"}:
+        assert snapshots_equal(completed[table], damaged[table]), table
+    assert len(damaged["uploaded_pdf_attempts"]) == len(completed["uploaded_pdf_attempts"]) == 1
+    attempt = completed["uploaded_pdf_attempts"][0]
+    previous_attempt = damaged["uploaded_pdf_attempts"][0]
+    for key in previous_attempt.keys() - {"stage", "status", "error_code", "error_message", "finished_at", "updated_at"}:
+        assert snapshots_equal(attempt[key], previous_attempt[key]), key
+    assert attempt["uploaded_pdf_id"] == uploaded["id"]
+    assert attempt["attempt_no"] == 1
+    assert attempt["stage"] == attempt["status"] == "failed"
+    assert attempt["error_code"] == "ingest_source_failure"
+    assert attempt["error_message"] == "ingest_order_facility_selection_changed"
+    assert previous_attempt["finished_at"] is None
+    assert attempt["finished_at"] is not None
+    assert attempt["updated_at"] >= previous_attempt["updated_at"]
+    with session_scope() as session:
+        delivery = session.query(IngestDelivery).filter_by(job_id=saved.message_id).one()
+        assert delivery.state == "ACKNOWLEDGED"
+        assert delivery.terminal_receipt["kind"] == "source_failure"
+        assert delivery.terminal_receipt["input_digest"] == original["input_digest"]
+        assert delivery.terminal_receipt["business_generation"] == original["generation"]
 
 
 def test_operator_restart_preserves_original_payload_and_runs_owned_delivery(monkeypatch, tmp_path):
@@ -645,15 +725,26 @@ def test_upload_missing_week_does_not_rewrite_existing_message_order():
         assert session.get(IngestJob, saved.message_id) is None
 
 
-def test_uploaded_pdf_linking_ignores_archived_orders_with_same_message() -> None:
+def test_uploaded_pdf_linking_ignores_archived_orders_with_same_message(monkeypatch, tmp_path) -> None:
+    from fastapi.testclient import TestClient
+    from src.main import app
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    from tests.contract.auth_support import registered_hospital_operator
+    from tests.unit.test_modernization_workflow_surface_parity import database_snapshot
+
     order_service.clear_all()
     saved = _saved_file(
         message_id="upload:sha256:archived-order-link",
         filename="17.fax000355472_0405_.pdf",
     )
+    uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC00001", menu_date=date(2026, 4, 6))
+    saved = ManualUploadSavedFile(message_id=saved.message_id, pdf_uri=uri,
+        content_sha256=digest, original_filename=saved.original_filename, received_at=saved.received_at)
     uploaded_pdf, _ = create_uploaded_pdf_from_upload(
         saved=saved,
-        facility_hint=None,
+        facility_hint="FAC00001",
+        facility_selection=_captured_upload_selection(
+            "FAC00001", date(2026, 4, 6), "authored-original", "2026-04@2026-04-05~2026-04-11"),
         week_hint="2026-04@2026-04-05~2026-04-11",
         facility_name=None,
         skip_ocr=False,
@@ -687,7 +778,20 @@ def test_uploaded_pdf_linking_ignores_archived_orders_with_same_message() -> Non
         session.add(document)
         session.add(order)
 
-    linked = get_uploaded_pdf(uploaded_pdf["id"])
+    source_bytes = {path: path.read_bytes() for path in (
+        pathlib.Path(uri), tmp_path / "authored-facilities.json", tmp_path / "authored-policy.json")}
+    with registered_hospital_operator(monkeypatch) as operator:
+        before = database_snapshot()
+        linked = get_uploaded_pdf(uploaded_pdf["id"])
+        client = TestClient(app)
+        try:
+            response = client.get(f"/ingest/uploads/{uploaded_pdf['id']}", headers=operator.headers)
+            assert response.status_code == 200, response.text
+            assert response.json() == linked
+        finally:
+            client.close()
+        assert snapshots_equal(database_snapshot(), before)
+    assert all(path.read_bytes() == content for path, content in source_bytes.items())
 
     assert linked is not None
     assert linked["current_document_id"] is None
