@@ -95,6 +95,12 @@ def test_invalid_json_is_blocked_without_repair(local_master, data):
 
 
 def test_config_reads_one_snapshot_without_db_or_data_cache(local_master, monkeypatch):
+    from test_modernization_explicit_ocr_quantity_contract import authored_template
+
+    path, original = local_master
+    authored = deepcopy(original)
+    authored["facilities"][0]["fax_template"] = authored_template()
+    path.write_text(json.dumps(authored), encoding="utf-8")
     calls = []
     real_read = store.read_snapshot
     def read():
