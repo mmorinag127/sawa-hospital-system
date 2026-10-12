@@ -2979,54 +2979,7 @@ def save_facility_template_columns(
             columns=columns,
             actor="workflow-v2-facility-template-columns",
         )
-        if error:
-            return result, error
-        workflow = _get_or_create_workflow(session, order.id)
-        meta = _workflow_meta(workflow)
-        template_version = result.get("template_version") if isinstance(result, dict) else None
-        template_version_id = _normalize_id((template_version or {}).get("id"))
-        template_version_digest = _normalize_id((template_version or {}).get("template_digest"))
-        deleted_ocr_results = _delete_all_ocr_and_downstream_after_template_change(session, order.id)
-        workflow.template_version_id = template_version_id or None
-        workflow.evidence_run_id = None
-        workflow.draft_id = None
-        workflow.confirmed_snapshot_id = None
-        order.template_version_id = template_version_id or None
-        meta["latest_ocr_result_id"] = None
-        meta["latest_ocr_error"] = None
-        meta["template_version_id"] = template_version_id or None
-        meta["template_version_digest"] = template_version_digest or None
-        meta["bagging_result_id"] = None
-        meta["bagging_result"] = None
-        meta["output_bundle_id"] = None
-        meta["output_bundle"] = None
-        meta["expanded_cell_copy_mode"] = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
-        if _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta):
-            workflow.state = "context_confirmed"
-            workflow.headline = "施設区分を保存しました。OCRを再実行してください"
-            workflow.primary_action = "run_ocr"
-            workflow.blockers_json = []
-        else:
-            workflow.state = "facility_template_unresolved"
-            workflow.headline = "施設テンプレートが未解決です"
-            workflow.primary_action = "register_facility_template"
-            workflow.blockers_json = ["facility_template_unresolved"]
-        workflow.warnings_json = []
-        workflow.last_transition_at = _now()
-        _write_workflow_meta(workflow, meta)
-        resolved_config = result.get("resolved_config") if isinstance(result, dict) else None
-        validation = result.get("validation") if isinstance(result, dict) else None
-        revision_error = _finalize_workflow_mutation(session, workflow)
-        if revision_error:
-            return {"workflow": _serialize_workflow(workflow)}, revision_error
-        return {
-            "updated": True,
-            "workflow": _serialize_workflow(workflow),
-            "resolved_config": resolved_config,
-            "validation": validation,
-            "template_version": template_version,
-            "ocr_results_cleared": deleted_ocr_results,
-        }, None
+        return result, error
 
 
 @workflow_command

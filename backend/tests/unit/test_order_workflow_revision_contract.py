@@ -185,7 +185,6 @@ def test_migration_0029_only_initializes_when_adding_the_revision_column():
         "set_expanded_cell_copy_mode",
         "select_ocr_result",
         "delete_ocr_result",
-        "save_facility_template_columns",
         "save_sheet",
         "confirm_sheet_review",
         "start_sheet_auto_edit_job",
