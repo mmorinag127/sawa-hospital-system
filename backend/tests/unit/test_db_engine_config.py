@@ -6,8 +6,26 @@ import sys
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import pytest
+
 
 _MISSING = object()
+
+
+@pytest.fixture(autouse=True)
+def isolated_database_env(monkeypatch):
+    for name in (
+        "DB_URI",
+        "ALEMBIC_DB_URI",
+        "DATABASE_URL",
+        "DB_USER",
+        "DB_PASSWORD",
+        "DB_NAME",
+        "DB_HOST",
+        "DB_PORT",
+        "DB_DRIVER",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @contextmanager

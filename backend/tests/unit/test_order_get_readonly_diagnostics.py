@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.orm import Session
 
 from src.api import orders
 from src.services import order_workflow_v2_service as workflow_service
@@ -88,10 +89,11 @@ def test_cache_status_is_diagnostic_not_terminal_substitution(monkeypatch):
     lambda order_id: workflow_service.get_sheet_auto_edit_job(order_id=order_id),
 ])
 def test_workflow_gets_use_no_conditional_write_lock(monkeypatch, getter):
-    session = SimpleNamespace()
+    session = Session()
     @contextmanager
     def readonly_session():
-        yield session
+        with session:
+            yield session
     def forbidden(*args, **kwargs):
         raise AssertionError("GET entered mutation workflow lock")
     monkeypatch.setattr(workflow_service, "session_scope", readonly_session)
