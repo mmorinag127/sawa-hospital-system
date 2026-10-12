@@ -10516,14 +10516,6 @@ def _sheet_row_identity_key(fields: list[str], row: list[Any]) -> tuple[str, str
     return tuple(parts)
 
 
-def _sheet_cell_has_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip() != ""
-    return True
-
-
 def _explicit_draft_row_identities(sheet: dict, rows: list) -> tuple[str, list[str]]:
     key = "physical_menu_row_ids" if "physical_menu_row_ids" in sheet else "row_ids"
     values = sheet.get(key)
@@ -10542,8 +10534,6 @@ def _merge_saved_draft_into_semantic_sheet(
     *,
     append_unmatched_current_rows: bool = True,
     merge_current_warnings: bool = True,
-    preserve_blank_quantity_values: bool = True,
-    preserve_current_quantity_values: bool = True,
 ) -> dict[str, Any] | None:
     if not isinstance(current_sheet, dict) or not isinstance(fresh_sheet, dict):
         raise ValueError("saved_draft_row_identity_missing")
@@ -10605,7 +10595,7 @@ def _merge_saved_draft_into_semantic_sheet(
         row_key = fresh_keys[idx]
         merged_row = list(fresh_row)
         merged_row_id = fresh_row_ids[idx]
-        if row_key is not None and row_key in current_by_key:
+        if row_key in current_by_key:
             current_row, current_row_id = current_by_key[row_key]
             if current_identity_kind == "row_ids" and _sheet_row_identity_key(current_fields, current_row) != _sheet_row_identity_key(fresh_fields, fresh_row):
                 raise ValueError("saved_draft_row_identity_changed")
@@ -10614,31 +10604,19 @@ def _merge_saved_draft_into_semantic_sheet(
                 if field_name in shared_quantity_fields:
                     continue
                 fresh_idx = fresh_index[field_name]
-                while len(merged_row) <= fresh_idx:
-                    merged_row.append("")
                 merged_row[fresh_idx] = ""
             for field_name, current_idx in current_index.items():
-                fresh_idx = fresh_index.get(field_name)
-                if fresh_idx is None or current_idx >= len(current_row):
-                    continue
+                fresh_idx = fresh_index[field_name]
                 current_value = current_row[current_idx]
                 if field_name.startswith("qty."):
-                    if preserve_current_quantity_values and (
-                        (_sheet_cell_has_value(current_value) or preserve_blank_quantity_values)
-                        and (
-                            preserve_blank_quantity_values
-                            or not _sheet_cell_has_value(merged_row[fresh_idx])
-                        )
-                    ):
-                        merged_row[fresh_idx] = current_value
+                    merged_row[fresh_idx] = current_value
                 elif _is_aux_sheet_field(field_name):
                     continue
                 elif field_name in shell_fields:
                     continue
                 else:
                     merged_row[fresh_idx] = current_value
-            if current_row_id:
-                merged_row_id = current_row_id
+            merged_row_id = current_row_id
         merged_rows.append(merged_row)
         merged_row_ids.append(merged_row_id)
 
@@ -10648,9 +10626,7 @@ def _merge_saved_draft_into_semantic_sheet(
                 continue
             appended = [""] * len(fresh_fields)
             for field_name, current_idx in current_index.items():
-                fresh_idx = fresh_index.get(field_name)
-                if fresh_idx is None or current_idx >= len(current_row):
-                    continue
+                fresh_idx = fresh_index[field_name]
                 appended[fresh_idx] = current_row[current_idx]
             merged_rows.append(appended)
             merged_row_ids.append(current_row_id)
@@ -10994,8 +10970,7 @@ def _merge_current_draft_quantity_values_into_semantic_sheet(
     # authorizes a positional pairing between different quantity fields.
     return _merge_saved_draft_into_semantic_sheet(
         current_sheet, fresh_sheet, append_unmatched_current_rows=False,
-        merge_current_warnings=False, preserve_blank_quantity_values=True,
-        preserve_current_quantity_values=True,
+        merge_current_warnings=False,
     )
 
 
@@ -11026,8 +11001,6 @@ def _maybe_refresh_semantic_sheet_draft(
             fresh_sheet,
             append_unmatched_current_rows=not prune_unmatched_rows,
             merge_current_warnings=False,
-            preserve_blank_quantity_values=True,
-            preserve_current_quantity_values=True,
         )
     except ValueError as exc:
         if not str(exc).startswith("saved_draft_row_identity_"):
@@ -12529,8 +12502,6 @@ def _rebase_draft_record_to_facility_schema(
                 not _should_prune_unmatched_rows_on_semantic_refresh(draft_record)
             ),
             merge_current_warnings=not clean_saved_draft,
-            preserve_blank_quantity_values=True,
-            preserve_current_quantity_values=True,
         )
     except ValueError as exc:
         if not str(exc).startswith("saved_draft_row_identity_"):
@@ -16617,8 +16588,6 @@ def _recanonicalize_edited_ocr_payload_for_template(
             rebuilt_sheet,
             append_unmatched_current_rows=False,
             merge_current_warnings=False,
-            preserve_blank_quantity_values=True,
-            preserve_current_quantity_values=True,
         )
     except ValueError as exc:
         if not str(exc).startswith("saved_draft_row_identity_"):
