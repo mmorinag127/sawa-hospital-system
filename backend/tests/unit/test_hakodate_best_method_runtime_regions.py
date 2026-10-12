@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-import sys
-import types
-
 import numpy as np
-
-topk_stub = types.ModuleType("src.services.yomitoku_text_recognizer_topk")
-topk_stub.YomitokuTextRecognizerTopKWrapper = object
-sys.modules.setdefault("src.services.yomitoku_text_recognizer_topk", topk_stub)
 
 from src.hakodate_best_method_runtime import compare_kasuga_digit_preprocess_methods as cmp
 from src.hakodate_best_method_runtime import render_best_method_overlay_all_facilities as render

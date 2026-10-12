@@ -1,14 +1,7 @@
 from __future__ import annotations
 
-import sys
-import types
-
 import numpy as np
 from PIL import Image, ImageDraw
-
-topk_stub = types.ModuleType("src.services.yomitoku_text_recognizer_topk")
-topk_stub.YomitokuTextRecognizerTopKWrapper = object
-sys.modules.setdefault("src.services.yomitoku_text_recognizer_topk", topk_stub)
 
 from src.hakodate_best_method_runtime import run_text_recognizer_corner_noise_trial
 from src.hakodate_best_method_runtime import run_text_recognizer_trial
