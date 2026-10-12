@@ -119,6 +119,24 @@ def test_existing_diagnostic_legacy_adoption_and_malformed_execution_guards_stil
     assert row_snapshot(row) == before
 
 
+@pytest.mark.parametrize("disposition,expected", [
+    ({"disposition": "pipeline_result"}, True), ({"disposition": "accepted"}, True),
+    ({"disposition": "rejected"}, False), ({}, False), ({"disposition": None}, False),
+    ({"disposition": "unknown"}, False), ({"disposition": " Accepted "}, False),
+    ({"disposition": []}, False),
+])
+@pytest.mark.parametrize("attempt,revision", [(None, None), ("component-attempt", 7)])
+def test_execution_bound_selection_requires_explicit_success_disposition(disposition, expected, attempt, revision):
+    row = make_row(payload={"tables": [{"rows": [["7", "0", ""]]}], "_ocr_execution": {
+        "evidence_run_id": "UNIT-SELECTION-EVIDENCE", "job_id": "component-job",
+        "workflow_attempt_id": attempt, "workflow_revision": revision, **disposition,
+    }})
+    before = row_snapshot(row)
+    assert evidence.evidence_run_is_selectable(row) is expected
+    assert evidence._serialize_evidence_run(row, include_payload=True)["selectable"] is expected
+    assert row_snapshot(row) == before
+
+
 @pytest.mark.parametrize("field", ["status", "stage"])
 @pytest.mark.parametrize("failure", [" FaIlEd ", " ERROR "])
 def test_ready_row_with_payload_failure_blocks_actual_selected_reads_and_output_without_writes(

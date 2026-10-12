@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, List, Optional
 from io import BytesIO
 import os
@@ -118,7 +119,7 @@ def _coerce_row_cell(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
-        return "1" if value else "0"
+        return str(value)
     if isinstance(value, (int, float)):
         return str(int(value)) if float(value).is_integer() else str(value)
     return str(value)
@@ -185,16 +186,22 @@ def _get_row_fields(template: dict) -> list[str]:
     return derived
 
 
-def _resolve_row_field(row: dict, field: str) -> object:
+def require_raw_recognizer_payload(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("ocr_raw_recognizer_payload_required")
+    return deepcopy(payload)
+
+
+def _resolve_row_field(row: dict, field: str, *, default: object = None) -> object:
     # LLM outputs may use flat dotted keys (e.g. "qty.regular_2f").
     # Prefer exact key lookup before nested traversal.
     if isinstance(row, dict) and field in row:
         return row.get(field)
     current: object = row
     for part in field.split("."):
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
     return current
 
 
@@ -246,10 +253,11 @@ def _rows_from_payload(payload: object, template: dict) -> list[list[str]] | Non
                     continue
                 indexed_rows[row_index] = row_values
                 returned_row_indexes.append(row_index)
+                missing = object()
                 present_fields = {
                     field
                     for field in fields
-                    if field in row
+                    if _resolve_row_field(row, field, default=missing) is not missing
                 }
                 if present_fields:
                     returned_row_fields.setdefault(row_index, set()).update(present_fields)
@@ -3028,74 +3036,33 @@ def extract_fax_data(
             recognizer_payload=output,
         )
 
-    if provider == "openai":
+    if provider in {"openai", "gemini"}:
         from src.services.openai_ocr_service import run_openai_ocr
-
-        try:
-            output = run_openai_ocr(
-                pdf_bytes=pdf_bytes,
-                template=template,
-                facility_id=facility_id,
-            )
-            rows = _rows_from_pipeline_payload(output, template) or []
-            facility_name = None
-            date_strings = []
-            raw_text, provider_debug = _extract_provider_debug(output)
-            if isinstance(output, dict):
-                raw_name = output.get("facility_name")
-                if isinstance(raw_name, str):
-                    facility_name = raw_name.strip() or None
-                date_strings = date_strings_from_row_source(output, template, rows=rows)
-            if not isinstance(provider_debug, dict):
-                provider_debug = {}
-            provider_debug.setdefault("provider", "openai")
-            return FaxExtractedData(
-                facility_name=facility_name,
-                date_strings=date_strings,
-                table_rows=rows,
-                tokens=[],
-                grid=grid,
-                ocr_provider=provider,
-                raw_text=raw_text,
-                provider_debug=provider_debug,
-                recognizer_payload=output,
-            )
-        except Exception:
-            raise
-
-    if provider == "gemini":
         from src.services.gemini_ocr_service import run_gemini_ocr
 
-        try:
-            output = run_gemini_ocr(
-                pdf_bytes=pdf_bytes,
-                template=template,
-                facility_id=facility_id,
-            )
-            rows = _rows_from_pipeline_payload(output, template) or []
-            facility_name = None
-            date_strings = []
-            raw_text, provider_debug = _extract_provider_debug(output)
-            if isinstance(output, dict):
-                raw_name = output.get("facility_name")
-                if isinstance(raw_name, str):
-                    facility_name = raw_name.strip() or None
-                date_strings = date_strings_from_row_source(output, template, rows=rows)
-            if not isinstance(provider_debug, dict):
-                provider_debug = {}
-            provider_debug.setdefault("provider", "gemini")
-            return FaxExtractedData(
-                facility_name=facility_name,
-                date_strings=date_strings,
-                table_rows=rows,
-                tokens=[],
-                grid=grid,
-                ocr_provider=provider,
-                raw_text=raw_text,
-                provider_debug=provider_debug,
-                recognizer_payload=output,
-            )
-        except Exception:
-            raise
+        run = run_openai_ocr if provider == "openai" else run_gemini_ocr
+        output = run(pdf_bytes=pdf_bytes, template=template, facility_id=facility_id)
+        raw = require_raw_recognizer_payload(
+            output.get("_ocr_raw_payload") if isinstance(output, dict) else None,
+        )
+        raw_text, provider_debug = _extract_provider_debug(output)
+        # Row projection may add index diagnostics; never mutate the captured JSON.
+        row_source = deepcopy(raw)
+        row_source["_ocr_debug"] = dict(provider_debug or {})
+        rows = _rows_from_pipeline_payload(row_source, template) or []
+        provider_debug = row_source["_ocr_debug"]
+        provider_debug.setdefault("provider", provider)
+        raw_name = raw.get("facility_name")
+        return FaxExtractedData(
+            facility_name=raw_name.strip() or None if isinstance(raw_name, str) else None,
+            date_strings=date_strings_from_row_source(row_source, template, rows=rows),
+            table_rows=rows,
+            tokens=[],
+            grid=grid,
+            ocr_provider=provider,
+            raw_text=raw_text,
+            provider_debug=provider_debug,
+            recognizer_payload=deepcopy(raw),
+        )
 
     raise RuntimeError(f"OCR provider '{provider}' is not supported")

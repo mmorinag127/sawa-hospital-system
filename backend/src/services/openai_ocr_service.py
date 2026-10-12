@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 import json
 import os
 import re
@@ -718,6 +719,7 @@ def run_openai_ocr(
         break
     if parsed is None:
         raise RuntimeError("OpenAI OCR returned empty response")
+    raw_payload = deepcopy(parsed)
     parsed = _normalize_payload(
         parsed,
         row_fields=row_fields,
@@ -756,6 +758,7 @@ def run_openai_ocr(
     returned_row_indexes = parsed.get("_ocr_returned_row_indexes")
     if isinstance(returned_row_indexes, list) and returned_row_indexes:
         debug_payload["returned_row_indexes"] = returned_row_indexes
+    parsed["_ocr_raw_payload"] = raw_payload
     parsed["_ocr_raw_text"] = text
     parsed["_ocr_debug"] = debug_payload
     return parsed

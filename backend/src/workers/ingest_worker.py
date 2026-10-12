@@ -835,13 +835,16 @@ def map_own_ingest_result(payload, pdf_bytes, pipeline_result, mapping_input):
     _dump_ocr_debug(payload, extracted)
     parsed_dates = [parse_date_string(raw, payload.received_at, policy=mapping_input["policy"], explicit_week=payload.week_hint) for raw in extracted.date_strings]
     parsed_dates = [date for date in parsed_dates if date]
+    quantity_issues = order_service._canonical_quantity_cell_issues(
+        extracted.table_rows, order_service._row_fields_from_template(template),
+    )
     lines = parse_order_lines(
         extracted.table_rows, template, payload.received_at, mapping_input["policy"].get("quantity_rules", {}),
         default_date=min(parsed_dates) if parsed_dates else None,
         tokens=tokens, grid=grid.__dict__ if grid else None, pdf_bytes=pdf_bytes,
         date_policy=mapping_input["policy"],
         explicit_week=payload.week_hint,
-    )
+    ) if extracted.table_rows and not quantity_issues else None
     raw = extracted.recognizer_payload
     result = deepcopy(raw) if isinstance(raw, dict) else {}
     if extracted.own_pipeline_payload is None:
@@ -860,9 +863,11 @@ def map_own_ingest_result(payload, pdf_bytes, pipeline_result, mapping_input):
             }},
         }
     result["raw_recognizer_payload"] = deepcopy(raw)
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not extracted.table_rows:
         result.update(status="error", error="first_pass_own_recognizer_result_missing")
         lines = None
+    elif quantity_issues:
+        result.update(status="error", error="sheet_ocr_review_required", cell_issues=quantity_issues)
     execution = current_nonworkflow_execution()
     if execution is None or not execution.get("input_reference"):
         raise ValueError("ocr_execution_input_required")

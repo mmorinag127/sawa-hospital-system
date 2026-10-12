@@ -18,9 +18,11 @@ from src.services import ocr_evidence_service as evidence
 
 @pytest.mark.parametrize("overrides,payload_additions,expected_reason", [
     pytest.param({}, {}, None, id="valid-noncanonical"),
-    pytest.param({}, {"_ocr_execution": {"evidence_run_id": "component-evidence", "job_id": "component-job"}},
+    pytest.param({}, {"_ocr_execution": {"evidence_run_id": "component-evidence", "job_id": "component-job",
+                                          "disposition": "pipeline_result"}},
                  None, id="valid-nonworkflow-execution"),
     pytest.param({}, {"_ocr_execution": {"evidence_run_id": "component-evidence", "job_id": "component-job",
+                                          "disposition": "pipeline_result",
                                           "workflow_attempt_id": "component-attempt", "workflow_revision": 3}},
                  None, id="valid-workflow-execution"),
     pytest.param({"status": "failed"}, {}, "evidence_unusable", id="row-failed"),

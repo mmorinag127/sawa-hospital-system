@@ -765,6 +765,8 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
             return "evidence_unusable"
         if (execution.get("workflow_attempt_id") is None) != (execution.get("workflow_revision") is None):
             return "evidence_unusable"
+        if execution.get("disposition") not in ("pipeline_result", "accepted"):
+            return "evidence_unusable"
     return None
 
 

@@ -209,7 +209,7 @@ def has_clean_saved_draft(draft_sheet: dict[str, Any] | None) -> bool:
     warnings = [
         token
         for token in warnings
-        if token not in {"llm_patch_applied"}
+        if token not in {"llm_patch_applied", "hakodate_ocr_evidence_assignment"}
     ]
     return len(blockers) == 0 and len(warnings) == 0
 

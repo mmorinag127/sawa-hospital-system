@@ -15845,6 +15845,8 @@ def _row_fields_from_template(template: dict[str, Any]) -> list[str]:
 def _field_value_to_str(value: object) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return str(value)
     if isinstance(value, (int, float)):
         number = float(value)
         if number.is_integer():
@@ -23072,7 +23074,7 @@ def _canonical_quantity_cell_issues(
     issues: list[dict[str, Any]] = []
     for row_index, row in enumerate(rows):
         for column_index, field in enumerate(fields):
-            if not field.startswith("qty."):
+            if field != "qty" and not field.startswith("qty."):
                 continue
             raw = _field_value_to_str(row[column_index]) if column_index < len(row) else ""
             if not raw.strip() or _parse_strict_numeric_cell(raw) is not None:
@@ -32817,6 +32819,26 @@ def _reparse_order_with_attempt(
                     provider_debug = dict(provider_debug)
                     provider_debug["structural_row_projection"] = projected_stats
                     extracted_data.provider_debug = provider_debug
+    if main_provider in {"openai", "gemini"} and not preparse_validation_error:
+        try:
+            raw_recognizer = fax_extractor.require_raw_recognizer_payload(
+                getattr(extracted_data, "recognizer_payload", None),
+            )
+        except ValueError as exc:
+            preparse_validation_error = str(exc)
+        else:
+            # Validate the returned source, not aligned/merged presentation rows.
+            quantity_rows = fax_extractor._rows_from_pipeline_payload(
+                deepcopy(raw_recognizer), template_to_use,
+            ) or []
+            quantity_issues = _canonical_quantity_cell_issues(
+                quantity_rows, _row_fields_from_template(template_to_use),
+            )
+            if not quantity_rows:
+                preparse_validation_error = "lines_empty"
+            elif quantity_issues:
+                preparse_validation_error = "sheet_ocr_review_required"
+                preparse_validation_detail = {"cell_issues": quantity_issues}
     if llm_full_table_active and not preparse_validation_error:
         candidate_returned_row_indexes = None
         candidate_returned_field_map = None
@@ -32918,6 +32940,7 @@ def _reparse_order_with_attempt(
             "rows": deepcopy(rows), "date_strings": deepcopy(date_strings),
             "provider": main_provider,
             "provider_debug": deepcopy(getattr(extracted_data, "provider_debug", None)),
+            "raw_recognizer_payload": deepcopy(getattr(extracted_data, "recognizer_payload", None)),
         }
     provider_fallback_blocked = False
     if (
@@ -32928,7 +32951,7 @@ def _reparse_order_with_attempt(
         and not auto_fallback_applied
     ):
         provider_fallback_blocked = True
-    if not lines and not preparse_validation_error:
+    if not lines and preparse_validation_error in {None, "lines_empty"}:
         sample_row = rows[0] if rows else None
         effective_provider = main_provider or "unknown"
         requested_provider_label = requested_provider or ""
@@ -33309,7 +33332,7 @@ def _reparse_order_with_attempt(
         }
     validation_warning_reasons: list[str] = []
     validation_warning_detail: dict[str, Any] | None = None
-    if validation_error and _is_soft_warning_validation_error(validation_error):
+    if validation_error and not preparse_validation_error and _is_soft_warning_validation_error(validation_error):
         normalized_warning = str(validation_error).strip()
         if normalized_warning:
             validation_warning_reasons = [normalized_warning]

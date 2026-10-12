@@ -53,7 +53,7 @@ def test_actual_provider_rows_raw_result_and_captured_policy_reach_persistence(m
     def recognize(**kwargs):
         calls.append(kwargs)
         assert kwargs["pdf_bytes"] == b"own-pdf"
-        return raw
+        return {**deepcopy(raw), "_ocr_raw_payload": deepcopy(raw)}
     monkeypatch.setattr(openai_ocr_service, "run_openai_ocr", recognize)
     monkeypatch.setattr(gemini_ocr_service, "run_gemini_ocr", recognize)
     def no_reload():

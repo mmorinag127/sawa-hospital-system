@@ -1,3 +1,7 @@
+from copy import deepcopy
+
+import pytest
+
 from src.services import apply_gate_service
 
 
@@ -27,3 +31,27 @@ def test_draft_newer_than_lines_allows_apply_but_blocks_confirm() -> None:
     assert apply_gate["can_confirm"] is False
     assert "draft_newer_than_lines" in apply_gate["confirm_blockers"]
     assert "draft_newer_than_lines" in apply_gate["warnings"]
+
+
+@pytest.mark.parametrize("changes,expected", [
+    ({}, True),
+    ({"warnings_json": ["llm_patch_applied"]}, True),
+    ({"warnings_json": ["hakodate_ocr_evidence_assignment"]}, True),
+    ({"draft_sheet_json": {"rows": [["0"]], "warnings": ["hakodate_ocr_evidence_assignment"]}}, True),
+    ({"warnings_json": ["hakodate_ocr_evidence_assignment", "unknown_warning"]}, False),
+    ({"draft_sheet_json": {"rows": [["0"]], "warnings": ["unknown_warning"]}}, False),
+    ({"warnings_json": ["hakodate_ocr_evidence_assignment_unknown"]}, False),
+    ({"warnings_json": ["hakodate_ocr_evidence_assignment"], "blockers_json": ["sheet_ocr_review_required"]}, False),
+    ({"draft_sheet_json": {"rows": []}}, False),
+    ({"draft_sheet_json": {}}, False),
+    ({"id": ""}, False),
+    (None, False),
+])
+def test_saved_draft_provenance_is_not_a_validation_warning(changes, expected):
+    draft = None if changes is None else {
+        "id": "saved", "draft_sheet_json": {"rows": [["0"]]},
+        "warnings_json": [], "blockers_json": [], **changes,
+    }
+    original = deepcopy(draft)
+    assert apply_gate_service.has_clean_saved_draft(draft) is expected
+    assert draft == original

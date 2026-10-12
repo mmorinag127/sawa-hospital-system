@@ -130,7 +130,7 @@ def producer(store, tmp_path, monkeypatch):
             assert kwargs["pdf_bytes"] == selected_bytes
             assert kwargs["template"] == selected_template
             calls.append(deepcopy(payload))
-            return deepcopy(payload)
+            return {**deepcopy(payload), "_ocr_raw_payload": deepcopy(payload)}
 
         monkeypatch.setattr(openai_ocr_service, "run_openai_ocr", external_response)
         return fax.extract_fax_data(selected_bytes, selected_template)

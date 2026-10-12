@@ -2872,8 +2872,7 @@ def select_ocr_result(
         selection_blocker = _evidence_selection_blocker(ocr_result)
         if selection_blocker:
             workflow = _get_or_create_workflow(session, order.id)
-            revision_error = _finalize_workflow_blocker(session, workflow, selection_blocker)
-            return _serialize_workflow(workflow), revision_error or selection_blocker
+            return _serialize_workflow(workflow), selection_blocker
         workflow = _get_or_create_workflow(session, order.id)
         context_error = _workflow_v2_projection_context_error(_workflow_meta(workflow))
         if context_error:
@@ -2895,8 +2894,7 @@ def select_ocr_result(
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
-            return _serialize_workflow(workflow), revision_error or template_error
+            return _serialize_workflow(workflow), template_error
         if workflow.evidence_run_id != normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
