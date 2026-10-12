@@ -1,8 +1,8 @@
 """Dependency source contracts and small real-API component probes only.
 
 Not hospital business-flow, OCR parity, native/live acceptance, exploitability,
-or vulnerability-elimination proof. No network, model load or service doubles.
-Installed-version assertions require the parent's later isolated installation.
+or vulnerability-elimination proof. No network or model load. Google certificate
+transport is doubled; RSA signing, verification and PDF decryption are real.
 The preexisting grpcio/grpcio-status 1.78.1 yanked risk remains outside this batch.
 """
 
@@ -23,6 +23,8 @@ import pytest
 BACKEND = Path(__file__).resolve().parents[2]
 ROOT = BACKEND.parent
 FLOORS = {
+    "cryptography": "==50.0.2",
+    "starlette": "==1.3.1",
     "anyio": ">=4.14.2,<5",
     "mako": ">=1.3.12,<2",
     "pyasn1": ">=0.6.4,<0.7",
@@ -32,6 +34,7 @@ FLOORS = {
     "pytest": ">=9.0.3,<10",
 }
 FIXED = {
+    "cryptography": "50.0.2", "starlette": "1.3.1",
     "anyio": "4.14.2", "mako": "1.3.12", "pyasn1": "0.6.4",
     "python-dotenv": "1.2.2", "python-multipart": "0.0.31",
     "urllib3": "2.8.0", "pytest": "9.0.3",
@@ -152,7 +155,7 @@ def test_explicit_model_platform_source_pins_remain_unchanged(path, system, mach
 
 
 def test_nonbatch_locked_pins_and_known_grpc_risk_not_silently_changed(sources):
-    baseline = {"fastapi": "0.136.1", "starlette": "0.52.1", "cryptography": "46.0.5",
+    baseline = {"fastapi": "0.136.1",
                 "pillow": "12.1.1", "grpcio": "1.78.1", "grpcio-status": "1.78.1"}
     for name, pinned in baseline.items():
         assert one([package for package in sources["lock"]["package"] if package["name"] == name])["version"] == pinned
@@ -245,3 +248,181 @@ def test_urllib3_actual_public_header_api_without_network():
     assert generated["user-agent"] == "Component/1.0"
     assert generated["connection"] == "keep-alive"
     assert generated["authorization"].isascii()
+
+
+@pytest.mark.parametrize("case,error", [
+    ("valid", None), ("tampered", "Could not verify token signature"),
+    ("audience", "wrong audience"), ("issuer", "Wrong issuer"),
+    ("expired", "Token expired"), ("future-iat", "Token used too early"),
+])
+def test_google_id_token_real_rsa_verification(case, error):
+    import base64
+    from datetime import datetime, timedelta, timezone
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from google.auth import crypt, exceptions, jwt
+    from google.oauth2 import id_token
+
+    now = datetime.now(timezone.utc)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "owned.invalid")])
+    certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                   .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                   .not_valid_before(now - timedelta(minutes=5))
+                   .not_valid_after(now + timedelta(hours=1)).sign(key, hashes.SHA256()))
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption())
+    signer = crypt.RSASigner.from_string(pem, key_id="owned-key")
+    assert isinstance(signer._impl._key, rsa.RSAPrivateKey)
+    claims = {"iss": "accounts.google.com", "aud": "owned-client", "sub": "owned-subject",
+              "iat": int(now.timestamp()) - 60, "exp": int(now.timestamp()) + 300}
+    if case == "audience":
+        claims["aud"] = "other-client"
+    elif case == "issuer":
+        claims["iss"] = "other.invalid"
+    elif case == "expired":
+        claims["exp"] = int(now.timestamp()) - 30
+    elif case == "future-iat":
+        claims["iat"] = int(now.timestamp()) + 120
+    token = jwt.encode(signer, claims)
+    if case == "tampered":
+        header, payload, signature = token.split(b".")
+        raw = base64.urlsafe_b64decode(signature + b"=" * (-len(signature) % 4))
+        signature = base64.urlsafe_b64encode(bytes([raw[0] ^ 1]) + raw[1:]).rstrip(b"=")
+        token = b".".join((header, payload, signature))
+    request = Mock(return_value=SimpleNamespace(status=200, data=json.dumps({
+        "owned-key": certificate.public_bytes(serialization.Encoding.PEM).decode("ascii"),
+    }).encode()))
+    if error is None:
+        assert id_token.verify_oauth2_token(token, request, audience="owned-client") == claims
+    else:
+        with pytest.raises(exceptions.GoogleAuthError, match=error):
+            id_token.verify_oauth2_token(token, request, audience="owned-client")
+    request.assert_called_once_with("https://www.googleapis.com/oauth2/v1/certs", method="GET")
+
+
+@pytest.mark.parametrize("encoding", ["urlencoded", "multipart"])
+@pytest.mark.parametrize("case", ["normal", "field-count", "part-size"])
+def test_actual_form_parser_limits(encoding, case):
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+
+    @app.post("/form")
+    async def form(request: Request):
+        async with request.form(max_fields=2, max_files=1, max_part_size=1024) as fields:
+            return list(fields.multi_items())
+
+    pairs = [("first", "value"), ("second", "")]
+    if case == "field-count":
+        pairs.append(("third", "value"))
+    elif case == "part-size":
+        pairs[0] = ("first", "x" * 1025)
+    kwargs = ({"data": dict(pairs)} if encoding == "urlencoded" else
+              {"files": [(key, (None, value)) for key, value in pairs]})
+    with TestClient(app) as client:
+        response = client.post("/form", **kwargs)
+    if case == "normal":
+        assert response.status_code == 200
+        assert response.json() == [["first", "value"], ["second", ""]]
+    else:
+        assert response.status_code == 400
+        expected = ("Too many fields. Maximum number of fields is 2." if case == "field-count" else
+                    "Field exceeded maximum size of 1KB." if encoding == "urlencoded" else
+                    "Part exceeded maximum size of 1KB.")
+        assert response.json() == {"detail": expected}
+
+
+def test_actual_multipart_file_count_limit():
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+
+    @app.post("/files")
+    async def files(request: Request):
+        async with request.form(max_files=1) as fields:
+            return [await item.read() for item in fields.getlist("file")]
+
+    with TestClient(app) as client:
+        payload = [("file", ("one.txt", b"one"))]
+        assert client.post("/files", files=payload).json() == ["one"]
+        response = client.post("/files", files=payload + [("file", ("two.txt", b"two"))])
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Too many files. Maximum number of files is 1."}
+
+
+def test_fastapi_lifespan_middleware_and_exception_contract():
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    events = []
+    app = FastAPI()
+
+    @app.on_event("startup")
+    async def startup():
+        events.append("startup")
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        events.append("shutdown")
+
+    @app.middleware("http")
+    async def mark(request, call_next):
+        response = await call_next(request)
+        response.headers["X-Component"] = "visited"
+        return response
+
+    @app.get("/handled")
+    async def handled():
+        raise HTTPException(409, "owned conflict")
+
+    @app.get("/unhandled")
+    async def unhandled():
+        raise RuntimeError("owned failure")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert events == ["startup"]
+        response = client.get("/handled")
+        assert (response.status_code, response.json(), response.headers["X-Component"]) == (
+            409, {"detail": "owned conflict"}, "visited")
+        response = client.get("/unhandled")
+        assert (response.status_code, response.text) == (500, "Internal Server Error")
+    assert events == ["startup", "shutdown"]
+
+
+@pytest.mark.parametrize("host,path,authority", [
+    (b"owned.invalid:8443", "/document", "owned.invalid:8443"),
+    (b"owned.invalid", "//other.invalid/document", "owned.invalid"),
+    (b"owned.invalid@other.invalid", "/document", "server.invalid:8443"),
+    (b"owned.invalid/other", "//other.invalid/document", "server.invalid:8443"),
+    (b"owned.invalid#other", "/document", "server.invalid:8443"),
+])
+def test_url_scope_preserves_authority_and_path(host, path, authority):
+    from starlette.datastructures import URL
+
+    url = URL(scope={"type": "http", "scheme": "https", "server": ("server.invalid", 8443),
+                     "path": path, "query_string": b"owned=1", "headers": [(b"host", host)]})
+    assert (url.scheme, url.netloc, url.path, url.query) == ("https", authority, path, "owned=1")
+    assert url.username is None and url.password is None
+
+
+def test_pdfminer_actual_owned_aes_pdf_passwords(tmp_path):
+    import pymupdf
+    from pdfminer.high_level import extract_text
+    from pdfminer.pdfdocument import PDFPasswordIncorrect
+
+    path = tmp_path / "component-aes.pdf"
+    with pymupdf.open() as document:
+        document.new_page().insert_text((72, 72), "Owned AES component")
+        document.save(path, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                      owner_pw="owned-owner", user_pw="owned-reader")
+    assert extract_text(path, password="owned-reader").strip() == "Owned AES component"
+    with pytest.raises(PDFPasswordIncorrect):
+        extract_text(path, password="wrong-password")
