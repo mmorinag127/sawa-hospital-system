@@ -1326,7 +1326,6 @@ def test_get_current_sheet_context_uses_weekly_menu_with_payload_overlay_when_pa
             "facility_entries_count": 2,
         },
     )
-    monkeypatch.setattr(order_service, "_load_sheet_order_lines", lambda order_id: [])
     monkeypatch.setattr(
         order_service,
         "_extract_sheet_rows_from_payload_uncanonicalized",
@@ -1407,7 +1406,6 @@ def test_get_current_sheet_context_uses_candidate_column_mapping_for_quantity_ov
             "facility_entries_count": 2,
         },
     )
-    monkeypatch.setattr(order_service, "_load_sheet_order_lines", lambda order_id: [])
     monkeypatch.setattr(
         order_service,
         "get_order_candidate_resolution",
@@ -1505,7 +1503,6 @@ def test_get_current_sheet_context_does_not_append_ocr_only_menu_rows_to_weekly_
             "facility_entries_count": 1,
         },
     )
-    monkeypatch.setattr(order_service, "_load_sheet_order_lines", lambda order_id: [])
     monkeypatch.setattr(
         order_service,
         "_build_position_menu_entries_from_ocr_payload",
