@@ -49,6 +49,48 @@ def test_existing_backend_functions_are_unchanged_except_additive_workflow_proje
         current = functions((ROOT / path).read_text())
         if path.endswith("/order_service.py"):
             original.pop("_recorded_hospital_job_status")
+            # Approved dead definitions only; keep the historical baseline and surviving AST.
+            retired = {
+                "_apply_payload_quantities_by_row_index",
+                "_attach_review_metadata_to_order_payload",
+                "_build_ocr_review_metadata",
+                "_build_position_menu_entries_from_order_lines",
+                "_build_position_menu_entries_from_orders",
+                "_build_prompt_rows_from_table_rows",
+                "_build_rows_from_order_lines",
+                "_build_sheet_rows_from_order_lines",
+                "_build_synthetic_ocr_pages",
+                "_draft_requires_facility_template_rebase",
+                "_expand_explicit_sheet_week_range",
+                "_format_block_order_hint",
+                "_format_sheet_week_value",
+                "_grid_detection_payload",
+                "_hakodate_projection_row_from_sheet_cell",
+                "_hakodate_target_cell_map_from_grid_and_rows",
+                "_hakodate_target_cell_map_from_order_document",
+                "_hakodate_week_rows_from_menu_entries",
+                "_is_saved_draft_revision",
+                "_is_supported_daypart",
+                "_load_visible_ocr_rerun_output",
+                "_max_source_row_index_for_position_scope",
+                "_maybe_upgrade_generic_sheet_draft",
+                "_normalize_materialization_signature_quantity",
+                "_normalize_sheet_warning_list",
+                "_overlay_historical_dayparts_onto_ocr_entries",
+                "_overlay_payload_aux_cells_onto_sheet_row_lists",
+                "_png_data_uri",
+                "_read_ocr_pipeline_wait_timeout_seconds",
+                "_read_ocr_rerun_pipeline_stage_timeout_seconds",
+                "_regular_override_priority",
+                "_rows_for_reparse_quality_gate",
+                "_sheet_candidate_sort_key",
+                "_summarize_prompt_block_coverage_gaps",
+                "_user_facility_template_columns_for_save",
+            }
+            assert set(original) - set(current) == retired
+            assert set(current) - set(original) == set()
+            for name in retired:
+                original.pop(name)
         else:
             current.pop("_recorded_workflow_job_status")
             result = next(node for node in current["_serialize_workflow"].body if isinstance(node, ast.Return)).value

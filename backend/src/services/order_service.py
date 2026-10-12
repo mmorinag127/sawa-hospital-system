@@ -479,14 +479,6 @@ def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, dat
     return sheet_week_service.parse_sheet_week_value(value)
 
 
-def _format_sheet_week_value(
-    month_id: str | None,
-    start_date: date | None = None,
-    end_date: date | None = None,
-) -> str | None:
-    return sheet_week_service.format_sheet_week_value(month_id, start_date, end_date)
-
-
 def _normalize_sheet_week_value(value: object) -> str | None:
     return sheet_week_service.normalize_sheet_week_value(value)
 
@@ -1066,10 +1058,6 @@ def _daypart_sort_components(value: object) -> tuple[int, str]:
     return _DAYPART_SORT_ORDER.get(normalized, 50), normalized
 
 
-def _is_supported_daypart(value: object) -> bool:
-    return _canonical_daypart_key(value) in {"朝", "昼", "夕"}
-
-
 def _normalize_entry_date(value: object) -> date | None:
     if isinstance(value, date):
         try:
@@ -1262,125 +1250,6 @@ def _build_position_menu_entries_safe(week_id: str, facility_id: str | None = No
     if session is not None:
         return _build_position_menu_entries(week_id, facility_id, session=session)
     return _build_position_menu_entries(week_id, facility_id)
-
-
-def _build_position_menu_entries_from_orders(
-    week_id: str,
-    facility_id: str | None,
-    *,
-    exclude_order_id: str | None = None,
-) -> list[dict]:
-    def _serialize_rows(rows: list[tuple[Any, Any, Any]]) -> list[dict]:
-        entries: list[dict] = []
-        seen: set[tuple[str, str, str]] = set()
-        for idx, (menu_date_raw, daypart_raw, menu_name_raw) in enumerate(rows):
-            menu_name = str(menu_name_raw or "").strip()
-            if not menu_name:
-                continue
-            menu_date = _normalize_entry_date(menu_date_raw)
-            daypart_key = _normalize_daypart_key(daypart_raw)
-            key = (
-                menu_date.isoformat() if isinstance(menu_date, date) else "",
-                daypart_key,
-                _normalize_menu_text(menu_name),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            entries.append(
-                {
-                    "menu_name": menu_name,
-                    "menu_date": menu_date,
-                    "daypart_key": daypart_key,
-                    "slot_index": idx,
-                    "order": idx,
-                }
-            )
-        entries.sort(
-            key=lambda item: (
-                item.get("menu_date") or date.min,
-                _daypart_sort_components(item.get("daypart_key"))[0],
-                _daypart_sort_components(item.get("daypart_key"))[1],
-                int(item.get("slot_index") or 0),
-                int(item.get("order") or 0),
-            )
-        )
-        return entries
-
-    month_ids = _sheet_week_month_ids(week_id)
-    if not month_ids:
-        return []
-    _anchor_month_id, week_start, week_end = _parse_sheet_week_value(week_id)
-
-    with session_scope() as session:
-        q = (
-            select(OrderLine.date, OrderLine.daypart, OrderLine.menu_name)
-            .join(Order, Order.id == OrderLine.order_id)
-            .where(OrderLine.menu_name.is_not(None))
-            .order_by(OrderLine.date, OrderLine.daypart, OrderLine.menu_name)
-        )
-        if isinstance(week_start, date) and isinstance(week_end, date):
-            q = q.where(OrderLine.date >= week_start, OrderLine.date <= week_end)
-        else:
-            q = q.where(or_(*[Order.week_code.like(f"{month_id}%") for month_id in month_ids]))
-        if exclude_order_id:
-            q = q.where(Order.id != exclude_order_id)
-        rows_all = session.execute(q).all()
-        if facility_id:
-            q_fac = q.where(Order.facility_code == facility_id)
-            rows_fac = session.execute(q_fac).all()
-            entries_fac = _serialize_rows(rows_fac)
-            if entries_fac:
-                return _clip_entries_to_sheet_week_range(entries_fac, week_id)
-        return _clip_entries_to_sheet_week_range(_serialize_rows(rows_all), week_id)
-
-
-def _build_position_menu_entries_from_order_lines(
-    week_id: str,
-    order_lines: list[dict[str, Any]] | None,
-) -> list[dict]:
-    entries: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
-    for idx, raw in enumerate(order_lines or []):
-        if not isinstance(raw, dict):
-            continue
-        menu_name = str(raw.get("menu_name") or raw.get("menu") or "").strip()
-        if not menu_name:
-            continue
-        menu_date = _normalize_entry_date(raw.get("date"))
-        daypart_key = _normalize_daypart_key(raw.get("daypart"))
-        key = (
-            menu_date.isoformat() if isinstance(menu_date, date) else "",
-            daypart_key,
-            _normalize_menu_text(menu_name),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        entries.append(
-            {
-                "menu_name": menu_name,
-                "menu_date": menu_date,
-                "daypart_key": daypart_key,
-                "category": normalize_aux_semantic_display_value(
-                    raw.get("menu_category") or raw.get("category"),
-                    "slot_label",
-                )
-                or None,
-                "slot_index": idx,
-                "order": idx,
-            }
-        )
-    entries.sort(
-        key=lambda item: (
-            item.get("menu_date") or date.min,
-            _daypart_sort_components(item.get("daypart_key"))[0],
-            _daypart_sort_components(item.get("daypart_key"))[1],
-            int(item.get("slot_index") or 0),
-            int(item.get("order") or 0),
-        )
-    )
-    return _clip_entries_to_sheet_week_range(entries, week_id)
 
 
 def _source_uses_weekly_menu_shell(source: str | None) -> bool:
@@ -1860,71 +1729,6 @@ def _merge_weekly_menu_entries_with_ocr_tail(
     return base_entries
 
 
-def _overlay_historical_dayparts_onto_ocr_entries(
-    ocr_entries: list[dict[str, Any]] | None,
-    historical_entries: list[dict[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], int]:
-    base_entries = [dict(item) for item in (ocr_entries or []) if isinstance(item, dict)]
-    if not base_entries or not historical_entries:
-        return base_entries, 0
-
-    historical_lookup: dict[tuple[date, str], list[str]] = {}
-    historical_by_date: dict[date, list[str]] = {}
-    for item in historical_entries:
-        if not isinstance(item, dict):
-            continue
-        menu_date = item.get("menu_date")
-        if not isinstance(menu_date, date):
-            continue
-        menu_name = str(item.get("menu_name") or "").strip()
-        if not menu_name:
-            continue
-        daypart_key = _canonical_daypart_key(item.get("daypart_key"))
-        if not daypart_key:
-            continue
-        historical_lookup.setdefault((menu_date, _normalize_menu_text(menu_name)), []).append(daypart_key)
-        historical_by_date.setdefault(menu_date, []).append(daypart_key)
-
-    matched = 0
-    overlayed = [dict(item) for item in base_entries]
-    unmatched_indexes_by_date: dict[date, list[int]] = {}
-    for idx, item in enumerate(overlayed):
-        menu_date = item.get("menu_date")
-        menu_name = str(item.get("menu_name") or "").strip()
-        if not isinstance(menu_date, date) or not menu_name:
-            continue
-        candidates = historical_lookup.get((menu_date, _normalize_menu_text(menu_name))) or []
-        if candidates:
-            counts: dict[str, int] = {}
-            for candidate in candidates:
-                counts[candidate] = int(counts.get(candidate, 0)) + 1
-            daypart_key, _count = max(counts.items(), key=lambda item: (item[1], item[0]))
-            item["daypart_key"] = daypart_key
-            matched += 1
-            continue
-        unmatched_indexes_by_date.setdefault(menu_date, []).append(idx)
-
-    for menu_date, unmatched_indexes in unmatched_indexes_by_date.items():
-        historical_dayparts = historical_by_date.get(menu_date) or []
-        if not historical_dayparts:
-            continue
-        date_indexes = [
-            idx
-            for idx, item in enumerate(overlayed)
-            if item.get("menu_date") == menu_date
-        ]
-        if len(date_indexes) != len(historical_dayparts):
-            continue
-        for position, idx in enumerate(date_indexes):
-            current_daypart = _canonical_daypart_key(overlayed[idx].get("daypart_key"))
-            historical_daypart = _canonical_daypart_key(historical_dayparts[position])
-            if not historical_daypart or current_daypart == historical_daypart:
-                continue
-            overlayed[idx]["daypart_key"] = historical_daypart
-            matched += 1
-    return overlayed, matched
-
-
 def _overlay_payload_dayparts_onto_sheet_rows(
     *,
     rows: list[dict[str, Any]] | None,
@@ -2185,44 +1989,6 @@ def _derive_cross_month_sheet_week_value(
     return None
 
 
-def _expand_explicit_sheet_week_range(
-    explicit_week_value: str | None,
-    observed_dates: set[date] | None,
-) -> str | None:
-    month_id, start_date, end_date = _parse_sheet_week_value(explicit_week_value)
-    if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
-        return explicit_week_value
-    normalized_dates = {
-        item
-        for item in (observed_dates or set())
-        if isinstance(item, date)
-    }
-    if not normalized_dates:
-        return explicit_week_value
-    dominant_dates = _select_dominant_date_cluster(
-        normalized_dates,
-        max_gap_days=2,
-        min_cluster_size=2,
-        min_cluster_share=0.5,
-    )
-    if len(dominant_dates) < 2:
-        return explicit_week_value
-    observed_min = min(dominant_dates)
-    observed_max = max(dominant_dates)
-    if start_date <= observed_min and observed_max <= end_date:
-        return explicit_week_value
-    if observed_min > end_date or observed_max < start_date:
-        return explicit_week_value
-    if (start_date - observed_min).days > 7 or (observed_max - end_date).days > 7:
-        return explicit_week_value
-    widened_start = min(start_date, observed_min)
-    widened_end = max(end_date, observed_max)
-    if (widened_end - widened_start).days > 10:
-        return explicit_week_value
-    widened = _format_sheet_week_value(widened_start.strftime("%Y-%m"), widened_start, widened_end)
-    return widened or explicit_week_value
-
-
 def _build_reparse_position_menu_entries(
     *,
     week_id: str | None,
@@ -2382,13 +2148,6 @@ def _collect_source_row_indexes_for_position_scope(lines: list[dict[str, Any]] |
         if source_idx >= 0:
             indexes.add(source_idx)
     return sorted(indexes)
-
-
-def _max_source_row_index_for_position_scope(lines: list[dict[str, Any]] | None) -> int:
-    indexes = _collect_source_row_indexes_for_position_scope(lines)
-    if not indexes:
-        return -1
-    return indexes[-1]
 
 
 def _expand_scoped_entries_for_source_row_span(
@@ -3155,25 +2914,6 @@ def _read_reparse_stage_timeout_seconds(processing_stage: str) -> float:
         default_timeout,
         min_value=30.0,
     )
-
-
-def _read_ocr_pipeline_wait_timeout_seconds() -> float:
-    raw = os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600")
-    try:
-        parsed = float(str(raw).strip())
-    except Exception:
-        parsed = 600.0
-    return max(parsed, 30.0)
-
-
-def _read_ocr_rerun_pipeline_stage_timeout_seconds() -> float:
-    wait_timeout = _read_ocr_pipeline_wait_timeout_seconds()
-    grace_seconds = _read_reparse_float_env(
-        "OCR_RERUN_PIPELINE_STAGE_GRACE_SECONDS",
-        90.0,
-        min_value=10.0,
-    )
-    return wait_timeout + grace_seconds
 
 
 def _run_reparse_with_heartbeat(
@@ -4255,17 +3995,6 @@ def _project_quantity_only_rows_onto_structural_rows(
         "quantity_cells_copied": quantity_cells_copied,
         "padded_blank_rows": padded_blank_rows,
     }
-
-
-def _rows_for_reparse_quality_gate(
-    *,
-    original_rows: list[list[str]] | None,
-    projected_rows: list[list[str]] | None,
-    llm_quantity_only_active: bool,
-) -> list[list[str]]:
-    if llm_quantity_only_active:
-        return [list(row) for row in (original_rows or []) if isinstance(row, list)]
-    return [list(row) for row in (projected_rows or original_rows or []) if isinstance(row, list)]
 
 
 def _validate_reparse_date_anchor_stability(
@@ -6144,22 +5873,6 @@ def _parse_materialization_quantity_cell(value: object) -> float | None:
     return parsed
 
 
-def _normalize_materialization_signature_quantity(value: object) -> int | float | None:
-    if value is None:
-        return None
-    parsed: float | None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        try:
-            parsed = float(value)
-        except Exception:
-            return None
-    else:
-        parsed = _parse_materialization_quantity_cell(value)
-    if parsed is None or parsed < 0:
-        return None
-    return int(parsed) if float(parsed).is_integer() else float(parsed)
-
-
 def _normalize_materialization_row_values(
     *,
     fields: list[str],
@@ -6447,17 +6160,6 @@ def _build_materialization_lines_from_sheet_rows(
             )
 
     return _apply_change_override_priority_to_lines(materialized_lines)
-
-
-def _regular_override_priority(diet_type: object) -> int:
-    normalized = _normalize_sheet_diet(diet_type)
-    if normalized == "change_2":
-        return 2
-    if normalized == "change_1":
-        return 1
-    if normalized == "regular":
-        return 0
-    return -1
 
 
 def _build_change_override_group_key(line: dict[str, Any]) -> tuple[object, ...] | None:
@@ -9350,136 +9052,6 @@ def _payload_has_hakodate_output_content(payload: dict[str, Any] | None, *, orde
     return isinstance(payload.get("hakodate_overlay"), dict)
 
 
-def _grid_detection_payload(grid: object) -> dict[str, Any]:
-    if isinstance(grid, dict):
-        return grid
-    return {
-        "table_box": list(getattr(grid, "table_box", []) or []),
-        "grid_column_edges": list(getattr(grid, "column_edges", []) or []),
-        "grid_row_edges": list(getattr(grid, "row_edges", []) or []),
-        "confidence": getattr(grid, "confidence", None),
-    }
-
-
-def _hakodate_week_rows_from_menu_entries(
-    *,
-    fields: list[str],
-    week_id: str | None,
-    facility_id: str | None,
-) -> list[list[str]]:
-    if not week_id:
-        return []
-    entries = _build_position_menu_entries_safe(week_id, facility_id)
-    if not entries:
-        return []
-    date_idx = fields.index("date") if "date" in fields else fields.index("date_mmdd") if "date_mmdd" in fields else None
-    daypart_idx = fields.index("daypart") if "daypart" in fields else None
-    menu_idx = fields.index("menu_name") if "menu_name" in fields else fields.index("menu") if "menu" in fields else None
-    if date_idx is None or daypart_idx is None or menu_idx is None:
-        return []
-    rows: list[list[str]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        row = ["" for _ in fields]
-        menu_date = entry.get("menu_date")
-        row[date_idx] = _format_mmdd(menu_date)
-        row[daypart_idx] = str(entry.get("daypart_key") or entry.get("daypart") or "").strip()
-        row[menu_idx] = str(entry.get("menu_name") or "").strip()
-        if row[date_idx] and row[daypart_idx] and row[menu_idx]:
-            rows.append(row)
-    return rows
-
-
-def _hakodate_target_cell_map_from_grid_and_rows(
-    *,
-    template: dict[str, Any],
-    rows: list[list[str]],
-    column_edges: list[float],
-    row_edges: list[float],
-    source: str,
-) -> list[dict[str, Any]]:
-    fields = _row_fields_from_template(template)
-    if not fields or not rows:
-        return []
-    menu_idx = next(
-        (
-            idx
-            for idx, field in enumerate(fields)
-            if str(field or "").strip() in {"menu", "menu_name"}
-        ),
-        None,
-    )
-    if menu_idx is None or len(column_edges) < 2 or len(row_edges) < 2:
-        return []
-    header_rows = int(template.get("hakodate_header_rows") or max(0, len(row_edges) - 1 - len(rows)))
-    header_rows = max(0, min(header_rows, max(0, len(row_edges) - 1)))
-    date_idx = fields.index("date") if "date" in fields else fields.index("date_mmdd") if "date_mmdd" in fields else None
-    daypart_idx = fields.index("daypart") if "daypart" in fields else None
-    cells: list[dict[str, Any]] = []
-    for payload_row_index, row in enumerate(rows):
-        if not isinstance(row, list):
-            continue
-        grid_row = header_rows + payload_row_index
-        if grid_row >= len(row_edges) - 1:
-            break
-
-        def _cell(index: int | None) -> str:
-            if index is None or index >= len(row):
-                return ""
-            return str(row[index] or "").strip()
-
-        date_value = _cell(date_idx)
-        daypart = _cell(daypart_idx)
-        menu_name = _cell(menu_idx)
-        for col_index, field in enumerate(fields):
-            semantic_field = str(field or "").strip()
-            if col_index <= menu_idx or col_index >= len(column_edges) - 1:
-                continue
-            target_id = f"{source}-r{grid_row}c{col_index}"
-            worksheet_row = grid_row + 1
-            worksheet_col = col_index + 1
-            sheet_cell = f"R{worksheet_row}C{worksheet_col}"
-            cells.append(
-                {
-                    "target_cell_id": target_id,
-                    "region_id": target_id,
-                    "sheet_cell": sheet_cell,
-                    "worksheet_row": worksheet_row,
-                    "worksheet_col": worksheet_col,
-                    "semantic_field": semantic_field,
-                    "field_label": _field_label(semantic_field),
-                    "date": date_value,
-                    "daypart": daypart,
-                    "menu_name": menu_name,
-                    "bbox": [
-                        column_edges[col_index],
-                        row_edges[grid_row],
-                        column_edges[col_index + 1],
-                        row_edges[grid_row + 1],
-                    ],
-                    "center": [
-                        (column_edges[col_index] + column_edges[col_index + 1]) / 2.0,
-                        (row_edges[grid_row] + row_edges[grid_row + 1]) / 2.0,
-                    ],
-                    "logical_targets": [
-                        {
-                            "sheet_cell": sheet_cell,
-                            "worksheet_row": worksheet_row,
-                            "worksheet_col": worksheet_col,
-                            "field": semantic_field,
-                            "field_label": _field_label(semantic_field),
-                            "date": date_value,
-                            "daypart": daypart,
-                            "menu_name": menu_name,
-                        }
-                    ],
-                    "source": source,
-                }
-            )
-    return cells
-
-
 def _hakodate_document_context(order_id: str) -> dict[str, Any] | None:
     try:
         with session_scope() as session:
@@ -9497,49 +9069,6 @@ def _hakodate_document_context(order_id: str) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Hakodate document context lookup failed", order_id=order_id, error=str(exc))
         return None
-
-
-def _hakodate_target_cell_map_from_order_document(
-    *,
-    order_id: str,
-    template: dict[str, Any],
-) -> list[dict[str, Any]]:
-    from src.services.storage_service import load_selected_pdf_bytes
-    receipt = processing_start_pdf_receipt()
-    context = _hakodate_document_context(order_id)
-    if not isinstance(context, dict):
-        return []
-    fields = _row_fields_from_template(template)
-    rows = _hakodate_week_rows_from_menu_entries(
-        fields=fields,
-        week_id=str(context.get("week_id") or "").strip() or None,
-        facility_id=str(context.get("facility_id") or "").strip() or None,
-    )
-    if not rows:
-        return []
-    try:
-        pdf_bytes = load_selected_pdf_bytes(str(context.get("document_uri") or ""), receipt)
-        grid = detect_table_grid(
-            pdf_bytes,
-            {
-                **template,
-                "grid_auto_table_box": True,
-                "grid_auto_use_raw_edges": True,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Hakodate target-cell grid generation failed", order_id=order_id, error=str(exc))
-        return []
-    grid_payload = _grid_detection_payload(grid)
-    column_edges = [float(value) for value in (grid_payload.get("grid_column_edges") or grid_payload.get("column_edges") or [])]
-    row_edges = [float(value) for value in (grid_payload.get("grid_row_edges") or grid_payload.get("row_edges") or [])]
-    return _hakodate_target_cell_map_from_grid_and_rows(
-        template=template,
-        rows=rows,
-        column_edges=column_edges,
-        row_edges=row_edges,
-        source="order_document_grid",
-    )
 
 
 def save_order_hakodate_canonical_manifest_item(
@@ -11544,38 +11073,6 @@ def _maybe_refresh_semantic_sheet_draft(
     return refreshed if isinstance(refreshed, dict) else None
 
 
-def _maybe_upgrade_generic_sheet_draft(
-    order_id: str,
-    draft: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    synchronous_write_input = _capture_synchronous_cache_write_input(order_id)
-    if not _synchronous_draft_input_matches(synchronous_write_input, draft):
-        return None
-    if not isinstance(draft, dict):
-        return draft
-    draft_sheet_json = draft.get("draft_sheet_json")
-    if not isinstance(draft_sheet_json, dict):
-        return draft
-    if not _draft_fields_look_generic(draft_sheet_json.get("fields")):
-        return draft
-    upgraded_sheet = _build_best_available_semantic_draft(
-        order_id, evidence_run_override=synchronous_write_input["evidence"],
-    )
-    if not isinstance(upgraded_sheet, dict):
-        return draft
-    upgraded = persist_sheet_draft(
-        order_id=order_id,
-        draft_sheet_json=upgraded_sheet,
-        draft_state=str(draft.get("draft_state") or "draft_ready").strip() or "draft_ready",
-        blockers=[str(item).strip() for item in (draft.get("blockers_json") or []) if str(item).strip()],
-        warnings=[str(item).strip() for item in (draft.get("warnings_json") or []) if str(item).strip()],
-        latest_patch_candidate_id=str(draft.get("latest_patch_candidate_id") or "").strip() or None,
-        edited_by="semantic-sheet-upgrade",
-        synchronous_write_input=synchronous_write_input,
-    )
-    return upgraded if isinstance(upgraded, dict) else None
-
-
 def get_latest_sheet_draft(
     order_id: str,
     *,
@@ -12928,49 +12425,6 @@ def _current_sheet_schema_snapshot_for_facility(
     }
 
 
-def _draft_requires_facility_template_rebase(
-    order_payload: dict[str, Any] | None,
-    draft_payload: dict[str, Any] | None,
-    *,
-    draft_template_id: str | None = None,
-    ocr_payload: dict[str, Any] | None = None,
-) -> bool:
-    if not isinstance(order_payload, dict) or not isinstance(draft_payload, dict):
-        return False
-    order_id = str(order_payload.get("id") or "").strip() or None
-    if not order_id:
-        return False
-    expected_sheet = _build_best_available_semantic_draft(
-        order_id,
-        use_saved_draft=False,
-    )
-    expected = (
-        {
-            "fields": list(expected_sheet.get("fields") or []),
-            "header": list(expected_sheet.get("header") or []),
-        }
-        if isinstance(expected_sheet, dict)
-        else None
-    )
-    if not isinstance(expected, dict):
-        return False
-    draft_fields = [
-        str(field).strip()
-        for field in (draft_payload.get("fields") or [])
-        if str(field).strip()
-    ]
-    expected_fields = [
-        str(field).strip()
-        for field in (expected.get("fields") or [])
-        if str(field).strip()
-    ]
-    if draft_fields != expected_fields:
-        return True
-    draft_header = list(draft_payload.get("header") or []) if isinstance(draft_payload.get("header"), list) else []
-    expected_header = list(expected.get("header") or []) if isinstance(expected.get("header"), list) else []
-    return draft_header != expected_header
-
-
 def _resolve_draft_record_base_evidence_run(
     draft_record: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -14210,33 +13664,6 @@ def _reconcile_finished_ocr_rerun(order_id: str) -> bool:
 
 def reconcile_ocr_rerun_state(order_id: str) -> bool:
     return _reconcile_finished_ocr_rerun(order_id)
-
-
-def _load_visible_ocr_rerun_output(
-    order_id: str,
-) -> tuple[dict[str, Any] | None, str | None, dict[str, Any] | None]:
-    normalized_order_id = str(order_id or "").strip()
-    if not normalized_order_id:
-        return None, None, None
-    job = _get_order_ocr_rerun_job(normalized_order_id)
-    if not isinstance(job, dict):
-        return None, None, None
-    if get_job_request_mode(job) != "ocr_rerun":
-        return None, None, job
-    output_reference = str(job.get("output_reference") or "").strip() or None
-    state = describe_ocr_job_state(job)
-    if not output_reference:
-        if state.get("status") in {"running", "pending", "awaiting_output", "recovering"}:
-            return None, "ocr_output_pending", job
-        return None, None, job
-    payload = _load_pipeline_output_once(output_reference)
-    if isinstance(payload, dict):
-        if _output_is_pending(payload):
-            return None, "ocr_output_pending", job
-        return payload, None, job
-    if state.get("status") in {"running", "pending", "awaiting_output", "recovering"}:
-        return None, "ocr_output_pending", job
-    return None, None, job
 
 
 def _extract_reparse_request_kwargs_from_job(job: dict[str, Any] | None) -> dict[str, Any]:
@@ -15758,228 +15185,6 @@ def _parse_iso_datetime_value(value: object) -> datetime | None:
         return datetime.fromisoformat(text)
     except Exception:
         return None
-
-
-def _normalize_sheet_warning_list(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [
-        token
-        for token in (
-            str(item or "").strip()
-            for item in values
-        )
-        if token
-    ]
-
-
-def _build_sheet_rows_from_order_lines(
-    *,
-    fields: list[str],
-    quantity_index: dict[tuple[str, str | None], int],
-    order_lines: list[dict[str, Any]],
-) -> tuple[list[list[str]], list[str]]:
-    rows: list[list[str]] = []
-    row_ids: list[str] = []
-    for idx, line in enumerate(order_lines):
-        if not isinstance(line, dict):
-            continue
-        row = [""] * len(fields)
-        parsed_date = _parse_date_value(line.get("date"))
-        qty_value = line.get("quantity_corrected")
-        if qty_value is None:
-            qty_value = line.get("quantity_original")
-        qty_text = _field_value_to_str(qty_value)
-        quantity_col_idx = _resolve_quantity_column_index(
-            quantity_index=quantity_index,
-            diet_key=line.get("diet_type"),
-            area_key=line.get("area_id"),
-        )
-        for col_idx, field in enumerate(fields):
-            if field == "date_mmdd":
-                row[col_idx] = parsed_date.strftime("%m/%d") if isinstance(parsed_date, date) else ""
-            elif field == "date":
-                row[col_idx] = parsed_date.isoformat() if isinstance(parsed_date, date) else ""
-            elif field == "daypart":
-                row[col_idx] = _field_value_to_str(line.get("daypart"))
-            elif field in {"menu", "menu_name"}:
-                row[col_idx] = _field_value_to_str(line.get("menu_name"))
-            elif field == "diet_type":
-                row[col_idx] = _field_value_to_str(line.get("diet_type"))
-            elif field == "area_id":
-                row[col_idx] = _field_value_to_str(line.get("area_id"))
-            elif field == "bag_type":
-                row[col_idx] = _field_value_to_str(line.get("bag_type"))
-            elif field in {"remarks", "note"}:
-                row[col_idx] = _field_value_to_str(line.get("change_note"))
-            elif quantity_col_idx is not None and col_idx == quantity_col_idx:
-                row[col_idx] = qty_text
-        if any(cell.strip() for cell in row):
-            rows.append(row)
-            row_ids.append(
-                str(line.get("id") or line.get("line_id") or f"line-{idx + 1}").strip()
-                or f"line-{idx + 1}"
-            )
-    return rows, row_ids
-
-
-def _build_ocr_review_metadata(
-    *,
-    order_id: str | None = None,
-    order_status: str | None,
-    lines_updated_at: datetime | None,
-    cached_payload: dict[str, Any] | None,
-    sheet_payload: dict[str, Any] | None = None,
-    strict_error: str | None = None,
-) -> dict[str, Any]:
-    if order_id:
-        latest_revision = _select_order_sheet_revision(
-            order_id=order_id,
-            payload=cached_payload,
-            exact_only=True,
-        )
-    else:
-        latest_revision = _select_edited_sheet_revision(cached_payload, exact_only=True)
-    latest_revision = latest_revision if isinstance(latest_revision, dict) else None
-    latest_revision_id = (
-        str(latest_revision.get("revision_id") or "").strip()
-        if latest_revision
-        else ""
-    )
-    latest_edited_at = (
-        _parse_iso_datetime_value(latest_revision.get("edited_at"))
-        if latest_revision
-        else None
-    )
-    latest_sheet_source = ""
-    if isinstance(sheet_payload, dict):
-        latest_sheet_source = str(sheet_payload.get("source") or "").strip()
-    if not latest_sheet_source and latest_revision:
-        latest_sheet_source = (
-            "edited_sheet_exact"
-            if bool(latest_revision.get("sheet_save_only"))
-            or str(latest_revision.get("sheet_save_mode") or "").strip().lower() == "exact"
-            else "edited_sheet"
-        )
-    warnings = _normalize_sheet_warning_list(
-        sheet_payload.get("warnings") if isinstance(sheet_payload, dict) else None
-    )
-    reparse_debug = cached_payload.get("_reparse_debug") if isinstance(cached_payload, dict) else None
-    last_reparse_error = (
-        str(reparse_debug.get("error") or "").strip()
-        if isinstance(reparse_debug, dict)
-        else ""
-    )
-    latest_revision_has_rows = bool(
-        latest_revision
-        and _is_saved_draft_revision(latest_revision)
-        and isinstance(latest_revision.get("rows"), list)
-    )
-    draft_newer_than_lines = False
-    if latest_revision_has_rows:
-        if lines_updated_at is None:
-            draft_newer_than_lines = True
-        elif latest_edited_at and latest_edited_at > lines_updated_at:
-            draft_newer_than_lines = True
-    auto_apply_blocked = bool(
-        latest_revision_has_rows
-        and draft_newer_than_lines
-        and (
-            latest_revision.get("auto_apply_blocked")
-            or str(latest_revision.get("reject_reason") or "").strip()
-        )
-    )
-    draft_available = bool(latest_revision_has_rows and (draft_newer_than_lines or auto_apply_blocked))
-
-    apply_blockers: list[str] = []
-    if strict_error in {
-        "facility_missing",
-        "facility_not_found",
-        "sheet_fields_not_found",
-        "sheet_fields_duplicate",
-        "sheet_template_field_invalid",
-        "sheet_quantity_columns_missing",
-    }:
-        apply_blockers.append(str(strict_error))
-
-    confirm_blockers: list[str] = []
-    if strict_error in {
-        "week_unresolved",
-        "menu_entries_missing",
-        "sheet_week_dates_incomplete",
-        "week_menu_date_mismatch",
-        "sheet_date_mismatch",
-        "sheet_canonical_mismatch",
-        "sheet_suspicious_blank_row",
-        "sheet_quantity_column_unmapped",
-    }:
-        confirm_blockers.append(str(strict_error))
-    if "sheet_weekly_menu_missing" in warnings and "sheet_weekly_menu_missing" not in confirm_blockers:
-        confirm_blockers.append("sheet_weekly_menu_missing")
-    if draft_newer_than_lines and "draft_not_applied" not in warnings:
-        warnings.append("draft_not_applied")
-
-    review_badges: list[str] = []
-    if draft_available:
-        review_badges.append("draft_ready")
-    if auto_apply_blocked:
-        review_badges.append("auto_apply_blocked")
-    if "sheet_ocr_review_required" in warnings:
-        review_badges.append("review_required")
-    if confirm_blockers:
-        review_badges.append("confirm_blocked")
-    elif last_reparse_error and not draft_available:
-        review_badges.append("ocr_failed")
-
-    if draft_available and (auto_apply_blocked or draft_newer_than_lines):
-        review_state = "draft_ready"
-    elif confirm_blockers or "sheet_ocr_review_required" in warnings:
-        review_state = "review_required"
-    elif last_reparse_error and not draft_available:
-        review_state = "ocr_failed"
-    elif str(order_status or "").strip() == "確定":
-        review_state = "confirmed"
-    elif lines_updated_at:
-        review_state = "lines_ready"
-    else:
-        review_state = "pending"
-
-    requires_human_review = apply_gate_service.raw_sheet_requires_human_review(warnings)
-
-    return {
-        "review_state": review_state,
-        "review_badges": review_badges,
-        "draft_available": draft_available,
-        "draft_newer_than_lines": draft_newer_than_lines,
-        "auto_apply_blocked": auto_apply_blocked,
-        "latest_draft_revision_id": latest_revision_id or None if draft_available else None,
-        "latest_draft_edited_at": latest_edited_at.isoformat() if latest_edited_at and draft_available else None,
-        "sheet_source": latest_sheet_source or None,
-        "last_reparse_error": last_reparse_error or None,
-        "can_apply": len(apply_blockers) == 0 and not requires_human_review,
-        "apply_blockers": apply_blockers,
-        "can_confirm": len(confirm_blockers) == 0 and not requires_human_review,
-        "confirm_blockers": confirm_blockers,
-        "confirm_warnings": warnings,
-    }
-
-
-def _attach_review_metadata_to_order_payload(
-    payload: dict[str, Any],
-    *,
-    cached_payload: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        return payload
-    metadata = _build_ocr_review_metadata(
-        order_id=str(payload.get("id") or "").strip() or None,
-        order_status=str(payload.get("status") or ""),
-        lines_updated_at=payload.get("lines_updated_at"),
-        cached_payload=cached_payload,
-    )
-    enriched = dict(payload)
-    enriched.update(metadata)
-    return enriched
 
 
 def _load_pipeline_output_with_retry(
@@ -17804,15 +17009,6 @@ def _parse_revision_datetime(value: object) -> datetime | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except Exception:
         return None
-
-
-def _is_saved_draft_revision(revision: dict[str, Any] | None) -> bool:
-    if not isinstance(revision, dict):
-        return False
-    revision_mode = str(revision.get("sheet_save_mode") or "").strip().lower()
-    if bool(revision.get("sheet_save_only")):
-        return True
-    return revision_mode in {"exact", "draft_candidate", "reparse_reject"}
 
 
 def _is_authoritative_applied_sheet_revision(revision: dict[str, Any] | None) -> bool:
@@ -20659,11 +19855,6 @@ def _resolve_reparse_llm_pdf_bytes(
     )
 
 
-def _png_data_uri(png_bytes: bytes) -> str:
-    encoded = base64.b64encode(png_bytes).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
-
-
 def review_ocr_table_with_llm(
     order_id: str,
     *,
@@ -21198,50 +20389,6 @@ def _get_ocr_output_without_legacy_edits(
                     return get_ocr_output(order_id)
                 raise
         raise
-
-
-def _build_synthetic_ocr_pages(
-    *,
-    document_uri: str,
-    payload: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, object]], dict[str, Any]] | tuple[None, None]:
-    try:
-        pdf_bytes, pdf_variant_meta = _resolve_reparse_llm_pdf_bytes(
-            document_uri=document_uri,
-            payload=payload,
-        )
-        png_bytes = render_pdf_to_png_bytes(
-            pdf_bytes=pdf_bytes,
-            dpi=220,
-            page=1,
-            # Synthetic preview is for operator guidance, not OCR quality. Cap pixel count
-            # so oversized corrected PDFs cannot OOM the request path.
-            max_pixels=18_000_000,
-        )
-    except Exception:
-        return None, None
-    markdown_text = None
-    if isinstance(payload, dict):
-        table_raw = payload.get("table_raw")
-        if isinstance(table_raw, str) and table_raw.strip():
-            markdown_text = table_raw.strip()
-    pages = [
-        {
-            "page_index": 1,
-            "markdown_uri": None,
-            "markdown_text": markdown_text,
-            "ocr_overlay_uri": None,
-            "ocr_overlay_url": _png_data_uri(png_bytes),
-            "layout_overlay_uri": None,
-            "layout_overlay_url": None,
-            "figure_uris": [],
-            "figure_urls": [],
-            "synthetic": True,
-            "synthetic_source": "pdf_render",
-            "pdf_variant_used": str(pdf_variant_meta.get("used") or "raw"),
-        }
-    ]
-    return pages, pdf_variant_meta
 
 
 def _compact_ocr_preview_tables_for_page(
@@ -23554,48 +22701,6 @@ def _overlay_payload_aux_cells_onto_sheet_rows(
     return cloned_rows
 
 
-def _overlay_payload_aux_cells_onto_sheet_row_lists(
-    *,
-    rows: list[list[str]] | None,
-    fields: list[str] | None,
-    header: list[str] | None = None,
-    payload_rows: list[list[str]] | None,
-    raw_payload: dict[str, Any] | None = None,
-    template: dict[str, Any] | None = None,
-) -> list[list[str]]:
-    normalized_rows = [
-        [_field_value_to_str(cell) for cell in row]
-        for row in (rows or [])
-        if isinstance(row, list)
-    ]
-    normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
-    normalized_payload_rows = [
-        [_field_value_to_str(cell) for cell in row]
-        for row in (payload_rows or [])
-        if isinstance(row, list)
-    ]
-    if not normalized_rows or not normalized_fields or not normalized_payload_rows:
-        return normalized_rows
-    overlaid = _overlay_payload_aux_cells_onto_sheet_rows(
-        rows=[{"values": list(row)} for row in normalized_rows],
-        fields=normalized_fields,
-        header=header,
-        payload_rows=normalized_payload_rows,
-        raw_payload=raw_payload,
-        template=template,
-    )
-    if not overlaid:
-        return normalized_rows
-    resolved_rows: list[list[str]] = []
-    for row_idx, row in enumerate(normalized_rows):
-        values = overlaid[row_idx].get("values") if row_idx < len(overlaid) else None
-        if isinstance(values, list):
-            resolved_rows.append([_field_value_to_str(cell) for cell in values])
-        else:
-            resolved_rows.append(list(row))
-    return resolved_rows
-
-
 def _project_payload_display_cells_onto_sheet_row_lists(
     *,
     rows: list[list[str]] | None,
@@ -24305,52 +23410,6 @@ def _resolve_sheet_week_id(
     return _normalize_sheet_week_value(current_week_id)
 
 
-def _build_rows_from_order_lines(
-    *,
-    order_lines: list[Any],
-    fields: list[str],
-    field_index: dict[str, int],
-) -> list[dict[str, Any]]:
-    def _line_value(line: Any, key: str):
-        if isinstance(line, dict):
-            return line.get(key)
-        return getattr(line, key, None)
-
-    date_field = next((field for field in fields if field.startswith("date")), None)
-    daypart_field = "daypart" if "daypart" in field_index else None
-    menu_field = "menu" if "menu" in field_index else ("menu_name" if "menu_name" in field_index else None)
-    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for line in order_lines:
-        line_date = _line_value(line, "date")
-        line_daypart = _line_value(line, "daypart")
-        line_menu_name = _line_value(line, "menu_name")
-        line_id = _line_value(line, "id")
-        identity = _sheet_row_identity(line_date, line_daypart, line_menu_name)
-        existing = grouped.get(identity)
-        if existing:
-            continue
-        values = [""] * len(fields)
-        if date_field:
-            values[field_index[date_field]] = _format_mmdd(line_date)
-        if daypart_field:
-            values[field_index[daypart_field]] = str(line_daypart or "")
-        if menu_field:
-            values[field_index[menu_field]] = str(line_menu_name or "")
-        grouped[identity] = {
-            "row_id": f"line__{line_id}",
-            "values": values,
-            "identity": identity,
-            "sort_key": (
-                line_date or date.min,
-                str(line_daypart or ""),
-                str(line_menu_name or ""),
-            ),
-        }
-    rows = list(grouped.values())
-    rows.sort(key=lambda item: item.get("sort_key"))
-    return rows
-
-
 def _apply_order_line_quantities_to_sheet_rows(
     *,
     rows: list[dict[str, Any]],
@@ -24581,35 +23640,6 @@ def _count_source_row_alignment_penalty_cells(
         rows=rows_by_source_index,
         quantity_index=quantity_index,
         row_indexes=mismatched_row_indexes,
-    )
-
-
-def _sheet_candidate_sort_key(
-    *,
-    mapped_count: int,
-    mapped_row_count: int,
-    mapped_column_count: int,
-    priority: int,
-    mismatch_penalty_cells: int = 0,
-    payload_match_stats: dict[str, Any] | None = None,
-) -> tuple[int, int, int, int, int, int]:
-    effective_count = int(mapped_count) - max(int(mismatch_penalty_cells), 0)
-    payload_trusted_match_score = 0
-    payload_row_index_penalty = 0
-    if isinstance(payload_match_stats, dict):
-        payload_trusted_match_score = (
-            int(payload_match_stats.get("exact", 0)) * 4
-            + int(payload_match_stats.get("partial", 0)) * 3
-            + int(payload_match_stats.get("neighbor", 0)) * 2
-        )
-        payload_row_index_penalty = int(payload_match_stats.get("row_index", 0))
-    return (
-        effective_count,
-        int(mapped_count),
-        payload_trusted_match_score,
-        -payload_row_index_penalty,
-        int(mapped_row_count) + int(mapped_column_count),
-        int(priority),
     )
 
 
@@ -25455,35 +24485,6 @@ def _parse_explicit_span_quantity_cell(value: object) -> tuple[float, int] | Non
     if dominant_count >= 2 and (dominant_count / max(total, 1)) >= 0.6:
         return dominant_qty, dominant_count
     return None
-
-
-def _apply_payload_quantities_by_row_index(
-    *,
-    rows: list[dict[str, Any]],
-    quantity_index: dict[tuple[str, str | None], int],
-    payload_rows: list[list[str]],
-) -> None:
-    if not rows or not quantity_index or not payload_rows:
-        return
-    quantity_columns = sorted(set(quantity_index.values()))
-    for row_idx, payload_row in enumerate(payload_rows):
-        if row_idx < 0 or row_idx >= len(rows):
-            continue
-        if not isinstance(payload_row, list):
-            continue
-        target = rows[row_idx]
-        values = target.get("values")
-        if not isinstance(values, list):
-            continue
-        for col_idx in quantity_columns:
-            if col_idx >= len(payload_row):
-                continue
-            qty = _parse_sheet_quantity_cell(payload_row[col_idx])
-            if qty is None:
-                continue
-            while len(values) <= col_idx:
-                values.append("")
-            values[col_idx] = _numeric_string_add(str(values[col_idx] or ""), qty)
 
 
 def _resolve_sheet_field_indexes(fields: list[str]) -> tuple[int | None, int | None, int | None]:
@@ -28516,23 +27517,6 @@ def _hakodate_projection_row_for_cell(
     return None
 
 
-def _hakodate_projection_row_from_sheet_cell(
-    sheet_cell: object,
-    *,
-    row_count: int | None = None,
-) -> tuple[int | None, bool]:
-    value = str(sheet_cell or "").strip()
-    match = re.fullmatch(r"[A-Z]+([0-9]+)", value)
-    if not match:
-        return None, False
-    row_index = int(match.group(1)) - 11
-    if row_index < 0:
-        return None, True
-    if row_count is not None and row_index >= row_count:
-        return None, True
-    return row_index, True
-
-
 def _hakodate_base_row_identity_index(
     *,
     fields: list[str],
@@ -30451,74 +29435,6 @@ def _summarize_tabular_date_blocks(
             }
         )
     return _summarize_prompt_date_blocks(prompt_rows)
-
-
-def _build_prompt_rows_from_table_rows(
-    *,
-    fields: list[str],
-    rows: list[list[str]] | None,
-    row_id_prefix: str,
-) -> list[dict[str, Any]]:
-    normalized_rows = [list(row) for row in (rows or []) if isinstance(row, list)]
-    if not fields or not normalized_rows:
-        return []
-    row_ids = [f"{row_id_prefix}-{idx + 1}" for idx in range(len(normalized_rows))]
-    return _build_llm_review_prompt_rows(fields=fields, rows=normalized_rows, row_ids=row_ids)
-
-
-def _summarize_prompt_block_coverage_gaps(
-    *,
-    baseline_prompt_rows: list[dict[str, Any]] | None,
-    first_pass_prompt_rows: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    baseline_blocks = _summarize_prompt_row_blocks(baseline_prompt_rows)
-    if not baseline_blocks or not first_pass_prompt_rows:
-        return []
-    first_pass_counts: dict[tuple[str, str], int] = {}
-    for row in first_pass_prompt_rows:
-        if not isinstance(row, dict):
-            continue
-        date_label = _normalize_prompt_block_date(
-            _prompt_row_value(row, "date_mmdd", "date", "menu_date")
-        )
-        daypart_raw = _prompt_row_value(row, "daypart")
-        daypart = _normalize_daypart_key(daypart_raw) or daypart_raw
-        key = (date_label, daypart)
-        if not any(key):
-            continue
-        first_pass_counts[key] = first_pass_counts.get(key, 0) + 1
-    coverage_gaps: list[dict[str, Any]] = []
-    for block in baseline_blocks:
-        key = (str(block.get("date_mmdd") or ""), str(block.get("daypart") or ""))
-        baseline_count = int(block.get("row_count") or 0)
-        first_pass_count = int(first_pass_counts.get(key, 0))
-        if first_pass_count >= baseline_count:
-            continue
-        entry = dict(block)
-        entry["first_pass_row_count"] = first_pass_count
-        entry["missing_structural_rows"] = max(baseline_count - first_pass_count, 0)
-        coverage_gaps.append(entry)
-    return coverage_gaps
-
-
-def _format_block_order_hint(blocks: list[dict[str, Any]] | None) -> str:
-    lines: list[str] = []
-    for block in (blocks or [])[:80]:
-        if not isinstance(block, dict):
-            continue
-        date_mmdd = str(block.get("date_mmdd") or "").strip() or "?"
-        daypart = str(block.get("daypart") or "").strip() or "?"
-        row_start = block.get("row_start")
-        row_end = block.get("row_end")
-        if isinstance(row_start, int) and isinstance(row_end, int):
-            if row_start == row_end:
-                range_text = f"row_index {row_start}"
-            else:
-                range_text = f"row_index {row_start}-{row_end}"
-        else:
-            range_text = "row_index ?"
-        lines.append(f"{date_mmdd} {daypart} -> {range_text}")
-    return "\n".join(lines)
 
 
 def _collect_candidate_blank_edge_hints(
@@ -34927,47 +33843,6 @@ def choose_critical_decision(
         "decision": chosen,
         "workflow_state": workflow,
     }, None
-
-
-def _user_facility_template_columns_for_save(columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep operator-editable column fields only.
-
-    Facility column editing is a visual/template operation. Machine fields such
-    as qty.* names, diet_type and area_id must be derived from the display label
-    in the shared config normalizer, not manually supplied or locked by the UI.
-    """
-
-    ordered = sorted(
-        [column for column in columns if isinstance(column, dict)],
-        key=lambda column: int(column.get("index") or 0),
-    )
-    sanitized: list[dict[str, Any]] = []
-    for idx, raw_column in enumerate(ordered):
-        role = str(raw_column.get("role") or "").strip().lower() or "quantity"
-        header = (
-            str(
-                raw_column.get("header")
-                or raw_column.get("display_name")
-                or raw_column.get("label")
-                or ""
-            ).strip()
-        )
-        column: dict[str, Any] = {"index": idx, "role": role}
-        if header:
-            column["header"] = header
-        source_index = raw_column.get("source_index")
-        try:
-            parsed_source_index = int(source_index) if source_index is not None else None
-        except Exception:
-            parsed_source_index = None
-        if parsed_source_index is not None and parsed_source_index >= 0:
-            column["source_index"] = parsed_source_index
-        if role == "date":
-            fmt = str(raw_column.get("format") or "").strip()
-            if fmt:
-                column["format"] = fmt
-        sanitized.append(column)
-    return sanitized
 
 
 def save_order_facility_template_columns(
