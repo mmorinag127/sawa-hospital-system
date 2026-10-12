@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -43,11 +44,31 @@ def store(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def payload():
-    return {"message_id": "authored-ingest", "pdf_uri": "fixture://metadata-only",
+def payload(tmp_path, monkeypatch):
+    from src.services import canonical_facility_store as canonical
+    from src.services import ingest_facility_selection_service as selection
+
+    data = {"message_id": "authored-ingest", "pdf_uri": "fixture://metadata-only",
         "received_at": "2026-10-07T00:00:00", "facility_hint": "authored-facility",
         "week_hint": "2026-10@2026-10-05~2026-10-11", "skip_ocr": False,
         "content_sha256": "a" * 64, "unknown": {"zero": 0, "null": None}}
+    # Reuse captured's synthetic component record for this explicitly authored week.
+    record = {"version_id": "authored-A", "valid_from": "2026-10-05", "valid_to": "2026-10-11",
+        "facility": {"facility_id": "authored-facility", "facility_name": "Authored component", "areas": None,
+            "unknown": {"zero": 0, "null": None}, "quantity_setting": 0,
+            "fax_template": {"template_id": "authored-template", "units": "normalized",
+                "table_box": [0, 0, 1, 1], "header_rows": 0,
+                "columns": [{"index": 0, "source_index": 0, "role": "quantity",
+                    "diet_type": "regular", "area_id": "X"}]}}}
+    path = tmp_path / "component-canonical.json"
+    path.write_text(json.dumps({"facilities": [{"facility_id": data["facility_hint"], "versions": [record]}]}))
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(path))
+    revision = canonical.read_snapshot().revision
+    data["facility_selection"] = selection.capture_selection(
+        data["facility_hint"], datetime.fromisoformat(data["received_at"]).date().isoformat(),
+        revision, "authored-A", data["week_hint"],
+    )
+    return data
 
 
 def intent(factory):
@@ -83,7 +104,8 @@ def test_upload_acceptance_rolls_back_upload_and_ingest(store, payload, monkeypa
     monkeypatch.setattr(delivery, "create_intent", refuse)
     with pytest.raises(RuntimeError, match="intent_storage_refused"):
         uploads.create_uploaded_pdf_from_upload(saved=saved, facility_hint=payload["facility_hint"],
-            week_hint=payload["week_hint"], facility_name=None, skip_ocr=False, source_kind="manual_upload")
+            week_hint=payload["week_hint"], facility_name=None, skip_ocr=False, source_kind="manual_upload",
+            facility_selection=payload["facility_selection"])
     with store() as session:
         assert session.execute(select(UploadedPdf)).first() is None
         assert session.get(IngestJob, payload["message_id"]) is None
@@ -227,7 +249,8 @@ def test_real_uploaded_skip_closes_original_upload_without_ocr_success(store, pa
     saved = SimpleNamespace(message_id=payload["message_id"], content_sha256=payload["content_sha256"],
         pdf_uri=payload["pdf_uri"], received_at=datetime(2026, 10, 7), original_filename="metadata-only.pdf")
     uploaded, _ = uploads.create_uploaded_pdf_from_upload(saved=saved, facility_hint=payload["facility_hint"],
-        week_hint=payload["week_hint"], facility_name=None, skip_ocr=True, source_kind="manual_upload")
+        week_hint=payload["week_hint"], facility_name=None, skip_ocr=True, source_kind="manual_upload",
+        facility_selection=payload["facility_selection"])
     delivery_id, generation, _ = intent(store)
     claim = delivery.claim_delivery(delivery_id, generation)
     terminal = {"document_id": "skipped-document", "status": "done", "result_state": "skipped"}
