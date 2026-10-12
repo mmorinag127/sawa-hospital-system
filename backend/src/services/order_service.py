@@ -12217,11 +12217,6 @@ _FORCED_REPAIR_MODES = {
     _FORCED_WEEKLY_MENU_REPAIR_MODE,
     _FORCED_FACILITY_SCHEMA_REPAIR_MODE,
 }
-_FORCED_REPAIR_WARNING_BY_MODE = {
-    _FORCED_WEEKLY_MENU_REPAIR_MODE: "forced_weekly_menu_overwrite",
-    _FORCED_FACILITY_SCHEMA_REPAIR_MODE: "forced_facility_schema_overwrite",
-}
-_FORCED_REPAIR_BLANK_QUANTITIES_WARNING = "forced_quantity_manual_entry_required"
 
 
 def _draft_payload_repair_mode(draft_payload: dict[str, Any] | None) -> str | None:
@@ -12328,44 +12323,6 @@ def _blank_quantity_values_in_sheet_payload(
     blanked = dict(sheet_payload)
     blanked["rows"] = blanked_rows
     return blanked
-
-
-def _attach_forced_repair_metadata(
-    sheet_payload: dict[str, Any] | None,
-    *,
-    repair_mode: str,
-    blank_quantities: bool = False,
-    source: str | None = None,
-) -> dict[str, Any] | None:
-    if not isinstance(sheet_payload, dict):
-        return None
-    payload = dict(sheet_payload)
-    if blank_quantities:
-        payload = _blank_quantity_values_in_sheet_payload(payload) or payload
-    warnings: list[str] = []
-    forced_warning = _FORCED_REPAIR_WARNING_BY_MODE.get(repair_mode)
-    if forced_warning and forced_warning not in warnings:
-        warnings.append(forced_warning)
-    if blank_quantities and _FORCED_REPAIR_BLANK_QUANTITIES_WARNING not in warnings:
-        warnings.append(_FORCED_REPAIR_BLANK_QUANTITIES_WARNING)
-    payload["warnings"] = warnings
-    payload["cell_issues"] = []
-    payload["issue_summary"] = {
-        "review_required_cell_count": 0,
-        "issue_codes": [],
-    }
-    payload["projection_diagnostics"] = {}
-    payload["repair_mode"] = repair_mode
-    payload["repair_metadata"] = {
-        "mode": repair_mode,
-        "blank_quantities": bool(blank_quantities),
-        "origin": "operator",
-    }
-    if source:
-        payload["source"] = source
-        payload["seed_source"] = source
-        payload["enrichment_source"] = "operator_forced_repair"
-    return payload
 
 
 def _load_latest_quantity_preservation_source_draft(
@@ -12628,7 +12585,6 @@ def _rebuild_current_sheet_for_facility_schema(
     *,
     edited_by: str,
     blank_quantities: bool = False,
-    repair_mode: str | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if _workflow_ocr_job_id.get() is None:
@@ -12677,18 +12633,6 @@ def _rebuild_current_sheet_for_facility_schema(
     if clean_preservation_source:
         draft_sheet_to_persist = dict(draft_sheet_to_persist)
         draft_sheet_to_persist["warnings"] = []
-    if repair_mode in _FORCED_REPAIR_MODES:
-        draft_sheet_to_persist = _attach_forced_repair_metadata(
-            draft_sheet_to_persist,
-            repair_mode=repair_mode,
-            blank_quantities=blank_quantities,
-            source=(
-                "forced_facility_schema"
-                if repair_mode == _FORCED_FACILITY_SCHEMA_REPAIR_MODE
-                else "forced_weekly_menu"
-            ),
-        ) or draft_sheet_to_persist
-        clean_preservation_source = False
     return _persist_sheet_draft_with_base_evidence(
         order_id=order_id,
         draft_sheet_json=draft_sheet_to_persist,
@@ -12713,196 +12657,6 @@ def _rebuild_current_sheet_for_facility_schema(
         ),
         synchronous_write_input=synchronous_write_input,
     )
-
-
-def force_overwrite_current_sheet_with_facility_schema(
-    order_id: str,
-    *,
-    blank_quantities: bool = True,
-) -> tuple[dict[str, Any] | None, str | None]:
-    synchronous_write_input = _capture_synchronous_cache_write_input(order_id)
-    if synchronous_write_input is None:
-        return None, "synchronous_input_missing"
-    order_payload = get_order_by_id(order_id)
-    if not isinstance(order_payload, dict):
-        return None, "order_not_found"
-    facility_id = str(order_payload.get("facility") or "").strip()
-    if not facility_id:
-        return None, "facility_missing"
-    _facility_config, template = _load_current_sheet_facility_template(
-        facility_id,
-        order_id=order_id,
-    )
-    if not isinstance(template, dict):
-        return None, "template_unresolved"
-    rebuilt = _rebuild_current_sheet_for_facility_schema(
-        order_id,
-        edited_by="manual-facility-schema-overwrite",
-        blank_quantities=blank_quantities,
-        repair_mode=_FORCED_FACILITY_SCHEMA_REPAIR_MODE,
-        synchronous_write_input=synchronous_write_input,
-    )
-    if not isinstance(rebuilt, dict):
-        return None, "facility_schema_rebuild_failed"
-    try:
-        workflow_state_service.refresh_workflow_state(order_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Workflow state refresh failed after forced facility schema overwrite", order_id=order_id, error=str(exc))
-    return rebuilt, None
-
-
-def force_overwrite_current_sheet_with_weekly_menu(
-    order_id: str,
-    *,
-    blank_quantities: bool = False,
-) -> tuple[dict[str, Any] | None, str | None]:
-    if _unresolved_order_week_context(order_id) is not None:
-        return None, "week_unresolved"
-    synchronous_write_input = _capture_synchronous_cache_write_input(order_id)
-    if synchronous_write_input is None:
-        return None, "synchronous_input_missing"
-    order_payload = get_order_by_id(order_id)
-    if not isinstance(order_payload, dict):
-        return None, "order_not_found"
-    facility_id = str(order_payload.get("facility") or "").strip() or None
-    if not facility_id:
-        return None, "facility_missing"
-    latest_draft_record = synchronous_write_input.get("draft")
-    latest_draft_payload = (
-        latest_draft_record.get("draft_sheet_json")
-        if isinstance(latest_draft_record, dict) and isinstance(latest_draft_record.get("draft_sheet_json"), dict)
-        else latest_draft_record
-        if isinstance(latest_draft_record, dict)
-        else None
-    )
-    sheet_payload, sheet_error = get_ocr_sheet(
-        order_id, use_saved_draft=False, evidence_run_override=synchronous_write_input["evidence"],
-    )
-    if not isinstance(sheet_payload, dict):
-        return None, sheet_error or "ocr_sheet_unavailable"
-    resolved_week_id = _resolve_current_sheet_context_week_id(
-            order_id=order_id,
-            order_payload=order_payload,
-            draft_payload=latest_draft_payload if isinstance(latest_draft_payload, dict) else None,
-            facility_id=facility_id,
-        )
-    if not resolved_week_id:
-        return None, "week_unresolved"
-    entries = deepcopy(synchronous_write_input.get("physical_menu_entries"))
-    if not isinstance(entries, list):
-        return None, "physical_menu_start_input_missing"
-    if not entries:
-        return None, "weekly_menu_missing"
-    fields = [str(field).strip() for field in (sheet_payload.get("fields") or []) if str(field).strip()]
-    configured = synchronous_write_input.get("configured_input")
-    template = (configured.get("facility") or {}).get("fax_template") if isinstance(configured, dict) else None
-    if not isinstance(template, dict):
-        return None, "template_unresolved"
-    if not fields:
-        fields, _field_index = _build_sheet_fields_and_indexes(template)
-        header = _sheet_header_from_template(fields, template)
-    else:
-        header = list(sheet_payload.get("header") or []) if isinstance(sheet_payload.get("header"), list) else []
-        if len(header) < len(fields):
-            header.extend([_field_label(field) for field in fields[len(header) :]])
-    field_index = {field: idx for idx, field in enumerate(fields)}
-    structured_rows, _ = _build_rows_from_menu_entries(
-        entries=entries,
-        fields=fields,
-        field_index=field_index,
-        header=header,
-        line_dates=set(),
-        source="weekly_menu",
-        payload_dates=None,
-        payload_row_count=0,
-        scope_anchor_date=None,
-    )
-    if not structured_rows:
-        return None, "weekly_menu_missing"
-    weekly_sheet = {
-        "order_id": order_id,
-        "facility_id": facility_id,
-        "week_id": resolved_week_id,
-        "resolved_week_id": resolved_week_id,
-        "fields": fields,
-        "header": header[: len(fields)],
-        "rows": [list(item.get("values") or []) for item in structured_rows],
-        "row_ids": [item["row_id"] for item in structured_rows],
-        "physical_menu_row_ids": [item["physical_menu_row_id"] for item in structured_rows],
-        "physical_menu_row_count": len(structured_rows),
-        "quantity_column_count": len([field for field in fields if field.startswith("qty.")]),
-        "source": "forced_weekly_menu",
-        "seed_source": "weekly_menu",
-        "enrichment_source": "operator_forced_repair",
-        "warnings": [],
-        "menu_diagnostics": _build_monthly_menu_diagnostics(
-            week_id=resolved_week_id,
-            facility_id=facility_id,
-        ),
-        "row_diagnostics": [],
-        "projection_diagnostics": {},
-        "cell_issues": [],
-        "issue_summary": {
-            "review_required_cell_count": 0,
-            "issue_codes": [],
-        },
-        "trace": {
-            "rows": _build_sheet_trace_rows(
-                rows=structured_rows,
-                fields=fields,
-                quantity_index=_build_sheet_quantity_index(fields, template=template),
-                source="forced_weekly_menu",
-                mapped_mode="forced_weekly_menu",
-                quantity_value_source=None,
-            ),
-            "mapped_mode": "forced_weekly_menu",
-        },
-    }
-    current_draft_before_rebuild = latest_draft_record
-    quantity_preservation_draft = current_draft_before_rebuild
-    current_draft_sheet = (
-        quantity_preservation_draft.get("draft_sheet_json")
-        if isinstance(quantity_preservation_draft, dict)
-        and isinstance(quantity_preservation_draft.get("draft_sheet_json"), dict)
-        else None
-    )
-    merged_weekly_sheet = _merge_current_draft_quantity_values_into_semantic_sheet(
-        current_draft_sheet, weekly_sheet, copy_shared_quantity_values=True,
-    )
-    if blank_quantities:
-        merged_weekly_sheet = _blank_quantity_values_in_sheet_payload(merged_weekly_sheet)
-    if not isinstance(merged_weekly_sheet, dict):
-        return None, "saved_draft_row_identity_missing"
-    merged_weekly_sheet = _attach_forced_repair_metadata(
-        merged_weekly_sheet,
-        repair_mode=_FORCED_WEEKLY_MENU_REPAIR_MODE,
-        blank_quantities=blank_quantities,
-        source="forced_weekly_menu",
-    ) or merged_weekly_sheet
-    evidence_run_override = synchronous_write_input["evidence"]
-    persisted = _persist_sheet_draft_with_base_evidence(
-        order_id=order_id,
-        draft_sheet_json=merged_weekly_sheet,
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[str(item).strip() for item in (merged_weekly_sheet.get("warnings") or []) if str(item).strip()],
-        edited_by="manual-weekly-menu-overwrite",
-        synchronous_write_input=synchronous_write_input,
-        evidence_run_override=evidence_run_override,
-        base_evidence_run_id_override=(
-            str((current_draft_before_rebuild or {}).get("base_evidence_run_id") or "").strip() or None
-        ),
-        base_template_resolution_id_override=(
-            str((current_draft_before_rebuild or {}).get("base_template_resolution_id") or "").strip() or None
-        ),
-    )
-    if not isinstance(persisted, dict):
-        return None, "weekly_menu_overwrite_failed"
-    try:
-        workflow_state_service.refresh_workflow_state(order_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Workflow state refresh failed after forced weekly overwrite", order_id=order_id, error=str(exc))
-    return persisted, None
 
 
 def _current_sheet_context_uses_canonical_snapshot(

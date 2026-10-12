@@ -328,7 +328,6 @@ def _legacy_workflow_boundary(monkeypatch):
         "get_candidate_draft_preview", "choose_critical_decision", "switch_draft_to_latest_evidence",
         "apply_submitted_ocr_sheet", "confirm_order", "confirm_order_authoritatively",
         "get_current_sheet_context", "save_ocr_sheet_exact", "persist_sheet_draft",
-        "force_overwrite_current_sheet_with_weekly_menu", "force_overwrite_current_sheet_with_facility_schema",
         "review_ocr_table_with_llm", "apply_patch_candidate_to_draft", "_load_pipeline_output_with_retry",
     ):
         monkeypatch.setattr(orders_api.order_service, name, fail_legacy_helper)
