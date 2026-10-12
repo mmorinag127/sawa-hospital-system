@@ -17,6 +17,8 @@ from src.services import uploaded_pdf_service as uploads
 from src.services import workflow_attempt_guard_service as guard
 from src.services import ingest_delivery_service as delivery
 from src.services import order_service
+from src.services.canonical_facility_store import read_snapshot
+from src.services.ingest_facility_selection_service import capture_selection
 from src.workers import ingest_worker as worker
 from src.workers.ingest_mail_adapter import parse_ingest_payload
 from src.api import ingest as ingest_api
@@ -32,11 +34,17 @@ def store(isolated_formal_schema, monkeypatch):
 def payload(store, tmp_path, monkeypatch):
     uri, digest = authored_sources(monkeypatch, tmp_path,
         facility_id="authored-facility", menu_date=date(2026, 10, 7))
-    return {"message_id": "authored-source", "pdf_uri": uri,
+    data = {"message_id": "authored-source", "pdf_uri": uri,
             "received_at": "2026-10-07T00:00:00", "facility_hint": "authored-facility",
             "week_hint": "2026-10@2026-10-05~2026-10-11", "skip_ocr": False,
             "content_sha256": digest,
             "unknown": {"zero": 0, "null": None}}
+    snapshot = read_snapshot()
+    data["facility_selection"] = capture_selection(
+        data["facility_hint"], date(2026, 10, 7).isoformat(),
+        snapshot.revision, "authored-original", data["week_hint"],
+    )
+    return data
 
 
 def claim(receipt, **kwargs):
@@ -80,7 +88,7 @@ def prepare_original(payload, monkeypatch, *, failed=False, attach_upload=True):
 def owned_uploaded_original(store, payload, monkeypatch, *, pending=False, failed=False, uploaded=True):
     if uploaded:
         add_upload(store, payload)
-        original_payload = {**uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload")),
+        original_payload = {**uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload"), facility_selection=payload["facility_selection"]),
                             "unknown": payload["unknown"]}
     else:
         original_payload = deepcopy(payload)
@@ -112,7 +120,7 @@ def original_ocr(store, receipt):
 def test_duplicate_does_not_replace_persisted_input(store, payload, state, monkeypatch):
     if state != "processing":
         add_upload(store, payload)
-        payload = {**uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload")), "unknown": payload["unknown"]}
+        payload = {**uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload"), facility_selection=payload["facility_selection"]), "unknown": payload["unknown"]}
     receipt = ingest.create_ingest_receipt(payload)
     if state == "processing":
         claim(receipt)
@@ -304,8 +312,11 @@ def test_exhausted_generation_cannot_execute_through_actual_claim_boundaries(sto
 def test_uploaded_exhausted_generation_stops_after_expiry_without_more_claims(store, payload, monkeypatch):
     monkeypatch.setenv("INGEST_JOB_AUTO_RECOVERY_MAX_ATTEMPTS", "1")
     add_upload(store, payload)
+    ingest.create_ingest_receipt(uploads.build_ingest_payload(
+        uploads.get_uploaded_pdf("own-upload"), facility_selection=payload["facility_selection"],
+    ))
     uploaded = uploads.claim_uploaded_pdf("own-upload", worker_instance="original-worker")
-    receipt = ingest.create_ingest_receipt(uploads.build_ingest_payload(uploaded))
+    receipt = ingest.create_ingest_receipt(uploads.build_ingest_payload(uploaded, facility_selection=payload["facility_selection"]))
     original = claim(receipt, uploaded_lease=uploaded)
     with store() as session:
         session.get(IngestJob, receipt["id"]).started_at = datetime.utcnow() - timedelta(hours=2)
@@ -373,7 +384,7 @@ def add_upload(store, payload):
 
 def test_uploaded_old_same_worker_lease_cannot_fail_complete_retry_or_link(store, payload):
     add_upload(store, payload)
-    ingest.create_ingest_receipt(uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload")))
+    ingest.create_ingest_receipt(uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload"), facility_selection=payload["facility_selection"]))
     old = uploads.claim_uploaded_pdf("own-upload", worker_instance="same-worker")
     uploads.requeue_uploaded_pdf("own-upload")
     current = uploads.claim_uploaded_pdf("own-upload", worker_instance="same-worker")
@@ -405,7 +416,7 @@ def test_uploaded_actual_wrapper_invalid_source_is_not_retry_wait(store, payload
     assert ingest.get_ingest_job_snapshot(payload["message_id"]) is None
     with store() as session:
         session.get(UploadedPdf, "own-upload").week_hint = payload["week_hint"]
-    original = uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload"))
+    original = uploads.build_ingest_payload(uploads.get_uploaded_pdf("own-upload"), facility_selection=payload["facility_selection"])
     receipt = ingest.create_ingest_receipt(original)
     prepare_original(original, monkeypatch)
     assert process_original(receipt)["result"] == "business_done"
@@ -426,6 +437,9 @@ def test_uploaded_actual_business_failure_stops_both_recovery_lanes(store, paylo
 
 def test_incomplete_upload_lease_cannot_establish_source_authority(store, payload):
     add_upload(store, payload)
+    ingest.create_ingest_receipt(uploads.build_ingest_payload(
+        uploads.get_uploaded_pdf("own-upload"), facility_selection=payload["facility_selection"],
+    ))
     own = uploads.claim_uploaded_pdf("own-upload", worker_instance="own-worker")
     incomplete = {key: value for key, value in own.items() if key != "page_count"}
     assert uploads.schedule_uploaded_pdf_retry("own-upload", lease=incomplete, worker_instance="own-worker",
