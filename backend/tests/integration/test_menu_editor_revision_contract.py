@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import sessionmaker
 
 from src import db
-from src.models.menu import MenuMaster, MenuRule
+from src.models.menu import MenuFacilityOverride, MenuMaster, MenuRule, MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
 from src.services import base_menu_service, menu_edit_revision_service, menu_rule_service
 
 
@@ -46,6 +46,10 @@ def _pre0030_metadata():
     sa.Table("base_menu_cycle_items", metadata, sa.Column("id", sa.String(), primary_key=True), sa.Column("cycle_day", sa.Integer(), nullable=False), sa.Column("daypart", sa.String()), sa.Column("category", sa.String()), sa.Column("name", sa.String(), nullable=False), sa.Column("diet_type", sa.String()), sa.Column("slot_index", sa.Integer()))
     sa.Table("menu_rules", metadata, sa.Column("id", sa.String(), primary_key=True), sa.Column("rule_type", sa.String(), nullable=False), sa.Column("match_type", sa.String()), sa.Column("menu_pattern", sa.String()), sa.Column("facility_id", sa.String()), sa.Column("daypart", sa.String()), sa.Column("category", sa.String()), sa.Column("diet_type", sa.String()), sa.Column("unit_type", sa.String()), sa.Column("qty_per_serving", sa.Float()), sa.Column("priority", sa.Integer()), sa.Column("active", sa.Boolean(), nullable=False), sa.Column("created_at", sa.DateTime(), nullable=False), sa.Column("updated_at", sa.DateTime(), nullable=False))
     MenuMaster.__table__.to_metadata(metadata)
+    MenuFacilityOverride.__table__.to_metadata(metadata)
+    MonthlyMenu.__table__.to_metadata(metadata)
+    MonthlyMenuItem.__table__.to_metadata(metadata)
+    MonthlyMenuEntry.__table__.to_metadata(metadata)
     return metadata
 
 
