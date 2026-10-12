@@ -2578,7 +2578,19 @@ def test_saved_sheet_quantity_index_does_not_let_no_fish_overwrite_regular_colum
     assert order_service._quantity_meta_from_field("qty.no_fish_regular_3f") == ("no_fish", "3F")  # noqa: SLF001
     assert order_service._quantity_meta_from_field("qty.no_meat_regular_2f") == ("no_meat", "2F")  # noqa: SLF001
 
-    quantity_index = order_service._build_sheet_quantity_index(fields, include_excluded=False)  # noqa: SLF001
+    quantity_index = order_service._build_sheet_quantity_index(  # noqa: SLF001
+        fields, include_excluded=False,
+        template={"columns": [
+            {"index": 0, "role": "date", "name": "date_mmdd"},
+            {"index": 1, "role": "daypart", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "name": "menu"},
+            {"index": 3, "role": "quantity", "name": "qty.regular_2f", "diet_type": "regular", "area_id": "2F"},
+            {"index": 4, "role": "quantity", "name": "qty.regular_3f", "diet_type": "regular", "area_id": "3F"},
+            {"index": 5, "role": "quantity", "name": "qty.soft_2f", "diet_type": "soft", "area_id": "2F"},
+            {"index": 6, "role": "quantity", "name": "qty.mixer_3f", "diet_type": "mixer", "area_id": "3F"},
+            {"index": 7, "role": "quantity", "name": "qty.no_fish_regular_3f", "diet_type": "no_fish", "area_id": "3F", "name_locked": True},
+        ]},
+    )
 
     assert quantity_index[("regular", "2F")] == 3
     assert quantity_index[("regular", "3F")] == 4
@@ -2614,7 +2626,7 @@ def test_saved_sheet_materialization_ignores_excluded_diet_columns_without_overw
             {"index": 4, "role": "quantity", "name": "qty.regular_3f", "diet_type": "regular", "area_id": "3F"},
             {"index": 5, "role": "quantity", "name": "qty.soft_2f", "diet_type": "soft", "area_id": "2F"},
             {"index": 6, "role": "quantity", "name": "qty.mixer_3f", "diet_type": "mixer", "area_id": "3F"},
-            {"index": 7, "role": "quantity", "name": "qty.no_fish_regular_3f", "diet_type": "no_fish", "area_id": "3F"},
+            {"index": 7, "role": "quantity", "name": "qty.no_fish_regular_3f", "diet_type": "no_fish", "area_id": "3F", "name_locked": True},
         ]},
     )
 
