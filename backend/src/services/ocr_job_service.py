@@ -196,7 +196,7 @@ def own_pipeline_delivery_for_output(output_reference, *, required=True, write_s
         return dict(receipt)
 
 
-def validate_own_pipeline_result(payload, output_reference, *, write_session=None):
+def validate_own_pipeline_result(payload, output_reference, *, write_session=None, allow_terminal_error=False):
     receipt = own_pipeline_delivery_for_output(output_reference, write_session=write_session)
     if not isinstance(payload, dict) or (
         payload.get("input_reference") != receipt["input_reference"]
@@ -209,15 +209,22 @@ def validate_own_pipeline_result(payload, output_reference, *, write_session=Non
         ))
     ):
         raise OwnPipelineLineageError("ocr_pipeline_result_generation_mismatch")
-    if payload.get("status") in {"done", "failed"} and payload.get("execution_owner") != {
+    status = payload.get("status")
+    stage = payload.get("stage")
+    if not isinstance(status, str) or status not in {"running", "pending", "queued", "done", "failed", "error"}:
+        raise OwnPipelineLineageError("ocr_pipeline_result_status_invalid")
+    if ((stage == "done" and status != "done")
+        or (stage in ("error", "failed") and status in {"running", "pending", "queued", "done"})):
+        raise OwnPipelineLineageError("ocr_pipeline_result_status_stage_mismatch")
+    if status in {"done", "failed", "error"} and payload.get("execution_owner") != {
         "job_id": receipt["job_id"], "order_id": receipt["order_id"],
         "workflow_attempt_id": receipt["workflow_attempt_id"], "workflow_revision": receipt["workflow_revision"],
         "nonworkflow_execution_id": receipt["execution_id"],
     }:
         raise OwnPipelineLineageError("ocr_pipeline_terminal_owner_mismatch")
-    if payload.get("status") == "failed":
+    if status == "failed" or (status == "error" and allow_terminal_error is not True):
         raise OwnPipelineLineageError("ocr_pipeline_required_stage_failed")
-    if payload.get("status") == "done":
+    if status == "done":
         stages = payload.get("canonical_stages")
         if payload.get("canonical_adoption_allowed") is not True or not isinstance(stages, dict) or set(stages) != {"classification", "roi", "correction"} or any(value not in {"passed", "disabled"} for value in stages.values()):
             raise OwnPipelineLineageError("ocr_pipeline_required_stage_failed")

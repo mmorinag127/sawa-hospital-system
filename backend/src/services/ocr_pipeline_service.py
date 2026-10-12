@@ -155,13 +155,7 @@ def get_pipeline_runtime_status() -> dict[str, Any]:
 def is_ocr_pipeline_output_pending(payload: dict[str, object] | None) -> bool:
     if not isinstance(payload, dict):
         return False
-    status = str(payload.get("status") or "").strip().lower()
-    stage = str(payload.get("stage") or "").strip().lower()
-    if status in {"running", "pending", "queued"}:
-        return True
-    if stage in {"upload", "running"}:
-        return True
-    return False
+    return payload.get("status") in ("running", "pending", "queued")
 
 
 def get_pipeline_config() -> dict[str, Any]:
@@ -323,10 +317,10 @@ def _wait_for_output(
                 payload = json.loads(data.decode("utf-8"))
                 from src.services.ocr_job_service import validate_own_pipeline_result
 
-                validate_own_pipeline_result(payload, format_gcs_uri(bucket, object_name))
-                status = str((payload or {}).get("status") or "").strip().lower()
-                stage = str((payload or {}).get("stage") or "").strip().lower()
-                if status == "done" or stage == "done":
+                validate_own_pipeline_result(payload, format_gcs_uri(bucket, object_name), allow_terminal_error=True)
+                status = payload["status"]
+                stage = payload.get("stage")
+                if status == "done":
                     elapsed = time.monotonic() - start
                     logger.info(
                         "OCR pipeline output ready bucket=%s name=%s elapsed=%.1fs status=%s stage=%s",
@@ -337,7 +331,7 @@ def _wait_for_output(
                         stage or "-",
                     )
                     return payload
-                if status in {"failed", "error"} or stage == "error":
+                if status == "error":
                     elapsed = time.monotonic() - start
                     logger.warning(
                         "OCR pipeline output terminal error bucket=%s name=%s elapsed=%.1fs status=%s stage=%s",
@@ -619,15 +613,17 @@ def run_ocr_pipeline(
                 output_reference=output_reference,
                 timeout_seconds=timeout_seconds,
             ) from exc
-        from src.services.ocr_job_service import validate_own_pipeline_result
-        validate_own_pipeline_result(output, output_reference)
-        save_pipeline_success(job_id, output_reference)
+        from src.services.ocr_job_service import OwnPipelineLineageError, validate_own_pipeline_result
+        validate_own_pipeline_result(output, output_reference, allow_terminal_error=True)
+        if output["status"] == "error":
+            save_pipeline_error(job_id, str(output.get("error") or "own_pipeline_failed"))
+        elif output["status"] == "done":
+            save_pipeline_success(job_id, output_reference)
+        else:
+            raise OwnPipelineLineageError("ocr_pipeline_required_stage_failed")
         if trigger_error_message and isinstance(output, dict):
             output = dict(output)
             output.setdefault("trigger_error", trigger_error_message)
-        from src.services.ocr_job_service import validate_own_pipeline_result
-
-        validate_own_pipeline_result(output, output_reference)
         return output
     except Exception as exc:  # noqa: BLE001
         try:
