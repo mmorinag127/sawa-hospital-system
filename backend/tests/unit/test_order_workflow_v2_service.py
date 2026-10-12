@@ -625,7 +625,7 @@ def test_ensure_ocr_prerequisites_blocks_when_weekly_menu_base_sheet_missing(mon
 def test_select_ocr_result_requires_confirmed_context() -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 
-    workflow, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    workflow, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
     assert workflow is None
     assert error == "context_not_confirmed"
@@ -1199,6 +1199,7 @@ def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -1364,9 +1365,10 @@ def test_sheet_source_uses_only_selected_ocr_payload(monkeypatch) -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1, evidence_id_2)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2, expected_revision=_current_workflow_revision(order_id))
     with session_scope() as session:
         evidence_1 = session.get(OrderOcrEvidenceRun, evidence_id_1)
         evidence_2 = session.get(OrderOcrEvidenceRun, evidence_id_2)
@@ -1418,9 +1420,10 @@ def test_sheet_source_blocks_monthly_menu_missing_before_projection(monkeypatch)
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
     def fake_assignment(**_kwargs):
         return {"metrics": {}, "blockers": [], "warnings": [], "sheet_output": {"cells": {}}}
@@ -1520,13 +1523,15 @@ def test_stale_saved_sheet_template_mismatch_keeps_selected_ocr_rebuild_path(mon
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     template_version_id = _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"fields": ["date", "menu_name", "qty.regular_x"], "rows": [["04/26", "A", "1"]]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert template_version_id
@@ -1623,10 +1628,11 @@ def test_expanded_cell_copy_mode_override_is_passed_to_sheet_projection(monkeypa
         facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
-    changed, error = order_workflow_v2_service.set_expanded_cell_copy_mode(order_id, "enabled")
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
+    changed, error = order_workflow_v2_service.set_expanded_cell_copy_mode(order_id, "enabled", expected_revision=_current_workflow_revision(order_id))
     assert error is None
     assert changed["expanded_cell_copy_mode"] == "enabled"
 
@@ -1679,13 +1685,15 @@ def test_facility_template_columns_save_is_disabled_and_keeps_downstream(monkeyp
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00016",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1, evidence_id_2)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu": "A", "qty": "1"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
@@ -1709,7 +1717,7 @@ def test_facility_template_columns_save_is_disabled_and_keeps_downstream(monkeyp
     )
     monkeypatch.setattr(order_workflow_v2_service, "_get_order_service_module", lambda: fake_order_service)
 
-    result, error = order_workflow_v2_service.save_facility_template_columns(order_id, columns)
+    result, error = order_workflow_v2_service.save_facility_template_columns(order_id, columns, expected_revision=_current_workflow_revision(order_id))
 
     assert result == {"error": "legacy_facility_template_column_override_disabled"}
     assert error == "legacy_facility_template_column_override_disabled"
@@ -1791,9 +1799,10 @@ def test_selecting_ocr_result_clears_downstream_sheet() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1, evidence_id_2)
-    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     assert error is None
     assert selected["selected_ocr_result_id"] == evidence_id_1
 
@@ -1801,12 +1810,13 @@ def test_selecting_ocr_result_clears_downstream_sheet() -> None:
         order_id=order_id,
         sheet={"rows": [{"menu": "A", "qty": "1"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert saved["workflow"]["state"] == "sheet_saved"
     first_saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
 
-    switched, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2)
+    switched, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2, expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     assert switched["selected_ocr_result_id"] == evidence_id_2
@@ -1823,18 +1833,20 @@ def test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu": "A", "qty": "1"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
 
-    workflow, error = order_workflow_v2_service.delete_ocr_result(order_id, evidence_id_1)
+    workflow, error = order_workflow_v2_service.delete_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     assert workflow["selected_ocr_result_id"] is None
@@ -1854,22 +1866,24 @@ def test_changing_selected_ocr_deletes_confirmed_snapshot_too(monkeypatch) -> No
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1, evidence_id_2)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
-    order_workflow_v2_service.run_bagging(order_id)
-    order_workflow_v2_service.confirm_bagging(order_id)
-    order_workflow_v2_service.prepare_output_review(order_id)
-    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
+    order_workflow_v2_service.confirm_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
+    order_workflow_v2_service.prepare_output_review(order_id, expected_revision=_current_workflow_revision(order_id))
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
     assert error is None
     snapshot_id = confirmed["confirmed_snapshot_id"]
 
-    switched, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2)
+    switched, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_2, expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     assert switched["selected_ocr_result_id"] == evidence_id_2
@@ -1888,20 +1902,22 @@ def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch) -> 
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
-    order_workflow_v2_service.run_bagging(order_id)
-    order_workflow_v2_service.confirm_bagging(order_id)
-    order_workflow_v2_service.prepare_output_review(order_id)
-    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
+    order_workflow_v2_service.confirm_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
+    order_workflow_v2_service.prepare_output_review(order_id, expected_revision=_current_workflow_revision(order_id))
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
     assert error is None
     snapshot_id = confirmed["confirmed_snapshot_id"]
 
@@ -1911,6 +1927,7 @@ def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch) -> 
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -1934,12 +1951,14 @@ def test_sheet_cannot_be_saved_without_selected_ocr() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": []},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert saved is None
@@ -1954,9 +1973,10 @@ def test_workflow_v2_does_not_use_order_lines_as_sheet_source() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
     sheet, error = order_workflow_v2_service.get_saved_sheet(order_id)
 
@@ -1976,13 +1996,15 @@ def test_inspection_is_read_only_projection_of_current_lineage() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu": "A", "qty": "1"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
@@ -2007,11 +2029,12 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
-    missing, error = order_workflow_v2_service.run_bagging(order_id)
+    missing, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
     assert missing is None
     assert error == "saved_sheet_required"
 
@@ -2024,11 +2047,12 @@ def test_bagging_requires_saved_sheet_and_uses_saved_sheet_as_source(monkeypatch
             ]
         },
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
 
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     assert bagging["workflow"]["state"] == "output_review"
@@ -2323,9 +2347,10 @@ def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) 
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={
@@ -2348,14 +2373,15 @@ def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch) 
             ],
         },
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     assert "anomaly_review" not in bagging["bagging_result"]
 
-    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(order_id, use_llm=False)
+    anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(order_id, use_llm=False, expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     review = anomaly["anomaly_review"]
@@ -2381,9 +2407,10 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_and_persists_che
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
     sheet = {
         "fields": ["date", "daypart", "menu", "regular", "soft"],
@@ -2400,6 +2427,7 @@ def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_and_persists_che
         order_id,
         sheet=sheet,
         use_llm=False,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2430,9 +2458,10 @@ def test_workflow_v2_save_sheet_requires_completed_pre_save_checks(monkeypatch) 
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     sheet = {
         "fields": ["date", "daypart", "menu", "regular", "soft"],
         "header": ["日付", "区分", "献立", "常食", "軟菜"],
@@ -2447,6 +2476,7 @@ def test_workflow_v2_save_sheet_requires_completed_pre_save_checks(monkeypatch) 
         sheet=sheet,
         edited_by="test",
         require_pre_save_checks=True,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert saved is None
@@ -2456,11 +2486,13 @@ def test_workflow_v2_save_sheet_requires_completed_pre_save_checks(monkeypatch) 
         order_id,
         sheet=sheet,
         use_llm=False,
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     sheet_review, error = order_workflow_v2_service.confirm_sheet_review(
         order_id=order_id,
         sheet=sheet,
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     sheet_hash = order_workflow_v2_service._stable_json_hash(sheet)
@@ -2503,6 +2535,7 @@ def test_workflow_v2_save_sheet_requires_completed_pre_save_checks(monkeypatch) 
         sheet=changed_sheet,
         edited_by="test",
         require_pre_save_checks=True,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2520,9 +2553,10 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) 
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     sheet = {
         "fields": ["date", "daypart", "menu", "regular", "soft"],
         "header": ["日付", "区分", "献立", "常食", "軟菜"],
@@ -2537,6 +2571,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) 
         order_id,
         sheet=sheet,
         use_llm=False,
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     warning = next(item for item in anomaly["anomaly_review"]["warnings"] if item["type"] == "high_outlier")
@@ -2545,6 +2580,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_persists_review(monkeypatch) 
         order_id=order_id,
         sheet=sheet,
         warning=warning,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2583,9 +2619,10 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_keeps_review_after_sheet_edit
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     sheet = {
         "fields": ["date", "daypart", "menu", "regular", "soft"],
         "header": ["日付", "区分", "献立", "常食", "軟菜"],
@@ -2600,6 +2637,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_keeps_review_after_sheet_edit
         order_id,
         sheet=sheet,
         use_llm=False,
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     warning = next(item for item in anomaly["anomaly_review"]["warnings"] if item["type"] == "high_outlier")
@@ -2611,6 +2649,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_keeps_review_after_sheet_edit
         order_id=order_id,
         sheet=changed_sheet,
         warning=warning,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2634,9 +2673,10 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_matches_uncelled_llm_warning(
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     sheet = {
         "fields": ["date", "daypart", "menu", "regular"],
         "header": ["日付", "区分", "献立", "常食"],
@@ -2686,6 +2726,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_matches_uncelled_llm_warning(
         order_id=order_id,
         sheet=sheet,
         warning=warning,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2713,9 +2754,10 @@ def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatc
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
     anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
         order_id,
@@ -2738,6 +2780,7 @@ def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatc
             ],
         },
         use_llm=True,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2759,6 +2802,7 @@ def test_workflow_v2_sheet_anomaly_review_always_returns_suggestions() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     anomaly, error = order_workflow_v2_service.run_sheet_anomaly_review(
@@ -2774,6 +2818,7 @@ def test_workflow_v2_sheet_anomaly_review_always_returns_suggestions() -> None:
             ],
         },
         use_llm=False,
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -2791,18 +2836,20 @@ def test_bagging_blocks_when_saved_sheet_cannot_materialize(monkeypatch) -> None
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"test_materialization_error": True, "rows": [{"menu_name": "A", "regular": "1"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert saved is not None
 
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
 
     assert bagging is None
     assert error == "test_materialization_error"
@@ -2817,25 +2864,27 @@ def test_step5_confirm_requires_output_review_and_writes_confirmed_snapshot(monk
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
-    blocked, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    blocked, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
     assert blocked is None
     assert error == "output_review_required"
 
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
     assert error is None
     bagging_result_id = bagging["bagging_result"]["bagging_result_id"]
     assert bagging["workflow"]["state"] == "output_review"
     assert bagging["output_bundle"]["source_bagging_result_id"] == bagging_result_id
 
-    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
 
     assert error is None
     assert confirmed["workflow"]["state"] == "confirmed"
@@ -2868,15 +2917,17 @@ def test_step4_final_confirm_blocks_materialization_digest_drift(monkeypatch) ->
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
     assert error is None
     assert bagging["output_bundle"]["materialization_digest"]
 
@@ -2887,7 +2938,7 @@ def test_step4_final_confirm_blocks_materialization_digest_drift(monkeypatch) ->
         output_bundle["materialization_digest"] = "stale-digest"
         output_artifact.payload_json = output_bundle
 
-    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
 
     assert confirmed is None
     assert error == "output_bundle_materialization_mismatch"
@@ -3144,16 +3195,18 @@ def test_output_source_mismatch_projects_to_step5_rebuild(monkeypatch) -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
-    order_workflow_v2_service.run_bagging(order_id)
-    order_workflow_v2_service.confirm_bagging(order_id)
+    order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
+    order_workflow_v2_service.confirm_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
 
     with session_scope() as session:
         row = session.get(OrderWorkflowState, order_id)
@@ -3182,15 +3235,17 @@ def test_output_review_blocks_when_output_bundle_artifact_row_is_missing(monkeyp
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
-    bagging, error = order_workflow_v2_service.run_bagging(order_id)
+    bagging, error = order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))
     assert error is None
 
     with session_scope() as session:
@@ -3215,17 +3270,19 @@ def test_saving_sheet_after_final_confirm_invalidates_snapshot_and_lines(monkeyp
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
-    assert order_workflow_v2_service.run_bagging(order_id)[1] is None
-    assert order_workflow_v2_service.confirm_bagging(order_id)[1] is None
-    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester")
+    assert order_workflow_v2_service.run_bagging(order_id, expected_revision=_current_workflow_revision(order_id))[1] is None
+    assert order_workflow_v2_service.confirm_bagging(order_id, expected_revision=_current_workflow_revision(order_id))[1] is None
+    confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
     assert error is None
     snapshot_id = confirmed["confirmed_snapshot_id"]
 
@@ -3233,6 +3290,7 @@ def test_saving_sheet_after_final_confirm_invalidates_snapshot_and_lines(monkeyp
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "71"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
 
     assert error is None
@@ -3256,6 +3314,7 @@ def test_get_workflow_projects_blocker_for_inconsistent_confirmed_lineage() -> N
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert workflow is not None
@@ -3297,17 +3356,19 @@ def test_get_workflow_projects_legacy_state_from_v2_lineage() -> None:
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert workflow is not None
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
-    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1)
+    selected, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
     assert error is None
     assert selected["state"] == "ocr_selected"
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
         sheet={"rows": [{"menu_name": "大豆のトマト煮", "regular": "70"}]},
         edited_by="test",
+        expected_revision=_current_workflow_revision(order_id),
     )
     assert error is None
     assert saved["workflow"]["state"] == "sheet_saved"
