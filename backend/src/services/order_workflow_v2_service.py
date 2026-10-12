@@ -898,7 +898,9 @@ def _evidence_selection_blocker(row: OrderOcrEvidenceRun) -> str | None:
     return None
 
 
-def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | None) -> None:
+def _apply_template_lineage_blocker(
+    workflow: OrderWorkflowState, error: str | None, *, invalidate_sources: bool = True,
+) -> None:
     normalized_error = _normalize_id(error)
     if not normalized_error:
         return
@@ -934,9 +936,10 @@ def _apply_template_lineage_blocker(workflow: OrderWorkflowState, error: str | N
         workflow.state = normalized_error
         workflow.headline = normalized_error
         workflow.primary_action = "confirm_context"
-    workflow.evidence_run_id = None
-    workflow.draft_id = None
-    workflow.confirmed_snapshot_id = None
+    if invalidate_sources:
+        workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
     workflow.blockers_json = [normalized_error]
     workflow.warnings_json = []
     workflow.last_transition_at = _now()
@@ -2185,11 +2188,11 @@ def mark_ocr_run_queued(
             return _serialize_workflow(workflow), WORKFLOW_REVISION_CONFLICT
         meta = _workflow_meta(workflow)
 
-        def finalize_queue_blocker(blocker: str, job: OcrJob | None = None, *, prerequisite: bool = False) -> tuple[dict[str, Any], str | None]:
+        def finalize_queue_blocker(blocker: str, job: OcrJob | None = None, *, prerequisite: bool = False, invalidate_sources: bool = True) -> tuple[dict[str, Any], str | None]:
             if prerequisite:
                 workflow.state = "ocr_blocked"
             else:
-                _apply_template_lineage_blocker(workflow, blocker)
+                _apply_template_lineage_blocker(workflow, blocker, invalidate_sources=invalidate_sources)
             _write_workflow_meta(workflow, meta)
             revision_error = _finalize_workflow_mutation(session, workflow)
             if revision_error:
@@ -2204,6 +2207,12 @@ def mark_ocr_run_queued(
                 job.error_message = blocker
                 session.flush()
             return _serialize_workflow(workflow, ocr_job=job), blocker
+
+        ocr_job, owner_error = ocr_job_service.lock_workflow_reparse_job(
+            session, job_id=normalized_job_id, order_id=order.id,
+        )
+        if owner_error:
+            return finalize_queue_blocker(owner_error, invalidate_sources=False)
 
         if not _workflow_meta_has_confirmed_context(meta):
             return None, "context_not_confirmed"
@@ -2232,7 +2241,6 @@ def mark_ocr_run_queued(
         )
         if prerequisite_blocker:
             return finalize_queue_blocker(prerequisite_blocker, prerequisite=True)
-        ocr_job = session.get(OcrJob, normalized_job_id)
         workflow_attempt_id = _new_id("OCA") if input_reference is not None else None
         delivery_request_identity: dict[str, Any] | None = None
         if input_reference is not None:

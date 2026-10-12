@@ -1097,24 +1097,65 @@ def test_select_ocr_result_blocks_legacy_cache_backfill(monkeypatch) -> None:
     assert selected["selected_ocr_result_id"] is None
 
 
-def test_ocr_job_order_mismatch_blocks_queue(monkeypatch) -> None:
-    order_id, _, _ = _create_order_with_evidence()
-    other_order_id = _id("ORDother")
-    order_workflow_v2_service.confirm_context(
+def test_ocr_job_order_mismatch_blocks_queue(monkeypatch, authored_april_context, isolated_formal_schema, record_property) -> None:
+    from tests.integration.test_workflow_ocr_enqueue_transaction import _database_snapshot
+
+    order_id, evidence_id, _ = _create_order_with_evidence()
+    other_order_id, _, _ = _create_order_with_evidence()
+    context, context_error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
         facility_id="FAC00001",
         week_start="2026-04-26",
         week_end="2026-04-30",
         template_id="template-fac00001",
+        expected_revision=0,
     )
-    _install_fake_ocr_prerequisite(monkeypatch)
+    assert context_error is None
+    assert context["state"] == "context_confirmed"
     _add_ocr_job(order_id, "OCR-job-mismatch", job_order_id=other_order_id)
+    with session_scope() as session:
+        session.add(OrderSheetDraft(id="owner-guard-draft", order_id=order_id, base_evidence_run_id=evidence_id,
+                    draft_sheet_json={"rows": []}, edited_by="component-operator"))
+        session.add(OrderWorkflowState(order_id=other_order_id, state="uploaded"))
+        session.flush()
+        workflow = session.get(OrderWorkflowState, order_id)
+        workflow.evidence_run_id, workflow.draft_id = evidence_id, "owner-guard-draft"
+        session.flush()
+        revision = workflow.revision
+        input_reference = session.get(Order, order_id).document_uri
 
-    queued, error = order_workflow_v2_service.mark_ocr_run_queued(order_id, "OCR-job-mismatch")
+    def unexpected(*args, **kwargs):
+        pytest.fail("foreign job must stop before prerequisites, capture, or downstream invalidation")
+
+    for name in ("_refresh_ocr_prerequisite_state", "capture_reparse_read_input", "capture_selected_pdf_receipt", "_delete_downstream_after_ocr_change"):
+        monkeypatch.setattr(order_workflow_v2_service, name, unexpected)
+    before = _database_snapshot(isolated_formal_schema)
+    queued, error = order_workflow_v2_service.mark_ocr_run_queued(
+        order_id, "OCR-job-mismatch", input_reference=input_reference,
+        request_mode="ocr_rerun", expected_revision=revision,
+    )
+    after = _database_snapshot(isolated_formal_schema)
+    record_property("sql_before", json.dumps(before, default=str, sort_keys=True))
+    record_property("sql_after", json.dumps(after, default=str, sort_keys=True))
 
     assert queued is not None
     assert error == "ocr_job_order_mismatch"
     assert queued["state"] == "ocr_job_order_mismatch"
+    assert queued["ocr_job"] is None
+    assert queued["selected_ocr_result_id"] == evidence_id
+    assert queued["saved_sheet_id"] == "owner-guard-draft"
+    assert queued["revision"] == revision + 1
+    assert queued["blockers"] == ["ocr_job_order_mismatch"]
+    for table, rows in before.items():
+        if table != "order_workflow_states":
+            assert after[table] == rows
+            continue
+        for previous, current in zip(rows, after[table], strict=True):
+            if previous["order_id"] != order_id:
+                assert current == previous
+            else:
+                allowed = {"state", "headline", "primary_action", "blockers_json", "warnings_json", "last_transition_at", "revision"}
+                assert {k: v for k, v in current.items() if k not in allowed} == {k: v for k, v in previous.items() if k not in allowed}
 
 
 def test_workflow_serializes_effective_template_for_legacy_meta(monkeypatch) -> None:

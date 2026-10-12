@@ -618,6 +618,21 @@ def create_job(
         return _job_to_dict(job), True
 
 
+def lock_workflow_reparse_job(
+    session: Any,
+    *,
+    job_id: str,
+    order_id: str,
+) -> tuple[OcrJob | None, str | None]:
+    """Lock an existing reservation without adopting or exposing another owner."""
+    job = session.execute(
+        select(OcrJob).where(OcrJob.id == job_id).with_for_update()
+    ).scalar_one_or_none()
+    if job is not None and (not job.order_id or job.order_id != order_id):
+        return None, "ocr_job_order_mismatch"
+    return job, None
+
+
 def reserve_workflow_reparse_job(
     session: Any,
     *,
@@ -636,9 +651,9 @@ def reserve_workflow_reparse_job(
     """
     if stale_action not in {"retry", "wait"}:
         return None, "stale_action_invalid"
-    existing = session.execute(
-        select(OcrJob).where(OcrJob.id == job_id).with_for_update()
-    ).scalar_one_or_none()
+    existing, owner_error = lock_workflow_reparse_job(session, job_id=job_id, order_id=order_id)
+    if owner_error:
+        return None, owner_error
     serialized = _job_to_dict(existing) if existing is not None else None
     active = bool(
         is_order_reparse_job(serialized, order_id)

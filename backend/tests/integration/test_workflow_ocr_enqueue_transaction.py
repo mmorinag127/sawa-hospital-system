@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
+import json
 
 import pytest
 import sqlalchemy as sa
@@ -59,6 +61,93 @@ def _metrics() -> dict:
         "result_state": "processing",
         "workflow_completion_revision": 8,
     }
+
+
+def _database_snapshot(database):
+    with database.connect() as connection:
+        return {table.name: [dict(row) for row in connection.execute(
+            sa.select(table).order_by(*table.primary_key.columns)).mappings()]
+            for table in db.Base.metadata.sorted_tables}
+
+
+@pytest.mark.parametrize("owner", ["ORD-foreign", None, ""], ids=["foreign", "null", "blank"])
+@pytest.mark.parametrize("status,age,stale_action,force", [
+    ("running", 0, "retry", False),
+    ("running", 2, "wait", False),
+    ("running", 2, "retry", False),
+    ("failed", 2, "retry", False),
+    ("running", 0, "retry", True),
+], ids=["active", "stale-wait", "stale-retry", "terminal", "force"])
+def test_reservation_refuses_foreign_or_unknown_owner_without_any_write(workflow_database, record_property, owner, status, age, stale_action, force):
+    """Stored legacy rows, including an invalid blank FK, are not adoptable jobs."""
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from src.models.order_sheet_draft import OrderSheetDraft
+
+    database, factory = workflow_database
+    for order_id in ("ORD-requester", "ORD-foreign"):
+        _add_order_and_workflow(factory, order_id=order_id)
+    recorded_at = datetime.utcnow() - timedelta(hours=age)
+    with factory.begin() as session:
+        session.add(OrderOcrEvidenceRun(id="foreign-evidence", order_id="ORD-foreign", schema_version="component",
+                    status="diagnostic_only", payload_json={"original": "diagnostics"}, artifact_manifest_json={"owned": "foreign-artifact"},
+                    artifact_digest=hashlib.sha256(json.dumps({"original": "diagnostics"}, sort_keys=True).encode()).hexdigest()))
+        session.flush()
+        session.add(OrderSheetDraft(id="foreign-draft", order_id="ORD-foreign", base_evidence_run_id="foreign-evidence",
+                    draft_sheet_json={"original": "stored draft"}, edited_by="original-operator"))
+        session.add(OrderOcrCache(order_id="ORD-foreign", payload={"original": "cache"}))
+        session.flush()
+        workflow = session.get(OrderWorkflowState, "ORD-foreign")
+        workflow.evidence_run_id, workflow.draft_id = "foreign-evidence", "foreign-draft"
+        session.add(OcrJob(id="OCR-owner-guard", order_id=owner, status=status,
+                    input_reference="component-only:foreign-input", output_reference="component-only:foreign-output",
+                    input_artifact_digest="original-diagnostic-digest", error_message="original error", template_id="original-template",
+                    metrics={"request_mode": "ocr_rerun", "stage_updated_at": recorded_at.isoformat(), "original": {"diagnostic": True}},
+                    created_at=recorded_at, updated_at=recorded_at))
+    before = _database_snapshot(database)
+    with factory.begin() as session:
+        job, error = ocr_job_service.reserve_workflow_reparse_job(
+            session, job_id="OCR-owner-guard", order_id="ORD-requester",
+            input_reference="component-only:requested-input", template_version_id=None,
+            metrics=_metrics(), stale_action=stale_action, force=force,
+        )
+    after = _database_snapshot(database)
+    record_property("sql_before", json.dumps(before, default=str, sort_keys=True))
+    record_property("sql_after", json.dumps(after, default=str, sort_keys=True))
+    assert job is None
+    assert error == "ocr_job_order_mismatch"
+    assert after == before
+
+
+@pytest.mark.parametrize("status,force,expected_error", [
+    ("running", False, "ocr_rerun_in_progress"),
+    ("running", True, None),
+    ("failed", False, None),
+], ids=["active", "force", "terminal"])
+def test_same_owner_reservation_keeps_existing_retry_policy(workflow_database, status, force, expected_error):
+    database, factory = workflow_database
+    _add_order_and_workflow(factory, order_id="ORD-enqueue")
+    with factory.begin() as session:
+        session.add(OcrJob(id="OCR-ORD-enqueue", order_id="ORD-enqueue", status=status,
+                          input_reference="component-only:original", metrics=_metrics()))
+    before = _database_snapshot(database)
+    with factory.begin() as session:
+        job, error = ocr_job_service.reserve_workflow_reparse_job(
+            session, job_id="OCR-ORD-enqueue", order_id="ORD-enqueue",
+            input_reference="component-only:retry", template_version_id=None,
+            metrics=_metrics(), stale_action="retry", force=force,
+        )
+        assert error == expected_error
+        if expected_error:
+            assert job is None
+        else:
+            assert job.order_id == "ORD-enqueue"
+            assert job.status == "running"
+            assert job.input_reference == "component-only:retry"
+    after = _database_snapshot(database)
+    if expected_error:
+        assert after == before
+    else:
+        assert {k: v for k, v in after.items() if k != "ocr_jobs"} == {k: v for k, v in before.items() if k != "ocr_jobs"}
 
 
 def test_reservation_and_workflow_update_commit_together(workflow_database):
