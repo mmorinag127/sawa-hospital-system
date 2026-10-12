@@ -863,7 +863,8 @@ def test_step4_http_enrichment_error_creates_no_artifacts(readonly_database, mon
         assert snapshot(readonly_database) == before
 
 
-def test_explicit_ingest_projection_read_and_menu_save_preserve_source_lines(readonly_database):
+@pytest.fixture
+def explicit_registration(readonly_database):
     from datetime import datetime
     from src.workers.ingest_mail_adapter import IngestEmailPayload
     seed(entries_only=True)
@@ -874,12 +875,26 @@ def test_explicit_ingest_projection_read_and_menu_save_preserve_source_lines(rea
                                  received_at=datetime(2099, 6, 7, 9), week_hint=canonical_inputs.WEEK,
                                  facility_hint=canonical_inputs.FACILITY,
                                  facility_selection=canonical_inputs.lineage.resolve(None, canonical_inputs.FACILITY, canonical_inputs.DAY)[0])
-    registered = order_service.create_order_from_ingest(payload, lines=[dict(source)])
+    return payload, source
+
+
+def test_explicit_stored_projection_read_and_menu_save_preserve_source_lines(readonly_database, explicit_registration):
+    payload, source = explicit_registration
+    with db.session_scope() as session:
+        session.add(Facility(id=payload.facility_hint, name=payload.facility_selection["facility_name"]))
+        session.flush()
+        _, version = canonical_inputs.lineage.materialize(session, payload.facility_selection)
+        order = Order(id=payload.message_id, message_id=payload.message_id, document_uri=payload.pdf_uri,
+                      received_at=payload.received_at, facility_code=payload.facility_hint,
+                      week_code=payload.week_hint, template_version_id=version.id, status="要確認")
+        session.add(order)
+        session.flush()
+        session.add(OrderLine(id=source["line_id"], order_id=order.id,
+                              **{**source, "date": date.fromisoformat(source["date"])}))
+    registered = order_service.get_order_by_id(payload.message_id, allow_unresolved_menu_amount=True)
     assert registered["menu_amount_resolution"]["blocker"] == "menu_amount_unresolved"
     for key, value in source.items():
         assert registered["lines"][0][key] == value
-    duplicate = order_service.create_order_from_ingest(payload, lines=[dict(source)])
-    assert duplicate["id"] == registered["id"]
     with TestClient(app) as client:
         response = client.get("/orders/" + registered["id"])
         assert response.status_code == 200
@@ -897,9 +912,19 @@ def test_explicit_ingest_projection_read_and_menu_save_preserve_source_lines(rea
         order = session.get(Order, registered["id"])
         assert order_serialization_service.candidate_menu_amount_resolution(order, adopted)["status"] == "resolved"
     before = snapshot(readonly_database)
-    _, error = order_workflow_v2_service.run_bagging(registered["id"])
+    _, error = order_workflow_v2_service.run_bagging(registered["id"], expected_revision=0)
     assert error == "saved_sheet_required"
     assert snapshot(readonly_database) == before
+
+
+def test_explicit_ingest_line_injection_is_refused_without_writes(readonly_database, explicit_registration):
+    payload, source = explicit_registration
+    before = snapshot(readonly_database)
+    with pytest.raises(ValueError, match="^first_pass_mapping_policy_missing$"):
+        order_service.create_order_from_ingest(payload, lines=[dict(source)])
+    assert snapshot(readonly_database) == before
+    # Direct injected lines have no first-pass receipt. Their former duplicate
+    # acceptance is not proved by seeding an already stored operator correction.
 
 
 def test_month_only_week_stays_unselected_with_menu_date_options(readonly_database):

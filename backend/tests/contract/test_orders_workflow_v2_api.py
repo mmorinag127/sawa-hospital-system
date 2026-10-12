@@ -1,3 +1,5 @@
+"""HTTP/service-boundary contracts; enqueue spies are not persisted OCR proof."""
+
 from __future__ import annotations
 
 import pathlib
@@ -17,7 +19,8 @@ def test_workflow_v2_facility_template_columns_is_the_only_write_endpoint(monkey
     client = TestClient(app)
     captured: dict[str, object] = {}
 
-    def fake_save(order_id: str, columns: list[dict]) -> tuple[dict, None]:
+    def fake_save(order_id: str, columns: list[dict], *, expected_revision: int) -> tuple[dict, None]:
+        assert expected_revision == 7
         captured["order_id"] = order_id
         captured["columns"] = columns
         return {
@@ -33,6 +36,7 @@ def test_workflow_v2_facility_template_columns_is_the_only_write_endpoint(monkey
 
     ok = client.put(
         "/orders/ORDcontract/workflow-v2/facility-template-columns",
+        headers={"If-Match": "7"},
         json={"columns": [{"role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"}]},
     )
     assert ok.status_code == 200
@@ -51,7 +55,8 @@ def test_workflow_v2_facility_template_columns_is_the_only_write_endpoint(monkey
 def test_workflow_v2_facility_template_columns_validation_error_is_actionable(monkeypatch) -> None:
     client = TestClient(app)
 
-    def fake_save(order_id: str, columns: list[dict]) -> tuple[dict, str]:
+    def fake_save(order_id: str, columns: list[dict], *, expected_revision: int) -> tuple[dict, str]:
+        assert expected_revision == 7
         _ = order_id, columns
         return {
             "validation": {
@@ -64,6 +69,7 @@ def test_workflow_v2_facility_template_columns_validation_error_is_actionable(mo
 
     res = client.put(
         "/orders/ORDcontract/workflow-v2/facility-template-columns",
+        headers={"If-Match": "7"},
         json={"columns": [{"role": "quantity", "header": "常食"}]},
     )
 
@@ -76,7 +82,8 @@ def test_workflow_v2_facility_template_columns_validation_error_is_actionable(mo
 def test_workflow_v2_ocr_run_blocks_unresolved_template_before_job_enqueue(monkeypatch) -> None:
     client = TestClient(app)
 
-    def fake_prerequisites(order_id: str) -> tuple[dict, str]:
+    def fake_prerequisites(order_id: str, *, expected_revision: int) -> tuple[dict, str]:
+        assert expected_revision == 7
         return {
             "order_id": order_id,
             "state": "facility_template_unresolved",
@@ -89,7 +96,7 @@ def test_workflow_v2_ocr_run_blocks_unresolved_template_before_job_enqueue(monke
     monkeypatch.setattr(orders_api.order_workflow_v2_service, "ensure_ocr_prerequisites", fake_prerequisites)
     monkeypatch.setattr(orders_api, "_enqueue_workflow_v2_evidence_rerun", fail_enqueue)
 
-    res = client.post("/orders/ORDcontract/workflow-v2/ocr-runs", json={"mode": "hakodate"})
+    res = client.post("/orders/ORDcontract/workflow-v2/ocr-runs", headers={"If-Match": "7"}, json={"mode": "hakodate"})
     assert res.status_code == 400
     assert res.json()["detail"] == "facility_template_unresolved"
 
@@ -98,13 +105,18 @@ def test_workflow_v2_ocr_run_forwards_selected_document_id(monkeypatch) -> None:
     client = TestClient(app)
     captured: dict[str, object] = {}
 
+    def fake_prerequisites(order_id, *, expected_revision):
+        assert expected_revision == 7
+        return {"order_id": order_id, "state": "context_confirmed", "revision": 8}, None
+
     monkeypatch.setattr(
         orders_api.order_workflow_v2_service,
         "ensure_ocr_prerequisites",
-        lambda order_id: ({"order_id": order_id, "state": "context_confirmed"}, None),
+        fake_prerequisites,
     )
 
-    def fake_enqueue(order_id: str, background_tasks, **kwargs):
+    def fake_enqueue(order_id: str, **kwargs):
+        assert kwargs["expected_revision"] == 8
         captured["order_id"] = order_id
         captured["selected_document_id"] = kwargs.get("selected_document_id")
         return {"accepted": True, "ocr_job_id": f"OCR-{order_id}", "workflow": {"order_id": order_id}}
@@ -113,6 +125,7 @@ def test_workflow_v2_ocr_run_forwards_selected_document_id(monkeypatch) -> None:
 
     res = client.post(
         "/orders/ORDcontract/workflow-v2/ocr-runs",
+        headers={"If-Match": "7"},
         json={"mode": "hakodate", "document_id": "DOC-history-001"},
     )
 
@@ -229,42 +242,37 @@ def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypa
         },
     )
     monkeypatch.setattr(orders_api.config_service, "get_facility_config", lambda _facility: {"facility_id": "FAC00001"})
-    monkeypatch.setattr(orders_api, "get_ocr_job", lambda _job_id: None)
-    monkeypatch.setattr(orders_api, "describe_ocr_job_state", lambda _job: {"status": "idle"})
-    monkeypatch.setattr(orders_api, "create_ocr_job", lambda *args, **kwargs: ({}, True))
-    monkeypatch.setattr(
-        orders_api,
-        "update_ocr_job",
-        lambda job_id, **kwargs: captured.update({"job_id": job_id, **kwargs}),
-    )
-    monkeypatch.setattr(
-        orders_api.order_workflow_v2_service,
-        "mark_ocr_run_queued",
-        lambda order_id, job_id: ({"order_id": order_id, "ocr_job_id": job_id}, None),
-    )
-
-    class Background:
-        def add_task(self, func, *args):
-            captured["background_args"] = args
+    delivery = object()  # Opaque dispatch-boundary token, not a receipt.
+    def mark_queued(order_id, job_id, **kwargs):
+        assert order_id == "ORDocrinput" and job_id == "OCR-ORDocrinput"
+        assert kwargs["expected_revision"] == 7
+        assert kwargs["request_mode"] == "ocr_rerun"
+        assert kwargs["delivery_selected_document_id"] == "DOC-v1"
+        captured.update(kwargs)
+        return {"workflow": {"order_id": order_id, "ocr_job_id": job_id}, "delivery": delivery}, None
+    monkeypatch.setattr(orders_api.order_workflow_v2_service, "mark_ocr_run_queued", mark_queued)
+    dispatched = []
+    monkeypatch.setattr(orders_api, "_dispatch_workflow_ocr_delivery", dispatched.append)
 
     result = orders_api._enqueue_workflow_v2_evidence_rerun(
         "ORDocrinput",
-        Background(),
         selected_document_id="DOC-v1",
+        expected_revision=7,
     )
 
     assert result["accepted"] is True
     assert captured["input_reference"] == "gs://bucket/old.pdf"
-    assert captured["metrics"]["selected_document_id"] == "DOC-v1"
-    assert captured["metrics"]["selected_document_version"] == 1
-    assert captured["background_args"] == ("ORDocrinput", "OCR-ORDocrinput", "DOC-v1")
+    assert captured["job_metrics"]["selected_document_id"] == "DOC-v1"
+    assert captured["job_metrics"]["selected_document_version"] == 1
+    assert dispatched == [delivery]
 
 
 def test_workflow_v2_header_axis_review_endpoints(monkeypatch) -> None:
     client = TestClient(app)
     saved: dict[str, object] = {}
 
-    def fake_get(order_id: str) -> tuple[dict, None]:
+    def fake_get(order_id: str, *, document_id) -> tuple[dict, None]:
+        assert document_id is None
         return {
             "order_id": order_id,
             "status": "ready",
@@ -272,7 +280,9 @@ def test_workflow_v2_header_axis_review_endpoints(monkeypatch) -> None:
             "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 80},
         }, None
 
-    def fake_save(order_id: str, *, corrected_xs: list[float], coordinate_space: dict) -> tuple[dict, None]:
+    def fake_save(order_id: str, *, corrected_xs: list[float], coordinate_space: dict, source_receipt, expected_revision) -> tuple[dict, None]:
+        assert source_receipt is None
+        assert expected_revision == 7
         saved["order_id"] = order_id
         saved["corrected_xs"] = corrected_xs
         saved["coordinate_space"] = coordinate_space
@@ -287,6 +297,7 @@ def test_workflow_v2_header_axis_review_endpoints(monkeypatch) -> None:
 
     saved_res = client.put(
         "/orders/ORDcontract/workflow-v2/header-axis-review",
+        headers={"If-Match": "7"},
         json={
             "corrected_xs": [11.0, 22.0],
             "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 80},

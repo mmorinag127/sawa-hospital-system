@@ -1,7 +1,10 @@
 from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from test_h2_operator_repair_revision import connected_physical_pipeline
 
 from src.services import storage_service, order_service, ocr_pipeline_service
 from src.services.workflow_attempt_guard_service import nonworkflow_execution_context
@@ -98,7 +101,8 @@ def test_corrected_review_requires_own_parent_receipt_not_old_overlay(own_pdf):
 def test_actual_write_guard_compares_document_upload_and_original_bytes(own_pdf, change):
     path, _, receipt = own_pdf
     receipt = {**receipt, "order_id": "order", "document_id": "document", "uploaded_pdf_id": "upload", "message_id": "message"}
-    document = SimpleNamespace(order_id="order", storage_uri=str(path), source_email_id="message")
+    order = SimpleNamespace(id="order", current_document_id="document", document_uri=str(path), message_id="message")
+    document = SimpleNamespace(id="document", order_id="order", storage_uri=str(path), source_email_id="message")
     upload = SimpleNamespace(storage_uri=str(path), message_id="message", content_sha256=receipt["sha256"])
     if change == "document":
         document.storage_uri = "foreign.pdf"
@@ -108,37 +112,48 @@ def test_actual_write_guard_compares_document_upload_and_original_bytes(own_pdf,
         path.write_bytes(b"foreign")
     locks = []
     def get(model, identity, **kwargs):
-        locks.append(kwargs.get("with_for_update"))
-        return document if model is guard.OrderDocument else upload
+        expected_id, row = {guard.Order: ("order", order), guard.OrderDocument: ("document", document), guard.UploadedPdf: ("upload", upload)}[model]
+        assert identity == expected_id
+        locks.append((model, kwargs.get("with_for_update")))
+        return row
     session = SimpleNamespace(get=get)
     if change == "bytes":
         with pytest.raises(ValueError, match="selected_pdf_bytes_changed"):
             guard.verify_selected_pdf_receipt(session, receipt)
     else:
         assert guard.verify_selected_pdf_receipt(session, receipt) is (change is None)
-    assert all(locks)
+    assert locks[:2] == [(guard.OrderDocument, True), (guard.Order, None)]
+    assert locks[2:] == ([] if change == "document" else [(guard.UploadedPdf, True)])
 
 
-def test_native_cell_recognition_does_not_reload_original_uri(monkeypatch, own_pdf):
-    path, _, receipt = own_pdf
+def test_native_cell_recognition_does_not_reload_original_uri(monkeypatch, connected_physical_pipeline):
+    order_id, receipt, start, item, _ = connected_physical_pipeline
+    start = order_service._capture_synchronous_cache_write_input(order_id)
+    receipt = receipt["selected_pdf_receipt"]
+    path = Path(receipt["storage_uri"])
     loaded = storage_service.load_selected_pdf_bytes(str(path), receipt)
-    monkeypatch.setattr(order_service, "_hakodate_best_method_draft_sheet", lambda order: {"rows": [[0]]})
+    assert loaded == path.read_bytes()
+    expected_draft = order_service._hakodate_best_method_draft_sheet(order_id, synchronous_write_input=start)
     calls = []
     def build(**kwargs):
         assert kwargs["pdf_bytes_override"] is loaded
-        return {"_verified_pdf_bytes": loaded, "fax_pdf": "materialized-own.pdf"}
+        return {**item, "_verified_pdf_bytes": loaded}
     monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", build)
     def recognize(**kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(metrics={}, outputs={}), None
+        assert kwargs["item"]["_verified_pdf_bytes"] is loaded
+        expected = item["original_expected_sheet_cells"]
+        return SimpleNamespace(metrics={"expected_sheet_cells": expected}, expected_sheet_cells=expected, outputs={}), None
     monkeypatch.setattr(order_service.hakodate_cell_ocr_batch_service, "build_hakodate_best_method_for_manifest_item", recognize)
     monkeypatch.setattr(storage_service, "load_selected_pdf_bytes", lambda *a, **k: pytest.fail("duplicate URI body read"))
-    assert order_service._hakodate_canonical_payload_from_manifest_item(
-        order_id="order", facility_id="facility", item={"source": "own-start"},
-        document_uri_override=str(path), pdf_bytes_override=loaded,
-    ) is None  # Missing recognizer regions remain missing, never synthetic quantity success.
+    with pytest.raises(ValueError, match="^hakodate_canonical_regions_missing$"):
+        order_service._hakodate_canonical_payload_from_manifest_item(
+            order_id=order_id, facility_id="fixture", item={"source": "own-start"},
+            document_uri_override=str(path), pdf_bytes_override=loaded,
+            configured_input=start["configured_input"], synchronous_write_input=start,
+        )
     assert len(calls) == 1
-    assert calls[0]["draft_sheet"]["rows"] == [[0]]
+    assert calls[0]["draft_sheet"] == expected_draft
 
 
 def test_unbound_prebuilt_manifest_never_runs_native_recognizer(monkeypatch):

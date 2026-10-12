@@ -4254,8 +4254,7 @@ def dismiss_sheet_anomaly_warning(
         }, None
 
 
-@workflow_command
-def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def _prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -4294,48 +4293,16 @@ def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             "bagging_result": bagging_result,
             "output_bundle": output_bundle,
         }, None
+
+
+@workflow_command
+def confirm_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    return _prepare_output_review(order_id)
 
 
 @workflow_command
 def prepare_output_review(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session:
-        order, error = _get_order_or_error(session, order_id)
-        if error:
-            return None, error
-        workflow = _get_or_create_workflow(session, order.id)
-        bagging_result = _current_bagging_result(session, workflow)
-        if not bagging_result:
-            return None, "bagging_result_required"
-        if _bagging_result_has_excluded_materialization_lines(bagging_result):
-            return None, "bagging_result_stale_template_columns"
-        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
-            session, order=order, workflow=workflow, meta=_workflow_meta(workflow),
-        )
-        if template_error:
-            return None, template_error
-        bagging_template_version_id = _normalize_id(bagging_result.get("template_version_id"))
-        if workflow_template_version_id and bagging_template_version_id != workflow_template_version_id:
-            return None, "bagging_result_template_mismatch"
-        output_bundle = _build_output_bundle_payload(order=order, bagging_result=bagging_result)
-        order_output_artifact_service.save_output_bundle_artifact(session, payload=output_bundle)
-        meta = _workflow_meta(workflow)
-        meta["output_bundle_id"] = output_bundle["output_bundle_id"]
-        meta["output_bundle"] = None
-        _write_workflow_meta(workflow, meta)
-        workflow.state = "output_review"
-        workflow.headline = "出力内容を確認してください"
-        workflow.primary_action = "final_confirm"
-        workflow.blockers_json = []
-        workflow.warnings_json = []
-        workflow.last_transition_at = _now()
-        revision_error = _finalize_workflow_mutation(session, workflow)
-        if revision_error:
-            return {"workflow": _serialize_workflow(workflow)}, revision_error
-        return {
-            "workflow": _serialize_workflow(workflow),
-            "bagging_result": bagging_result,
-            "output_bundle": output_bundle,
-        }, None
+    return _prepare_output_review(order_id)
 
 
 @workflow_command

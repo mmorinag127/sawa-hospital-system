@@ -306,7 +306,18 @@ def test_mapped_indexes_from_columns_authoritative_skips_nonexplicit_sparse_colu
     }
 
 
-def test_extract_fax_data_disables_gemini_pipeline_fallback_in_llm_full_table_mode(monkeypatch):
+@pytest.fixture
+def selected_pdf_bytes(tmp_path):
+    from hashlib import sha256
+    from src.services.storage_service import load_selected_pdf_bytes
+
+    path = tmp_path / "original.pdf"
+    body = b"%PDF-1.4\n%EOF\n"
+    path.write_bytes(body)
+    return load_selected_pdf_bytes(str(path), {"storage_uri": str(path), "sha256": sha256(body).hexdigest(), "generation": None})
+
+
+def test_extract_fax_data_disables_gemini_pipeline_fallback_in_llm_full_table_mode(monkeypatch, selected_pdf_bytes):
     monkeypatch.setattr(fax_extractor, "detect_table_grid", lambda *_args, **_kwargs: None)
 
     def _fake_run_gemini_ocr(*, pdf_bytes, template, facility_id=None):  # noqa: ARG001
@@ -320,7 +331,7 @@ def test_extract_fax_data_disables_gemini_pipeline_fallback_in_llm_full_table_mo
 
     with pytest.raises(RuntimeError, match="Gemini OCR timeout after 240s"):
         extract_fax_data(
-            b"%PDF-1.4\n%EOF\n",
+            selected_pdf_bytes,
             {
                 "main_ocr_provider": "gemini",
                 "main_ocr_row_fields": ["date_mmdd", "daypart", "menu"],
@@ -329,31 +340,26 @@ def test_extract_fax_data_disables_gemini_pipeline_fallback_in_llm_full_table_mo
         )
 
 
-def test_extract_fax_data_keeps_gemini_pipeline_fallback_for_non_llm_mode(monkeypatch):
+def test_extract_fax_data_disables_gemini_pipeline_fallback_for_non_llm_mode(monkeypatch, selected_pdf_bytes):
     monkeypatch.setattr(fax_extractor, "detect_table_grid", lambda *_args, **_kwargs: None)
 
     def _fake_run_gemini_ocr(*, pdf_bytes, template, facility_id=None):  # noqa: ARG001
         raise RuntimeError("Gemini OCR timeout after 90s")
 
     def _fake_run_ocr_pipeline(**_kwargs):
-        return {
-            "rows": [["4/26", "朝", "Menu A", "7"]],
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|4/26|朝|Menu A|7|",
-        }
+        raise AssertionError("pipeline fallback must not run in non-llm mode")
 
     monkeypatch.setattr("src.services.gemini_ocr_service.run_gemini_ocr", _fake_run_gemini_ocr)
     monkeypatch.setattr(fax_extractor, "run_ocr_pipeline", _fake_run_ocr_pipeline)
 
-    extracted = extract_fax_data(
-        b"%PDF-1.4\n%EOF\n",
-        {
-            "main_ocr_provider": "gemini",
-            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
-        },
-    )
-
-    assert extracted.ocr_provider == "gemini_fallback_pipeline"
-    assert extracted.table_rows == [["4/26", "朝", "Menu A", "7"]]
+    with pytest.raises(RuntimeError, match="Gemini OCR timeout after 90s"):
+        extract_fax_data(
+            selected_pdf_bytes,
+            {
+                "main_ocr_provider": "gemini",
+                "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            },
+        )
 
 
 def _template_floor_2f3f_v1_for_projection() -> dict:

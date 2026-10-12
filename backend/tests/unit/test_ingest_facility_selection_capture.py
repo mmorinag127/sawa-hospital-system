@@ -165,6 +165,9 @@ def test_real_registration_persists_captured_projection_and_rejects_unowned_sour
         jobs.prepare_ingest_ocr_job(claim["lease"], "component-ocr", parsed)
         registered = order_service.create_order_from_ingest(parsed, lines=None, document_status="processing",
             error_message="ocr_pending", registration_job_id="component-ocr")
+        duplicate = order_service.create_order_from_ingest(parsed, lines=None, document_status="processing",
+            error_message="ocr_pending", registration_job_id="component-ocr")
+        assert duplicate["id"] == registered["id"]
     with session_scope() as session:
         order = session.get(Order, registered["id"])
         assert order.template_version_id == data["facility_selection"]["facility_template_version_id"]

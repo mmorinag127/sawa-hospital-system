@@ -487,6 +487,18 @@ def test_readonly_assignment_never_repairs_or_writes(repair_order, monkeypatch):
         assert session.get(OrderOcrCache, order_id) is None
 
 
+def _capture_reparse_job(session, order_id, job_id, attempt):
+    from src.models.ocr_job import OcrJob
+    from src.services import workflow_attempt_guard_service as guard
+
+    order = session.get(Order, order_id)
+    start = guard.capture_reparse_read_input(session, order)
+    pdf = guard.capture_selected_pdf_receipt(session, order)
+    template_version_id = order.template_version_id
+    session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+    return start, pdf, template_version_id
+
+
 @pytest.mark.parametrize("superseded", [False, True])
 def test_job_owned_cache_canonicalization_uses_original_receipt(repair_order, superseded):
     from src.models.ocr_job import OcrJob
@@ -494,11 +506,7 @@ def test_job_owned_cache_canonicalization_uses_original_receipt(repair_order, su
     order_id, revision, configured = repair_order
     job_id, attempt = str(uuid4()), str(uuid4())
     with session_scope() as session:
-        order = session.get(Order, order_id)
-        captured = guard.capture_reparse_read_input(session, order)
-        pdf = guard.capture_selected_pdf_receipt(session, order)
-        template_version_id = order.template_version_id
-        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": captured, "selected_pdf_receipt": pdf}))
+        captured, pdf, template_version_id = _capture_reparse_job(session, order_id, job_id, attempt)
     if superseded:
         with session_scope() as session:
             job = session.get(OcrJob, job_id)
@@ -614,8 +622,6 @@ def test_original_workbook_expectation_owned_write_preserves_zero_and_null(repai
     start = order_service._capture_synchronous_cache_write_input(order_id)
     source = order_service._hakodate_owned_source(start["configured_input"], start["selected_pdf_receipt"], start)
     assert source["expected_sheet_cells"] == ["E11"]
-    targets = [{"sheet_cell": cell, "worksheet_row": 11, "worksheet_col": 5, "bbox": [0, 0, 10, 10], "source_receipt": deepcopy(source), "value": value} for cell in source["expected_sheet_cells"]]
-    records = [{"evidence_id": str(uuid4()), "source_scope": "hakodate_cell_crop_batch", "raw_text": value, "engine_metadata": {"sheet_cell": cell, "source_receipt": deepcopy(source)}} for cell in source["expected_sheet_cells"]]
     targets, records = _owned_artifact_fixture(source, value)
     payload = {"hakodate_repair_source_receipt": deepcopy(source), "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": deepcopy(source["expected_sheet_cells"])}}
     _attach_provider_artifact_packet(payload)
@@ -659,18 +665,12 @@ def test_real_evidence_writer_keeps_independent_expectation_on_selected_replay(r
     order_id, revision, _ = repair_order
     job_id, attempt = str(uuid4()), str(uuid4())
     with session_scope() as session:
-        order = session.get(Order, order_id)
-        start = guard.capture_reparse_read_input(session, order)
-        pdf = guard.capture_selected_pdf_receipt(session, order)
-        template_version_id = order.template_version_id
-        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+        start, pdf, template_version_id = _capture_reparse_job(session, order_id, job_id, attempt)
     tokens = [(variable, variable.set(val)) for variable, val in ((order_service._workflow_ocr_job_id, job_id), (order_service._workflow_ocr_order_id, order_id), (order_service._workflow_ocr_attempt_id, attempt), (order_service._workflow_ocr_revision, revision))]
     try:
         with guard.workflow_execution_context(job_id, order_id, attempt, revision):
             source = order_service._hakodate_owned_source(start["configured_input"], pdf)
             assert source["expected_sheet_cells"] == ["E11"]
-            targets = [{"target_cell_id": cell, "sheet_cell": cell, "worksheet_row": 11, "worksheet_col": 5, "semantic_field": "qty.regular_x", "bbox": [0, 0, 10, 10], "value": value, "source_receipt": deepcopy(source)} for cell in source["expected_sheet_cells"]]
-            records = [{"evidence_id": str(uuid4()), "source_scope": "hakodate_cell_crop_batch", "raw_text": value, "normalized_value": "0" if value == 0 else "", "center": [5, 5], "engine_metadata": {"sheet_cell": cell, "source_receipt": deepcopy(source)}} for cell in source["expected_sheet_cells"]]
             targets, records = _owned_artifact_fixture(source, value)
             payload = {"hakodate_repair_source_receipt": deepcopy(source), "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": deepcopy(source["expected_sheet_cells"])}}
             _attach_provider_artifact_packet(payload)
@@ -720,12 +720,8 @@ def test_actual_canonical_producer_json_writer_and_selected_read(repair_order, m
     assert physical[0]["menu_date"] == date(2026, 10, 7)
     monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, **kwargs: deepcopy(physical))
     with session_scope() as session:
-        order = session.get(Order, order_id)
-        start = guard.capture_reparse_read_input(session, order)
-        pdf = guard.capture_selected_pdf_receipt(session, order)
         job_id, attempt = str(uuid4()), str(uuid4())
-        template_version_id = order.template_version_id
-        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+        start, pdf, template_version_id = _capture_reparse_job(session, order_id, job_id, attempt)
     verified = storage_service.load_selected_pdf_bytes(pdf["storage_uri"], pdf)
     draft = {"fields": ["date", "daypart", "menu"], "rows": [["2026-10-07", "昼", "own"]]}
     # External rendering/recognition are injected, not the production payload
@@ -990,13 +986,9 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
     monkeypatch.setattr(order_service, "get_default_output_bucket", lambda: "fixture-output")
     monkeypatch.setattr(order_service, "save_artifact_bytes_to_gcs", lambda bucket, message, name, body, **kwargs: f"gs://{bucket}/{message}/{name}")
     with session_scope() as session:
-        order = session.get(Order, order_id)
-        start = guard.capture_reparse_read_input(session, order)
-        pdf = guard.capture_selected_pdf_receipt(session, order)
         revision = session.get(OrderWorkflowState, order_id).revision
         job_id, attempt = str(uuid4()), str(uuid4())
-        template_version_id = order.template_version_id
-        session.add(OcrJob(id=job_id, order_id=order_id, template_version_id=template_version_id, status="running", input_reference=pdf["storage_uri"], metrics={"workflow_attempt_id": attempt, "reparse_read_input": start, "selected_pdf_receipt": pdf}))
+        start, pdf, template_version_id = _capture_reparse_job(session, order_id, job_id, attempt)
     if owner_kind == "nonworkflow":
         with session_scope() as session:
             session.get(OcrJob, job_id).metrics = {}

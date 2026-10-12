@@ -199,10 +199,26 @@ def test_migration_0029_only_initializes_when_adding_the_revision_column():
 )
 def test_every_public_workflow_mutator_finalizes_before_its_success_snapshot(command_name):
     source = Path(order_workflow_v2_service.__file__).read_text(encoding="utf-8")
-    command_source = source.split(f"def {command_name}(", 1)[1]
-    next_command = command_source.find("\n@workflow_command")
-    if next_command >= 0:
-        command_source = command_source[:next_command]
+    if command_name in {"confirm_bagging", "prepare_output_review"}:
+        command = _source_function(order_workflow_v2_service.__file__, command_name)
+        assert [ast.unparse(node) for node in command.decorator_list] == ["workflow_command"]
+        assert [ast.unparse(node) for node in command.body] == ["return _prepare_output_review(order_id)"]
+        shared = _source_function(order_workflow_v2_service.__file__, "_prepare_output_review")
+        assert shared.decorator_list == []
+        command_source = ast.get_source_segment(source, shared)
+        statements = shared.body[0].body
+        finalizer = next(index for index, node in enumerate(statements)
+                         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                         and ast.unparse(node.value.func) == "_finalize_workflow_mutation")
+        assert isinstance(statements[-1], ast.Return)
+        assert ast.unparse(statements[-1].value.elts[-1]) == "None"
+        assert finalizer < len(statements) - 1
+        assert "_serialize_workflow(workflow)" in ast.unparse(statements[-1])
+    else:
+        command_source = source.split(f"def {command_name}(", 1)[1]
+        next_command = command_source.find("\n@workflow_command")
+        if next_command >= 0:
+            command_source = command_source[:next_command]
 
     assert "_finalize_workflow_mutation(session," in command_source
 

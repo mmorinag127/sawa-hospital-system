@@ -192,6 +192,39 @@ def test_saved_output_digest_is_required_by_reader_and_writer(bagged_receipt):
     _assert_originals(fixture, original)
 
 
+@pytest.mark.parametrize("command_name", ["confirm_bagging", "prepare_output_review"])
+@pytest.mark.parametrize("outcome", ["success", "stale_revision", "writer_failure"])
+def test_output_review_commands_share_owned_receipt_and_atomic_revision(bagged_receipt, monkeypatch, command_name, outcome):
+    fixture, bagged, original = bagged_receipt
+    before = database_snapshot()
+    current_revision = revision(fixture)
+    command = getattr(workflow, command_name)
+    if outcome == "writer_failure":
+        writer = artifacts.save_output_bundle_artifact
+        def fail_after_write(session, *, payload):
+            writer(session, payload=payload)
+            raise RuntimeError("synthetic output writer failure")
+        monkeypatch.setattr(artifacts, "save_output_bundle_artifact", fail_after_write)
+        with pytest.raises(RuntimeError, match="^synthetic output writer failure$"):
+            command(fixture.order_id, expected_revision=current_revision)
+    elif outcome == "stale_revision":
+        _, error = command(fixture.order_id, expected_revision=current_revision - 1)
+        assert error == workflow.WORKFLOW_REVISION_CONFLICT
+    else:
+        result, error = command(fixture.order_id, expected_revision=current_revision)
+        assert error is None, error
+        assert result["workflow"]["state"] == "output_review"
+        assert result["workflow"]["revision"] == current_revision + 1
+        assert result["bagging_result"] == bagged["bagging_result"]
+        assert result["output_bundle"]["materialization_digest"] == bagged["output_bundle"]["materialization_digest"]
+        with fixture.session_scope() as session:
+            assert artifacts.load_output_bundle_payload(session, result["output_bundle"]["output_bundle_id"], expected_order_id=fixture.order_id) == result["output_bundle"]
+    if outcome != "success":
+        assert database_snapshot() == before
+        assert revision(fixture) == current_revision
+    _assert_originals(fixture, original)
+
+
 @pytest.mark.parametrize("output", [False, True], ids=["bagging", "output"])
 @pytest.mark.parametrize("fault", ["owner", "source", "outer-hash"])
 def test_real_sql_owner_source_and_outer_hash_guards_remain(bagged_receipt, output, fault):

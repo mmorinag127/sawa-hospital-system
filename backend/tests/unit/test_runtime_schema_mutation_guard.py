@@ -274,9 +274,8 @@ def test_startup_calls_facility_schema_validator_without_ddl(monkeypatch, formal
     monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: calls.append("menu"))
     monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda: calls.append("facility"))
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: calls.append("facility-sync"))
-    monkeypatch.setattr(main, "start_uploaded_pdf_recovery_loop", lambda: calls.append("recovery"))
     main._initialize_menu_schema()
-    assert calls == ["menu", "facility", "facility-sync", "recovery"]
+    assert calls == ["menu", "facility", "facility-sync"]
 
 
 @pytest.mark.parametrize("partial", [False, True])
@@ -292,7 +291,6 @@ def test_startup_blocks_missing_or_partial_facility_schema_without_ddl(monkeypat
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: None)
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: None)
-    monkeypatch.setattr(main, "start_uploaded_pdf_recovery_loop", lambda: None)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
     try:
@@ -315,7 +313,6 @@ def test_startup_accepts_migrated_facility_schema_without_ddl(monkeypatch, forma
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: None)
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: None)
-    monkeypatch.setattr(main, "start_uploaded_pdf_recovery_loop", lambda: None)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
     try:

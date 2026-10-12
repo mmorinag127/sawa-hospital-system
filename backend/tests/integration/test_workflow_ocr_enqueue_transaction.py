@@ -230,21 +230,43 @@ def test_wait_on_stale_job_leaves_no_job_mutation(workflow_database):
 
 
 def test_old_attempt_cannot_finish_or_fail_the_retried_job(workflow_database, monkeypatch, tmp_path):
+    import json
     from copy import deepcopy
+    from datetime import date
     from hashlib import sha256
     from src.models.document import OrderDocument
+    from src.models.facility import Facility
     from src.models.uploaded_pdf import UploadedPdf
-    from src.services import config_service
+    from src.services import canonical_facility_lineage as lineage, config_service
     _database, factory = workflow_database
     _add_order_and_workflow(factory, order_id="ORD-attempt")
     pdf = tmp_path / "attempt.pdf"
     pdf.write_bytes(b"original attempt ownership input")
-    configured = {"facility": {"facility_id": "FAC_TEST", "fax_template": {"template_id": "own", "page": 1, "columns": [{"column_id": "menu", "index": 0, "source_index": 0, "role": "menu"}]}}, "policy": {}}
+    configured = {"facility": {"facility_id": "FAC_TEST", "facility_name": "FAC_TEST", "areas": None, "fax_template": {"template_id": "own", "page": 1, "columns": [{"column_id": "menu", "index": 0, "source_index": 0, "role": "menu"}]}}, "policy": {}}
+    configured["facility"]["fax_template"]["columns"].append({
+        "column_id": "quantity", "index": 1, "source_index": 1, "role": "quantity",
+        "diet_type": "regular", "area_id": "X", "name": "qty.regular_x",
+    })
     physical = [{"menu_date": "2026-10-07", "daypart": "lunch", "slot_index": 0, "name": "own"}]
-    monkeypatch.setattr(config_service, "capture_authored_processing_config", lambda *args: deepcopy(configured))
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args: deepcopy(physical))
+    # Synthetic concurrency input, not a live facility or recognition receipt.
+    authored = {"version_id": "own", "valid_from": "2026-10-05", "valid_to": "2026-10-11", "facility": configured["facility"]}
+    master = tmp_path / "attempt-facilities.json"
+    master.write_text(json.dumps({"facilities": [{**configured["facility"], "versions": [authored]}]}), encoding="utf-8")
+    policy = tmp_path / "attempt-policy.json"
+    policy.write_text(json.dumps(configured["policy"]), encoding="utf-8")
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(master))
+    monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", policy)
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda *args, session=None: deepcopy(physical))
     with factory.begin() as session:
+        selected, _ = lineage.resolve(session, "FAC_TEST", date(2026, 10, 5))
+        session.add(Facility(id=selected["facility_id"], name=selected["facility_name"]))
+        session.flush()
+        _, projection = lineage.materialize(session, selected)
+        template_version_id = projection.id
         order = session.get(Order, "ORD-attempt")
+        order.template_version_id = template_version_id
         order.week_code = "2026-10@2026-10-05~2026-10-11"
         order.document_uri = str(pdf)
         order.current_document_id = "attempt-document"
@@ -256,7 +278,7 @@ def test_old_attempt_cannot_finish_or_fail_the_retried_job(workflow_database, mo
             job_id="OCR-ORD-attempt",
             order_id="ORD-attempt",
             input_reference=str(pdf),
-            template_version_id=None,
+            template_version_id=template_version_id,
             metrics={**_metrics(), "workflow_attempt_id": "attempt-old"},
             stale_action="retry",
             force=False,
@@ -270,7 +292,7 @@ def test_old_attempt_cannot_finish_or_fail_the_retried_job(workflow_database, mo
             job_id="OCR-ORD-attempt",
             order_id="ORD-attempt",
             input_reference=str(pdf),
-            template_version_id=None,
+            template_version_id=template_version_id,
             metrics={**_metrics(), "workflow_attempt_id": "attempt-new"},
             stale_action="retry",
             force=True,
