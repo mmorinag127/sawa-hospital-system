@@ -136,7 +136,10 @@ def test_actual_write_gate_rejects_foreign_recognizer_lineage(monkeypatch, field
                 ocr_job_service.validate_own_first_pass_recognizer(result, write_session=session)
 
 
-def test_hakodate_structure_only_is_not_yomitoku_quantity_success(monkeypatch):
+def test_hakodate_structure_only_is_not_yomitoku_quantity_success(monkeypatch, tmp_path):
+    own_pdf = tmp_path / "own.pdf"
+    own_pdf.write_bytes(b"own-pdf")
+    own_uri = str(own_pdf)
     pipeline = {"engine": "yomitoku", "template_id": "authored-template", "output_reference": "own-output", "table_rows": [["999"]]}
     monkeypatch.setattr(ingest_worker, "validate_own_pipeline_result", lambda *args: pipeline)
     monkeypatch.setattr(ingest_worker, "extract_fax_data", lambda *args, **kwargs: fax_extractor.FaxExtractedData(
@@ -144,8 +147,9 @@ def test_hakodate_structure_only_is_not_yomitoku_quantity_success(monkeypatch):
     ))
     monkeypatch.setattr(ingest_worker, "detect_table_grid", lambda *args: None)
     monkeypatch.setattr(ingest_worker, "_dump_ocr_debug", lambda *args: None)
-    payload = IngestEmailPayload("own-mail", "own.pdf", datetime(2026, 2, 16), week_hint=WEEK)
-    with nonworkflow_execution_context({"job_id": "real-job", "order_id": "order", "execution_id": "own", "input_reference": "own.pdf"}):
+    payload = IngestEmailPayload("own-mail", own_uri, datetime(2026, 2, 16), week_hint=WEEK)
+    with nonworkflow_execution_context({"job_id": "real-job", "order_id": "order", "execution_id": "own", "input_reference": own_uri,
+        "selected_pdf_receipt": {"storage_uri": own_uri, "sha256": sha256(own_pdf.read_bytes()).hexdigest(), "generation": None}}):
         mapped = ingest_worker.map_own_ingest_result(payload, b"own-pdf", pipeline, {
             "template": {"template_id": "authored-template"}, "preferred_template_id": "authored-template", "policy": {},
         })
