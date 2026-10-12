@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -414,7 +415,31 @@ def _standard_active_template_for_workflow_tests(isolated_formal_schema) -> None
     _install_active_template_version("FAC00001", "template-fac00001")
 
 
-def test_context_confirm_requires_explicit_facility_week_and_template() -> None:
+@pytest.fixture
+def authored_april_context(tmp_path, monkeypatch) -> None:
+    facility = {
+        "facility_id": "FAC00001",
+        "facility_name": "Template Facility FAC00001",
+        "areas": None,
+        "fax_template_id": "template-fac00001",
+        "fax_template": {"template_id": "template-fac00001", "columns": _template_columns()},
+    }
+    source = tmp_path / "facility-master.json"
+    source.write_text(json.dumps({"facilities": [{
+        "facility_id": "FAC00001",
+        "versions": [{
+            "version_id": "authored-april-context",
+            "valid_from": "2026-04-26",
+            "valid_to": "2026-04-30",
+            "facility": facility,
+        }],
+    }]}), encoding="utf-8")
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(source))
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+
+
+def test_context_confirm_requires_explicit_facility_week_and_template(authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
 
     workflow, error = order_workflow_v2_service.confirm_context(
@@ -510,7 +535,7 @@ def test_workflow_v2_get_endpoints_do_not_create_workflow_rows() -> None:
         assert session.get(OrderWorkflowState, order_id) is None
 
 
-def test_list_ocr_results_only_returns_current_template_candidates() -> None:
+def test_list_ocr_results_only_returns_current_template_candidates(authored_april_context) -> None:
     order_id, current_evidence_id, mismatched_evidence_id = _create_order_with_evidence()
 
     workflow, error = order_workflow_v2_service.confirm_context(
@@ -569,9 +594,9 @@ def test_list_ocr_results_only_returns_current_template_candidates() -> None:
     assert results["results"][0]["template_version_id"] == current_template_version_id
 
 
-def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch) -> None:
+def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch, authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
-    order_workflow_v2_service.confirm_context(
+    context, context_error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
         expected_revision=0,
         facility_id="FAC00001",
@@ -579,6 +604,8 @@ def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch) -> None:
         week_end="2026-04-30",
         template_id="template-fac00001",
     )
+    assert context_error is None
+    assert context["state"] == "context_confirmed"
     monkeypatch.setattr(
         order_workflow_v2_service,
         "_hakodate_weekly_menu_base_sheet_error",
@@ -1177,7 +1204,7 @@ def test_context_confirm_blocks_facility_columns_without_template_id(monkeypatch
         assert row.secondary_actions_json["workflow_v2"]["template_id"] is None
 
 
-def test_context_confirm_normalizes_legacy_non_dict_workflow_meta() -> None:
+def test_context_confirm_normalizes_legacy_non_dict_workflow_meta(authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
     with session_scope() as session:
         session.add(
@@ -1943,9 +1970,9 @@ def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch) -> 
         assert session.get(Order, order_id).status == "要確認"
 
 
-def test_sheet_cannot_be_saved_without_selected_ocr() -> None:
+def test_sheet_cannot_be_saved_without_selected_ocr(authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
-    order_workflow_v2_service.confirm_context(
+    context, context_error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
         facility_id="FAC00001",
         week_start="2026-04-26",
@@ -1953,6 +1980,8 @@ def test_sheet_cannot_be_saved_without_selected_ocr() -> None:
         template_id="template-fac00001",
         expected_revision=_current_workflow_revision(order_id),
     )
+    assert context_error is None
+    assert context["state"] == "context_confirmed"
 
     saved, error = order_workflow_v2_service.save_sheet(
         order_id=order_id,
@@ -1965,9 +1994,9 @@ def test_sheet_cannot_be_saved_without_selected_ocr() -> None:
     assert error == "selected_ocr_required"
 
 
-def test_workflow_v2_does_not_use_order_lines_as_sheet_source() -> None:
+def test_workflow_v2_does_not_use_order_lines_as_sheet_source(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
-    order_workflow_v2_service.confirm_context(
+    context, context_error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
         facility_id="FAC00001",
         week_start="2026-04-26",
@@ -1975,6 +2004,8 @@ def test_workflow_v2_does_not_use_order_lines_as_sheet_source() -> None:
         template_id="template-fac00001",
         expected_revision=_current_workflow_revision(order_id),
     )
+    assert context_error is None
+    assert context["state"] == "context_confirmed"
     _stamp_evidence_with_workflow_template(order_id, evidence_id_1)
     order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
 
@@ -3306,7 +3337,7 @@ def test_saving_sheet_after_final_confirm_invalidates_snapshot_and_lines(monkeyp
         assert session.get(Order, order_id).status == "要確認"
 
 
-def test_get_workflow_projects_blocker_for_inconsistent_confirmed_lineage() -> None:
+def test_get_workflow_projects_blocker_for_inconsistent_confirmed_lineage(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
