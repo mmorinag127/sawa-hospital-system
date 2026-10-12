@@ -24,6 +24,7 @@ from src.services.uploaded_pdf_service import claim_uploaded_pdf, mark_uploaded_
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 from tests.helpers.ingest_original import (  # noqa: E402
+    _authored_selection,
     configure_delivery, authored_sources, register_authored_original,
     authored_pipeline_provider, process_uploaded_original,
 )
@@ -764,6 +765,10 @@ def test_retry_uploaded_pdf_requeues_row(monkeypatch, tmp_path, isolated_formal_
     configure_delivery(monkeypatch)
     uri, digest = authored_sources(monkeypatch, tmp_path,
         facility_id="FAC001", menu_date=date(2026, 2, 15))
+    facility_selection = _authored_selection(
+        {"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
+        date(2026, 2, 15),
+    )
     saved = ManualUploadSavedFile(
         message_id="upload:sha256:retry-row",
         pdf_uri=uri,
@@ -775,6 +780,7 @@ def test_retry_uploaded_pdf_requeues_row(monkeypatch, tmp_path, isolated_formal_
 
     uploaded_pdf, _ = ingest_api.create_uploaded_pdf_from_upload(
         saved=saved,
+        facility_selection=facility_selection,
         facility_hint="FAC001",
         week_hint="2026-02@2026-02-15~2026-02-21",
         facility_name=None,
@@ -814,6 +820,10 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch, tmp
     configure_delivery(monkeypatch)
     uri, digest = authored_sources(monkeypatch, tmp_path,
         facility_id="FAC001", menu_date=date(2026, 2, 15))
+    facility_selection = _authored_selection(
+        {"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
+        date(2026, 2, 15),
+    )
     now = ingest_api._parse_optional_datetime(None)
     completed = ManualUploadSavedFile(
         message_id="upload:sha256:completed-row",
@@ -831,6 +841,7 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch, tmp
     )
     completed_row, _ = ingest_api.create_uploaded_pdf_from_upload(
         saved=completed,
+        facility_selection=facility_selection,
         facility_hint="FAC001",
         week_hint="2026-02@2026-02-15~2026-02-21",
         facility_name=None,
@@ -839,6 +850,7 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch, tmp
     )
     processing_row, _ = ingest_api.create_uploaded_pdf_from_upload(
         saved=processing,
+        facility_selection=facility_selection,
         facility_hint="FAC001",
         week_hint="2026-02@2026-02-15~2026-02-21",
         facility_name=None,
@@ -932,6 +944,10 @@ def test_retry_uploaded_pdf_allows_completed_row_with_missing_week(monkeypatch, 
     configure_delivery(monkeypatch)
     uri, digest = authored_sources(monkeypatch, tmp_path,
         facility_id="FAC001", menu_date=date(2026, 2, 15))
+    facility_selection = _authored_selection(
+        {"facility_hint": "FAC001", "week_hint": "2026-02@2026-02-15~2026-02-21"},
+        date(2026, 2, 15),
+    )
     now = ingest_api._parse_optional_datetime(None)
     saved = ManualUploadSavedFile(
         message_id="upload:sha256:completed-missing-week",
@@ -942,6 +958,7 @@ def test_retry_uploaded_pdf_allows_completed_row_with_missing_week(monkeypatch, 
     )
     row, _ = ingest_api.create_uploaded_pdf_from_upload(
         saved=saved,
+        facility_selection=facility_selection,
         facility_hint="FAC001",
         week_hint="2026-02@2026-02-15~2026-02-21",
         facility_name=None,

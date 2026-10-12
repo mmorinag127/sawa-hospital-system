@@ -37,6 +37,7 @@ def test_after_capture_selection_uses_original_uri_without_version_reread(monkey
     monkeypatch.setattr(order_service, "_workflow_ocr_job_id", SimpleNamespace(get=lambda: "actual-job"))
     monkeypatch.setattr(order_service, "_workflow_attempt_write_fence", lambda *args: True)
     monkeypatch.setattr(order_service, "current_nonworkflow_execution", lambda: {
+        "order_id": captured["order_id"],
         "selected_version_input": captured, "input_reference": "original-uri",
     })
     session = SimpleNamespace(get=lambda *args, **kwargs: pytest.fail("input re-selection"))
