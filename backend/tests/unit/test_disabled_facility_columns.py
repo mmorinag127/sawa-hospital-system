@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 import pytest
@@ -68,9 +69,13 @@ def stored_records(isolated_formal_schema, tmp_path, monkeypatch):
     ("missing-revision", 428, {"error": "workflow_revision_required"}),
     ("missing-order", 404, "order_not_found"),
     ("unauthenticated", 401, "Unauthorized"),
+    ("nonempty-current", 400, ERROR),
 ])
 def test_disabled_columns_http_preserves_all_stored_state(stored_records, monkeypatch, record_property, case, status, detail):
     engine, source, revision = stored_records
+    save = Mock(wraps=order_workflow_v2_service.save_facility_template_columns)
+    monkeypatch.setattr(order_workflow_v2_service, "save_facility_template_columns", save)
+    columns = [{"role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"}] if case == "nonempty-current" else []
     with registered_hospital_operator(monkeypatch) as actor:
         before, source_before = _snapshot(engine), source.read_bytes()
         headers = actor.headers if case != "unauthenticated" else {}
@@ -83,7 +88,7 @@ def test_disabled_columns_http_preserves_all_stored_state(stored_records, monkey
         event.listen(engine, "before_cursor_execute", observe)
         try:
             response = TestClient(app).put(f"/orders/{order_id}/workflow-v2/facility-template-columns",
-                                          headers=headers, json={"columns": []})
+                                          headers=headers, json={"columns": columns})
         finally:
             event.remove(engine, "before_cursor_execute", observe)
         record_property("response", json.dumps({"status": response.status_code, "body": response.json()}, sort_keys=True))
@@ -96,6 +101,10 @@ def test_disabled_columns_http_preserves_all_stored_state(stored_records, monkey
             actor.verifier.assert_not_called()
         assert response.status_code == status
         assert response.json() == {"detail": detail}
+        if case in {"missing-revision", "unauthenticated"}:
+            save.assert_not_called()
+        else:
+            save.assert_called_once_with(order_id, columns, expected_revision=revision - 1 if case == "stale" else revision)
         with session_scope() as session:
             assert [row.quantity_corrected for row in session.query(OrderLine).order_by(OrderLine.id)] == [0, 7, 9]
             assert session.get(OrderSheetDraft, "disabled-draft").draft_sheet_json == {"rows": [{"quantity": q} for q in [0, 7, 9]]}

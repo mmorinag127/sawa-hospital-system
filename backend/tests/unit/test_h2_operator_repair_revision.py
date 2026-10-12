@@ -1163,6 +1163,32 @@ def test_saved_draft_rebase_preserves_distinct_original_slots_and_edits():
     assert order_service._merge_saved_draft_into_semantic_sheet(manual, deepcopy(manual))["rows"] == manual["rows"]
 
 
+@pytest.mark.parametrize("quantities", [["1", "2", "3"], ["", 0, None]], ids=["original-values", "blank-zero-null"])
+def test_saved_draft_added_quantity_column_preserves_fields_values_and_identity(quantities):
+    """Active merge boundary, not a legacy HTTP column-write capability."""
+    current = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.soft_2f", "qty.mixer_2f", "remarks"],
+        "header": ["日付", "区分", "メニュー", "常食2F", "軟菜2F", "ミキサー2F", "備考"],
+        "rows": [["01/08", "昼", "Menu A", *quantities, "seeded"]],
+        "row_ids": ["row-preserve-1"],
+        "source": "draft_ready",
+    }
+    fresh = {
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.no_fish_2f", "qty.soft_2f", "qty.mixer_2f", "remarks"],
+        "header": ["日付", "区分", "メニュー", "常食2F", "魚禁2F", "軟菜2F", "ミキサー2F", "備考"],
+        "rows": [["01/08", "昼", "Menu A", "1", "2", "3", "", "rebuilt"]],
+        "row_ids": ["row-preserve-1"],
+        "source": "weekly_menu+ocr_payload",
+        "warnings": [],
+    }
+    before = deepcopy((current, fresh))
+    merged = order_service._merge_saved_draft_into_semantic_sheet(current, fresh)
+    assert merged["fields"][3:7] == ["qty.regular_2f", "qty.no_fish_2f", "qty.soft_2f", "qty.mixer_2f"]
+    assert merged["rows"][0][3:7] == [quantities[0], "", quantities[1], quantities[2]]
+    assert merged["row_ids"] == ["row-preserve-1"]
+    assert (current, fresh) == before
+
+
 @pytest.mark.parametrize("fault", ["missing", "short", "duplicate_physical", "duplicate_row", "foreign", "null"])
 def test_actual_rebase_identity_failure_returns_original_blocker_without_write(monkeypatch, fault):
     current = _slot_draft()
