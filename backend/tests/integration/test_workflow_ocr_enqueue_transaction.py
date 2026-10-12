@@ -47,6 +47,8 @@ def _add_order_and_workflow(factory, *, order_id: str, revision: int = 7) -> Non
                 last_transition_at=datetime.utcnow(),
             )
         )
+        session.flush()
+        session.get(OrderWorkflowState, order_id).revision = revision
 
 
 def _metrics() -> dict:
@@ -247,7 +249,7 @@ def test_old_attempt_cannot_finish_or_fail_the_retried_job(workflow_database, mo
         order.document_uri = str(pdf)
         order.current_document_id = "attempt-document"
         session.add(OrderDocument(id="attempt-document", storage_uri=str(pdf), source_email_id=order.message_id))
-        session.add(UploadedPdf(id="attempt-pdf", storage_uri=str(pdf), message_id=order.message_id, original_filename="attempt.pdf", content_sha256=sha256(pdf.read_bytes()).hexdigest()))
+        session.add(UploadedPdf(id="attempt-pdf", storage_uri=str(pdf), message_id=order.message_id, original_filename="attempt.pdf", content_sha256=sha256(pdf.read_bytes()).hexdigest(), received_at=order.received_at))
     with factory.begin() as session:
         job, error = ocr_job_service.reserve_workflow_reparse_job(
             session,
@@ -398,6 +400,7 @@ def test_same_attempt_new_workflow_revision_fails_the_transaction_guard(workflow
                 id="OCR-ORD-revision-fence",
                 order_id="ORD-revision-fence",
                 status="running",
+                input_reference=session.get(Order, "ORD-revision-fence").document_uri,
                 metrics={"workflow_attempt_id": "attempt-current", "request_mode": "ocr_rerun"},
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
