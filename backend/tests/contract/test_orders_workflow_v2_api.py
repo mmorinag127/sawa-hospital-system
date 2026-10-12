@@ -254,6 +254,7 @@ def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypa
         assert order_id == "ORDocrinput" and job_id == "OCR-ORDocrinput"
         assert kwargs["expected_revision"] == 7
         assert kwargs["request_mode"] == "ocr_rerun"
+        assert kwargs["stale_action"] == "retry"
         assert kwargs["delivery_selected_document_id"] == "DOC-v1"
         captured.update(kwargs)
         return {"workflow": {"order_id": order_id, "ocr_job_id": job_id}, "delivery": delivery}, None

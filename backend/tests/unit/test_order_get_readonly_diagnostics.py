@@ -83,6 +83,30 @@ def test_cache_status_is_diagnostic_not_terminal_substitution(monkeypatch):
     assert order["ocr_cache_diagnostic"]["status"] == "success"
 
 
+def test_stale_reparse_with_cached_evidence_keeps_job_tokens_cache_and_quantity(monkeypatch, readonly_jobs):
+    job = readonly_jobs
+    cached = {
+        "status": "done",
+        "template_id": "fax_layout_regular_2f3f_v1",
+        "pages": [{"page_index": 0, "ocr_overlay_url": "https://example.com/ocr.pdf"}],
+        "table_raw": "|日付|区分|メニュー|常食2F|\n|03/22|朝|Menu A|5|",
+    }
+    before_job, before_cache = deepcopy(job), deepcopy(cached)
+    monkeypatch.setattr(orders.order_service, "get_cached_ocr_payload", lambda order_id: cached)
+    order = {"id": "order", "ocr_status": "running", "lines": [{"quantity": 0}]}
+
+    assert orders._mark_stale_order_reparse_job(order, job) is job
+    assert orders._apply_cached_status_override(order, "order", job) is job
+
+    assert order["ocr_stale_diagnostic"] == {
+        "error": "reparse_stale_timeout>30m", "job_id": job["id"], "processing_stage": "waiting",
+    }
+    assert order["ocr_status"] == "running"
+    assert order["lines"] == [{"quantity": 0}]
+    assert job == before_job
+    assert cached == before_cache
+
+
 @pytest.mark.parametrize("getter", [
     workflow_service.get_saved_sheet, workflow_service.get_inspection,
     workflow_service.list_ocr_results, workflow_service.build_sheet_from_selected_ocr,
