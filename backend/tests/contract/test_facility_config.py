@@ -66,14 +66,18 @@ def _seed_facilities_from_master():
         facility_service._sync_facilities_from_master(session)  # noqa: SLF001
 
 
-def _ensure_active_template_version_for_facility(facility_id: str):
-    with session_scope() as session:
-        facility_template_version_service.ensure_active_template_version_from_resolved_config(
-            session,
-            facility_id=facility_id,
-            facility_config=config_service.get_facility_config(facility_id),
-            created_by="test-explicit-template-registration",
-        )
+def _unversioned_columns(payload, master_path, facility_id):
+    """Assert authored metadata, never generated field IDs or an implicit version."""
+    master = json.loads(master_path.read_bytes())
+    authored = next(item for item in master["facilities"] if item["facility_id"] == facility_id)
+    assert payload["resolved_config"] == authored
+    assert "fax_template" not in payload["resolved_config"]
+    assert "facility_template_version" not in payload["resolved_config"]
+    assert payload["template_version_reference"] is None
+    assert payload["template_version_reference_status"] == "unavailable"
+    assert payload["version_resolution"] == {
+        "status": "unversioned_reference_only", "dated_endpoint": f"/facilities/{facility_id}/resolved"}
+    return payload["resolved_config"]["fax_template_override"]["columns"]
 
 
 def test_facility_config_update_contract(owned_master):
@@ -378,17 +382,15 @@ def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
     ]
 
 
-def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
+def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column(owned_master):
     _clear_facilities()
     _seed_facilities_from_master()
-    _ensure_active_template_version_for_facility("FAC00002")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00002")
     assert fetched.status_code == 200
     payload = fetched.json()
-    resolved = payload.get("resolved_config") or {}
-    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    columns = _unversioned_columns(payload, owned_master, "FAC00002")
 
     assert [column.get("header") for column in columns[:10]] == [
         "日付",
@@ -405,25 +407,21 @@ def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column():
     placeholder = columns[4]
     assert placeholder.get("role") == "quantity"
     assert placeholder.get("diet_type") == "placeholder"
-    assert placeholder.get("name") == "qty.placeholder_x"
+    assert "name" not in placeholder
+    assert placeholder.get("area_id") == "X"
     assert placeholder.get("source_index") == 5
-    version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
-    version_placeholder = version_columns[4]
-    assert version_placeholder.get("column_id") == "col_005_quantity"
-    assert (version_placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
+    assert "column_id" not in placeholder and "semantic" not in placeholder
 
 
-def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
+def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column(owned_master):
     _clear_facilities()
     _seed_facilities_from_master()
-    _ensure_active_template_version_for_facility("FAC00007")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00007")
     assert fetched.status_code == 200
     payload = fetched.json()
-    resolved = payload.get("resolved_config") or {}
-    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    columns = _unversioned_columns(payload, owned_master, "FAC00007")
 
     assert [column.get("header") for column in columns[:10]] == [
         "日付",
@@ -438,25 +436,23 @@ def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column():
         "備考欄",
     ]
     assert [column.get("source_index") for column in columns[:10]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10]
-    version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
-    validation = facility_template_version_service.validate_template_columns(version_columns)
-    assert validation["errors"] == []
-    placeholder = version_columns[4]
+    placeholder = columns[4]
+    assert placeholder.get("role") == "quantity"
     assert placeholder.get("diet_type") == "placeholder"
-    assert (placeholder.get("semantic") or {}).get("aggregation_role") == "exclude"
+    assert placeholder.get("area_id") == "X"
+    assert "name" not in placeholder
+    assert "column_id" not in placeholder and "semantic" not in placeholder
 
 
-def test_fac00004_current_columns_preserve_physical_source_indexes():
+def test_fac00004_current_columns_preserve_physical_source_indexes(owned_master):
     _clear_facilities()
     _seed_facilities_from_master()
-    _ensure_active_template_version_for_facility("FAC00004")
     client = TestClient(app)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00004")
     assert fetched.status_code == 200
     payload = fetched.json()
-    resolved = payload.get("resolved_config") or {}
-    columns = ((resolved.get("fax_template") or {}).get("columns")) or []
+    columns = _unversioned_columns(payload, owned_master, "FAC00004")
 
     assert [column.get("header") for column in columns[:11]] == [
         "日付",
@@ -472,12 +468,10 @@ def test_fac00004_current_columns_preserve_physical_source_indexes():
         "備考欄",
     ]
     assert [column.get("source_index") for column in columns[:11]] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    version_columns = ((resolved.get("facility_template_version") or {}).get("columns")) or []
-    validation = facility_template_version_service.validate_template_columns(version_columns)
-    assert validation["errors"] == []
-    assert version_columns[2].get("column_id") == "col_003_menu_name"
-    assert version_columns[3].get("column_id") == "col_004_quantity"
-    assert version_columns[4].get("column_id") == "col_005_quantity"
+    assert columns[2].get("role") == "menu_name"
+    assert [(column.get("role"), column.get("diet_type"), column.get("area_id")) for column in columns[3:5]] == [
+        ("quantity", "regular", "X"), ("quantity", "daycare", "X")]
+    assert all("column_id" not in column and "semantic" not in column for column in columns)
 
 
 def test_facility_master_columns_define_source_indexes_without_runtime_enrichment():
@@ -537,7 +531,7 @@ def test_facility_config_does_not_enrich_missing_source_indexes_from_source_work
     assert "template_source_index_missing" in validation["errors"]
 
 
-def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns():
+def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns(owned_master):
     _clear_facilities()
     _seed_facilities_from_master()
     client = TestClient(app)
@@ -570,7 +564,7 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
     resolved = fetched.json()["resolved_config"]
     assert resolved == config_service.get_facility_by_id("FAC00003")
     assert "fax_template" not in resolved
-    columns = resolved["fax_template_override"]["columns"]
+    columns = _unversioned_columns(fetched.json(), owned_master, "FAC00003")
     assert [column.get("header") for column in columns] == [
         "日付",
         "区分",
@@ -590,13 +584,8 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
         "備考",
     ]
     assert [column.get("source_index") for column in columns] == [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    assert [column.get("name") for column in columns[3:15]] == [
-        "qty.regular_2f",
-        "qty.regular_3f",
-        "qty.soft_2f",
-        "qty.soft_3f",
-        "qty.mixer_2f",
-        "qty.mixer_3f",
+    assert all("name" not in column for column in columns[3:9])
+    assert [column.get("name") for column in columns[9:15]] == [
         "qty.no_fish_regular_2f",
         "qty.no_fish_regular_3f",
         "qty.no_fish_soft_2f",
@@ -604,3 +593,26 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns()
         "qty.no_fish_mixer_2f",
         "qty.no_fish_mixer_3f",
     ]
+
+
+def test_all_original_metadata_reads_are_readonly_without_implicit_date_resolution(owned_master, monkeypatch):
+    from unittest.mock import Mock
+
+    master = json.loads(owned_master.read_bytes())
+    assert len(master["facilities"]) == 17
+    before = owned_master.read_bytes(), _database_rows()
+    resolver = Mock(wraps=facility_template_version_service.get_active_template_version)
+    monkeypatch.setattr(facility_template_version_service, "get_active_template_version", resolver)
+    client = TestClient(app)
+    for facility in master["facilities"]:
+        response = client.get(f"/facilities/{facility['facility_id']}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["resolved_config"] == facility
+        assert payload["template_version_reference"] is None
+        assert payload["template_version_reference_status"] == "unavailable"
+        assert payload["version_resolution"] == {
+            "status": "unversioned_reference_only",
+            "dated_endpoint": f"/facilities/{facility['facility_id']}/resolved"}
+    resolver.assert_not_called()
+    assert (owned_master.read_bytes(), _database_rows()) == before

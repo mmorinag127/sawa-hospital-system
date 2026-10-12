@@ -1,16 +1,12 @@
 import os
 
-from loguru import logger
-
 from fastapi import APIRouter, HTTPException, Depends, File, Form, UploadFile, status
 from pydantic import BaseModel
 
-from src.db import session_scope
 from src.services import (
     facility_master_service,
     facility_service,
     config_service,
-    facility_template_version_service,
     master_order_form_template_service,
     order_form_service,
 )
@@ -82,19 +78,10 @@ def get_facility(facility_id: str):
         snapshot = facility_master_service.get_snapshot()
         response = facility_service.facility_response(snapshot.master, facility_id, snapshot.revision)
     response["validation"] = validate_facility_config(response["config"])
-    # A legacy DB version is a reference, not provenance for this JSON snapshot.
+    # Undated metadata cannot identify a dated canonical template version.
     response["version_resolution"] = {"status": "unversioned_reference_only", "dated_endpoint": f"/facilities/{facility_id}/resolved"}
-    try:
-        with session_scope() as session:
-            active_version = facility_template_version_service.get_active_template_version(session, facility_id)
-            response["template_version_reference"] = (
-                facility_template_version_service.serialize_template_version(active_version) if active_version is not None else None
-            )
-        response["template_version_reference_status"] = "legacy_unverified" if active_version is not None else "absent"
-    except Exception:
-        logger.warning("Canonical facility read succeeded; legacy DB version reference unavailable")
-        response["template_version_reference"] = None
-        response["template_version_reference_status"] = "unavailable"
+    response["template_version_reference"] = None
+    response["template_version_reference_status"] = "unavailable"
     return response
 
 
