@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sys
 from unittest.mock import create_autospec
@@ -10,7 +11,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 import src.api.base_menus as base_menus_api  # noqa: E402
-import src.api.facility_master as facility_master_api  # noqa: E402
 import src.api.facilities as facilities_api  # noqa: E402
 import src.api.menu_masters as menu_masters_api  # noqa: E402
 import src.api.menu_rules as menu_rules_api  # noqa: E402
@@ -82,15 +82,31 @@ def test_user2_menu_rules_allows_operator(monkeypatch, hospital_operator):
     assert client.delete("/menu-rules/r1", headers={**headers, "If-Match": revision}).status_code == 200
 
 
-def test_user2_facility_master_save_allows_operator(monkeypatch, hospital_operator):
+def test_user2_facility_master_save_allows_operator(monkeypatch, hospital_operator, tmp_path):
     headers = hospital_operator.headers
     sample_master = {"schema_version": "1", "facilities": [{"facility_id": "FAC00001", "facility_name": "Test"}]}
-    monkeypatch.setattr(facility_master_api.facility_master_service, "save_master", lambda master: master)
+    path = tmp_path / "facility-master.json"
+    path.write_text(json.dumps(sample_master), encoding="utf-8")
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(path))
 
     client = TestClient(app)
-    res = client.put("/facility-master", json=sample_master, headers=headers)
+    read = client.get("/facility-master", headers=headers)
+    assert read.status_code == 200
+    assert read.json()["facility_master"] == sample_master
+    res = client.put(
+        "/facility-master",
+        json={"facility_master": sample_master, "expected_revision": read.json()["revision"]},
+        headers=headers,
+    )
     assert res.status_code == 200
     assert res.json()["updated"] is True
+    fresh = client.get("/facility-master", headers=headers)
+    assert fresh.status_code == 200
+    assert fresh.json()["facility_master"] == sample_master
+    assert fresh.json()["revision"] == res.json()["revision"]
+    assert json.loads(path.read_text(encoding="utf-8")) == sample_master
 
 
 def test_user2_facility_basic_update_allows_operator(monkeypatch, hospital_operator):
