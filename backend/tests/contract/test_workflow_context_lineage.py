@@ -250,3 +250,89 @@ def test_successful_reconfirm_keeps_existing_invalidation_semantics(context_sour
         assert session.get(OrderCurrentState, ORDER).evidence_run_id is None
     assert _snapshot(f.engine)["facility_template_versions"] == projection_before
     assert f.source.read_bytes() == source_before
+
+
+@pytest.mark.parametrize("populated", [False, True])
+@pytest.mark.parametrize("declaration,runtime_error", [
+    ("missing-nested", "authored_fax_template_id_mismatch"),
+    ("conflicting", "authored_fax_template_id_mismatch"),
+    ("multiple", "authored_fax_template_ambiguous"),
+])
+def test_declared_template_must_pass_runtime_validation_before_context_writes(
+    context_source, populated, declaration, runtime_error, record_property,
+):
+    from src.services.config_service import _validate_authored_facility_config
+    from src.services.canonical_facility_store import validate_authored_snapshot
+
+    f = context_source
+    revision = _stored_downstream() if populated else 0
+    content = f.authored["facility"]
+    if declaration == "missing-nested":
+        del content["fax_template"]["template_id"]
+    elif declaration == "conflicting":
+        content["fax_template"]["template_id"] = "explicit-other-template"
+    else:
+        content["fax_template_ids"] = [TEMPLATE, "explicit-other-template"]
+    f.source.write_text(json.dumps(f.master), encoding="utf-8")
+    before, source_before = _snapshot(f.engine), f.source.read_bytes()
+    with pytest.raises(ValueError, match=runtime_error):
+        _validate_authored_facility_config(content, None)
+    with pytest.raises(CanonicalStoreError) as failure:
+        validate_authored_snapshot(content, f.authored["version_id"])
+    assert failure.value.status_code == 422
+    assert failure.value.detail["validation_errors"] == [runtime_error]
+    response = _request(f, template=None, revision=revision)
+    record_property("response", response.text)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "facility_version_snapshot_incomplete"
+    assert _snapshot(f.engine) == before
+    assert f.source.read_bytes() == source_before
+
+
+def test_original_registered_layout_without_nested_id_is_refused(context_source):
+    f = context_source
+    facility_id = "FACREG-original-malformed"
+    original = {
+        "facility_id": facility_id, "facility_name": f"Template Facility {facility_id}", "areas": None,
+        "fax_template_id": "fax_layout_regular_forbidden_v1",
+        "fax_template": {"columns": [
+            {"index": 0, "role": "date", "header": "日付", "source_index": 0},
+            {"index": 1, "role": "quantity", "header": "常食", "diet_type": "regular",
+             "area_id": "X", "source_index": 3},
+        ]},
+    }
+    f.source.write_text(json.dumps({"facilities": [{"facility_id": facility_id, "versions": [{
+        "version_id": "unit-april-contract", "valid_from": "2026-04-26", "valid_to": "2026-04-30",
+        "facility": original,
+    }]}]}), encoding="utf-8")
+    with session_scope() as session:
+        session.add(Facility(id=facility_id, name=original["facility_name"]))
+    before, source_before = _snapshot(f.engine), f.source.read_bytes()
+    response = f.client.post(f"/orders/{ORDER}/workflow-v2/context",
+        headers={**f.actor.headers, "If-Match": '"0"'},
+        json={"facility_id": facility_id, "week_start": "2026-04-26", "week_end": "2026-04-30"})
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "facility_version_snapshot_incomplete"
+    assert _snapshot(f.engine) == before
+    assert f.source.read_bytes() == source_before
+
+
+def test_undeclared_inline_template_remains_valid_without_an_inferred_id(context_source):
+    from src.services.config_service import _validate_authored_facility_config
+
+    f = context_source
+    content = f.authored["facility"]
+    del content["fax_template_id"]
+    del content["fax_template"]["template_id"]
+    f.source.write_text(json.dumps(f.master), encoding="utf-8")
+    source_before = f.source.read_bytes()
+    assert _validate_authored_facility_config(content, None) == content
+    response = _request(f, template=None)
+    assert response.status_code == 200, response.text
+    assert response.json()["template_id"] is None
+    with session_scope() as session:
+        projection = session.query(FacilityTemplateVersion).one()
+        assert projection.template_id is None
+        assert projection.config_json == content
+        assert lineage.verify_projection(projection)["authored_version"] == f.authored
+    assert f.source.read_bytes() == source_before

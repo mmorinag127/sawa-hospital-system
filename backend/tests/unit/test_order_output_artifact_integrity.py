@@ -125,6 +125,8 @@ def test_confirmed_snapshot_requires_both_owned_canonical_artifacts(saved, damag
         if damage == "snapshot_digest":
             snapshot.snapshot_digest = "bad"
         elif damage == "snapshot_owner":
+            session.add(Order(id="foreign", document_uri="fixture://foreign-input", message_id="foreign-message"))
+            session.flush()
             snapshot.order_id = "foreign"
         elif damage == "snapshot_inline":
             snapshot.snapshot_json = {**snapshot_payload, "bagging_result": {**bag, "quantities": [99]}}

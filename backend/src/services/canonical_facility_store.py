@@ -93,6 +93,7 @@ def facility_versions(master: dict, facility_id: str) -> list[dict]:
 def validate_authored_snapshot(content: dict, version_id: str) -> None:
     # These are the production validators, not template normalization or repair.
     from src.services import config_validator
+    from src.services.config_service import _validate_authored_facility_config
     from src.services.facility_template_version_service import validate_template_columns
     from src.services.template_field_schema_service import canonical_field_name_from_template_column
 
@@ -131,6 +132,11 @@ def validate_authored_snapshot(content: dict, version_id: str) -> None:
     validate_authored_geometry(template, errors)
     config_validator._validate_ocr_provider_config(template, "fax_template", errors)
     config_validator._validate_order_form_source_config(template, "fax_template", errors)
+    if not errors:
+        try:
+            _validate_authored_facility_config(content, None)
+        except ValueError as exc:
+            errors.append(str(exc))
     if errors:
         raise CanonicalStoreError("facility_version_snapshot_incomplete", status_code=422,
                                   version_id=version_id, validation_errors=errors)
