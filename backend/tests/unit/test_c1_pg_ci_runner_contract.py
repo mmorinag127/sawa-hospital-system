@@ -22,15 +22,16 @@ SPEC.loader.exec_module(runner)
 SOURCE_SHA = '04ef4a6ce7897bb187bb4d91f77839cfa30edde7'
 
 
-@pytest.mark.parametrize('suite,prefix,module', [
-    ('readonly', 'sawa-ro', 'backend/tests/integration/test_menu_readonly_boundary.py'),
-    ('c1', 'sawa-c1', 'backend/tests/integration/test_menu_master_revision.py'),
+@pytest.mark.parametrize('suite,prefix,modules', [
+    ('readonly', 'sawa-ro', ['backend/tests/integration/test_menu_readonly_boundary.py']),
+    ('c1', 'sawa-c1', ['backend/tests/integration/test_menu_master_revision.py',
+                      'backend/tests/integration/test_menu_editor_revision_contract.py']),
 ])
-def test_explicit_suite_selects_one_whole_module_and_distinct_owned_root(suite, prefix, module):
+def test_explicit_suite_selects_whole_modules_and_distinct_owned_root(suite, prefix, modules):
     root = runner.owned_root('123', '2', suite)
     assert root == Path('/tmp').resolve() / f'{prefix}-123-2'
     assert runner.pytest_command(root, suite) == [
-        sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', module,
+        sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', *modules,
         '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results.xml'), '-v',
     ]
     assert runner.owned_root('123', '2') == runner.owned_root('123', '2', 'readonly')
@@ -194,7 +195,9 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
         assert sql[14] == '-c' and 'current_database()' in sql[15]
         metadata = json.loads((root / 'evidence/run.json').read_text())
         assert metadata['source_sha'] == SOURCE_SHA and metadata['uri'] == env[key]
-        assert metadata['module'] == 'backend/tests/integration/test_menu_master_revision.py'
+        assert metadata['modules'] == ['backend/tests/integration/test_menu_master_revision.py',
+                                       'backend/tests/integration/test_menu_editor_revision_contract.py']
+        assert metadata['argv'] == args
     else:
         assert env['C2_MENU_READONLY_OWNED_ROOT'] == str(root)
         assert not any(Path(args[0]).name in {'createdb', 'psql'} for args in commands)

@@ -13,7 +13,11 @@ from urllib.parse import urlencode
 
 PG_BIN = Path('/usr/lib/postgresql/16/bin')
 MODULE = 'backend/tests/integration/test_menu_readonly_boundary.py'
-MODULES = {'readonly': MODULE, 'c1': 'backend/tests/integration/test_menu_master_revision.py'}
+MODULES = {
+    'readonly': [MODULE],
+    'c1': ['backend/tests/integration/test_menu_master_revision.py',
+           'backend/tests/integration/test_menu_editor_revision_contract.py'],
+}
 
 
 def owned_root(run_id, attempt, suite='readonly'):
@@ -28,7 +32,7 @@ def owned_root(run_id, attempt, suite='readonly'):
 def pytest_command(root, suite='readonly'):
     if suite not in MODULES:
         raise ValueError('unknown suite')
-    return [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', MODULES[suite],
+    return [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', *MODULES[suite],
             '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results.xml'), '-v']
 
 
@@ -92,7 +96,7 @@ def run(source, run_id, attempt, suite='readonly'):
         if suite == 'c1':
             (evidence / 'run.json').write_text(json.dumps({
                 'source_sha': sha.strip(), 'source': str(source), 'suite': suite,
-                'module': MODULES[suite], 'argv': pytest_command(root, suite),
+                'modules': MODULES[suite], 'argv': pytest_command(root, suite),
                 'root': str(root), 'data': str(data), 'socket': str(socket),
                 'port': port, 'pg_bin': str(PG_BIN), 'uri': env['C1_POSTGRES_URI'],
             }, indent=2) + '\n')
