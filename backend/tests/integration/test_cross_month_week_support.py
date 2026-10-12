@@ -315,7 +315,7 @@ def test_apply_payload_quantities_numeric_only_prefers_identity_over_row_index_f
     assert rows[3]["values"][3:6] == ["102", "2", "2"]
 
 
-def test_candidate_resolution_resolves_calendar_week_without_user_choice() -> None:
+def test_candidate_resolution_does_not_resolve_ocr_dates_without_explicit_choice() -> None:
     resolution = candidate_resolution_service.build_week_resolution(
         current_week=None,
         received_at=datetime(2026, 4, 30, 9, 0, 0),
@@ -323,9 +323,13 @@ def test_candidate_resolution_resolves_calendar_week_without_user_choice() -> No
         facility_id="FAC00001",
     )
 
-    assert resolution["resolved_value"] == "2026-04@2026-04-26~2026-05-02"
-    assert resolution["requires_user_choice"] is False
-    assert resolution["blocked"] is False
+    assert resolution["resolved_value"] is None
+    assert resolution["requires_user_choice"] is True
+    assert resolution["blocked"] is True
+    assert resolution["blocked_reasons"] == ["week_choice_required"]
+    assert {"2026-04@2026-04-26~2026-04-30", "2026-05@2026-05-01~2026-05-02"} <= {
+        item["value"] for item in resolution["candidates"]
+    }
 
 
 def test_candidate_resolution_preserves_explicit_current_week_range() -> None:

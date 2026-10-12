@@ -267,8 +267,9 @@ def build_week_resolution(
     facility_id: str | None,
 ) -> dict[str, Any]:
     raw_current_value = str(current_week or "").strip() or None
-    current_value = raw_current_value if raw_current_value and "@" in raw_current_value else None
-    anchor_month = (raw_current_value.split("@", 1)[0] if raw_current_value else "") or (
+    current_month, current_start, current_end = sheet_week_service.parse_sheet_week_value(raw_current_value)
+    current_value = raw_current_value if current_start is not None and current_end is not None else None
+    anchor_month = current_month or (
         received_at or datetime.utcnow()
     ).strftime("%Y-%m")
     payload_dates = _collect_payload_dates(payload, received_at)
@@ -278,7 +279,6 @@ def build_week_resolution(
         if shifted and shifted not in candidate_months:
             candidate_months.append(shifted)
     normalized_candidates: list[dict[str, Any]] = []
-    matched_candidates: list[str] = []
     for month_id in candidate_months:
         for week_option in week_candidate_service.build_week_option_entries(month_id, facility_id):
             week_value = str(week_option.get("week_id") or "").strip()
@@ -298,14 +298,13 @@ def build_week_resolution(
             ]
             matched_ratio = (len(matched_dates) / len(payload_dates)) if payload_dates else 0.0
             score = 0.2
-            reason = "menu_week"
+            reason = "calendar_week"
             if current_value and current_value == week_value:
                 score = 1.0
                 reason = "current_order_value"
             elif matched_dates:
                 score = 0.9 + min(matched_ratio, 1.0) * 0.09
                 reason = "ocr_dates"
-                matched_candidates.append(week_value)
             elif isinstance(received_at, datetime) and start_date <= received_at.date() <= end_date:
                 score = 0.75
                 reason = "received_at"
@@ -320,38 +319,20 @@ def build_week_resolution(
                     "reason": reason,
                 }
             )
+    if current_value and not any(item["value"] == current_value for item in normalized_candidates):
+        normalized_candidates.append({
+            "value": current_value,
+            "label": sheet_week_service.format_sheet_week_label(current_value),
+            "score": 1.0,
+            "reason": "current_order_value",
+        })
     normalized_candidates.sort(key=lambda item: (item.get("score") or 0.0, item.get("value") or ""), reverse=True)
     normalized_candidates = _dedupe_candidates(normalized_candidates)
     top_score = normalized_candidates[0]["score"] if normalized_candidates else None
-    deduped_matched_candidates: list[str] = []
-    for value in matched_candidates:
-        if value not in deduped_matched_candidates:
-            deduped_matched_candidates.append(value)
-    requires_user_choice = False
-    month_only_current = bool(raw_current_value and not current_value)
+    # OCR/received-date scores rank suggestions; only an explicit valid range resolves.
     resolved_value = current_value
-    if (
-        not resolved_value
-        and len(deduped_matched_candidates) == 1
-        and not (month_only_current and len(normalized_candidates) >= 2)
-    ):
-        resolved_value = deduped_matched_candidates[0]
-    if not resolved_value and len(deduped_matched_candidates) >= 2:
-        requires_user_choice = True
-    elif not resolved_value and month_only_current:
-        # A month-only order week is only ambiguous when OCR payload dates actually
-        # point at a specific weekly slice. Pure calendar fallback candidates are not
-        # authoritative enough to force a user choice ahead of downstream blockers.
-        requires_user_choice = bool(payload_dates)
-    elif not resolved_value and not payload_dates and len(normalized_candidates) >= 2:
-        requires_user_choice = True
-    elif not resolved_value and len(normalized_candidates) >= 2 and not deduped_matched_candidates:
-        requires_user_choice = True
-    blocked_reasons: list[str] = []
-    if not resolved_value and requires_user_choice:
-        blocked_reasons.append("week_choice_required")
-    elif not resolved_value and not normalized_candidates:
-        blocked_reasons.append("week_candidates_missing")
+    requires_user_choice = current_value is None
+    blocked_reasons = ["week_choice_required"] if requires_user_choice else []
     return {
         "decision_type": "week",
         "resolved_value": resolved_value,
@@ -852,11 +833,8 @@ def resolve_order_list_candidates(
     current_facility = str(facility_code or "").strip() or None
     current_week = str(week_code or "").strip() or None
     facility = build_facility_resolution(current_facility=current_facility, payload=evidence_payload)
-    # Treat bare month codes as unresolved for list grouping so OCR-derived
-    # week ranges can surface without forcing a full workflow refresh.
-    explicit_current_week = current_week if current_week and "@" in current_week else None
     week = build_week_resolution(
-        current_week=explicit_current_week,
+        current_week=current_week,
         received_at=received_at,
         payload=evidence_payload,
         facility_id=facility.get("resolved_value") or current_facility,

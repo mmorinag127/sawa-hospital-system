@@ -1,15 +1,22 @@
 import pathlib
 import sys
 import pytest
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from sqlalchemy import delete
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import candidate_resolution_service, facility_service  # noqa: E402
+from src.services import candidate_resolution_service, facility_service, menu_service, week_candidate_service  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
+
+
+@pytest.fixture
+def no_week_menu_access(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("calendar choices must not access menu sources")
+    monkeypatch.setattr(menu_service, "get_menu_for_facility", forbidden)
 
 
 def _structured_cells(rows: list[list[str]]) -> list[dict[str, object]]:
@@ -77,33 +84,7 @@ def test_build_facility_resolution_keeps_current_order_value() -> None:
     assert resolution["candidates"][0]["value"] == "FAC00009"
 
 
-def test_build_week_resolution_requires_choice_when_multiple_weeks_match(monkeypatch) -> None:
-    def _fake_get_menu_for_facility(_month_id: str, _facility_id: str | None, **_kwargs):
-        return {
-            "entries": [
-                {"menu_date": "2026-03-01"},
-                {"menu_date": "2026-03-02"},
-                {"menu_date": "2026-03-03"},
-                {"menu_date": "2026-03-04"},
-                {"menu_date": "2026-03-05"},
-                {"menu_date": "2026-03-06"},
-                {"menu_date": "2026-03-07"},
-                {"menu_date": "2026-03-15"},
-                {"menu_date": "2026-03-16"},
-                {"menu_date": "2026-03-17"},
-                {"menu_date": "2026-03-18"},
-                {"menu_date": "2026-03-19"},
-                {"menu_date": "2026-03-20"},
-                {"menu_date": "2026-03-21"},
-            ]
-        }
-
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        _fake_get_menu_for_facility,
-    )
-
+def test_build_week_resolution_requires_choice_when_multiple_weeks_match(no_week_menu_access) -> None:
     resolution = candidate_resolution_service.build_week_resolution(
         current_week=None,
         received_at=datetime(2026, 3, 22, 9, 0, 0),
@@ -119,13 +100,7 @@ def test_build_week_resolution_requires_choice_when_multiple_weeks_match(monkeyp
     assert len(resolution["candidates"]) >= 2
 
 
-def test_build_week_resolution_uses_sunday_saturday_week_ranges_without_menu(monkeypatch) -> None:
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        lambda *_args, **_kwargs: {},
-    )
-
+def test_build_week_resolution_uses_sunday_saturday_week_ranges_without_menu(no_week_menu_access) -> None:
     resolution = candidate_resolution_service.build_week_resolution(
         current_week="2026-04",
         received_at=datetime(2026, 4, 6, 9, 0, 0),
@@ -140,13 +115,7 @@ def test_build_week_resolution_uses_sunday_saturday_week_ranges_without_menu(mon
     assert resolution["resolved_value"] is None
 
 
-def test_build_week_resolution_uses_sunday_saturday_calendar_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        lambda _month_id, _facility_id, **_kwargs: {"entries": []},
-    )
-
+def test_build_week_resolution_ranks_calendar_suggestions_without_menu(no_week_menu_access) -> None:
     resolution = candidate_resolution_service.build_week_resolution(
         current_week=None,
         received_at=datetime(2026, 4, 6, 9, 0, 0),
@@ -157,6 +126,87 @@ def test_build_week_resolution_uses_sunday_saturday_calendar_fallback(monkeypatc
     candidate_values = [item["value"] for item in resolution["candidates"]]
     assert "2026-04@2026-04-05~2026-04-11" in candidate_values
     assert "2026-04@2026-04-01~2026-04-07" not in candidate_values
+    assert resolution["resolved_value"] is None
+    assert resolution["requires_user_choice"] is True
+    assert resolution["blocked_reasons"] == ["week_choice_required"]
+
+
+@pytest.mark.parametrize("month,ends", [
+    ("2026-04", [4, 11, 18, 25, 30]),
+    ("2026-02", [7, 14, 21, 28]),
+    ("2024-02", [3, 10, 17, 24, 29]),
+    ("2025-12", [6, 13, 20, 27, 31]),
+    ("2026-01", [3, 10, 17, 24, 31]),
+    ("0001-01", [6, 13, 20, 27, 31]),
+    ("9999-12", [4, 11, 18, 25, 31]),
+])
+def test_calendar_options_cover_exact_month_without_menu_access(no_week_menu_access, month, ends):
+    options = week_candidate_service.build_week_option_entries(month, "FAC00001")
+    assert options == week_candidate_service.build_week_option_entries(month, None)
+    start_day = 1
+    expected = []
+    for end_day in ends:
+        start, end = f"{month}-{start_day:02d}", f"{month}-{end_day:02d}"
+        expected.append({"week_id": f"{month}@{start}~{end}",
+            "label": f"{month} ({start[5:7]}/{start[8:]}-{end[5:7]}/{end[8:]})",
+            "date_from": start, "date_to": end})
+        start_day = end_day + 1
+    assert options == expected
+    for index, item in enumerate(options):
+        start, end = date.fromisoformat(item["date_from"]), date.fromisoformat(item["date_to"])
+        assert start <= end and (end - start).days <= 6
+        if index:
+            assert start.weekday() == 6
+            assert start == date.fromisoformat(options[index - 1]["date_to"]) + timedelta(days=1)
+        if index != len(options) - 1:
+            assert end.weekday() == 5
+
+
+@pytest.mark.parametrize("month", [None, "", "2026-00", "2026-13", "0000-01", "10000-01", "2026-4", "2026-04junk"])
+def test_calendar_options_reject_invalid_month(no_week_menu_access, month):
+    assert week_candidate_service.build_week_option_entries(month, "FAC00001") == []
+
+
+@pytest.mark.parametrize("current_week", [
+    None, "2026-04", "invalid", "2026-04@invalid", "2026-04@2026-04-31~2026-05-02",
+    "2026-04@2026-04-11~2026-04-05", "2026-03@2026-04-05~2026-04-11",
+])
+def test_week_resolution_requires_valid_explicit_range_despite_single_ocr_match(no_week_menu_access, current_week):
+    payload = {"table_raw": "2026/04/06", "week_candidates": [{
+        "value": "2026-04@2026-04-05~2026-04-11", "score": 1.0, "auto": True}]}
+    resolution = candidate_resolution_service.build_week_resolution(
+        current_week=current_week, received_at=datetime(2026, 4, 6), payload=payload, facility_id="FAC00001")
+    assert resolution["resolved_value"] is None and resolution["resolved_label"] is None
+    assert resolution["requires_user_choice"] is True and resolution["blocked"] is True
+    assert resolution["blocked_reasons"] == ["week_choice_required"]
+    assert resolution["confidence"] == "unknown"
+    assert resolution["candidates"][0]["value"] == "2026-04@2026-04-05~2026-04-11"
+    assert resolution["candidates"][0]["reason"] == "ocr_dates"
+    assert payload["week_candidates"][0]["auto"] is True
+
+
+@pytest.mark.parametrize("current_week", [
+    "2026-04@2026-04-05~2026-04-11", "2026-04@2026-04-26~2026-04-30",
+    "2026-04@2026-04-26~2026-05-02", "2026-05@2026-05-01~2026-05-02",
+])
+def test_week_resolution_preserves_explicit_range_over_conflicting_suggestions(no_week_menu_access, current_week):
+    resolution = candidate_resolution_service.build_week_resolution(
+        current_week=current_week, received_at=datetime(2026, 3, 11),
+        payload={"table_raw": "2026/03/11"}, facility_id="FAC00001")
+    assert resolution["resolved_value"] == current_week
+    assert resolution["resolved_label"] == candidate_resolution_service.sheet_week_service.format_sheet_week_label(current_week)
+    assert resolution["requires_user_choice"] is False and resolution["blocked"] is False
+    assert resolution["blocked_reasons"] == []
+    assert resolution["candidates"][0]["value"] == current_week
+    assert resolution["candidates"][0]["reason"] == "current_order_value"
+
+
+def test_order_list_week_suggestions_keep_explicit_month_without_adopting_received_date(no_week_menu_access):
+    result = candidate_resolution_service.resolve_order_list_candidates(
+        facility_code="FAC00001", week_code="2026-01", received_at=datetime(2026, 9, 1), evidence_payload={})
+    week = result["resolutions"]["week"]
+    assert week["resolved_value"] is None and week["requires_user_choice"] is True
+    assert all(item["value"].startswith("2026-01@") for item in week["candidates"])
 
 
 def test_build_template_resolution_requires_choice_when_multiple_candidates_exist() -> None:
@@ -280,23 +330,7 @@ def test_summarize_resolution_gate_can_suppress_layout_decisions() -> None:
     assert detail_by_type["template"]["suppressed"] is True
 
 
-def test_resolve_order_list_candidates_promotes_month_week_to_ocr_range(monkeypatch) -> None:
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        lambda _month_id, _facility_id, **_kwargs: {
-            "entries": [
-                {"menu_date": "2026-03-22"},
-                {"menu_date": "2026-03-23"},
-                {"menu_date": "2026-03-24"},
-                {"menu_date": "2026-03-25"},
-                {"menu_date": "2026-03-26"},
-                {"menu_date": "2026-03-27"},
-                {"menu_date": "2026-03-28"},
-            ]
-        },
-    )
-
+def test_resolve_order_list_candidates_ranks_ocr_range_without_resolving_month_week(no_week_menu_access) -> None:
     resolved = candidate_resolution_service.resolve_order_list_candidates(
         facility_code="FAC00001",
         week_code="2026-03",
@@ -311,19 +345,15 @@ def test_resolve_order_list_candidates_promotes_month_week_to_ocr_range(monkeypa
 
     week = resolved["resolutions"]["week"]
     facility = resolved["resolutions"]["facility"]
-    assert week["resolved_value"] == "2026-03@2026-03-22~2026-03-28"
-    assert week["resolved_label"] == "2026-03 (03/22-03/28)"
+    assert week["resolved_value"] is None and week["resolved_label"] is None
+    assert week["candidates"][0]["value"] == "2026-03@2026-03-22~2026-03-28"
+    assert week["candidates"][0]["label"] == "2026-03 (03/22-03/28)"
     assert facility["resolved_value"] == "FAC00001"
-    assert resolved["requires_user_choice"] is False
+    assert resolved["requires_user_choice"] is True
+    assert week["blocked_reasons"] == ["week_choice_required"]
 
 
-def test_resolve_order_candidates_treats_month_only_week_as_unresolved(monkeypatch) -> None:
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        lambda *_args, **_kwargs: {},
-    )
-
+def test_resolve_order_candidates_treats_month_only_week_as_unresolved(no_week_menu_access) -> None:
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-CAND-WEEK-1",
         facility_code="FAC00001",
@@ -346,13 +376,7 @@ def test_resolve_order_candidates_treats_month_only_week_as_unresolved(monkeypat
     ]
 
 
-def test_resolve_order_candidates_does_not_force_week_choice_from_month_only_calendar_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        lambda *_args, **_kwargs: {},
-    )
-
+def test_resolve_order_candidates_requires_explicit_week_without_ocr_dates(no_week_menu_access) -> None:
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-CAND-WEEK-2",
         facility_code="FAC00001",
@@ -368,21 +392,11 @@ def test_resolve_order_candidates_does_not_force_week_choice_from_month_only_cal
 
     week = resolved["resolutions"]["week"]
     assert week["resolved_value"] is None
-    assert week["requires_user_choice"] is False
-    assert week["blocked_reasons"] == []
+    assert week["requires_user_choice"] is True
+    assert week["blocked_reasons"] == ["week_choice_required"]
 
 
-def test_resolve_current_week_selection_does_not_promote_month_from_received_date(monkeypatch) -> None:
-    monkeypatch.setattr(
-        candidate_resolution_service.week_candidate_service.menu_service,
-        "get_menu_for_facility",
-        lambda *_args, **_kwargs: {
-            "entries": [
-                {"menu_date": "2026-02-01"},
-            ]
-        },
-    )
-
+def test_resolve_current_week_selection_does_not_promote_month_from_received_date(no_week_menu_access) -> None:
     selection = candidate_resolution_service.week_candidate_service.resolve_current_week_selection(
         "2026-02",
         received_at=datetime(2026, 2, 15, 9, 0, 0),
