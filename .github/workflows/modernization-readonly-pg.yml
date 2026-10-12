@@ -24,6 +24,12 @@ jobs:
           - suite: c1
             root-prefix: sawa-c1
             artifact-prefix: hospital-c1
+          - suite: c1-guards
+            root-prefix: sawa-c1-guards
+            artifact-prefix: hospital-c1-guards
+          - suite: menu-identity
+            root-prefix: sawa-menu-identity
+            artifact-prefix: hospital-menu-identity
     steps:
       - uses: actions/checkout@v6
         with:
@@ -41,6 +47,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${{ matrix.suite }}" == c1-guards || "${{ matrix.suite }}" == menu-identity ]]; then
+            status=0
+            (
+              if [[ -e /private || -L /private ]]; then
+                printf '%s\n' 'Refusing existing or aliased /private' >&2
+                exit 1
+              fi
+              sudo mkdir -m 700 -- /private || exit $?
+              sudo chown "$(id -u):$(id -g)" -- /private || exit $?
+              mkdir -m 700 -- /private/tmp || exit $?
+            ) 2>&1 | tee "$RUNNER_TEMP/readonly-evidence/private-parent.log" || status=$?
+            printf '%s\n' "$status" > "$RUNNER_TEMP/readonly-evidence/private-parent-exit.txt"
+            if [[ "$status" != 0 ]]; then exit "$status"; fi
+          fi
           status=0
           python scripts/run_readonly_pg_tests.py --source "$GITHUB_WORKSPACE" \
             --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
@@ -58,6 +78,8 @@ jobs:
             ${{ runner.temp }}/readonly-evidence/git-sha.txt
             ${{ runner.temp }}/readonly-evidence/runner.log
             ${{ runner.temp }}/readonly-evidence/runner-exit.txt
+            ${{ runner.temp }}/readonly-evidence/private-parent.log
+            ${{ runner.temp }}/readonly-evidence/private-parent-exit.txt
             /tmp/${{ matrix.root-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.log
             /tmp/${{ matrix.root-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
             /tmp/${{ matrix.root-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}/evidence/results.xml
