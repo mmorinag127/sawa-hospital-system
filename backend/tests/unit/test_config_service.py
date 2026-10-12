@@ -1,3 +1,7 @@
+from copy import deepcopy
+
+import pytest
+
 from src.services import candidate_resolution_service, position_column_mapping_service
 from src.services import config_service
 from src.services.config_service import normalize_fax_template_columns
@@ -85,39 +89,38 @@ def test_fax_template_registry_loader_is_removed() -> None:
     assert not hasattr(config_service, "load_fax_template_registry")
 
 
-def test_facility_config_storage_strips_db_template_override() -> None:
-    sanitized = config_service.sanitize_facility_config_for_storage(
-        "FAC00010",
-        {
-            "fax_template_id": "legacy-db-template",
-            "fax_template_ids": ["legacy-db-template"],
-            "facility_template_source": "operator_override",
-            "fax_template_override": {
-                "columns": [
-                    {
-                        "index": 0,
-                        "role": "quantity",
-                        "header": "legacy",
-                        "diet_type": "regular",
-                        "area_id": "X",
-                    }
-                ],
-                "columns_authoritative": True,
-            },
-            "bagging_exceptions": [{"date": "2026-07-12"}],
+def test_legacy_facility_config_sanitizer_is_explicitly_disabled() -> None:
+    config = {
+        "fax_template_id": "legacy-db-template",
+        "fax_template_ids": ["legacy-db-template"],
+        "facility_template_source": "operator_override",
+        "fax_template_override": {
+            "columns": [
+                {
+                    "index": 0,
+                    "role": "quantity",
+                    "header": "legacy",
+                    "diet_type": "regular",
+                    "area_id": "X",
+                }
+            ],
+            "columns_authoritative": True,
         },
-        current_config={
-            "fax_template_id": "legacy-current-template",
-            "facility_template_source": "operator_override",
-        },
-        allow_authoritative_column_changes=True,
-    )
-
-    assert sanitized["fax_template_id"] == "山城"
-    assert sanitized["fax_template_ids"] == ["山城"]
-    assert sanitized.get("facility_template_source") is None
-    assert "fax_template_override" not in sanitized
-    assert sanitized["bagging_exceptions"] == [{"date": "2026-07-12"}]
+        "bagging_exceptions": [{"date": "2026-07-12"}],
+    }
+    current_config = {
+        "fax_template_id": "legacy-current-template",
+        "facility_template_source": "operator_override",
+    }
+    before = deepcopy((config, current_config))
+    with pytest.raises(config_service.canonical_facility_store.CanonicalStoreError) as raised:
+        config_service.sanitize_facility_config_for_storage(
+            "FAC00010", config, current_config=current_config,
+            allow_authoritative_column_changes=True,
+        )
+    assert raised.value.status_code == 410
+    assert raised.value.detail == {"error": "legacy_facility_config_sanitizer_disabled"}
+    assert (config, current_config) == before
 
 
 def test_position_fallback_is_not_allowed() -> None:

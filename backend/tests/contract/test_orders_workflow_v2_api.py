@@ -320,11 +320,19 @@ def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
     monkeypatch.setattr(orders_api.order_service, "get_ocr_pages", fail_legacy_helper)
     monkeypatch.setattr(orders_api.order_service, "get_ocr_sheet", fail_legacy_helper)
     monkeypatch.setattr(orders_api.order_service, "get_candidate_draft_preview", fail_legacy_helper)
+    for name in ("choose_critical_decision", "switch_draft_to_latest_evidence",
+                 "apply_submitted_ocr_sheet", "confirm_order"):
+        monkeypatch.setattr(orders_api.order_service, name, fail_legacy_helper)
+    monkeypatch.setattr(orders_api, "_dispatch_workflow_ocr_delivery", fail_legacy_helper)
+    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", fail_legacy_helper)
 
     endpoints = [
         ("get", "/orders/ORDcontract/draft-sheet"),
         ("get", "/orders/ORDcontract/workflow-state"),
         ("get", "/orders/ORDcontract/critical-decisions"),
+        ("post", "/orders/ORDcontract/critical-decisions/facility"),
+        ("post", "/orders/ORDcontract/critical-decisions/week"),
+        ("post", "/orders/ORDcontract/critical-decisions/template"),
         ("get", "/orders/ORDcontract/ocr-pages"),
         ("get", "/orders/ORDcontract/ocr-sheet"),
         ("get", "/orders/ORDcontract/draft-sheet/candidate-preview"),
@@ -332,6 +340,8 @@ def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
         ("post", "/orders/ORDcontract/draft-sheet/switch-evidence"),
         ("post", "/orders/ORDcontract/draft-sheet/keep-current"),
         ("post", "/orders/ORDcontract/confirm"),
+        ("post", "/orders/ORDcontract/ocr-rerun"),
+        ("post", "/orders/ORDcontract/ocr-apply"),
     ]
 
     for method, path in endpoints:
@@ -339,6 +349,8 @@ def test_legacy_current_workflow_endpoints_are_hard_410(monkeypatch) -> None:
         assert response.status_code == 410
         detail = response.json()["detail"]
         assert detail["error"] == "legacy_order_workflow_disabled"
+        endpoint = path.removeprefix("/orders/ORDcontract/")
+        assert detail["endpoint"] == ("critical-decisions" if endpoint.startswith("critical-decisions/") else endpoint)
         assert detail["replacement"] == "workflow-v2"
 
 

@@ -615,6 +615,19 @@ def test_successor_owned_terminal_ack_and_no_parent_overwrite(store, successor_p
     def actual_receipt_adapter(order_id, **kwargs):
         calls.append(kwargs)
         assert kwargs["original_request"]["llm_assist"] is True and kwargs["provider"] == "gemini"
+        # The outer real process owns the original mutex during this callback.
+        with store() as session:
+            before = {table.name: [dict(row) for row in session.execute(
+                select(table).order_by(*table.primary_key.columns)).mappings()]
+                for table in models.Base.metadata.sorted_tables}
+        assert service.dispatch(identity, 1) == {"action": "active_owner"}
+        with pytest.raises(ValueError, match="^auto_llm_execution_busy$"):
+            service.process(identity, 1)
+        assert len(calls) == 1
+        with store() as session:
+            assert {table.name: [dict(row) for row in session.execute(
+                select(table).order_by(*table.primary_key.columns)).mappings()]
+                for table in models.Base.metadata.sorted_tables} == before
         if outcome == "storage":
             raise RuntimeError("authored_terminal_storage_refusal")
         if outcome == "empty":

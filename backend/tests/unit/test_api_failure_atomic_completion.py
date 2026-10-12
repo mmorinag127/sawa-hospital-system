@@ -105,6 +105,8 @@ def test_missing_capture_stops_without_entering_transaction(monkeypatch):
 @pytest.mark.parametrize("failure", ["timeout", "crash"])
 def test_actual_rerun_callback_failure_uses_captured_atomic_completion(monkeypatch, completion_transaction, failure):
     job, workflow, _ = completion_transaction
+    before_job, before_workflow = deepcopy(vars(job)), deepcopy(workflow)
+    fault = RuntimeError("pipeline crash")
     monkeypatch.setattr(orders, "get_ocr_job", lambda job_id: {"metrics": {}})
     monkeypatch.setattr(orders.ocr_job_service, "update_job_for_workflow_attempt", lambda *args, **kwargs: (job, True))
     @contextmanager
@@ -114,9 +116,19 @@ def test_actual_rerun_callback_failure_uses_captured_atomic_completion(monkeypat
             raise orders.OcrExecutionSlotTimeout("timeout")
         yield {}
     def crash(*args, **kwargs):
-        raise RuntimeError("pipeline crash")
+        raise fault
     monkeypatch.setattr(orders, "acquire_ocr_execution_slot", slot)
     monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", crash)
+    if failure == "crash":
+        # Unclaimed callbacks cannot terminalize a durable delivery owner's job.
+        with pytest.raises(RuntimeError) as raised:
+            orders._run_ocr_rerun_background(
+                "order", "real-job", expected_revision=7, workflow_attempt_id="captured-attempt",
+            )
+        assert raised.value is fault
+        assert vars(job) == before_job
+        assert workflow == before_workflow
+        return
     orders._run_ocr_rerun_background(
         "order", "real-job", expected_revision=7, workflow_attempt_id="captured-attempt",
     )
@@ -128,16 +140,24 @@ def test_actual_rerun_callback_failure_uses_captured_atomic_completion(monkeypat
     assert workflow["revision"] == 8
 
 
-def test_dispatch_failure_uses_same_atomic_completion(completion_transaction):
+def test_delivery_dispatch_failure_does_not_complete_unclaimed_attempt(monkeypatch, completion_transaction):
+    """Transport-double component; real durable SQL dispatch is covered separately."""
     job, workflow, _ = completion_transaction
+    before_job, before_workflow = deepcopy(vars(job)), deepcopy(workflow)
+    fault = RuntimeError("dispatch failed")
+    calls = []
     def dispatch(*args):
-        raise RuntimeError("dispatch failed")
+        calls.append(args)
+        raise fault
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unclaimed dispatch must not complete the job")
+    monkeypatch.setattr(orders.workflow_ocr_delivery_dispatch_service, "dispatch", dispatch)
+    monkeypatch.setattr(orders, "_complete_workflow_ocr_run", forbidden)
     with pytest.raises(orders.HTTPException) as raised:
-        orders._dispatch_workflow_ocr_task(
-            SimpleNamespace(add_task=dispatch), lambda: None,
-            order_id="order", job_id="real-job", expected_revision=7,
-            workflow_attempt_id="captured-attempt",
-        )
+        orders._dispatch_workflow_ocr_delivery({"id": "component-delivery", "generation": 1})
     assert raised.value.status_code == 503
-    assert job.metrics["rerun_terminal_receipt"]["error"] == "ocr_dispatch_failed"
-    assert workflow["revision"] == 8
+    assert raised.value.detail == {"error": "workflow_ocr_delivery_dispatch_failed", "delivery_id": "component-delivery"}
+    assert raised.value.__cause__ is fault
+    assert calls == [("component-delivery", 1)]
+    assert vars(job) == before_job
+    assert workflow == before_workflow
