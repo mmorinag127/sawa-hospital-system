@@ -5,7 +5,7 @@ import pytest
 
 from tests.unit.test_modernization_selected_template_reads import (
     owned as owned, unchanged_reads, reject_selected, blocked_context,
-    public_readers, seed_current_state,
+    public_readers, seed_current_state, assert_selected_saved_blocked,
 )
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.services.canonical_facility_store import CanonicalStoreError
@@ -23,7 +23,7 @@ def test_corrupt_projection_public_reads_bind_empty_owned_receipt_without_writes
     reject_selected(owned, 'corrupt-projection')
     with unchanged_reads(owned):
         context = reader(owned.order_id)
-        assert context == blocked_context(owned.order_id, REASON)
+        assert_selected_saved_blocked(owned, context, REASON)
         receipt = context.input_receipt
         assert receipt['input']['sheet_source_unavailable'] == REASON
         assert receipt['input']['order']['id'] == owned.order_id

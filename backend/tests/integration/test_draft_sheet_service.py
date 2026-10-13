@@ -13,6 +13,7 @@ from src.models.order import Order, OrderLine  # noqa: E402
 from src.models.order_sheet_draft import OrderSheetDraft  # noqa: E402
 from src.services import draft_sheet_service, ocr_evidence_service, order_current_state_service, order_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+from tests.helpers.authored_sheet_case import authored_sheet_case, save_draft  # noqa: E402,F401
 
 pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
@@ -231,25 +232,22 @@ def _append_sheet_revision(
     )
 
 
-def test_build_initial_sheet_draft_prefers_latest_saved_draft() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-draft-saved")
+def test_build_initial_sheet_draft_prefers_latest_saved_draft(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3)
+    order = {"id": case.id}
 
-    draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
+    saved = save_draft(case, {
             "order_id": order["id"],
             "source": "manual_draft",
             "fields": ["col1"],
             "header": ["数量"],
             "rows": [["9"]],
             "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
+        })
 
-    built = draft_sheet_service.build_initial_sheet_draft(order["id"])
+    with case.readonly():
+        built = draft_sheet_service.build_initial_sheet_draft(order["id"])
+    assert draft_sheet_service.get_selected_sheet_draft(case.id)["id"] == saved["id"]
 
     assert isinstance(built, dict)
     assert built["source"] == "manual_draft"
@@ -1531,13 +1529,12 @@ def test_get_current_sheet_context_does_not_append_ocr_only_menu_rows_to_weekly_
     assert current["rows"] == [["03/22", "朝", "Menu A", "4", "", "", "", "", "", ""]]
 
 
-def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-context-read-only")
+def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, cell_values="9")
+    assert case.selected_sheet["rows"][0][3] == "9"
+    order = {"id": case.id}
 
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
+    saved = save_draft(case, {
             "order_id": order["id"],
             "source": "draft_sheet",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
@@ -1545,27 +1542,13 @@ def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(mon
             "rows": [["03/22", "朝", "Menu A", "3", "saved"]],
             "row_ids": ["row-1"],
             "warnings": [],
-        },
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[],
-        edited_by="tester",
-    )
+        })
     assert isinstance(saved, dict)
 
-    monkeypatch.setattr(
-        order_service,
-        "_build_best_available_semantic_draft",
-        lambda _order_id, **_kwargs: {
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
-            "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
-            "rows": [["03/22", "朝", "Menu A", "9", "semantic-refresh"]],
-            "row_ids": ["row-1"],
-            "warnings": [],
-        },
-    )
+    def unexpected_semantic_rebuild(*_args, **_kwargs):
+        raise AssertionError("saved operator rows must not be reconstructed on read")
+
+    monkeypatch.setattr(order_service, "_build_best_available_semantic_draft", unexpected_semantic_rebuild)
 
     with session_scope() as session:
         before_count = (
@@ -1574,12 +1557,13 @@ def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(mon
             .count()
         )
 
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=True,
-    )
+    with case.readonly():
+        current = order_service.get_current_sheet_context(
+            order["id"],
+            refresh_draft_from_semantic=True,
+            upgrade_generic_from_sheet=True,
+            backfill_from_revision=True,
+        )
 
     assert isinstance(current, dict)
     assert current["rows"] == [["03/22", "朝", "Menu A", "3", "saved"]]
@@ -1631,13 +1615,11 @@ def test_get_current_sheet_context_ignores_non_authoritative_auto_blocked_draft_
     assert current["rows"] == []
 
 
-def test_get_current_sheet_context_keeps_operator_forced_repair_draft_as_authoritative_current_truth() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-forced-repair-authoritative")
+def test_get_current_sheet_context_keeps_operator_forced_repair_draft_as_authoritative_current_truth(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3)
+    order = {"id": case.id}
 
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
+    saved = save_draft(case, {
             "order_id": order["id"],
             "source": "forced_weekly_menu",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
@@ -1651,20 +1633,16 @@ def test_get_current_sheet_context_keeps_operator_forced_repair_draft_as_authori
                 "origin": "operator",
                 "blank_quantities": False,
             },
-        },
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=["forced_weekly_menu_overwrite"],
-        edited_by="manual-weekly-menu-overwrite",
-    )
+        })
     assert isinstance(saved, dict)
 
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
+    with case.readonly():
+        current = order_service.get_current_sheet_context(
+            order["id"],
+            refresh_draft_from_semantic=True,
+            upgrade_generic_from_sheet=True,
+            backfill_from_revision=False,
+        )
 
     assert isinstance(current, dict)
     assert current["draft_id"] == saved["id"]
@@ -1799,45 +1777,32 @@ def test_get_current_sheet_context_projects_blocked_empty_semantic_shell_over_ge
     assert current["draft_record"]["draft_sheet_json"]["rows"] == []
 
 
-def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-generic-draft-always-upgrade")
+def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, cell_values="6")
+    assert case.selected_sheet["rows"][0][3] == "6"
+    order = {"id": case.id}
 
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
+    saved = save_draft(case, {
             "order_id": order["id"],
             "source": "ocr_evidence",
             "fields": ["col1", "col2", "col3", "col4"],
             "header": ["日付", "区分", "メニュー", "常食2F"],
             "rows": [["03/22", "朝", "Menu A", "5"]],
             "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
+        })
     assert isinstance(saved, dict)
 
-    monkeypatch.setattr(
-        order_service,
-        "get_ocr_sheet",
-        lambda _order_id, **_kwargs: (
-            {
-                "source": "weekly_menu+ocr_payload",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [["03/22", "朝", "Menu A", "6"]],
-                "row_ids": ["semantic-1"],
-                "warnings": [],
-            },
-            None,
-        ),
-    )
+    def unexpected_projection(*_args, **_kwargs):
+        raise AssertionError("no opt-in must preserve the saved generic sheet")
 
-    current = order_service.get_latest_sheet_draft(
-        order["id"],
-        backfill_from_revision=False,
-    )
+    monkeypatch.setattr(order_service, "get_ocr_sheet", unexpected_projection)
+
+    with case.readonly():
+        current = order_service.get_latest_sheet_draft(
+            order["id"],
+            backfill_from_revision=False,
+        )
+    assert current["id"] == saved["id"]
 
     assert isinstance(current, dict)
     draft_json = current["draft_sheet_json"]

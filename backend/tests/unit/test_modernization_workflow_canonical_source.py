@@ -167,6 +167,7 @@ def test_sheet_delegation_preserves_kwargs_and_result(monkeypatch, force_refresh
     assert calls == [(("canonical-order",), {
         "refresh_draft_from_semantic": refresh_semantic,
         "upgrade_generic_from_sheet": True, "backfill_from_revision": False,
+        **({"publish_snapshot": False} if force_refresh else {}),
     })]
 
 

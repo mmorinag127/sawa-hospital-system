@@ -13,6 +13,12 @@ from src.models.order_workflow_state import OrderWorkflowState  # noqa: E402
 from src.services import config_service, critical_decision_service, draft_sheet_service, order_current_state_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+from src.models.order import Order, OrderLine  # noqa: E402
+from src.models.order_current_state import OrderCurrentState  # noqa: E402
+from src.models.menu import MonthlyMenuEntry  # noqa: E402
+from tests.helpers.authored_sheet_case import PERIOD, authored_sheet_case, publish_current, save_draft  # noqa: E402,F401
+from src.services.workflow_attempt_guard_service import CurrentSheetInputChanged  # noqa: E402
+from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
@@ -133,15 +139,10 @@ def _semantic_initial_draft(
     }
 
 
-def test_refresh_workflow_state_persists_current_state_snapshot() -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-snapshot-001")
-    draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json=_semantic_initial_draft(order["id"], source="manual_draft"),
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
+def test_refresh_workflow_state_persists_current_state_snapshot(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    saved = save_draft(case, _semantic_initial_draft(order["id"], source="manual_draft"))
 
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
     snapshot = order_current_state_service.get_current_state_payload(order["id"])
@@ -151,7 +152,10 @@ def test_refresh_workflow_state_persists_current_state_snapshot() -> None:
     assert snapshot["order_id"] == order["id"]
     assert snapshot["source"] == "manual_draft"
     assert snapshot["draft_id"]
-    assert snapshot["resolved_week_id"] == "2026-03"
+    assert snapshot["resolved_week_id"] == PERIOD
+    assert snapshot["draft_id"] == saved["id"]
+    assert snapshot["rows"] == saved["draft_sheet_json"]["rows"]
+    assert snapshot.input_receipt["input"]["workflow_revision"] == case.revision()
 
 
 def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row(monkeypatch, tmp_path) -> None:
@@ -243,17 +247,11 @@ def test_persist_current_state_upserts_existing_order_row() -> None:
     assert persisted["state_json"]["source"] == "seed-b"
 
 
-def test_get_current_sheet_context_prefers_persisted_current_state_snapshot(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-snapshot-002")
-    draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json=_semantic_initial_draft(order["id"], source="manual_draft"),
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
-    workflow_state_service.refresh_workflow_state(order["id"])
-    persisted = order_current_state_service.get_current_state_payload(order["id"])
+def test_get_current_sheet_context_prefers_persisted_current_state_snapshot(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    save_draft(case, _semantic_initial_draft(order["id"], source="manual_draft"))
+    persisted = publish_current(case)
 
     assert isinstance(persisted, dict)
 
@@ -262,15 +260,16 @@ def test_get_current_sheet_context_prefers_persisted_current_state_snapshot(monk
 
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _unexpected_rebuild)
 
-    current = order_service.get_current_sheet_context(order["id"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(order["id"])
 
     assert current == persisted
 
 
-def test_get_current_sheet_context_builds_transient_when_current_state_snapshot_missing(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-snapshot-003")
-    order_current_state_service.delete_current_state(order["id"])
+def test_get_current_sheet_context_builds_transient_when_current_state_snapshot_missing(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5)
+    order = {"id": case.id}
+    assert order_current_state_service.get_current_state_payload(case.id) is None
     calls = {"count": 0}
     original_builder = order_service._build_current_sheet_context_uncached
 
@@ -280,55 +279,46 @@ def test_get_current_sheet_context_builds_transient_when_current_state_snapshot_
 
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _wrapped_builder)
 
-    current = order_service.get_current_sheet_context(order["id"])
-    snapshot = order_current_state_service.get_current_state_payload(order["id"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(order["id"])
+        snapshot = order_current_state_service.get_current_state_payload(order["id"])
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
     assert snapshot is None
 
 
-def test_get_current_sheet_context_rebuilds_when_persisted_current_state_lines_timestamp_stale(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-snapshot-stale-lines-001")
-    saved_draft = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json=_semantic_initial_draft(order["id"], source="manual_draft"),
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
-    workflow_state_service.refresh_workflow_state(order["id"])
-    stale_snapshot = order_current_state_service.get_current_state_payload(order["id"])
+def test_get_current_sheet_context_rebuilds_when_persisted_current_state_lines_timestamp_stale(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    saved_draft = save_draft(case, _semantic_initial_draft(order["id"], source="manual_draft"))
+    stale_snapshot = publish_current(case)
 
     assert isinstance(saved_draft, dict)
     assert isinstance(stale_snapshot, dict)
 
-    monkeypatch.setattr(workflow_state_service, "refresh_workflow_state", lambda *_args, **_kwargs: None)
-    assert order_service.update_lines(
-        order["id"],
-        [
-            {
-                "id": "line-stale-1",
-                "line_id": "line-stale-1",
-                "date": "2026-03-22",
-                "daypart": "朝",
-                "menu_name": "Menu A",
-                "diet_type": None,
-                "area_id": None,
-                "bag_type": None,
-                "quantity_original": 7,
-                "quantity_corrected": None,
-                "change_note": None,
-            }
-        ],
-    ) is True
+    # Stored legacy lines are diagnostics, not a revived public line writer.
+    with session_scope() as session:
+        session.query(OrderLine).filter_by(order_id=case.id).delete()
+        session.add(OrderLine(id="line-stale-1", line_id="line-stale-1", order_id=case.id,
+            date=datetime(2026, 3, 22).date(), daypart="朝", menu_name="Menu A",
+            diet_type=None, area_id=None, bag_type=None, quantity_original=7,
+            quantity_corrected=None, change_note=None))
+        session.get(Order, case.id).lines_updated_at = datetime.utcnow() + timedelta(seconds=1)
+    with session_scope() as session:
+        assert session.get(OrderLine, "line-stale-1").quantity_original == 7
 
-    order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        state_json=stale_snapshot,
-        draft_id=str(saved_draft.get("id") or "").strip() or None,
-        evidence_run_id=str(stale_snapshot.get("base_evidence_run_id") or "").strip() or None,
-    )
+    physical_snapshot = order_current_state_service.get_current_state(case.id)
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        with pytest.raises(CurrentSheetInputChanged, match="^current_sheet_input_changed$"):
+            order_current_state_service.persist_current_state(
+                order_id=case.id, state_json=stale_snapshot, draft_id=stale_snapshot["draft_id"],
+                evidence_run_id=stale_snapshot["base_evidence_run_id"],
+                template_version_id=stale_snapshot["template_version_id"],
+            )
+    assert order_current_state_service.get_current_state(case.id) == physical_snapshot
+    assert order_current_state_service.get_current_state_payload(case.id) is None
 
     calls = {"count": 0}
     original_builder = order_service._build_current_sheet_context_uncached
@@ -339,14 +329,19 @@ def test_get_current_sheet_context_rebuilds_when_persisted_current_state_lines_t
 
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _wrapped_builder)
 
-    current = order_service.get_current_sheet_context(order["id"])
-    snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(order["id"])
+        snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
     assert current["order_payload"]["lines_updated_at"] != stale_snapshot["order_payload"]["lines_updated_at"]
-    assert isinstance(snapshot_after, dict)
-    assert snapshot_after["order_payload"]["lines_updated_at"] == stale_snapshot["order_payload"]["lines_updated_at"]
+    assert snapshot_after is None
+    assert order_current_state_service.get_current_state(case.id) == physical_snapshot
+    assert current["draft_id"] == saved_draft["id"]
+    assert current["rows"] == saved_draft["draft_sheet_json"]["rows"]
+    for key in ("fields", "header", "row_ids"):
+        assert current[key] == saved_draft["draft_sheet_json"][key]
 
 
 def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidence_changes(monkeypatch) -> None:
@@ -391,32 +386,24 @@ def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidenc
     assert snapshot_after["base_evidence_run_id"] == "OEV-old"
 
 
-def test_get_current_sheet_context_does_not_delete_unusable_current_state_on_read(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-read-no-delete-001")
-    order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        state_json={
-            "order_id": order["id"],
-            "draft_id": None,
-            "source": "stale-transient",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        draft_id=None,
-        evidence_run_id=None,
-    )
+def test_get_current_sheet_context_does_not_delete_unusable_current_state_on_read(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5)
+    publish_current(case)
+    with session_scope() as session:
+        stored = session.get(OrderCurrentState, case.id)
+        stored.state_json = {**stored.state_json, "source": "stale-transient"}
+        session.get(Order, case.id).template_version_id = None
+    physical_snapshot = order_current_state_service.get_current_state(case.id)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        snapshot_after = order_current_state_service.get_current_state(case.id)
+        assert order_current_state_service.get_current_state_payload(case.id) is None
+    assert snapshot_after == physical_snapshot
 
-    monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", lambda *_args, **_kwargs: None)
-
-    current = order_service.get_current_sheet_context(order["id"])
-    snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
-
-    assert current is None
+    assert current["blockers"] == ["original_template_projection_missing"]
+    assert current["draft_payload"] is None
     assert isinstance(snapshot_after, dict)
-    assert snapshot_after["source"] == "stale-transient"
+    assert snapshot_after["state_json"]["source"] == "stale-transient"
 
 
 def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeypatch) -> None:
@@ -464,47 +451,34 @@ def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeyp
     assert persisted_decisions == []
 
 
-def test_get_current_sheet_context_does_not_reuse_transient_current_state_snapshot(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-snapshot-004")
-    order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        state_json={
-            "order_id": order["id"],
-            "draft_id": None,
-            "source": "weekly_menu",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", ""]],
-            "row_ids": ["row-1"],
-            "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-        },
-        draft_id=None,
-        evidence_run_id=None,
-    )
+def test_get_current_sheet_context_does_not_reuse_transient_current_state_snapshot(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5)
+    order = {"id": case.id}
+    published = publish_current(case)
+    assert published["draft_id"] is None
+    # A stored legacy empty shell is not an accepted projection/receipt.
+    with session_scope() as session:
+        stored = session.get(OrderCurrentState, case.id)
+        stored.state_json = {**stored.state_json, "source": "weekly_menu",
+                             "rows": [["03/22", "朝", "Menu A", ""]]}
+    physical_snapshot = order_current_state_service.get_current_state(case.id)
     calls = {"count": 0}
+    original_builder = order_service._build_current_sheet_context_uncached
 
     def _rebuilt_context(*_args, **_kwargs):
         calls["count"] += 1
-        return {
-            "order_id": order["id"],
-            "draft_id": None,
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-            "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-        }
+        return original_builder(*_args, **_kwargs)
 
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _rebuilt_context)
 
-    current = order_service.get_current_sheet_context(order["id"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(order["id"])
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
-    assert current["source"] == "weekly_menu+ocr_payload"
+    assert current["source"] == case.selected_sheet["source"] == "workflow_v2_selected_ocr_projection"
     assert current["rows"][0][3] == "5"
+    assert order_current_state_service.get_current_state(case.id) == physical_snapshot
 
 
 def test_refresh_workflow_state_moves_from_choice_required_to_apply_ready_after_facility_choice(monkeypatch):
@@ -587,14 +561,15 @@ def test_refresh_workflow_state_ignores_order_bound_first_pass_job_as_reparse_st
     assert (workflow.get("reparse_state") or {}).get("status") == "idle"
 
 
-def test_list_workflow_states_serializes_within_session():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-list-001", facility_hint="FAC00001", week_hint="2026-03")
+def test_list_workflow_states_serializes_within_session(authored_sheet_case):
+    case = authored_sheet_case(quantity=5)
+    order = {"id": case.id}
 
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    listed = workflow_state_service.list_workflow_states([order["id"]])
+    with case.readonly():
+        listed = workflow_state_service.list_workflow_states([order["id"]])
 
     assert listed[order["id"]]["order_id"] == order["id"]
     assert listed[order["id"]]["state"] == workflow["state"]
@@ -3194,61 +3169,14 @@ def test_refresh_workflow_state_blocks_on_menu_entries_missing_without_monthly_m
     assert "monthly_menu_object_missing" not in blockers
 
 
-def test_refresh_workflow_state_uses_current_sheet_context_menu_diagnostics_without_relookup(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(
-        message_id="msg-workflow-state-current-sheet-menu-diagnostics-001",
-        facility_hint="FAC00001",
-        week_hint="2026-03",
-    )
-    _persist_evidence(order["id"])
-    order_payload = order_service.get_order_by_id(order["id"])
-
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "order_id": order["id"],
-            "order_payload": order_payload,
-            "draft_record": None,
-            "draft_payload": {
-                "source": "ocr_table",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [["03/22", "朝", "Menu A", "5"]],
-                "row_ids": ["semantic-1"],
-                "warnings": [],
-                "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-                "menu_diagnostics": {
-                    "order_codes": ["menu_entries_missing"],
-                    "facility_entries_count": 0,
-                    "global_entries_count": 0,
-                },
-            },
-            "draft_id": None,
-            "source": "ocr_table",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["semantic-1"],
-            "warnings": [],
-            "blockers": [],
-            "has_persisted_draft": False,
-            "clean_saved_draft": False,
-            "base_evidence_run_id": None,
-            "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-            "facility_id": "FAC00001",
-            "menu_diagnostics": {
-                "order_codes": ["menu_entries_missing"],
-                "facility_entries_count": 0,
-                "global_entries_count": 0,
-            },
-            "row_diagnostics": [],
-            "seed_source": "ocr_table",
-            "enrichment_source": None,
-            "has_semantic_fields": True,
-        },
-    )
+def test_refresh_workflow_state_uses_current_sheet_context_menu_diagnostics_without_relookup(monkeypatch, authored_sheet_case):
+    # Actual saved-sheet scenario: missing menu diagnostics remain warnings;
+    # missing physical inputs separately prevent downstream materialization.
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    save_draft(case, _semantic_initial_draft(case.id, source="ocr_table"))
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
 
     def _unexpected_menu_context(**_kwargs):
         raise AssertionError("workflow menu context should come from current_sheet_context diagnostics")
@@ -3258,73 +3186,41 @@ def test_refresh_workflow_state_uses_current_sheet_context_menu_diagnostics_with
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    blockers = workflow["apply_gate"]["blockers"] or []
-    assert "menu_entries_missing" in blockers
+    context = order_service.get_current_sheet_context(case.id)
+    assert context["menu_diagnostics"]["order_codes"] == ["menu_entries_missing"]
+    assert "menu_entries_missing" in workflow["apply_gate"]["apply_warnings"]
+    assert "menu_entries_missing" in workflow["apply_gate"]["confirm_warnings"]
+    assert workflow["apply_gate"]["can_apply"] is False
+    assert workflow["apply_gate"]["can_confirm"] is False
 
 
-def test_refresh_workflow_state_exposes_review_summary_from_sheet_gate(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(
-        message_id="msg-workflow-state-review-summary-parity-001",
-        facility_hint="FAC00001",
-        week_hint="2026-03",
-    )
-    _persist_evidence(order["id"])
-    order_payload = order_service.get_order_by_id(order["id"])
-
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "order_id": order["id"],
-            "order_payload": order_payload,
-            "draft_record": {
-                "id": "ODRreview001",
-                "edited_at": "2026-03-22T10:00:00",
-                "warnings_json": ["sheet_ocr_review_required"],
-                "blockers_json": [],
-            },
-            "draft_payload": {
-                "source": "review_blocked",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [],
-                "row_ids": [],
-                "warnings": ["sheet_ocr_review_required"],
-                "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-                "menu_diagnostics": {"order_codes": ["menu_entries_missing"]},
-            },
-            "draft_id": "ODRreview001",
-            "source": "review_blocked",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [],
-            "row_ids": [],
-            "warnings": ["sheet_ocr_review_required"],
-            "blockers": [],
-            "has_persisted_draft": True,
-            "clean_saved_draft": False,
-            "base_evidence_run_id": None,
-            "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-            "facility_id": "FAC00001",
-            "menu_diagnostics": {"order_codes": ["menu_entries_missing"]},
-            "row_diagnostics": [],
-            "seed_source": "review_blocked",
-            "enrichment_source": None,
-            "has_semantic_fields": True,
-        },
-    )
+def test_refresh_workflow_state_exposes_review_summary_from_sheet_gate(authored_sheet_case):
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    sheet = _semantic_initial_draft(case.id, source="review_blocked")
+    sheet.update(rows=[], row_ids=[], warnings=["sheet_ocr_review_required"])
+    saved = save_draft(case, sheet)
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
 
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
+    current = order_service.get_current_sheet_context(case.id)
+    assert current["draft_id"] == saved["id"]
+    assert current["draft_payload"] == sheet
+    # The actual selected save remains a pending draft, not an OCR-only review.
     assert workflow["ocr_review_state"] == "draft_ready"
     assert workflow["ocr_review_stage"] == "needs_human_review"
     assert workflow["ocr_has_saved_draft"] is True
     assert workflow["ocr_draft_row_count"] == 0
-    assert "menu_entries_missing" in (workflow["ocr_apply_blockers"] or [])
+    assert "menu_entries_missing" in workflow["apply_gate"]["apply_warnings"]
     assert "rows_empty" in (workflow["ocr_apply_blockers"] or [])
-    assert "menu_entries_missing" in (workflow["ocr_confirm_blockers"] or [])
+    assert "menu_entries_missing" in workflow["apply_gate"]["confirm_warnings"]
+    assert "current_sheet_source_unavailable" in workflow["ocr_apply_blockers"]
+    assert "current_sheet_source_unavailable" in workflow["ocr_confirm_blockers"]
+    assert workflow["ocr_can_apply_draft"] is False
+    assert workflow["ocr_can_confirm"] is False
 
 
 def test_project_workflow_state_uses_canonical_order_week_over_stale_current_sheet_week(
@@ -3431,36 +3327,18 @@ def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_bloc
     assert "draft_newer_than_lines" in (workflow["apply_gate"]["warnings"] or [])
 
 
-def test_refresh_workflow_state_uses_persisted_draft_without_exact_revision(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-persisted-draft-truth", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"])
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
+def test_refresh_workflow_state_uses_persisted_draft_without_exact_revision(authored_sheet_case):
+    case = authored_sheet_case(quantity=5, area="X")
+    order = {"id": case.id}
+    saved = save_draft(case, {
             "order_id": order["id"],
             "source": "draft_sheet",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
             "header": ["日付", "区分", "メニュー", "常食", "備考"],
             "rows": [["03/22", "朝", "Menu A", "8", "manual"]],
             "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[],
-        edited_by="tester",
-    )
+        })
     assert saved is not None
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
 
     workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
