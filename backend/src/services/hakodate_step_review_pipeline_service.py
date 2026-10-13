@@ -2544,23 +2544,17 @@ def _row_intersection_correct_ys(
     day_source["date_column_boundary_source"] = "actual_worksheet_renderer.merge_aware_borders.column_A"
     day_source["canonical_date_column_boundary_indexes"] = canonical_date_boundaries
     day_source["observed_date_column_boundary_indexes"] = observed_date_boundaries
-    if observed_date_boundaries != canonical_date_boundaries:
-        return None, {"used": False, "reason": "fax_date_column_physical_boundaries_changed",
-                      "canonical_day_source": day_source,
-                      "missing_date_column_boundary_indexes": sorted(set(canonical_date_boundaries) - set(observed_date_boundaries)),
-                      "extra_date_column_boundary_indexes": sorted(set(observed_date_boundaries) - set(canonical_date_boundaries)),
-                      **detection}
     dates = [entry["date"] for entry in physical_plan]
     if dates != sorted(dates):
         return None, {"used": False, "reason": "fax_canonical_day_identity_ambiguous",
                       "canonical_day_source": day_source, **detection}
-    # Date-cell subdivisions (including the final weekday cell) are printed
-    # boundaries, but only physical-plan date changes delimit calendar days.
+    # Actual day changes are mandatory; known weekday subdivisions are optional.
     day_boundaries = [0, *(index for index in range(1, len(dates)) if dates[index] != dates[index - 1]), len(dates)]
-    missing_day_support = [index for index in day_boundaries if 0 not in body_clusters[index].get("column_votes", [])]
-    if missing_day_support:
-        return None, {"used": False, "reason": "fax_canonical_day_boundary_unobserved",
-                      "canonical_day_source": day_source, "missing_date_column_boundary_indexes": missing_day_support,
+    if not set(day_boundaries).issubset(observed_date_boundaries) or set(observed_date_boundaries) - set(canonical_date_boundaries):
+        return None, {"used": False, "reason": "fax_date_column_physical_boundaries_changed",
+                      "canonical_day_source": day_source,
+                      "missing_date_column_boundary_indexes": sorted(set(day_boundaries) - set(observed_date_boundaries)),
+                      "extra_date_column_boundary_indexes": sorted(set(observed_date_boundaries) - set(canonical_date_boundaries)),
                       **detection}
     day_source["days"] = [
         {"date": dates[first], "first_body_row_index": first, "stop_body_row_index": stop,
@@ -2573,7 +2567,7 @@ def _row_intersection_correct_ys(
          "worksheet_row": physical_plan[index]["worksheet_row"], "observed_y": float(cluster["value"]),
          "source": "canonical_rendered_weekday_or_date_cell_subdivision"}
         for index, cluster in enumerate(body_clusters)
-        if index in canonical_date_boundaries and index not in day_boundaries
+        if index in canonical_date_boundaries and index in observed_date_boundaries and index not in day_boundaries
     ]
     structural_evidence = {
         "used": True,

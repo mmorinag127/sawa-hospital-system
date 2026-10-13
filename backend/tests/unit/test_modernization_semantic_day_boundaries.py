@@ -128,7 +128,7 @@ def test_same_total_valid_generated_nine_seven_fax_cannot_use_eight_eight_canoni
     assert corrected is None
     assert evidence["used"] is False
     assert evidence["reason"] == "fax_date_column_physical_boundaries_changed"
-    assert evidence["missing_date_column_boundary_indexes"] == [7]
+    assert evidence["missing_date_column_boundary_indexes"] == []
     assert evidence["extra_date_column_boundary_indexes"] == [9]
     source = evidence["canonical_day_source"]
     assert source["canonical_physical_row_count"] == source["observed_physical_row_count"] == 56
@@ -137,13 +137,48 @@ def test_same_total_valid_generated_nine_seven_fax_cannot_use_eight_eight_canoni
     assert [[canonical.ws.cell(row, 5).value] for row in range(11, 67)] == original_quantities
 
 
-@pytest.mark.parametrize("damage,index,missing,extra", [
-    ("missing-weekday", 7, [7], []),
-    ("missing-day-end", 8, [8], []),
-    ("extra-subdivision", 4, [], [4]),
+@pytest.mark.parametrize("missing", [[7], [7, 23, 55], [7, 15, 23, 31, 39, 47, 55]],
+                         ids=["one-weekday", "some-weekdays", "all-weekdays"])
+def test_approved_missing_weekday_rulings_accepts_real_days_without_fabricated_observations(
+    form_factory, tmp_path, missing,
+):
+    # Approved change: missing optional weekday rulings no longer reject a valid FAX.
+    form = form_factory()
+    image = form.image.copy()
+    left, right = map(round, form.xs[:2])
+    for index in missing:
+        y = form.ys[2 + index]
+        image[y - 4:y + 5, left - 4:right - 4] = 255
+        cv2.line(image, (left, y - 4), (left, y + 4), (0, 0, 0), 3)
+    assert cv2.imwrite(str(tmp_path / "synthetic-optional-weekday-lines.png"), image)
+    corrected, evidence = _observe(form, image=image)
+    _assert_body(form, corrected, evidence)
+    structural = evidence["structural_match"]
+    assert structural["body_day_boundary_indexes"] == SEMANTIC_8_8
+    source = structural["canonical_day_source"]
+    assert source["canonical_physical_row_count"] == source["observed_physical_row_count"] == 56
+    assert source["canonical_date_column_boundary_indexes"] == PHYSICAL_8_8
+    assert source["observed_date_column_boundary_indexes"] == sorted(set(PHYSICAL_8_8) - set(missing))
+    subdivisions = structural["date_column_subdivision_boundaries"]
+    assert [item["body_boundary_index"] for item in subdivisions] == sorted(set(PHYSICAL_8_8) - set(SEMANTIC_8_8) - set(missing))
+    for item in subdivisions:
+        assert item["observed_y"] == corrected[2 + item["body_boundary_index"]]
+    for first, last, week in ((0, 56, WEEK), (0, 32, "2026-09@2026-09-27~2026-09-30"),
+                              (32, 56, "2026-10@2026-10-01~2026-10-03")):
+        sheet = _sheet(form.entries[first:last], week)
+        before = deepcopy(sheet)
+        assert batch._validate_menu_day_boundaries(sheet, evidence) == list(range(first, last))
+        assert sheet == before
+    assert [[form.ws.cell(row, 5).value] for row in range(11, 67)] == form.quantities
+
+
+@pytest.mark.parametrize("damage,index,missing,extra,optional_missing", [
+    ("missing-day-end", 8, [8], [], []),
+    ("extra-subdivision", 4, [], [4], []),
+    ("missing-day-and-all-weekdays", 8, [8], [], [7, 15, 23, 31, 39, 47, 55]),
 ])
 def test_date_column_line_loss_or_extra_line_stops_without_changing_body_count(
-    form_factory, tmp_path, damage, index, missing, extra,
+    form_factory, tmp_path, damage, index, missing, extra, optional_missing,
 ):
     form = form_factory()
     image = form.image.copy()
@@ -152,10 +187,11 @@ def test_date_column_line_loss_or_extra_line_stops_without_changing_body_count(
     if extra:
         cv2.line(image, (left, y), (right, y), (0, 0, 0), 3)
     else:
-        image[y - 4:y + 5, left - 4:right - 4] = 255
-        # Preserve the actual outer vertical line; only the A-column ruling is
-        # damaged. Other columns still carry this exact observed body edge.
-        cv2.line(image, (left, y - 4), (left, y + 4), (0, 0, 0), 3)
+        for removed in [index, *optional_missing]:
+            y = form.ys[2 + removed]
+            image[y - 4:y + 5, left - 4:right - 4] = 255
+            # Other columns still carry this exact observed body edge.
+            cv2.line(image, (left, y - 4), (left, y + 4), (0, 0, 0), 3)
     assert cv2.imwrite(str(tmp_path / f"synthetic-{damage}.png"), image)
     corrected, evidence = _observe(form, image=image)
     assert corrected is None
@@ -166,7 +202,7 @@ def test_date_column_line_loss_or_extra_line_stops_without_changing_body_count(
     source = evidence["canonical_day_source"]
     assert source["canonical_physical_row_count"] == source["observed_physical_row_count"] == 56
     assert source["canonical_date_column_boundary_indexes"] == PHYSICAL_8_8
-    assert source["observed_date_column_boundary_indexes"] == sorted((set(PHYSICAL_8_8) - set(missing)) | set(extra))
+    assert source["observed_date_column_boundary_indexes"] == sorted((set(PHYSICAL_8_8) - set(missing) - set(optional_missing)) | set(extra))
     assert [[form.ws.cell(row, 5).value] for row in range(11, 67)] == form.quantities
 
 
