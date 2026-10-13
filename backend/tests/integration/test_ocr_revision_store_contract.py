@@ -123,8 +123,6 @@ def test_revision_history_keeps_latest_twenty_revisions_and_overwrites_edited_ca
 
 
 def test_normalized_snapshot_is_written_for_revision_rows():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-rev-3")
     fields, header, rows, row_ids = _build_revision_payload(4)
 
     snapshot = normalize_sheet_revision_snapshot(
