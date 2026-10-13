@@ -772,14 +772,9 @@ def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bo
         "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
         "rows": [["05/10", "昼", "献立A", ""]],
     }
-    bootstrap_calls = []
     materializer_drafts = []
     _workflow_v2_session(monkeypatch, workflow=workflow, draft=blank_draft)
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_build_canonical_bootstrap_sheet",
-        lambda *args, **kwargs: bootstrap_calls.append((args, kwargs)) or ({"rows": [["05/10", "昼", "献立A", "12"]]}, None),
-    )
+    assert not hasattr(output_builder.order_service, "_build_canonical_bootstrap_sheet")
 
     def materialize(_order_id, *, draft_record, **_kwargs):
         materializer_drafts.append(draft_record["id"])
@@ -791,7 +786,8 @@ def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bo
         output_builder._workflow_v2_lines_for_outputs(order, order["lines"])  # noqa: SLF001
 
     assert materializer_drafts == ["ODS-CANONICAL"]
-    assert bootstrap_calls == []
+    assert order["lines"] == [{"quantity_original": 4}]
+    assert blank_draft.draft_sheet_json["rows"] == [["05/10", "昼", "献立A", ""]]
 
 
 def test_workflow_v2_lines_blocks_materializer_exception_with_persisted_draft(monkeypatch):
