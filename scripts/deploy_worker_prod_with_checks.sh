@@ -143,10 +143,10 @@ if [[ "${RUN_LOCAL_REGRESSION}" == "1" ]]; then
     cd "${WORKSPACE_DIR}/backend"
     uv run --extra dev pytest \
       tests/integration/test_draft_sheet_service.py::test_current_sheet_context_prefers_canonical_order_week_over_stale_draft_week \
-      tests/integration/test_workflow_state_service.py::test_refresh_workflow_state_uses_canonical_order_week_over_stale_current_sheet_week \
-      tests/integration/test_workflow_state_service.py::test_refresh_workflow_state_does_not_mutate_saved_sheet_blockers_on_read \
-      tests/integration/test_ocr_sheet_history.py::test_set_facility_keeps_saved_sheet_until_operator_resolves_context_change \
-      tests/integration/test_ocr_sheet_history.py::test_set_facility_does_not_mutate_clean_saved_sheet_header_when_fields_match \
+      tests/integration/test_workflow_state_service.py::test_project_workflow_state_uses_canonical_order_week_over_stale_current_sheet_week \
+      tests/integration/test_workflow_state_service.py::test_project_workflow_state_does_not_mutate_saved_sheet_blockers_on_read \
+      tests/integration/test_ocr_sheet_history.py::test_legacy_set_facility_refusal_keeps_saved_sheet_until_operator_resolves_context_change \
+      tests/integration/test_ocr_sheet_history.py::test_legacy_set_facility_refusal_does_not_mutate_clean_saved_sheet_header_when_fields_match \
       tests/unit/test_historical_forced_sheet_read.py::test_stored_historical_sheet_keeps_quantities_metadata_and_menu_on_read \
       tests/contract/test_orders_workflow_v2_api.py::test_legacy_current_workflow_endpoints_are_hard_410 \
       tests/unit/test_order_workflow_v2_service.py::test_mark_ocr_run_queued_requires_context_and_clears_downstream \

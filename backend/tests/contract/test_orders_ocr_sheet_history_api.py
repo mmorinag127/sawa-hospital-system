@@ -514,7 +514,7 @@ def test_saved_sheet_is_not_rebased_by_legacy_db_config_on_read(history_case):
 
 def test_build_recoverable_ocr_sheet_payload_can_skip_saved_draft(history_case):
     f = history_case()
-    f.produce()
+    source = f.produce()["sheet"]
     sheet = _sheet("2", "", "row-recoverable-1")
     sheet["header"] = [*HEADER[:3], "旧常食2F", HEADER[4]]
     f.save(sheet)
@@ -525,7 +525,10 @@ def test_build_recoverable_ocr_sheet_payload_can_skip_saved_draft(history_case):
         assert with_saved["header"] == sheet["header"]
         without_saved, error = order_service.build_recoverable_ocr_sheet_payload(f.id, "menu_entries_missing", use_saved_draft=False)
         assert error is None and isinstance(without_saved, dict)
-        assert without_saved["source"] == "review_blocked"
+        assert without_saved["source"] == source["source"] == "workflow_v2_selected_ocr_projection"
+        for key in ("rows", "row_ids", "fields", "header"):
+            assert guard.snapshots_equal(without_saved[key], source[key])
+        assert without_saved["rows"][0][without_saved["fields"].index("qty.regular_2f")] == "2"
         assert without_saved["header"][3] != "旧常食2F"
 
 
@@ -557,16 +560,14 @@ def test_build_recoverable_ocr_sheet_payload_does_not_rehydrate_revision_without
             f.observations.append({"selected": selected, "exception": type(exc).__name__, "message": str(exc)})
             raise
         f.observations.append({"recoverable_payload": deepcopy(recovered), "error": error})
-        assert error is None and isinstance(recovered, dict)
-        assert recovered["row_ids"] != ["rev-1"]
-        assert all("Revision Menu" not in row and "9" not in row for row in recovered["rows"])
         if selected:
+            assert error is None and isinstance(recovered, dict)
+            assert recovered["row_ids"] != ["rev-1"]
+            assert all("Revision Menu" not in row and "9" not in row for row in recovered["rows"])
             assert recovered["row_ids"] == source["row_ids"]
             assert recovered["rows"][0][recovered["fields"].index("qty.regular_2f")] == "2"
         else:
-            assert recovered["source"] == "review_blocked"
-            assert recovered["recovery_source"] == "none"
-            assert recovered["rows"] == [] and recovered["row_ids"] == []
+            assert recovered is None and error == "selected_ocr_required"
 
 
 def test_activity_history_reads_existing_audit_without_reviving_lines_writer(history_case):

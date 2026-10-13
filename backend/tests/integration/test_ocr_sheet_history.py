@@ -3,6 +3,8 @@ import pathlib
 import json
 from datetime import date, datetime
 
+import pytest
+
 from sqlalchemy import delete
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -22,6 +24,8 @@ from src.services import fax_extractor  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData, rows_from_markdown  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
 
 def _seed_monthly_menu_2026_01() -> None:
@@ -381,108 +385,105 @@ def test_build_position_menu_entries_uses_previous_month_menu_when_week_is_cover
     assert all(entry["menu_date"] == date(2098, 4, 5) for entry in entries)
 
 
-def test_set_facility_keeps_saved_sheet_until_operator_resolves_context_change():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-set-facility-schema-refresh-001")
-    facility = facility_service.create_facility("Facility Switch Target", [])
-    assert facility_service.update_config(
-        facility["id"],
-        {
-            "fax_template_override": {
-                "columns_authoritative": True,
-                "columns": [
+def _assert_legacy_facility_refusal(
+    isolated_formal_schema, tmp_path, monkeypatch, *, target_name, target_header, target_area, row_id,
+):
+    from tests.contract.auth_support import registered_hospital_operator
+    from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase, LEGACY, _line
+    from tests.contract import test_portal_google_auth
+
+    monkeypatch.setattr(test_portal_google_auth, "engine", isolated_formal_schema)
+
+    with registered_hospital_operator(monkeypatch) as actor:
+        f = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
+            lines=[_line(quantity=2), _line(quantity=1, area="3F"),
+                   {**_line(quantity=3), "diet_type": "soft"}])
+        # The original line fixture has three explicit quantity identities.
+        authored = json.loads(f.source.read_text())
+        envelope = authored["facilities"][0]
+        for config in (envelope, envelope["versions"][0]["facility"]):
+            columns = config["fax_template"]["columns"]
+            columns[4:4] = [
+                {"index": 4, "source_index": 4, "name": "qty.regular_3f", "header": "常食3F",
+                 "role": "quantity", "diet_type": "regular", "area_id": "3F"},
+                {"index": 5, "source_index": 5, "name": "qty.soft_2f", "header": "軟食2F",
+                 "role": "quantity", "diet_type": "soft", "area_id": "2F"},
+            ]
+            columns[-1].update(index=6, source_index=6)
+        f.source.write_text(json.dumps(authored, ensure_ascii=False), encoding="utf-8")
+        f.produce()
+        target_id = "FAC-legacy-switch-target"
+        with session_scope() as session:
+            session.add(Facility(id=target_id, name=target_name))
+            session.flush()
+            session.add(FacilityConfig(facility_id=target_id, config_json={
+                "fax_template_override": {"columns_authoritative": True, "columns": [
                     {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
                     {"index": 1, "role": "daypart", "header": "区分"},
                     {"index": 2, "role": "menu_name", "header": "メニュー"},
-                    {"index": 3, "role": "quantity", "header": "施設常食", "diet_type": "regular", "area_id": "X"},
+                    {"index": 3, "role": "quantity", "header": target_header,
+                     "diet_type": "regular", "area_id": target_area},
                     {"index": 4, "role": "note", "header": "備考"},
-                ],
-            }
-        },
-    )
-    seeded = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
+                ]}}))
+        expected = {
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
             "header": ["日付", "区分", "メニュー", "旧常食2F", "備考"],
             "rows": [["01/08", "昼", "Menu A", "8", "seeded"]],
-            "row_ids": ["row-facility-refresh-1"],
+            "row_ids": [row_id],
             "source": "draft_ready",
-        },
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[],
-        edited_by="test-seed",
-    )
-    assert seeded is not None
+        }
+        seeded = f.save(expected)
+        assert seeded is not None
+        with f.readonly():
+            unauthenticated = f.client.post(f"/orders/{f.id}/facility",
+                json={"facility_id": target_id})
+            assert unauthenticated.status_code == 401
+            refused = f.client.post(f"/orders/{f.id}/facility",
+                json={"facility_id": target_id}, headers=actor.headers)
+            assert refused.status_code == 410
+            assert refused.json() == {"detail": {**LEGACY, "endpoint": "facility"}}
+            current = order_service.get_current_sheet_context(f.id)
+            sheet, error = order_service.get_ocr_sheet(f.id)
+            assert current is not None
+            assert current["facility_id"] == f.facility
+            assert error is None
+            assert sheet is not None
+            assert current["header"][3] == "旧常食2F"
+            assert current["fields"][3] == "qty.regular_2f"
+            assert sheet["header"][3] == "旧常食2F"
+            assert sheet["fields"][3] == "qty.regular_2f"
+            assert current["rows"][0][3] == "8"
+            assert sheet["rows"][0][3] == "8"
+            for key in ("fields", "header", "rows", "row_ids"):
+                assert current[key] == sheet[key] == expected[key]
+            assert order_service.get_current_sheet_context(f.id) == current
+            assert order_service.get_ocr_sheet(f.id) == (sheet, None)
+        assert f.get("workflow-v2/sheet")["sheet"] == expected
+        state = f.get("workflow-v2")
+        assert state["facility_id"] == f.facility
+        assert "quantity_template_field_missing" in state["blockers"]
+        assert state["menu_amount_resolution"]["blocker"] == "quantity_template_field_missing"
+        assert "quantity_template_field_missing" in current["blockers"]
+        for key in ("apply_blockers", "confirm_blockers", "blockers"):
+            assert "quantity_template_field_missing" in sheet[key]
+        assert sheet["can_apply"] is False and sheet["can_confirm"] is False
+        f.client.close()
 
-    assert order_service.set_facility(order["id"], facility["id"]) is True
 
-    current = order_service.get_current_sheet_context(order["id"])
-    sheet, error = order_service.get_ocr_sheet(order["id"])
-
-    assert current is not None
-    assert current["facility_id"] == facility["id"]
-    assert error is None
-    assert sheet is not None
-    assert current["header"][3] == "旧常食2F"
-    assert current["fields"][3] == "qty.regular_2f"
-    assert sheet["header"][3] == "旧常食2F"
-    assert sheet["fields"][3] == "qty.regular_2f"
-
-    assert current["rows"][0][3] == "8"
-    assert sheet["rows"][0][3] == "8"
-    assert order_service.get_current_sheet_context(order["id"]) == current
-    assert order_service.get_ocr_sheet(order["id"]) == (sheet, None)
+def test_legacy_set_facility_refusal_keeps_saved_sheet_until_operator_resolves_context_change(
+    isolated_formal_schema, tmp_path, monkeypatch,
+):
+    _assert_legacy_facility_refusal(isolated_formal_schema, tmp_path, monkeypatch,
+        target_name="Facility Switch Target", target_header="施設常食", target_area="X",
+        row_id="row-facility-refresh-1")
 
 
-def test_set_facility_does_not_mutate_clean_saved_sheet_header_when_fields_match():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-set-facility-header-stable-001")
-    facility = facility_service.create_facility("Facility Same Field Header", [])
-    assert facility_service.update_config(
-        facility["id"],
-        {
-            "fax_template_override": {
-                "columns_authoritative": True,
-                "columns": [
-                    {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
-                    {"index": 1, "role": "daypart", "header": "区分"},
-                    {"index": 2, "role": "menu_name", "header": "メニュー"},
-                    {"index": 3, "role": "quantity", "header": "別名常食2F", "diet_type": "regular", "area_id": "2F"},
-                    {"index": 4, "role": "note", "header": "備考"},
-                ],
-            }
-        },
-    )
-    seeded = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
-            "header": ["日付", "区分", "メニュー", "旧常食2F", "備考"],
-            "rows": [["01/08", "昼", "Menu A", "8", "seeded"]],
-            "row_ids": ["row-facility-header-stable-1"],
-            "source": "draft_ready",
-        },
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[],
-        edited_by="test-seed",
-    )
-    assert seeded is not None
-
-    assert order_service.set_facility(order["id"], facility["id"]) is True
-
-    current = order_service.get_current_sheet_context(order["id"])
-    sheet, error = order_service.get_ocr_sheet(order["id"])
-
-    assert current is not None
-    assert current["header"][3] == "旧常食2F"
-    assert current["fields"][3] == "qty.regular_2f"
-    assert error is None
-    assert sheet is not None
-    assert sheet["header"][3] == "旧常食2F"
-    assert sheet["fields"][3] == "qty.regular_2f"
+def test_legacy_set_facility_refusal_does_not_mutate_clean_saved_sheet_header_when_fields_match(
+    isolated_formal_schema, tmp_path, monkeypatch,
+):
+    _assert_legacy_facility_refusal(isolated_formal_schema, tmp_path, monkeypatch,
+        target_name="Facility Same Field Header", target_header="別名常食2F", target_area="2F",
+        row_id="row-facility-header-stable-1")
 
 
 def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_saved_draft(monkeypatch):

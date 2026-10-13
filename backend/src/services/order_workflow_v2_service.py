@@ -3817,13 +3817,31 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    return build_sheet_from_ocr_evidence(order_id)
+
+
+def build_sheet_from_ocr_evidence(
+    order_id: str, *, evidence_run_override: dict[str, Any] | None = None,
+    synchronous_write_input: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Project a stored selected/candidate result without selecting or persisting it."""
     try:
-        return _build_sheet_from_selected_ocr(order_id)
-    except ocr_evidence_service.SelectedEvidenceRejected as exc:
+        return _build_sheet_from_selected_ocr(
+            order_id, evidence_run_override=evidence_run_override,
+            synchronous_write_input=synchronous_write_input,
+        )
+    except (ValueError, CanonicalStoreError) as exc:
         return None, str(exc)
 
 
-def _build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+def _build_sheet_from_selected_ocr(
+    order_id: str, *, evidence_run_override: dict[str, Any] | None = None,
+    synchronous_write_input: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    from src.services.workflow_attempt_guard_service import (
+        capture_current_sheet_input, bind_current_sheet_input, validate_current_sheet_input, snapshots_equal,
+    )
+    publication_input = capture_current_sheet_input(order_id)
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -3833,10 +3851,18 @@ def _build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None
             return None, "workflow_not_initialized"
         if not workflow.evidence_run_id:
             return None, "selected_ocr_required"
-        evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
+        evidence_id = (
+            _normalize_id(evidence_run_override.get("id"))
+            if isinstance(evidence_run_override, dict) else workflow.evidence_run_id
+        )
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id) if evidence_id else None
         if evidence is None or evidence.order_id != order.id:
             return None, "selected_ocr_missing"
-        payload = evidence.payload_json if isinstance(evidence.payload_json, dict) else None
+        serialized = ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True)
+        if evidence_run_override is not None and not snapshots_equal(evidence_run_override, serialized):
+            return None, "candidate_evidence_changed"
+        evidence_snapshot = copy.deepcopy({column.key: getattr(evidence, column.key) for column in evidence.__table__.columns})
+        payload = copy.deepcopy(evidence.payload_json) if isinstance(evidence.payload_json, dict) else None
         meta = _workflow_meta(workflow)
         context_error = _workflow_v2_projection_context_error(meta)
         if context_error:
@@ -3861,8 +3887,15 @@ def _build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None
         template_id = _normalize_id(meta.get("template_id"))
         selected_ocr_result_id = evidence.id
         captured = _get_order_service_module()._capture_synchronous_cache_write_input(order.id, write_session=session)
-        if not isinstance(captured, dict) or captured.get("evidence_run_id") != evidence.id:
+        if not isinstance(captured, dict) or captured.get("evidence_run_id") != workflow.evidence_run_id:
             return None, "synchronous_input_missing"
+        if synchronous_write_input is not None and any(
+            not snapshots_equal(value, synchronous_write_input.get(key)) for key, value in captured.items()
+        ):
+            return None, "synchronous_input_conflict"
+        rejection = ocr_evidence_service.evidence_run_selectability_error(evidence)
+        if rejection:
+            return None, rejection
     if not isinstance(payload, dict):
         return None, "selected_ocr_payload_missing"
     if not facility_id:
@@ -3870,7 +3903,7 @@ def _build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None
 
     order_service_module = _get_order_service_module()
     try:
-        order_service_module._validate_selected_hakodate_artifacts(captured["evidence"], captured)
+        order_service_module._validate_selected_hakodate_artifacts(serialized, captured)
     except ValueError as exc:
         return None, str(exc)
     assignment = order_service_module._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
@@ -3914,6 +3947,19 @@ def _build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None
         row_count=len(projected.get("rows") or []),
     )
     projected["target_cell_map"] = target_cell_map
+    # A candidate is not part of the selected-input receipt: re-read it as well.
+    with session_scope() as session:
+        validate_current_sheet_input(session, order_id, bind_current_sheet_input(
+            {"order_id": order_id, "sheet": projected}, publication_input,
+        ))
+        current = session.get(OrderOcrEvidenceRun, selected_ocr_result_id, populate_existing=True)
+        if current is None or not snapshots_equal(
+            evidence_snapshot, {column.key: getattr(current, column.key) for column in current.__table__.columns},
+        ):
+            return None, "candidate_evidence_changed"
+        if not verify_selected_pdf_receipt(session, captured["selected_pdf_receipt"], read_only=True):
+            return None, "selected_pdf_input_mismatch"
+        order_service_module._validate_selected_hakodate_artifacts(serialized, captured)
     return {
         "order_id": order_id,
         "selected_ocr_result_id": selected_ocr_result_id,
