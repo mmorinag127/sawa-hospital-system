@@ -118,8 +118,40 @@ def test_fullweek_variable_meal_counts_preserve_observed_boundaries(monkeypatch,
     assert _validate_menu_day_boundaries(_sheet(meal_counts), evidence) == list(range(sum(day_counts)))
 
 
-def test_missing_header_boundary_blocks_row_axis(monkeypatch):
-    corrected, evidence, _, _ = _observed_axis(monkeypatch, (8, 8, 8, 8), header_count=1)
+def test_missing_header_boundary_blocks_row_axis(tmp_path, copied_master):
+    # Synthetic printed-header damage, not a real FAX or menu approval proof.
+    entries = entries_for(range(4), (2, 3, 3))
+    path = tmp_path / "missing-header.xlsx"
+    master.build_facility_template_xlsx(
+        facility_config=facility(), master_template_path=copied_master, output_path=path,
+        week_value="2026-09@2026-09-27~2026-09-30", week_menu_entries=entries,
+    )
+    workbook = load_workbook(path)
+    try:
+        worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
+        assert len(master.validated_body_row_plan(worksheet)) == 4 * 8
+        header = renderer.worksheet_header_boundary_contract(
+            worksheet, header_edge_rows=master.TEMPLATE_HEADER_EDGE_ROWS,
+            body_start_row=pipeline.STEP_REVIEW_BODY_START_ROW,
+        )
+        assert header[0]["column_votes"]
+        geometry = renderer.worksheet_render_geometry(worksheet, dpi=144)
+        image = renderer.render_worksheet_to_image(worksheet, dpi=144)
+        try:
+            fax = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        finally:
+            image.close()
+        xs = [float(geometry["x_positions"][col]) for col in range(1, worksheet.max_column + 2)]
+        ys = [geometry["y_positions"][row] for row in master.validated_template_row_edges(worksheet)]
+        y = round(ys[0])
+        left, right = round(xs[0]), round(xs[-1])
+        assert np.any(fax[y - 4:y + 5, left:right] < 128)
+        fax[y - 4:y + 5, left - 4:right + 5] = 255
+        corrected, evidence = pipeline._row_intersection_correct_ys(
+            rectified_fax=fax, corrected_xs=xs, template_ys=ys, worksheet=worksheet,
+        )
+    finally:
+        workbook.close()
 
     assert corrected is None
     assert evidence["used"] is False
