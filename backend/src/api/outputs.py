@@ -582,27 +582,6 @@ def _render_editable_delivery_note_html(
 </html>"""
 
 
-def _extract_delivery_note_sheet(html: str) -> tuple[str, str]:
-    title_start = html.find("<title>")
-    title_end = html.find("</title>")
-    title = html[title_start + len("<title>") : title_end] if title_start >= 0 and title_end > title_start else "納品書"
-    sheet_start = html.find('<main class="sheet"')
-    if sheet_start < 0:
-        sheet_start = html.find('<main class="sheet">')
-    sheet_end = html.find("</main>", sheet_start)
-    if sheet_start < 0 or sheet_end < 0:
-        raise ValueError("delivery note sheet not found")
-    return title, html[sheet_start : sheet_end + len("</main>")]
-
-
-def _extract_delivery_note_style(html: str) -> str:
-    style_start = html.find("<style>")
-    style_end = html.find("</style>", style_start)
-    if style_start < 0 or style_end < 0:
-        return ""
-    return html[style_start + len("<style>") : style_end]
-
-
 def _render_editable_daily_delivery_note_html(
     target_date: dt_date,
     *,
@@ -794,17 +773,6 @@ def _normalize_cell(value) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
-
-
-def _preview_excel(path: str, limit: int) -> dict:
-    df = pd.read_excel(path)
-    if limit > 0:
-        df = df.head(limit)
-    headers = [str(col) for col in df.columns]
-    rows: list[list[str]] = []
-    for _, row in df.iterrows():
-        rows.append([_normalize_cell(row.get(col)) for col in df.columns])
-    return {"headers": headers, "rows": rows}
 
 
 def _parse_iso_date(value: str) -> dt_date:

@@ -74,32 +74,6 @@ _UPLOADED_PDF_RECOVERY_STOP = threading.Event()
 _UPLOADED_PDF_INFLIGHT: set[str] = set()
 
 
-def _uploaded_pdf_worker_instance() -> str:
-    revision = str(os.getenv("K_REVISION", "local") or "local").strip() or "local"
-    return f"{revision}:{os.getpid()}"
-
-
-def _uploaded_pdf_recovery_interval_seconds() -> float:
-    raw = str(os.getenv("UPLOADED_PDF_RECOVERY_INTERVAL_SECONDS", "15") or "").strip()
-    try:
-        return max(float(raw), 1.0)
-    except ValueError:
-        return 15.0
-
-
-def _uploaded_pdf_recovery_enabled() -> bool:
-    raw = str(os.getenv("UPLOADED_PDF_RECOVERY_ENABLED", "1") or "").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        return False
-    return True
-
-
-def _ingest_runs_inline() -> bool:
-    return os.getenv("INGEST_RUN_INLINE", "").lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
-
-
 def _wait_for_pipeline_output_on_ingest() -> bool:
     raw = str(os.getenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
     if raw:
@@ -596,13 +570,6 @@ def _dump_ocr_debug(payload, extracted) -> None:
         logger.exception("Failed to dump OCR debug data")
 
 
-def _get_ocr_storage() -> StorageService:
-    base_dir = os.getenv("OCR_ARTIFACT_DIR")
-    if not base_dir:
-        base_dir = str(Path(__file__).resolve().parents[1] / "tmp" / "ocr-artifacts")
-    return StorageService(base_dir)
-
-
 def enqueue_ingest(payload: dict, force: bool = False) -> tuple[str, bool]:
     """
     Reserve an original input and dispatch its durable recorded transport intent.
@@ -708,16 +675,6 @@ def run_uploaded_pdf_recovery_once(limit: int | None = None) -> int:
         if _submit_uploaded_pdf_job(uploaded_pdf_id):
             accepted += 1
     return accepted
-
-
-def _run_uploaded_pdf_recovery_loop() -> None:
-    interval = _uploaded_pdf_recovery_interval_seconds()
-    while not _UPLOADED_PDF_RECOVERY_STOP.is_set():
-        try:
-            run_uploaded_pdf_recovery_once(limit=_INGEST_MAX_WORKERS)
-        except Exception:  # noqa: BLE001
-            logger.exception("Uploaded PDF recovery loop failed")
-        _UPLOADED_PDF_RECOVERY_STOP.wait(interval)
 
 
 def start_uploaded_pdf_recovery_loop() -> None:

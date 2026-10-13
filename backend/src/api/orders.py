@@ -152,50 +152,8 @@ class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
 
 
-def _is_read_timeout_error(value: object) -> bool:
-    return isinstance(value, str) and "read operation timed out" in value.lower()
-
-
-def _is_reparse_stale_timeout_error(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    normalized = value.strip().lower()
-    return normalized.startswith("reparse_stale_timeout>")
-
-
-def _is_terminal_reparse_error(value: object) -> bool:
-    if not isinstance(value, str):
-        return False
-    normalized = value.strip().lower()
-    if not normalized:
-        return False
-    return (
-        normalized.startswith("sheet_")
-        or normalized.startswith("lines_empty")
-        or normalized.startswith("llm_cost_")
-        or normalized.startswith("main_ocr_failed:")
-        or normalized.startswith("first_pass_ocr_missing")
-    )
-
-
 def _is_order_reparse_job(job: object, order_id: str) -> bool:
     return is_order_reparse_ocr_job(job if isinstance(job, dict) else None, order_id)
-
-
-def _should_preserve_terminal_reparse_state(job: dict | None, order_id: str) -> bool:
-    if not isinstance(job, dict) or not _is_order_reparse_job(job, order_id):
-        return False
-    normalized_status = str(job.get("status") or "").strip().lower()
-    if normalized_status in {"running", "pending", "awaiting_output", "recovering"}:
-        return False
-    metrics = job.get("metrics")
-    metrics = metrics if isinstance(metrics, dict) else {}
-    result_state = str(metrics.get("result_state") or "").strip().lower()
-    error_message = job.get("error_message")
-    return _is_terminal_reparse_error(error_message) or result_state in {
-        "hard_failed",
-        "draft_ready_blocked",
-    }
 
 
 def _derive_status_from_payload(payload: dict | None) -> str | None:
@@ -209,19 +167,6 @@ def _derive_status_from_payload(payload: dict | None) -> str | None:
     if payload.get("pages") or payload.get("table_raw") or payload.get("rows"):
         return "success"
     return None
-
-
-def _has_persisted_ocr_evidence(payload: dict | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    table_raw = payload.get("table_raw")
-    if isinstance(table_raw, str) and table_raw.strip():
-        return True
-    if isinstance(payload.get("pages"), list) and payload.get("pages"):
-        return True
-    if isinstance(payload.get("tables"), list) and payload.get("tables"):
-        return True
-    return False
 
 
 def _is_running_status(value: object) -> bool:
@@ -468,52 +413,6 @@ def _apply_job_status_to_order(order: dict, job: dict | None) -> None:
     order["ocr_updated_at"] = job.get("updated_at")
 
 
-def _align_order_ocr_readiness_with_workflow(order: dict) -> None:
-    workflow = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else None
-    if not isinstance(workflow, dict):
-        return
-    blockers = [
-        str(item or "").strip()
-        for item in (workflow.get("blockers_json") or [])
-        if str(item or "").strip()
-    ]
-    has_evidence_blocker = any(
-        code in {"evidence_view_unavailable", "evidence_edit_unavailable"}
-        for code in blockers
-    )
-    if not has_evidence_blocker:
-        return
-    current_status = str(order.get("ocr_status") or "").strip().lower()
-    current_error = str(order.get("ocr_error") or "").strip().lower()
-    if current_status in {"done", "success"} and not current_error:
-        return
-    order_id = str(order.get("id") or "").strip()
-    if order_id:
-        try:
-            current_payload, current_error_code = order_service._get_ocr_output_without_legacy_edits(  # noqa: SLF001
-                order_id,
-                persist_cache=False,
-            )
-        except Exception:
-            current_payload, current_error_code = None, "ocr_output_probe_failed"
-        if isinstance(current_payload, dict) and current_error_code is None:
-            return
-    reparse_state = workflow.get("reparse_state") if isinstance(workflow.get("reparse_state"), dict) else {}
-    reparse_status = str((reparse_state or {}).get("status") or "").strip().lower()
-    if reparse_status in {"running", "pending", "awaiting_output", "recovering"}:
-        return
-    order["ocr_status"] = "blocked"
-    order["ocr_error"] = "ocr_evidence_recovery_required"
-    order["ocr_processing_stage"] = "evidence_unavailable"
-    order["ocr_result_state"] = "blocked"
-    order["ocr_updated_at"] = None
-    order["ocr_metrics"] = {
-        "error": "ocr_evidence_recovery_required",
-        "processing_stage": "evidence_unavailable",
-        "result_state": "blocked",
-    }
-
-
 def _needs_list_candidate_summary(order: dict) -> bool:
     if not isinstance(order, dict):
         return False
@@ -587,19 +486,6 @@ def _attach_order_list_candidate_summary(
     if not isinstance(week, dict) and not isinstance(facility, dict):
         return
     order["candidate_resolution"] = summary
-
-
-def _is_active_order_reparse_job(job: dict | None, order_id: str) -> bool:
-    if not isinstance(job, dict):
-        return False
-    if not _is_order_reparse_job(job, order_id):
-        return False
-    normalized_status = str(job.get("status") or "").strip().lower()
-    if normalized_status not in {"running", "pending", "awaiting_output", "recovering"}:
-        return False
-    if _is_job_stale(job):
-        return False
-    return True
 
 
 def _heal_active_order_reparse_job_from_workflow(order_id: str, job: dict | None) -> dict | None:

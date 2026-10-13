@@ -1527,19 +1527,6 @@ def _apply_condiment_lines(lines: list[dict]) -> list[dict]:
     return enriched
 
 
-def _build_condiment_map(menu_names: list[str], facility_id: str | None) -> dict[str, list[str]]:
-    if not menu_names:
-        return {}
-    defaults = _read_captured_menu_defaults(menu_names, facility_id)
-    condiment_map: dict[str, list[str]] = {}
-    for name in menu_names:
-        payload = defaults.get(name, {})
-        condiments = _normalize_condiments(payload.get("condiments"))
-        if condiments:
-            condiment_map[name] = condiments
-    return condiment_map
-
-
 def _append_delivery_note(row: dict, note: object) -> None:
     text = str(note or "").strip()
     if not text or text == "袋分け例外適用":
@@ -2115,15 +2102,6 @@ def _workflow_v2_lines_for_outputs(
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"workflow-v2 output state lookup failed: {exc}") from exc
     return None
-
-
-def _workflow_v2_output_state_requires_saved_sheet(state: object) -> bool:
-    return str(state or "").strip() in {
-        "sheet_saved",
-        "bagging_ready",
-        "output_review",
-        "confirmed",
-    }
 
 
 def _workflow_v2_materialization_candidate(
@@ -3036,28 +3014,6 @@ def _normalize_ocr_daypart(value: Any) -> str:
     return text
 
 
-def _normalize_ocr_category(value: Any) -> str:
-    text = _normalize_ocr_text(value)
-    if not text:
-        return ""
-    if "主" in text:
-        if "A" in text or "Ａ" in text:
-            return "主Ａ"
-        if "B" in text or "Ｂ" in text:
-            return "主Ｂ"
-        return "主"
-    if "副" in text:
-        if "2" in text or "②" in text:
-            return "副②"
-        return "副①"
-    if text.isdigit():
-        if "2" in text:
-            return "副②"
-        if "1" in text:
-            return "副①"
-    return ""
-
-
 def _parse_ocr_date(value: str, year_hint: int | None, fallback: dt_date | None) -> dt_date | None:
     text = _normalize_ocr_text(value)
     if not text:
@@ -3103,73 +3059,6 @@ def _parse_ocr_quantity(value: Any) -> float | None:
         return None
 
 
-def _parse_ocr_table_rows(table_raw: str, year_hint: int | None) -> list[dict]:
-    rows: list[dict] = []
-    current_date: dt_date | None = None
-    current_daypart = ""
-    in_table = False
-    header_seen = False
-    for line in table_raw.splitlines():
-        raw_line = line.lstrip()
-        if not in_table and raw_line.startswith("|") and "日付" in raw_line and "献立" in raw_line:
-            in_table = True
-            header_seen = True
-            continue
-        if not in_table:
-            continue
-        if raw_line.startswith("|-"):
-            continue
-        if not raw_line.startswith("|"):
-            if header_seen:
-                break
-            continue
-        cells = [cell.strip() for cell in raw_line.split("|")[1:-1]]
-        if len(cells) < 4:
-            continue
-        date_cell = _normalize_ocr_text(cells[0])
-        if date_cell:
-            parsed_date = _parse_ocr_date(date_cell, year_hint, current_date)
-            if parsed_date:
-                current_date = parsed_date
-        daypart_cell = _normalize_ocr_text(cells[1])
-        if daypart_cell:
-            current_daypart = _normalize_ocr_daypart(daypart_cell)
-        category_cell = _normalize_ocr_category(cells[2])
-        menu_name = _normalize_ocr_text(cells[3])
-        if not menu_name:
-            continue
-        qty_values = [None] * 6
-        note_value = _normalize_ocr_text(cells[10]) if len(cells) >= 11 else ""
-        if len(cells) >= 10:
-            qty_cells = cells[4:10]
-            if len(cells) >= 11 and not cells[4] and sum(1 for c in qty_cells if _normalize_ocr_text(c)) == 5:
-                qty_cells = cells[5:10] + [None]
-            qty_values = [
-                _parse_ocr_quantity(qty_cells[0]),
-                _parse_ocr_quantity(qty_cells[1]),
-                _parse_ocr_quantity(qty_cells[2]),
-                _parse_ocr_quantity(qty_cells[3]),
-                _parse_ocr_quantity(qty_cells[4]),
-                _parse_ocr_quantity(qty_cells[5]),
-            ]
-        rows.append(
-            {
-                "date": current_date,
-                "daypart": current_daypart,
-                "category": category_cell,
-                "menu_name": menu_name,
-                "qty_regular_2f": qty_values[0],
-                "qty_regular_3f": qty_values[1],
-                "qty_soft_2f": qty_values[2],
-                "qty_soft_3f": qty_values[3],
-                "qty_mixer_2f": qty_values[4],
-                "qty_mixer_3f": qty_values[5],
-                "note": note_value,
-            }
-        )
-    return rows
-
-
 def _resolve_ocr_year_hint(order: dict) -> int | None:
     year_hint = None
     for line in order.get("lines", []):
@@ -3210,14 +3099,6 @@ def _load_order_ocr_payload(order_id: str) -> dict[str, Any] | None:
         if isinstance(parsed_raw, dict):
             return parsed_raw
     return {"table_raw": raw_text}
-
-
-def _entry_quantity_key(diet: str | None, area: str | None) -> str | None:
-    diet_key = _normalize_diet_key(diet)
-    area_key = str(area or "").strip().lower()
-    if not diet_key or not area_key:
-        return None
-    return f"{diet_key}_{area_key}"
 
 
 def _legacy_entry_quantity_field(diet: str | None, area: str | None) -> str | None:
@@ -4278,15 +4159,6 @@ def _write_aggregate_csv(path: Path, rows: list[dict], label_fields: list[str]) 
             writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 
-def _safe_filename_segment(value: object, fallback: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    text = re.sub(r"[^\w.-]+", "_", text)
-    text = text.strip("._")
-    return text or fallback
-
-
 def _safe_sheet_title(value: object, fallback: str, used_titles: set[str]) -> str:
     text = str(value or "").strip() or fallback
     text = re.sub(r'[\\/*?:\[\]]+', "_", text)
@@ -4450,11 +4322,6 @@ def _xlsx_content_type_tag(name: str) -> str:
     return f"{{{_XLSX_CONTENT_TYPE_NS}}}{name}"
 
 
-def _excel_serial_date(value: dt_date | datetime) -> float:
-    date_value = value.date() if isinstance(value, datetime) else value
-    return float((date_value - dt_date(1899, 12, 30)).days)
-
-
 def _worksheet_paths_by_name(xlsx_parts: dict[str, bytes]) -> dict[str, str]:
     workbook_root = ET.fromstring(xlsx_parts["xl/workbook.xml"])
     rels_root = ET.fromstring(xlsx_parts["xl/_rels/workbook.xml.rels"])
@@ -4518,10 +4385,6 @@ def _set_xml_attr_text(attrs: str, name: str, value: str) -> str:
     return f'{attrs} {name}="{value}"'
 
 
-def _remove_xml_attr_text(attrs: str, name: str) -> str:
-    return re.sub(rf'\s{name}="[^"]*"', "", attrs)
-
-
 def _patch_sheet_column_width_xml_text(sheet_xml: str, column_index: int, width: float | None) -> str:
     if not width:
         return sheet_xml
@@ -4534,29 +4397,6 @@ def _patch_sheet_column_width_xml_text(sheet_xml: str, column_index: int, width:
         return f"{attrs}/>"
 
     return pattern.sub(repl, sheet_xml, count=1)
-
-
-def _xml_cell_inner_value(value: Any) -> tuple[str | None, str]:
-    if _is_blank_cell_value(value):
-        return None, ""
-    if isinstance(value, (datetime, dt_date)):
-        return "n", f"<v>{_format_number(_excel_serial_date(value))}</v>"
-    if isinstance(value, bool):
-        return "b", f"<v>{'1' if value else '0'}</v>"
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return "n", f"<v>{_format_number(value)}</v>"
-    return "inlineStr", f"<is><t>{xml_escape(str(value))}</t></is>"
-
-
-def _xml_cell_with_value(attrs: str, value: Any) -> str:
-    attrs = attrs.rstrip("/")
-    attrs = _remove_xml_attr_text(attrs, "t")
-    cell_type, inner = _xml_cell_inner_value(value)
-    if cell_type:
-        attrs = _set_xml_attr_text(attrs, "t", cell_type)
-    if not inner:
-        return f"<c{attrs}/>"
-    return f"<c{attrs}>{inner}</c>"
 
 
 def _template_xml_spans(content: bytes) -> dict:
@@ -4892,70 +4732,6 @@ def _drop_calc_chain(parts: dict[str, bytes]) -> None:
             if override.attrib.get("PartName") == "/xl/calcChain.xml":
                 content_root.remove(override)
         parts[content_types_path] = ET.tostring(content_root, encoding="utf-8", xml_declaration=True)
-
-
-def _ensure_xml_row(sheet_data, row_idx: int):
-    rows = {int(row.attrib["r"]): row for row in sheet_data.findall(_xlsx_tag("row")) if row.attrib.get("r")}
-    row = rows.get(row_idx)
-    if row is not None:
-        return row
-    row = ET.Element(_xlsx_tag("row"), {"r": str(row_idx)})
-    inserted = False
-    for index, existing in enumerate(list(sheet_data)):
-        existing_r = int(existing.attrib.get("r", "0") or 0)
-        if existing_r > row_idx:
-            sheet_data.insert(index, row)
-            inserted = True
-            break
-    if not inserted:
-        sheet_data.append(row)
-    return row
-
-
-def _ensure_xml_cell(row, coordinate: str):
-    cells = {cell.attrib.get("r"): cell for cell in row.findall(_xlsx_tag("c"))}
-    cell = cells.get(coordinate)
-    if cell is not None:
-        return cell
-    cell = ET.Element(_xlsx_tag("c"), {"r": coordinate})
-    inserted = False
-    for index, existing in enumerate(list(row)):
-        existing_ref = str(existing.attrib.get("r") or "")
-        if existing_ref and existing_ref > coordinate:
-            row.insert(index, cell)
-            inserted = True
-            break
-    if not inserted:
-        row.append(cell)
-    return cell
-
-
-def _set_xml_cell_value(cell, value: Any) -> None:
-    for child in list(cell):
-        if child.tag in {_xlsx_tag("f"), _xlsx_tag("v"), _xlsx_tag("is")}:
-            cell.remove(child)
-    cell.attrib.pop("t", None)
-    if _is_blank_cell_value(value):
-        return
-    if isinstance(value, (datetime, dt_date)):
-        cell.attrib["t"] = "n"
-        node = ET.SubElement(cell, _xlsx_tag("v"))
-        node.text = _format_number(_excel_serial_date(value))
-        return
-    if isinstance(value, bool):
-        cell.attrib["t"] = "b"
-        node = ET.SubElement(cell, _xlsx_tag("v"))
-        node.text = "1" if value else "0"
-        return
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        cell.attrib["t"] = "n"
-        node = ET.SubElement(cell, _xlsx_tag("v"))
-        node.text = _format_number(value)
-        return
-    cell.attrib["t"] = "inlineStr"
-    inline = ET.SubElement(cell, _xlsx_tag("is"))
-    text = ET.SubElement(inline, _xlsx_tag("t"))
-    text.text = str(value)
 
 
 def _is_delivery_static_artifact_value(value: Any) -> bool:

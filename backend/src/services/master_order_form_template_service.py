@@ -879,22 +879,6 @@ def _weekday_label(menu_date: date) -> str:
     return labels[menu_date.weekday()]
 
 
-def _clear_body_identity_values(ws: Worksheet) -> None:
-    for row in range(BODY_START_ROW, BODY_END_ROW + 1):
-        for col in range(1, 5):
-            cell = ws.cell(row=row, column=col)
-            if isinstance(cell, MergedCell):
-                continue
-            cell.value = None
-
-
-def _write_cell_if_writable(ws: Worksheet, *, row: int, column: int, value: object) -> None:
-    cell = ws.cell(row=row, column=column)
-    if isinstance(cell, MergedCell):
-        return
-    cell.value = value
-
-
 def _split_week_menu_identity_entries(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]], int]:
     for entry in entries:
         if not isinstance(entry.get("_menu_date_obj"), date):

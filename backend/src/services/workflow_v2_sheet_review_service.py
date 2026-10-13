@@ -83,11 +83,6 @@ def _numeric_display(value: object) -> str:
     return str(numeric)
 
 
-def _digit_groups(value: object) -> list[str]:
-    text = _normalize_text(value).translate(str.maketrans("０１２３４５６７８９", "0123456789"))
-    return [match.group(0) for match in re.finditer(r"\d+(?:\.\d+)?", text)]
-
-
 def _is_structural_field(field: object) -> bool:
     normalized = _normalize_text(field).lower()
     if normalized in _STRUCTURAL_FIELDS:
@@ -983,10 +978,6 @@ def _suspect_target_cells_from_presence(sheet: dict[str, Any]) -> list[dict[str,
         }
         selected.append(target)
     return selected
-
-
-def _second_pass_suspect_target_cells(sheet: dict[str, Any]) -> list[dict[str, Any]]:
-    return _suspect_target_cells_from_presence(sheet)
 
 
 def _sheet_context_for_llm(
