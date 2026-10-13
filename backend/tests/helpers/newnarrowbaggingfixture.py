@@ -18,14 +18,16 @@ from tests.helpers.ingest_original import (
 )
 
 
-def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None):
+def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, facility_name=None, menu_temp_type=None, area_names=None):
     day = date.fromisoformat(lines[0]["date"])
-    facility = f"bagging-component-{uuid4().hex}"
+    facility = facility_id if facility_id is not None else f"bagging-component-{uuid4().hex}"
     configure_delivery(monkeypatch)
     path, _ = authored_sources(monkeypatch, tmp_path, facility_id=facility, menu_date=day)
     master_path = tmp_path / "authored-facilities.json"
     master = json.loads(master_path.read_text())
     configured = master["facilities"][0]
+    if facility_name is not None:
+        configured["facility_name"] = facility_name
     if daily_label_comparable_diet_types is not None:
         configured["daily_label_comparable_diet_types"] = deepcopy(daily_label_comparable_diet_types)
     authored_areas = {
@@ -33,6 +35,9 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         "2F": {"area_id": "2F", "name": "Synthetic component second floor"},
         "3F": {"area_id": "3F", "name": "Synthetic component third floor"},
     }
+    for area, name in (area_names or {}).items():
+        assert area in authored_areas
+        authored_areas[area]["name"] = name
     columns = configured["fax_template"]["columns"][:3]
     quantities = list(dict.fromkeys((line["diet_type"], line["area_id"]) for line in lines))
     configured["areas"] = []
@@ -83,6 +88,9 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         assert date.fromisoformat(line["date"]) == day
         groups.setdefault((line["daypart"], line["menu_name"]), []).append(line)
     with session_scope() as session:
+        if facility_name is not None:
+            from src.models.facility import Facility
+            session.get(Facility, facility).name = facility_name
         for name, values in (accessory_masters or {}).items():
             session.add(MenuMaster(id=str(uuid4()), name=name, normalized_name=menu_service._normalize_menu_name(name),
                 qty_per_serving=values["qty_per_serving"], unit_type=values["unit_type"], category="添え"))
@@ -96,6 +104,7 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
             master_id = str(uuid4())
             session.add(MenuMaster(id=master_id, name=menu_name, normalized_name=menu_service._normalize_menu_name(menu_name),
                 qty_per_serving=menu_qty_per_serving, unit_type=menu_unit_type, category=menu_category,
+                temp_type=menu_temp_type,
                 condiments=["ソース"] if group[0]["bag_type"] == "condiment" else []))
             # Physical regular identity is authored separately from requested
             # logical quantities. It never adds a regular order column/value.
@@ -143,6 +152,17 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         "rows": [[day.isoformat(), row[1], row[2],
                   *[int(value) if value != "" else None for value in row[3:]]] for row in rows],
         "week_id": f"{day:%Y-%m}@{day.isoformat()}~{day.isoformat()}"}
+    return registered, sheet
+
+
+def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None):
+    registered, sheet = selected_bagging_order(
+        monkeypatch, tmp_path, lines, invoice_template=invoice_template,
+        menu_category=menu_category, omit_invoice=omit_invoice,
+        menu_qty_per_serving=menu_qty_per_serving, menu_unit_type=menu_unit_type,
+        output_diet_types=output_diet_types, accessory_masters=accessory_masters,
+        daily_label_comparable_diet_types=daily_label_comparable_diet_types,
+    )
     current, error = workflow.get_workflow_readonly(registered["id"])
     assert error is None, error
     saved, error = workflow.save_sheet(order_id=registered["id"], sheet=sheet,
