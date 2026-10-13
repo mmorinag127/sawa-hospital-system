@@ -537,7 +537,7 @@ def test_facility_template_merge_detection_uses_body_merge_policy() -> None:
         "facility_id": "FAC00007",
         "facility_name": "ゆうゆう（株）百々家",
         "fax_template_id": "fax_layout_regular_forbidden_v1",
-        "fax_template_override": {
+        "fax_template": {
             "body_merge_policy": {
                 "mode": "daypart",
                 "columns": ["qty.regular_x"],
@@ -546,6 +546,12 @@ def test_facility_template_merge_detection_uses_body_merge_policy() -> None:
     }
 
     assert order_form_service.facility_template_has_vertical_merged_quantity_cells(
+        facility,
+        week_sheet_name="4月26日～4月30日",
+    )
+
+    facility["fax_template_override"] = facility.pop("fax_template")
+    assert not order_form_service.facility_template_has_vertical_merged_quantity_cells(
         facility,
         week_sheet_name="4月26日～4月30日",
     )
@@ -953,7 +959,7 @@ def test_build_fax_structure_only_excel_clears_body_values(tmp_path, monkeypatch
             "facility_id": facility_id,
             "facility_name": "構造比較施設",
             "fax_template_id": "fax_layout_regular_forbidden_v1",
-            "fax_template_override": {
+            "fax_template": {
                 "columns": [
                     {"role": "date", "header": "日付", "name": "date_mmdd", "source_index": 0},
                     {"role": "daypart", "header": "区分", "name": "daypart", "source_index": 1},
@@ -981,6 +987,20 @@ def test_build_fax_structure_only_excel_clears_body_values(tmp_path, monkeypatch
     assert generated_sheet["E11"].value is None
     assert schema_rows["source"] == "master_layout_template"
     assert schema_rows["facility_id"] == "FACSTRUCT01"
+
+    legacy_facility = order_form_service.config_service.get_facility_config("FACSTRUCT01")
+    legacy_facility["fax_template_override"] = legacy_facility.pop("fax_template")
+    monkeypatch.setattr(
+        order_form_service.config_service,
+        "get_facility_config",
+        lambda facility_id: legacy_facility,
+    )
+    with pytest.raises(ValueError, match="^facility_template_generated_columns_missing$"):
+        order_form_service.build_fax_structure_only_excel(
+            facility_id="FACSTRUCT01",
+            week_sheet_name="4月5日～4月11日",
+            output_dir=tmp_path / "old-key-only",
+        )
 
 
 def test_build_order_form_excel_blocks_when_month_specific_source_missing(tmp_path, monkeypatch):
