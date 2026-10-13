@@ -2,6 +2,8 @@
 """Real filesystem/FD audit regressions, not OCR or native acceptance evidence."""
 import argparse
 from copy import deepcopy
+import ctypes
+import errno
 import os
 from pathlib import Path
 import platform
@@ -9,7 +11,9 @@ import socket
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
+import native_dependency_ci as ci
 import native_dependency_probe as probe
 import native_network_isolation as isolation
 
@@ -307,6 +311,115 @@ class IsolationLogicChecks(unittest.TestCase):
             isolation.verify_arguments(args)
 
 
+class IPCPolicyChecks(unittest.TestCase):
+    """Portable rule/ABI/failure decisions, never accepted kernel execution proof."""
+    def test_rule_comparisons_cover_only_unix_stream_and_null_destination(self):
+        def refused(name, args):
+            for syscall, arg, op, a, b in isolation.ipc_rules():
+                if syscall == name and ((op == isolation.SCMP_NE and args[arg] != a)
+                    or (op == isolation.SCMP_MASKED_EQ and args[arg] & a == b)):
+                    return True
+            return False
+        for flags in (0, *isolation.IPC_FLAGS, isolation.IPC_FLAGS[0] | isolation.IPC_FLAGS[1]):
+            self.assertFalse(refused('socketpair', [1, 1 | flags, 0]))
+            for kind in (0, 2, 3, 4, 5, 6, 10):
+                self.assertTrue(refused('socketpair', [1, kind | flags, 0]))
+        for bit in range(32):
+            if (1 << bit) & (1 | isolation.IPC_FLAGS[0] | isolation.IPC_FLAGS[1]):
+                continue
+            self.assertTrue(refused('socketpair', [1, 1 | (1 << bit), 0]))
+        for family, protocol in ((0, 0), (2, 0), (10, 0), (-1, 0), (1, 1), (1, -1)):
+            self.assertTrue(refused('socketpair', [family, 1, protocol]))
+        self.assertFalse(refused('sendto', [-1, 0, 0, 0, 0, 0]))
+        for address in (1, 0xffffffff, 0xffffffffffffffff):
+            self.assertTrue(refused('sendto', [-1, 0, 0, 0, address, 0]))
+        self.assertEqual(set(isolation.DENIED_SYSCALLS), {'connect', 'listen', 'accept', 'accept4',
+            'sendmsg', 'sendmmsg', 'recvmsg', 'recvmmsg',
+            'io_uring_setup', 'io_uring_enter', 'io_uring_register'})
+
+    def test_public_abi_layout_and_action_constants(self):
+        self.assertEqual(ctypes.sizeof(isolation.ArgumentComparison), 24)
+        self.assertEqual([getattr(isolation.ArgumentComparison, name).offset
+                          for name in ('arg', 'op', 'datum_a', 'datum_b')], [0, 4, 8, 16])
+        self.assertEqual(ctypes.sizeof(isolation.SeccompVersion), 12)
+        self.assertEqual((isolation.SCMP_NE, isolation.SCMP_EQ, isolation.SCMP_MASKED_EQ), (1, 4, 7))
+        self.assertEqual(isolation.SCMP_ALLOW, 0x7fff0000)
+        self.assertEqual(isolation.SCMP_ERRNO | errno.EPERM, 0x00050001)
+
+    def test_library_api_errors_release_context_and_never_accept_isolation(self):
+        # Deliberately no successful load double: these cases prove failure handling only.
+        for stage in ('version', 'init', 'resolve', 'rule', 'load'):
+            library = Mock()
+            library.seccomp_version.return_value = ctypes.pointer(isolation.SeccompVersion(2, 5, 5))
+            library.seccomp_init.return_value = 123
+            library.seccomp_syscall_resolve_name.return_value = 44
+            library.seccomp_rule_add_array.return_value = 0
+            library.seccomp_load.return_value = -errno.EPERM
+            function, value = {'version': ('seccomp_version', None),
+                'init': ('seccomp_init', None), 'resolve': ('seccomp_syscall_resolve_name', -1),
+                'rule': ('seccomp_rule_add_array', -errno.EINVAL),
+                'load': ('seccomp_load', -errno.EPERM)}[stage]
+            getattr(library, function).return_value = value
+            with self.subTest(stage=stage), patch.object(isolation.sys, 'platform', 'linux'), \
+                    patch.object(isolation.platform, 'machine', return_value='x86_64'), \
+                    patch.object(isolation.os, 'listdir', return_value=['1']), \
+                    patch.object(isolation.ctypes, 'CDLL', return_value=library):
+                with self.assertRaises(RuntimeError):
+                    isolation.install_ipc_filter()
+            if stage in ('version', 'init'):
+                library.seccomp_release.assert_not_called()
+            else:
+                library.seccomp_release.assert_called_once_with(123)
+            if stage == 'load':
+                self.assertEqual(library.seccomp_rule_add_array.call_count, len(isolation.ipc_rules()))
+                self.assertEqual(library.seccomp_rule_add_array.argtypes[-1],
+                                 ctypes.POINTER(isolation.ArgumentComparison))
+
+    def test_missing_library_and_existing_threads_fail_closed(self):
+        with patch.object(isolation.sys, 'platform', 'linux'), \
+                patch.object(isolation.platform, 'machine', return_value='x86_64'), \
+                patch.object(isolation.os, 'listdir', return_value=['1', '2']), \
+                patch.object(isolation.ctypes, 'CDLL') as loader:
+            with self.assertRaisesRegex(RuntimeError, 'precede thread'):
+                isolation.install_ipc_filter()
+            loader.assert_not_called()
+        with patch.object(isolation.sys, 'platform', 'linux'), \
+                patch.object(isolation.platform, 'machine', return_value='x86_64'), \
+                patch.object(isolation.os, 'listdir', return_value=['1']), \
+                patch.object(isolation.ctypes, 'CDLL', side_effect=OSError('unavailable')):
+            with self.assertRaises(OSError):
+                isolation.install_ipc_filter()
+
+    def test_manifest_keeps_hidden_files_and_refuses_drift(self):
+        root = probe.OUT / self._testMethodName
+        (root / '.cache').mkdir(parents=True)
+        (root / '.cache/.ses').write_bytes(b'owned hidden evidence')
+        ci.save(root / 'sha256.json', ci.evidence_manifest(root))
+        ci.verify_evidence(root)
+        self.assertEqual(set(ci.load(root / 'sha256.json')), {'.cache/.ses'})
+        (root / '.cache/.ses').write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'incomplete or changed'):
+            ci.verify_evidence(root)
+        (root / '.cache/.ses').unlink()
+        with self.assertRaisesRegex(ValueError, 'incomplete or changed'):
+            ci.verify_evidence(root)
+
+    def test_manifest_refuses_outside_links_and_credential_placeholder(self):
+        root = probe.OUT / self._testMethodName
+        root.mkdir()
+        target = probe.OUT / 'manifest-outside-sentinel'
+        target.write_bytes(b'not part of this evidence root')
+        link = root / 'escape'
+        link.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'escapes owned root'):
+            ci.evidence_manifest(root)
+        link.unlink()
+        (root / 'no-credentials.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'credential placeholder'):
+            ci.evidence_manifest(root)
+        (root / 'no-credentials.json').unlink()
+
+
 def main():
     global FOREIGN, FOREIGN_DIR, FOREIGN_FILE, OWNED_DIR
     global ISOLATION_ARGS
@@ -336,13 +449,13 @@ def main():
     FOREIGN_FILE = os.open(sentinel, os.O_RDWR)
     OWNED_DIR = os.open(owned, os.O_RDONLY)
     os.environ['OWNED_EVIDENCE_ROOT'] = str(owned)
-    probe.install_audit(args)
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(OwnershipChecks)
-    if args.network_checks:
-        for tests in (NetworkChecks, IsolationLogicChecks):
-            suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(tests))
-    ids = [test.id() for test in suite]
     try:
+        probe.install_audit(args)
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(OwnershipChecks)
+        if args.network_checks:
+            for tests in (NetworkChecks, IsolationLogicChecks, IPCPolicyChecks):
+                suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(tests))
+        ids = [test.id() for test in suite]
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         unchanged = before == (sentinel.read_bytes(), sentinel.stat().st_mode, sentinel.stat().st_ino)
         unchanged = unchanged and sorted(p.name for p in FOREIGN.iterdir()) == ['empty', 'sentinel']
@@ -359,6 +472,11 @@ def main():
         probe.save(owned / 'checks.json', summary)
         return 0 if result.wasSuccessful() and unchanged and not result.skipped else 1
     finally:
+        # The /dev/null and foreign-link fixtures have served their refusal checks;
+        # do not publish symlinks as native evidence (in particular the null alias).
+        for path in owned.rglob('*'):
+            if path.is_symlink():
+                path.unlink()
         for fd in (FOREIGN_DIR, FOREIGN_FILE, OWNED_DIR):
             os.close(fd)
 

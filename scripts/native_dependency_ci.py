@@ -47,6 +47,33 @@ def load(path):
     return json.loads(Path(path).read_text())
 
 
+def evidence_manifest(root):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('physical evidence directory required')
+    root = root.resolve(strict=True)
+    result = {}
+    for path in sorted(root.rglob('*')):
+        if not path.resolve(strict=True).is_relative_to(root):
+            raise ValueError('evidence link escapes owned root: ' + str(path.relative_to(root)))
+        # This is the explicit absent credential path in phase_environment, not a
+        # content scanner. No inherited HOME/token/credential directories are uploaded.
+        if path.name == 'no-credentials.json':
+            raise ValueError('credential placeholder must remain absent')
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError('non-file evidence entry: ' + str(path.relative_to(root)))
+        if path != root / 'sha256.json':
+            result[str(path.relative_to(root))] = digest(path)
+    return result
+
+
+def verify_evidence(root):
+    actual = evidence_manifest(root)
+    if actual != load(root / 'sha256.json'):
+        raise ValueError('evidence manifest incomplete or changed')
+
+
 def owned_root(run_id, attempt):
     if any(not re.fullmatch(r'[1-9][0-9]{0,19}', x) for x in (run_id, attempt)):
         raise ValueError('explicit numeric GitHub run and attempt required')
@@ -447,8 +474,12 @@ def run(source, root):
         summary['exit'] = 1 if summary['failures'] else 0
         summary['acceptance'] = 'Pending parent visual inspection; never whole-task/live approval'
         save(evidence / 'summary.json', summary)
-        save(evidence / 'sha256.json', {str(p.relative_to(evidence)): digest(p)
-             for p in sorted(evidence.rglob('*')) if p.is_file() and p.name != 'sha256.json'})
+        try:
+            save(evidence / 'sha256.json', evidence_manifest(evidence))
+        except Exception:
+            summary['failures'].append({'phase': 'evidence', 'error': traceback.format_exc()})
+            summary['exit'] = 1
+            save(evidence / 'summary.json', summary)
     return summary['exit']
 
 
@@ -457,6 +488,7 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--attempt', required=True)
+    parser.add_argument('--verify-evidence', action='store_true')
     args = parser.parse_args()
     source = args.source.resolve(strict=True)
     if (sys.platform != 'linux' or sys.version_info[:2] != (3, 11)
@@ -465,6 +497,9 @@ def main():
             or not os.environ.get('GITHUB_REPOSITORY_OWNER')
             or os.environ.get('GITHUB_ACTOR') != os.environ['GITHUB_REPOSITORY_OWNER']):
         parser.error('owner/exact-branch Linux Python3.11 GitHub Actions only')
+    if args.verify_evidence:
+        verify_evidence(owned_root(args.run_id, args.attempt) / 'evidence')
+        return 0
     def interrupted(_signal, _frame):
         raise InterruptedError('CI termination requested; reap owned process group')
     signal.signal(signal.SIGTERM, interrupted)

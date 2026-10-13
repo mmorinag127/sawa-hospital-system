@@ -36,13 +36,20 @@ jobs:
           python scripts/native_dependency_ci.py
           --source "$GITHUB_WORKSPACE"
           --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
-      - name: Preserve failures, input pages and native evidence
+      - name: Verify owned evidence before upload
+        id: evidence
         if: always()
+        run: >-
+          python -B scripts/native_dependency_ci.py
+          --source "$GITHUB_WORKSPACE"
+          --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --verify-evidence
+      - name: Preserve failures, input pages and native evidence
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: linux-native-proof-${{ github.sha }}-${{ github.run_attempt }}
-          path: |
-            /tmp/sawa-native-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
-            ${{ runner.temp }}/native-font-setup.log
+          path: /tmp/sawa-native-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
