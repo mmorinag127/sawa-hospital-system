@@ -1274,7 +1274,7 @@ def canonical_generated_column_slots(template: dict[str, Any], *, col_count: int
         spec = _canonical_slot_from_template_column(authored, fallback_index=column["index"])
         if not spec:
             raise ValueError("hakodate_authored_column_role_unresolved")
-        slots.append({"worksheet_col_index": master.GENERATED_START_COL + offset, "role": spec["role"], "slot_name": spec["slot_name"], "label": column.get("header") or column.get("column_id") or spec["label"], "canonical_source": "facility_fax_template"})
+        slots.append({"worksheet_col_index": master.GENERATED_START_COL + offset, "role": spec["role"], "slot_name": "note" if column["role"] == "note" else spec["slot_name"], "label": _template_slot_label(column, spec["canonical_field"]), "canonical_source": "facility_fax_template"})
     return slots
 
 

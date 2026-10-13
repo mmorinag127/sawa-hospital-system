@@ -3539,7 +3539,7 @@ def canonical_logical_target_plan(*, worksheet: Any, fax_template: dict, draft_s
             sheet_cell = f"{get_column_letter(worksheet_col)}{worksheet_row}"
             merged = merged_cells.get((worksheet_row, worksheet_col))
             region_id = merged["range"] if merged else sheet_cell
-            logical = {"sheet_cell": sheet_cell, "worksheet_row": worksheet_row, "worksheet_col": worksheet_col, "role": slot["role"], "field": slot["slot_name"], "field_label": slot["label"], "date": row[roles["date"]], "daypart": row[roles["daypart"]], "menu_name": row[roles["menu"]]}
+            logical = {"sheet_cell": sheet_cell, "worksheet_row": worksheet_row, "worksheet_col": worksheet_col, "role": slot["role"], "field": slot["slot_name"], "field_label": slot["label"], "date": row[roles["date"]], "daypart": row[roles["daypart"]], "menu_name": hakodate_assignment_service._normalize_slot_text(row[roles["menu"]])}
             region = regions.setdefault(region_id, {**logical, "region_id": region_id, "merged_cell": merged, "physical_split_from_excel_merge": None, "logical_targets": [], "covered_sheet_cells": []})
             region["logical_targets"].append(logical)
             region["covered_sheet_cells"].append(sheet_cell)
