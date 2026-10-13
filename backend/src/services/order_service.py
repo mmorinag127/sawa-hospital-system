@@ -20047,33 +20047,6 @@ def _build_rows_from_menu_entries(
     return rows, source
 
 
-def _sheet_row_display_sort_key(row: dict[str, Any], idx: int) -> tuple[Any, ...]:
-    identity = row.get("identity")
-    menu_date: date | None = None
-    daypart_key = ""
-    menu_name_key = ""
-    if isinstance(identity, tuple) and len(identity) == 3:
-        date_key = str(identity[0] or "").strip()
-        if date_key:
-            try:
-                menu_date = date.fromisoformat(date_key)
-            except Exception:
-                menu_date = None
-        daypart_key = _canonical_daypart_key(identity[1]) or ""
-        menu_name_key = _normalize_menu_text(identity[2])
-    sort_key = row.get("sort_key")
-    if not isinstance(sort_key, tuple):
-        sort_key = (sort_key, idx)
-    daypart_primary, daypart_secondary = _daypart_sort_components(daypart_key)
-    return (
-        0 if isinstance(menu_date, date) else 1,
-        menu_date or date.max,
-        daypart_primary,
-        daypart_secondary,
-        menu_name_key,
-        sort_key,
-        idx,
-    )
 
 
 
@@ -21113,67 +21086,6 @@ def _extract_sheet_rows_from_payload_uncanonicalized(payload: dict[str, Any], te
 
 
 
-def _score_first_pass_projection_rows(
-    *,
-    rows: list[list[str]],
-    fields: list[str],
-    template: dict[str, Any],
-) -> tuple[int, int, int, int, int]:
-    if not rows or not fields:
-        return (0, 0, 0, 0, 0)
-    quantity_columns = _template_quantity_column_indexes(template)
-    if not quantity_columns:
-        return (0, 0, 0, 0, 0)
-    date_idx, daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
-    quantity_rows = [
-        row
-        for row in rows
-        if isinstance(row, list) and _row_has_numeric_quantity_cells(row, quantity_columns)
-    ]
-    if not quantity_rows:
-        return (0, 0, 0, 0, 0)
-
-    dated_quantity_row_count = 0
-    menu_anchor_count = 0
-    daypart_block_count = 0
-    current_date_key = ""
-    current_daypart_key = ""
-    current_block_key: tuple[str, str] | None = None
-    for row in quantity_rows:
-        raw_date = _safe_row_get(row, date_idx)
-        raw_daypart = _safe_row_get(row, daypart_idx)
-        date_key = _normalize_sheet_date_key(raw_date)
-        if date_key:
-            current_date_key = date_key
-            dated_quantity_row_count += 1
-        else:
-            date_key = current_date_key
-        daypart_key = _normalize_daypart_key(raw_daypart)
-        if daypart_key:
-            current_daypart_key = daypart_key
-        else:
-            daypart_key = current_daypart_key
-        block_key = (date_key, daypart_key)
-        if any(block_key) and block_key != current_block_key:
-            current_block_key = block_key
-            daypart_block_count += 1
-        if _looks_like_structural_menu_text(_safe_row_get(row, menu_idx)):
-            menu_anchor_count += 1
-
-    date_group_count = len(
-        _collect_payload_quantity_date_groups(
-            payload_rows=rows,
-            fields=fields,
-            quantity_columns=quantity_columns,
-        )
-    )
-    return (
-        int(date_group_count),
-        int(dated_quantity_row_count),
-        int(daypart_block_count),
-        int(menu_anchor_count),
-        int(len(quantity_rows)),
-    )
 
 
 
@@ -21185,97 +21097,8 @@ def _parse_resolved_column_mapping_pairs(
     return fax_extractor._parse_resolved_column_mapping_pairs(payload, fields)
 
 
-def _template_explicit_quantity_pairs(
-    *,
-    template: dict[str, Any] | None,
-    fields: list[str],
-    observed_width: int,
-) -> list[tuple[int, str]]:
-    if not isinstance(template, dict) or observed_width <= 0 or not fields:
-        return []
-    explicit_pairs: list[tuple[int, str]] = []
-    seen_fields: set[str] = set()
-    for source_col_index, dest_idx in fax_extractor._mapped_indexes_from_template_columns(
-        template=template,
-        fields=fields,
-        observed_width=observed_width,
-    ).items():
-        if not isinstance(dest_idx, int) or dest_idx < 0 or dest_idx >= len(fields):
-            continue
-        field = str(fields[dest_idx] or "").strip()
-        if not field.startswith("qty.") or field in seen_fields:
-            continue
-        explicit_pairs.append((int(source_col_index), field))
-        seen_fields.add(field)
-    return explicit_pairs
 
 
-def _overlay_aux_display_cells_from_template_rows(
-    *,
-    rows: list[list[str]] | None,
-    payload: dict[str, Any],
-    template: dict[str, Any],
-) -> list[list[str]]:
-    normalized_rows = [
-        [_field_value_to_str(cell) for cell in row]
-        for row in (rows or [])
-        if isinstance(row, list)
-    ]
-    if not normalized_rows:
-        return normalized_rows
-    if isinstance(payload.get("_reparse_recognizer_result"), dict):
-        _extract_sheet_rows_from_payload_uncanonicalized(payload, template)
-        return normalized_rows
-    fields = _get_row_fields(template)
-    aux_indexes = [idx for idx, field in enumerate(fields) if _is_aux_sheet_field(field)]
-    if not aux_indexes:
-        return normalized_rows
-    header = _sheet_header_from_template(fields, template)
-    helper_semantics = _resolve_helper_column_semantics(fields=fields, header=header)
-    projected_rows = rows_from_pipeline_payload(
-        payload,
-        template,
-        allow_payload_template_override=False,
-    )
-    if not projected_rows:
-        return normalized_rows
-    projected_rows, _helper_stats = _canonicalize_block_helper_display_rows(
-        rows=projected_rows,
-        fields=fields,
-        header=header,
-    )
-    for row_idx, row in enumerate(normalized_rows):
-        if row_idx >= len(projected_rows):
-            break
-        projected_row = projected_rows[row_idx]
-        if not isinstance(projected_row, list):
-            continue
-        for col_idx in aux_indexes:
-            while len(row) <= col_idx:
-                row.append("")
-            semantic = helper_semantics.get(col_idx)
-            if semantic == "slot_label":
-                candidate_value = projected_row[col_idx] if col_idx < len(projected_row) else ""
-                row[col_idx] = _resolve_semantic_aux_display_value(
-                    current_value=row[col_idx],
-                    candidate_value=candidate_value,
-                    semantic=semantic,
-                )
-                continue
-            if col_idx >= len(projected_row):
-                continue
-            aux_value = _field_value_to_str(projected_row[col_idx]).strip()
-            if not aux_value or aux_value == "-":
-                continue
-            row[col_idx] = aux_value
-    normalized_rows, _structured_helper_stats = _overlay_structured_block_total_cells_onto_sheet_row_lists(
-        rows=normalized_rows,
-        fields=fields,
-        header=header,
-        raw_payload=payload,
-        template=template,
-    )
-    return normalized_rows
 
 
 def _overlay_payload_aux_cells_onto_sheet_rows(
@@ -21461,52 +21284,6 @@ def _resolved_quantity_source_target_pairs(
     return [(idx, idx) for idx, field in enumerate(fields) if field.startswith("qty.")]
 
 
-def _resolve_fragmented_structured_source_indexes(
-    *,
-    matrix: list[list[str]] | None,
-    fields: list[str],
-) -> dict[str, int] | None:
-    normalized_matrix = fax_extractor._normalize_table_matrix_rows(matrix or [])
-    if not normalized_matrix or not fields:
-        return None
-    fields_set = set(fields)
-    header_height: int | None = None
-    for idx, row in enumerate(normalized_matrix[:6]):
-        if fax_extractor._looks_like_data_row(row, fields_set):
-            header_height = idx
-            break
-    if header_height is None or header_height <= 0:
-        return None
-    header_rows = normalized_matrix[:header_height]
-    merged_header = fax_extractor._merge_header_group(header_rows)
-    if not merged_header:
-        return None
-
-    date_source_idx: int | None = None
-    menu_source_idx: int | None = None
-    daypart_source_idx: int | None = None
-    for source_col_index, header_cell in enumerate(merged_header):
-        raw_header = str(header_cell or "")
-        compact_header = re.sub(r"\s+", "", raw_header)
-        mapped_field = fax_extractor._field_from_header(raw_header, fields_set)
-        if mapped_field is None and ("日付" in compact_header or ("月" in compact_header and "付" in compact_header)):
-            mapped_field = "date_mmdd" if "date_mmdd" in fields_set else "date"
-        if mapped_field in {"date_mmdd", "date"} and date_source_idx is None:
-            date_source_idx = source_col_index
-        elif mapped_field in {"menu", "menu_name"} and menu_source_idx is None:
-            menu_source_idx = source_col_index
-        elif mapped_field == "daypart" and daypart_source_idx is None:
-            daypart_source_idx = source_col_index
-    if date_source_idx is None or menu_source_idx is None:
-        return None
-    resolved = {
-        "header_height": int(header_height),
-        "date_source_idx": int(date_source_idx),
-        "menu_source_idx": int(menu_source_idx),
-    }
-    if daypart_source_idx is not None:
-        resolved["daypart_source_idx"] = int(daypart_source_idx)
-    return resolved
 
 
 
@@ -22804,79 +22581,8 @@ def _parse_sheet_quantity_cell(value: object) -> float | None:
     return _coerce_sheet_quantity_upper_bound(parsed)
 
 
-def _cell_contains_explicit_span_marker(value: object) -> bool:
-    text = _field_value_to_str(value).strip()
-    if not text:
-        return False
-    normalized = (
-        text.replace("<br>", " ")
-        .replace("<br/>", " ")
-        .replace("<br />", " ")
-        .translate(_SHEET_TRANSLATION)
-    )
-    compact = re.sub(r"[\s　]+", "", normalized)
-    if not compact:
-        return False
-    if "->" in compact or "→" in compact or "←" in compact or "↔" in compact or "↕" in compact:
-        return True
-    repeated_tokens = re.findall(r"-?\d+(?:\.\d+)?", normalized)
-    if len(repeated_tokens) >= 2 and len(set(repeated_tokens)) == 1:
-        return True
-    marker_count = 0
-    for marker in (")", "）", "]", "】", "}", "｝", "|", "｜", "¦"):
-        marker_count += compact.count(marker)
-    return marker_count >= 2
 
 
-def _parse_explicit_span_quantity_cell(value: object) -> tuple[float, int] | None:
-    text = _field_value_to_str(value).strip()
-    if not text:
-        return None
-    normalized = (
-        text.replace("<br>", " ")
-        .replace("<br/>", " ")
-        .replace("<br />", " ")
-        .translate(_SHEET_TRANSLATION)
-    )
-    compact = re.sub(r"[\s　]+", "", normalized)
-    compact = compact.replace(",", "").replace("，", "")
-    compact = compact.replace("．", ".").replace("。", ".")
-    if not compact:
-        return None
-    repeated_tokens = re.findall(r"-?\d+(?:\.\d+)?", normalized)
-    if len(repeated_tokens) >= 2 and len(set(repeated_tokens)) == 1:
-        parsed_repeat = _parse_sheet_quantity_cell(repeated_tokens[0])
-        if parsed_repeat is not None:
-            return parsed_repeat, len(repeated_tokens)
-    if not _cell_contains_explicit_span_marker(value):
-        return None
-    # Ignore plain "(20)" style tokens that do not represent a span.
-    stripped = compact.strip("()[]{}（）［］【】｛｝")
-    if re.fullmatch(r"-?\d+(?:\.\d+)?", stripped):
-        return None
-
-    raw_tokens = re.findall(r"-?\d+(?:\.\d+)?", compact)
-    if not raw_tokens:
-        return None
-    parsed_tokens: list[float] = []
-    for token in raw_tokens:
-        parsed = _parse_sheet_quantity_cell(token)
-        if parsed is None:
-            continue
-        parsed_tokens.append(parsed)
-    if not parsed_tokens:
-        return None
-
-    counts: dict[float, int] = {}
-    for parsed in parsed_tokens:
-        counts[parsed] = int(counts.get(parsed, 0)) + 1
-    dominant_qty, dominant_count = max(counts.items(), key=lambda item: (item[1], item[0]))
-    if len(counts) == 1:
-        return dominant_qty, dominant_count
-    total = len(parsed_tokens)
-    if dominant_count >= 2 and (dominant_count / max(total, 1)) >= 0.6:
-        return dominant_qty, dominant_count
-    return None
 
 
 def _resolve_sheet_field_indexes(fields: list[str]) -> tuple[int | None, int | None, int | None]:
@@ -23056,38 +22762,6 @@ def _build_payload_row_mapping_by_menu_priority(
 
 
 
-def _extract_loose_numeric_tokens(value: object) -> list[float]:
-    text = _field_value_to_str(value).strip()
-    if not text:
-        return []
-    normalized = (
-        text.replace("<br>", " ")
-        .replace("<br/>", " ")
-        .replace("<br />", " ")
-        .translate(_SHEET_TRANSLATION)
-    )
-    compact = re.sub(r"[\s　]+", "", normalized)
-    if not compact:
-        return []
-    # Avoid dates/time/page fragments.
-    if re.search(r"\d{1,2}[/-]\d{1,2}", compact):
-        return []
-    if re.search(r"\d{1,2}:\d{2}", compact):
-        return []
-    tokens: list[float] = []
-    max_abs = _read_sheet_quantity_max_abs()
-    for raw in re.findall(r"(?<!\d)(-?\d{1,3}(?:\.\d+)?)(?!\d)", compact):
-        try:
-            parsed = float(raw)
-        except Exception:
-            continue
-        if parsed <= 0:
-            continue
-        coerced = _coerce_sheet_quantity_upper_bound(parsed)
-        if coerced is None:
-            continue
-        tokens.append(coerced)
-    return tokens
 
 
 
@@ -23378,18 +23052,6 @@ def _project_payload_quantities_onto_sheet_row_lists(
     return resolved_rows, projection_stats
 
 
-def _row_has_numeric_quantity_cells(
-    row: list[Any] | None,
-    quantity_columns: list[int],
-) -> bool:
-    if not isinstance(row, list):
-        return False
-    for col_idx in quantity_columns:
-        if col_idx < 0 or col_idx >= len(row):
-            continue
-        if _parse_sheet_quantity_cell(row[col_idx]) is not None:
-            return True
-    return False
 
 
 def _build_weekly_menu_shell_date_groups(
@@ -23436,47 +23098,6 @@ def _build_weekly_menu_shell_date_groups(
     return groups
 
 
-def _collect_payload_quantity_date_groups(
-    *,
-    payload_rows: list[list[str]],
-    fields: list[str],
-    quantity_columns: list[int],
-) -> list[dict[str, Any]]:
-    if not payload_rows or not fields or not quantity_columns:
-        return []
-    date_idx, _daypart_idx, menu_idx = _resolve_sheet_field_indexes(fields)
-    groups: list[dict[str, Any]] = []
-    current_group: dict[str, Any] | None = None
-    current_date_key = ""
-    for payload_idx, payload_row in enumerate(payload_rows):
-        if not isinstance(payload_row, list):
-            continue
-        candidate_date = _normalize_sheet_date_key(_safe_row_get(payload_row, date_idx))
-        if candidate_date:
-            current_date_key = candidate_date
-            current_group = {
-                "payload_date_key": candidate_date,
-                "items": [],
-                "menu_norms": set(),
-            }
-            groups.append(current_group)
-        if current_group is None or not current_date_key:
-            continue
-        menu_norm = _normalize_menu_text(_safe_row_get(payload_row, menu_idx))
-        if not menu_norm and not any(
-            col_idx < len(payload_row) and _field_value_to_str(payload_row[col_idx]).strip()
-            for col_idx in quantity_columns
-        ):
-            continue
-        item = {
-            "payload_row_index": payload_idx,
-            "row": list(payload_row),
-            "menu_norm": menu_norm,
-        }
-        current_group["items"].append(item)
-        if menu_norm:
-            current_group["menu_norms"].add(menu_norm)
-    return [group for group in groups if list(group.get("items") or [])]
 
 
 
