@@ -61,14 +61,18 @@ def _sheet(quantity, remark, row_id):
 
 class HistoryCase:
     def __init__(self, engine, root, monkeypatch, actor, *, week=WEEK, facility="FAC00001",
-                 period=WEEK, received=datetime(2026, 1, 8, 9), lines=None, menu=True):
+                 period=WEEK, received=datetime(2026, 1, 8, 9), lines=None, menu=True,
+                 columns=None, menu_entries=None):
         self.engine, self.root, self.monkeypatch = engine, root, monkeypatch
         self.actor, self.client, self.id = actor, TestClient(app), "history-contract-order"
         self.facility, self.period = facility, period
         start, end = period.split("@", 1)[1].split("~")
-        columns = [{"index": i, "source_index": i, "name": name, "header": header, "role": role}
-            for i, (name, header, role) in enumerate(zip(FIELDS, HEADER, ["date", "daypart", "menu_name", "quantity", "note"]))]
-        columns[3].update(diet_type="regular", area_id="2F" if facility == "FAC00001" else "X")
+        if columns is None:
+            columns = [{"index": i, "source_index": i, "name": name, "header": header, "role": role}
+                for i, (name, header, role) in enumerate(zip(FIELDS, HEADER, ["date", "daypart", "menu_name", "quantity", "note"]))]
+            columns[3].update(diet_type="regular", area_id="2F" if facility == "FAC00001" else "X")
+        else:
+            columns = deepcopy(columns)
         config = {"facility_id": facility, "facility_name": f"Synthetic history {facility}", "areas": None,
                   "fax_template_id": TEMPLATE, "fax_template": {"template_id": TEMPLATE, "page": 1, "columns": columns}}
         # Explicit synthetic envelope; not the live facility's dated configuration.
@@ -84,14 +88,26 @@ class HistoryCase:
         monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", policy)
         monkeypatch.setenv("OCR_ARTIFACT_DIR", str(root / "artifacts"))
         with session_scope() as session:
-            assert session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+            if engine.dialect.name == "sqlite":
+                assert session.connection().exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+            else:
+                assert engine.dialect.name == "postgresql"
+                assert session.connection().exec_driver_sql("SHOW session_replication_role").scalar_one() == "origin"
             session.add(Facility(id=facility, name=config["facility_name"]))
             session.add(Order(id=self.id, facility_code=facility, week_code=week,
                               document_uri="stored:history-component", message_id=self.id, received_at=received))
             session.flush()
             for index, line in enumerate(lines if lines is not None else [_line()]):
                 session.add(OrderLine(id=f"history-line-{index}", line_id=f"line-{index + 1}", order_id=self.id, **line))
-            if menu:
+            if menu_entries is not None:
+                months = {entry["menu_date"].replace(day=1) for entry in menu_entries}
+                for month in sorted(months):
+                    month_id = month.strftime("%Y-%m")
+                    session.add(MonthlyMenu(id=month_id, month_start=month, filename=f"seed-{month_id}.xlsx"))
+                session.flush()
+                for entry in menu_entries:
+                    session.add(MonthlyMenuEntry(**entry))
+            elif menu:
                 session.add(MonthlyMenu(id="2026-01", month_start=date(2026, 1, 1), filename="seed-2026-01.xlsx"))
                 session.flush()
                 session.add(MonthlyMenuEntry(id="seed-entry-2026-01-08-lunch-menu-a", monthly_menu_id="2026-01",
@@ -104,7 +120,7 @@ class HistoryCase:
     @contextmanager
     def readonly(self):
         before = _snapshot(self.engine)
-        paths = (*self.protected, Path(self.engine.url.database))
+        paths = self.protected + ((Path(self.engine.url.database),) if self.engine.dialect.name == "sqlite" else ())
         hashes = {str(p): sha256(p.read_bytes()).hexdigest() for p in paths}
         statements = []
         def observe(_connection, _cursor, statement, _parameters, _context, _many):
@@ -198,7 +214,7 @@ class HistoryCase:
               guard.workflow_execution_context(self.job, self.id, attempt, revision)):
             yield
 
-    def produce(self):
+    def produce(self, *, cell_values="2"):
         from src.services import hakodate_cell_ocr_batch_service as batch
         self.queue()
         with session_scope() as session:
@@ -213,9 +229,12 @@ class HistoryCase:
             regions = [{**deepcopy(r), "bbox": [i * 20, 0, i * 20 + 10, 10]}
                        for i, r in enumerate(item["original_target_semantics"])]
             calls.append(regions)
-            values = {r["sheet_cell"]: "2" for r in regions}
-            records = [{**r, "ocr_text": "2", "recognizer_score": 1.0,
-                        "recognizer_accepted_candidate": {"normalized_digits": "2"}} for r in regions]
+            values = {r["sheet_cell"]: cell_values[r["sheet_cell"]] if isinstance(cell_values, dict) else cell_values
+                      for r in regions}
+            if isinstance(cell_values, dict):
+                assert set(values) == set(cell_values)
+            records = [{**r, "ocr_text": values[r["sheet_cell"]], "recognizer_score": 1.0,
+                        "recognizer_accepted_candidate": {"normalized_digits": values[r["sheet_cell"]]}} for r in regions]
             outputs = _provider_output_files(output_dir, records=records, regions=regions, sheet_values=values)
             return SimpleNamespace(metrics={"expected_sheet_cells": item["original_expected_sheet_cells"]},
                 expected_sheet_cells=tuple(item["original_expected_sheet_cells"]), outputs=outputs,

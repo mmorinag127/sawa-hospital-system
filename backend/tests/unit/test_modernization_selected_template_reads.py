@@ -20,7 +20,8 @@ from src.models.menu import MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
 from src.models.order import Order
 from src.models.order_current_state import OrderCurrentState
 from src.models.order_sheet_draft import OrderSheetDraft
-from src.services import apply_gate_service, config_service, order_current_state_service, order_service
+from src.services import apply_gate_service, config_service, draft_sheet_service, order_current_state_service, order_service
+from src.services import workflow_attempt_guard_service as guard
 
 
 @pytest.fixture
@@ -221,6 +222,26 @@ def blocked_context(order_id, reason):
     }
 
 
+def assert_selected_saved_blocked(fixture, context, reason):
+    saved = draft_sheet_service.get_selected_sheet_draft(fixture.order_id)
+    assert saved["id"] == fixture.draft_id
+    assert context["draft_id"] == fixture.draft_id
+    assert context["source_draft_record"] == saved
+    assert context["draft_payload"] == saved["draft_sheet_json"] == fixture.payload
+    assert context["sheet_unavailable"] is True
+    assert context["blockers"][0] == reason
+    for key in ("fields", "header", "rows", "row_ids"):
+        assert context[key] == fixture.payload.get(key, [])
+    gate = apply_gate_service.evaluate_sheet_gate_from_context(context)
+    assert reason in gate["apply_blockers"] and reason in gate["confirm_blockers"]
+    assert apply_gate_service.gate_can_apply(apply_blockers=gate["apply_blockers"]) is False
+    assert apply_gate_service.gate_can_confirm(confirm_blockers=gate["confirm_blockers"]) is False
+    assert order_service.get_ocr_sheet(fixture.order_id) == (None, reason)
+    assert order_service.build_recoverable_ocr_sheet_payload(fixture.order_id, "diagnostic") == (None, reason)
+    with fixture.session_scope() as session:
+        assert guard.validate_current_sheet_input(session, fixture.order_id, context).id == fixture.order_id
+
+
 @pytest.mark.parametrize("persisted", [False, True], ids=["no-current-state", "current-state"])
 @pytest.mark.parametrize("failure,reason", REJECTIONS)
 def test_clean_saved_draft_cannot_bypass_selected_source_blocker(owned, persisted, failure, reason):
@@ -229,20 +250,26 @@ def test_clean_saved_draft_cannot_bypass_selected_source_blocker(owned, persiste
     reject_selected(owned, failure)
     for reader in public_readers():
         with unchanged_reads(owned):
-            assert reader(owned.order_id) == blocked_context(owned.order_id, reason)
+            assert_selected_saved_blocked(owned, reader(owned.order_id), reason)
 
 
-@pytest.mark.parametrize("persisted", [False, True])
-def test_unresolved_week_has_priority_over_missing_projection(owned, persisted):
+@pytest.mark.parametrize(
+    "persisted,week",
+    [(False, None), (True, None), (False, ""), (True, ""), (False, "2026-13"), (True, "2026-13")],
+    ids=["False", "True", "empty-False", "empty-True", "invalid-month-False", "invalid-month-True"],
+)
+def test_unresolved_week_has_priority_over_missing_projection(owned, persisted, week):
     if persisted:
         seed_current_state(owned)
     with owned.session_scope() as session:
         order = session.get(Order, owned.order_id)
-        order.week_code = None
+        order.week_code = week
         order.template_version_id = None
     for reader in public_readers():
         with unchanged_reads(owned):
-            assert reader(owned.order_id) == blocked_context(owned.order_id, "week_unresolved")
+            context = reader(owned.order_id)
+            assert_selected_saved_blocked(owned, context, "week_unresolved")
+            assert context["resolved_week_id"] is None
 
 
 def test_nonexistent_order_stays_none_without_database_mutation(owned):
