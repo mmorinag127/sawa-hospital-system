@@ -149,6 +149,8 @@ class HistoryCase:
                 'PRAGMA main.index_info("sqlite_autoindex_monthly_menu_items_1")',
                 "BEGIN",
             }
+            if self.engine.dialect.name == "postgresql":
+                schema_reads.add("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             assert set(non_select) <= schema_reads, non_select
             assert after_hashes == hashes
 

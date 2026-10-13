@@ -341,9 +341,14 @@ def readonly_database(request, tmp_path, monkeypatch):
         original = db.engine
         monkeypatch.setattr(db, "SessionLocal", sessionmaker(isolated, autoflush=False, future=True))
         for module in tuple(sys.modules.values()):
-            if module is not None and getattr(module, "__name__", "").startswith("src."):
-                if getattr(module, "engine", None) is original:
-                    monkeypatch.setattr(module, "engine", isolated)
+            if module is None or getattr(module, "engine", None) is not original:
+                continue
+            eligible = getattr(module, "__name__", "").startswith("src.")
+            if not eligible and getattr(module, "__file__", None):
+                source = Path(module.__file__).resolve()
+                eligible = source.is_relative_to(ROOT / "backend/tests") and source != ROOT / "backend/tests"
+            if eligible:
+                monkeypatch.setattr(module, "engine", isolated)
         monkeypatch.setattr(menu_service, "_MENU_SCHEMA_INITIALIZED", False)
         canonical_inputs.configure(tmp_path, monkeypatch)
         yield isolated
