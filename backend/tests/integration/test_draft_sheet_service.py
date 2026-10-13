@@ -13,7 +13,8 @@ from src.models.order import Order, OrderLine  # noqa: E402
 from src.models.order_sheet_draft import OrderSheetDraft  # noqa: E402
 from src.services import draft_sheet_service, ocr_evidence_service, order_current_state_service, order_service  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
-from tests.helpers.authored_sheet_case import authored_sheet_case, save_draft  # noqa: E402,F401
+from tests.helpers.authored_sheet_case import authored_sheet_case, prepare_rerun, save_draft  # noqa: E402,F401
+from tests.unit.test_disabled_facility_columns import _snapshot  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
@@ -1875,59 +1876,120 @@ def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_curre
         assert lines[0].quantity_original == 3
 
 
-def test_rerun_ocr_evidence_only_maps_failed_partial_output_to_pipeline_failure(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-failed-partial")
+def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
+    from src.models.order_workflow_state import OrderWorkflowState
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
 
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+    receipt = rerun["terminal_receipt"]
+    assert receipt == {
+        "order_id": case.id, "job_id": case.job, "execution_id": None,
+        "workflow_attempt_id": case.queued["ocr_job"]["workflow_attempt_id"],
+        "workflow_revision": case.queued["workflow"]["revision"],
+        "evidence_run_id": rerun["id"], "status": "failed", "error": error,
+    }
+    assert rerun["status"] == "diagnostic_only"
+    assert rerun["order_id"] == case.id
+    payload = rerun["payload_json"]
+    assert {key: payload[key] for key in diagnostic} == diagnostic
+    lineage = payload["_ocr_execution"]
+    assert lineage["disposition"] == "rejected"
+    for key in ("job_id", "workflow_attempt_id", "workflow_revision", "evidence_run_id"):
+        assert lineage[key] == receipt[key]
+    latest = order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False)
+    assert rerun["created"] is True
+    assert latest == {key: value for key, value in rerun.items() if key not in {"terminal_receipt", "created"}}
+    job = order_service.get_ocr_job(case.job)
+    assert job["status"] == "failed"
+    assert job["error_message"] == error
+    assert job["metrics"]["adopted"] is False
+    assert {key: job["metrics"]["rerun_terminal_receipt"][key] for key in receipt} == receipt
+    after = _snapshot(case.engine)
+    for table in ("order_sheet_drafts", "order_ocr_cache", "order_ocr_revisions",
+                  "order_current_states", "order_confirmed_snapshots", "order_lines"):
+        assert after[table] == before[table], table
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, case.id)
+        assert state.evidence_run_id is None and state.draft_id is None
+        assert state.confirmed_snapshot_id is None
+        assert state.state == "ocr_failed" and state.blockers_json == [error]
+        assert state.revision == receipt["workflow_revision"] + 1
+        assert session.query(OrderLine).filter(OrderLine.order_id == case.id).all() == []
+
+    # Real authenticated commands may acquire CAS locks, but cannot adopt or mutate state.
+    revision = case.revision()
+    headers = {**case.actor.headers, "If-Match": f'"{revision}"'}
+    with unchanged_after_refusal(case, revision):
+        selected = case.client.post(f"/orders/{case.id}/workflow-v2/ocr-results/{rerun['id']}/select", headers=headers)
+        assert selected.status_code == 400
+        assert selected.json()["detail"] == "ocr_diagnostic_result_not_selectable"
+    with unchanged_after_refusal(case, revision):
+        applied = case.client.post(f"/orders/{case.id}/ocr-apply", headers=headers, json={"evidence_run_id": rerun["id"]})
+        assert applied.status_code == 410
+        assert applied.json()["detail"]["error"] == "legacy_order_workflow_disabled"
+    with unchanged_after_refusal(case, revision):
+        reviewed = case.client.post(f"/orders/{case.id}/workflow-v2/sheet/review-confirm", headers=headers,
+            json={"sheet": {"fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+                            "header": ["日付", "区分", "メニュー", "常食2F"],
+                            "rows": [["03/22", "朝", "Menu A", "3"]]}})
+        assert reviewed.status_code == 400
+        assert reviewed.json()["detail"] == "selected_ocr_required"
+    with unchanged_after_refusal(case, revision):
+        confirmed = case.client.post(f"/orders/{case.id}/workflow-v2/confirm", headers=headers,
+                                     json={"confirmed_by": "operator"})
+        assert confirmed.status_code == 400
+        assert confirmed.json()["detail"] == "output_review_required"
+
+
+def test_rerun_ocr_evidence_only_maps_failed_partial_output_to_pipeline_failure(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, produce=False)
+    with session_scope() as session:
+        line = session.query(OrderLine).filter(OrderLine.order_id == case.id).one()
+        assert (line.date, line.daypart, line.menu_name, line.diet_type, line.area_id, line.quantity_original) == (
+            date(2026, 3, 22), "朝", "Menu A", "regular", "2F", 3)
+    calls = prepare_rerun(case)
+    order = {"id": case.id}
+    diagnostic = {
+        "status": "failed", "stage": "error", "error": "template resolution failed",
+        "input_reference": "gs://bucket/input.pdf", "output_reference": "gs://bucket/output.json",
+    }
     monkeypatch.setattr(
         order_service,
         "_hakodate_canonical_payload_from_manifest_item",
-        lambda **_kwargs: {
-            "status": "failed",
-            "stage": "error",
-            "error": "template resolution failed",
-            "input_reference": "gs://bucket/input.pdf",
-            "output_reference": "gs://bucket/output.json",
-        },
+        lambda **_kwargs: diagnostic.copy(),
     )
+    before = _snapshot(case.engine)
+    with case.execution():
+        rerun, error = order_service.rerun_ocr_evidence_only(order["id"], job_id=case.job)
 
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
-
-    assert rerun is None
     assert error == "ocr_pipeline_failed"
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
-    assert isinstance(job, dict)
-    assert job["status"] == "failed"
-    assert str(job.get("error_message") or "").startswith("ocr_pipeline_failed:")
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    assert latest_evidence is None
+    assert calls == []
+    _assert_rejected_rerun(case, rerun, error, diagnostic, before)
 
 
-def test_rerun_ocr_evidence_only_maps_empty_done_output_to_evidence_unusable(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-empty-output")
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+def test_rerun_ocr_evidence_only_maps_empty_done_output_to_evidence_unusable(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, produce=False)
+    with session_scope() as session:
+        line = session.query(OrderLine).filter(OrderLine.order_id == case.id).one()
+        assert (line.date, line.daypart, line.menu_name, line.diet_type, line.area_id, line.quantity_original) == (
+            date(2026, 3, 22), "朝", "Menu A", "regular", "2F", 3)
+    calls = prepare_rerun(case)
+    order = {"id": case.id}
+    diagnostic = {
+        "status": "done", "stage": "done",
+        "input_reference": "gs://bucket/input.pdf", "output_reference": "gs://bucket/output.json",
+    }
     monkeypatch.setattr(
         order_service,
         "_hakodate_canonical_payload_from_manifest_item",
-        lambda **_kwargs: {
-            "status": "done",
-            "stage": "done",
-            "input_reference": "gs://bucket/input.pdf",
-            "output_reference": "gs://bucket/output.json",
-        },
+        lambda **_kwargs: diagnostic.copy(),
     )
+    before = _snapshot(case.engine)
+    with case.execution():
+        rerun, error = order_service.rerun_ocr_evidence_only(order["id"], job_id=case.job)
 
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
-
-    assert rerun is None
     assert error == "evidence_unusable"
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
-    assert isinstance(job, dict)
-    assert job["status"] == "failed"
-    assert str(job.get("error_message") or "").startswith("evidence_unusable")
+    assert calls == []
+    _assert_rejected_rerun(case, rerun, error, diagnostic, before)
 
 
 def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_output(monkeypatch) -> None:
@@ -1985,20 +2047,13 @@ def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_o
     assert latest_evidence["id"] == rerun["id"]
 
 
-def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-awaiting-output")
+def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, produce=False)
+    prepare_rerun(case, cell_values="9")
+    order = {"id": case.id}
 
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
-
-    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
-    monkeypatch.setattr(
-        order_service,
-        "_build_hakodate_weekly_menu_base_sheet",
-        lambda order_id: (_sample_hakodate_base_sheet(order_id), None),
-    )
-
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+    with case.execution():
+        rerun, error = order_service.rerun_ocr_evidence_only(order["id"], job_id=case.job)
 
     assert error is None
     assert isinstance(rerun, dict)
@@ -2012,19 +2067,13 @@ def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch) -> No
     assert latest_evidence["producer_version"] == "hakodate_best_method_pipeline"
 
 
-def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-async-trigger")
+def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, produce=False)
+    prepare_rerun(case, cell_values="9")
+    order = {"id": case.id}
 
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
-    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
-    monkeypatch.setattr(
-        order_service,
-        "_build_hakodate_weekly_menu_base_sheet",
-        lambda order_id: (_sample_hakodate_base_sheet(order_id), None),
-    )
-
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+    with case.execution():
+        rerun, error = order_service.rerun_ocr_evidence_only(order["id"], job_id=case.job)
 
     assert error is None
     assert isinstance(rerun, dict)
@@ -2038,23 +2087,24 @@ def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeyp
     assert latest_evidence["producer_version"] == "hakodate_best_method_pipeline"
 
 
-def test_rerun_ocr_evidence_only_uses_pipeline_wait_timeout_plus_grace(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-timeout-override")
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
+def test_rerun_ocr_evidence_only_uses_pipeline_wait_timeout_plus_grace(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, produce=False)
+    prepare_rerun(case, cell_values="9")
+    order = {"id": case.id}
     monkeypatch.setenv("OCR_PIPELINE_TIMEOUT_SECONDS", "1200")
     monkeypatch.setenv("OCR_RERUN_PIPELINE_STAGE_GRACE_SECONDS", "45")
 
     captured: dict[str, object] = {}
+    produce = order_service._hakodate_canonical_payload_from_manifest_item
 
     def _fake_hakodate(**kwargs):
         captured.update(kwargs)
-        return _sample_hakodate_payload("9")
+        return produce(**kwargs)
 
     monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", _fake_hakodate)
 
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
+    with case.execution():
+        rerun, error = order_service.rerun_ocr_evidence_only(order["id"], job_id=case.job)
 
     assert error is None
     assert isinstance(rerun, dict)

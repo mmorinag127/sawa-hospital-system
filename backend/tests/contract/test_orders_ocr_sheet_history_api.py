@@ -216,7 +216,7 @@ class HistoryCase:
               guard.workflow_execution_context(self.job, self.id, attempt, revision)):
             yield
 
-    def produce(self, *, cell_values="2"):
+    def prepare_provider(self, *, cell_values="2"):
         from src.services import hakodate_cell_ocr_batch_service as batch
         self.queue()
         with session_scope() as session:
@@ -243,6 +243,10 @@ class HistoryCase:
                 ocr_engine="component-external-recognizer"), None
         self.monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", manifest)
         self.monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognize)
+        return calls
+
+    def produce(self, *, cell_values="2"):
+        calls = self.prepare_provider(cell_values=cell_values)
         with self.execution():
             evidence, error = order_service.rerun_ocr_evidence_only(self.id, job_id=self.job, project_sheet=False, refresh_workflow=False)
         assert error is None, (error, evidence)
