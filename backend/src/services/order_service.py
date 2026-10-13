@@ -96,6 +96,7 @@ from src.services.template_field_schema_service import (
     authored_quantity_identity,
     resolve_quantity_field_identities,
     quantity_field_identities_for_fields,
+    QuantitySchemaError,
     build_template_field_schema_contract,
     classify_aux_header_semantic,
     normalize_aux_semantic_display_value,
@@ -5733,9 +5734,15 @@ def _build_materialization_candidate_from_draft_record(
         }
     # Materialization and its guard must use the original saved quantities.
     effective_rows_payload = rows_payload
-    quantity_issues = _materialization_quantity_cell_issues(
-        fields=draft_sheet.get("fields"), rows_payload=rows_payload, template=template,
-    )
+    try:
+        quantity_issues = _materialization_quantity_cell_issues(
+            fields=draft_sheet.get("fields"), rows_payload=rows_payload, template=template,
+        )
+    except QuantitySchemaError as exc:
+        return {
+            "source": "draft_sheet", "draft_id": draft_record.get("id"),
+            "error": str(exc), "line_count": 0, "lines": [],
+        }
     if quantity_issues:
         return {
             "source": "draft_sheet", "draft_id": draft_record.get("id"),
@@ -12774,6 +12781,12 @@ def _build_current_sheet_context_uncached(
         list(draft_payload.get("warnings") or []) + list(current_record.get("warnings_json") or [])
     )
     blockers = _dedupe_str_tokens(current_record.get("blockers_json") or [])
+    try:
+        quantity_field_identities_for_fields(
+            publication_input["configured_input"]["facility"]["fax_template"], fields,
+        )
+    except QuantitySchemaError as exc:
+        blockers = _dedupe_str_tokens([*blockers, str(exc)])
     clean_saved_draft = apply_gate_service.has_clean_saved_draft(current_record)
     facility_id = str((order_payload or {}).get("facility") or "").strip() or None
     template_version_id = (
@@ -14276,6 +14289,7 @@ def flatten_current_sheet_payload(
     for item in (
         list(draft_json.get("blockers") or [])
         + list(draft_record.get("blockers_json") or [])
+        + list((current_sheet_context or {}).get("blockers") or [])
         + menu_codes
     ):
         normalized = str(item).strip()

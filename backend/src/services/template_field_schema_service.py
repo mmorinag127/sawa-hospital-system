@@ -176,28 +176,32 @@ def canonical_field_name_from_template_column(
     return f"qty.{diet}_{area or 'x'}"
 
 
+class QuantitySchemaError(ValueError):
+    """The sheet quantity fields cannot bind to the authored template."""
+
+
 def authored_quantity_identity(diet: Any, area: Any) -> tuple[str, str | None]:
     if not isinstance(diet, str) or not diet.strip():
-        raise ValueError("quantity_template_identity_required")
+        raise QuantitySchemaError("quantity_template_identity_required")
     if area is not None and not isinstance(area, str):
-        raise ValueError("quantity_template_area_invalid")
+        raise QuantitySchemaError("quantity_template_area_invalid")
     return diet.strip(), (area.strip() or None) if isinstance(area, str) else None
 
 
 def resolve_quantity_field_identities(template: Any) -> dict[str, tuple[str, str | None]]:
     """Bind canonical fields to authored identities without interpreting display names."""
     if not isinstance(template, dict) or not isinstance(template.get("columns"), list):
-        raise ValueError("quantity_template_source_required")
+        raise QuantitySchemaError("quantity_template_source_required")
     resolved: dict[str, tuple[str, str | None]] = {}
     identities: set[tuple[str, str | None]] = set()
     fields: set[str] = set()
     for column in template["columns"]:
         if not isinstance(column, dict):
-            raise ValueError("quantity_template_column_invalid")
+            raise QuantitySchemaError("quantity_template_column_invalid")
         field = canonical_field_name_from_template_column(column)
         if field:
             if field in fields:
-                raise ValueError("quantity_template_alias_collision")
+                raise QuantitySchemaError("quantity_template_alias_collision")
             fields.add(field)
         if str(column.get("role") or "").strip().lower() not in {"quantity", "quantity_change"}:
             continue
@@ -205,15 +209,15 @@ def resolve_quantity_field_identities(template: Any) -> dict[str, tuple[str, str
         area = column.get("area_id")
         identity = authored_quantity_identity(diet, area)
         if identity in identities:
-            raise ValueError("quantity_template_identity_duplicate")
+            raise QuantitySchemaError("quantity_template_identity_duplicate")
         identities.add(identity)
         if not field:
-            raise ValueError("quantity_template_field_required")
+            raise QuantitySchemaError("quantity_template_field_required")
         if field in resolved:
-            raise ValueError("quantity_template_alias_collision")
+            raise QuantitySchemaError("quantity_template_alias_collision")
         resolved[field] = identity
     if not identities:
-        raise ValueError("quantity_template_identity_required")
+        raise QuantitySchemaError("quantity_template_identity_required")
     return resolved
 
 
@@ -227,18 +231,18 @@ def quantity_field_identities_for_fields(template: Any, fields: list[str]) -> di
         if canonical_field not in resolved:
             # Nonquantity metadata remains the structural validator's responsibility.
             if canonical_field.startswith("qty."):
-                raise ValueError("quantity_template_field_unknown")
+                raise QuantitySchemaError("quantity_template_field_unknown")
             continue
         identity = resolved[canonical_field]
         if canonical_field in matched_fields or identity in seen:
-            raise ValueError("quantity_template_alias_collision")
+            raise QuantitySchemaError("quantity_template_alias_collision")
         matched_fields.add(canonical_field)
         seen.add(identity)
         selected[field] = identity
     if not selected:
-        raise ValueError("quantity_template_field_missing")
+        raise QuantitySchemaError("quantity_template_field_missing")
     if set(resolved) - matched_fields:
-        raise ValueError("quantity_template_field_missing")
+        raise QuantitySchemaError("quantity_template_field_missing")
     return selected
 
 

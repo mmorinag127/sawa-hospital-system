@@ -2336,14 +2336,27 @@ def test_get_current_sheet_context_returns_transient_semantic_initial_with_menu_
     assert str(context["current_sheet_revision_id"]).startswith("current:")
 
 
-def test_current_sheet_context_prefers_canonical_order_week_over_stale_draft_week() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-context-week-parity")
+def test_current_sheet_context_prefers_canonical_order_week_over_stale_draft_week(
+    isolated_formal_schema, tmp_path, monkeypatch,
+) -> None:
+    from src.models.menu import MonthlyMenuEntry
+    from tests.contract.auth_support import registered_hospital_operator
+    from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase, _line
+    from tests.integration.test_ocr_sheet_history import _seed_monthly_menu_custom_entries
 
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
+    week = "2026-03@2026-03-22~2026-03-28"
+    with registered_hospital_operator(monkeypatch) as actor:
+        f = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
+            week=week, period=week, received=datetime(2026, 3, 22, 9),
+            lines=[_line("2026-03-22", "Menu A", 3, daypart="朝")], menu=False)
+        _seed_monthly_menu_custom_entries(month_id="2026-03", month_start=date(2026, 3, 1),
+            entries=[(date(2026, 3, 22), "朝", "Menu A", 0)])
+        with session_scope() as session:
+            session.get(MonthlyMenuEntry, "seed-entry-2026-03-custom-0").diet_type = "regular"
+        source = f.produce()["sheet"]
+        assert source["rows"][0][:3] == ["03/22", "朝", "Menu A"]
+        sheet = {
+            "order_id": f.id,
             "source": "manual_draft",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
             "header": ["日付", "区分", "メニュー", "常食2F"],
@@ -2351,20 +2364,20 @@ def test_current_sheet_context_prefers_canonical_order_week_over_stale_draft_wee
             "row_ids": ["row-1"],
             "resolved_week_id": "2026-03@2026-03-01~2026-03-07",
             "week_id": "2026-03@2026-03-01~2026-03-07",
-        },
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=False,
-        upgrade_generic_from_sheet=False,
-        backfill_from_revision=False,
-    )
-
-    assert isinstance(current, dict)
-    assert current["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    flattened = order_service.flatten_current_sheet_payload(order["id"], current)
-    assert flattened["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
+        }
+        saved = f.save(sheet)
+        assert isinstance(saved, dict)
+        with f.readonly():
+            current = order_service.get_current_sheet_context(f.id,
+                refresh_draft_from_semantic=False, upgrade_generic_from_sheet=False,
+                backfill_from_revision=False)
+            assert isinstance(current, dict)
+            assert current["resolved_week_id"] == week
+            flattened = order_service.flatten_current_sheet_payload(f.id, current)
+            assert flattened["resolved_week_id"] == week
+            for key in ("fields", "header", "rows", "row_ids"):
+                assert current[key] == flattened[key] == sheet[key]
+        assert f.get("workflow-v2/sheet")["sheet"] == sheet
+        assert f.get()["persisted_week_value"] == week
+        assert f.get("workflow-v2/sheet-source")["sheet"]["row_ids"] == source["row_ids"]
+        f.client.close()

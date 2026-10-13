@@ -3327,70 +3327,48 @@ def test_refresh_workflow_state_exposes_review_summary_from_sheet_gate(monkeypat
     assert "menu_entries_missing" in (workflow["ocr_confirm_blockers"] or [])
 
 
-def test_refresh_workflow_state_uses_canonical_order_week_over_stale_current_sheet_week(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(
-        message_id="msg-workflow-state-week-parity-001",
-        facility_hint="FAC00001",
-        week_hint="2026-03",
-    )
-    _persist_evidence(order["id"])
-    order_payload = order_service.get_order_by_id(order["id"])
-    captured: dict[str, str | None] = {}
-    original_resolve = workflow_state_service.candidate_resolution_service.resolve_order_candidates
+def test_project_workflow_state_uses_canonical_order_week_over_stale_current_sheet_week(
+    isolated_formal_schema, tmp_path, monkeypatch,
+):
+    from datetime import date
+    from src.models.menu import MonthlyMenuEntry
+    from tests.contract.auth_support import registered_hospital_operator
+    from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase
+    from tests.integration.test_ocr_sheet_history import _seed_monthly_menu_custom_entries
 
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "order_id": order["id"],
-            "order_payload": order_payload,
-            "draft_record": None,
-            "draft_payload": {
-                "source": "manual_draft",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [["03/22", "朝", "Menu A", "5"]],
-                "row_ids": ["row-1"],
-                "warnings": [],
-                "resolved_week_id": "2026-03@2026-03-01~2026-03-07",
-                "menu_diagnostics": {"order_codes": [], "facility_entries_count": 21, "global_entries_count": 21},
-            },
-            "draft_id": None,
+    week = "2026-03@2026-03-22~2026-03-28"
+    with registered_hospital_operator(monkeypatch) as actor:
+        f = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
+            week="2026-03", period=week, received=datetime(2026, 3, 22, 9),
+            lines=[], menu=False)
+        _seed_monthly_menu_custom_entries(month_id="2026-03", month_start=date(2026, 3, 1),
+            entries=[(date(2026, 3, 22), "朝", "Menu A", 0)])
+        with session_scope() as session:
+            session.get(MonthlyMenuEntry, "seed-entry-2026-03-custom-0").diet_type = "regular"
+        source = f.produce()["sheet"]
+        assert source["rows"][0][:3] == ["03/22", "朝", "Menu A"]
+        sheet = {
             "source": "manual_draft",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
             "header": ["日付", "区分", "メニュー", "常食2F"],
             "rows": [["03/22", "朝", "Menu A", "5"]],
             "row_ids": ["row-1"],
             "warnings": [],
-            "blockers": [],
-            "has_persisted_draft": False,
-            "clean_saved_draft": False,
-            "base_evidence_run_id": None,
             "resolved_week_id": "2026-03@2026-03-01~2026-03-07",
-            "facility_id": "FAC00001",
-            "menu_diagnostics": {"order_codes": [], "facility_entries_count": 21, "global_entries_count": 21},
-            "row_diagnostics": [],
-            "seed_source": "manual_draft",
-            "enrichment_source": None,
-            "has_semantic_fields": True,
-        },
-    )
-
-    def _capture_resolve_order_candidates(**kwargs):
-        captured["week_code"] = kwargs.get("week_code")
-        return original_resolve(**kwargs)
-
-    monkeypatch.setattr(
-        workflow_state_service.candidate_resolution_service,
-        "resolve_order_candidates",
-        _capture_resolve_order_candidates,
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert captured["week_code"] == "2026-03"
+        }
+        f.save(sheet)
+        with f.readonly():
+            current = order_service.get_current_sheet_context(f.id)
+            workflow = workflow_state_service.project_workflow_state(f.id,
+                current_sheet_context=current)
+            assert isinstance(workflow, dict)
+            assert workflow["candidate_resolution"]["resolutions"]["week"]["resolved_value"] == week
+            assert current["resolved_week_id"] == week
+            for key in ("fields", "header", "rows", "row_ids"):
+                assert current[key] == sheet[key]
+        assert f.get()["persisted_week_value"] == week
+        assert f.get("workflow-v2/sheet")["sheet"] == sheet
+        f.client.close()
 
 
 def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_blockers(monkeypatch):
@@ -3492,67 +3470,66 @@ def test_refresh_workflow_state_uses_persisted_draft_without_exact_revision(monk
     assert workflow["ocr_draft_updated_at"] == saved["edited_at"]
 
 
-def test_refresh_workflow_state_does_not_mutate_saved_sheet_blockers_on_read(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-refresh-clears-stale-blockers", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"])
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
+def test_project_workflow_state_does_not_mutate_saved_sheet_blockers_on_read(
+    isolated_formal_schema, tmp_path, monkeypatch,
+):
+    from datetime import date
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.menu import MonthlyMenuEntry
+    from tests.contract.auth_support import registered_hospital_operator
+    from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase
+    from tests.integration.test_ocr_sheet_history import _seed_monthly_menu_custom_entries
+
+    week = "2026-03@2026-03-22~2026-03-28"
+    with registered_hospital_operator(monkeypatch) as actor:
+        f = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
+            week=week, period=week, received=datetime(2026, 3, 22, 9),
+            lines=[], menu=False)
+        _seed_monthly_menu_custom_entries(month_id="2026-03", month_start=date(2026, 3, 1),
+            entries=[(date(2026, 3, 22), "朝", "Menu A", 0)])
+        with session_scope() as session:
+            session.get(MonthlyMenuEntry, "seed-entry-2026-03-custom-0").diet_type = "regular"
+        f.produce()
+        sheet = {
+            "order_id": f.id,
             "source": "draft_sheet",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
             "header": ["日付", "区分", "メニュー", "常食", "備考"],
             "rows": [
                 ["03/22", "朝", "Menu A", "5", ""],
-                ["01/01", "\"", "Ghost Menu", "23", ""],
+                ["01/01", '"', "Ghost Menu", "23", ""],
             ],
             "row_ids": ["draft-2", "draft-1"],
             "warnings": ["stale-current-warning-should-drop"],
-        },
-        draft_state="auto_apply_blocked",
-        blockers=["sheet_canonical_mismatch"],
-        warnings=["sheet_ocr_review_required"],
-    )
-    assert saved is not None
-    monkeypatch.setattr(
-        order_service,
-        "_build_best_available_semantic_draft",
-        lambda _order_id, use_saved_draft=False: {
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "header": ["日付", "区分", "メニュー", "常食", "備考"],
-            "rows": [["03/22", "朝", "Menu A", "", ""]],
-            "row_ids": ["fresh-1"],
-            "warnings": [],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-    refreshed_draft = draft_sheet_service.get_latest_sheet_draft(order["id"])
-
-    assert refreshed_draft is not None
-    assert refreshed_draft["blockers_json"] == ["sheet_canonical_mismatch"]
-    assert refreshed_draft["warnings_json"] == ["sheet_ocr_review_required"]
-    assert refreshed_draft["draft_sheet_json"]["rows"] == [
-        ["03/22", "朝", "Menu A", "5", ""],
-        ["01/01", "\"", "Ghost Menu", "23", ""],
-    ]
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "draft_blocked"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert "sheet_canonical_mismatch" in (workflow["apply_gate"]["blockers"] or [])
+        }
+        saved = f.save(sheet)
+        assert saved is not None
+        # Historical blocked metadata on a genuinely captured/saved draft, not a receipt double.
+        with session_scope() as session:
+            state = session.get(OrderWorkflowState, f.id)
+            draft = session.get(OrderSheetDraft, state.draft_id)
+            draft.draft_state = "auto_apply_blocked"
+            draft.blockers_json = ["sheet_canonical_mismatch"]
+            draft.warnings_json = ["sheet_ocr_review_required"]
+        before = draft_sheet_service.get_latest_sheet_draft(f.id)
+        with f.readonly():
+            workflow = workflow_state_service.project_workflow_state(f.id)
+            refreshed_draft = draft_sheet_service.get_latest_sheet_draft(f.id)
+            assert refreshed_draft is not None
+            assert refreshed_draft == before
+            assert refreshed_draft["blockers_json"] == ["sheet_canonical_mismatch"]
+            assert refreshed_draft["warnings_json"] == ["sheet_ocr_review_required"]
+            assert refreshed_draft["draft_sheet_json"]["rows"] == [
+                ["03/22", "朝", "Menu A", "5", ""],
+                ["01/01", '"', "Ghost Menu", "23", ""],
+            ]
+            assert refreshed_draft["draft_sheet_json"] == sheet
+            assert isinstance(workflow, dict)
+            assert workflow["state"] == "draft_blocked"
+            assert workflow["apply_gate"]["can_apply"] is False
+            assert "sheet_canonical_mismatch" in (workflow["apply_gate"]["blockers"] or [])
+        assert f.get("workflow-v2/sheet")["sheet"] == sheet
+        f.client.close()
 
 
 def test_refresh_workflow_state_returns_layout_choice_required_for_critical_quantity_candidates():
