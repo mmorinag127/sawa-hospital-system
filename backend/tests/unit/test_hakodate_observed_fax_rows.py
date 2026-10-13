@@ -4,8 +4,13 @@ from datetime import date, timedelta
 import numpy as np
 import pytest
 import cv2
+from openpyxl import load_workbook
+
+from test_modernization_dynamic_form_layout import copied_master, entries_for, facility, WEEK
 
 from src.services import hakodate_step_review_pipeline_service as pipeline
+from src.services import master_order_form_template_service as master
+from src.services import workbook_pdf_renderer as renderer
 from src.services.hakodate_cell_ocr_batch_service import _validate_menu_day_boundaries
 
 
@@ -23,7 +28,7 @@ def _sheet(meal_counts, start=date(2026, 9, 27)):
     }
 
 
-def _observed_axis(monkeypatch, day_counts, blank_counts=(), header_count=2):
+def _observed_axis(monkeypatch, day_counts, blank_counts=(), header_count=2, *, worksheet=None):
     boundaries = [0, *accumulate((*day_counts, *blank_counts))]
     body_count = sum(day_counts) + sum(blank_counts)
     # Unequal observed heights expose interpolation as well as truncation.
@@ -31,23 +36,37 @@ def _observed_axis(monkeypatch, day_counts, blank_counts=(), header_count=2):
     for index in range(header_count + body_count):
         ys.append(ys[-1] + 30 + index % 3 * 4)
     xs = [float(value) for value in range(50, 851, 100)]
+    canonical_edges = master.validated_template_row_edges(worksheet) if worksheet is not None else None
+    if worksheet is not None:
+        xs = np.linspace(50, 850, worksheet.max_column + 1).tolist()
+        header = renderer.worksheet_header_boundary_contract(
+            worksheet, header_edge_rows=master.TEMPLATE_HEADER_EDGE_ROWS,
+            body_start_row=pipeline.STEP_REVIEW_BODY_START_ROW,
+        )
+        for index, boundary in enumerate(header[:-1]):
+            if not boundary["column_votes"]:
+                ratio = (boundary["render_y"] - header[0]["render_y"]) / (header[-1]["render_y"] - header[0]["render_y"])
+                ys[index] = ys[0] + ratio * (ys[header_count] - ys[0])
     points = []
     for index, y in enumerate(ys):
         body_index = index - header_count
         columns = range(len(xs)) if body_index in boundaries else range(3, len(xs))
+        if worksheet is not None and index < header_count:
+            columns = header[index]["column_votes"]
         points.extend({"x": xs[column], "y": y} for column in columns)
 
     def detect(image, *, corrected_xs, template_ys):
         assert corrected_xs == xs
-        assert len(template_ys) - pipeline.STEP_REVIEW_HEADER_BANDS - 1 == 57
+        assert len(template_ys) == (len(canonical_edges) if canonical_edges is not None else 60)
         return points, {"intersection_count": len(points)}
 
     monkeypatch.setattr(pipeline, "_detect_table_intersections_for_row_axis", detect)
-    template_ys = np.linspace(ys[0], ys[-1], 60).astype(int).tolist()
+    template_ys = np.linspace(ys[0], ys[-1], len(canonical_edges) if canonical_edges is not None else 60).astype(int).tolist()
     corrected, evidence = pipeline._row_intersection_correct_ys(
         rectified_fax=np.zeros((int(ys[-1]) + 1, 901, 3), dtype=np.uint8),
         corrected_xs=xs,
         template_ys=template_ys,
+        **({"worksheet": worksheet} if worksheet is not None else {}),
     )
     return corrected, evidence, ys, boundaries
 
@@ -75,9 +94,21 @@ def test_month_boundary_preserves_all_observed_rows(monkeypatch, blank_counts):
         [(3, 4, 3), (2, 3, 4), (2, 2, 3), (3, 3, 3), (1, 4, 3), (2, 4, 4), (3, 2, 3)],
     ],
 )
-def test_fullweek_variable_meal_counts_preserve_observed_boundaries(monkeypatch, meal_counts):
+def test_fullweek_variable_meal_counts_preserve_observed_boundaries(monkeypatch, meal_counts, tmp_path, copied_master):
     day_counts = tuple(map(sum, meal_counts))
-    corrected, evidence, observed, boundaries = _observed_axis(monkeypatch, day_counts)
+    entries = [entry for day, counts in enumerate(meal_counts) for entry in entries_for([day], counts)]
+    path = tmp_path / "canonical.xlsx"
+    master.build_facility_template_xlsx(
+        facility_config=facility(), master_template_path=copied_master, output_path=path,
+        week_value=WEEK, week_menu_entries=entries,
+    )
+    workbook = load_workbook(path)
+    try:
+        worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
+        assert len(master.validated_body_row_plan(worksheet)) == sum(day_counts)
+        corrected, evidence, observed, boundaries = _observed_axis(monkeypatch, day_counts, worksheet=worksheet)
+    finally:
+        workbook.close()
 
     assert corrected == observed
     assert len(corrected) == 2 + sum(day_counts) + 1
