@@ -2530,7 +2530,10 @@ def test_get_ocr_sheet_weekly_menu_prefers_persisted_order_lines_over_payload():
     assert dinner[qty_idx] == "5"
 
 
-def test_canonicalize_sheet_daypart_rows_defaults_invalid_blocks_by_date_order():
+def test_canonicalize_sheet_daypart_rows_preserves_unknown_tokens_and_blocks_projection():
+    from copy import deepcopy
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
     rows = [
         ["04/05", '"', "Menu A", ""],
@@ -2540,12 +2543,21 @@ def test_canonicalize_sheet_daypart_rows_defaults_invalid_blocks_by_date_order()
         ["04/11", "品", "Menu E", ""],
     ]
 
+    before = deepcopy((fields, rows))
     normalized = order_service._canonicalize_sheet_daypart_rows(rows=rows, fields=fields)
 
-    assert [row[1] for row in normalized] == ["朝", "昼", "朝", "昼", "朝"]
+    assert normalized == before[1]
+    assert (fields, rows) == before
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, [{"values": row} for row in normalized], normalized)
+    assert normalized == before[1]
+    assert (fields, rows) == before
 
 
-def test_canonicalize_sheet_daypart_rows_respects_supported_anchor_blocks():
+def test_canonicalize_sheet_daypart_rows_preserves_unknown_and_blank_beside_known_anchors():
+    from copy import deepcopy
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
     rows = [
         ["04/05", "61", "Menu A", ""],
@@ -2554,9 +2566,15 @@ def test_canonicalize_sheet_daypart_rows_respects_supported_anchor_blocks():
         ["04/07", "夕", "Menu D", ""],
     ]
 
+    before = deepcopy((fields, rows))
     normalized = order_service._canonicalize_sheet_daypart_rows(rows=rows, fields=fields)
 
-    assert [row[1] for row in normalized] == ["朝", "昼", "昼", "夕"]
+    assert normalized == before[1]
+    assert (fields, rows) == before
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, [{"values": row} for row in normalized], normalized)
+    assert normalized == before[1]
+    assert (fields, rows) == before
 
 
 def test_overlay_payload_dayparts_onto_sheet_rows_by_date_order_keeps_menu_rows():
