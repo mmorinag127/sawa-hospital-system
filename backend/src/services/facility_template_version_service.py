@@ -270,26 +270,6 @@ def materialize_facility_version_lineage(session: Any, selection: dict) -> tuple
 
 
 
-def _write_workflow_meta_payload(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
-    from src.services.canonical_facility_store import CanonicalStoreError
-    raise CanonicalStoreError("legacy_missing_lineage_stamp_disabled", status_code=409)
-
-
-def _stamp_workflow_template_lineage(
-    row: OrderWorkflowState,
-    *,
-    facility_id: str,
-    version: FacilityTemplateVersion,
-) -> bool:
-    from src.services.canonical_facility_store import CanonicalStoreError
-    raise CanonicalStoreError("legacy_missing_lineage_stamp_disabled", status_code=409)
-
-
-def _set_template_version_if_missing(row: Any, version_id: str) -> bool:
-    from src.services.canonical_facility_store import CanonicalStoreError
-    raise CanonicalStoreError("legacy_missing_lineage_stamp_disabled", status_code=409)
-
-
 def _ensure_active_version_for_backfill(
     session: Any,
     *,

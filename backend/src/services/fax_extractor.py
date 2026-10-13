@@ -64,14 +64,6 @@ def _flag_enabled(value: object) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
-def _should_disable_llm_provider_fallback(template: dict) -> bool:
-    if _flag_enabled(template.get("llm_full_table_mode")):
-        return True
-    if _flag_enabled(template.get("llm_quantity_only_mode")):
-        return True
-    return bool(str(template.get("_force_main_ocr_provider") or "").strip())
-
-
 def _crop_to_bbox(image, bbox: list[float]):
     width, height = image.size
     x0 = int(max(bbox[0] * width, 0))
@@ -83,36 +75,9 @@ def _crop_to_bbox(image, bbox: list[float]):
     return image.crop((x0, y0, x1, y1))
 
 
-def _ocr_crop_text(crop) -> str:
-    _ = crop
-    raise RuntimeError("tesseract_ocr_removed")
-
-
 def _extract_tesseract_tokens(image) -> list[dict]:
     _ = image
     raise RuntimeError("tesseract_ocr_removed")
-
-
-def _map_tokens_to_box(tokens: list[dict], bbox: list[float]) -> list[dict]:
-    x0, y0, x1, y1 = bbox
-    width = x1 - x0
-    height = y1 - y0
-    if width <= 0 or height <= 0:
-        return tokens
-    mapped = []
-    for token in tokens:
-        x = token.get("x")
-        y = token.get("y")
-        if x is None or y is None:
-            continue
-        mapped.append(
-            {
-                **token,
-                "x": x0 + x * width,
-                "y": y0 + y * height,
-            }
-        )
-    return mapped
 
 
 def _coerce_row_cell(value: object) -> str:
@@ -123,14 +88,6 @@ def _coerce_row_cell(value: object) -> str:
     if isinstance(value, (int, float)):
         return str(int(value)) if float(value).is_integer() else str(value)
     return str(value)
-
-
-def _canonical_aux_field_name(
-    column: dict[str, Any] | None,
-    *,
-    fallback_index: int | None = None,
-) -> str:
-    return _shared_canonical_aux_field_name(column, fallback_index=fallback_index)
 
 
 def _canonical_field_name_from_template_column(
@@ -2171,69 +2128,6 @@ def _extract_markdown_tables(markdown: str) -> list[tuple[list[str], list[list[s
     return parsed
 
 
-def _rows_from_header_and_data(
-    header: list[str],
-    data: list[list[str]],
-    template: dict,
-    *,
-    allow_explicit_template_columns: bool = False,
-) -> list[list[str]] | None:
-    projected = _project_rows_from_header_and_data_internal(
-        header=header,
-        data=data,
-        template=template,
-        allow_explicit_template_columns=allow_explicit_template_columns,
-    )
-    if not isinstance(projected, tuple) or len(projected) != 2:
-        return None
-    _meta, rows = projected
-    return rows or None
-
-
-def _rows_from_table_matrix(table_rows: list[list[object]], template: dict) -> list[list[str]] | None:
-    fields = _get_row_fields(template)
-    if not fields:
-        return None
-    normalized_rows = _normalize_table_matrix_rows(table_rows)
-    if not normalized_rows:
-        return None
-    fields_set = set(fields)
-    header_height: int | None = None
-    for idx, row in enumerate(normalized_rows[:6]):
-        if _looks_like_data_row(row, fields_set):
-            header_height = idx
-            break
-    if header_height is None:
-        header_height = 1 if len(normalized_rows) > 1 else 0
-    header_rows = normalized_rows[:header_height]
-    data = normalized_rows[header_height:]
-    if not data and normalized_rows:
-        header_rows = normalized_rows[:1]
-        data = normalized_rows[1:]
-    header = _merge_header_group(header_rows)
-    return _rows_from_header_and_data(
-        header,
-        data,
-        template,
-        allow_explicit_template_columns=True,
-    )
-
-
-def _rows_from_markdown_blocks(markdown: str, template: dict) -> list[list[str]] | None:
-    fields = _get_row_fields(template)
-    if not fields:
-        return None
-    tables = _extract_markdown_tables(markdown)
-    if not tables:
-        return None
-    normalized: list[list[str]] = []
-    for header, data in tables:
-        table_rows = _rows_from_header_and_data(header, data, template)
-        if table_rows:
-            normalized.extend(table_rows)
-    return normalized or None
-
-
 def _matrix_from_structured_cells(
     cells: list[dict],
     *,
@@ -2824,14 +2718,6 @@ def structured_cell_issues_from_payload(
     return issues
 
 
-def _rows_from_markdown(markdown: str, template: dict) -> list[list[str]] | None:
-    tables = _extract_markdown_tables(markdown)
-    if not tables:
-        return None
-    header, data = max(tables, key=lambda item: len(item[1]))
-    return _rows_from_header_and_data(header, data, template)
-
-
 def rows_from_markdown(markdown: str, template: dict) -> list[list[str]] | None:
     return rows_from_explicit_physical_payload({"table_raw": markdown}, template) or None
 
@@ -2894,29 +2780,6 @@ def date_strings_from_row_source(
         if value is not None and str(value).strip()
     ] if isinstance(raw_dates, list) else []
     return semantic_dates + values
-
-
-def _extract_facility_and_dates_tesseract(image, template: dict) -> tuple[str | None, list[str]]:
-    facility_name = None
-    date_strings: List[str] = []
-    facility_box = template.get("facility_name_box")
-    if facility_box:
-        crop = _crop_to_bbox(image, facility_box)
-        if crop:
-            text = _ocr_crop_text(crop)
-            if text:
-                facility_name = text
-    for date_box in template.get("date_boxes", []) or []:
-        bbox = date_box.get("bbox")
-        if not bbox:
-            continue
-        crop = _crop_to_bbox(image, bbox)
-        if not crop:
-            continue
-        text = _ocr_crop_text(crop)
-        if text:
-            date_strings.append(text)
-    return facility_name, date_strings
 
 
 def filter_tokens_by_box(tokens: List[dict], table_box: Optional[list[float]]) -> List[dict]:

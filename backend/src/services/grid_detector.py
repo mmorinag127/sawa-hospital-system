@@ -106,20 +106,6 @@ def _adaptive_binary(image):
     return 255 - binary
 
 
-def _otsu_binary(image):
-    import cv2  # type: ignore
-    import numpy as np
-
-    img = np.array(image)
-    if img.ndim == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    else:
-        gray = img
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return 255 - binary
-
-
 def _extract_grid_lines(
     binary,
     line_scale: int,
@@ -394,13 +380,6 @@ def _projection_grid_lines(binary) -> tuple[list[int], list[int]]:
         _cluster_positions(xs.tolist(), max_gap=max(3, width // 700)),
         _cluster_positions(ys.tolist(), max_gap=max(3, height // 700)),
     )
-
-
-def _auto_table_box_from_image(image, template: dict) -> Optional[list[float]]:
-    auto = _auto_detect_grid(image, template)
-    if auto is None:
-        return None
-    return auto[0]
 
 
 def _find_best_sequence(values: list[float], length: int, tolerance: float) -> list[float]:

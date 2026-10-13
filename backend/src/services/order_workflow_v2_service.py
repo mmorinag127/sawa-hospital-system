@@ -206,13 +206,6 @@ def _set_pre_save_check(meta: dict[str, Any], key: str, *, sheet_hash: str, payl
     meta["pre_save_checks"] = checks
 
 
-def _clear_pre_save_check(meta: dict[str, Any], key: str) -> None:
-    checks = _workflow_pre_save_checks(meta)
-    if key in checks:
-        checks.pop(key, None)
-        meta["pre_save_checks"] = checks
-
-
 def _clear_pre_save_checks(meta: dict[str, Any]) -> None:
     meta["pre_save_checks"] = {}
 
@@ -321,13 +314,6 @@ def _facility_config_with_expanded_cell_mode(
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}{uuid4().hex[:16]}"
-
-
-def _derived_id(prefix: str, *parts: object) -> str:
-    digest = hashlib.sha256(
-        json.dumps([str(part or "") for part in parts], ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-    return f"{prefix}{digest[:16]}"
 
 
 def _format_week_code_from_range(week_start: str, week_end: str) -> str | None:
@@ -503,36 +489,6 @@ def _ocr_progress_payload(job: OcrJob | None, metrics: dict[str, Any]) -> dict[s
     }
 
 
-def _facility_config_has_resolved_fax_template(
-    facility_config: dict[str, Any] | None,
-    *,
-    template_id: str | None = None,
-) -> bool:
-    return _facility_config_template_resolution_error(facility_config, template_id=template_id) is None
-
-
-def _facility_config_template_resolution_error(
-    facility_config: dict[str, Any] | None,
-    *,
-    template_id: str | None = None,
-) -> str | None:
-    if not isinstance(facility_config, dict):
-        return "facility_template_unresolved"
-    template = facility_config.get("fax_template") if isinstance(facility_config.get("fax_template"), dict) else {}
-    resolved_template_id = (
-        _normalize_id(template_id)
-        or _normalize_id(facility_config.get("fax_template_id"))
-        or _normalize_id(template.get("template_id"))
-    )
-    if not resolved_template_id:
-        return "facility_template_unresolved"
-    columns = facility_template_version_service.normalize_template_columns(template.get("columns"))
-    validation = facility_template_version_service.validate_template_columns(columns)
-    if validation.get("errors"):
-        return "facility_template_unresolved"
-    return None
-
-
 def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
     return bool(
         _normalize_id(meta.get("facility_id"))
@@ -543,11 +499,6 @@ def _workflow_meta_has_confirmed_context(meta: dict[str, Any]) -> bool:
 
 def _workflow_meta_has_resolved_template(meta: dict[str, Any]) -> bool:
     return bool(_normalize_id(meta.get("template_version_id")))
-
-
-def _workflow_state_needs_context_projection(row: OrderWorkflowState, meta: dict[str, Any]) -> bool:
-    state = _canonical_workflow_v2_state(row, meta)
-    return _workflow_state_requires_selected_ocr(state) or _workflow_state_requires_saved_sheet(state)
 
 
 def _workflow_v2_projection_context_error(meta: dict[str, Any]) -> str | None:
@@ -3485,19 +3436,6 @@ def _saved_sheet_with_target_cell_map(
     return serialized
 
 
-def _sheet_rows(sheet: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = sheet.get("rows") if isinstance(sheet, dict) else None
-    if not isinstance(rows, list):
-        return []
-    normalized: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
-        if isinstance(row, dict):
-            normalized.append({"row_index": index, **row})
-        elif isinstance(row, list):
-            normalized.append({"row_index": index, "cells": list(row)})
-    return normalized
-
-
 def _numeric_value(value: object) -> float | None:
     if value is None:
         return None
@@ -3508,24 +3446,6 @@ def _numeric_value(value: object) -> float | None:
         return float(text)
     except ValueError:
         return None
-
-
-def _quantity_values_from_row(row: dict[str, Any]) -> list[float]:
-    values: list[float] = []
-    for key, value in row.items():
-        key_text = str(key or "").strip().lower()
-        if key_text in {"row_index", "date", "daypart", "menu", "menu_name", "cells"}:
-            continue
-        numeric = _numeric_value(value)
-        if numeric is not None:
-            values.append(numeric)
-    cells = row.get("cells")
-    if isinstance(cells, list):
-        for value in cells:
-            numeric = _numeric_value(value)
-            if numeric is not None:
-                values.append(numeric)
-    return values
 
 
 def _draft_record_from_saved_sheet(saved_sheet: OrderSheetDraft) -> dict[str, Any]:

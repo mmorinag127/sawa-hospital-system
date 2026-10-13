@@ -303,12 +303,6 @@ def _facility_source_workbook_names(facility: dict | None) -> list[str]:
     return result
 
 
-def _resolve_facility_source_workbook_name_for_month(
-    facility: dict, *, fax_template_id: str, month_id: str,
-) -> str:
-    return _read_saved_sheet_source_workbook(facility, _normalize_month_id(month_id))["reference"]
-
-
 def _source_workbook_sheetnames(source_workbook_name: str) -> tuple[str, ...]:
     source_path = _resolve_source_workbook_path(source_workbook_name)
     cache_key = str(source_path)
@@ -622,40 +616,6 @@ def _clear_week_sheet_body(worksheet) -> None:
             cell.value = None
 
 
-def _daypart_key(value: object) -> str:
-    return str(value or "").strip()
-
-
-def _week_menu_daypart_key(value: object) -> str:
-    text = str(value or "").strip()
-    if text.startswith("朝"):
-        return "朝"
-    if text.startswith("昼"):
-        return "昼"
-    if text.startswith("夕"):
-        return "夕"
-    return text
-
-
-def _week_menu_daypart_capacity(value: object) -> int | None:
-    key = _week_menu_daypart_key(value)
-    if key == "朝":
-        return 2
-    if key in {"昼", "夕"}:
-        return 3
-    return None
-
-
-def _week_entry_overflow_payload(entry: dict) -> dict[str, str]:
-    menu_date = entry.get("_menu_date_obj")
-    return {
-        "date": menu_date.isoformat() if isinstance(menu_date, date) else str(entry.get("menu_date") or ""),
-        "daypart": str(entry.get("daypart") or ""),
-        "category": str(entry.get("category") or ""),
-        "name": str(entry.get("name") or ""),
-    }
-
-
 def _split_week_entries_for_order_form(week_entries: list[dict]) -> tuple[list[dict], list[dict[str, str]], int]:
     for entry in week_entries:
         if (not isinstance(entry, dict) or not isinstance(entry.get("_menu_date_obj"), date)
@@ -686,45 +646,6 @@ def _weekday_label(menu_date: date) -> str:
     return _WEEKDAY_LABELS[menu_date.weekday()]
 
 
-def _column_merged_ranges(worksheet, col_idx: int) -> list[tuple[int, int, int, int]]:
-    ranges: list[tuple[int, int, int, int]] = []
-    for merged_range in worksheet.merged_cells.ranges:
-        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-        if min_col <= col_idx <= max_col:
-            ranges.append((min_col, min_row, max_col, max_row))
-    return sorted(ranges, key=lambda item: (item[1], item[0], item[3], item[2]))
-
-
-def _write_weekday_label_for_date_block(
-    worksheet,
-    *,
-    date_start_row: int,
-    date_end_row: int,
-    menu_date: date,
-) -> None:
-    date_range: tuple[int, int, int, int] | None = None
-    col_ranges = _column_merged_ranges(worksheet, 1)
-    for merged in col_ranges:
-        _min_col, min_row, _max_col, max_row = merged
-        if min_row <= date_start_row <= max_row:
-            date_range = merged
-            break
-    target_row = date_end_row
-    if date_range is not None:
-        _min_col, _min_row, _max_col, date_range_end = date_range
-        for merged in col_ranges:
-            _min_col, min_row, _max_col, max_row = merged
-            if min_row > date_range_end and min_row <= date_end_row <= max_row:
-                target_row = min_row
-                break
-    _write_to_cell_or_merged_anchor(
-        worksheet,
-        row_idx=target_row,
-        col_idx=1,
-        value=_weekday_label(menu_date),
-    )
-
-
 def _write_week_entries(worksheet, week_entries: list[dict], *, facility_config: dict) -> WeekEntriesWriteResult:
     physical_entries, overflow_entries, source_rows = _split_week_entries_for_order_form(week_entries)
     if not physical_entries:
@@ -740,29 +661,8 @@ def _write_week_entries(worksheet, week_entries: list[dict], *, facility_config:
     return result
 
 
-def _sheet_field_indexes(fields: list[Any]) -> dict[str, int]:
-    result: dict[str, int] = {}
-    for idx, field in enumerate(fields):
-        normalized = str(field or "").strip()
-        if normalized and normalized not in result:
-            result[normalized] = idx
-    return result
-
-
 def _normalize_sheet_label(value: object) -> str:
     return re.sub(r"[\s　・]+", "", str(value or "")).strip().lower()
-
-
-def _sheet_field_label(fields: list[Any], header: list[Any], idx: int) -> str:
-    header_text = str(header[idx] or "").strip() if idx < len(header) else ""
-    return header_text or str(fields[idx] or "").strip()
-
-
-def _first_field_index(field_indexes: dict[str, int], candidates: tuple[str, ...]) -> int | None:
-    for candidate in candidates:
-        if candidate in field_indexes:
-            return field_indexes[candidate]
-    return None
 
 
 def _sheet_cell(row: list[Any], idx: int | None) -> object:
@@ -783,45 +683,6 @@ def _coerce_quantity_cell(value: object) -> object:
     if number.is_integer():
         return int(number)
     return number
-
-
-def _field_role(field: object, label: object = "") -> str | None:
-    field_text = str(field or "").strip().lower()
-    label_text = _normalize_sheet_label(label)
-    token = f"{field_text} {label_text}"
-    if field_text in {"date", "menu_date", "date_mmdd"} or label_text in {"日付", "日にち"}:
-        return "date"
-    if field_text in {"daypart", "meal"} or label_text in {"区分", "食区分"}:
-        return "daypart"
-    if field_text in {"category", "menu_category"} or label_text in {"献立区分", "副区分", "区分2"}:
-        return "category"
-    if field_text in {"menu_name", "name", "menu"} or label_text in {"献立", "メニュー"}:
-        return "menu"
-    if field_text in {"remarks", "remark", "note", "notes"} or "備考" in label_text:
-        return "remarks"
-    if "合計" in label_text or "total" in token:
-        return "total"
-    if "常食" in label_text or "regular" in token:
-        return "regular"
-    if "通所" in label_text or "daycare" in token:
-        return "daycare"
-    if "職員" in label_text or "staff" in token:
-        return "staff"
-    if "肉禁" in label_text or "nomeat" in token or "no_meat" in token:
-        return "no_meat"
-    if "魚禁" in label_text or "nofish" in token or "no_fish" in token:
-        return "no_fish"
-    if "その他" in label_text or "forbiddenother" in token or "forbidden_other" in token:
-        return "forbidden_other"
-    if "揚禁" in label_text or "nofried" in token or "no_fried" in token:
-        return "no_fried"
-    if "変更①" in label_text or "変更1" in label_text or "change_1" in token:
-        return "change_1"
-    if "変更②" in label_text or "変更2" in label_text or "change_2" in token:
-        return "change_2"
-    if "placeholder" in token or "unknown" in token or "不明" in label_text:
-        return None
-    return None
 
 
 def _worksheet_quantity_column_role_map(worksheet, *, template: dict) -> dict[str, int]:
@@ -888,20 +749,6 @@ def _source_body_merge_columns(worksheet, *, facility_config: dict, targets: dic
     if any(target < 5 or target > worksheet.max_column or target not in targets.values() for target in result):
         raise ValueError("source workbook merge column unmapped")
     return result
-
-
-def _write_to_cell_or_merged_anchor(worksheet, *, row_idx: int, col_idx: int, value: object) -> None:
-    cell = worksheet.cell(row=row_idx, column=col_idx)
-    if not isinstance(cell, MergedCell):
-        cell.value = value
-        return
-    for merged_range in worksheet.merged_cells.ranges:
-        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-        if min_row <= row_idx <= max_row and min_col <= col_idx <= max_col:
-            anchor = worksheet.cell(row=min_row, column=min_col)
-            if anchor.value in (None, "") or anchor.value == value:
-                anchor.value = value
-            return
 
 
 def _write_saved_sheet_rows_to_order_form(
@@ -1451,27 +1298,6 @@ def build_fax_order_form_excel(
     )
 
 
-def _clear_order_form_body_values(
-    worksheet,
-    *,
-    start_row: int = _ORDER_FORM_BODY_START_ROW,
-    end_row: int = _ORDER_FORM_BODY_END_ROW,
-    min_col: int = 1,
-    max_col: int | None = None,
-) -> None:
-    target_max_col = max_col if max_col is not None else worksheet.max_column
-    for row in worksheet.iter_rows(
-        min_row=start_row,
-        max_row=end_row,
-        min_col=min_col,
-        max_col=target_max_col,
-    ):
-        for cell in row:
-            if isinstance(cell, MergedCell):
-                continue
-            cell.value = None
-
-
 def build_fax_structure_only_excel(
     *,
     facility_id: str,
@@ -1552,49 +1378,6 @@ def _render_fax_order_form_workbook(
     return output_path
 
 
-def _render_fax_structure_only_workbook(
-    *,
-    source_workbook_name: str,
-    week_sheet_name: str,
-    facility_name: str,
-    facility_id: str,
-    fax_template_id: str,
-    family_label: str,
-    output_dir: Path | str | None,
-) -> Path:
-    source_path = _resolve_source_workbook_path(source_workbook_name)
-    workbook = load_workbook(source_path)
-    if week_sheet_name not in workbook.sheetnames:
-        raise ValueError(f"week sheet not found in source workbook: {week_sheet_name}")
-    _keep_only_target_sheet(workbook, week_sheet_name)
-    worksheet = workbook[week_sheet_name]
-
-    _clear_order_form_body_values(worksheet)
-    _write_facility_name(worksheet, facility_name)
-    _extend_print_area(worksheet, bottom_row=_BOTTOM_MARKER_ROW)
-    _append_hidden_metadata_sheet(
-        workbook,
-        source_workbook_name=source_workbook_name,
-        facility_id=facility_id,
-        facility_name=facility_name,
-        fax_template_id=fax_template_id,
-        family_label=family_label,
-        week_sheet_name=week_sheet_name,
-        base_label="structure_only",
-    )
-
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    safe_template_id = _sanitize_filename_fragment(fax_template_id)
-    safe_facility_id = _sanitize_filename_fragment(facility_id)
-    safe_week = _sanitize_filename_fragment(week_sheet_name)
-    output_name = (
-        f"fax_order_form_structure_only_{safe_facility_id}_{safe_week}_{safe_template_id}_{stamp}.xlsx"
-    )
-    output_path = _resolve_fax_output_dir(output_dir) / output_name
-    workbook.save(output_path)
-    return output_path
-
-
 def _resolve_fax_output_dir(output_dir: Path | str | None) -> Path:
     if output_dir is None:
         path = _FAX_OUTPUT_DIR
@@ -1610,16 +1393,6 @@ def _keep_only_target_sheet(workbook: Workbook, week_sheet_name: str) -> None:
             continue
         del workbook[sheet_name]
     workbook.active = 0
-
-
-def _ensure_week_sheet_from_template(workbook: Workbook, week_sheet_name: str) -> None:
-    if week_sheet_name in workbook.sheetnames:
-        return
-    template_sheet_name = _DEFAULT_WEEK_SHEET if _DEFAULT_WEEK_SHEET in workbook.sheetnames else workbook.sheetnames[0]
-    template_sheet = workbook[template_sheet_name]
-    copied = workbook.copy_worksheet(template_sheet)
-    _clone_sheet_images(template_sheet, copied)
-    copied.title = week_sheet_name
 
 
 def _write_facility_name(worksheet, facility_name: str) -> None:

@@ -105,16 +105,6 @@ def authoritative_sheet_suppresses_stale_evidence_issues(
     return False
 
 
-def _stale_issue_suppressions(
-    *,
-    source: str | None,
-    clean_saved_draft: bool = False,
-    position_fallback_semantics_ready: bool = False,
-    stale_authoritative_sheet: bool = False,
-) -> set[str]:
-    return set()
-
-
 def filter_stale_issue_tokens(
     tokens: list[str] | None,
     *,

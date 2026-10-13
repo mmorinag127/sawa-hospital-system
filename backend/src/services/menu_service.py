@@ -4209,15 +4209,6 @@ def resolve_menu_defaults_in_session(session, names: list[str], facility_id: str
     return ({name: defaults.get(_normalize_menu_name(name or ""), {}) for name in names}, sorted(sources))
 
 
-def _find_condiment_header_row(ws, max_scan: int = 20) -> int | None:
-    for row in range(1, max_scan + 1):
-        for col in range(1, ws.max_column + 1):
-            value = ws.cell(row=row, column=col).value
-            if value in _CONDIMENT_HEADERS:
-                return row
-    return None
-
-
 def import_condiments(file_bytes: bytes, filename: str, sheet_name: str | None = None) -> dict:
     ensure_menu_schema()
     if filename.lower().endswith(".csv"):

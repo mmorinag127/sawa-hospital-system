@@ -661,13 +661,6 @@ def _header_row_count(template: dict[str, Any]) -> int:
     return header_rows
 
 
-def _synthesize_edges(start: float, end: float, count: int) -> list[float]:
-    span = float(end) - float(start)
-    if count < 1 or span <= 0:
-        return []
-    return [float(start) + span * idx / count for idx in range(count + 1)]
-
-
 def _match_detected_edges_to_expected(
     *,
     detected_edges: list[float],
@@ -1045,113 +1038,6 @@ def _detect_dense_vertical_edges_from_table_image(
         "table_box_px": [x0, y0, x1, y1],
     }
     return edges, evidence, None
-
-
-def _align_grid_edges_to_template(
-    *,
-    grid: GridDetectionResult | dict[str, Any],
-    template: dict[str, Any],
-    skeleton_rows: list[dict[str, Any]] | None,
-) -> tuple[dict[str, Any], list[str], list[str]]:
-    grid_data = _grid_payload(grid)
-    table_box = grid_data.get("table_box") or []
-    if not isinstance(table_box, list) or len(table_box) < 4:
-        return grid_data, [], ["grid_table_box_missing"]
-
-    warnings: list[str] = []
-    blockers: list[str] = []
-    fields = derive_row_fields_from_template(template)
-    column_edges = [float(value) for value in (grid_data.get("column_edges") or [])]
-    row_edges = [float(value) for value in (grid_data.get("row_edges") or [])]
-    expected_columns = len(fields)
-    expected_rows = _header_row_count(template) + len(skeleton_rows or [])
-    detected_column_count = max(0, len(column_edges) - 1)
-    detected_row_count = max(0, len(row_edges) - 1)
-    tolerance = float(template.get("hakodate_grid_line_match_tolerance") or 0.04)
-    tolerance = max(0.005, min(tolerance, 0.12))
-
-    if expected_columns >= 2 and detected_column_count != expected_columns:
-        matched, reason = _match_detected_edges_to_expected(
-            detected_edges=column_edges,
-            expected_cell_count=expected_columns,
-            table_start=float(table_box[0]),
-            table_end=float(table_box[2]),
-            tolerance=tolerance,
-        )
-        grid_data["detected_column_count"] = detected_column_count
-        if matched:
-            grid_data["column_edges"] = matched
-            grid_data["column_edges_source"] = "detected_template_matched"
-            warnings.append("grid_column_edges_template_matched")
-        else:
-            blockers.append(reason or "grid_column_edges_unmatched")
-    elif expected_columns >= 2:
-        grid_data["column_edges_source"] = grid_data.get("column_edges_source") or "detected_exact_count"
-        grid_data["detected_column_count"] = detected_column_count
-
-    if expected_rows >= 2 and detected_row_count != expected_rows:
-        matched, reason = _match_detected_edges_to_expected(
-            detected_edges=row_edges,
-            expected_cell_count=expected_rows,
-            table_start=float(table_box[1]),
-            table_end=float(table_box[3]),
-            tolerance=tolerance,
-        )
-        grid_data["detected_row_count"] = detected_row_count
-        if matched:
-            grid_data["row_edges"] = matched
-            grid_data["row_edges_source"] = "detected_template_matched"
-            warnings.append("grid_row_edges_template_matched")
-        else:
-            blockers.append(reason or "grid_row_edges_unmatched")
-    elif expected_rows >= 2:
-        grid_data["row_edges_source"] = grid_data.get("row_edges_source") or "detected_exact_count"
-        grid_data["detected_row_count"] = detected_row_count
-
-    return grid_data, warnings, blockers
-
-
-def _template_table_box(template: dict[str, Any]) -> list[float]:
-    for value in (
-        template.get("grid_table_box"),
-        template.get("table_box"),
-        ((template.get("rois") or {}).get("table_box") if isinstance(template.get("rois"), dict) else None),
-    ):
-        if not isinstance(value, list) or len(value) < 4:
-            continue
-        try:
-            box = [float(value[idx]) for idx in range(4)]
-        except Exception:  # noqa: BLE001
-            continue
-        if box[2] > box[0] and box[3] > box[1]:
-            return box
-    return []
-
-
-def _fallback_grid_from_template(
-    *,
-    template: dict[str, Any],
-    skeleton_rows: list[dict[str, Any]] | None,
-) -> dict[str, Any] | None:
-    table_box = _template_table_box(template)
-    fields = derive_row_fields_from_template(template)
-    row_count = _header_row_count(template) + len(skeleton_rows or [])
-    if not table_box or len(fields) < 2 or row_count < 2:
-        return None
-    column_edges = _synthesize_edges(table_box[0], table_box[2], len(fields))
-    row_edges = _synthesize_edges(table_box[1], table_box[3], row_count)
-    if not column_edges or not row_edges:
-        return None
-    return {
-        "table_box": table_box,
-        "column_edges": column_edges,
-        "row_edges": row_edges,
-        "confidence": 0.2,
-        "column_edges_source": "template_fallback",
-        "row_edges_source": "template_fallback",
-        "detected_column_count": 0,
-        "detected_row_count": 0,
-    }
 
 
 def _merged_value_map(worksheet: Any) -> dict[tuple[int, int], object]:
@@ -1639,44 +1525,6 @@ def _structure_grid_from_rendered_worksheet(worksheet: Any, *, dpi: int) -> dict
         "detected_column_count": len(column_edges) - 1,
         "detected_row_count": len(row_edges) - 1,
     }
-
-
-def _map_token_to_structure_space(
-    token: HakodateToken,
-    *,
-    source_box: list[float],
-    target_box: list[float],
-) -> HakodateToken | None:
-    try:
-        sx0, sy0, sx1, sy1 = [float(value) for value in source_box]
-        tx0, ty0, tx1, ty1 = [float(value) for value in target_box]
-    except Exception:
-        return None
-    sw = sx1 - sx0
-    sh = sy1 - sy0
-    tw = tx1 - tx0
-    th = ty1 - ty0
-    if sw <= 0 or sh <= 0 or tw <= 0 or th <= 0:
-        return None
-
-    def map_x(value: float) -> float:
-        return tx0 + ((value - sx0) / sw) * tw
-
-    def map_y(value: float) -> float:
-        return ty0 + ((value - sy0) / sh) * th
-
-    return HakodateToken(
-        text=token.text,
-        x=map_x(float(token.x)),
-        y=map_y(float(token.y)),
-        bbox=[
-            map_x(float(token.bbox[0])),
-            map_y(float(token.bbox[1])),
-            map_x(float(token.bbox[2])),
-            map_y(float(token.bbox[3])),
-        ],
-        confidence=token.confidence,
-    )
 
 
 def _map_structure_bbox_to_fax_bbox(
