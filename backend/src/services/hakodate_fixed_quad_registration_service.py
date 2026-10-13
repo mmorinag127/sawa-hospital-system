@@ -702,8 +702,15 @@ def registration_template_axes_from_workbook(
     if not (0 <= ys[0] < ys[-1] <= canvas_height
             and 0 <= frame[0] < frame[-1] <= canvas_height):
         raise ValueError("canonical_template_frame_invalid")
-    scale = (frame[-1] - frame[0]) / (ys[-1] - ys[0])
-    mapped = [int(round(frame[0] + (y - ys[0]) * scale)) for y in ys]
+    body_index = len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS)
+    if not (ys[body_index] < ys[-1] and frame[body_index] < frame[-1]):
+        raise ValueError("canonical_template_body_frame_invalid")
+    # Printed headers do not grow when a FAX contains fewer menu dates.
+    scale = (frame[-1] - frame[body_index]) / (ys[-1] - ys[body_index])
+    mapped = [*frame[:body_index], *[
+        int(round(frame[body_index] + (y - ys[body_index]) * scale))
+        for y in ys[body_index:]
+    ]]
     return _normalize_explicit_template_axes(
         xs, mapped, expected_x_edge_count=len(xs), expected_y_edge_count=len(ys),
     )

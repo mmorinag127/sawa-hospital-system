@@ -29,8 +29,11 @@ def test_dynamic_ocr_axes_keep_master_frame_and_render_geometry(tmp_path, copied
     assert len(ys) == len(entries) + len(master.TEMPLATE_HEADER_EDGE_ROWS) + 1
     assert (ys[0], ys[-1]) == (frame[0], frame[-1])
     assert all(b > a for a, b in zip(ys, ys[1:]))
-    assert [(y - ys[0]) / (ys[-1] - ys[0]) for y in ys] == pytest.approx(
-        [(y - raw[1][0]) / (raw[1][-1] - raw[1][0]) for y in raw[1]], abs=1 / (ys[-1] - ys[0]),
+    body = len(master.TEMPLATE_HEADER_EDGE_ROWS)
+    assert ys[:body + 1] == frame[:body + 1]
+    assert [(y - ys[body]) / (ys[-1] - ys[body]) for y in ys[body:]] == pytest.approx(
+        [(y - raw[1][body]) / (raw[1][-1] - raw[1][body]) for y in raw[1][body:]],
+        abs=1 / (ys[-1] - ys[body]),
     )
     assert registration.canonical_template_axes_from_workbook(
         path, sheet_name=master.FACILITY_TEMPLATE_SHEET_NAME, **canvas,
