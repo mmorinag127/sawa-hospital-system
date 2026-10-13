@@ -2530,137 +2530,6 @@ def test_get_ocr_sheet_weekly_menu_prefers_persisted_order_lines_over_payload():
     assert dinner[qty_idx] == "5"
 
 
-def test_apply_payload_cells_by_menu_priority_prefers_exact_menu_match_over_row_index():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "昼", "A", "", ""]},
-        {"values": ["02/15", "昼", "B", "", ""]},
-        {"values": ["02/15", "昼", "C", "", ""]},
-    ]
-    payload_rows = [
-        ["02/15", "昼", "B", "20", "note-b"],
-        ["02/15", "昼", "A", "10", "note-a"],
-        ["02/15", "昼", "C", "30", "note-c"],
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["exact"] == 3
-    assert rows[0]["values"][3] == "10"
-    assert rows[1]["values"][3] == "20"
-    assert rows[2]["values"][3] == "30"
-    assert rows[0]["values"][4] == "note-a"
-    assert rows[1]["values"][4] == "note-b"
-    assert rows[2]["values"][4] == "note-c"
-
-
-def test_apply_payload_cells_by_menu_priority_supports_partial_match():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "朝", "じゃが芋のコンソメ煮", ""]},
-        {"values": ["02/15", "朝", "キャベツサラダ", ""]},
-    ]
-    payload_rows = [
-        ["02/15", "朝", "キャベツサラダ", "8"],
-        ["02/15", "朝", "じゃがいものコンソメ煮", "7"],
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["partial"] >= 1
-    assert rows[0]["values"][3] == "7"
-    assert rows[1]["values"][3] == "8"
-
-
-def test_apply_payload_cells_by_menu_priority_falls_back_to_row_index():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.soft_2f"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "昼", "Menu A", "", ""]},
-    ]
-    payload_rows = [
-        ["02/15", "昼", "", "5", "2"],
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 1
-    # Temporary policy: quantity columns use raw column positions.
-    assert rows[0]["values"][3] == "5"
-    assert rows[0]["values"][4] == "2"
-
-
-def test_apply_payload_cells_by_menu_priority_row_index_skips_free_text_noise():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.soft_2f"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "昼", "Menu A", "", ""]},
-    ]
-    payload_rows = [
-        # Free-text/noise row (no quantity columns) should not be row-index mapped.
-        ["", "3000", "自由領域メモ", "", ""],
-        # Quantity-only row remains eligible for row-index fallback.
-        ["02/15", "昼", "", "5", "2"],
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 1
-    assert rows[0]["values"][3] == "5"
-    assert rows[0]["values"][4] == "2"
-
-
-def test_apply_payload_cells_by_menu_priority_row_index_prefers_direct_candidate_for_same_index():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "昼", "じゃが芋のコンソメ煮", ""]},
-        {"values": ["02/15", "昼", "キャベツサラダ", ""]},
-        {"values": ["02/15", "昼", "豚肉とれんこんの炒め煮", ""]},
-    ]
-    payload_rows = [
-        ["02/15", "昼", "じゃが芋のコンソメ煮", ""],
-        ["02/15", "昼", "", "23"],
-        ["02/15", "昼", "豚肉とれんこんの炒め煮", ""],
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    # Quantity-only row should be consumed by direct row-index for the same row.
-    assert stats["row_index"] >= 1
-    assert stats.get("exact", 0) >= 0
-    assert rows[0]["values"][3] == ""
-    assert rows[1]["values"][3] == "23"
-    assert rows[2]["values"][3] == ""
-
-
 def test_canonicalize_sheet_daypart_rows_defaults_invalid_blocks_by_date_order():
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
     rows = [
@@ -2719,33 +2588,6 @@ def test_overlay_payload_dayparts_onto_sheet_rows_by_date_order_keeps_menu_rows(
         "サワラの西京焼き",
         "じゃが芋の煮物",
     ]
-
-
-def test_apply_payload_cells_by_menu_priority_row_index_rejects_cross_date_candidates():
-    fields = ["date_mmdd", "menu", "qty.regular_2f"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "Menu A", ""]},
-        {"values": ["02/15", "Menu B", ""]},
-        {"values": ["02/16", "Menu C", ""]},
-    ]
-    payload_rows = [
-        ["02/15", "Menu A", ""],
-        ["", "", ""],
-        ["02/16", "", "12"],
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 1
-    assert rows[0]["values"][2] == ""
-    assert rows[1]["values"][2] == ""
-    assert rows[2]["values"][2] == "12"
 
 
 def test_apply_payload_quantities_numeric_only_skips_cross_date_rows():
@@ -2996,51 +2838,6 @@ def test_apply_payload_quantities_numeric_only_does_not_fill_leading_blank_clust
     assert rows[5]["values"][3] == "20"
 
 
-def test_apply_weekly_menu_order_line_cluster_consensus_fill_fills_third_row():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/08", "昼", "Menu A", "45", "", ""]},
-        {"values": ["02/08", "昼", "Menu B", "45", "", ""]},
-        {"values": ["02/08", "昼", "Menu C", "", "", ""]},
-        {"values": ["02/09", "昼", "Menu D", "44", "", ""]},
-    ]
-
-    filled = order_service._apply_weekly_menu_order_line_cluster_consensus_fill(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-    )
-
-    assert filled >= 1
-    assert rows[2]["values"][3] == "45"
-
-def test_llm_allows_order_line_cluster_consensus_fill_defaults_false():
-    assert order_service._llm_allows_order_line_cluster_consensus_fill(None) is False
-    assert order_service._llm_allows_order_line_cluster_consensus_fill({}) is False
-    assert (
-        order_service._llm_allows_order_line_cluster_consensus_fill(
-            {"_reparse_debug": {"sheet_cluster_fill_decision": ""}}
-        )
-        is False
-    )
-
-
-def test_llm_allows_order_line_cluster_consensus_fill_accepts_explicit_allow():
-    assert (
-        order_service._llm_allows_order_line_cluster_consensus_fill(
-            {"_reparse_debug": {"sheet_cluster_fill_decision": "allow"}}
-        )
-        is True
-    )
-    assert (
-        order_service._llm_allows_order_line_cluster_consensus_fill(
-            {"_sheet_fill_decision": True}
-        )
-        is True
-    )
-
-
 def test_apply_payload_quantities_numeric_only_copies_explicit_span_marker_cluster():
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
     quantity_index = order_service._build_sheet_quantity_index(fields)
@@ -3202,26 +2999,6 @@ def test_sanitize_payload_table_raw_trims_non_table_tail():
         "| --- | --- | --- | --- |",
         "| 02/15 | 朝 | Menu A | 7 |",
     ]
-
-
-def test_apply_payload_cells_ignores_outlier_quantities():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"values": ["02/15", "朝", "Menu A", ""]},
-    ]
-    payload_rows = [
-        ["02/15", "朝", "Menu A", "3000"],
-    ]
-
-    order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert rows[0]["values"][3] == ""
 
 
 def test_apply_payload_quantities_numeric_only_keeps_valid_large_counts():
@@ -4582,44 +4359,6 @@ def test_rows_from_markdown_infers_columns_from_sparse_header():
     assert second[2] == "キャベツサラダ"
     assert second[3] == "18"
     assert second[4] == "3"
-
-
-def test_apply_order_line_quantities_by_source_row_index_fallback():
-    fields = [
-        "date_mmdd",
-        "daypart",
-        "menu",
-        "qty.regular_2f",
-        "qty.regular_3f",
-        "qty.soft_2f",
-        "qty.soft_3f",
-        "qty.mixer_2f",
-        "qty.mixer_3f",
-        "remarks",
-    ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
-    rows = [
-        {"row_id": "r0", "values": ["", "", "Menu 0", "", "", "", "", "", "", ""]},
-        {"row_id": "r1", "values": ["", "", "Menu 1", "", "", "", "", "", "", ""]},
-    ]
-    order_lines = [
-        {
-            "source_row_index": 1,
-            "diet_type": "regular",
-            "area_id": "2F",
-            "quantity_original": 5,
-            "quantity_corrected": None,
-            "change_note": None,
-        }
-    ]
-
-    order_service._apply_order_line_quantities_by_source_row_index(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        order_lines=order_lines,
-    )
-    assert rows[1]["values"][3] == "5"
 
 
 def test_count_source_row_alignment_penalty_cells_counts_shifted_rows():
@@ -6771,45 +6510,6 @@ def test_extract_sheet_rows_from_payload_merges_blocks_and_collects_unstructured
     sanitized = order_service._sanitize_payload_table_raw(payload)
     candidates = order_service._extract_payload_unstructured_quantity_candidates(sanitized)
     assert "16" in candidates
-
-
-def test_apply_payload_cells_by_menu_priority_recovers_missing_quantities():
-    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
-    quantity_index = {("regular", "X"): 3}
-    rows = [
-        {"values": ["02/15", "朝", "Menu A", "", ""]},
-        {"values": ["02/15", "朝", "Menu B", "", ""]},
-        {"values": ["02/15", "昼", "Menu C", "", ""]},
-        {"values": ["02/15", "昼", "Menu D", "", ""]},
-        {"values": ["02/15", "昼", "Menu E", "", ""]},
-        {"values": ["02/15", "夕", "Menu F", "", ""]},
-        {"values": ["02/15", "夕", "Menu G", "", ""]},
-    ]
-    payload_rows = [
-        ["2/15", "朝", "Menu A", "23", ""],
-        ["2/15", "朝", "Menu B", "", "23"],  # loose numeric in note column
-        ["2/15", "昼", "Menu C", "23", ""],
-        ["2/15", "昼", "Menu D", "", ""],  # isolated gap
-        ["2/15", "昼", "Menu E", "23", ""],
-        ["2/15", "夕", "Menu F", "16", ""],
-        ["2/15", "夕", "Menu G", "", ""],  # recovered from unstructured tail candidate
-    ]
-
-    stats = order_service._apply_payload_cells_by_menu_priority(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        payload_unstructured_qty=["16"],
-    )
-
-    assert rows[0]["values"][3] == "23"
-    assert rows[1]["values"][3] == "23"
-    assert rows[3]["values"][3] == "23"
-    assert rows[6]["values"][3] == "16"
-    assert stats.get("loose_cell", 0) >= 1
-    assert stats.get("gap_fill", 0) >= 1
-    assert stats.get("unstructured", 0) >= 1
 
 
 def test_hakodate_projection_uses_target_truth_field_for_remarks_column():

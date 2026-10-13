@@ -640,3 +640,262 @@ def test_merge_without_authoritative_rebase_preserves_unreturned_operator_cells(
     assert result["detail"]["authoritative_quantity_reset_count"] == 0
     assert result["detail"]["quantity_change_count"] == 1
     assert baseline == before
+
+
+# Authored schemas for the retired private-helper inputs; no customer defaults.
+def orphan_projection_template(fields):
+    quantities = {
+        "qty.regular_2f": ("regular", "2F"), "qty.regular_3f": ("regular", "3F"),
+        "qty.soft_2f": ("soft", "2F"), "qty.soft_3f": ("soft", "3F"),
+        "qty.mixer_2f": ("mixer", "2F"), "qty.mixer_3f": ("mixer", "3F"),
+        "qty.regular_x": ("regular", "X"),
+    }
+    return {
+        "main_ocr_row_fields": list(fields),
+        "columns": [
+            {"index": i, "source_index": i, "role": "quantity",
+             "diet_type": quantities[field][0], "area_id": quantities[field][1]}
+            for i, field in enumerate(fields) if field in quantities
+        ],
+    }
+
+
+def orphan_projection(fields, rows, payload_rows):
+    before = deepcopy((fields, rows, payload_rows))
+    try:
+        return orders._project_payload_quantities_onto_sheet_row_lists(
+            rows=[row["values"] for row in rows], fields=fields, payload_rows=payload_rows,
+            strict_raw_ocr_only=True, template=orphan_projection_template(fields))
+    finally:
+        assert (fields, rows, payload_rows) == before
+
+
+def test_retired_payload_cells_by_menu_priority_prefers_exact_menu_match_over_row_index():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
+    rows = [
+        {"values": ["02/15", "昼", "A", "", ""]},
+        {"values": ["02/15", "昼", "B", "", ""]},
+        {"values": ["02/15", "昼", "C", "", ""]},
+    ]
+    payload_rows = [
+        ["02/15", "昼", "B", "20", "note-b"],
+        ["02/15", "昼", "A", "10", "note-a"],
+        ["02/15", "昼", "C", "30", "note-c"],
+    ]
+
+    projected, stats = orphan_projection(fields, rows, payload_rows)
+    assert stats["exact"] == 3
+    assert [row[3] for row in projected] == ["10", "20", "30"]
+    raw = {"rows": deepcopy(payload_rows)}
+    extracted = orders._extract_sheet_rows_from_payload_uncanonicalized(
+        raw, orphan_projection_template(fields))
+    assert extracted == payload_rows
+    assert [row[4] for row in extracted] == ["note-b", "note-a", "note-c"]
+    assert raw == {"rows": payload_rows}
+    # Quantity projection must not introduce the retired note-concatenation behavior.
+    assert [row[4] for row in projected] == ["", "", ""]
+
+
+def test_retired_partial_menu_input_is_rejected():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    rows = [
+        {"values": ["02/15", "朝", "じゃが芋のコンソメ煮", ""]},
+        {"values": ["02/15", "朝", "キャベツサラダ", ""]},
+    ]
+    payload_rows = [
+        ["02/15", "朝", "キャベツサラダ", "8"],
+        ["02/15", "朝", "じゃがいものコンソメ煮", "7"],
+    ]
+
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
+
+
+def test_retired_row_index_input_without_menu_is_rejected():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.soft_2f"]
+    rows = [
+        {"values": ["02/15", "昼", "Menu A", "", ""]},
+    ]
+    payload_rows = [
+        ["02/15", "昼", "", "5", "2"],
+    ]
+
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
+
+
+def test_retired_noise_and_quantity_only_rows_are_rejected():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.soft_2f"]
+    rows = [
+        {"values": ["02/15", "昼", "Menu A", "", ""]},
+    ]
+    payload_rows = [
+        # Free-text/noise row (no quantity columns) should not be row-index mapped.
+        ["", "3000", "自由領域メモ", "", ""],
+        # The old quantity-only row must not gain an inferred menu identity.
+        ["02/15", "昼", "", "5", "2"],
+    ]
+
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
+
+
+def test_retired_same_index_cannot_replace_missing_menu():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    rows = [
+        {"values": ["02/15", "昼", "じゃが芋のコンソメ煮", ""]},
+        {"values": ["02/15", "昼", "キャベツサラダ", ""]},
+        {"values": ["02/15", "昼", "豚肉とれんこんの炒め煮", ""]},
+    ]
+    payload_rows = [
+        ["02/15", "昼", "じゃが芋のコンソメ煮", ""],
+        ["02/15", "昼", "", "23"],
+        ["02/15", "昼", "豚肉とれんこんの炒め煮", ""],
+    ]
+
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
+
+
+def test_retired_cross_date_input_without_meal_is_rejected():
+    fields = ["date_mmdd", "menu", "qty.regular_2f"]
+    rows = [
+        {"values": ["02/15", "Menu A", ""]},
+        {"values": ["02/15", "Menu B", ""]},
+        {"values": ["02/16", "Menu C", ""]},
+    ]
+    payload_rows = [
+        ["02/15", "Menu A", ""],
+        ["", "", ""],
+        ["02/16", "", "12"],
+    ]
+
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
+
+
+def test_retired_large_quantity_input_keeps_raw_3000():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    rows = [
+        {"values": ["02/15", "朝", "Menu A", ""]},
+    ]
+    payload_rows = [
+        ["02/15", "朝", "Menu A", "3000"],
+    ]
+
+    projected, stats = orphan_projection(fields, rows, payload_rows)
+    assert projected == [["02/15", "朝", "Menu A", "3000"]]
+    assert stats["exact"] == 1
+
+
+def test_retired_notes_and_tail_cannot_fill_quantity_gaps():
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"]
+    rows = [
+        {"values": ["02/15", "朝", "Menu A", "", ""]},
+        {"values": ["02/15", "朝", "Menu B", "", ""]},
+        {"values": ["02/15", "昼", "Menu C", "", ""]},
+        {"values": ["02/15", "昼", "Menu D", "", ""]},
+        {"values": ["02/15", "昼", "Menu E", "", ""]},
+        {"values": ["02/15", "夕", "Menu F", "", ""]},
+        {"values": ["02/15", "夕", "Menu G", "", ""]},
+    ]
+    payload_rows = [
+        ["2/15", "朝", "Menu A", "23", ""],
+        ["2/15", "朝", "Menu B", "", "23"],  # loose numeric in note column
+        ["2/15", "昼", "Menu C", "23", ""],
+        ["2/15", "昼", "Menu D", "", ""],  # isolated gap
+        ["2/15", "昼", "Menu E", "23", ""],
+        ["2/15", "夕", "Menu F", "16", ""],
+        ["2/15", "夕", "Menu G", "", ""],  # must not adopt the tail candidate
+    ]
+
+    raw = {"rows": deepcopy(payload_rows), "unstructured_qty": ["16"]}
+    before = deepcopy(raw)
+    selected = orphan_projection_template(fields)
+    baseline = {
+        "fields": fields, "rows": [row["values"] for row in rows],
+        "raw_output": raw, "baseline_source": "sheet",
+    }
+    projected, stats = orders._build_reparse_authoritative_quantity_baseline_rows(
+        baseline=baseline, template=selected)
+    assert [row[3] for row in projected] == ["23", "", "23", "", "23", "16", ""]
+    assert raw == before
+    extracted = orders._extract_sheet_rows_from_payload_uncanonicalized(raw, selected)
+    assert extracted == payload_rows and extracted[1][4] == "23"
+    assert raw["unstructured_qty"] == ["16"]
+    assert stats["exact"] == 7
+    assert all(stats[key] == 0 for key in ("loose_cell", "gap_fill", "unstructured", "cluster_fill"))
+
+
+def test_retired_source_row_index_cannot_supply_missing_identity():
+    fields = [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+        "remarks",
+    ]
+    rows = [
+        {"row_id": "r0", "values": ["", "", "Menu 0", "", "", "", "", "", "", ""]},
+        {"row_id": "r1", "values": ["", "", "Menu 1", "", "", "", "", "", "", ""]},
+    ]
+    order_lines = [
+        {
+            "source_row_index": 1,
+            "diet_type": "regular",
+            "area_id": "2F",
+            "quantity_original": 5,
+            "quantity_corrected": None,
+            "change_note": None,
+        }
+    ]
+
+    before = deepcopy((rows, order_lines))
+    line = order_lines[0]
+    assert orders._build_canonical_menu_key(
+        menu_date=line.get("date"), daypart=line.get("daypart"),
+        menu_name=line.get("menu_name")) is None
+    # Keep the original absent identities and quantity 5; never borrow target Menu 1.
+    payload_rows = [[line.get("date", ""), line.get("daypart", ""), line.get("menu_name", ""),
+                     str(line["quantity_original"]), "", "", "", "", "", ""]]
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
+    assert (rows, order_lines) == before
+
+
+@pytest.mark.parametrize("flags", [
+    None, {}, {"_reparse_debug": {"sheet_cluster_fill_decision": ""}},
+    {"_reparse_debug": {"sheet_cluster_fill_decision": "allow"}},
+    {"_sheet_fill_decision": True},
+], ids=["none", "absent", "empty", "allow", "true"])
+def test_retired_cluster_flags_never_authorize_quantity_fill(flags):
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f", "remarks"]
+    rows = [
+        ["02/08", "昼", "Menu A", "45", "", ""],
+        ["02/08", "昼", "Menu B", "45", "", ""],
+        ["02/08", "昼", "Menu C", "", "", ""],
+        ["02/09", "昼", "Menu D", "44", "", ""],
+    ]
+    raw = {"rows": deepcopy(rows), **(flags or {})}
+    baseline = {"fields": fields, "rows": deepcopy(rows), "raw_output": raw, "baseline_source": "sheet"}
+    selected = orphan_projection_template(fields)
+    before = deepcopy((baseline, selected))
+    projected, stats = orders._build_reparse_authoritative_quantity_baseline_rows(
+        baseline=baseline, template=selected)
+    assert projected == rows and projected[2][3] == ""
+    assert stats["exact"] == 4 and stats["cluster_fill"] == 0
+    assert (baseline, selected) == before
+
+
+def test_retired_row_rescue_cannot_cross_explicit_dates():
+    target = [{"values": ["2026/10/01", "昼", "Same menu", "", "", ""]}]
+    source = [["2026/10/02", "昼", "Same menu", "12", "0", ""]]
+    before = deepcopy((target, source))
+    with pytest.raises(fax.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        bound_projection(target, source)
+    assert (target, source) == before
