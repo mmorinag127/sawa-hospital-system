@@ -2617,9 +2617,10 @@ def test_apply_payload_quantities_numeric_only_skips_cross_date_rows():
     assert rows[1]["values"][4] == "keep-b"
 
 
-def test_apply_payload_quantities_numeric_only_allows_row_index_when_payload_has_no_dates():
+def test_canonical_projection_rejects_missing_dates_and_mismatched_menus():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", "keep-a"]},
         {"values": ["02/15", "昼", "Menu B", "", "keep-b"]},
@@ -2629,21 +2630,14 @@ def test_apply_payload_quantities_numeric_only_allows_row_index_when_payload_has
         ["", "", "OCRノイズB", "10", "payload-note-b"],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 2
-    assert rows[0]["values"][3] == "20"
-    assert rows[1]["values"][3] == "10"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_ignores_payload_daypart_noise_for_row_index_rescue():
+def test_canonical_projection_rejects_noisy_dayparts_and_missing_identity():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", "keep-a"]},
         {"values": ["02/15", "昼", "Menu B", "", "keep-b"]},
@@ -2655,22 +2649,14 @@ def test_apply_payload_quantities_numeric_only_ignores_payload_daypart_noise_for
         ["", "€", "", "8", "payload-note-c"],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 3
-    assert rows[0]["values"][3] == "20"
-    assert rows[1]["values"][3] == "10"
-    assert rows[2]["values"][3] == "8"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_keeps_sparse_column_value_from_direct_payload_row():
+def test_canonical_projection_rejects_sparse_quantities_with_mismatched_menus():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f", "qty.mixer_3f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", "", "", "keep-a"]},
         {"values": ["02/15", "昼", "Menu B", "", "", "", "keep-b"]},
@@ -2680,25 +2666,14 @@ def test_apply_payload_quantities_numeric_only_keeps_sparse_column_value_from_di
         ["02/15", "昼", "OCR B", "4", "9", "58", "note-b"],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 2
-    assert rows[0]["values"][3] == "4"
-    assert rows[0]["values"][4] == "9"
-    assert rows[0]["values"][5] == ""
-    assert rows[1]["values"][3] == "4"
-    assert rows[1]["values"][4] == "9"
-    assert rows[1]["values"][5] == "58"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_fills_two_row_cluster_edge_gap():
+def test_canonical_projection_rejects_identityless_cluster_edge_quantities():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_3f", "qty.soft_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", "", "keep-a"]},
         {"values": ["02/15", "朝", "Menu B", "", "", "keep-b"]},
@@ -2708,24 +2683,14 @@ def test_apply_payload_quantities_numeric_only_fills_two_row_cluster_edge_gap():
         ["", "", "", "4", "9", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 1
-    assert stats.get("cluster_fill", 0) >= 2
-    assert rows[0]["values"][3] == "4"
-    assert rows[0]["values"][4] == "9"
-    assert rows[1]["values"][3] == "4"
-    assert rows[1]["values"][4] == "9"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_skips_cluster_fill_when_consensus_disabled():
+def test_canonical_projection_rejects_identityless_quantities_without_consensus():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_3f", "qty.soft_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", "", "keep-a"]},
         {"values": ["02/15", "朝", "Menu B", "", "", "keep-b"]},
@@ -2735,25 +2700,14 @@ def test_apply_payload_quantities_numeric_only_skips_cluster_fill_when_consensus
         ["", "", "", "4", "9", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        enable_daypart_consensus=False,
-    )
-
-    assert stats["row_index"] == 1
-    assert stats.get("cluster_fill", 0) == 0
-    assert rows[0]["values"][3] == ""
-    assert rows[0]["values"][4] == ""
-    assert rows[1]["values"][3] == "4"
-    assert rows[1]["values"][4] == "9"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_fills_leading_blank_cluster_from_daypart_consensus():
+def test_canonical_projection_preserves_blanks_with_three_explicit_quantities():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A1", "", ""]},
         {"values": ["02/15", "朝", "Menu A2", "", ""]},
@@ -2775,25 +2729,20 @@ def test_apply_payload_quantities_numeric_only_fills_leading_blank_cluster_from_
         ["02/18", "朝", "Menu D2", "", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        allow_heuristics=False,
-    )
-
-    assert stats["exact"] >= 3
-    assert stats["row_index"] == 0
-    assert stats.get("cluster_fill", 0) >= 5
-    assert rows[0]["values"][3] == "20"
-    assert rows[1]["values"][3] == "20"
-    assert all(row["values"][3] == "20" for row in rows)
+    projected, stats = orphan_projection(fields, rows, payload_rows)
+    assert projected == payload_rows
+    assert stats["exact"] == len(rows)
+    assert stats["row_index"] == stats["cluster_fill"] == stats["span_copy"] == 0
+    assert [row[3] for row in projected] == ['', '', '20', '', '20', '', '20', '']
+    assert [row[:3] + row[4:] for row in projected] == [
+        row["values"][:3] + row["values"][4:] for row in rows
+    ]
 
 
-def test_apply_payload_quantities_numeric_only_does_not_fill_leading_blank_cluster_with_low_support():
+def test_canonical_projection_preserves_blanks_with_two_explicit_quantities():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A1", "", ""]},
         {"values": ["02/15", "朝", "Menu A2", "", ""]},
@@ -2811,28 +2760,20 @@ def test_apply_payload_quantities_numeric_only_does_not_fill_leading_blank_clust
         ["02/17", "朝", "Menu C2", "", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        allow_heuristics=False,
-    )
-
-    assert stats["exact"] >= 2
-    assert stats["row_index"] == 0
-    assert stats.get("cluster_fill", 0) >= 2
-    assert rows[0]["values"][3] == ""
-    assert rows[1]["values"][3] == ""
-    assert rows[2]["values"][3] == "20"
-    assert rows[3]["values"][3] == "20"
-    assert rows[4]["values"][3] == "20"
-    assert rows[5]["values"][3] == "20"
+    projected, stats = orphan_projection(fields, rows, payload_rows)
+    assert projected == payload_rows
+    assert stats["exact"] == len(rows)
+    assert stats["row_index"] == stats["cluster_fill"] == stats["span_copy"] == 0
+    assert [row[3] for row in projected] == ['', '', '20', '', '20', '']
+    assert [row[:3] + row[4:] for row in projected] == [
+        row["values"][:3] + row["values"][4:] for row in rows
+    ]
 
 
-def test_apply_payload_quantities_numeric_only_copies_explicit_span_marker_cluster():
+def test_canonical_projection_rejects_span_markers_without_matching_identity():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", ""]},
         {"values": ["02/15", "朝", "Menu B", "", ""]},
@@ -2842,24 +2783,14 @@ def test_apply_payload_quantities_numeric_only_copies_explicit_span_marker_clust
         ["", "", "OCR-A", ")20)20)20", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        allow_heuristics=False,
-    )
-
-    assert stats["row_index"] == 1
-    assert stats.get("span_copy", 0) >= 2
-    assert rows[0]["values"][3] == "20"
-    assert rows[1]["values"][3] == "20"
-    assert rows[2]["values"][3] == "20"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_applies_parenthesized_span_row_hint():
+def test_canonical_projection_rejects_parenthesized_hints_with_incomplete_identity():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/19", "昼", "Menu A", "", ""]},
         {"values": ["02/19", "昼", "Menu B", "", ""]},
@@ -2871,22 +2802,13 @@ def test_apply_payload_quantities_numeric_only_applies_parenthesized_span_row_hi
         ["", "", "Menu C", "", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        allow_heuristics=False,
-    )
-
-    assert stats["row_index"] >= 2
-    assert stats.get("span_copy", 0) >= 2
-    assert rows[0]["values"][3] == "20"
-    assert rows[1]["values"][3] == "20"
-    assert rows[2]["values"][3] == "20"
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
-def test_apply_payload_quantities_numeric_only_ignores_low_purity_quantity_column():
+def test_canonical_projection_rejects_mixed_quantity_text_without_identity():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = [
         "date_mmdd",
         "daypart",
@@ -2896,7 +2818,6 @@ def test_apply_payload_quantities_numeric_only_ignores_low_purity_quantity_colum
         "qty.mixer_3f",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "昼", f"Menu {idx}", "", "", "", ""]}
         for idx in range(8)
@@ -2912,17 +2833,8 @@ def test_apply_payload_quantities_numeric_only_ignores_low_purity_quantity_colum
         ["", "", "", "4", "9", "", ""],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 8
-    assert all(row["values"][3] == "4" for row in rows)
-    assert all(row["values"][4] == "9" for row in rows)
-    assert all(row["values"][5] == "" for row in rows)
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
 
 
 def test_extract_sheet_rows_from_payload_supports_escaped_newlines(tmp_path, monkeypatch):
