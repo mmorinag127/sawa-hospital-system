@@ -36,6 +36,8 @@ INPUTS = []
 MODEL_LOADS = []
 FONT = None
 GLYPHS = None
+ISOLATION = None
+BIND_SOCKETS = []
 
 
 def digest(path):
@@ -121,8 +123,8 @@ def audit(event, args):
         violation['stack'] = [{'file': frame.filename, 'line': frame.lineno, 'function': frame.name}
                               for frame in traceback.extract_stack()[:-1]]
         if event.startswith('socket.'):
-            family = args[2] if event == 'socket.getaddrinfo' else getattr(args[0], 'family', None)
-            address = args[:2] if event == 'socket.getaddrinfo' else args[-1]
+            family = args[2] if event == 'socket.getaddrinfo' else getattr(args[0] if args else None, 'family', None)
+            address = args[:2] if event == 'socket.getaddrinfo' else (args[-1] if args else None)
             violation['socket_family'] = getattr(family, 'name', str(family))
             violation['address'] = {'kind': type(address).__name__, 'value': '<redacted>'}
             if isinstance(address, tuple) and len(address) > 1 and type(address[1]) is int:
@@ -158,8 +160,17 @@ def audit(event, args):
             refuse('write outside owned native evidence root: ' + original)
         return resolved
 
-    if event in ('socket.connect', 'socket.getaddrinfo', 'socket.sendto', 'socket.bind',
-                 'subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'):
+    if event.startswith('socket.'):
+        if event == 'socket.__new__':
+            return
+        if event == 'socket.bind' and ISOLATION is not None and isolation.capability_bind(*args):
+            record = {'operation': 'IPv6 loopback ephemeral capability reservation',
+                      'requested': ['::1', 0], 'os_result': 'pending', 'closed': False}
+            AUDIT['allowed_capability_binds'].append(record)
+            BIND_SOCKETS.append((args[0], record))
+            return
+        refuse('native network/external process forbidden')
+    elif event in ('subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn', 'os.fork', 'os.forkpty'):
         refuse('native network/external process forbidden')
     elif event == 'sqlite3.connect':
         path = Path(args[0]).resolve()
@@ -195,19 +206,41 @@ def audit(event, args):
 
 def finish():
     sys.setprofile(None)
+    for sock, record in BIND_SOCKETS:
+        record['closed'] = sock.fileno() == -1
     save(OUT / 'audit.json', AUDIT)
     save(OUT / 'native-observed.json', OBSERVED)
     save(OUT / 'inputs.json', INPUTS)
     save(OUT / 'model-loads.json', MODEL_LOADS)
 
 
-def install_audit():
-    global OUT
+def observe_bind(_frame, event, function):
+    if event not in ('c_return', 'c_exception') or getattr(function, '__name__', None) != 'bind':
+        return
+    for sock, record in BIND_SOCKETS:
+        if getattr(function, '__self__', None) is sock and record['os_result'] == 'pending':
+            record['os_result'] = 'bound' if event == 'c_return' else 'os_error'
+            if event == 'c_return':
+                record['actual_address'] = list(sock.getsockname())
+
+
+def install_audit(isolation_args=None):
+    global OUT, ISOLATION, isolation
     OUT = Path(os.environ['OWNED_EVIDENCE_ROOT']).resolve(strict=True)
     if OUT.is_symlink() or OUT == Path('/'):
         raise ValueError('physical owned output root required')
+    # Only real /proc and kernel syscall verification can enable the exception.
+    # The environment alone, or a supplied precomputed state dictionary, cannot.
+    if isolation_args is not None:
+        import native_network_isolation as isolation
+
+        ISOLATION = isolation.verify_arguments(isolation_args)
+    AUDIT['isolation'] = ISOLATION
+    AUDIT['allowed_capability_binds'] = []
     sys.addaudithook(audit)
     atexit.register(finish)
+    if ISOLATION is not None:
+        sys.setprofile(observe_bind)
 
 
 def value(item):
@@ -354,6 +387,7 @@ def observe_model(frame, event, result):
 
 
 def observe(frame, event, result):
+    observe_bind(frame, event, result)
     if event != 'return' or result is None:
         return
     name, filename = frame.f_code.co_name, frame.f_code.co_filename
@@ -470,6 +504,7 @@ def run_ocr():
 
     def observe_analysis(frame, event, returned):
         try:
+            observe_bind(frame, event, returned)
             observe_model(frame, event, returned)
             if (event == 'return' and frame.f_code.co_name == '_serialize_results'
                     and frame.f_code.co_filename.endswith('yomitoku_runner.py')):
@@ -491,19 +526,39 @@ def run_ocr():
 
 
 def main():
+    import native_network_isolation as isolation
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('models', 'backend', 'ocr'))
+    parser.add_argument('mode', choices=('models', 'backend', 'ocr', 'network-check'))
     parser.add_argument('modules', nargs='*')
     parser.add_argument('--models', type=Path)
     parser.add_argument('--output', type=Path)
+    isolation.add_arguments(parser)
     args = parser.parse_args()
     if args.mode == 'models':
         if args.models is None or args.output is None:
             parser.error('model cache and manifest paths required')
         download_models(args.models, args.output)
         return 0
-    install_audit()
+    install_audit(args)
     try:
+        if ISOLATION is None:
+            raise RuntimeError('verified kernel isolation required; no native fallback')
+        if args.mode == 'network-check':
+            # Fresh process: this is the real library import under both guards,
+            # not an import before auditing or a substituted capability result.
+            import urllib3
+            from urllib3.util.connection import HAS_IPV6
+
+            finish()
+            records = AUDIT['allowed_capability_binds']
+            if (AUDIT['violations'] or AUDIT['observer_errors'] or len(records) != 1
+                    or not records[0]['closed'] or records[0]['os_result'] == 'pending'
+                    or HAS_IPV6 != (records[0]['os_result'] == 'bound')):
+                raise RuntimeError('actual urllib3 capability reservation proof incomplete')
+            save(OUT / 'capability.json', {'urllib3': urllib3.__version__, 'HAS_IPV6': HAS_IPV6,
+                                          'actual_bind': records[0]})
+            return 0
         if args.mode == 'backend':
             if not args.modules:
                 raise ValueError('explicit complete native test modules required')

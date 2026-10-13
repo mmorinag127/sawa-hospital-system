@@ -18,6 +18,8 @@ import time
 import traceback
 import xml.etree.ElementTree as ET
 
+from native_network_isolation import run_isolated
+
 BRANCH = 'codex/modernization-native-ci-20261013'
 PRIMARY = 'backend/tests/unit/test_modernization_owned_numeric_fax.py'
 REVIEW = ['backend/tests/unit/test_modernization_native_operator_review.py',
@@ -83,7 +85,7 @@ def command(argv, *, cwd, env, evidence, timeout=1200):
     try:
         with (evidence / 'stdout.log').open('w') as out, (evidence / 'stderr.log').open('w') as err:
             process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out, stderr=err,
-                                       start_new_session=True)
+                                       stdin=subprocess.DEVNULL, close_fds=True, start_new_session=True)
             record['pid'] = process.pid
             try:
                 record['exit'] = process.wait(timeout=timeout)
@@ -316,9 +318,14 @@ def run(source, root):
     save(evidence / 'run.json', summary)
     runtimes = {}
     try:
-        require_command([sys.executable, '-B', source / 'scripts/native_dependency_audit_checks.py',
-                         '--output', evidence / 'fd-audit-checks'], cwd=source, env=env,
-                        evidence=evidence / 'fd-audit-process', timeout=120)
+        result = run_isolated(command,
+            [sys.executable, '-B', source / 'scripts/native_dependency_audit_checks.py',
+             '--output', evidence / 'fd-audit-checks', '--network-checks'],
+            root=root, phase='kernel-preflight', cwd=source, env=env,
+            evidence=evidence / 'fd-audit-process', timeout=120)
+        if (result['exit'] or not result['process_group_absent'] or result.get('leftover_group')
+                or not result['isolation_cleanup_complete']):
+            raise RuntimeError('kernel/FD preflight failed before dependencies or models')
         if not FONT.is_file() or FONT.resolve() != FONT:
             raise ValueError(f'explicit runner Noto CJK font missing or aliased: {FONT}')
         require_command(['dpkg-query', '-W', '-f=${Version}', 'fonts-noto-cjk'],
@@ -333,6 +340,19 @@ def run(source, root):
                 summary['failures'].append({'phase': track + '-setup', 'error': traceback.format_exc()})
         if not runtimes:
             raise ValueError('no complete runtime pair available')
+        for track, pair in runtimes.items():
+            for version, python in pair.items():
+                name = track.replace('_', '-') + '-' + version + '-capability'
+                phase = evidence / name
+                phase.mkdir()
+                native_env = clean_environment(root / 'home')
+                native_env['OWNED_EVIDENCE_ROOT'] = str(phase)
+                result = run_isolated(command, [python, '-B', probe, 'network-check'],
+                    root=root, phase=name, cwd=source, env=native_env,
+                    evidence=phase / 'process', timeout=120)
+                if (result['exit'] or not result['process_group_absent'] or result.get('leftover_group')
+                        or not result['isolation_cleanup_complete']):
+                    raise RuntimeError('real urllib3 capability preflight failed: ' + name)
         models = root / 'models'
         downloader = next(iter(runtimes.values()))['after']
         require_command([downloader, probe, 'models', '--models', models,
@@ -346,8 +366,9 @@ def run(source, root):
             if pdf is not None:
                 native_env.update({'OWNED_PDF': str(pdf), 'OWNED_PDF_SHA256': digest(pdf)})
             before_models = {str(p.relative_to(models)): digest(p) for p in models.rglob('*') if p.is_file()}
-            result = command([runtimes[track][version], '-B', probe, *args],
-                             cwd=source, env=native_env, evidence=phase / 'process', timeout=900)
+            result = run_isolated(command, [runtimes[track][version], '-B', probe, *args],
+                root=root, phase=name, cwd=source, env=native_env,
+                evidence=phase / 'process', timeout=900)
             result['models_unchanged'] = before_models == {
                 str(p.relative_to(models)): digest(p) for p in models.rglob('*') if p.is_file()}
             result['font_unchanged'] = digest(FONT) == font['sha256']
@@ -361,10 +382,14 @@ def run(source, root):
             actual_models = ({x['name'] for x in load(phase / 'model-loads.json')}
                              if (phase / 'model-loads.json').is_file() else set())
             result['audit_clean'] = (audit is not None and not audit['violations']
-                                     and not audit['observer_errors'] and actual_models == required_models)
+                                     and not audit['observer_errors'] and audit.get('isolation') is not None
+                                     and all(x['closed'] and x['os_result'] != 'pending'
+                                             for x in audit.get('allowed_capability_binds', []))
+                                     and actual_models == required_models)
             summary['phases'][name] = result
             if (result['exit'] or not result['models_unchanged'] or not result['font_unchanged'] or not result['audit_clean']
                     or not result['process_group_absent'] or result.get('leftover_group')
+                    or not result['isolation_cleanup_complete']
                     or any(c['state'] != 'passed' for c in result.get('cases', []))):
                 summary['failures'].append({'phase': name, 'reason': 'test/probe/audit/process failure; not waived'})
             return phase

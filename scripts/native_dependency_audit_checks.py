@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Real filesystem/FD audit regressions, not OCR or native acceptance evidence."""
 import argparse
+from copy import deepcopy
 import os
 from pathlib import Path
 import platform
+import socket
 import sys
 import tempfile
 import unittest
 
 import native_dependency_probe as probe
+import native_network_isolation as isolation
 
 
 class OwnershipChecks(unittest.TestCase):
@@ -185,11 +188,134 @@ class OwnershipChecks(unittest.TestCase):
         self.denied('open', lambda: (probe.OUT / 'null-alias').write_text('forbidden alias'))
 
 
+class NetworkChecks(unittest.TestCase):
+    def denied(self, event, action):
+        before = len(probe.AUDIT['violations'])
+        with self.assertRaisesRegex(RuntimeError, 'native network/external process forbidden'):
+            action()
+        self.assertEqual(len(probe.AUDIT['violations']), before + 1)
+        self.assertEqual(probe.AUDIT['violations'][-1]['event'], event)
+
+    def test_exact_capability_requires_real_isolation(self):
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            if probe.ISOLATION is None:
+                self.denied('socket.bind', lambda: sock.bind(('::1', 0)))
+            else:
+                sock.bind(('::1', 0))
+                self.assertGreater(sock.getsockname()[1], 0)
+                record = probe.AUDIT['allowed_capability_binds'][-1]
+                self.assertEqual(record['os_result'], 'bound')
+                self.assertEqual(record['actual_address'], list(sock.getsockname()))
+        self.assertEqual(sock.fileno(), -1)
+
+    def test_wildcard_fixedport_and_non_tcp_bind_refused(self):
+        for family, kind, address in (
+            (socket.AF_INET6, socket.SOCK_STREAM, ('::', 0)),
+            (socket.AF_INET6, socket.SOCK_STREAM, ('::1', 9)),
+            (socket.AF_INET6, socket.SOCK_STREAM, ('::1', 0, 0, 0)),
+            (socket.AF_INET6, socket.SOCK_DGRAM, ('::1', 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, ('127.0.0.1', 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, ('0.0.0.0', 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, ('192.0.2.1', 0)),
+        ):
+            with self.subTest(address=address, kind=kind):
+                with socket.socket(family, kind) as sock:
+                    self.denied('socket.bind', lambda: sock.bind(address))
+
+    def test_python_communications_dns_unknown_events_refused(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            for event, action in (
+                ('socket.connect', lambda: sock.connect(('127.0.0.1', 9))),
+                ('socket.sendto', lambda: sock.sendto(b'blocked', ('127.0.0.1', 9))),
+                ('socket.sendmsg', lambda: sock.sendmsg([b'blocked'], [], 0, ('127.0.0.1', 9))),
+                ('socket.getaddrinfo', lambda: socket.getaddrinfo('invalid.example', 80)),
+                ('socket.gethostbyname', lambda: socket.gethostbyname('invalid.example')),
+                ('socket.gethostbyaddr', lambda: socket.gethostbyaddr('192.0.2.1')),
+                ('socket.gethostname', socket.gethostname),
+                ('socket.getnameinfo', lambda: socket.getnameinfo(('192.0.2.1', 9), 0)),
+                ('socket.future_operation', lambda: sys.audit('socket.future_operation')),
+            ):
+                with self.subTest(event=event):
+                    self.denied(event, action)
+
+    def test_live_socket_descriptor_blocks_attestation(self):
+        if probe.ISOLATION is None:
+            with self.assertRaises(RuntimeError):
+                isolation.verify_current(os.getpid(), 'net:[1]', os.getuid(), os.getgid(), 'fake.service')
+        else:
+            # Real FD, not a fabricated accepted state. Validation rejects it
+            # before any raw syscall probe can run beneath the installed audit.
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM):
+                with self.assertRaisesRegex(RuntimeError, 'inherited standard descriptor'):
+                    isolation.verify_arguments(ISOLATION_ARGS)
+
+
+class IsolationLogicChecks(unittest.TestCase):
+    """Portable decision tests. Synthetic state is never Linux execution proof."""
+    def test_rejects_false_namespace_privileges_routes_and_descriptors(self):
+        unit = 'sawa-native-1-1-preflight.service'
+        state = {'uid': [1001] * 4, 'gid': [1001] * 4, 'namespace': 'net:[2]',
+                 'host_namespace': 'net:[1]', 'interfaces': ['lo'], 'external_routes': [],
+                 'capabilities': dict.fromkeys(isolation.CAPABILITIES, 0),
+                 'no_new_privs': 1, 'seccomp': 2, 'cgroup': '0::/system.slice/' + unit,
+                 'fds': [0, 1, 2], 'socket_fds': [], 'uring_fds': []}
+        for field, invalid in (
+            ('namespace', 'net:[1]'), ('host_namespace', 'net:[3]'), ('uid', [0] * 4),
+            ('gid', [0] * 4), ('interfaces', ['lo', 'eth0']), ('external_routes', ['default']),
+            ('no_new_privs', 0), ('seccomp', 0), ('cgroup', '0::/'),
+            ('fds', [1, 2]), ('socket_fds', [0]), ('uring_fds', [3]),
+            *[('capabilities', {**state['capabilities'], key: 1}) for key in isolation.CAPABILITIES],
+        ):
+            with self.subTest(field=field, invalid=invalid):
+                changed = deepcopy(state)
+                changed[field] = invalid
+                with self.assertRaises(RuntimeError):
+                    isolation.validate_state(changed, 'net:[1]', 1001, 1001, unit)
+
+    def test_unit_argv_is_bounded_nonroot_and_no_namespace_join(self):
+        unit = isolation.unit_name(Path('/tmp/sawa-native-123-2'), 'backend-before')
+        self.assertEqual(unit, 'sawa-native-123-2-backend-before.service')
+        argv = isolation.service_command(unit, ['/usr/bin/python3', '-B', 'probe.py'],
+                                        Path('/tmp/source'), {'HOME': '/tmp/owned'}, 1001, 1001, 120)
+        for prop in ('PrivateNetwork=yes', 'CapabilityBoundingSet=', 'AmbientCapabilities=',
+                     'NoNewPrivileges=yes', 'RestrictNamespaces=yes', 'SystemCallArchitectures=native',
+                     'RestrictAddressFamilies=AF_INET AF_INET6', 'SystemCallErrorNumber=EPERM',
+                     'RuntimeMaxSec=120', 'TimeoutStopSec=10', 'KillMode=control-group',
+                     'User=1001', 'Group=1001'):
+            self.assertIn('--property=' + prop, argv)
+        self.assertIn('--property=SystemCallFilter=~' + ' '.join(isolation.DENIED_SYSCALLS), argv)
+        self.assertIn('--expand-environment=no', argv)
+        self.assertIn('-i', argv)
+        self.assertFalse(any('JoinsNamespaceOf' in item or 'NetworkNamespacePath' in item for item in argv))
+        with self.assertRaises(ValueError):
+            isolation.service_command(unit, ['python'], Path('/tmp'), {}, 0, 0, 120)
+        with self.assertRaises(ValueError):
+            isolation.unit_name(Path('/tmp/other'), 'backend')
+        with self.assertRaises(ValueError):
+            isolation.unit_name(Path('/tmp/sawa-native-123-2'), '../other')
+
+    def test_arguments_do_not_accept_partial_or_fake_isolation(self):
+        parser = argparse.ArgumentParser()
+        isolation.add_arguments(parser)
+        self.assertIsNone(isolation.verify_arguments(parser.parse_args([])))
+        with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+            isolation.verify_arguments(parser.parse_args(['--isolation-host-pid', '1']))
+        args = parser.parse_args(['--isolation-host-pid', str(os.getpid()), '--isolation-host-netns',
+                                  'net:[1]', '--isolation-uid', '0', '--isolation-gid', '0',
+                                  '--isolation-unit', 'fake.service'])
+        with self.assertRaises(RuntimeError):
+            isolation.verify_arguments(args)
+
+
 def main():
     global FOREIGN, FOREIGN_DIR, FOREIGN_FILE, OWNED_DIR
+    global ISOLATION_ARGS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--network-checks', action='store_true')
+    isolation.add_arguments(parser)
     args = parser.parse_args()
+    ISOLATION_ARGS = args
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     owned = output / 'owned'
@@ -210,8 +336,11 @@ def main():
     FOREIGN_FILE = os.open(sentinel, os.O_RDWR)
     OWNED_DIR = os.open(owned, os.O_RDONLY)
     os.environ['OWNED_EVIDENCE_ROOT'] = str(owned)
-    probe.install_audit()
+    probe.install_audit(args)
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(OwnershipChecks)
+    if args.network_checks:
+        for tests in (NetworkChecks, IsolationLogicChecks):
+            suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(tests))
     ids = [test.id() for test in suite]
     try:
         result = unittest.TextTestRunner(verbosity=2).run(suite)
@@ -222,6 +351,7 @@ def main():
                    'errors': result.errors, 'skips': result.skipped,
                    'outside_fixture_unchanged': unchanged,
                    'expected_refusals_retained': len(probe.AUDIT['violations']),
+                   'kernel_isolation_verified': probe.ISOLATION is not None,
                    'label': 'real FD tooling checks only, not native OCR acceptance'}
         # unittest failures include TestCase instances; retain their exact IDs.
         for key in ('failures', 'errors', 'skips'):
