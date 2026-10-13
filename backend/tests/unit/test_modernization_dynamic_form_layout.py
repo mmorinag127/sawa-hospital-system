@@ -125,6 +125,45 @@ def test_actual_saved_reloaded_layout_and_all_consumers_share_every_physical_row
         grid = assignment._structure_grid_from_rendered_worksheet(ws, dpi=144)
         assert grid["detected_row_count"] == expected_count + 2
         assert len(grid["row_edges"]) == expected_count + 3
+        merge_regions = assignment._worksheet_merge_regions_for_grid(
+            ws, row_edges=grid["row_edges"], column_edges=grid["column_edges"],
+            quantity_columns={5, 6},
+        )
+        quantity_regions = [region for region in merge_regions
+                            if region["is_quantity"] and region["min_row"] >= 11]
+        assert len(quantity_regions) == len(spans)
+        assert {region["range"] for region in quantity_regions} == {
+            f"E{first}:E{last}" for first, last, _key in spans
+        }
+        lines = assignment._merge_aware_grid_line_segments(
+            row_edges=grid["row_edges"], column_edges=grid["column_edges"],
+            merge_regions=merge_regions,
+        )
+        x0, x1, adjacent_end = grid["column_edges"][4:7]
+        for first, last, _key in spans:
+            start_index, end_index = first - 9, last - 9
+            y0, y1 = grid["row_edges"][start_index], grid["row_edges"][end_index + 1]
+            region = next(region for region in quantity_regions if region["range"] == f"E{first}:E{last}")
+            assert region == {
+                "range": f"E{first}:E{last}",
+                "min_col": 5, "max_col": 5, "min_row": first, "max_row": last,
+                "row_span": last - first + 1, "col_span": 1,
+                "start_col_index": 4, "end_col_index": 4,
+                "start_row_index": start_index, "end_row_index": end_index,
+                "bbox": pytest.approx([x0, y0, x1, y1]), "is_quantity": True,
+            }
+            for edge_index in range(start_index + 1, end_index + 1):
+                y = grid["row_edges"][edge_index]
+                horizontal = [line for line in lines if line["orientation"] == "horizontal"
+                              and line["start"][1] == line["end"][1] == y]
+                assert all(line["end"][0] <= x0 or line["start"][0] >= x1 for line in horizontal)
+                assert any(line["start"][0] <= x1 and line["end"][0] >= adjacent_end
+                           for line in horizontal)
+            for x in (x0, x1):
+                assert any(line["orientation"] == "vertical"
+                           and line["start"][0] == line["end"][0] == x
+                           and line["start"][1] <= y0 and line["end"][1] >= y1
+                           for line in lines)
         maps = [assignment._workbook_physical_row_map(ws, row_count=expected_count + 2),
                 review._step_review_physical_row_map(ws, row_count=expected_count + 2)]
         for row_map in maps:
