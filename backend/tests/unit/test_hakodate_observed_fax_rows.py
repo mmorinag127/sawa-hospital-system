@@ -11,6 +11,7 @@ from test_modernization_dynamic_form_layout import copied_master, entries_for, f
 from src.services import hakodate_step_review_pipeline_service as pipeline
 from src.services import master_order_form_template_service as master
 from src.services import workbook_pdf_renderer as renderer
+from src.services import hakodate_physical_menu_row_service as physical
 from src.services.hakodate_cell_ocr_batch_service import _validate_menu_day_boundaries
 
 
@@ -26,6 +27,38 @@ def _sheet(meal_counts, start=date(2026, 9, 27)):
         "physical_menu_row_count": len(row_ids),
         "week_id": f"{start:%Y-%m}@{start.isoformat()}~{(start + timedelta(days=len(meal_counts)-1)).isoformat()}",
     }
+
+
+@pytest.fixture
+def target_worksheet(tmp_path, copied_master):
+    workbooks = []
+
+    def build(sheet, *, thin_fax=False):
+        entries = []
+        for row_id in sheet["physical_menu_row_ids"]:
+            menu_date, meal, slot = row_id.split("__")
+            entries.append({"menu_date": menu_date, "daypart": {"breakfast": "朝", "lunch": "昼", "dinner": "夕"}[meal],
+                            "name": row_id, "sort_order": int(slot)})
+        config = facility()
+        if thin_fax:
+            columns = config["fax_template"]["columns"]
+            columns.append({**columns[3], "index": 6, "name": "qty.regular_y", "area_id": "Y"})
+            for column in columns[3:]:
+                column["header_group"] = "group"
+        path = tmp_path / f"target-{len(workbooks)}.xlsx"
+        master.build_facility_template_xlsx(
+            facility_config=config, master_template_path=copied_master, output_path=path,
+            week_value=sheet["week_id"], week_menu_entries=entries,
+        )
+        workbook = load_workbook(path)
+        workbooks.append(workbook)
+        worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
+        assert len(master.validated_body_row_plan(worksheet)) == sheet["physical_menu_row_count"]
+        return worksheet
+
+    yield build
+    for workbook in workbooks:
+        workbook.close()
 
 
 def _observed_axis(monkeypatch, day_counts, blank_counts=(), header_count=2, *, worksheet=None):
@@ -72,9 +105,10 @@ def _observed_axis(monkeypatch, day_counts, blank_counts=(), header_count=2, *, 
 
 
 @pytest.mark.parametrize("blank_counts", [(2, 3, 4), (8, 8, 8), (7, 9, 11)])
-def test_month_boundary_preserves_all_observed_rows(monkeypatch, blank_counts):
+def test_month_boundary_preserves_all_observed_rows(monkeypatch, blank_counts, target_worksheet):
     corrected, evidence, observed, boundaries = _observed_axis(
-        monkeypatch, (8, 8, 8, 8), blank_counts
+        monkeypatch, (8, 8, 8, 8), blank_counts,
+        worksheet=target_worksheet(_sheet([(2, 3, 3)] * 4)),
     )
 
     assert corrected == observed
@@ -177,26 +211,55 @@ def test_menu_day_boundaries_reject_missing_structural_evidence():
 
 
 @pytest.mark.parametrize("blank_counts", [(8, 8, 8, 8), (2, 3, 4, 5), (9, 7, 6, 10)])
-def test_leading_blank_days_map_to_observed_october_rows(monkeypatch, blank_counts):
-    _, evidence, _, _ = _observed_axis(monkeypatch, (*blank_counts, 8, 8, 8))
+def test_leading_blank_days_map_to_observed_october_rows(monkeypatch, blank_counts, target_worksheet):
+    _, evidence, _, _ = _observed_axis(monkeypatch, (*blank_counts, 8, 8, 8),
+        worksheet=target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1))))
     indexes = _validate_menu_day_boundaries(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1)), evidence)
     assert indexes == list(range(sum(blank_counts), sum(blank_counts) + 24))
 
 
-def test_leading_and_trailing_blank_days_with_variable_menu_counts(monkeypatch):
-    _, evidence, _, _ = _observed_axis(monkeypatch, (5, 6, 9, 10, 11, 4, 3))
+def test_leading_and_trailing_blank_days_with_variable_menu_counts(monkeypatch, target_worksheet):
+    _, evidence, _, _ = _observed_axis(monkeypatch, (5, 6, 9, 10, 11, 4, 3),
+        worksheet=target_worksheet(_sheet([(2, 4, 3), (3, 4, 3), (3, 4, 4)], date(2026, 9, 29))))
     sheet = _sheet([(2, 4, 3), (3, 4, 3), (3, 4, 4)], date(2026, 9, 29))
     assert _validate_menu_day_boundaries(sheet, evidence) == list(range(11, 41))
 
 
-def test_wrong_target_day_count_is_not_replaced_with_another_matching_day(monkeypatch):
-    _, evidence, _, _ = _observed_axis(monkeypatch, (8, 8, 8, 8, 9, 8, 8))
+def test_month_pair_covers_each_row_once_before_recognition(monkeypatch, target_worksheet):
+    before = _sheet([(2, 3, 3)] * 4)
+    after = _sheet([(2, 3, 3)] * 3, date(2026, 10, 1))
+    selected = []
+    for sheet in (before, after):
+        _, evidence, _, _ = _observed_axis(monkeypatch, (8,) * 7, worksheet=target_worksheet(sheet))
+        selected.append(_validate_menu_day_boundaries(sheet, evidence))
+    assert selected == [list(range(32)), list(range(32, 56))]
+    assert set(selected[0]).isdisjoint(selected[1])
+    assert sorted(selected[0] + selected[1]) == list(range(56))
+
+
+@pytest.mark.parametrize("boundaries,reason", [
+    ([0, 1, 2, 3, 4, 5, 13, 21, 29], "fax_calendar_day_boundaries_ambiguous"),
+    ([0, 8, 16, 24, 32, 40, 44, 48, 56], "fax_date_column_physical_boundaries_changed"),
+    ([0, 8, 16, 24, 32, 40, 56], "fax_date_column_physical_boundaries_changed"),
+])
+def test_partial_week_rejects_ambiguous_unknown_extra_and_missing_days(target_worksheet, boundaries, reason):
+    ws = target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1)))
+    plan = master.validated_body_row_plan(ws)
+    printed = renderer.worksheet_date_column_boundary_indexes(ws, body_start_row=11, body_end_row=34)
+    with pytest.raises(ValueError, match=reason):
+        physical.resolve_partial_calendar_day_boundaries(plan, printed, boundaries, boundaries[-1])
+
+
+def test_wrong_target_day_count_is_not_replaced_with_another_matching_day(monkeypatch, target_worksheet):
+    _, evidence, _, _ = _observed_axis(monkeypatch, (8, 8, 8, 8, 9, 8, 8),
+        worksheet=target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1))))
     with pytest.raises(ValueError, match="fax_day_boundaries_disagree_with_monthly_menu"):
         _validate_menu_day_boundaries(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1)), evidence)
 
 
-def test_missing_monthly_day_blocks_mapping(monkeypatch):
-    _, evidence, _, _ = _observed_axis(monkeypatch, (8,) * 7)
+def test_missing_monthly_day_blocks_mapping(monkeypatch, target_worksheet):
+    _, evidence, _, _ = _observed_axis(monkeypatch, (8,) * 7,
+        worksheet=target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1))))
     sheet = _sheet([(2, 3, 3)] * 3, date(2026, 10, 1))
     del sheet["physical_menu_row_ids"][8:16]
     sheet["physical_menu_row_count"] = 16
@@ -204,7 +267,7 @@ def test_missing_monthly_day_blocks_mapping(monkeypatch):
         _validate_menu_day_boundaries(sheet, evidence)
 
 
-def test_broken_thin_fax_rulings_preserve_leading_blank_cells():
+def test_broken_thin_fax_rulings_preserve_leading_blank_cells(target_worksheet):
     xs = [float(value) for value in range(50, 851, 100)]
     ys = [50 + 32 * index for index in range(59)]
     image = np.full((1950, 901, 3), 255, dtype=np.uint8)
@@ -220,7 +283,8 @@ def test_broken_thin_fax_rulings_preserve_leading_blank_cells():
             for x in range(350, 850, 6):
                 cv2.line(image, (x, y), (x + 4, y), (0, 0, 0), 1)
     corrected, evidence = pipeline._row_intersection_correct_ys(
-        rectified_fax=image, corrected_xs=xs, template_ys=ys,
+        rectified_fax=image, corrected_xs=xs, template_ys=np.linspace(ys[0], ys[-1], 27).astype(int).tolist(),
+        worksheet=target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1)), thin_fax=True),
     )
     assert len(corrected) == len(ys)
     assert evidence["structural_match"]["body_day_boundary_indexes"] == list(range(0, 57, 8))

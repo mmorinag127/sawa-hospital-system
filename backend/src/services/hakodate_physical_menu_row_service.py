@@ -1,9 +1,59 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from collections import Counter
 from typing import Any
 
 from src.services import sheet_week_service
+
+
+def resolve_partial_calendar_day_boundaries(
+    physical_plan: list[dict[str, Any]], printed_boundaries: list[int],
+    observed_boundaries: list[int], observed_count: int,
+) -> list[int]:
+    """Resolve seven physical days while constraining only the authored target days."""
+    dates = [date.fromisoformat(row["date"]) for row in physical_plan]
+    _, first, last = sheet_week_service.parse_sheet_week_value(
+        sheet_week_service.build_calendar_week_value(dates[0]),
+    )
+    if first is None or last is None or dates[-1] > last:
+        raise ValueError("fax_calendar_week_unresolved")
+    counts = Counter(dates)
+    target_dates = [dates[0] + timedelta(days=i) for i in range((dates[-1] - dates[0]).days + 1)]
+    if list(counts) != target_dates:
+        raise ValueError("fax_canonical_day_identity_ambiguous")
+    if (not observed_boundaries or observed_boundaries[0] != 0
+            or observed_boundaries[-1] != observed_count
+            or any(b <= a for a, b in zip(observed_boundaries, observed_boundaries[1:]))):
+        raise ValueError("fax_date_column_physical_boundaries_changed")
+    day_indexes = [0, *(i for i in range(1, len(dates)) if dates[i] != dates[i - 1]), len(dates)]
+    subdivision_offsets = {
+        stop - edge for start, stop in zip(day_indexes, day_indexes[1:])
+        for edge in printed_boundaries if start < edge < stop
+    }
+    solutions = []
+
+    def visit(day_index, position, boundaries):
+        if len(solutions) > 1:
+            return
+        if day_index == 7:
+            if position == len(observed_boundaries) - 1:
+                solutions.append(boundaries)
+            return
+        known_count = counts.get(first + timedelta(days=day_index))
+        start = observed_boundaries[position]
+        for end_position in range(position + 1, min(len(observed_boundaries), position + len(subdivision_offsets) + 2)):
+            stop = observed_boundaries[end_position]
+            if known_count is not None and stop - start != known_count:
+                continue
+            if any(stop - edge not in subdivision_offsets for edge in observed_boundaries[position + 1:end_position]):
+                continue
+            visit(day_index + 1, end_position, [*boundaries, stop])
+
+    visit(0, 0, [0])
+    if len(solutions) != 1:
+        raise ValueError("fax_calendar_day_boundaries_ambiguous" if solutions else "fax_date_column_physical_boundaries_changed")
+    return solutions[0]
 
 
 def resolve_fax_menu_row_indexes(sheet: dict[str, Any], row_match: dict[str, Any]) -> list[int]:

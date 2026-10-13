@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import date
 import itertools
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils import range_boundaries
 from PIL import Image, ImageDraw, ImageFont
 
-from src.services import config_service, hakodate_assignment_service, master_order_form_template_service, workbook_pdf_renderer
+from src.services import config_service, hakodate_assignment_service, hakodate_physical_menu_row_service, master_order_form_template_service, sheet_week_service, workbook_pdf_renderer
 from src.services.hakodate_fixed_quad_registration_service import (
     build_fixed_quad_template_registration,
     render_pdf_page_to_bgr,
@@ -2445,6 +2446,12 @@ def _row_intersection_correct_ys(
     if worksheet is None:
         raise ValueError("fax_row_worksheet_required")
     row_edges = master_order_form_template_service.validated_template_row_edges(worksheet)
+    physical_plan = master_order_form_template_service.validated_body_row_plan(worksheet)
+    dates = [entry["date"] for entry in physical_plan]
+    _, calendar_start, calendar_end = sheet_week_service.parse_sheet_week_value(
+        sheet_week_service.build_calendar_week_value(date.fromisoformat(dates[0])),
+    )
+    partial_period = dates[0] != calendar_start.isoformat() or dates[-1] != calendar_end.isoformat()
     if len(template_ys) != len(row_edges) or len(corrected_xs) != worksheet.max_column + 1:
         return None, {"used": False, "reason": "fax_row_canonical_axes_mismatch"}
     if any(not np.isfinite(value) for value in [*template_ys, *corrected_xs]) or any(
@@ -2478,13 +2485,18 @@ def _row_intersection_correct_ys(
             continue
         candidates = [
             index for index, cluster in enumerate(voted_y_clusters)
-            if all(
+            if (partial_period or all(
                 abs(float(cluster["value"]) - float(template_ys[logical_index]))
                 < abs(float(cluster["value"]) - float(other_y))
                 for other_index, other_y in enumerate(template_ys) if other_index != logical_index
-            )
+            ))
             and set(boundary["column_votes"]).issubset(cluster.get("column_votes", []))
         ]
+        if partial_period:
+            previous = physical_matches[-1][1] if physical_matches else -1
+            # Printed header edges form the table's ordered prefix, before any body day.
+            following = [index for index in candidates if index > previous]
+            candidates = following[:1]
         if len(candidates) != 1:
             return None, {"used": False, "reason": "fax_body_header_boundary_unresolved",
                           "header_boundary_contract": header_contract, "header_candidates": candidates, **detection}
@@ -2496,7 +2508,7 @@ def _row_intersection_correct_ys(
     body_y = float(body_cluster["value"])
     matched_clusters = [voted_y_clusters[index] for index in matched_indexes]
     if any(float(cluster["value"]) < body_y and cluster not in matched_clusters for cluster in y_clusters):
-        return None, {"used": False, "reason": "fax_header_sequence_ambiguous", **detection}
+        return None, {"used": False, "reason": "fax_body_header_boundary_unresolved" if partial_period else "fax_header_sequence_ambiguous", **detection}
     observed_header = {logical: float(voted_y_clusters[index]["value"]) for logical, index in physical_matches}
     logical_header = []
     header_sources = []
@@ -2520,7 +2532,6 @@ def _row_intersection_correct_ys(
     corrected = [*logical_header, *(float(cluster["value"]) for cluster in body_clusters)]
     if any(right <= left for left, right in zip(corrected, corrected[1:])):
         return None, {"used": False, "reason": "fax_header_sequence_ambiguous", **detection}
-    physical_plan = master_order_form_template_service.validated_body_row_plan(worksheet)
     if not physical_plan:
         return None, {"used": False, "reason": "fax_canonical_day_source_missing", **detection}
     observed_body_count = len(body_clusters) - 1
@@ -2531,7 +2542,7 @@ def _row_intersection_correct_ys(
         "canonical_physical_row_count": len(physical_plan),
         "observed_physical_row_count": observed_body_count,
     }
-    if observed_body_count != len(physical_plan):
+    if not partial_period and observed_body_count != len(physical_plan):
         return None, {"used": False, "reason": "fax_physical_body_count_changed",
                       "canonical_day_source": day_source, **detection}
     canonical_date_boundaries = workbook_pdf_renderer.worksheet_date_column_boundary_indexes(
@@ -2544,27 +2555,41 @@ def _row_intersection_correct_ys(
     day_source["date_column_boundary_source"] = "actual_worksheet_renderer.merge_aware_borders.column_A"
     day_source["canonical_date_column_boundary_indexes"] = canonical_date_boundaries
     day_source["observed_date_column_boundary_indexes"] = observed_date_boundaries
-    dates = [entry["date"] for entry in physical_plan]
     if dates != sorted(dates):
         return None, {"used": False, "reason": "fax_canonical_day_identity_ambiguous",
                       "canonical_day_source": day_source, **detection}
     # Actual day changes are mandatory; known weekday subdivisions are optional.
     day_boundaries = [0, *(index for index in range(1, len(dates)) if dates[index] != dates[index - 1]), len(dates)]
-    if not set(day_boundaries).issubset(observed_date_boundaries) or set(observed_date_boundaries) - set(canonical_date_boundaries):
+    if partial_period:
+        try:
+            day_boundaries = hakodate_physical_menu_row_service.resolve_partial_calendar_day_boundaries(
+                physical_plan, canonical_date_boundaries, observed_date_boundaries, observed_body_count,
+            )
+        except ValueError as exc:
+            return None, {"used": False, "reason": str(exc), "canonical_day_source": day_source, **detection}
+        first_day = (date.fromisoformat(dates[0]) - calendar_start).days
+        offset = day_boundaries[first_day]
+        canonical_date_boundaries = [edge + offset for edge in canonical_date_boundaries]
+        day_source["target_body_row_offset"] = offset
+        day_source["canonical_row_scope"] = "target_period"
+        day_source["canonical_date_column_boundary_indexes"] = canonical_date_boundaries
+    if not partial_period and (not set(day_boundaries).issubset(observed_date_boundaries) or set(observed_date_boundaries) - set(canonical_date_boundaries)):
         return None, {"used": False, "reason": "fax_date_column_physical_boundaries_changed",
                       "canonical_day_source": day_source,
                       "missing_date_column_boundary_indexes": sorted(set(day_boundaries) - set(observed_date_boundaries)),
                       "extra_date_column_boundary_indexes": sorted(set(observed_date_boundaries) - set(canonical_date_boundaries)),
                       **detection}
+    target_day_boundaries = [0, *(index for index in range(1, len(dates)) if dates[index] != dates[index - 1]), len(dates)]
+    offset = day_source.get("target_body_row_offset", 0)
     day_source["days"] = [
-        {"date": dates[first], "first_body_row_index": first, "stop_body_row_index": stop,
+        {"date": dates[first], "first_body_row_index": first + offset, "stop_body_row_index": stop + offset,
          "first_worksheet_row": physical_plan[first]["worksheet_row"],
          "last_worksheet_row": physical_plan[stop - 1]["worksheet_row"]}
-        for first, stop in zip(day_boundaries, day_boundaries[1:])
+        for first, stop in zip(target_day_boundaries, target_day_boundaries[1:])
     ]
     date_subdivisions = [
-        {"body_boundary_index": index, "date": dates[index],
-         "worksheet_row": physical_plan[index]["worksheet_row"], "observed_y": float(cluster["value"]),
+        {"body_boundary_index": index, "date": dates[index - offset],
+         "worksheet_row": physical_plan[index - offset]["worksheet_row"], "observed_y": float(cluster["value"]),
          "source": "canonical_rendered_weekday_or_date_cell_subdivision"}
         for index, cluster in enumerate(body_clusters)
         if index in canonical_date_boundaries and index in observed_date_boundaries and index not in day_boundaries
