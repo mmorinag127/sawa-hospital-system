@@ -649,6 +649,7 @@ def orphan_projection_template(fields):
         "qty.soft_2f": ("soft", "2F"), "qty.soft_3f": ("soft", "3F"),
         "qty.mixer_2f": ("mixer", "2F"), "qty.mixer_3f": ("mixer", "3F"),
         "qty.regular_x": ("regular", "X"),
+        "qty.soft_x": ("soft", "X"), "qty.regular_bag_x": ("regular_bag", "X"),
     }
     return {
         "main_ocr_row_fields": list(fields),

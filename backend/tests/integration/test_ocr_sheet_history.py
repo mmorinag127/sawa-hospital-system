@@ -2591,8 +2591,9 @@ def test_overlay_payload_dayparts_onto_sheet_rows_by_date_order_keeps_menu_rows(
 
 
 def test_apply_payload_quantities_numeric_only_skips_cross_date_rows():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["02/15", "朝", "Menu A", "", "keep-a"]},
         {"values": ["02/15", "昼", "Menu B", "", "keep-b"]},
@@ -2602,17 +2603,8 @@ def test_apply_payload_quantities_numeric_only_skips_cross_date_rows():
         ["01/01", "朝", "OCRノイズB", "10", "payload-note-b"],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-    )
-
-    assert stats["row_index"] == 0
-    assert stats["exact"] == 0
-    assert stats["partial"] == 0
-    assert stats["neighbor"] == 0
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError, match="^sheet_canonical_mismatch$"):
+        orphan_projection(fields, rows, payload_rows)
     assert rows[0]["values"][0] == "02/15"
     assert rows[0]["values"][1] == "朝"
     assert rows[0]["values"][2] == "Menu A"
@@ -3002,6 +2994,8 @@ def test_sanitize_payload_table_raw_trims_non_table_tail():
 
 
 def test_apply_payload_quantities_numeric_only_keeps_valid_large_counts():
+    from tests.unit.test_modernization_ocr_canonical_projection import orphan_projection
+
     fields = [
         "date_mmdd",
         "daypart",
@@ -3009,7 +3003,6 @@ def test_apply_payload_quantities_numeric_only_keeps_valid_large_counts():
         "qty.soft_x",
         "qty.regular_bag_x",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
     rows = [
         {"values": ["04/05", "夕", "じゃが芋の煮物", "", ""]},
     ]
@@ -3017,16 +3010,10 @@ def test_apply_payload_quantities_numeric_only_keeps_valid_large_counts():
         ["04/05", "夕", "じゃが芋の煮物", "58", "2"],
     ]
 
-    order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        enable_daypart_consensus=False,
-    )
+    projected, stats = orphan_projection(fields, rows, payload_rows)
 
-    assert rows[0]["values"][3] == "58"
-    assert rows[0]["values"][4] == "2"
+    assert stats["exact"] == 1
+    assert projected == [["04/05", "夕", "じゃが芋の煮物", "58", "2"]]
 
 
 def test_parse_sheet_quantity_cell_rejects_embedded_text_tokens():
