@@ -9297,7 +9297,7 @@ def _build_live_hakodate_manifest_item(
     )
     from src.services.hakodate_fixed_quad_registration_service import (
         build_fixed_quad_template_registration,
-        canonical_template_axes_from_workbook,
+        registration_template_axes_from_workbook,
         render_pdf_page_to_bgr,
     )
 
@@ -9308,7 +9308,7 @@ def _build_live_hakodate_manifest_item(
     accepted_canvas_height = 4273
     template_image = render_pdf_page_to_bgr(str(structure_pdf), width=accepted_canvas_width)
     template_bbox = _estimate_hakodate_template_bbox_from_rendered_image(template_image)
-    template_axes_x, template_axes_y = canonical_template_axes_from_workbook(
+    template_axes_x, template_axes_y = registration_template_axes_from_workbook(
         structure_xlsx,
         sheet_name=template_sheet_name,
         canvas_width=accepted_canvas_width,

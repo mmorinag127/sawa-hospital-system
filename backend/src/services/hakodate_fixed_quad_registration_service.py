@@ -685,6 +685,30 @@ def canonical_template_axes_from_workbook(
     )
 
 
+def registration_template_axes_from_workbook(
+    workbook_path: Path | str, *, sheet_name: str, canvas_width: int,
+    canvas_height: int, table_bbox: list[float] | None = None,
+) -> tuple[list[int], list[int]]:
+    """Keep dynamic row identities within the locked master's OCR canvas frame."""
+    xs, ys = canonical_template_axes_from_workbook(
+        workbook_path, sheet_name=sheet_name, canvas_width=canvas_width,
+        canvas_height=canvas_height, table_bbox=table_bbox,
+    )
+    _, frame = canonical_template_axes_from_workbook(
+        master_order_form_template_service.MASTER_TEMPLATE_PATH,
+        sheet_name=master_order_form_template_service.MASTER_SHEET_NAME,
+        canvas_width=canvas_width, canvas_height=canvas_height,
+    )
+    if not (0 <= ys[0] < ys[-1] <= canvas_height
+            and 0 <= frame[0] < frame[-1] <= canvas_height):
+        raise ValueError("canonical_template_frame_invalid")
+    scale = (frame[-1] - frame[0]) / (ys[-1] - ys[0])
+    mapped = [int(round(frame[0] + (y - ys[0]) * scale)) for y in ys]
+    return _normalize_explicit_template_axes(
+        xs, mapped, expected_x_edge_count=len(xs), expected_y_edge_count=len(ys),
+    )
+
+
 def draw_fixed_quad_overlay(original: np.ndarray, quad: np.ndarray) -> np.ndarray:
     image = original.copy()
     cv2.polylines(image, [quad.astype(np.int32)], True, (0, 0, 255), 6, cv2.LINE_AA)
