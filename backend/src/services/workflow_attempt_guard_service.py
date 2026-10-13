@@ -165,9 +165,10 @@ def _read_current_sheet_order(session: Any, order_id: str) -> Any:
     return lock_order_execution_input(session, order_id, read_only=True)
 
 
-def capture_current_sheet_input(order_id: str) -> dict[str, Any]:
+def capture_current_sheet_input(order_id: str, *, read_session: Any = None) -> dict[str, Any]:
+    from contextlib import nullcontext
     from src.db import session_scope
-    with session_scope() as session:
+    with (nullcontext(read_session) if read_session is not None else session_scope()) as session:
         order = _read_current_sheet_order(session, order_id)
         if order is None:
             if session.get(Order, order_id, populate_existing=True) is not None:
@@ -269,11 +270,24 @@ def validate_current_sheet_input(session: Any, order_id: str, context: Any, *, w
     _validate_current_sheet_boundary_input(order_id, actual)
     if not snapshots_equal(captured, actual):
         raise CurrentSheetInputChanged("current_sheet_input_changed")
-    if captured.get("sheet_source_unavailable") and not (
-        context.get("sheet_unavailable") is True
-        or (context.get("blockers") and context.get("draft_payload") is None)
-    ):
-        raise CurrentSheetInputChanged("current_sheet_source_unavailable")
+    if captured.get("sheet_source_unavailable"):
+        if context.get("draft_payload") is not None:
+            from src.services.order_service import _draft_record_is_selected_saved_sheet
+            source = context.get("source_draft_record")
+            if not (
+                context.get("sheet_unavailable") is True
+                and captured["sheet_source_unavailable"] in (context.get("blockers") or [])
+                and _draft_record_is_selected_saved_sheet(source)
+                and source.get("order_id") == order_id
+                and source.get("id") == (captured.get("draft") or {}).get("id") == context.get("draft_id")
+                and snapshots_equal(source["draft_sheet_json"], captured["draft"]["draft_sheet_json"])
+                and snapshots_equal(source["draft_sheet_json"], context["draft_payload"])
+                and all(snapshots_equal(context.get(key), source["draft_sheet_json"].get(key, []))
+                        for key in ("fields", "header", "rows", "row_ids"))
+            ):
+                raise CurrentSheetInputChanged("current_sheet_source_unavailable")
+        elif not (context.get("sheet_unavailable") is True or context.get("blockers")):
+            raise CurrentSheetInputChanged("current_sheet_source_unavailable")
     # A semantic rebase may create a new, unselected draft. Verify that exact
     # artifact as well as the selected inputs captured before generation.
     source = receipt.get("materialized_draft")

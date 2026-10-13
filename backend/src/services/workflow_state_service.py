@@ -17,6 +17,7 @@ from src.services.workflow_attempt_guard_service import (
     lock_order_execution_input,
     validate_current_sheet_input,
     capture_current_sheet_input, bind_current_sheet_input,
+    snapshots_equal,
     CurrentSheetInputChanged,
 )
 from src.services.ocr_job_service import (
@@ -475,6 +476,7 @@ def _load_workflow_current_sheet_context(
             refresh_draft_from_semantic=refresh_draft_from_semantic,
             upgrade_generic_from_sheet=True,
             backfill_from_revision=False,
+            publish_snapshot=False,
         )
     return _order_service.get_current_sheet_context(
         order_id,
@@ -914,7 +916,7 @@ def _build_workflow_state_projection(
     )
     with session_scope() as session:
         order_input = validate_current_sheet_input(session, normalized_order_id, projection_context, writing=persist)
-        return _build_locked_workflow_state_projection(
+        projected = _build_locked_workflow_state_projection(
             normalized_order_id,
             canonical_order_service=_order_service,
             current_sheet_context=current_sheet_context,
@@ -925,6 +927,27 @@ def _build_workflow_state_projection(
             projection_session=session,
             order_input=order_input,
         )
+        committed_input = capture_current_sheet_input(normalized_order_id, read_session=session) if persist else None
+    if persist:
+        # Rebuild from committed inputs; never attach a new receipt to the
+        # pre-mutation context. A concurrent edit between transactions refuses.
+        from src.services import order_current_state_service
+        current = _order_service.get_current_sheet_context(
+            normalized_order_id, refresh_draft_from_semantic=refresh_draft_from_semantic,
+        )
+        receipt = getattr(current, "input_receipt", None)
+        if not isinstance(receipt, dict) or not snapshots_equal(committed_input, receipt.get("input")):
+            raise CurrentSheetInputChanged("current_sheet_input_changed")
+        if _order_service._current_sheet_context_uses_canonical_snapshot(
+            refresh_draft_from_semantic=refresh_draft_from_semantic,
+            upgrade_generic_from_sheet=True, backfill_from_revision=False,
+        ):
+            order_current_state_service.persist_current_state(
+                order_id=normalized_order_id, state_json=current,
+                draft_id=current.get("draft_id"), evidence_run_id=current.get("base_evidence_run_id"),
+                template_version_id=current.get("template_version_id"),
+            )
+    return projected
 
 
 def _build_locked_workflow_state_projection(

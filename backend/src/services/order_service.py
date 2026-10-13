@@ -5712,6 +5712,9 @@ def _build_materialization_candidate_from_draft_record(
         }
     if not isinstance(configured_input, dict) or not isinstance(configured_input.get("facility"), dict) or not isinstance(configured_input.get("policy"), dict):
         return {"source": "draft_sheet", "error": "materialization_start_input_missing", "lines": [], "line_count": 0}
+    if isinstance(synchronous_write_input, dict) and synchronous_write_input.get("physical_menu_entries") == []:
+        return {"source": "draft_sheet", "draft_id": draft_record.get("id"),
+                "error": "menu_entries_missing", "lines": [], "line_count": 0}
     facility_config = deepcopy(configured_input["facility"])
     if facility_config.get("facility_id") != facility_id:
         return {"source": "draft_sheet", "error": "materialization_facility_input_mismatch", "lines": [], "line_count": 0}
@@ -11583,6 +11586,16 @@ def _draft_record_has_semantic_sheet_contract(
     return isinstance(rows, list) and len(rows) > 0
 
 
+def _draft_record_is_selected_saved_sheet(draft_record: dict[str, Any] | None) -> bool:
+    if not isinstance(draft_record, dict) or draft_record.get("draft_state") != "saved":
+        return False
+    order_id = draft_record.get("order_id")
+    if not order_id or not draft_record.get("id"):
+        return False
+    selected = draft_sheet_service.get_selected_sheet_draft(order_id)
+    return isinstance(selected, dict) and snapshots_equal(selected, draft_record)
+
+
 def _draft_record_is_authoritative_current_sheet(
     draft_record: dict[str, Any] | None,
 ) -> bool:
@@ -11594,6 +11607,8 @@ def _draft_record_is_authoritative_current_sheet(
         return False
     if (draft_record.get("draft_sheet_json") or {}).get("adopted") is False:
         return False
+    if draft_record.get("draft_state") == "saved":
+        return _draft_record_is_selected_saved_sheet(draft_record)
     if _draft_record_has_forced_repair_mode(draft_record):
         return True
     draft_payload = (
@@ -12054,6 +12069,8 @@ def _draft_record_requires_current_sheet_semantic_rebase(
 ) -> tuple[bool, dict[str, Any] | None]:
     if not isinstance(draft_record, dict):
         return False, None
+    if _draft_record_is_selected_saved_sheet(draft_record):
+        return False, None
     if _draft_record_has_forced_repair_mode(draft_record):
         return False, None
     draft_sheet_json = (
@@ -12298,7 +12315,8 @@ def _build_current_sheet_context_uncached(
     if not isinstance(draft_payload, dict):
         return None
 
-    if upgrade_generic_from_sheet and _draft_fields_look_generic(draft_payload.get("fields")):
+    selected_saved_sheet = _draft_record_is_selected_saved_sheet(current_record)
+    if not selected_saved_sheet and upgrade_generic_from_sheet and _draft_fields_look_generic(draft_payload.get("fields")):
         semantic_current = build_initial_sheet_draft(normalized_order_id)
         if isinstance(semantic_current, dict) and not _draft_fields_look_generic(semantic_current.get("fields")):
             draft_payload = dict(semantic_current)
@@ -12314,13 +12332,20 @@ def _build_current_sheet_context_uncached(
     raw_source = str(
         draft_payload.get("source") or current_record.get("draft_state") or "draft"
     ).strip() or "draft"
-    fields = [str(field).strip() for field in (draft_payload.get("fields") or []) if str(field).strip()]
+    fields = (
+        deepcopy(draft_payload.get("fields") or [])
+        if selected_saved_sheet
+        else [str(field).strip() for field in (draft_payload.get("fields") or []) if str(field).strip()]
+    )
     rows = deepcopy(draft_payload.get("rows")) if isinstance(draft_payload.get("rows"), list) else []
     row_ids = deepcopy(draft_payload.get("row_ids")) if isinstance(draft_payload.get("row_ids"), list) else []
     warnings = _dedupe_str_tokens(
         list(draft_payload.get("warnings") or []) + list(current_record.get("warnings_json") or [])
     )
     blockers = _dedupe_str_tokens(current_record.get("blockers_json") or [])
+    physical_source_missing = publication_input.get("physical_menu_entries") == []
+    if physical_source_missing:
+        blockers = _dedupe_str_tokens([*blockers, "current_sheet_source_unavailable"])
     try:
         quantity_field_identities_for_fields(
             publication_input["configured_input"]["facility"]["fax_template"], fields,
@@ -12344,14 +12369,14 @@ def _build_current_sheet_context_uncached(
     if not resolved_week_id:
         raise ValueError("week_unresolved")
     header = list(draft_payload.get("header") or []) if isinstance(draft_payload.get("header"), list) else []
-    if len(header) < len(fields):
+    if len(header) < len(fields) and not selected_saved_sheet:
         header.extend([_field_label(field) for field in fields[len(header) :]])
     has_authoritative_persisted_draft = bool(
         str(materialized_record.get("id") or "").strip()
         and _draft_record_is_authoritative_current_sheet(materialized_record)
     )
     source = raw_source
-    if facility_id and fields and not _draft_fields_look_generic(fields) and not clean_saved_draft:
+    if facility_id and fields and not _draft_fields_look_generic(fields) and not clean_saved_draft and not selected_saved_sheet:
         current_schema = _current_sheet_schema_snapshot_for_facility(
             facility_id,
             order_id=normalized_order_id,
@@ -12387,6 +12412,7 @@ def _build_current_sheet_context_uncached(
         "draft_record": materialized_record,
         "source_draft_record": current_record,
         "draft_payload": draft_payload,
+        **({"sheet_unavailable": True} if physical_source_missing else {}),
         "draft_id": str(materialized_record.get("id") or "").strip() or None,
         "template_version_id": template_version_id,
         "source": source,
@@ -12433,6 +12459,28 @@ def _bind_blocked_current_sheet_context(order_id: str, context: dict[str, Any] |
     if context is None:
         return None
     from src.services.workflow_attempt_guard_service import bind_current_sheet_input, validate_current_sheet_input
+    selected = draft_sheet_service.get_selected_sheet_draft(order_id)
+    if _draft_record_is_selected_saved_sheet(selected):
+        payload = deepcopy(selected["draft_sheet_json"])
+        context = dict(context)
+        if captured.get("sheet_source_unavailable"):
+            context["blockers"] = _dedupe_str_tokens([
+                *context.get("blockers", []), captured["sheet_source_unavailable"],
+            ])
+        context.update({key: deepcopy(payload.get(key, [])) for key in ("fields", "header", "rows", "row_ids")})
+        context.update(
+            draft_id=selected["id"], draft_record=deepcopy(selected), source_draft_record=deepcopy(selected),
+            draft_payload=payload, has_persisted_draft=True, authoritative_persisted_draft=True,
+            template_version_id=selected["template_version_id"], base_evidence_run_id=selected["base_evidence_run_id"],
+            sheet_unavailable=True, source=payload.get("source"),
+            order_payload=get_order_by_id(order_id, allow_unresolved_menu_amount=True),
+            facility_id=(captured.get("order") or {}).get("facility_code"),
+            resolved_week_id=_normalize_sheet_week_value((captured.get("order") or {}).get("week_code")),
+        )
+        context["current_sheet_revision_id"] = _current_sheet_revision_id_from_artifact(
+            draft_id=selected["id"], fields=context["fields"], header=context["header"],
+            rows_payload=context["rows"], row_ids=context["row_ids"],
+        )
     bound = bind_current_sheet_input(context, captured)
     with session_scope() as session:
         validate_current_sheet_input(session, order_id, bound)
@@ -12445,6 +12493,7 @@ def refresh_current_sheet_context(
     refresh_draft_from_semantic: bool = True,
     upgrade_generic_from_sheet: bool = True,
     backfill_from_revision: bool = False,
+    publish_snapshot: bool = True,
 ) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
@@ -12464,7 +12513,7 @@ def refresh_current_sheet_context(
     if (isinstance(context, dict) and context.get("blockers")
             and context.get("resolved_week_id") is None and context.get("draft_payload") is None):
         return context
-    if _current_sheet_context_uses_canonical_snapshot(
+    if publish_snapshot and _current_sheet_context_uses_canonical_snapshot(
         refresh_draft_from_semantic=refresh_draft_from_semantic,
         upgrade_generic_from_sheet=upgrade_generic_from_sheet,
         backfill_from_revision=backfill_from_revision,
@@ -24733,7 +24782,7 @@ def get_ocr_sheet(
             context = get_current_sheet_context(order_id)
             if not isinstance(context, dict):
                 return None, "sheet_unavailable"
-            if context.get("draft_payload") is None:
+            if context.get("draft_payload") is None or context.get("sheet_unavailable"):
                 return None, next(iter(context.get("blockers") or []), "sheet_unavailable")
             payload, _record = _authoritative_surface_payload_from_current_sheet_context(order_id, context)
             if payload is None:

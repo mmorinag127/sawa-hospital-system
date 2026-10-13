@@ -561,101 +561,111 @@ def test_build_label_csv_for_order_date_uses_daily_zero_quantity_rows(tmp_path, 
     assert {row[""] for row in rows} == {"0人前"}
 
 
-def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch):
-    order = {
-        "id": "ORD-DRAFT",
-        "facility": "FAC001",
-        "lines": [
-            {
-                "date": TARGET_DATE,
-                "daypart": "朝",
-                "menu_name": "stale",
-                "diet_type": "regular",
-                "area_id": "X",
-                "quantity_original": 1,
-            }
-        ],
-        "workflow_state": {"state": "apply_ready", "warnings": ["draft_newer_than_lines"]},
-    }
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *args, **kwargs: [])
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *args, **kwargs: [])
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
-    monkeypatch.setattr(
-        output_builder,
-        "_workflow_v2_lines_for_outputs",
-        lambda *_args, **_kwargs: [{
-            "date": TARGET_DATE,
-            "daypart": "朝",
-            "menu_name": "draft",
-            "diet_type": "regular",
-            "area_id": "X",
-            "quantity_original": 7,
-        }],
-    )
+def _selected_output(monkeypatch, tmp_path, engine, *, quantity=4, day=TARGET_DATE,
+                     menu="current", daypart="朝", lines=None, **authored):
+    from tests.helpers.newnarrowbaggingfixture import selected_bagging_order
+    if lines is None:
+        lines = [{"date": day.isoformat(), "daypart": daypart, "menu_name": menu,
+                  "diet_type": "regular", "area_id": "X", "bag_type": "standard",
+                  "quantity_original": quantity}]
+    registered, sheet = selected_bagging_order(
+        monkeypatch, tmp_path, lines, **{"facility_id": "FAC001", **authored})
+    return SimpleNamespace(id=registered["id"], root=tmp_path, engine=engine, sheet=sheet,
+                           protected=tuple(p for p in tmp_path.rglob("*")
+                                           if p.is_file() and "sqlite" not in p.name),
+                           observations=[])
 
-    lines = output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
 
+def _save_output(f, sheet):
+    from src.services import order_workflow_v2_service as workflow
+    current, error = workflow.get_workflow_readonly(f.id)
+    assert error is None
+    saved, error = workflow.save_sheet(order_id=f.id, sheet=sheet,
+                                      expected_revision=current["revision"])
+    assert error is None, error
+    assert saved["saved_sheet"]["sheet"] == sheet
+    f.revision = saved["workflow"]["revision"]
+    f.saved_id = saved["saved_sheet"]["saved_sheet_id"]
+    return saved
+
+
+def _bag_output(f):
+    from src.services import order_workflow_v2_service as workflow
+    bagging, error = workflow.run_bagging(f.id, expected_revision=f.revision)
+    assert error is None, error
+    f.revision = bagging["workflow"]["revision"]
+    return bagging
+
+
+@contextmanager
+def _output_readonly(f):
+    from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
+    with unchanged_after_refusal(f, None), HistoryCase.readonly(f):
+        yield
+
+
+def _assert_unaccepted_output(f, order):
+    from unittest.mock import patch
+    with patch.object(order_service, "_build_materialization_candidate_from_draft_record",
+                      side_effect=AssertionError("reads must not reconstruct")) as materializer:
+        with _output_readonly(f), pytest.raises(ValueError, match="saved-sheet acceptance receipt missing"):
+            output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+        materializer.assert_not_called()
+
+
+def test_build_order_lines_for_outputs_uses_newer_draft_materialization(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
+    from unittest.mock import patch
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, quantity=7, menu="draft")
+    _save_output(f, f.sheet)
+    _bag_output(f)
+    order = order_service.get_order_by_id(f.id)
+    order["lines"] = [{"date": TARGET_DATE, "daypart": "朝", "menu_name": "stale",
+                      "diet_type": "regular", "area_id": "X", "quantity_original": 1}]
+    before = deepcopy(order)
+    with patch.object(order_service, "_build_materialization_candidate_from_draft_record",
+                      side_effect=AssertionError("accepted reads must not reconstruct")) as materializer:
+        with _output_readonly(f):
+            lines = output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+        materializer.assert_not_called()
     assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("draft", 7)]
+    assert order == before
+    assert lines[0]["date"] == TARGET_DATE.isoformat()
+    assert (lines[0]["diet_type"], lines[0]["area_id"]) == ("regular", "X")
 
 
-def test_build_order_lines_for_outputs_does_not_force_materialization_for_apply_ready_only(monkeypatch):
-    order = {
-        "id": "ORD-APPLY-READY",
-        "facility": "FAC001",
-        "lines": [
-            {
-                "date": TARGET_DATE,
-                "daypart": "朝",
-                "menu_name": "current",
-                "diet_type": "regular",
-                "area_id": "X",
-                "quantity_original": 3,
-            }
-        ],
-        "workflow_state": {"state": "apply_ready", "warnings": []},
-    }
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *args, **kwargs: [])
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *args, **kwargs: [])
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
-    monkeypatch.setattr(
-        output_builder,
-        "_workflow_v2_lines_for_outputs",
-        lambda *_args, **_kwargs: None,
-    )
-
-    lines = output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
-
+def test_build_order_lines_for_outputs_does_not_force_materialization_for_apply_ready_only(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, quantity=3)
+    order = order_service.get_order_by_id(f.id)
+    order["lines"] = [{"date": TARGET_DATE, "daypart": "朝", "menu_name": "current",
+                      "diet_type": "regular", "area_id": "X", "quantity_original": 3}]
+    before = deepcopy(order)
+    with _output_readonly(f), pytest.raises(ValueError, match="accepted saved sheet missing"):
+        output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+    assert order == before
+    _save_output(f, f.sheet)
+    _assert_unaccepted_output(f, order)
+    _bag_output(f)
+    with _output_readonly(f):
+        lines = output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
     assert [(line["menu_name"], line["quantity_original"]) for line in lines] == [("current", 3)]
 
 
-def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materialize(monkeypatch):
-    order = {
-        "id": "ORD-DRAFT",
-        "facility": "FAC001",
-        "lines": [],
-        "workflow_state": {"state": "apply_ready", "warnings": ["draft_newer_than_lines"]},
-    }
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
-    monkeypatch.setattr(
-        output_builder,
-        "_workflow_v2_lines_for_outputs",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ValueError("workflow-v2 saved sheet materialization failed: draft_materialization_mismatch")
-        ),
-    )
-
-    try:
-        output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
-    except ValueError as exc:
-        assert "workflow-v2 saved sheet materialization failed" in str(exc)
-    else:
-        raise AssertionError("expected draft materialization blocker")
+def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materialize(monkeypatch, tmp_path, isolated_formal_schema):
+    from src.services import order_workflow_v2_service as workflow
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema)
+    f.sheet["rows"][0][-1] = "?"
+    _save_output(f, f.sheet)
+    with unchanged_after_refusal(f, f.revision):
+        result, error = workflow.run_bagging(f.id, expected_revision=f.revision)
+    assert result is None
+    assert error == "sheet_ocr_review_required"
+    order = order_service.get_order_by_id(f.id)
+    assert order["lines"] == []
+    _assert_unaccepted_output(f, order)
 
 
 def _accepted_materializer_read(monkeypatch, tmp_path, names, quantities, stale_lines, *, accessory_masters=None):
@@ -762,58 +772,100 @@ def _saved_draft(order_id: str = "ORD-CANONICAL", draft_id: str = "ODS-CANONICAL
     )
 
 
-def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bootstrap(monkeypatch):
-    """A blank saved draft must block; auxiliary bootstrap quantity 12 is never adopted."""
-    order = {"id": "ORD-CANONICAL", "facility": "FAC001", "lines": [{"quantity_original": 4}]}
-    workflow = _persisted_workflow()
-    blank_draft = _saved_draft()
-    blank_draft.draft_sheet_json = {
-        "source": "weekly_menu",
-        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
-        "rows": [["05/10", "昼", "献立A", ""]],
-    }
-    materializer_drafts = []
-    _workflow_v2_session(monkeypatch, workflow=workflow, draft=blank_draft)
+def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bootstrap(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
+    from hashlib import sha256
+    from src.db import session_scope
+    from src.models.order import Order
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.services import order_workflow_v2_service as workflow
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema,
+                         quantity=12, day=dt_date(2026, 5, 10), menu="献立A", daypart="昼")
+    assert f.sheet["rows"] == [["2026-05-10", "昼", "献立A", 12]]
+    with _output_readonly(f):
+        selected, error = workflow.build_sheet_from_selected_ocr(f.id)
+    # This external OCR component does not fabricate Hakodate image receipts.
+    assert selected is None and error == "hakodate_selected_evidence_lineage_missing"
+    with _output_readonly(f), session_scope() as session:
+        state = session.get(OrderWorkflowState, f.id)
+        evidence = session.get(OrderOcrEvidenceRun, state.evidence_run_id)
+        assert evidence.order_id == f.id
+        assert evidence.payload_json["table_rows"] == [["05/10", "昼", "献立A", "12"]]
+        assert evidence.payload_json["input_sha256"] == sha256((tmp_path / "original.pdf").read_bytes()).hexdigest()
+    sheet = deepcopy(f.sheet)
+    sheet["fields"][0] = "date_mmdd"
+    sheet["rows"] = [["05/10", "昼", "献立A", 4]]
+    _save_output(f, sheet)
+    _bag_output(f)
+    confirmed, error = workflow.final_confirm(f.id, expected_revision=f.revision)
+    assert error is None, error
+    original = order_service.get_order_by_id(f.id)
+    assert [line["quantity_original"] for line in original["lines"]] == [4]
+    original_lines = deepcopy(original["lines"])
+    blank = deepcopy(sheet)
+    blank["rows"][0][-1] = ""
+    _save_output(f, blank)
     assert not hasattr(output_builder.order_service, "_build_canonical_bootstrap_sheet")
-
-    def materialize(_order_id, *, draft_record, **_kwargs):
-        materializer_drafts.append(draft_record["id"])
-        return {"error": "draft_lines_empty", "lines": []}
-
-    monkeypatch.setattr(output_builder.order_service, "_build_materialization_candidate_from_draft_record", materialize)
-
-    with pytest.raises(ValueError, match="draft_lines_empty"):
-        output_builder._workflow_v2_lines_for_outputs(order, order["lines"])  # noqa: SLF001
-
-    assert materializer_drafts == ["ODS-CANONICAL"]
-    assert order["lines"] == [{"quantity_original": 4}]
-    assert blank_draft.draft_sheet_json["rows"] == [["05/10", "昼", "献立A", ""]]
-
-
-def test_workflow_v2_lines_blocks_materializer_exception_with_persisted_draft(monkeypatch):
-    order = {"id": "ORD-CANONICAL", "facility": "FAC001", "lines": [{"quantity_original": 4}]}
-    _workflow_v2_session(monkeypatch, workflow=_persisted_workflow(), draft=_saved_draft())
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_build_materialization_candidate_from_draft_record",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rebuild crashed")),
-    )
-
-    with pytest.raises(ValueError, match="workflow-v2 output state lookup failed: rebuild crashed"):
-        output_builder._workflow_v2_lines_for_outputs(order, order["lines"])  # noqa: SLF001
+    with _output_readonly(f), session_scope() as session:
+        candidate = workflow._build_materialization_candidate_for_saved_sheet(
+            session=session, order=session.get(Order, f.id),
+            saved_sheet=session.get(OrderSheetDraft, f.saved_id))
+    assert candidate["error"] == "draft_lines_empty"
+    assert candidate["lines"] == [] and candidate["line_count"] == 0
+    with unchanged_after_refusal(f, f.revision):
+        result, error = workflow.run_bagging(f.id, expected_revision=f.revision)
+    assert result is None and error == "draft_lines_empty"
+    _assert_unaccepted_output(f, original)
+    assert original["lines"] == original_lines
+    assert [line["quantity_original"] for line in original["lines"]] == [4]
+    assert order_service.get_order_by_id(f.id)["lines"] == []
+    with _output_readonly(f), session_scope() as session:
+        assert session.get(OrderSheetDraft, f.saved_id).draft_sheet_json == blank
+    assert blank["rows"] == [["05/10", "昼", "献立A", ""]]
 
 
-def test_workflow_v2_lines_blocks_apply_ready_materializer_error_with_persisted_draft(monkeypatch):
-    order = {"id": "ORD-CANONICAL", "facility": "FAC001", "lines": [{"quantity_original": 4}]}
-    _workflow_v2_session(monkeypatch, workflow=_persisted_workflow("apply_ready"), draft=_saved_draft())
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "_build_materialization_candidate_from_draft_record",
-        lambda *_args, **_kwargs: {"error": "draft_materialization_mismatch", "lines": []},
-    )
+def test_workflow_v2_lines_blocks_materializer_exception_with_persisted_draft(monkeypatch, tmp_path, isolated_formal_schema):
+    from src.services import order_workflow_v2_service as workflow
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema)
+    _save_output(f, f.sheet)
+    calls = []
+    def crashed(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("rebuild crashed")
+    with monkeypatch.context() as fault:
+        fault.setattr(order_service, "_build_materialization_lines_from_sheet_rows", crashed)
+        with unchanged_after_refusal(f, f.revision), pytest.raises(RuntimeError, match="rebuild crashed"):
+            workflow.run_bagging(f.id, expected_revision=f.revision)
+    assert len(calls) == 1
+    assert calls[0]["rows_payload"] == f.sheet["rows"]
+    assert calls[0]["template"]["columns"][-1]["diet_type"] == "regular"
+    _assert_unaccepted_output(f, order_service.get_order_by_id(f.id))
 
-    with pytest.raises(ValueError, match="draft_materialization_mismatch"):
-        output_builder._workflow_v2_lines_for_outputs(order, order["lines"])  # noqa: SLF001
+
+def test_workflow_v2_lines_blocks_apply_ready_materializer_error_with_persisted_draft(monkeypatch, tmp_path, isolated_formal_schema):
+    from src.db import session_scope
+    from src.models.order import Order
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.services import order_workflow_v2_service as workflow
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema)
+    f.sheet["fields"][-1] = "qty.unknown_x"
+    _save_output(f, f.sheet)
+    with _output_readonly(f), session_scope() as session:
+        candidate = workflow._build_materialization_candidate_for_saved_sheet(
+            session=session, order=session.get(Order, f.id),
+            saved_sheet=session.get(OrderSheetDraft, f.saved_id))
+    assert candidate["error"] == "quantity_template_field_unknown"
+    assert candidate["lines"] == [] and candidate["line_count"] == 0
+    with unchanged_after_refusal(f, f.revision):
+        result, error = workflow.run_bagging(f.id, expected_revision=f.revision)
+    assert result is None and error == candidate["error"]
+    assert f.sheet["rows"][0][-1] == 4
+    _assert_unaccepted_output(f, order_service.get_order_by_id(f.id))
 
 
 def test_workflow_v2_lines_blocks_mismatched_bagging_lineage_with_persisted_draft(monkeypatch):
@@ -952,106 +1004,57 @@ def test_workflow_v2_lines_blocks_missing_order_id_when_saved_sheet_is_required(
         )
 
 
-def test_build_order_lines_for_outputs_can_allow_stale_lines_for_audit(monkeypatch):
-    """Approved contract change: a stale audit read blocks instead of accepting raw lines."""
-    order = {
-        "id": "ORD-DRAFT",
-        "facility": "FAC001",
-        "lines": [
-            {
-                "date": TARGET_DATE,
-                "daypart": "朝",
-                "menu_name": "current",
-                "diet_type": "regular",
-                "area_id": "X",
-                "quantity_original": 4,
-            }
-        ],
-        "workflow_state": {"warnings": ["draft_newer_than_lines"]},
-    }
-    monkeypatch.setattr(
-        output_builder,
-        "_workflow_v2_lines_for_outputs",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ValueError("workflow-v2 saved sheet materialization failed: draft_lines_empty")
-        ),
-    )
+def test_build_order_lines_for_outputs_can_allow_stale_lines_for_audit(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema)
+    _save_output(f, f.sheet)
+    _bag_output(f)
+    original = order_service.get_order_by_id(f.id)
+    original["lines"] = [{"date": TARGET_DATE, "daypart": "朝", "menu_name": "current",
+                         "diet_type": "regular", "area_id": "X", "quantity_original": 4}]
+    before = deepcopy(original)
+    blank = deepcopy(f.sheet)
+    blank["rows"][0][-1] = ""
+    _save_output(f, blank)
+    _assert_unaccepted_output(f, original)
+    assert original == before
+    assert order_service.get_order_by_id(f.id)["lines"] == []
 
-    with pytest.raises(ValueError, match="saved sheet materialization failed"):
+
+def test_build_order_lines_for_outputs_accepts_stale_lines_keyword_without_materializing(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema)
+    order = order_service.get_order_by_id(f.id)
+    order["lines"] = [{"date": TARGET_DATE, "daypart": "朝", "menu_name": "current",
+                      "diet_type": "regular", "area_id": "X", "quantity_original": 4}]
+    before = deepcopy(order)
+    with _output_readonly(f), pytest.raises(ValueError, match="accepted saved sheet missing"):
         output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+    assert order == before
+    assert order_service.get_order_by_id(f.id)["lines"] == []
 
 
-def test_build_order_lines_for_outputs_accepts_stale_lines_keyword_without_materializing(monkeypatch):
-    """Approved contract change: a required saved draft blocks instead of accepting stale raw lines."""
-    order = {
-        "id": "ORD-DAILY-STABLE",
-        "facility": "FAC001",
-        "lines": [
-            {
-                "date": TARGET_DATE,
-                "daypart": "朝",
-                "menu_name": "current",
-                "diet_type": "regular",
-                "area_id": "X",
-                "quantity_original": 4,
-            }
-        ],
-        "workflow_state": {"warnings": ["draft_newer_than_lines"]},
-    }
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: {})
-    monkeypatch.setattr(output_builder.order_service, "_apply_change_override_priority_to_lines", lambda lines: lines)
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_entries_for_week", lambda *args, **kwargs: [])
-    monkeypatch.setattr(output_builder.order_service, "_collect_menu_items_for_week", lambda *args, **kwargs: [])
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda order_id: None)
-    monkeypatch.setattr(output_builder.daily_output_override_service, "apply_overrides_to_lines", lambda lines, facility_id: lines)
-    monkeypatch.setattr(
-        output_builder,
-        "_workflow_v2_lines_for_outputs",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("latest saved sheet is missing")),
-    )
-
-    with pytest.raises(ValueError, match="latest saved sheet is missing"):
-        output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
-
-
-def test_daily_bag_summary_keeps_expanded_copy_choice_separate_from_canonical_lines(monkeypatch):
-    target_date = TARGET_DATE
-    order_payload = {
-        "id": "ORD-PARITY",
-        "facility": "FAC001",
-        "lines": [{"date": target_date, "menu_name": "canonical", "quantity_original": 7}],
-    }
+def test_daily_bag_summary_keeps_expanded_copy_choice_separate_from_canonical_lines(monkeypatch, tmp_path, isolated_formal_schema):
+    from src.services import order_workflow_v2_service as workflow
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, quantity=7, menu="canonical", daypart="昼")
+    _save_output(f, f.sheet)
+    _bag_output(f)
+    confirmed, error = workflow.final_confirm(f.id, expected_revision=f.revision)
+    assert error is None, error
     calls = []
-
-    monkeypatch.setattr(order_service, "list_orders_by_line_date", lambda *_args, **_kwargs: [{"id": "ORD-PARITY"}])
-    monkeypatch.setattr(order_service, "get_order_by_id", lambda _order_id: order_payload)
-    monkeypatch.setattr(order_service, "_resolve_facility_label_for_code", lambda _facility: "FAC001")
-    monkeypatch.setattr(
-        output_builder,
-        "build_order_lines_for_outputs",
-        lambda _order, *, include_expanded_copy: calls.append(include_expanded_copy) or list(order_payload["lines"]),
-    )
-    monkeypatch.setattr(
-        output_builder,
-        "build_bag_payload_for_outputs",
-        lambda _order, *, order_lines: [
-            {
-                "date": target_date,
-                "daypart": "昼",
-                "menu_name": order_lines[0]["menu_name"],
-                "diet_type": "regular",
-                "area_id": "X",
-                "quantity": order_lines[0]["quantity_original"],
-            }
-        ],
-    )
-
-    default_summary = order_service.get_daily_bag_summary(target_date)
-    legacy_summary = order_service.get_daily_bag_summary(target_date, include_expanded_copy=False)
-
+    original_builder = output_builder.build_order_lines_for_outputs
+    def observed(order, **kwargs):
+        if "include_expanded_copy" in kwargs:
+            calls.append(kwargs["include_expanded_copy"])
+        return original_builder(order, **kwargs)
+    monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", observed)
+    with _output_readonly(f):
+        default_summary = order_service.get_daily_bag_summary(TARGET_DATE)
+        legacy_summary = order_service.get_daily_bag_summary(TARGET_DATE, include_expanded_copy=False)
     assert calls == [True, False]
     assert default_summary["groups"] == legacy_summary["groups"]
     assert default_summary["groups"][0]["menu_name"] == "canonical"
+    assert default_summary["groups"][0]["diet_groups"][0]["total_quantity"] == 7
 
 
 def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_path, monkeypatch):
@@ -2481,71 +2484,30 @@ def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
         assert saved["池袋病院"].cell(row=row_idx, column=6).value is None
 
 
-def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_path, monkeypatch):
-    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
-    order_id = "ORD-both"
-    facility_code = "FAC00009"
-    facility_name = "グループホームそよかぜ"
-    order_lines = [
-        {
-            "date": TARGET_DATE,
-            "daypart": "朝",
-            "menu_category": "副①",
-            "menu_name": "ごぼうと竹輪の煮物",
-            "diet_type": "regular",
-            "area_id": "2F",
-            "quantity_original": 3,
-            "menu_unit_type": "g",
-            "menu_qty_per_serving": 70,
-            "menu_temp_type": "温菜",
-        },
-        {
-            "date": TARGET_DATE,
-            "daypart": "朝",
-            "menu_category": "副①",
-            "menu_name": "ごぼうと竹輪の煮物",
-            "diet_type": "no_fish",
-            "area_id": "2F",
-            "quantity_original": 1,
-            "menu_unit_type": "g",
-            "menu_qty_per_serving": 70,
-            "menu_temp_type": "温菜",
-        },
-    ]
-    context = {
-        "order": {"id": order_id, "facility": facility_code},
-        "order_lines": order_lines,
-        "order_for_outputs": {"id": order_id, "facility": facility_code, "lines": order_lines},
-        "bags": output_builder.build_bag_rows_for_outputs(
-            {"id": order_id, "facility": facility_code, "lines": order_lines},
-            order_lines=order_lines,
-            facility_config={"facility_name": facility_name},
-        ),
-        "label_profile": {},
-        "facility_config": {"facility_name": facility_name},
-        "invoice_template": {},
-        "quantity_rules": {"zero_as_empty": True},
-        "ocr_menu_meta": {},
-    }
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "list_orders_by_line_date",
-        lambda target_date, status=None: [{"id": order_id, "facility": facility_code}],
-    )
-    monkeypatch.setattr(
-        output_builder.config_service,
-        "get_facility_config",
-        lambda code: {"facility_name": facility_name},
-    )
-    monkeypatch.setattr(
-        output_builder,
-        "_prepare_output_context_for_bundle",
-        lambda order_id, **kwargs: context,
-    )
-
-    output_path, manifest = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="both", status="confirmed")
+def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_path, monkeypatch, isolated_formal_schema):
+    from src.services import order_workflow_v2_service as workflow
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path / "output")
+    lines = [{"date": TARGET_DATE.isoformat(), "daypart": "朝", "menu_category": "副①",
+              "menu_name": "ごぼうと竹輪の煮物", "diet_type": diet, "area_id": "2F",
+              "quantity_original": quantity, "bag_type": "standard", "menu_unit_type": "g",
+              "menu_qty_per_serving": 70, "menu_temp_type": "温菜"}
+             for diet, quantity in (("regular", 3), ("no_fish", 1))]
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, lines=lines,
+                         facility_id="FAC00009", facility_name="グループホームそよかぜ",
+                         menu_category="副①", menu_qty_per_serving=70, menu_unit_type="g",
+                         menu_temp_type="温菜", area_names={"2F": "２階"})
+    _save_output(f, f.sheet)
+    bagging = _bag_output(f)
+    candidate = bagging["bagging_result"]["materialization_candidate"]
+    assert f.sheet["rows"][0][-2:] == [3, 1]
+    assert f.sheet["fields"][-2:] == ["qty.regular_2f", "qty.no_fish_2f"]
+    # Forbidden diets remain saved; existing aggregation excludes them.
+    assert [(line["diet_type"], line["quantity_original"]) for line in candidate["lines"]] == [("regular", 3)]
+    confirmed, error = workflow.final_confirm(f.id, expected_revision=f.revision)
+    assert error is None, error
+    assert order_service.get_order_by_id(f.id)["status"] == "確定"
+    output_path, manifest = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="both", status="確定")
     saved = load_workbook(output_path, data_only=False)
-
     assert manifest["success_orders"] == 1
     delivery_sheets = [name for name in saved.sheetnames if name.startswith("納品書_グループホームそよかぜ")]
     assert delivery_sheets
