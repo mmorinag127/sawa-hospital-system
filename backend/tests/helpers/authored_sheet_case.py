@@ -21,7 +21,7 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
     with registered_hospital_operator(monkeypatch) as actor:
         cases = []
 
-        def create(*, quantity, area="2F", cell_values=None, include_remarks=True):
+        def create(*, quantity, area="2F", cell_values=None, include_remarks=True, produce=True):
             assert not cases, "one owned source/order per case"
             fields = ["date_mmdd", "daypart", "menu", f"qty.regular_{area.lower()}", "remarks"]
             headers = ["日付", "区分", "メニュー", "常食2F" if area == "2F" else "常食", "備考"]
@@ -40,13 +40,21 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
                     "slot_index": 0, "diet_type": "regular",
                 }])
             cases.append(case)
-            case.selected_sheet = case.produce(cell_values=str(quantity) if cell_values is None else cell_values)["sheet"]
+            if produce:
+                case.selected_sheet = case.produce(cell_values=str(quantity) if cell_values is None else cell_values)["sheet"]
             return case
 
         yield create
         for case in cases:
             (tmp_path / "authored-sheet-observations.json").write_text(
                 json.dumps(case.observations, indent=2), encoding="utf-8")
+
+
+def prepare_rerun(case, *, cell_values="9"):
+    """Real queue/claim and capture; only rendering/recognition are component doubles."""
+    calls = case.prepare_provider(cell_values=cell_values)
+    assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+    return calls
 
 
 def save_draft(case, sheet):
