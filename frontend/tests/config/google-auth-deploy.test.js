@@ -95,7 +95,9 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.deepEqual(jobs["menu-master-migration"].needs, ["source-gate", "automation-bootstrap"]);
   assert.equal(jobs["menu-master-migration"].if, backendChanged);
   assert.ok(jobs["menu-master-migration"].steps.some(step =>
-    step.run === "uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py"));
+    step.run === "uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py"));
+  assert.ok(jobs["menu-master-migration"].steps.some(step =>
+    step.run === "uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py"));
   assert.deepEqual(jobs["build-backend"].needs, ["source-gate", "automation-bootstrap", "menu-master-migration"]);
   assert.equal(jobs["build-backend"].if, backendChanged);
   assert.deepEqual(jobs["deploy-backend"].needs, ["source-gate", "build-backend", "menu-master-migration"]);

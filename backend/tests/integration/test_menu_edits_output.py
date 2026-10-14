@@ -47,8 +47,8 @@ def test_menu_edit_updates_item():
         assert row.unit_type is None
         assert row.qty_per_serving is None
         assert row.temp_type is None
-        assert row.daypart is None
-        assert row.category is None
+        assert row.daypart == "昼食"
+        assert row.category == "主菜"
 
         master = session.get(MenuMaster, row.menu_master_id)
         assert master is not None

@@ -278,3 +278,24 @@ def test_live_current_definition_matches_except_explicit_endpoint_metadata(monke
 def test_live_read_cannot_be_skipped_without_token():
     with pytest.raises(ValueError, match="live_verification_token_required"):
         transport.verify_live_initial({}, "")
+
+
+def test_initial_validation_phase_logs_only_type(inputs, monkeypatch, capsys):
+    from src.services import canonical_facility_store
+    import staging_db_target
+
+    request = MagicMock(side_effect=AssertionError('HTTP must not be reached'))
+    monkeypatch.setattr(staging_db_target, 'read_http', request)
+    monkeypatch.setattr(canonical_facility_store, '_encode', MagicMock(side_effect=ValueError('SECRET raw HTTP body and locals')))
+    monkeypatch.setattr(transport, 'run', lambda args: transport.verify_live_initial({}, 'secret-token'))
+    argv = ['prepare']
+    for name in ('initial', 'policy', 'orders'):
+        argv.extend(['--' + name, str(getattr(inputs, name)), '--' + name + '-sha256', getattr(inputs, name + '_sha256')])
+    argv.extend(['--source-sha', inputs.source_sha, '--output', str(inputs.output)])
+    monkeypatch.setattr(sys, 'argv', argv)
+    assert transport.main() == 1
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert json.loads(output.err) == {'phase': 'initial_validation', 'exception_type': 'ValueError'}
+    assert 'SECRET' not in output.err and 'Traceback' not in output.err and 'secret-token' not in output.err
+    request.assert_not_called()

@@ -2,22 +2,15 @@
 
 from copy import deepcopy
 from datetime import datetime
-import hashlib
-import json
 from types import SimpleNamespace
 
 from sqlalchemy import select, insert
 from sqlalchemy.exc import IntegrityError
 from src.models.facility import Facility
 from src.models.facility_template_version import FacilityTemplateVersion
-from src.services.canonical_facility_store import CanonicalStoreError, canonical_date, version_start
+from src.services.canonical_facility_store import CanonicalStoreError, canonical_date, version_start, digest
 
 SOURCE = "canonical-json-lineage-v2"
-
-
-def digest(value):
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
-                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
 def identity(receipt):

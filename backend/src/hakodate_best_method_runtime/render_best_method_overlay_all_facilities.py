@@ -51,6 +51,15 @@ LOCAL_WORKSPACE_PREFIX = "/Users/mmorinag/Sawa/2025.12/workspace/"
 _TEXT_RECOGNIZER = None
 
 
+class HakodateRecognizerCheckpointError(RuntimeError):
+    """Recognition failed after a durable, input-bound checkpoint was created."""
+
+    def __init__(self, *, checkpoint_reference: Any):
+        super().__init__("hakodate_recognizer_failed_after_checkpoint")
+        self.stage = "recognition"
+        self.checkpoint_reference = checkpoint_reference
+
+
 def _get_text_recognizer():
     global _TEXT_RECOGNIZER
     if _TEXT_RECOGNIZER is None:
@@ -354,6 +363,40 @@ def _run_text_recognizer_records(
         "pred_nonempty_count": sum(1 for record in records if str(record.get("pred_digits") or "").strip()),
     }
     return records, metrics, contact_sheet
+
+
+def _validate_operator_values(operator_values: dict[str, str] | None, expected_sheet_cells: list[str]) -> dict[str, str] | None:
+    if operator_values is None:
+        return None
+    if not isinstance(operator_values, dict) or set(operator_values) != set(expected_sheet_cells):
+        raise ValueError("hakodate_operator_values_cells_mismatch")
+    if any(not isinstance(value, str) or any(char not in "0123456789" for char in value) for value in operator_values.values()):
+        raise ValueError("hakodate_operator_values_invalid")
+    return {cell: operator_values[cell] for cell in expected_sheet_cells}
+
+
+def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], truth: dict[str, dict[str, Any]], operator_values: dict[str, str]) -> tuple[list[dict[str, Any]], dict[str, Any], Image.Image]:
+    contact_sheet, usable_regions, _polygons, skipped_regions = build_recognizer_contact_sheet(
+        rectified_fax_bgr=raw_rectified_bgr, regions=regions, line_mask=None, mode="corner_cc",
+    )
+    records = []
+    for region in sorted(usable_regions + skipped_regions, key=lambda value: int(value.get("ocr_contact_slot_index") or 0)):
+        cell = str(region.get("sheet_cell") or region.get("region_id") or "")
+        value = operator_values[cell]
+        records.append({
+            **region, "truth": truth.get(cell) or {}, "expected_digits": str((truth.get(cell) or {}).get("expected_digits") or ""),
+            "raw_text": "", "pred_digits": value, "score": None, "ocr_candidate": False,
+            "ocr_engine": "operator", "recognition_source": "operator", "operator_value": value,
+            "supervised_label_source": "operator",
+        })
+    return records, {
+        "ocr_seconds": 0.0, "raw_prediction_count": 0, "digit_prediction_count": 0,
+        "accepted_digit_count": 0, "candidate_digit_prediction_count": 0, "candidate_digit_accept_count": 0,
+        "contact_sheet_seconds": 0.0, "contact_sheet_size": [int(contact_sheet.width), int(contact_sheet.height)],
+        "contact_sheet_region_count": len(regions), "contact_sheet_usable_region_count": len(usable_regions),
+        "contact_sheet_skipped_region_count": len(skipped_regions), "numeric_eval_cell_count": len(records),
+        "pred_nonempty_count": sum(1 for record in records if record["pred_digits"]),
+    }, contact_sheet
 
 
 def _draw_overlay(
@@ -773,6 +816,9 @@ def build_best_method_for_manifest_item(
     draft_sheet: dict[str, Any],
     output_dir: Path,
     render_width: int = 1864,
+    checkpoint_callback: Any | None = None,
+    recognition_checkpoint: dict[str, Any] | None = None,
+    operator_values: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], Image.Image]:
     item = _resolve_item_paths(item)
     facility_code = str(item.get("facility_code") or "")
@@ -781,11 +827,26 @@ def build_best_method_for_manifest_item(
     if not isinstance(draft_rows, list) or not any(isinstance(row, list) for row in draft_rows):
         raise ValueError("hakodate_draft_sheet_rows_missing")
     total_t0 = time.perf_counter()
-    preprocess_t0 = time.perf_counter()
-    pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width, draft_sheet=draft_sheet)
-    expected_sheet_cells = list(pre["expected_sheet_cells"])
-    preprocess_seconds = time.perf_counter() - preprocess_t0
-    eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
+    if recognition_checkpoint is not None:
+        from src.services.hakodate_ocr_checkpoint_service import load_recognizer_checkpoint
+        state = load_recognizer_checkpoint(checkpoint=recognition_checkpoint, item=item)
+        if state["metadata"] is None:
+            raise ValueError("hakodate_checkpoint_metadata_required")
+        pre = {"raw_rectified": state["raw_rectified"], "axis_evidence": state["axis_evidence"],
+               "rectified_quad_points": state["rectified_quad_points"]}
+        expected_sheet_cells = state["expected_sheet_cells"]
+        eval_regions = state["regions"]
+        snap_debug = state["snap_debug"]
+        preprocess_seconds = 0.0
+        snap_seconds = 0.0
+        checkpoint_reference = recognition_checkpoint
+    else:
+        preprocess_t0 = time.perf_counter()
+        pre = _build_preprocess_for_ocr(item=item, page=page_index, render_width=render_width, draft_sheet=draft_sheet)
+        expected_sheet_cells = list(pre["expected_sheet_cells"])
+        preprocess_seconds = time.perf_counter() - preprocess_t0
+        eval_regions = _select_template_owned_eval_regions(pre["target_regions"])
+        checkpoint_reference = None
     truth, field_by_col = _build_truth_for_facility(draft_sheet, eval_regions)
     preprocess_axis_evidence = pre.get("axis_evidence") if isinstance(pre.get("axis_evidence"), dict) else {}
     preprocess_snap_debug = (
@@ -793,7 +854,9 @@ def build_best_method_for_manifest_item(
         if isinstance(preprocess_axis_evidence.get("target_local_grid_snap"), dict)
         else {}
     )
-    if preprocess_snap_debug.get("applied"):
+    if recognition_checkpoint is not None:
+        snapped_regions = eval_regions
+    elif preprocess_snap_debug.get("applied"):
         snapped_regions = eval_regions
         snap_debug = {**preprocess_snap_debug, "source": "preprocess_target_regions"}
         snap_seconds = 0.0
@@ -805,11 +868,26 @@ def build_best_method_for_manifest_item(
     facility_dir.mkdir(parents=True, exist_ok=True)
     if [region.get("sheet_cell") for region in snapped_regions] != expected_sheet_cells:
         raise ValueError("hakodate_expected_cells_changed")
-    records, ocr_metrics, contact_sheet = _run_text_recognizer_records(
-        raw_rectified_bgr=pre["raw_rectified"],
-        regions=snapped_regions,
-        truth=truth,
-    )
+    if checkpoint_callback is not None and recognition_checkpoint is None:
+        checkpoint_reference = checkpoint_callback(
+            item=item,
+            raw_rectified_bgr=pre["raw_rectified"],
+            regions=snapped_regions,
+            expected_sheet_cells=expected_sheet_cells,
+            metadata={"axis_evidence": preprocess_axis_evidence, "rectified_quad_points": pre.get("rectified_quad_points"), "snap_debug": snap_debug},
+        )
+    try:
+        values = _validate_operator_values(operator_values, expected_sheet_cells)
+        if values is None:
+            records, ocr_metrics, contact_sheet = _run_text_recognizer_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth)
+        else:
+            records, ocr_metrics, contact_sheet = _operator_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth, operator_values=values)
+    except Exception as exc:
+        if checkpoint_callback is None and recognition_checkpoint is None:
+            raise
+        raise HakodateRecognizerCheckpointError(
+            checkpoint_reference=checkpoint_reference,
+        ) from exc
     records = _restore_display_bboxes(records, snapped_regions)
     metrics = cmp._evaluate(records)
     metrics["expected_sheet_cells"] = expected_sheet_cells
@@ -832,7 +910,7 @@ def build_best_method_for_manifest_item(
             "contact_sheet_skipped_region_count": ocr_metrics.get("contact_sheet_skipped_region_count"),
             "target_grid_snap_applied": bool(snap_debug.get("applied")),
             "target_grid_snap_reason": snap_debug.get("reason"),
-            "target_grid_snap_source": snap_debug.get("source") or "runtime_resnap",
+            "target_grid_snap_source": snap_debug.get("source") or ("checkpoint" if recognition_checkpoint is not None else "runtime_resnap"),
             "target_grid_snap_snapped_region_count": snap_debug.get("snapped_region_count"),
             "target_grid_snap_fallback_region_count": snap_debug.get("fallback_region_count"),
             "target_grid_snap_fallback_reason_counts": snap_debug.get("fallback_reason_counts"),
@@ -936,14 +1014,20 @@ def build_best_method_for_manifest_item(
     _write_pdf_from_pages([review_page], page_pdf)
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
+    for original, serialized in zip(records, records_json):
+        if original.get("recognition_source") == "operator":
+            serialized.update(operator_value=original["operator_value"], recognition_source="operator", ocr_engine="operator")
     records_path.write_text(json.dumps(records_json, ensure_ascii=False, indent=2), encoding="utf-8")
     ocr_regions: list[dict[str, Any]] = []
-    for record in records_json:
+    for original_record, record in zip(records, records_json):
         region = dict(record)
-        region["ocr_text"] = str(record.get("raw_text") or record.get("pred_digits") or "").strip()
+        operator_record = original_record.get("recognition_source") == "operator"
+        region["ocr_text"] = "" if operator_record else str(record.get("raw_text") or record.get("pred_digits") or "").strip()
         region["ocr_normalized"] = str(record.get("pred_digits") or "").strip()
-        region["ocr_engine"] = "opencv_knn_leave_one_out_k5"
-        region["source"] = "render_best_method_overlay_all_facilities.py"
+        region["ocr_engine"] = "operator" if operator_record else "opencv_knn_leave_one_out_k5"
+        region["source"] = "operator" if operator_record else "render_best_method_overlay_all_facilities.py"
+        if operator_record:
+            region["operator_value"] = original_record.get("operator_value")
         ocr_regions.append(region)
     regions_path.write_text(json.dumps(ocr_regions, ensure_ascii=False, indent=2), encoding="utf-8")
     sheet_values_path.write_text(json.dumps({"cells": {}, "rows": [], "columns": []}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -954,8 +1038,10 @@ def build_best_method_for_manifest_item(
         "facility_code": facility_code,
         "order_id": order_id,
         "method": "fax_line_snap_current_frame_noise_text_recognizer_topk",
-        "engine": TEXT_RECOGNIZER_ENGINE,
+        "engine": "operator" if operator_values is not None else TEXT_RECOGNIZER_ENGINE,
         "postprocess": "none",
+        "recognition_checkpoint": checkpoint_reference,
+        "recognition_provenance": "operator" if operator_values is not None else "recognizer",
         "field_by_col": field_by_col,
         "metrics": metrics,
         "snap_debug": snap_debug,

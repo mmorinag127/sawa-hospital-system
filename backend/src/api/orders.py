@@ -146,6 +146,13 @@ class WorkflowV2RowAxisReviewBody(BaseModel):
     corrected_ys: list[float]
     coordinate_space: dict
     source_receipt: dict | None = None
+    body_day_boundary_indexes: list[int] | None = None
+    day_labels: list[str] | None = None
+
+
+class WorkflowV2RecognitionReviewBody(BaseModel):
+    source_receipt: dict
+    values: dict[str, str]
 
 
 class WorkflowV2FinalConfirmBody(BaseModel):
@@ -1497,6 +1504,23 @@ def get_order_workflow_v2_header_axis_review(order_id: str, document_id: str | N
     return _workflow_v2_or_404(order_workflow_v2_service.get_header_axis_review(order_id, document_id=document_id))
 
 
+@router.get("/{order_id}/workflow-v2/recognition-review", dependencies=[Depends(require_role("operator"))])
+def get_order_recognition_review(order_id: str, document_id: str | None = None):
+    from src.services import ocr_recognition_recovery_service
+    return _workflow_v2_or_404(ocr_recognition_recovery_service.get_review(order_id, document_id=document_id))
+
+
+@router.put("/{order_id}/workflow-v2/recognition-review")
+def save_order_recognition_review(order_id: str, body: WorkflowV2RecognitionReviewBody,
+                                 expected_revision: int = Depends(_require_workflow_if_match),
+                                 user=Depends(require_role("operator"))):
+    from src.services import ocr_recognition_recovery_service
+    return _workflow_v2_or_404(ocr_recognition_recovery_service.save_review(
+        order_id, source_receipt=body.source_receipt, values=body.values,
+        edited_by=user.account, expected_revision=expected_revision,
+    ))
+
+
 @router.put("/{order_id}/workflow-v2/header-axis-review", dependencies=[Depends(require_role("operator"))])
 def save_order_workflow_v2_header_axis_review(order_id: str, body: WorkflowV2HeaderAxisReviewBody, expected_revision: int = Depends(_require_workflow_if_match)):
     return _workflow_v2_or_404(
@@ -1523,6 +1547,8 @@ def save_order_workflow_v2_row_axis_review(order_id: str, body: WorkflowV2RowAxi
             corrected_ys=body.corrected_ys,
             coordinate_space=body.coordinate_space,
             source_receipt=body.source_receipt,
+            body_day_boundary_indexes=body.body_day_boundary_indexes,
+            day_labels=body.day_labels,
             expected_revision=expected_revision,
         )
     )

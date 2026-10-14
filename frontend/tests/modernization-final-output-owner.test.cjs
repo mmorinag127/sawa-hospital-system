@@ -57,6 +57,7 @@ test('same-turn registered weekly edit fences pending output before a render', a
   try {
     await h.settle();
     let operation;
+    await h.settle(() => probe.current.conditionForm.setValue('week', '2026-W41'));
     await h.settle(() => { operation = probe.current.downloadWeeklyWeight(probe.current.conditionForm.getValues()); });
     await h.waitFor(() => t.calls.some(call => call.url === '/outputs/weekly-weight'), 'actual output dispatched');
     await h.settle(() => {

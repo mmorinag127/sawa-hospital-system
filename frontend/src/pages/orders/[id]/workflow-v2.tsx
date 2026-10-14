@@ -1,4 +1,4 @@
-import { Button, Input, NativeSelect } from "@mui/material";
+import { Button, Checkbox, Dialog, DialogActions, DialogContent, DialogTitle, Input, NativeSelect, TextField } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";
 import { type KeyboardEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -41,6 +41,11 @@ type WorkflowV2 = {
   pre_save_checks?: PreSaveChecks | null;
   blockers?: string[] | null;
   warnings?: string[] | null;
+  recognition_override_invalidation?: {
+    reason: string;
+    geometry_kind: string;
+    invalidated_at: string;
+  } | null;
   quad_override?: {
     quad_px?: number[][];
     quad_source?: string | null;
@@ -155,6 +160,7 @@ type HeaderAxisReviewPayload = {
   order_id: string;
   source_receipt?: Record<string, unknown> | null;
   status?: string | null;
+  error_detail?: string | null;
   image_png_base64?: string | null;
   image_size?: number[] | null;
   crop_box?: number[] | null;
@@ -170,10 +176,22 @@ type HeaderAxisReviewPayload = {
   coordinate_space?: { mode?: string; width?: number; height?: number } | null;
 };
 
+type RecognitionReviewPayload = {
+  order_id: string;
+  source_receipt: Record<string, any>;
+  error_detail?: string;
+  cells: Array<{cell: string; image_png_base64: string}>;
+};
+
 type RowAxisReviewPayload = {
   order_id: string;
   source_receipt?: Record<string, unknown> | null;
   status?: string | null;
+  error_detail?: string | null;
+  calendar_days?: Array<{date: string; expected_band_count: number | null}>;
+  body_day_boundary_indexes?: number[] | null;
+  header_band_count?: number;
+  boundary_diagnostics?: {expected?: number[] | null; actual?: number[] | null; missing?: number[] | null; extra?: number[] | null};
   image_png_base64?: string | null;
   image_size?: number[] | null;
   canvas_size?: number[] | null;
@@ -182,6 +200,8 @@ type RowAxisReviewPayload = {
   saved_override?: {
     source_receipt?: Record<string, unknown> | null;
     corrected_ys?: number[];
+    body_day_boundary_indexes?: number[];
+    day_labels?: string[];
     coordinate_space?: { mode?: string; width?: number; height?: number };
   } | null;
   axis_evidence?: Record<string, unknown> | null;
@@ -1322,6 +1342,9 @@ export default function OrderWorkflowV2Page() {
   const [rowAxisLoading, setRowAxisLoading] = useState(false);
   const [rowAxisMessage, setRowAxisMessage] = useState("");
   const [rowAxisYs, setRowAxisYs] = useState<number[]>([]);
+  const [rowDayBoundaries, setRowDayBoundaries] = useState<string[]>([]);
+  const [recognitionReview, setRecognitionReview] = useState<RecognitionReviewPayload | null>(null);
+  const [recognitionValues, setRecognitionValues] = useState<Record<string, string>>({});
   const [draggingRowAxisIndex, setDraggingRowAxisIndex] = useState<number | null>(null);
   const [selectedRowAxisIndex, setSelectedRowAxisIndex] = useState<number | null>(null);
   const [rowAxisAddMode, setRowAxisAddMode] = useState(false);
@@ -1526,7 +1549,7 @@ export default function OrderWorkflowV2Page() {
       retireOutput("download"); retireOutput("preview");
       ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current;
       quadSourceRef.current=null; setQuadReview(null); setQuadReviewLoading(false);
-      setHeaderAxisReview(null); setRowAxisReview(null);
+      setHeaderAxisReview(null); setRowAxisReview(null); setRecognitionReview(null); setRecognitionValues({});
       axisSourceRef.current={};
       setHeaderAxisLoading(false); setRowAxisLoading(false);
       if (quadBusyOwnerRef.current===busyGenerationRef.current) setBusy("");
@@ -1538,7 +1561,7 @@ export default function OrderWorkflowV2Page() {
   },[router.events]);
   useEffect(()=>{
     quadSourceRef.current=null; setQuadReview(null); setQuadReviewMessage(""); setQuadReviewLoading(false);
-    setHeaderAxisReview(null); setRowAxisReview(null);
+    setHeaderAxisReview(null); setRowAxisReview(null); setRecognitionReview(null); setRecognitionValues({});
     axisSourceRef.current={};
     if (renderedInputGeneration===workingInputGenerationRef.current) {
       setManualQuadPoints([]); setManualQuadMode(false); finishWorkflowEditorEdit("quad");
@@ -2684,6 +2707,41 @@ export default function OrderWorkflowV2Page() {
     }
   };
 
+  const loadRecognitionReview = () => runAction("セル画像取得", async ({assertCurrent, adopt}) => {
+    const response = await apiClient.get<RecognitionReviewPayload>(`/orders/${orderId}/workflow-v2/recognition-review`,
+      {params: {document_id: effectiveSelectedDocumentId}});
+    assertCurrent();
+    const review = response.data;
+    if (review.order_id !== orderId || review.source_receipt?.selected_pdf_receipt?.document_id !== effectiveSelectedDocumentId
+        || review.source_receipt.workflow_revision !== workflowRevisionRef.current?.revision || !Array.isArray(review.cells)) {
+      throw new Error("注文・PDF・入力版が変わりました。再取得してください。");
+    }
+    adopt(() => {setRecognitionReview(review); setRecognitionValues({});});
+  }, {refreshAfter: false, successMessage: "認識停止時のセル画像を取得しました"});
+
+  const saveRecognitionReview = () => runAction("セル訂正保存", async ({assertCurrent, adopt}) => {
+    if (!recognitionReview || recognitionReview.order_id !== orderId
+        || recognitionReview.source_receipt.workflow_revision !== workflowRevisionRef.current?.revision) {
+      throw new Error("入力版が変わりました。セル画像を再取得してください。");
+    }
+    const captured = adopt(() => {beginWorkflowEditorEdit("recognition", true); return captureWorkflowInputVersion("recognition");});
+    const response = await apiClient.put(`/orders/${orderId}/workflow-v2/recognition-review`,
+      {source_receipt: recognitionReview.source_receipt, values: recognitionValues}, workflowMutationConfig(captured));
+    assertCurrent();
+    adopt(() => {
+      if (!adoptOwnWorkflowCommandResponse(response.data, captured)) throw new Error("セル訂正中に入力が変更されました。");
+      finishWorkflowEditorEdit("recognition"); setRecognitionReview(null); setRecognitionValues({});
+    });
+  }, {successMessage: "手入力を保存しました。OCR再実行から保存したセル対応で処理を再開できます"});
+
+  const closeRecognitionReview = () => {
+    if (busy) return;
+    if (editorVersion("recognition").dirty && !window.confirm("未保存のセル訂正を破棄しますか？")) return;
+    finishWorkflowEditorEdit("recognition");
+    setRecognitionReview(null);
+    setRecognitionValues({});
+  };
+
   const confirmContext = () =>
     runAction("Step1 context confirm", async ({ adopt }) => {
       if (contextFacilityResolution.status !== "ready") {
@@ -2998,7 +3056,12 @@ export default function OrderWorkflowV2Page() {
         const next=validSource?(validSaved?saved:detected):[];
         const points=(Array.isArray(next)?next:[]).map(value=>Number(value)).filter(Number.isFinite);
         if (axis==="header") { setHeaderAxisXs(points); setSelectedHeaderAxisIndex(null); setHeaderAxisAddMode(false); }
-        else { setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false); }
+        else {
+          const rowReview = review as RowAxisReviewPayload;
+          const boundaries = validSource ? rowReview.saved_override?.body_day_boundary_indexes ?? rowReview.body_day_boundary_indexes : null;
+          setRowDayBoundaries(Array.from({length: 8}, (_, index) => boundaries?.[index]?.toString() ?? ""));
+          setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false);
+        }
         if (!validSource) message("保存済み補正のPDF・入力の正本を確認できません。補正点は反映していません。");
       }
     } catch(err:any) { if (current()) message(formatApiError(err,"交点確認データの取得に失敗しました")); }
@@ -3018,6 +3081,9 @@ export default function OrderWorkflowV2Page() {
     }
     const coordinateSpace=review?.coordinate_space;
     if (points.length<2 || !coordinateSpace?.width || !coordinateSpace.height) { message("交点または座標系が不足しています。"); return; }
+    if (axis === "row" && (rowDayBoundaries.length !== 8 || rowDayBoundaries.some(value => !/^\d+$/.test(value)))) {
+      message("7日分の日境界と最終境界を整数で指定してください。"); return;
+    }
     if (axis==="header") {
       const expectedCount=getHeaderAxisExpectedCount();
       if (expectedCount>0 && points.length!==expectedCount && typeof window!=="undefined"
@@ -3035,7 +3101,8 @@ export default function OrderWorkflowV2Page() {
       if (!current()) return;
       if (captured.revision!==receipt.workflow_revision) throw new Error("交点確認後にworkflow版が変わりました。元の入力は保存していません。");
       const response=await apiClient.put(`/orders/${own.context.orderId}/workflow-v2/${axis}-axis-review`,
-        {...(axis==="header"?{corrected_xs:points}:{corrected_ys:points}),coordinate_space:coordinateSpace,source_receipt:receipt},
+        {...(axis==="header"?{corrected_xs:points}:{corrected_ys:points,
+          body_day_boundary_indexes:rowDayBoundaries.map(Number), day_labels:rowAxisReview?.calendar_days?.map(day => day.date)}),coordinate_space:coordinateSpace,source_receipt:receipt},
         workflowMutationConfig(captured,{timeout:getHeaderAxisTimeoutMs()}));
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(response.data,captured)) throw new Error("補正保存中に入力が変更されました。");
@@ -3047,7 +3114,7 @@ export default function OrderWorkflowV2Page() {
         {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId},workflowMutationConfig(rerunInputVersion,{timeout:getHeaderAxisTimeoutMs()}));
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(rerun.data,rerunInputVersion)) throw new Error("OCR再実行中に入力が変更されました。");
-      finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis]; discardSheetDraft();
+      finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis];
       setSheetAutoEditResult(null); setLocalAnomalyReview(null); setSelectedAnomalyIndex(null); setSelectedAutoEditIndex(null);
       setMessage(axis==="header"?"ヘッダー交点補正を保存し、OCRを再実行しました。":"行境界補正を保存し、OCRを再実行しました。"); setVisibleStep(2);
     } catch(err:any) { if (current()) setError(formatApiError(err,"交点補正の保存またはOCR再実行に失敗しました")); }
@@ -3167,8 +3234,8 @@ export default function OrderWorkflowV2Page() {
       .sort((a, b) => a - b);
     const normalized: number[] = [];
     for (const value of sorted) {
-      if (normalized.length && Math.abs(value - normalized[normalized.length - 1]) < 1) continue;
-      normalized.push(Number(value.toFixed(3)));
+      if (normalized.length && value === normalized[normalized.length - 1]) continue;
+      normalized.push(value);
     }
     return normalized;
   };
@@ -4124,6 +4191,44 @@ export default function OrderWorkflowV2Page() {
           <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          {workflow?.recognition_override_invalidation ? <p role="status">
+            {({quad: "4点", header_axis: "ヘッダー", row_axis: "行・日境界"} as Record<string, string>)[workflow.recognition_override_invalidation.geometry_kind] ?? "幾何"}補正が変更されたため、以前のセル手入力は履歴に保持し、新しいセルには適用しません。保存済みシートは保持しています。
+          </p> : null}
+          {workflow?.state === "ocr_failed" ? <div role="alert">
+            <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
+            {workflow.ocr_job?.recovery_action === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={loadRecognitionReview}>セル画像を確認・訂正</Button> : null}
+            {[
+              {stage: "row_day_boundaries", action: "review_row_day_boundaries", step: 1.7, label: "行・日境界の画像を開いて訂正"},
+              {stage: "header_boundaries", action: "review_header_boundaries", step: 1.6, label: "ヘッダー境界を訂正"},
+              {stage: "quad_estimation", action: "review_or_edit_quad", step: 1.5, label: "表外枠4点を訂正"},
+              {stage: "template_resolution", action: "review_facility_template", step: 1, label: "施設テンプレートを確認"},
+            ].filter(item => item.stage === workflow.ocr_job?.processing_stage && item.action === workflow.ocr_job?.recovery_action).map(item => (
+              <Button key={item.action} type="button" className="btn ghost workflow-ordinary-control" disabled={Boolean(busy)} onClick={() => setVisibleStep(item.step)}>
+                {item.label}
+              </Button>
+            ))}
+          </div> : null}
+          <Dialog open={recognitionReview !== null} onClose={closeRecognitionReview} fullWidth maxWidth="md">
+            <DialogTitle>認識停止セルの訂正</DialogTitle>
+            <DialogContent>
+              <p role="alert">{recognitionReview?.error_detail}</p>
+              <p>未確認 {recognitionReview?.cells.filter(cell => !(cell.cell in recognitionValues)).length ?? 0} セル</p>
+              <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12}}>
+                {recognitionReview?.cells.map(cell => <div key={cell.cell}>
+                  <img src={`data:image/png;base64,${cell.image_png_base64}`} alt={`${cell.cell}のFAX原画像`} style={{width: "100%", height: 72, objectFit: "contain"}} />
+                  <TextField label={cell.cell} size="small" value={recognitionValues[cell.cell] ?? ""} disabled={Boolean(busy)}
+                    slotProps={{htmlInput: {inputMode: "numeric", pattern: "[0-9]*"}}}
+                    onChange={event => {const value=event.target.value; if (/^[0-9]*$/.test(value)) {beginWorkflowEditorEdit("recognition"); setRecognitionValues(current => ({...current, [cell.cell]: value}));}}} />
+                  <label><Checkbox size="small" disabled={Boolean(busy)} checked={recognitionValues[cell.cell] === ""}
+                    onChange={event => {beginWorkflowEditorEdit("recognition"); const checked=event.target.checked; setRecognitionValues(current => {const next={...current}; if(checked) next[cell.cell]=""; else delete next[cell.cell]; return next;});}} />空欄</label>
+                </div>)}
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button disabled={Boolean(busy)} onClick={closeRecognitionReview}>閉じる</Button>
+              <Button disabled={Boolean(busy) || !recognitionReview?.cells.length || recognitionReview.cells.some(cell => !(cell.cell in recognitionValues))} onClick={saveRecognitionReview}>手入力を保存</Button>
+            </DialogActions>
+          </Dialog>
           {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
@@ -4904,6 +5009,7 @@ export default function OrderWorkflowV2Page() {
             縦軸をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に縦軸を追加します。
           </p>
           {headerAxisMessage ? <div className="notice error">{headerAxisMessage}</div> : null}
+          {headerAxisReview?.error_detail ? <div className="notice error" role="alert">ヘッダー境界の検証停止: {headerAxisReview.error_detail}</div> : null}
           <div className="header-axis-canvas-wrap">
             {headerAxisImageSrc ? (
               <div className="header-axis-canvas">
@@ -5006,6 +5112,35 @@ export default function OrderWorkflowV2Page() {
             </div>
           </header>
           {rowAxisWarning ? <div className="notice warning">{rowAxisWarning}</div> : null}
+          {rowAxisReview?.error_detail ? <div className="notice error" role="alert">
+            行・日境界の検証停止: {rowAxisReview.error_detail}
+          </div> : null}
+          {rowAxisReview?.boundary_diagnostics ? <p>
+            日付欄の期待境界: {rowAxisReview.boundary_diagnostics.expected?.join(", ") ?? "未確定"} / 検出境界: {rowAxisReview.boundary_diagnostics.actual?.join(", ") ?? "未検出"}
+          </p> : null}
+          <p className="subtle">本文の先頭境界は0です。ヘッダーは{rowAxisReview?.header_band_count ?? "未確認"}帯。対象外の日も空欄帯を残します。</p>
+          <div className="row-actions">
+            {rowAxisReview?.calendar_days?.map((day, index) => (
+              <label key={day.date}>
+                {day.date} 開始境界
+                <input type="number" min={0} step={1} value={rowDayBoundaries[index] ?? ""}
+                  disabled={Boolean(busy)} onChange={event => {
+                    beginWorkflowEditorEdit("row", true);
+                    setRowDayBoundaries(current => current.map((value, i) => i === index ? event.target.value : value));
+                  }} />
+                <span>期待 {day.expected_band_count ?? "対象外（原画像で確認）"}帯 / 現在 {
+                  rowDayBoundaries[index] !== "" && rowDayBoundaries[index + 1] !== ""
+                    ? Number(rowDayBoundaries[index + 1]) - Number(rowDayBoundaries[index]) : "未指定"}帯</span>
+              </label>
+            ))}
+            <label>最終境界
+              <input type="number" min={0} step={1} value={rowDayBoundaries[7] ?? ""}
+                disabled={Boolean(busy)} onChange={event => {
+                  beginWorkflowEditorEdit("row", true);
+                  setRowDayBoundaries(current => current.map((value, i) => i === 7 ? event.target.value : value));
+                }} />
+            </label>
+          </div>
           <p className="subtle">
             現在 {rowAxisYs.length} 本。横線をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に行境界を追加します。
           </p>
@@ -5054,7 +5189,10 @@ export default function OrderWorkflowV2Page() {
                             setRowAxisAddMode(false);
                           }}
                         >
-                          {idx + 1}
+                          {idx < (rowAxisReview?.header_band_count ?? 0) ? `H${idx}` : `本文${idx - (rowAxisReview?.header_band_count ?? 0)}`}
+                          {rowAxisReview?.calendar_days?.map((day, dayIndex) =>
+                            rowDayBoundaries[dayIndex] !== "" && Number(rowDayBoundaries[dayIndex]) + (rowAxisReview.header_band_count ?? 0) === idx
+                              ? ` ${day.date}` : "").join("")}
                         </text>
                       </g>
                     );

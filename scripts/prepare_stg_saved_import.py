@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+_phase = "startup"
 
 
 def checked_inputs(args):
@@ -38,6 +39,8 @@ def checked_inputs(args):
 
 
 def verify_live_initial(initial, token):
+    global _phase
+    _phase = "initial_validation"
     from staging_db_target import read_http
     from src.services.canonical_facility_store import _encode
 
@@ -47,6 +50,7 @@ def verify_live_initial(initial, token):
     facilities = initial["facilities"]
     if not facilities:
         raise ValueError("saved_import_initial_facilities_required")
+    _phase = "live_facility_inventory"
     status, body = read_http("https://web-stg-avlnzjjrca-dt.a.run.app/api/facilities", token)
     if status != 200:
         raise ValueError("saved_import_live_facility_read_failed")
@@ -54,6 +58,7 @@ def verify_live_initial(initial, token):
     if len(live_ids) != len(facilities) or set(live_ids) != {entry["facility_id"] for entry in facilities}:
         raise ValueError("saved_import_live_facility_inventory_changed")
     for entry in facilities:
+        _phase = "live_facility_configuration"
         versions = entry.get("versions")
         if not isinstance(versions, list) or len(versions) != 1 or "initial_snapshot" not in versions[0]:
             raise ValueError("saved_import_single_initial_snapshot_required")
@@ -112,6 +117,8 @@ def capture(connection, initial, policy, orders):
 
 
 def run(args):
+    global _phase
+    _phase = "runtime_imports"
     from run_stg_menu_master_migration import (
         require_staging_context, cloud_sql_proxy, _load_service_db_config,
         STAGING_INSTANCE, STAGING_DATABASE,
@@ -119,20 +126,27 @@ def run(args):
     from sqlalchemy import create_engine
     from sqlalchemy.engine import URL
 
+    _phase = "staging_context"
     require_staging_context()
+    _phase = "source_identity"
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if sha != args.source_sha or sha != os.environ.get("GITHUB_SHA"):
         raise ValueError("saved_import_actions_source_sha_mismatch")
+    _phase = "checked_inputs"
     initial, policy, orders = checked_inputs(args)
     verify_live_initial(initial, os.environ.get("LIVE_ID_TOKEN", ""))
+    _phase = "service_configuration"
     configs = [_load_service_db_config(os.environ["PROJECT_ID"], os.environ["REGION"], os.environ[key])
                for key in ("WEB_SERVICE", "WORKER_SERVICE")]
+    _phase = "staging_target"
     for config in configs:
         if (config.instance_connection_name, config.db_name, config.db_user) != (
                 STAGING_INSTANCE, STAGING_DATABASE, "orders_app"):
             raise ValueError("saved_import_staging_target_required")
     web = configs[0]
+    _phase = "database_proxy"
     with cloud_sql_proxy(web.instance_connection_name):
+        _phase = "database_connection"
         url = URL.create("postgresql+psycopg2", username=web.db_user, password=web.db_password,
                          host="127.0.0.1", port=5432, database=web.db_name,
                          query={"options": "-c default_transaction_read_only=on"})
@@ -141,6 +155,7 @@ def run(args):
         os.environ["DB_URI"] = url.render_as_string(hide_password=False)
         try:
             with engine.connect() as connection:
+                _phase = "saved_capture"
                 result = capture(connection, initial, policy, orders)
         finally:
             engine.dispose()
@@ -148,6 +163,7 @@ def run(args):
                 os.environ.pop("DB_URI", None)
             else:
                 os.environ["DB_URI"] = previous
+    _phase = "write_output"
     raw = (json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
     with args.output.open("xb") as stream:
         stream.write(raw)
@@ -165,8 +181,8 @@ def main():
     args = parser.parse_args()
     try:
         run(args)
-    except Exception:
-        print("Staging saved import failed; cloud, database and saved contents suppressed", file=sys.stderr)
+    except Exception as exc:
+        print(json.dumps({"phase": _phase, "exception_type": type(exc).__name__}), file=sys.stderr)
         return 1
     return 0
 

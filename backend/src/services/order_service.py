@@ -437,38 +437,7 @@ def _normalize_operator_header_axis_override(value: object, *, selected_pdf_rece
         return None
     session_kwargs = {"session": session} if session is not None else {}
     _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
-    coordinate_space = value.get("coordinate_space")
-    if not isinstance(coordinate_space, dict):
-        return None
-    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
-        return None
-    try:
-        width = int(coordinate_space.get("width"))
-        height = int(coordinate_space.get("height"))
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    raw_xs = value.get("corrected_xs")
-    if not isinstance(raw_xs, list) or len(raw_xs) < 2:
-        return None
-    corrected_xs: list[float] = []
-    for raw in raw_xs:
-        try:
-            x = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if x < 0 or x > float(width):
-            return None
-        corrected_xs.append(round(x, 3))
-    if any(b <= a for a, b in zip(corrected_xs, corrected_xs[1:])):
-        return None
-    return {
-        "corrected_xs": corrected_xs,
-        "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
-        "source": str(value.get("source") or "operator_header_axis_override"),
-        "source_receipt": deepcopy(value["source_receipt"]),
-    }
+    return deepcopy(value)
 
 
 def _normalize_operator_row_axis_override(value: object, *, selected_pdf_receipt=None, configured_input=None, order_input_identity=None, session=None) -> dict[str, Any] | None:
@@ -476,38 +445,9 @@ def _normalize_operator_row_axis_override(value: object, *, selected_pdf_receipt
         return None
     session_kwargs = {"session": session} if session is not None else {}
     _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
-    coordinate_space = value.get("coordinate_space")
-    if not isinstance(coordinate_space, dict):
-        return None
-    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
-        return None
-    try:
-        width = int(coordinate_space.get("width"))
-        height = int(coordinate_space.get("height"))
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    raw_ys = value.get("corrected_ys")
-    if not isinstance(raw_ys, list) or len(raw_ys) < 2:
-        return None
-    corrected_ys: list[float] = []
-    for raw in raw_ys:
-        try:
-            y = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if y < 0 or y > float(height):
-            return None
-        corrected_ys.append(round(y, 3))
-    if any(b <= a for a, b in zip(corrected_ys, corrected_ys[1:])):
-        return None
-    return {
-        "corrected_ys": corrected_ys,
-        "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
-        "source": str(value.get("source") or "operator_row_axis_override"),
-        "source_receipt": deepcopy(value["source_receipt"]),
-    }
+    # Validate geometry in the shared pipeline; never silently replace saved input
+    # with automatic estimation, including older edits lacking day boundaries.
+    return deepcopy(value)
 
 
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
@@ -8994,7 +8934,18 @@ def _validate_hakodate_owned_artifacts(payload, expected_source):
     if any(not isinstance(identity, str) or not identity for identity in record_evidence_ids) or len(set(record_evidence_ids)) != len(record_evidence_ids):
         raise ValueError("hakodate_own_record_identity_missing")
     records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=expected_source["selected_pdf_receipt"]["order_id"])
-    recognizer_regions = [(record.get("engine_metadata") or {}).get("recognizer_output") for record in records]
+    recognizer_regions = []
+    for record in records:
+        metadata = record.get("engine_metadata") or {}
+        if metadata.get("source") == "operator":
+            authored = metadata.get("operator_output")
+            if (not metadata.get("edited_by") or not isinstance(authored, dict)
+                    or authored.get("recognition_source") != "operator"
+                    or authored.get("operator_value") != record.get("raw_text")):
+                raise ValueError("recognition_operator_record_mismatch")
+            recognizer_regions.append(authored)
+        else:
+            recognizer_regions.append(metadata.get("recognizer_output"))
     if not snapshots_equal(canonical_target_semantics(recognizer_regions), expected_source["expected_target_semantics"]):
         raise ValueError("hakodate_record_semantics_changed")
     target_ids = [cell.get("sheet_cell") for cell in targets]
@@ -9383,6 +9334,7 @@ def _build_live_hakodate_manifest_item(
         "facility_code": facility_id,
         "facility_id": facility_id,
         "fax_pdf": fax_pdf_for_registration,
+        "week_code": week_code,
         "_verified_pdf_bytes": pdf_bytes_override,
         "configured_input": deepcopy(quad_configured_input),
         "original_physical_draft": hakodate_cell_ocr_batch_service.original_physical_draft(physical_menu_entries=original_input["physical_menu_entries"], week_code=week_code),
@@ -9401,6 +9353,7 @@ def _build_live_hakodate_manifest_item(
         "template_axes_y": template_axes_y,
         "quad_px": registration.quad_px,
         "quad_source": registration.quad_source,
+        "quad_override": deepcopy(workflow_meta.get("quad_override")),
         "header_axis_override": header_axis_override,
         "row_axis_override": row_axis_override,
         "week_sheet_name": week_sheet_name,
@@ -9441,7 +9394,6 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             week_sheet_name=week_sheet_name,
         )
         fax_template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(runtime_item, facility_id)  # noqa: SLF001
-        horizontal_line_mask, _vertical_line_mask = hakodate_cell_ocr_batch_service._split_line_masks(rectified_fax)  # noqa: SLF001
         aligned_xs, aligned_ys, axis_evidence, _axis_match_image = hakodate_cell_ocr_batch_service._align_axes(  # noqa: SLF001
             rectified_fax=rectified_fax,
             template_xs=template_xs,
@@ -9454,30 +9406,10 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             row_axis_override=runtime_item.get("row_axis_override")
             if isinstance(runtime_item.get("row_axis_override"), dict)
             else None,
-        )
-        grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
-            worksheet=worksheet,
-            rectified_fax=rectified_fax,
-            xs=aligned_xs,
-            ys=aligned_ys,
-            horizontal_line_mask=horizontal_line_mask,
-        )
-        target_regions, _target_evidence = hakodate_cell_ocr_batch_service._post_menu_target_regions(  # noqa: SLF001
-            worksheet=worksheet,
-            column_edges=[float(value) for value in aligned_xs],
-            row_edges=[float(value) for value in aligned_ys],
-            fax_template=fax_template,
-            horizontal_line_mask=horizontal_line_mask,
-            draft_sheet=runtime_item["original_physical_draft"],
-            menu_body_row_indexes=hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], axis_evidence["row_intersection_y_match"]),
-        )
-        hakodate_cell_ocr_batch_service.validate_original_target_plan(runtime_item, target_regions)
-        image = hakodate_cell_ocr_batch_service._draw_target_regions(  # noqa: SLF001
-            grid_overlay=grid_overlay,
-            regions=target_regions,
+            diagnostic_only=True,
         )
         image = hakodate_cell_ocr_batch_service._draw_header_intersections_overlay(  # noqa: SLF001
-            image=image,
+            image=_axis_match_image,
             axis_evidence=axis_evidence,
         ).convert("RGB")
         match = axis_evidence.get("header_intersection_x_match") if isinstance(axis_evidence, dict) else {}
@@ -9504,14 +9436,12 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             clusters = match.get("fax_x_clusters")
             if isinstance(clusters, list):
                 corrected_xs = [cluster.get("value") for cluster in clusters if isinstance(cluster, dict)]
-        if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
-            corrected_xs = list(runtime_item.get("template_axes_x") or [])
+        if not isinstance(corrected_xs, list):
+            corrected_xs = []
         xs: list[float] = []
         for raw in corrected_xs:
-            try:
-                xs.append(round(float(raw), 3))
-            except (TypeError, ValueError):
-                continue
+            if type(raw) in (int, float) and math.isfinite(raw):
+                xs.append(float(raw))
         y_clusters = match.get("fax_y_clusters")
         y_levels: list[float] = []
         if isinstance(y_clusters, list):
@@ -9522,12 +9452,11 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
                     y_levels.append(round(float(cluster.get("value")), 3))
                 except (TypeError, ValueError):
                     continue
-        if not y_levels:
-            y_levels = [float(value) for value in list(runtime_item.get("template_axes_y") or [])[:3]]
         _validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], start_input["configured_input"], source_receipt["order_input_identity"])
         return {
             "order_id": order_id,
-            "status": "ready",
+            "status": "ready" if match.get("used") else "needs_correction",
+            "error_detail": None if match.get("used") else match.get("reason"),
             "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "image_size": [crop.width, crop.height],
             "crop_box": crop_box,
@@ -9580,7 +9509,6 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             week_sheet_name=week_sheet_name,
         )
         fax_template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(runtime_item, facility_id)  # noqa: SLF001
-        horizontal_line_mask, _vertical_line_mask = hakodate_cell_ocr_batch_service._split_line_masks(rectified_fax)  # noqa: SLF001
         aligned_xs, aligned_ys, axis_evidence, _axis_match_image = hakodate_cell_ocr_batch_service._align_axes(  # noqa: SLF001
             rectified_fax=rectified_fax,
             template_xs=template_xs,
@@ -9593,19 +9521,25 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             row_axis_override=runtime_item.get("row_axis_override")
             if isinstance(runtime_item.get("row_axis_override"), dict)
             else None,
-        )
-        grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
-            worksheet=worksheet,
-            rectified_fax=rectified_fax,
-            xs=aligned_xs,
-            ys=aligned_ys,
-            horizontal_line_mask=horizontal_line_mask,
+            diagnostic_only=True,
         )
         image = hakodate_cell_ocr_batch_service._draw_row_intersections_overlay(  # noqa: SLF001
-            image=grid_overlay,
+            image=_axis_match_image,
             axis_evidence=axis_evidence,
         ).convert("RGB")
-        hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], axis_evidence["row_intersection_y_match"])
+        match = axis_evidence["row_intersection_y_match"]
+        diagnostic_error = match.get("reason") if match.get("diagnostic_only") else None
+        if diagnostic_error is None:
+            try:
+                hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], match)
+            except ValueError as exc:
+                diagnostic_error = str(exc)
+        from src.services import ocr_row_recovery_service, master_order_form_template_service
+        days = ocr_row_recovery_service.calendar_contract(
+            master_order_form_template_service.validated_body_row_plan(worksheet)
+        )
+        structural = match.get("structural_match") or {}
+        day_source = match.get("canonical_day_source") or structural.get("canonical_day_source") or {}
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
@@ -9623,7 +9557,17 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
         _validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], start_input["configured_input"], source_receipt["order_input_identity"])
         return {
             "order_id": order_id,
-            "status": "ready",
+            "status": "needs_correction" if diagnostic_error else "ready",
+            "error_detail": diagnostic_error,
+            "calendar_days": days,
+            "boundary_diagnostics": {
+                "expected": day_source.get("canonical_date_column_boundary_indexes"),
+                "actual": day_source.get("observed_date_column_boundary_indexes"),
+                "missing": match.get("missing_date_column_boundary_indexes"),
+                "extra": match.get("extra_date_column_boundary_indexes"),
+            },
+            "body_day_boundary_indexes": (match.get("structural_match") or {}).get("body_day_boundary_indexes"),
+            "header_band_count": len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS),
             "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "image_size": [image.width, image.height],
             "canvas_size": [image.width, image.height],
@@ -9672,6 +9616,23 @@ def _hakodate_overlay_fingerprint(
     ).hexdigest()
 
 
+def _persist_hakodate_recognition_checkpoint(**kwargs):
+    from src.services.hakodate_ocr_checkpoint_service import persist_recognizer_checkpoint
+
+    execution = current_nonworkflow_execution()
+    job_id = execution["job_id"] if execution is not None else _workflow_ocr_job_id.get()
+    if not job_id:
+        raise ValueError("recognition_checkpoint_job_required")
+    checkpoint = persist_recognizer_checkpoint(**kwargs)
+    updated = _update_reparse_job_progress(
+        job_id, processing_stage="recognition", result_state="processing",
+        metrics_patch={"recognition_checkpoint": checkpoint, "recovery_action": "review_recognition_cells"},
+    )
+    if updated is None:
+        raise ValueError("recognition_checkpoint_job_ownership_changed")
+    return checkpoint
+
+
 def _hakodate_canonical_payload_from_manifest_item(
     *,
     order_id: str,
@@ -9685,10 +9646,47 @@ def _hakodate_canonical_payload_from_manifest_item(
     draft_sheet = _hakodate_best_method_draft_sheet(order_id, synchronous_write_input=synchronous_write_input)
     if not isinstance(draft_sheet, dict):
         raise ValueError("hakodate_best_method_draft_sheet_missing")
+    captured = synchronous_write_input if synchronous_write_input is not None else processing_start_read_input()
+    if synchronous_write_input is not None:
+        captured = {
+            **captured,
+            "order": captured["input_versions"]["order"],
+            "workflow": {"secondary_actions_json": captured["workflow_meta"]},
+        }
+    meta = ((captured.get("workflow") or {}).get("secondary_actions_json") or {}).get("workflow_v2") or {}
+    recognition_override = meta.get("recognition_override")
+    resume_options = {}
     with tempfile.TemporaryDirectory(prefix=f"hakodate_canonical_{order_id}_") as tmp:
         output_dir = Path(tmp)
         runtime_item = dict(item)
-        if not all(str(runtime_item.get(key) or "").strip() for key in ("fax_pdf", "template_pdf", "step2_png")):
+        if recognition_override is not None:
+            from src.services import ocr_recognition_recovery_service as recovery
+            from src.services.storage_service import load_selected_pdf_bytes
+            if (not isinstance(recognition_override, dict)
+                    or recognition_override.get("source") != "operator"
+                    or not recognition_override.get("edited_by")):
+                raise ValueError("recognition_operator_identity_required")
+            receipt = (captured["input_versions"]["selected_pdf_receipt"]
+                       if synchronous_write_input is not None else processing_start_pdf_receipt())
+            if not isinstance(receipt, dict):
+                raise ValueError("selected_pdf_source_required")
+            runtime_item = recovery.current_item(
+                recognition_override["checkpoint"], captured,
+                {"selected_pdf_receipt": receipt}, order_id,
+            )
+            if document_uri_override is not None and document_uri_override != receipt["storage_uri"]:
+                raise ValueError("selected_pdf_input_mismatch")
+            runtime_item["_verified_pdf_bytes"] = (
+                pdf_bytes_override if pdf_bytes_override is not None
+                else load_selected_pdf_bytes(receipt["storage_uri"], receipt)
+            )
+            resume_options = {
+                "recognition_checkpoint": recognition_override["checkpoint"],
+                "operator_values": recovery.operator_values(
+                    recognition_override.get("values"), runtime_item["original_expected_sheet_cells"],
+                ),
+            }
+        elif not all(str(runtime_item.get(key) or "").strip() for key in ("fax_pdf", "template_pdf", "step2_png")):
             if not facility_id:
                 raise ValueError("facility_missing")
             runtime_item = _build_live_hakodate_manifest_item(
@@ -9704,7 +9702,7 @@ def _hakodate_canonical_payload_from_manifest_item(
         else:
             raise ValueError("hakodate_manifest_selected_pdf_receipt_required")
         from src.services.storage_service import verify_selected_pdf_bytes
-        verify_selected_pdf_bytes(runtime_item["_verified_pdf_bytes"])
+        verify_selected_pdf_bytes(runtime_item["_verified_pdf_bytes"], runtime_item["selected_pdf_receipt"])
         original_source = _hakodate_owned_source(runtime_item["configured_input"], runtime_item["selected_pdf_receipt"], synchronous_write_input)
         runtime_item["original_expected_sheet_cells"] = deepcopy(original_source["expected_sheet_cells"])
         runtime_item["original_target_semantics"] = deepcopy(original_source["expected_target_semantics"])
@@ -9714,6 +9712,8 @@ def _hakodate_canonical_payload_from_manifest_item(
             draft_sheet=draft_sheet,
             output_dir=output_dir,
             render_width=1864,
+            checkpoint_callback=_persist_hakodate_recognition_checkpoint if synchronous_write_input is None else None,
+            **resume_options,
         )
         runtime_metrics_raw = getattr(result, "metrics", None)
         runtime_metrics = dict(runtime_metrics_raw) if isinstance(runtime_metrics_raw, dict) else {}
@@ -9744,7 +9744,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             if not isinstance(region, dict):
                 continue
             copied = dict(region)
-            copied["source"] = "hakodate_best_method_pipeline"
+            copied["source"] = "operator" if recognition_override is not None else "hakodate_best_method_pipeline"
             canonical_regions.append(copied)
         if not digit_records:
             raise ValueError("hakodate_own_recognizer_records_missing")
@@ -9761,7 +9761,14 @@ def _hakodate_canonical_payload_from_manifest_item(
         for index, region in enumerate(evidence_source_records):
             accepted_candidate = region.get("recognizer_accepted_candidate")
             accepted_candidate = accepted_candidate if isinstance(accepted_candidate, dict) else {}
-            if "recognizer_raw_text" in region:
+            if recognition_override is not None:
+                cell = region.get("sheet_cell")
+                values = resume_options["operator_values"]
+                if (cell not in values or region.get("recognition_source") != "operator"
+                        or region.get("operator_value") != values[cell]):
+                    raise ValueError("recognition_operator_record_mismatch")
+                raw_value = values[cell]
+            elif "recognizer_raw_text" in region:
                 raw_value = region["recognizer_raw_text"]
             elif "raw_text" in region:
                 raw_value = region["raw_text"]
@@ -9801,15 +9808,22 @@ def _hakodate_canonical_payload_from_manifest_item(
                     },
                 }
             )
+            if recognition_override is not None:
+                raw_evidence_records[-1]["engine_metadata"] = {
+                    "source": "operator", "edited_by": recognition_override["edited_by"],
+                    "created_at": recognition_override["created_at"],
+                    "source_receipt": deepcopy(owned_source), "sheet_cell": region["sheet_cell"],
+                    "source_artifact": "best_method_records", "operator_output": deepcopy(region),
+                }
         target_cells = hakodate_ocr_evidence_service.target_cells_from_regions(canonical_regions)
         for cell in target_cells:
-            cell["source"] = "hakodate_best_method_pipeline"
+            cell["source"] = "operator" if recognition_override is not None else "hakodate_best_method_pipeline"
             cell["source_receipt"] = deepcopy(owned_source)
         evidence_records = hakodate_ocr_evidence_service.evidence_from_records(
             raw_evidence_records,
             run_id=f"{order_id}:hakodate-best-method",
             engine=str(result.ocr_engine or hakodate_cell_ocr_batch_service.DEFAULT_CELL_OCR_ENGINE),
-            source_scope="hakodate_cell_crop_batch",
+            source_scope="operator_cell_review" if recognition_override is not None else "hakodate_cell_crop_batch",
             raw_payload_ref=outputs["records"],
             retain_empty_records=True,
         )
@@ -13314,8 +13328,22 @@ def _rerun_ocr_evidence_only_with_input(
 
     def _hakodate_rerun_failure_payload(exc: Exception) -> dict[str, Any]:
         from src.services.hakodate_fixed_quad_registration_service import QuadEstimationError
+        from src.hakodate_best_method_runtime.render_best_method_overlay_all_facilities import HakodateRecognizerCheckpointError
+        from src.services.ocr_row_recovery_service import failure_details
 
         raw_message = str(exc).strip()
+        if isinstance(exc, HakodateRecognizerCheckpointError):
+            return {
+                "error": "hakodate_recognizer_failed_after_checkpoint",
+                "error_detail": str(exc.__cause__) if exc.__cause__ is not None else raw_message,
+                "processing_stage": "recognition",
+                "recognition_checkpoint": deepcopy(exc.checkpoint_reference),
+                "recovery_action": "review_recognition_cells",
+                "error_user_message": "文字認識で停止しました。保存したセル画像から確認・訂正できます。",
+            }
+        geometry_failure = failure_details(raw_message)
+        if geometry_failure is not None:
+            return geometry_failure
         if isinstance(exc, QuadEstimationError):
             return {
                 "error": "quad_estimation_failed",

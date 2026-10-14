@@ -178,7 +178,7 @@ def _monthly_item_identity_key(
         str(name or "").strip(),
         str(_coerce_master_field_value("daypart", daypart) or "").strip(),
         str(category or "").strip(),
-        str(normalize_diet_type(diet_type) or "").strip(),
+        str(_monthly_entry_diet_identity(diet_type) or "").strip(),
         str(facility_override or "").strip(),
     )
 
@@ -245,19 +245,28 @@ def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str,
     )
 
 
+def _monthly_entry_diet_identity(value: object) -> str | None:
+    # Persisted monthly rows use a blank diet to encode regular meals.
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "regular"
+    return normalize_diet_type(value)
+
+
 def _monthly_entry_override_key(entry: MonthlyMenuEntry) -> tuple[object, object, int, str]:
     return (
         entry.menu_date,
         entry.daypart,
         int(entry.slot_index) if entry.slot_index is not None else -1,
-        str(normalize_diet_type(entry.diet_type) or "").strip(),
+        str(_monthly_entry_diet_identity(entry.diet_type) or "").strip(),
     )
 
 
 def _monthly_entry_diet_filter(column, diet_type: object):
-    normalized = normalize_diet_type(diet_type)
+    normalized = _monthly_entry_diet_identity(diet_type)
     if not normalized:
         return column.in_([])
+    if normalized == "regular":
+        return or_(column.is_(None), column == "", column == "regular")
     return column == normalized
 
 
@@ -3034,7 +3043,7 @@ def _find_existing_monthly_entry(
     facility_override: str | None,
     diet_type: str | None,
 ) -> MonthlyMenuEntry | None:
-    if not normalize_diet_type(diet_type):
+    if not _monthly_entry_diet_identity(diet_type):
         return None
     query = (
         select(MonthlyMenuEntry)

@@ -106,6 +106,19 @@ def _digest(value: object) -> str:
 def hakodate_evidence_record_allowed(record: dict[str, Any]) -> bool:
     source_scope = str(record.get("source_scope") or "").strip()
     engine = str(record.get("engine") or "").strip()
+    if source_scope == "operator_cell_review":
+        metadata = record.get("engine_metadata")
+        if not isinstance(metadata, dict):
+            return False
+        original = metadata.get("operator_output")
+        return bool(
+            engine == "operator" and metadata.get("source") == "operator"
+            and metadata.get("edited_by") and isinstance(original, dict)
+            and original.get("recognition_source") == "operator"
+            and original.get("sheet_cell") == metadata.get("sheet_cell")
+            and isinstance(original.get("operator_value"), str)
+            and original["operator_value"] == record.get("raw_text")
+        )
     if source_scope in _HAKODATE_ALLOWED_SOURCE_SCOPES:
         return True
     if engine in _HAKODATE_ALLOWED_EVIDENCE_ENGINES:
