@@ -36,7 +36,8 @@ def test_operator_requires_explicit_value_for_every_cell(values):
         operator_values(values, ["E11"])
 
 
-def test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_boundary, monkeypatch):
+@pytest.mark.parametrize("async_job", [False, True])
+def test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_boundary, monkeypatch, async_job):
     import numpy as np
     from src.services import hakodate_ocr_checkpoint_service as checkpoints
     from src.services import ocr_recognition_recovery_service as recovery
@@ -64,9 +65,15 @@ def test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_b
     }
     monkeypatch.setattr(runtime, "_build_preprocess_for_ocr", lambda **kw: pytest.fail("preprocessing repeated"))
     monkeypatch.setattr(runtime, "_run_text_recognizer_records", lambda **kw: pytest.fail("operator values recognized again"))
+    if async_job:
+        captured = {key: value for key, value in captured.items() if key not in {"selected_pdf_receipt", "input_versions"}}
+        monkeypatch.setattr(order_service, "processing_start_read_input", lambda: captured)
+        monkeypatch.setattr(order_service, "processing_start_pdf_receipt", lambda: start["selected_pdf_receipt"])
+        original_draft = order_service._hakodate_best_method_draft_sheet(order_id, synchronous_write_input=start)
+        monkeypatch.setattr(order_service, "_hakodate_best_method_draft_sheet", lambda *args, **kwargs: deepcopy(original_draft))
     result = order_service._hakodate_canonical_payload_from_manifest_item(
         order_id=order_id, facility_id=captured["order"]["facility_code"], item={},
-        synchronous_write_input=start,
+        synchronous_write_input=None if async_job else start,
     )
     records = result["hakodate_ocr_evidence_records"]
     assert len(records) == len(values)

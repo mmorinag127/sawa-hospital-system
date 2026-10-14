@@ -9649,9 +9649,8 @@ def _hakodate_canonical_payload_from_manifest_item(
                     or recognition_override.get("source") != "operator"
                     or not recognition_override.get("edited_by")):
                 raise ValueError("recognition_operator_identity_required")
-            receipt = captured.get("selected_pdf_receipt")
-            if synchronous_write_input is not None:
-                receipt = captured["input_versions"]["selected_pdf_receipt"]
+            receipt = (captured["input_versions"]["selected_pdf_receipt"]
+                       if synchronous_write_input is not None else processing_start_pdf_receipt())
             if not isinstance(receipt, dict):
                 raise ValueError("selected_pdf_source_required")
             runtime_item = recovery.current_item(
