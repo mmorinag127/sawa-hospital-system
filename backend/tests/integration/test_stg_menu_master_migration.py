@@ -462,7 +462,7 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
     auth_step = next(step for step in gate["steps"] if step.get("uses") == "google-github-actions/auth@v3")
     assert auth_step["with"]["workload_identity_provider"] == "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}"
     assert auth_step["with"]["service_account"] == "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}"
-    migration_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py"
+    migration_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py"
     preflight_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py"
     gate_commands = [step["run"] for step in gate["steps"] if "run" in step]
     assert gate_commands == [migration_command, preflight_command]
