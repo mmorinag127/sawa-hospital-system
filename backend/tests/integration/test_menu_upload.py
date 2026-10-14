@@ -58,6 +58,7 @@ def test_menu_upload_records_menu():
     with session_scope() as session:
         session.query(AuditLog).delete()
         session.query(MonthlyMenuItem).delete()
+        session.query(MonthlyMenuEntry).delete()
         session.query(MenuFacilityOverride).delete()
         session.query(MenuMaster).delete()
         session.query(MonthlyMenu).delete()

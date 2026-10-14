@@ -9616,6 +9616,23 @@ def _hakodate_overlay_fingerprint(
     ).hexdigest()
 
 
+def _persist_hakodate_recognition_checkpoint(**kwargs):
+    from src.services.hakodate_ocr_checkpoint_service import persist_recognizer_checkpoint
+
+    execution = current_nonworkflow_execution()
+    job_id = execution["job_id"] if execution is not None else _workflow_ocr_job_id.get()
+    if not job_id:
+        raise ValueError("recognition_checkpoint_job_required")
+    checkpoint = persist_recognizer_checkpoint(**kwargs)
+    updated = _update_reparse_job_progress(
+        job_id, processing_stage="recognition", result_state="processing",
+        metrics_patch={"recognition_checkpoint": checkpoint, "recovery_action": "review_recognition_cells"},
+    )
+    if updated is None:
+        raise ValueError("recognition_checkpoint_job_ownership_changed")
+    return checkpoint
+
+
 def _hakodate_canonical_payload_from_manifest_item(
     *,
     order_id: str,
@@ -9689,14 +9706,13 @@ def _hakodate_canonical_payload_from_manifest_item(
         original_source = _hakodate_owned_source(runtime_item["configured_input"], runtime_item["selected_pdf_receipt"], synchronous_write_input)
         runtime_item["original_expected_sheet_cells"] = deepcopy(original_source["expected_sheet_cells"])
         runtime_item["original_target_semantics"] = deepcopy(original_source["expected_target_semantics"])
-        from src.services.hakodate_ocr_checkpoint_service import persist_recognizer_checkpoint
         result, _review_page = hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item(
             item=runtime_item,
             page=_authored_geometry_page(runtime_item["configured_input"]),
             draft_sheet=draft_sheet,
             output_dir=output_dir,
             render_width=1864,
-            checkpoint_callback=persist_recognizer_checkpoint,
+            checkpoint_callback=_persist_hakodate_recognition_checkpoint if synchronous_write_input is None else None,
             **resume_options,
         )
         runtime_metrics_raw = getattr(result, "metrics", None)

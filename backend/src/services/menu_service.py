@@ -178,7 +178,7 @@ def _monthly_item_identity_key(
         str(name or "").strip(),
         str(_coerce_master_field_value("daypart", daypart) or "").strip(),
         str(category or "").strip(),
-        str(normalize_diet_type(diet_type) or "").strip(),
+        str(_monthly_entry_diet_identity(diet_type) or "").strip(),
         str(facility_override or "").strip(),
     )
 
@@ -246,7 +246,7 @@ def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str,
 
 
 def _monthly_entry_diet_identity(value: object) -> str | None:
-    # Persisted monthly entries used a blank diet to encode regular meals.
+    # Persisted monthly rows use a blank diet to encode regular meals.
     if value is None or (isinstance(value, str) and not value.strip()):
         return "regular"
     return normalize_diet_type(value)

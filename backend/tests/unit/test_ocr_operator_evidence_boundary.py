@@ -36,6 +36,41 @@ def test_operator_requires_explicit_value_for_every_cell(values):
         operator_values(values, ["E11"])
 
 
+@pytest.mark.parametrize("accepted", [True, False])
+def test_checkpoint_is_bound_to_owned_job_before_recognition(monkeypatch, accepted):
+    from src.services import hakodate_ocr_checkpoint_service as checkpoints
+    checkpoint = {"checkpoint": {"sha256": "synthetic"}}
+    events = []
+    monkeypatch.setattr(checkpoints, "persist_recognizer_checkpoint", lambda **kw: events.append("stored") or checkpoint)
+    monkeypatch.setattr(order_service, "current_nonworkflow_execution", lambda: {"job_id": "owned-job"})
+    def update(job_id, **kwargs):
+        assert events == ["stored"]
+        assert job_id == "owned-job"
+        assert kwargs["processing_stage"] == "recognition"
+        assert kwargs["metrics_patch"]["recognition_checkpoint"] == checkpoint
+        events.append("job-bound")
+        return {"id": job_id} if accepted else None
+    monkeypatch.setattr(order_service, "_update_reparse_job_progress", update)
+    if accepted:
+        assert order_service._persist_hakodate_recognition_checkpoint(item={}) == checkpoint
+    else:
+        with pytest.raises(ValueError, match="recognition_checkpoint_job_ownership_changed"):
+            order_service._persist_hakodate_recognition_checkpoint(item={})
+    assert events == ["stored", "job-bound"]
+
+
+def test_job_checkpoint_rejects_missing_owner_before_storage(monkeypatch):
+    from src.services import hakodate_ocr_checkpoint_service as checkpoints
+    monkeypatch.setattr(checkpoints, "persist_recognizer_checkpoint", lambda **kw: pytest.fail("unowned checkpoint stored"))
+    monkeypatch.setattr(order_service, "current_nonworkflow_execution", lambda: None)
+    token = order_service._workflow_ocr_job_id.set(None)
+    try:
+        with pytest.raises(ValueError, match="recognition_checkpoint_job_required"):
+            order_service._persist_hakodate_recognition_checkpoint(item={})
+    finally:
+        order_service._workflow_ocr_job_id.reset(token)
+
+
 @pytest.mark.parametrize("async_job", [False, True])
 def test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_boundary, monkeypatch, async_job):
     import numpy as np
