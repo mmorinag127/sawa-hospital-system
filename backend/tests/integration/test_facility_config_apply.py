@@ -5,6 +5,8 @@ import json
 from hashlib import sha256
 from copy import deepcopy
 import pytest
+from fastapi.testclient import TestClient
+from tests.contract.auth_support import hospital_operator  # noqa: F401
 from datetime import datetime
 
 from openpyxl import Workbook
@@ -68,7 +70,7 @@ def _clear_facilities():
         session.execute(delete(Facility))
 
 
-def test_facility_config_applies_to_resolved_config():
+def test_facility_version_endpoint_applies_to_resolved_config(hospital_operator):
     _clear_facilities()
     fac = _create_facility(
         "Beta Facility",
@@ -82,8 +84,32 @@ def test_facility_config_applies_to_resolved_config():
             "columns": [{"name": "date", "source": "date"}],
         },
     }
-    assert _update_config(fac["id"], config)
-    resolved = config_service.get_facility_config(fac["id"])
+    from src.main import app
+    client = TestClient(app, headers=hospital_operator.headers)
+    versions = client.get(f"/facilities/{fac['id']}/versions")
+    assert versions.status_code == 200
+    effective_date = canonical_facility_store.facility_change_today().isoformat()
+    authored = {
+        "facility_id": fac["id"], "facility_name": "Beta Facility", "areas": fac["areas"],
+        "packaging_policy": deepcopy(config["packaging_policy_override"]),
+        "label_profile": deepcopy(config["label_profile_override"]),
+        "invoice_template": deepcopy(config["invoice_template"]),
+        "fax_template_id": "beta-authored-template",
+        "fax_template": {"template_id": "beta-authored-template", "columns": [
+            {"index": 0, "source_index": 0, "role": "date", "name": "date_mmdd"},
+            {"index": 1, "source_index": 1, "role": "quantity", "name": "qty.regular_are100",
+             "diet_type": "regular", "area_id": "ARE100"},
+        ]},
+    }
+    saved = client.post(f"/facilities/{fac['id']}/versions", json={
+        "expected_revision": versions.json()["revision"],
+        "version": {"version_id": "beta-authored-v1", "valid_from": effective_date, "valid_to": None,
+                    "facility": authored},
+    })
+    assert saved.status_code == 200, saved.text
+    response = client.get(f"/facilities/{fac['id']}/resolved", params={"effective_date": effective_date})
+    assert response.status_code == 200, response.text
+    resolved = response.json()["config"]
     assert resolved is not None
     assert resolved["packaging_policy"]["split_key"] == ["facility", "date"]
     assert resolved["label_profile"]["storage_mode"] == "frozen"

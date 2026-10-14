@@ -1,3 +1,4 @@
+from modernization_input_support import prepare_supersede_recognition, owned_recognition_pdf, recognize_ingest
 import pytest
 from modernization_input_support import registration_environment, authored_ingest_master, register_ingest  # noqa: F401
 
@@ -13,7 +14,7 @@ from src.workers.ingest_mail_adapter import IngestEmailPayload
 from src.services import order_service
 
 
-def test_ingest_supersede_records_upload_time_versions_and_line_snapshots():
+def test_ingest_supersede_records_upload_time_versions_and_line_snapshots(tmp_path, monkeypatch):
     order_service.clear_all()
     first = IngestEmailPayload(
         message_id="msg-version-1",
@@ -30,33 +31,16 @@ def test_ingest_supersede_records_upload_time_versions_and_line_snapshots():
         week_hint="2025-12@2025-12-22~2025-12-28",
     )
 
-    created = register_ingest(
-        first,
-        lines=[
-            {
-                "line_id": "first-line",
-                "date": "2025-12-23",
-                "daypart": "昼",
-                "menu_name": "初回メニュー",
-                "quantity_original": 3,
-            }
-        ],
-    )
-    updated = register_ingest(
-        second,
-        lines=[
-            {
-                "line_id": "second-line",
-                "date": "2025-12-24",
-                "daypart": "夕",
-                "menu_name": "変更後メニュー",
-                "quantity_original": 7,
-            }
-        ],
-    )
+    prepare_supersede_recognition(monkeypatch, tmp_path)
+    first_rows = [["12/23", "昼", "初回メニュー", "3"]]
+    second_rows = [["12/24", "夕", "変更後メニュー", "7"]]
+    first = owned_recognition_pdf(first, tmp_path, first_rows)
+    second = owned_recognition_pdf(second, tmp_path, second_rows)
+    created = recognize_ingest(first, monkeypatch, first_rows)
+    updated = recognize_ingest(second, monkeypatch, second_rows)
 
     assert updated["id"] == created["id"]
-    assert updated["document"] == "file://version2.pdf"
+    assert updated["document"] == second.pdf_uri
     assert updated["version_count"] == 2
     assert [version["version_no"] for version in updated["versions"]] == [2, 1]
     assert [version["message_id"] for version in updated["versions"]] == ["msg-version-2", "msg-version-1"]
@@ -65,19 +49,10 @@ def test_ingest_supersede_records_upload_time_versions_and_line_snapshots():
     assert updated["versions"][1]["received_at"].isoformat() == "2025-12-23T10:00:00"
     assert updated["versions"][0]["line_snapshot"][0]["menu_name"] == "変更後メニュー"
     assert updated["versions"][1]["line_snapshot"][0]["menu_name"] == "初回メニュー"
+    assert updated["versions"][0]["line_snapshot"][0]["quantity_original"] == 7
+    assert updated["versions"][1]["line_snapshot"][0]["quantity_original"] == 3
 
-    retried = register_ingest(
-        second,
-        lines=[
-            {
-                "line_id": "second-line",
-                "date": "2025-12-24",
-                "daypart": "夕",
-                "menu_name": "変更後メニュー",
-                "quantity_original": 7,
-            }
-        ],
-    )
+    retried = recognize_ingest(second, monkeypatch, second_rows)
 
     assert retried["version_count"] == 2
     assert [version["version_no"] for version in retried["versions"]] == [2, 1]

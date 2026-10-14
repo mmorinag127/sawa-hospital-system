@@ -169,3 +169,63 @@ def seed_sheet_monthly_menu(rows, *, slot_start=0):
             session.add(MonthlyMenuEntry(id=key, monthly_menu_id="2025-12", menu_date=day,
                                         daypart=row[1], category="主菜", diet_type="regular", name=row[2],
                                         slot_index=slot_start + rows.index(row)))
+
+
+def prepare_supersede_recognition(monkeypatch, root):
+    """Author only the FAC001 recognition fixture; retain its owner and period."""
+    snapshot = facility_master_service.get_snapshot()
+    master = deepcopy(snapshot.master)
+    facility = next(item for item in master["facilities"] if item["facility_id"] == "FAC001")
+    facility.pop("versions")
+    facility["fax_template"]["columns"] = [
+        {"index": 0, "source_index": 0, "role": "date", "name": "date_mmdd"},
+        {"index": 1, "source_index": 1, "role": "daypart", "name": "daypart"},
+        {"index": 2, "source_index": 2, "role": "menu_name", "name": "menu"},
+        {"index": 3, "source_index": 3, "role": "quantity", "name": "qty.regular_x",
+         "diet_type": "regular", "area_id": "X"},
+    ]
+    facility["fax_template"]["main_ocr_row_fields"] = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    digest = sha256(json.dumps(facility, sort_keys=True).encode()).hexdigest()
+    facility["versions"] = [canonical_facility_store.initial_facility_version(facility, digest)]
+    Path(snapshot.source).write_text(json.dumps(master, ensure_ascii=False), encoding="utf-8")
+    policy = root / "supersede-policy.json"
+    policy.write_text(json.dumps({"ocr_retry_limit": 1, "quantity_rules": {},
+                                  "backlog_policy": {"skip_ocr_for_stale": False}}))
+    monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", policy)
+    seed_sheet_monthly_menu([["12/23", "昼", "初回メニュー"], ["12/24", "夕", "変更後メニュー"]])
+
+
+def owned_recognition_pdf(payload, root, rows):
+    path = root / (payload.message_id + ".pdf")
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((40, 40), f"Synthetic {payload.facility_hint} / {payload.week_hint}")
+        page.insert_textbox((40, 60, 550, 800), json.dumps(rows, ensure_ascii=True), fontsize=8)
+        pdf.save(path)
+    digest = sha256(path.read_bytes()).hexdigest()
+    received = datetime.fromisoformat(payload.received_at)
+    with session_scope() as session:
+        session.add(UploadedPdf(id=str(uuid4()), message_id=payload.message_id, storage_uri=str(path),
+                               original_filename=path.name, content_sha256=digest, received_at=received, page_count=1))
+    return replace(payload, pdf_uri=str(path), content_sha256=digest, received_at=received)
+
+
+def recognize_ingest(payload, monkeypatch, rows):
+    from tests.helpers.ingest_original import authored_pipeline_provider
+
+    original = jobs.get_ingest_job_snapshot(payload.message_id)
+    is_retry = original is not None
+    if original is None:
+        register_ingest(payload, lines=None, document_status="processing", error_message="ocr_pending")
+        original = jobs.get_ingest_job_snapshot(payload.message_id)
+    delivery_id, generation = delivery.delivery_for_job(original["id"], original["generation"], original["input_digest"])
+    with monkeypatch.context() as provider_patch:
+        authored_pipeline_provider(provider_patch, table_rows=rows)
+        result = delivery.process(delivery_id, generation)
+    if is_retry:
+        assert result == {"acknowledged": True, "duplicate": True}
+    else:
+        assert result["result"] == "business_done", result
+    existing = order_service.preview_existing_order_for_ingest(payload)
+    assert existing is not None
+    return order_service.get_order_by_id(existing["order_id"])
