@@ -3,8 +3,8 @@ variable "facility_master_uri" {
   type        = string
   nullable    = false
   validation {
-    condition     = trimspace(var.facility_master_uri) != ""
-    error_message = "An explicit facility_master_uri is required."
+    condition     = can(regex("^gs://[^/?#]+/[^?#]*[^/?#][^?#]*$", trimspace(var.facility_master_uri)))
+    error_message = "An explicit gs://bucket/object facility_master_uri without query or fragment is required."
   }
 }
 

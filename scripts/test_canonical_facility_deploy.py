@@ -77,10 +77,43 @@ class CanonicalDeployTest(unittest.TestCase):
             block = variables.split('variable "facility_master_uri" {', 1)[1].split('\nvariable ', 1)[0]
             self.assertIn("type        = string", block)
             self.assertIn("nullable    = false", block)
-            self.assertIn('trimspace(var.facility_master_uri) != ""', block)
+            self.assertIn('can(regex("^gs://[^/?#]+/[^?#]*[^/?#][^?#]*$", trimspace(var.facility_master_uri)))', block)
             self.assertNotIn("default", block)
             self.assertRegex(main, r"FACILITY_MASTER_URI\s*= var.facility_master_uri")
             self.assertNotIn("FACILITY_MASTER_PATH", main)
+
+    def test_canonical_writer_is_scoped_to_exact_object(self):
+        expected_expression = 'expression = "resource.name == ${jsonencode("projects/_/buckets/${local.facility_master_uri_parts[0]}/objects/${local.facility_master_uri_parts[1]}")}"'
+        for target in ("stg", "prod"):
+            source = (ROOT / "infra/terraform/envs" / target / "facility-master-iam.tf").read_text()
+            self.assertIn('regex("^gs://([^/]+)/(.+)$", trimspace(var.facility_master_uri))', source)
+            self.assertIn('role   = "roles/storage.objectAdmin"', source)
+            self.assertIn('member = "serviceAccount:${module.cloudrun.service_accounts["worker"]}"', source)
+            self.assertIn(expected_expression, source)
+            self.assertNotIn("startsWith", source)
+            self.assertEqual(source.count('resource "google_storage_bucket_iam_member"'), 1)
+
+    def test_uri_validation_uses_terraform_for_edge_cases(self):
+        pattern = "^gs://[^/?#]+/[^?#]*[^/?#][^?#]*$"
+        cases = ["", "file:///tmp/master.json", "gs://bucket", "gs://bucket/", "gs://bucket///",
+                 "gs://bucket/key?query", "gs://bucket/key#fragment", "gs://bucket/master.json",
+                 " gs://bucket/config/master.json ", 'gs://bucket/config/a"b.json']
+        expected = [False] * 7 + [True] * 3
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            cli = directory / "terraformrc"
+            cli.write_text("")
+            env = {"PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary,
+                   "TF_DATA_DIR": str(directory / "data"), "TF_CLI_CONFIG_FILE": str(cli),
+                   "TF_IN_AUTOMATION": "true", "CHECKPOINT_DISABLE": "1"}
+            expression = f"jsonencode([for uri in {json.dumps(cases)} : can(regex({json.dumps(pattern)}, trimspace(uri)))])"
+            query = directory / "query.txt"
+            query.write_text(expression + "\n")
+            with query.open() as stdin:
+                result = subprocess.run(["terraform", "console", "-no-color"], cwd=directory,
+                                        stdin=stdin, env=env, capture_output=True, text=True,
+                                        check=True, timeout=15)
+            self.assertEqual(json.loads(json.loads(result.stdout)), expected)
 
     def test_staging_only_backend_changes_require_uri_after_detection(self):
         source = (ROOT / ".github/workflows/deploy-stg.yml").read_text()
