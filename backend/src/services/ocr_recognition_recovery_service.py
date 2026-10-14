@@ -118,9 +118,14 @@ def save_review(order_id, *, source_receipt, values, edited_by):
         except ValueError as exc:
             return None, str(exc)
         meta = workflow._workflow_meta(state)
+        try:
+            workflow._validate_recognition_override_archive(meta)
+        except ValueError as exc:
+            return None, str(exc)
         meta["recognition_override"] = {"checkpoint": checkpoint, "values": authored,
             "source_receipt": deepcopy(source_receipt), "edited_by": edited_by,
             "source": "operator", "created_at": workflow._now().isoformat()}
+        meta.pop("recognition_override_invalidation", None)
         workflow._write_workflow_meta(state, meta)
         state.state = "context_confirmed"
         state.headline = "セルの手入力を保存しました。処理を再開できます"

@@ -41,6 +41,11 @@ type WorkflowV2 = {
   pre_save_checks?: PreSaveChecks | null;
   blockers?: string[] | null;
   warnings?: string[] | null;
+  recognition_override_invalidation?: {
+    reason: string;
+    geometry_kind: string;
+    invalidated_at: string;
+  } | null;
   quad_override?: {
     quad_px?: number[][];
     quad_source?: string | null;
@@ -4186,6 +4191,9 @@ export default function OrderWorkflowV2Page() {
           <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          {workflow?.recognition_override_invalidation ? <p role="status">
+            {({quad: "4点", header_axis: "ヘッダー", row_axis: "行・日境界"} as Record<string, string>)[workflow.recognition_override_invalidation.geometry_kind] ?? "幾何"}補正が変更されたため、以前のセル手入力は履歴に保持し、新しいセルには適用しません。保存済みシートは保持しています。
+          </p> : null}
           {workflow?.state === "ocr_failed" ? <div role="alert">
             <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
             {workflow.ocr_job?.recovery_action === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={loadRecognitionReview}>セル画像を確認・訂正</Button> : null}

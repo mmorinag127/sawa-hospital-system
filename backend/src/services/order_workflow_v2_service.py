@@ -968,6 +968,7 @@ def _serialize_workflow(
         or None,
         "quad_override": quad_override if isinstance(quad_override, dict) else None,
         "row_axis_override": row_axis_override if isinstance(row_axis_override, dict) else None,
+        "recognition_override_invalidation": copy.deepcopy(meta.get("recognition_override_invalidation")),
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
@@ -1780,7 +1781,7 @@ def save_quad_review_decision(
             return None, "quad_estimate_mismatch"
         meta = _workflow_meta(workflow)
         source = "operator_approved_estimate" if normalized_decision == "approved_estimate" else "operator_manual"
-        meta["quad_override"] = {
+        replacement = {
             "quad_px": normalized_quad,
             "quad_source": source,
             "decision": normalized_decision,
@@ -1788,9 +1789,14 @@ def save_quad_review_decision(
             "created_at": _now().isoformat(),
             "source_receipt": copy.deepcopy(source_receipt),
         }
+        had_recognition_override = isinstance(meta.get("recognition_override"), dict)
+        try:
+            _save_geometry_override(meta, kind="quad", replacement=replacement)
+        except ValueError as exc:
+            return None, str(exc)
         meta["latest_ocr_error"] = None
         _write_workflow_meta(workflow, meta)
-        if workflow.state == "ocr_failed" and "quad_estimation_failed" in (workflow.blockers_json or []):
+        if had_recognition_override or (workflow.state == "ocr_failed" and "quad_estimation_failed" in (workflow.blockers_json or [])):
             workflow.state = "context_confirmed"
             workflow.headline = "4点補正を保存しました。OCRを再実行できます"
             workflow.primary_action = "run_ocr"
@@ -1816,6 +1822,84 @@ def _axis_source_receipt(session, order, workflow, document_id=None):
     receipt["physical_menu_entries"] = copy.deepcopy(captured["physical_menu_entries"])
     receipt["geometry_source_digest"] = service.geometry_source_digest(receipt["selected_pdf_receipt"], captured["configured_input"], receipt["order_input_identity"], physical_entries=captured["physical_menu_entries"])
     return receipt, captured
+
+
+def _geometry_override_signature(kind: str, override: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Compare authored geometry and its canonical inputs, excluding save versions."""
+    if not isinstance(override, dict):
+        return None
+    fields_by_kind = {
+        "quad": ("quad_px", "coordinate_space"),
+        "header_axis": ("corrected_xs", "coordinate_space"),
+        "row_axis": ("corrected_ys", "body_day_boundary_indexes", "day_labels", "coordinate_space"),
+    }
+    fields = fields_by_kind.get(kind)
+    if fields is None:
+        raise ValueError("geometry_override_kind_invalid")
+    receipt = override.get("source_receipt")
+    source_fields = (
+        "geometry_source_digest", "selected_pdf_receipt", "order_input_identity",
+        "configured_input_digest", "physical_menu_entries",
+    )
+    source_identity = (
+        {field: copy.deepcopy(receipt.get(field)) for field in source_fields}
+        if isinstance(receipt, dict) else None
+    )
+    return {
+        "kind": kind,
+        **{field: copy.deepcopy(override.get(field)) for field in fields},
+        "source_identity": source_identity,
+    }
+
+
+def _validate_recognition_override_archive(meta: dict[str, Any]) -> list:
+    archive = meta.get("invalidated_recognition_overrides", [])
+    if not isinstance(archive, list) or any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("recognition_override"), dict)
+        or entry.get("reason") != "recognition_checkpoint_geometry_changed"
+        or entry.get("geometry_kind") not in {"quad", "header_axis", "row_axis"}
+        or not isinstance(entry.get("invalidated_at"), str)
+        or not entry["invalidated_at"].strip()
+        for entry in archive
+    ):
+        raise ValueError("recognition_override_archive_invalid")
+    return archive
+
+
+def _invalidate_recognition_checkpoint_for_geometry_change(
+    meta: dict[str, Any], *, kind: str, replacement: dict[str, Any],
+) -> bool:
+    """Expire a checkpoint only when its authored geometry actually changes."""
+    archive = _validate_recognition_override_archive(meta)
+    meta_key = {"quad": "quad_override", "header_axis": "header_axis_override", "row_axis": "row_axis_override"}[kind]
+    if _geometry_override_signature(kind, meta.get(meta_key)) == _geometry_override_signature(kind, replacement):
+        return False
+    recognition_override = meta.get("recognition_override")
+    if not isinstance(recognition_override, dict):
+        return False
+    meta["invalidated_recognition_overrides"] = archive
+    archive.append({
+        "recognition_override": copy.deepcopy(recognition_override),
+        "reason": "recognition_checkpoint_geometry_changed",
+        "geometry_kind": kind,
+        "invalidated_at": _now().isoformat(),
+    })
+    meta.pop("recognition_override", None)
+    meta["recognition_override_invalidation"] = {
+        "reason": "recognition_checkpoint_geometry_changed",
+        "geometry_kind": kind,
+        "invalidated_at": _now().isoformat(),
+    }
+    return True
+
+
+def _save_geometry_override(meta: dict[str, Any], *, kind: str, replacement: dict[str, Any]) -> None:
+    _invalidate_recognition_checkpoint_for_geometry_change(meta, kind=kind, replacement=replacement)
+    key = f"{kind}_override"
+    # Checkpoints hash the whole dictionary, including receipt and creation time.
+    if _geometry_override_signature(kind, meta.get(key)) != _geometry_override_signature(kind, replacement):
+        meta[key] = copy.deepcopy(replacement)
 
 
 def _validate_axis_receipt(session, order, workflow, source_receipt):
@@ -1904,13 +1988,17 @@ def save_header_axis_review_decision(
         if receipt_error:
             return None, receipt_error
         meta = _workflow_meta(workflow)
-        meta["header_axis_override"] = {
+        replacement = {
             "source_receipt": copy.deepcopy(source_receipt),
             "corrected_xs": normalized_xs,
             "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
             "source": "operator_header_axis_override",
             "created_at": _now().isoformat(),
         }
+        try:
+            _save_geometry_override(meta, kind="header_axis", replacement=replacement)
+        except ValueError as exc:
+            return None, str(exc)
         meta["latest_ocr_error"] = None
         _write_workflow_meta(workflow, meta)
         workflow.state = "context_confirmed"
@@ -2014,7 +2102,7 @@ def save_row_axis_review_decision(
         if receipt_error:
             return None, receipt_error
         meta = _workflow_meta(workflow)
-        meta["row_axis_override"] = {
+        replacement = {
             "source_receipt": copy.deepcopy(source_receipt),
             "corrected_ys": normalized_ys,
             "body_day_boundary_indexes": copy.deepcopy(body_day_boundary_indexes),
@@ -2023,6 +2111,10 @@ def save_row_axis_review_decision(
             "source": "operator_row_axis_override",
             "created_at": _now().isoformat(),
         }
+        try:
+            _save_geometry_override(meta, kind="row_axis", replacement=replacement)
+        except ValueError as exc:
+            return None, str(exc)
         meta["latest_ocr_error"] = None
         _write_workflow_meta(workflow, meta)
         workflow.state = "context_confirmed"
