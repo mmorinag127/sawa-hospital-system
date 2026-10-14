@@ -48,7 +48,7 @@ jobs:
           pg_root="/tmp/sawa-adopt-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           test ! -e "$proof"
           test ! -e "$pg_root"
-          mkdir -p "$EVIDENCE_DIR" "$pg_root"
+          mkdir -p "$EVIDENCE_DIR" "$pg_root" "$GITHUB_WORKSPACE/.live-schema-adoption"
           git rev-parse HEAD > "$EVIDENCE_DIR/source-sha.txt"
           export GITHUB_ACTIONS=true
           export OWNED_POSTGRES_PG_BIN="$PG_BIN"
