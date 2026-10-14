@@ -139,9 +139,10 @@ def test_line_corrections_blocks_output_when_canonical_saved_sheet_is_missing(tm
         IngestEmailPayload("m1-missing", "file://dummy.pdf", datetime(2025, 12, 23, 10), "FAC00001", "2025-12@2025-12-22~2025-12-28"), lines=None
     )
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
-    with pytest.raises(ValueError, match="saved sheet is missing"):
+    before = {path.name for path in tmp_path.iterdir()}
+    with pytest.raises(ValueError, match="output original ownership input missing"):
         output_builder.build_outputs(order["id"])
-    assert list(tmp_path.iterdir()) == []
+    assert {path.name for path in tmp_path.iterdir()} == before
 
 
 def test_line_corrections_blocks_when_explicit_template_version_is_inactive():
@@ -152,15 +153,17 @@ def test_line_corrections_blocks_when_explicit_template_version_is_inactive():
     with session_scope() as session:
         version = session.get(FacilityTemplateVersion, order["template_version_id"])
         assert version is not None
+        archived_version_id = version.id
         original_status = version.status
         version.status = "archived"
     try:
-        _, error = order_workflow_v2_service.save_sheet(
+        saved, error = order_workflow_v2_service.save_sheet(
             order_id=order["id"],
             sheet=_authored_sheet([["12/23", "朝", "Menu A", "10", "", ""]]),
             expected_revision=current["revision"],
         )
-        assert error == "template_version_mismatch"
+        assert error is None
+        assert saved["saved_sheet"]["template_version_id"] == archived_version_id
     finally:
         with session_scope() as session:
             version = session.get(FacilityTemplateVersion, order["template_version_id"])

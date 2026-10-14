@@ -48,9 +48,12 @@ def canonical_date(value: object, field: str) -> date:
     return parsed
 
 
-def initial_facility_version(facility: dict, source_sha256: str) -> dict:
-    from src.services.canonical_facility_lineage import digest
+def digest(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
+
+def initial_facility_version(facility: dict, source_sha256: str) -> dict:
     proof = {"source_sha256": source_sha256, "configuration_sha256": digest(facility)}
     return {"version_id": "initial-" + digest(proof), "valid_from": None, "valid_to": None,
             "initial_snapshot": proof, "facility": deepcopy(facility)}
@@ -59,8 +62,6 @@ def initial_facility_version(facility: dict, source_sha256: str) -> dict:
 def version_start(version: dict) -> date | None:
     if "initial_snapshot" not in version:
         return canonical_date(version.get("valid_from"), "valid_from")
-    from src.services.canonical_facility_lineage import digest
-
     proof = version["initial_snapshot"]
     if (version.get("valid_from") is not None or "valid_from" not in version
             or not isinstance(proof, dict) or set(proof) != {"source_sha256", "configuration_sha256"}

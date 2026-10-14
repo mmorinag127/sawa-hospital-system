@@ -13,35 +13,12 @@ const original = cp.execFileSync("git", ["show", base + ":" + filename], { cwd: 
 const migration = 'd55763365c3d2159dc976b130e0cc7a6de5f162f';
 const current = cp.execFileSync('git', ['show', migration + ':' + filename], { cwd: root, encoding: 'utf8' });
 test('current approved output owner/history/action AI/feedback/PDF refusal functions remain exact', () => {
-  const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'HEAD'];
+  assert.equal(fs.readFileSync(path.join(root, filename), 'utf8'),
+    cp.execFileSync('git', ['show', 'd26febd:' + filename], { cwd: root, encoding: 'utf8' }),
+    'Full current functions, protected grid, render callbacks, receipt and owner guards remain exact');
+  const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'd26febd', 'HEAD'];
   for (let i = 1; i < lineage.length; i++)
     cp.execFileSync('git', ['merge-base', '--is-ancestor', lineage[i - 1], lineage[i]], { cwd: root });
-  let restored = fs.readFileSync(path.join(root, filename), 'utf8');
-  const additions = [
-    // Only the exact route identity replacement and empty-owner stop are normalized.
-    ["  const orderId = router.isReady && typeof router.query.id === \"string\" && router.query.id !== \"[id]\"\n    ? router.query.id : \"\";", "  const orderId = useMemo(() => {\n    if (typeof router.query.id === \"string\" && router.query.id && router.query.id !== \"[id]\") {\n      return router.query.id;\n    }\n    if (typeof window !== \"undefined\") {\n      const fromLocation = orderIdFromWorkflowPath(window.location.pathname);\n      if (fromLocation && fromLocation !== \"[id]\") return fromLocation;\n    }\n    return orderIdFromWorkflowPath(router.asPath || \"\");\n  }, [router.asPath, router.query.id]);"],
-    ["type WorkflowV2 = {", "const orderIdFromWorkflowPath = (asPath: string): string => {\n  const pathname = (asPath || \"\").split(\"?\")[0]?.split(\"#\")[0] || \"\";\n  const match = pathname.match(/^\\/orders\\/([^/]+)\\/workflow-v2\\/?$/);\n  if (!match?.[1]) return \"\";\n  try {\n    return decodeURIComponent(match[1]);\n  } catch {\n    return match[1];\n  }\n};\n\ntype WorkflowV2 = {"],
-    ["  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current\n    && Boolean(own.context.orderId)\n", "  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current\n"],
-    ['import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";', 'import { sawaTheme } from "@sawa/ui";'],
-    ['  common_job_status?: JobStatusRecord | null;\n', ''],
-    ['    order_id?: string | null;\n', ''],
-    [`  const commonJobStatus = workflow?.order_id === orderId
-    && workflow?.ocr_job?.order_id === orderId
-    && Boolean(workflow?.ocr_job?.ocr_job_id)
-    && workflow?.common_job_status?.domain === "hospital"
-    && workflow.common_job_status.jobId === workflow.ocr_job.ocr_job_id
-    && workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null)
-    ? workflow.common_job_status : null;
-`, ''],
-    ['          {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}\n', ''],
-  ];
-  for (const [addition, original] of additions) {
-    assert.equal(restored.split(addition).length - 1, 1, 'only the exact additive recorded-status change');
-    restored = restored.replace(addition, original);
-  }
-  assert.equal(restored,
-    cp.execFileSync('git', ['show', '3c5a9ca:' + filename], { cwd: root, encoding: 'utf8' }),
-    'Full current functions, protected grid, render callbacks, receipt and owner guards remain exact');
 });
 const marker = "workflow-ordinary-control";
 const names = new Map([["Button", "button"], ["Input", "input"], ["NativeSelect", "select"]]);

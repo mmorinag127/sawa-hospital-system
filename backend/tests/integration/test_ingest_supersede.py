@@ -195,12 +195,32 @@ def test_ingest_message_retry_preserves_explicit_selected_week():
     assert preview is not None
     assert preview["week_code"] == explicit_week
 
-    updated = register_ingest(retry)
-    assert updated is not None
-    assert updated["id"] == created["id"]
+    before_rejected_retry = {
+        "week": refreshed["persisted_week_value"],
+        "document": refreshed["document"],
+        "versions": [(version["version_no"], version["message_id"]) for version in refreshed["versions"]],
+        "quantities": [
+            (line["id"], line.get("quantity_original"), line.get("quantity_corrected"))
+            for line in refreshed["lines"]
+        ],
+    }
+    with pytest.raises(ValueError, match="ingest_facility_selection_outside_order_period"):
+        register_ingest(retry)
+
     refreshed_after = order_service.get_order_by_id(created["id"])
     assert refreshed_after is not None
-    assert refreshed_after["persisted_week_value"] == explicit_week
+    assert {
+        "week": refreshed_after["persisted_week_value"],
+        "document": refreshed_after["document"],
+        "versions": [
+            (version["version_no"], version["message_id"])
+            for version in refreshed_after["versions"]
+        ],
+        "quantities": [
+            (line["id"], line.get("quantity_original"), line.get("quantity_corrected"))
+            for line in refreshed_after["lines"]
+        ],
+    } == before_rejected_retry
 
 
 def test_clear_all_invalidates_list_orders_cache():

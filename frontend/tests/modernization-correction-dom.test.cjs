@@ -5,12 +5,12 @@ const { mount, transport, deferred } = require('./helpers/modernization-react-do
 // Authored synthetic identity/geometry only: no live PDF, OCR or provider proof.
 const order = 'synthetic-order', documentId = 'pdf-A';
 const copy = value => JSON.parse(JSON.stringify(value));
-const points = { quad: [[0, 0], [10, 0], [10, 20], [0, 20]], header: [0, 10], row: [0, 20] };
+const points = { quad: [[0, 0], [10, 0], [10, 20], [0, 20]], header: [0, 10], row: Array.from({ length: 57 }, (_, index) => index * 10) };
 const endpoint = kind => `/orders/${order}/workflow-v2/${kind === 'quad' ? 'quad' : `${kind}-axis`}-review`;
 const rerun = `/orders/${order}/workflow-v2/ocr-runs`;
 const probeFor = () => ({ component: 'OrderWorkflowV2Page', bindings: [
   'workflow', 'effectiveSelectedDocumentId', 'loadQuadReview', 'loadAxisReview', 'saveQuadAndRerun', 'saveAxisAndRerun',
-  'quadReview', 'headerAxisReview', 'rowAxisReview', 'manualQuadPoints', 'headerAxisXs', 'rowAxisYs',
+  'quadReview', 'headerAxisReview', 'rowAxisReview', 'manualQuadPoints', 'headerAxisXs', 'rowAxisYs', 'rowDayBoundaries',
   'quadReviewLoading', 'headerAxisLoading', 'rowAxisLoading', 'quadReviewMessage', 'headerAxisMessage', 'rowAxisMessage',
   'beginWorkflowEditorEdit', 'editorVersion', 'setManualQuadPoints', 'setHeaderAxisXs', 'setRowAxisYs',
   'setSelectedDocumentId', 'setBusy', 'busy', 'setMessage', 'message', 'setError', 'error', 'visibleStep',
@@ -24,10 +24,21 @@ function fixture() {
     configured_input_digest: 'synthetic-config', order_input_identity: { facility_code: 'synthetic-facility', week_code: '2026-W07' },
     suggested_quad_px: copy(points.quad), unknown: { quantity: 0, absent: null, counts: [0, 6, 9] } };
   const reviews = Object.fromEntries(['quad', 'header', 'row'].map(kind => [kind, {
-    order_id: order, source_receipt: copy(receipt), coordinate_space: { width: 10, height: 20 },
-    image_png_base64: '', x_positions: [0, 10], y_positions: [0, 20],
-    saved_override: { source_receipt: copy(receipt), quad_px: copy(points.quad), corrected_xs: [0, 10], corrected_ys: [0, 20] },
+    order_id: order, source_receipt: copy(receipt), coordinate_space: { width: 10, height: kind === 'row' ? 560 : 20 },
+    image_png_base64: '', x_positions: [0, 10], y_positions: copy(points.row), header_band_count: 0,
+    calendar_days: Array.from({ length: 7 }, (_, index) => ({ date: `2026-10-${25 + index}`, expected_band_count: 8 })),
+    body_day_boundary_indexes: [0, 8, 16, 24, 32, 40, 48, 56],
+    saved_override: { source_receipt: copy(receipt), quad_px: copy(points.quad), corrected_xs: [0, 10], corrected_ys: copy(points.row),
+      body_day_boundary_indexes: [0, 8, 16, 24, 32, 40, 48, 56], day_labels: ['2026-10-25', '2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31'] },
   }]));
+  const row = reviews.row;
+  assert.equal(row.y_positions.length - 1 - row.header_band_count, row.body_day_boundary_indexes.at(-1));
+  assert.equal(row.y_positions.at(-1), row.coordinate_space.height);
+  assert.deepEqual(row.saved_override.corrected_ys, row.y_positions);
+  assert.deepEqual(row.saved_override.day_labels, row.calendar_days.map(day => day.date));
+  row.calendar_days.forEach((day, index) => {
+    assert.equal(row.body_day_boundary_indexes[index + 1] - row.body_day_boundary_indexes[index], day.expected_band_count);
+  });
   t.on('get', '/auth/me', () => ({ data: { role: 'operator' } }));
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic-master', facilities: [] } }));
   t.on('get', `/orders/${order}/workflow-v2`, () => ({ data: { order_id: order, revision: state.revision,
@@ -96,6 +107,11 @@ for (const kind of ['quad', 'header', 'row']) test(`actual DOM ${kind} normal re
     assert.ok(put); assert.ok(post);
     assert.deepEqual(copy(put.body.source_receipt), receipt);
     assert.deepEqual(copy(put.body[kind === 'quad' ? 'quad_px' : kind === 'header' ? 'corrected_xs' : 'corrected_ys']), points[kind]);
+    if (kind === 'row') {
+      assert.deepEqual(copy(probe.current.rowDayBoundaries), ['0', '8', '16', '24', '32', '40', '48', '56']);
+      assert.deepEqual(copy(put.body.body_day_boundary_indexes), [0, 8, 16, 24, 32, 40, 48, 56]);
+      assert.deepEqual(copy(put.body.day_labels), ['2026-10-25', '2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31']);
+    }
     assert.equal(put.config.headers['If-Match'], '"7"'); assert.equal(post.config.headers['If-Match'], '"8"');
     assert.deepEqual(copy(post.body), { stale_action: 'retry', force: true, mode: 'hakodate', document_id: documentId });
     assert.equal(probe.current.workflow.revision, 9); assert.equal(probe.current.visibleStep, 2);

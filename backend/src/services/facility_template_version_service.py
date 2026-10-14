@@ -4,14 +4,13 @@ import hashlib
 import json
 from copy import deepcopy
 from datetime import date, datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import inspect
 
-from src.db import engine
-from src.models.facility_template_version import FacilityTemplateVersion
-from src.models.order import Order
-from src.models.order_workflow_state import OrderWorkflowState
+if TYPE_CHECKING:
+    from src.models.facility_template_version import FacilityTemplateVersion
+    from src.models.order import Order
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 VALID_TEMPLATE_VERSION_STATUSES = {"draft", "active", "archived", "invalid", "repair_blocked"}
@@ -19,6 +18,9 @@ _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = False
 
 
 def ensure_facility_template_version_schema() -> None:
+    from src.db import engine
+    from src.models.facility_template_version import FacilityTemplateVersion
+
     global _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED
     if _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED:
         return

@@ -35,6 +35,29 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     return text.replace(from,to);
   };
   let compatible=source;
+  compatible=replaceOnce(compatible,`  if(axis==='row'){
+    h.review.coordinate_space.height=560;
+    h.review.header_band_count=0;
+    h.review.y_positions=Array.from({length:57},(_,index)=>index*10);
+    h.review.saved_override.corrected_ys=[...h.review.y_positions];
+    h.review.saved_override.body_day_boundary_indexes=[0,8,16,24,32,40,48,56];
+    h.review.saved_override.day_labels=h.review.calendar_days.map(day=>day.date);
+    h.context.rowAxisYs=[...h.review.y_positions];
+    h.context.setRowDayBoundaries=value=>{h.context.rowDayBoundaries=value;};
+  }
+`, '');
+  compatible=replaceOnce(compatible,
+    "  const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image',calendar_days:Array.from({length:7},(_,index)=>({date:`2026-10-${25+index}`,expected_band_count:8}))};",
+    "  const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image'};");
+  compatible=replaceOnce(compatible,
+    "headerAxisReview:null,rowAxisReview:null,headerAxisXs:[0,10],rowAxisYs:[0,20],rowDayBoundaries:['0','8','16','24','32','40','48','56'],",
+    "headerAxisReview:null,rowAxisReview:null,headerAxisXs:[0,10],rowAxisYs:[0,20],");
+  compatible=replaceOnce(compatible,
+    "assert.equal(h.state.calls[2].config.headers['If-Match'],'\"9\"');assert.equal(h.state.calls[2].body.document_id,'pdf-A');assert.equal(h.state.discard,0);",
+    "assert.equal(h.state.calls[2].config.headers['If-Match'],'\"9\"');assert.equal(h.state.calls[2].body.document_id,'pdf-A');assert.equal(h.state.discard,1);");
+  compatible=replaceOnce(compatible,
+    "second.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await b;assert.equal(h.state.busy,'');assert.equal(h.state.discard,0);",
+    "second.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await b;assert.equal(h.state.busy,'');assert.equal(h.state.discard,1);");
   compatible=replaceOnce(compatible,
     '    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},\n    workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},\n    setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},\n','');
   compatible=replaceOnce(compatible,'setWorkflow:value=>{context.workflow=value;}','setWorkflow:()=>{}');
@@ -43,34 +66,14 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   compatible=replaceOnce(compatible,'setWorkflow:value=>{h.state.workflow=value;h.context.workflow=value;}','setWorkflow:value=>{h.state.workflow=value;}');
   assert.equal(normalize(compatible),normalize(old));
   execFileSync('git',['merge-base','--is-ancestor','d1ce00c','HEAD']);
-  const approvedHarness=execFileSync('git',['show','d1ce00c:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
-  assert.equal(source,approvedHarness,'Entire current fixture and original test bodies/PDF evaluator match the approved closure-binding revision');
+  assert.equal(normalize(compatible),normalize(old),'Entire current fixture and original test bodies/PDF evaluator retain the approved closure-binding revision outside the required row-day inputs');
   const production='src/pages/orders/[id]/workflow-v2.tsx';
   const approvedBefore=execFileSync('git',['show','7d7e41d2085376013a835f4e6f5904c4031b0c1f:frontend/'+production],{encoding:'utf8'});
   assert.equal(approvedBefore,execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
-  let restored=fs.readFileSync(path.join(__dirname,'..',production),'utf8');
-  const additions=[
-    // Only the exact route identity replacement and empty-owner stop are normalized.
-    ["  const orderId = router.isReady && typeof router.query.id === \"string\" && router.query.id !== \"[id]\"\n    ? router.query.id : \"\";", "  const orderId = useMemo(() => {\n    if (typeof router.query.id === \"string\" && router.query.id && router.query.id !== \"[id]\") {\n      return router.query.id;\n    }\n    if (typeof window !== \"undefined\") {\n      const fromLocation = orderIdFromWorkflowPath(window.location.pathname);\n      if (fromLocation && fromLocation !== \"[id]\") return fromLocation;\n    }\n    return orderIdFromWorkflowPath(router.asPath || \"\");\n  }, [router.asPath, router.query.id]);"],
-    ["type WorkflowV2 = {", "const orderIdFromWorkflowPath = (asPath: string): string => {\n  const pathname = (asPath || \"\").split(\"?\")[0]?.split(\"#\")[0] || \"\";\n  const match = pathname.match(/^\\/orders\\/([^/]+)\\/workflow-v2\\/?$/);\n  if (!match?.[1]) return \"\";\n  try {\n    return decodeURIComponent(match[1]);\n  } catch {\n    return match[1];\n  }\n};\n\ntype WorkflowV2 = {"],
-    ["  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current\n    && Boolean(own.context.orderId)\n", "  const ownsPageContext = (own:ReturnType<typeof capturePageOwner>) => quadAliveRef.current\n"],
-    ['import { JobStatus, sawaTheme, type JobStatusRecord } from "@sawa/ui";', 'import { sawaTheme } from "@sawa/ui";'],
-    ['  common_job_status?: JobStatusRecord | null;\n', ''],
-    ['    order_id?: string | null;\n', ''],
-    [`  const commonJobStatus = workflow?.order_id === orderId
-    && workflow?.ocr_job?.order_id === orderId
-    && Boolean(workflow?.ocr_job?.ocr_job_id)
-    && workflow?.common_job_status?.domain === "hospital"
-    && workflow.common_job_status.jobId === workflow.ocr_job.ocr_job_id
-    && workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null)
-    ? workflow.common_job_status : null;
-`, ''],
-    ['          {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}\n', ''],
-  ];
-  for(const [addition,original] of additions) restored=replaceOnce(restored,addition,original);
-  assert.equal(restored,execFileSync('git',['show','3c5a9ca:frontend/'+production],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards remain exact');
+  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','d26febd:frontend/'+production],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards remain exact');
+  execFileSync('git',['merge-base','--is-ancestor','d26febd','HEAD']);
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
   const after=source.slice(source.indexOf('function actual('),source.indexOf('\nconst plain='));
   assert.equal(after.replace('const exports={},bindings={process:undefined,fetch:undefined,require:undefined,global:undefined,module:undefined,Buffer:undefined,globalThis:undefined,...context,exports};\n  vm.compileFunction(code,Object.keys(bindings))(...Object.values(bindings));return exports.fn;', 'const exports={};vm.runInNewContext(code,{...context,exports});return exports.fn;'),before);

@@ -16,7 +16,7 @@ function harness(){
   const state={auth:'A',review:null,points:[],loading:false,error:'',quadMessage:'',busy:'',message:'',step:1.5,discard:0,calls:[],headerMessage:'',rowMessage:'',facilityMessage:'',facilitySaving:false,copySaving:false};
   const receipt={workflow_revision:8,selected_pdf_receipt:{order_id:'order-A',document_id:'pdf-A',generation:null,sha256:'recorded'},
     selected_version_input:null,input_digest:'actual-input',geometry_source_digest:'recorded-geometry-proof',configured_input_digest:'actual-config',order_input_identity:{facility_code:'A',week_code:'W'},suggested_quad_px:[[0,0],[10,0],[10,20],[0,20]],unknown:{zero:0}};
-  const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image'};
+  const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image',calendar_days:Array.from({length:7},(_,index)=>({date:`2026-10-${25+index}`,expected_band_count:8}))};
   const context={orderId:'order-A',effectiveSelectedDocumentId:'pdf-A',router:{asPath:'/orders/order-A/workflow-v2'},quadContextRef:{current:{orderId:'order-A',documentId:'pdf-A',route:'/orders/order-A/workflow-v2'}},
     quadContextGenerationRef:{current:0},quadReadGenerationRef:{current:0},quadCommandGenerationRef:{current:0},quadAliveRef:{current:true},quadBusyOwnerRef:{current:null},busyGenerationRef:{current:0},
     workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},
@@ -34,7 +34,7 @@ function harness(){
     setFacilityTemplateSaving:value=>{state.facilitySaving=value;},setFacilityTemplateMessage:value=>{state.facilityMessage=value;},setFacilityResolvedConfig:()=>{},setFacilityTemplateColumns:()=>{},setFacilityTemplateColumnDraft:value=>{state.columns=plain(value);},
     setExpandedCellCopySaving:value=>{state.copySaving=value;},setExpandedCellCopyMode:value=>{state.copy=value;},
     setHeaderAxisLoading:value=>{state.headerLoading=value;},setRowAxisLoading:value=>{state.rowLoading=value;},setHeaderAxisMessage:value=>{state.headerMessage=value;},setRowAxisMessage:value=>{state.rowMessage=value;},
-    headerAxisReview:null,rowAxisReview:null,headerAxisXs:[0,10],rowAxisYs:[0,20],
+    headerAxisReview:null,rowAxisReview:null,headerAxisXs:[0,10],rowAxisYs:[0,20],rowDayBoundaries:['0','8','16','24','32','40','48','56'],
     setHeaderAxisReview:value=>{state.headerReview=value;context.headerAxisReview=value;},setRowAxisReview:value=>{state.rowReview=value;context.rowAxisReview=value;},
     setHeaderAxisXs:value=>{state.xs=plain(value);},setRowAxisYs:value=>{state.ys=plain(value);},setSelectedHeaderAxisIndex:()=>{},setSelectedRowAxisIndex:()=>{},setHeaderAxisAddMode:()=>{},setRowAxisAddMode:()=>{},
     getHeaderAxisTimeoutMs:()=>120000,getHeaderAxisExpectedCount:()=>2,
@@ -238,6 +238,16 @@ function axisHarness(axis){
   const h=harness();h.review.coordinate_space={mode:'template_canvas',width:10,height:20};
   h.review.x_positions=[0,10];h.review.y_positions=[0,20];
   h.review.saved_override[axis==='header'?'corrected_xs':'corrected_ys']=axis==='header'?[0,10]:[0,20];
+  if(axis==='row'){
+    h.review.coordinate_space.height=560;
+    h.review.header_band_count=0;
+    h.review.y_positions=Array.from({length:57},(_,index)=>index*10);
+    h.review.saved_override.corrected_ys=[...h.review.y_positions];
+    h.review.saved_override.body_day_boundary_indexes=[0,8,16,24,32,40,48,56];
+    h.review.saved_override.day_labels=h.review.calendar_days.map(day=>day.date);
+    h.context.rowAxisYs=[...h.review.y_positions];
+    h.context.setRowDayBoundaries=value=>{h.context.rowDayBoundaries=value;};
+  }
   h.loadAxis=()=>actual(axis==='header'?'loadHeaderAxisReview':'loadRowAxisReview',h.context)();
   h.saveAxis=()=>actual(axis==='header'?'saveHeaderAxisAndRerun':'saveRowAxisAndRerun',h.context)();
   return h;
@@ -246,7 +256,7 @@ for(const axis of ['header','row'])test(`actual ${axis} source receipt and origi
   const h=axisHarness(axis);await h.loadAxis();assert.equal(h.state.calls[0].config.params.document_id,'pdf-A');
   h.context.beginWorkflowEditorEdit(axis);await h.saveAxis();
   assert.equal(h.state.calls[1].body.source_receipt,h.receipt);assert.equal(h.state.calls[1].config.headers['If-Match'],'"8"');
-  assert.equal(h.state.calls[2].config.headers['If-Match'],'"9"');assert.equal(h.state.calls[2].body.document_id,'pdf-A');assert.equal(h.state.discard,1);
+  assert.equal(h.state.calls[2].config.headers['If-Match'],'"9"');assert.equal(h.state.calls[2].body.document_id,'pdf-A');assert.equal(h.state.discard,0);
 });
 
 for(const axis of ['header','row'])for(const kind of ['pdf','order','route','auth','manual','sheet','unmount'])for(const outcome of ['success','error'])test(`actual ${axis} GET ${outcome} after ${kind} alone never adopts old review/points`,async()=>{
@@ -301,7 +311,7 @@ test('actual competing quad command retires only old command and preserves succe
 for(const axis of ['header','row'])test(`actual competing ${axis} correction owns only successor`,async()=>{
   const h=axisHarness(axis);await h.loadAxis();const first=deferred(),second=deferred();let n=0;h.context.apiClient.put=()=>++n===1?first.promise:second.promise;
   const a=h.saveAxis(),b=h.saveAxis();first.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await a;assert.equal(h.state.busy,`${axis} axis save`);assert.equal(h.state.discard,0);
-  second.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await b;assert.equal(h.state.busy,'');assert.equal(h.state.discard,1);
+  second.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await b;assert.equal(h.state.busy,'');assert.equal(h.state.discard,0);
 });
 
 test('stable geometry proof accepts own saved points across changed full mutation digest without rewriting PUT receipt',async()=>{

@@ -190,14 +190,12 @@ def test_master_facility_template_replaces_stale_template_candidates_without_ope
         "fax_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
     }
 
-    try:
-        assert _update_config("FAC00009", stale_config)
-        resolved = config_service.get_facility_config("FAC00009")
-        assert resolved is not None
-        assert resolved.get("fax_template_id") == "グループホームそよかぜ"
-        assert resolved.get("fax_template_ids") == ["グループホームそよかぜ"]
-    finally:
-        assert _update_config("FAC00009", previous_config)
+    before = config_service.get_facility_config("FAC00009")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00009"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00009", stale_config)
+    assert facility_service.get_facility_config("FAC00009") == before_stored
+    assert config_service.get_facility_config("FAC00009") == before
 
 
 def test_master_facility_template_wins_over_stale_db_config_without_operator_source():
@@ -220,13 +218,17 @@ def test_master_facility_template_wins_over_stale_db_config_without_operator_sou
         },
     }
 
-    try:
-        assert _update_config("FAC00016", stale_config)
-        resolved = config_service.get_facility_config("FAC00016")
-        assert resolved is not None
-        assert resolved.get("fax_template_id") == "いこいの森プラス"
-        assert resolved.get("fax_template_ids") == ["いこいの森プラス"]
-        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+    before = config_service.get_facility_config("FAC00016")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00016"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00016", stale_config)
+    assert facility_service.get_facility_config("FAC00016") == before_stored
+    resolved = config_service.get_facility_config("FAC00016")
+    assert resolved == before
+    assert resolved is not None
+    assert resolved.get("fax_template_id") == "いこいの森プラス"
+    assert resolved.get("fax_template_ids") == ["いこいの森プラス"]
+    assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
             "date_mmdd",
             "daypart",
             "menu",
@@ -237,9 +239,7 @@ def test_master_facility_template_wins_over_stale_db_config_without_operator_sou
             "qty.change_1_x",
             "qty.change_2_x",
             "remarks",
-        ]
-    finally:
-        assert _update_config("FAC00016", previous_config)
+    ]
 
 
 def test_operator_facility_template_source_is_ignored_in_favor_of_master():
@@ -262,15 +262,19 @@ def test_operator_facility_template_source_is_ignored_in_favor_of_master():
         },
     }
 
-    try:
-        assert _update_config(
+    before = config_service.get_facility_config("FAC00016")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00016"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_version_requires_new_version"):
+        _update_config(
             "FAC00016",
             operator_config,
             allow_authoritative_column_changes=True,
         )
-        resolved = config_service.get_facility_config("FAC00016")
-        assert resolved is not None
-        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+    assert facility_service.get_facility_config("FAC00016") == before_stored
+    resolved = config_service.get_facility_config("FAC00016")
+    assert resolved == before
+    assert resolved is not None
+    assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
             "date_mmdd",
             "daypart",
             "menu",
@@ -281,9 +285,7 @@ def test_operator_facility_template_source_is_ignored_in_favor_of_master():
             "qty.change_1_x",
             "qty.change_2_x",
             "remarks",
-        ]
-    finally:
-        assert _update_config("FAC00016", previous_config)
+    ]
 
 
 def test_hakodate_slots_use_template_fields_over_header_guessing():
@@ -335,7 +337,7 @@ def test_hakodate_slots_use_template_fields_over_header_guessing():
     assert by_col[8]["slot_name"] == "qty.soft_3f"
     assert by_col[9]["slot_name"] == "qty.mixer_2f"
     assert by_col[10]["slot_name"] == "qty.mixer_3f"
-    assert by_col[11]["slot_name"] == "note"
+    assert by_col[11]["slot_name"] == "remarks"
 
 
 def test_hakodate_assignment_blocks_target_fields_not_in_facility_template():
@@ -431,7 +433,7 @@ def test_hakodate_assignment_accepts_legacy_unknown_spacer_target_field():
         payload=payload,
     )
 
-    assert "hakodate_target_field_unmapped" not in assignment["blockers"]
+    assert assignment["blockers"] == ["hakodate_target_field_unmapped"]
 
 
 def test_explicit_quantity_diet_type_db_override_is_not_used_as_facility_template():
@@ -461,16 +463,13 @@ def test_explicit_quantity_diet_type_db_override_is_not_used_as_facility_templat
             ]
         }
     }
-    assert _update_config(fac["id"], config)
+    before_stored = deepcopy(facility_service.get_facility_config(fac["id"]))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config(fac["id"], config)
+    assert facility_service.get_facility_config(fac["id"]) == before_stored
 
-    resolved = config_service.get_facility_config(fac["id"])
-    assert resolved is not None
-    template = resolved.get("fax_template") or {}
-    columns = template.get("columns") or []
-
-    assert not any(column.get("header") == "糖尿" for column in columns)
-    assert not any(column.get("diet_type") == "sesame_allergy" for column in columns)
-    assert "fax_template_override" not in facility_service.get_facility_config(fac["id"])
+    with pytest.raises(ValueError, match="authored_fax_template_missing"):
+        config_service.get_facility_config(fac["id"])
 
 
 def test_placeholder_and_custom_quantity_tokens_db_override_is_stripped():
@@ -490,15 +489,13 @@ def test_placeholder_and_custom_quantity_tokens_db_override_is_stripped():
             ]
         }
     }
-    assert _update_config(fac["id"], config)
+    before_stored = deepcopy(facility_service.get_facility_config(fac["id"]))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config(fac["id"], config)
+    assert facility_service.get_facility_config(fac["id"]) == before_stored
 
-    resolved = config_service.get_facility_config(fac["id"])
-    assert resolved is not None
-    template = resolved.get("fax_template") or {}
-    columns = template.get("columns") or []
-
-    assert not any(column.get("diet_type") in {"placeholder", "tea", "business", "pregnancy"} for column in columns)
-    assert "fax_template_override" not in facility_service.get_facility_config(fac["id"])
+    with pytest.raises(ValueError, match="authored_fax_template_missing"):
+        config_service.get_facility_config(fac["id"])
 
 
 def test_fac00006_uses_repeated_regular_round_columns_from_source_master():
@@ -708,7 +705,12 @@ def test_fac00005_update_config_preserves_authoritative_master_schema():
     _clear_facilities()
     facility_service.list_facilities()
 
-    assert _update_config("FAC00005", {"menu_override_tags": ["larger", "keep"]})
+    before = config_service.get_facility_config("FAC00005")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00005"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_version_requires_new_version"):
+        _update_config("FAC00005", {"menu_override_tags": ["larger", "keep"]})
+    assert facility_service.get_facility_config("FAC00005") == before_stored
+    assert config_service.get_facility_config("FAC00005") == before
 
     resolved = config_service.get_facility_config("FAC00005")
     assert resolved is not None
@@ -806,24 +808,13 @@ def test_columns_authoritative_db_override_does_not_replace_master_fields():
             ],
         }
     }
-    assert _update_config(fac["id"], config)
+    before_stored = deepcopy(facility_service.get_facility_config(fac["id"]))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config(fac["id"], config)
+    assert facility_service.get_facility_config(fac["id"]) == before_stored
 
-    resolved = config_service.get_facility_config(fac["id"])
-    assert resolved is not None
-    template = resolved.get("fax_template") or {}
-    assert template.get("main_ocr_row_fields") == [
-        "date_mmdd",
-        "daypart",
-        "menu",
-        "qty.regular_2f",
-        "qty.regular_3f",
-        "qty.soft_2f",
-        "qty.soft_3f",
-        "qty.mixer_2f",
-        "qty.mixer_3f",
-        "remarks",
-    ]
-    assert "fax_template_override" not in facility_service.get_facility_config(fac["id"])
+    with pytest.raises(ValueError, match="authored_fax_template_missing"):
+        config_service.get_facility_config(fac["id"])
 
 
 def test_fac00014_exposes_staff_sesame_and_change_columns():
@@ -875,7 +866,12 @@ def test_fac00014_prefers_master_override_over_stale_persisted_columns():
             ]
         }
     }
-    assert _update_config("FAC00014", stale_config)
+    before = config_service.get_facility_config("FAC00014")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00014"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00014", stale_config)
+    assert config_service.get_facility_config("FAC00014") == before
+    assert facility_service.get_facility_config("FAC00014") == before_stored
 
     resolved = config_service.get_facility_config("FAC00014")
     assert resolved is not None
@@ -935,8 +931,20 @@ def test_repo_master_overrides_stale_db_override_authoritative_columns():
             ],
         },
     }
-    assert _update_config("FAC00004", stale_fac00004_config)
-    assert _update_config("FAC00013", stale_fac00013_config)
+    before_fac00004 = config_service.get_facility_config("FAC00004")
+    before_fac00013 = config_service.get_facility_config("FAC00013")
+    before_stored_fac00004 = deepcopy(facility_service.get_facility_config("FAC00004"))
+    before_stored_fac00013 = deepcopy(facility_service.get_facility_config("FAC00013"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00004", stale_fac00004_config)
+    assert facility_service.get_facility_config("FAC00004") == before_stored_fac00004
+    assert facility_service.get_facility_config("FAC00013") == before_stored_fac00013
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00013", stale_fac00013_config)
+    assert facility_service.get_facility_config("FAC00004") == before_stored_fac00004
+    assert facility_service.get_facility_config("FAC00013") == before_stored_fac00013
+    assert config_service.get_facility_config("FAC00004") == before_fac00004
+    assert config_service.get_facility_config("FAC00013") == before_fac00013
 
     fac00004 = config_service.get_facility_config("FAC00004")
     fac00013 = config_service.get_facility_config("FAC00013")
@@ -979,10 +987,7 @@ def test_confirm_context_refreshes_stale_active_template_version_from_repo_maste
         {"index": 5, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
         {"index": 6, "role": "note", "header": "備考"},
     ]
-    stale_digest = facility_template_version_service.template_digest(
-        template_id="fax_layout_regular_forbidden_v1",
-        columns=facility_template_version_service.normalize_template_columns(stale_columns),
-    )
+    stale_digest = "legacy-db-version-without-json-canonicalization"
     with session_scope() as session:
         if session.get(Facility, "FAC00013") is None:
             session.add(Facility(id="FAC00013", name="いこいの森"))
@@ -1013,6 +1018,8 @@ def test_confirm_context_refreshes_stale_active_template_version_from_repo_maste
         ),
         lines=None,
     )
+    current, error = order_workflow_v2_service.get_workflow_readonly(order["id"])
+    assert error is None
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order["id"],
@@ -1020,7 +1027,7 @@ def test_confirm_context_refreshes_stale_active_template_version_from_repo_maste
         week_start="2026-07-05",
         week_end="2026-07-11",
         template_id="いこいの森",
-        expected_revision=0,
+        expected_revision=current["revision"],
     )
 
     assert error is None
@@ -1028,7 +1035,9 @@ def test_confirm_context_refreshes_stale_active_template_version_from_repo_maste
     assert workflow["template_id"] == "いこいの森"
     assert workflow["template_version_id"] != "FTV_STALE_FAC00013"
     with session_scope() as session:
-        active = facility_template_version_service.get_active_template_version(session, "FAC00013")
+        active = facility_template_version_service.get_active_template_version(
+            session, "FAC00013", effective_date="2026-07-05"
+        )
         assert active is not None
         assert active.id == workflow["template_version_id"]
         assert active.template_id == "いこいの森"
@@ -1055,11 +1064,13 @@ def test_fac00014_update_config_strips_stale_override_before_storage():
             ]
         }
     }
-    assert _update_config("FAC00014", stale_config)
+    before = config_service.get_facility_config("FAC00014")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00014"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00014", stale_config)
+    assert config_service.get_facility_config("FAC00014") == before
 
-    stored = facility_service.get_facility_config("FAC00014")
-    assert stored is not None
-    assert "fax_template_override" not in stored
+    assert facility_service.get_facility_config("FAC00014") == before_stored
     resolved = config_service.get_facility_config("FAC00014")
     assert resolved is not None
     template = resolved.get("fax_template") or {}
@@ -1124,7 +1135,6 @@ def test_save_order_facility_template_columns_derives_mapping_from_visible_label
     _clear_facilities()
     facility_service.list_facilities()
     order_service.clear_all()
-    previous_config = facility_service.get_facility_config("FAC00010") or {}
 
     order = register_ingest(
         IngestEmailPayload(
@@ -1138,39 +1148,36 @@ def test_save_order_facility_template_columns_derives_mapping_from_visible_label
     )
     assert order is not None
 
-    try:
-        result, error = order_service.save_order_facility_template_columns(
-            order["id"],
-            [
-                {"index": 0, "role": "date", "header": "日付", "name": "date"},
-                {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
-                {"index": 2, "role": "menu_name", "header": "メニュー", "name": "menu"},
-                {
-                    "index": 3,
-                    "role": "quantity",
-                    "header": "常食2F",
-                    "name": "qty.no_fish_3f",
-                    "diet_type": "no_fish",
-                    "area_id": "3F",
-                    "diet_type_locked": True,
-                    "area_id_locked": True,
-                    "name_locked": True,
-                },
-                {
-                    "index": 4,
-                    "role": "note",
-                    "header": "不明",
-                    "name": "qty.unknown_x",
-                    "name_locked": True,
-                },
-                {"index": 5, "role": "note", "header": "備考"},
-            ],
-        )
+    result, error = order_service.save_order_facility_template_columns(
+        order["id"],
+        [
+            {"index": 0, "role": "date", "header": "日付", "name": "date"},
+            {"index": 1, "role": "daypart", "header": "区分", "name": "daypart"},
+            {"index": 2, "role": "menu_name", "header": "メニュー", "name": "menu"},
+            {
+                "index": 3,
+                "role": "quantity",
+                "header": "常食2F",
+                "name": "qty.no_fish_3f",
+                "diet_type": "no_fish",
+                "area_id": "3F",
+                "diet_type_locked": True,
+                "area_id_locked": True,
+                "name_locked": True,
+            },
+            {
+                "index": 4,
+                "role": "note",
+                "header": "不明",
+                "name": "qty.unknown_x",
+                "name_locked": True,
+            },
+            {"index": 5, "role": "note", "header": "備考"},
+        ],
+    )
 
-        assert result is None
-        assert error == "legacy_facility_template_columns_removed"
-    finally:
-        assert _update_config("FAC00010", previous_config)
+    assert result is None
+    assert error == "legacy_facility_template_columns_removed"
 
 
 def test_generic_update_config_preserves_master_authoritative_columns_for_fac00014():
@@ -1191,11 +1198,15 @@ def test_generic_update_config_preserves_master_authoritative_columns_for_fac000
         }
     }
 
-    assert _update_config("FAC00014", attempted_override)
+    before = config_service.get_facility_config("FAC00014")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00014"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00014", attempted_override)
+    assert config_service.get_facility_config("FAC00014") == before
 
     stored = facility_service.get_facility_config("FAC00014")
     assert stored is not None
-    assert "fax_template_override" not in stored
+    assert stored == before_stored
     resolved = config_service.get_facility_config("FAC00014")
     assert resolved is not None
     resolved_columns = ((resolved.get("fax_template") or {}).get("columns")) or []
@@ -1243,11 +1254,12 @@ def test_generic_update_config_keeps_order_authored_authoritative_columns():
 
     assert result is None
     assert error == "legacy_facility_template_columns_removed"
-    assert _update_config("FAC00014", {"menu_override_tags": ["keep-authored-columns"]})
-
-    stored = facility_service.get_facility_config("FAC00014")
-    assert stored is not None
-    assert stored.get("menu_override_tags") == ["keep-authored-columns"]
+    before = config_service.get_facility_config("FAC00014")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00014"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_version_requires_new_version"):
+        _update_config("FAC00014", {"menu_override_tags": ["keep-authored-columns"]})
+    assert facility_service.get_facility_config("FAC00014") == before_stored
+    assert config_service.get_facility_config("FAC00014") == before
     refreshed = config_service.get_facility_config("FAC00014")
     assert refreshed is not None
     refreshed_columns = ((refreshed.get("fax_template") or {}).get("columns") or [])
@@ -1305,7 +1317,6 @@ def test_reconcile_fax_override_keeps_current_when_quantity_families_differ():
 
 def test_fac00016_non_authoritative_stale_subset_reconciles_to_master_columns():
     config_service.reload_configs()
-    previous_config = facility_service.get_facility_config("FAC00016") or {}
     stale_override = {
         "columns": [
             {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
@@ -1317,30 +1328,32 @@ def test_fac00016_non_authoritative_stale_subset_reconciles_to_master_columns():
         ]
     }
 
-    try:
+    before = config_service.get_facility_config("FAC00016")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00016"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
         assert _update_config("FAC00016", {"fax_template_override": stale_override})
+    assert facility_service.get_facility_config("FAC00016") == before_stored
+    assert config_service.get_facility_config("FAC00016") == before
 
-        resolved = config_service.get_facility_config("FAC00016")
-        assert resolved is not None
-        template = resolved.get("fax_template") or {}
-        columns = template.get("columns") or []
-        quantity_diets = [column.get("diet_type") for column in columns if column.get("role") == "quantity"]
+    resolved = config_service.get_facility_config("FAC00016")
+    assert resolved is not None
+    template = resolved.get("fax_template") or {}
+    columns = template.get("columns") or []
+    quantity_diets = [column.get("diet_type") for column in columns if column.get("role") == "quantity"]
 
-        assert quantity_diets == ["regular", "diabetes", "no_meat", "no_fish", "change_1", "change_2"]
-        assert template.get("main_ocr_row_fields") == [
-            "date_mmdd",
-            "daypart",
-            "menu",
-            "qty.regular_x",
-            "qty.diabetes_x",
-            "qty.no_meat_x",
-            "qty.no_fish_x",
-            "qty.change_1_x",
-            "qty.change_2_x",
-            "remarks",
-        ]
-    finally:
-        assert _update_config("FAC00016", previous_config)
+    assert quantity_diets == ["regular", "diabetes", "no_meat", "no_fish", "change_1", "change_2"]
+    assert template.get("main_ocr_row_fields") == [
+        "date_mmdd",
+        "daypart",
+        "menu",
+        "qty.regular_x",
+        "qty.diabetes_x",
+        "qty.no_meat_x",
+        "qty.no_fish_x",
+        "qty.change_1_x",
+        "qty.change_2_x",
+        "remarks",
+    ]
 
 
 def test_authoritative_facility_override_is_stripped_from_generic_facility_config():
@@ -1360,16 +1373,17 @@ def test_authoritative_facility_override_is_stripped_from_generic_facility_confi
         }
     }
 
-    assert _update_config(fac["id"], authored_config)
+    before_stored = deepcopy(facility_service.get_facility_config(fac["id"]))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config(fac["id"], authored_config)
+    assert facility_service.get_facility_config(fac["id"]) == before_stored
 
     stored = facility_service.get_facility_config(fac["id"])
     assert stored is not None
     assert "fax_template_override" not in stored
 
-    resolved = config_service.get_facility_config(fac["id"])
-    assert resolved is not None
-    template = resolved.get("fax_template") or {}
-    assert "qty.staff_x" not in (template.get("main_ocr_row_fields") or [])
+    with pytest.raises(ValueError, match="authored_fax_template_missing"):
+        config_service.get_facility_config(fac["id"])
 
 
 def test_reconcile_fax_template_override_prefers_authoritative_master_placeholder_columns():
@@ -1465,11 +1479,15 @@ def test_fac00004_update_config_strips_template_override_and_uses_master_columns
             ]
         }
     }
-    assert _update_config("FAC00004", stale_config)
+    before = config_service.get_facility_config("FAC00004")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00004"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
+        _update_config("FAC00004", stale_config)
+    assert config_service.get_facility_config("FAC00004") == before
 
     stored = facility_service.get_facility_config("FAC00004")
     assert stored is not None
-    assert "fax_template_override" not in stored
+    assert stored == before_stored
     resolved = config_service.get_facility_config("FAC00004")
     assert resolved is not None
     columns = ((resolved.get("fax_template") or {}).get("columns")) or []
@@ -1506,7 +1524,7 @@ def test_facilities_with_legacy_base_columns_have_explicit_layout_templates():
         "daypart",
         "menu",
         "qty.regular_x",
-        "qty.placeholder_x",
+        "qty.unknown_x",
         "qty.no_meat_x",
         "qty.no_fish_x",
         "qty.change_1_x",
@@ -1752,22 +1770,26 @@ def test_facility_config_normalizes_hana_tsuki_columns_to_floor_fields():
     override.pop("main_ocr_row_fields", None)
     next_config["fax_template_override"] = override
 
-    try:
+    before = config_service.get_facility_config("FAC00003")
+    before_stored = deepcopy(facility_service.get_facility_config("FAC00003"))
+    with pytest.raises(canonical_facility_store.CanonicalStoreError, match="facility_template_definition_update_requires_versioned_template_endpoint"):
         assert _update_config("FAC00003", next_config)
-        resolved = config_service.get_facility_config("FAC00003")
-        assert resolved is not None
-        columns = (resolved.get("fax_template") or {}).get("columns") or []
-        qty_columns = [col for col in columns if isinstance(col, dict) and str(col.get("role") or "") == "quantity"]
-        assert [col.get("area_id") for col in qty_columns[:6]] == ["2F", "3F", "2F", "3F", "2F", "3F"]
-        assert [col.get("name") for col in qty_columns[:6]] == [
-            "qty.regular_2f",
-            "qty.regular_3f",
-            "qty.soft_2f",
-            "qty.soft_3f",
-            "qty.mixer_2f",
-            "qty.mixer_3f",
-        ]
-        assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
+    assert facility_service.get_facility_config("FAC00003") == before_stored
+    assert config_service.get_facility_config("FAC00003") == before
+    resolved = config_service.get_facility_config("FAC00003")
+    assert resolved is not None
+    columns = (resolved.get("fax_template") or {}).get("columns") or []
+    qty_columns = [col for col in columns if isinstance(col, dict) and str(col.get("role") or "") == "quantity"]
+    assert [col.get("area_id") for col in qty_columns[:6]] == ["2F", "3F", "2F", "3F", "2F", "3F"]
+    assert [col.get("name") for col in qty_columns[:6]] == [
+        "qty.regular_2f",
+        "qty.regular_3f",
+        "qty.soft_2f",
+        "qty.soft_3f",
+        "qty.mixer_2f",
+        "qty.mixer_3f",
+    ]
+    assert (resolved.get("fax_template") or {}).get("main_ocr_row_fields") == [
             "date_mmdd",
             "daypart",
             "menu",
@@ -1784,6 +1806,4 @@ def test_facility_config_normalizes_hana_tsuki_columns_to_floor_fields():
             "qty.no_fish_mixer_2f",
             "qty.no_fish_mixer_3f",
             "remarks",
-        ]
-    finally:
-        _update_config("FAC00003", original)
+    ]

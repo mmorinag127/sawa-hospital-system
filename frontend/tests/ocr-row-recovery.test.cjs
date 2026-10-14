@@ -29,7 +29,7 @@ function fixture() {
   const noop = () => {};
   const context = {
     setHeaderAxisMessage: noop, setRowAxisMessage: value => messages.push(value),
-    headerAxisReview: null, rowAxisReview: review, headerAxisXs: [], rowAxisYs: [0, 100, 200],
+    headerAxisReview: null, rowAxisReview: review, headerAxisXs: [], rowAxisYs: Array.from({length: 57}, (_, index) => index * 10),
     rowDayBoundaries: ['0', '8', '16', '24', '32', '40', '48', '56'],
     axisSourceRef: {current: {row: {review, own}}}, ownsPageContext: () => true,
     beginWorkflowEditorEdit: noop, pageOperationGenerationRef: {current: 0},
@@ -54,7 +54,7 @@ test('row save sends explicit day labels and boundaries without changing points 
   assert.equal(f.calls.length, 2);
   assert.deepEqual(Array.from(f.calls[0].body.body_day_boundary_indexes), [0, 8, 16, 24, 32, 40, 48, 56]);
   assert.equal(f.calls[0].body.day_labels[3], '2026-10-28');
-  assert.deepEqual(Array.from(f.calls[0].body.corrected_ys), [0, 100, 200]);
+  assert.deepEqual(Array.from(f.calls[0].body.corrected_ys), Array.from({length: 57}, (_, index) => index * 10));
   assert.equal(f.calls[1].body.document_id, 'original-pdf');
 });
 test('missing day boundary keeps editor input and never sends save or rerun', async () => {

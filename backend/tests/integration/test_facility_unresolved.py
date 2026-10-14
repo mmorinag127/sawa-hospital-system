@@ -1,6 +1,8 @@
 import sys
 import pathlib
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
@@ -17,8 +19,6 @@ def test_facility_unresolved_sets_unknown():
         facility_hint=None,
         week_hint="2025-12@2025-12-22~2025-12-28",
     )
-    order_service.create_order_from_ingest(payload)
-    orders = order_service.list_orders()
-    assert len(orders) == 1
-    assert orders[0]["facility"] is None
-    assert orders[0]["status"] == "要確認"
+    with pytest.raises(ValueError, match="ingest_facility_selection_missing"):
+        order_service.create_order_from_ingest(payload)
+    assert order_service.list_orders() == []
