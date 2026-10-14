@@ -150,6 +150,11 @@ class WorkflowV2RowAxisReviewBody(BaseModel):
     day_labels: list[str] | None = None
 
 
+class WorkflowV2RecognitionReviewBody(BaseModel):
+    source_receipt: dict
+    values: dict[str, str]
+
+
 class WorkflowV2FinalConfirmBody(BaseModel):
     confirmed_by: str | None = None
 
@@ -1497,6 +1502,23 @@ def save_order_workflow_v2_quad_review(order_id: str, body: WorkflowV2QuadReview
 @router.get("/{order_id}/workflow-v2/header-axis-review", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_v2_header_axis_review(order_id: str, document_id: str | None = None):
     return _workflow_v2_or_404(order_workflow_v2_service.get_header_axis_review(order_id, document_id=document_id))
+
+
+@router.get("/{order_id}/workflow-v2/recognition-review", dependencies=[Depends(require_role("operator"))])
+def get_order_recognition_review(order_id: str, document_id: str | None = None):
+    from src.services import ocr_recognition_recovery_service
+    return _workflow_v2_or_404(ocr_recognition_recovery_service.get_review(order_id, document_id=document_id))
+
+
+@router.put("/{order_id}/workflow-v2/recognition-review")
+def save_order_recognition_review(order_id: str, body: WorkflowV2RecognitionReviewBody,
+                                 expected_revision: int = Depends(_require_workflow_if_match),
+                                 user=Depends(require_role("operator"))):
+    from src.services import ocr_recognition_recovery_service
+    return _workflow_v2_or_404(ocr_recognition_recovery_service.save_review(
+        order_id, source_receipt=body.source_receipt, values=body.values,
+        edited_by=user.account, expected_revision=expected_revision,
+    ))
 
 
 @router.put("/{order_id}/workflow-v2/header-axis-review", dependencies=[Depends(require_role("operator"))])

@@ -57,14 +57,14 @@ def _source(item: dict[str, Any]) -> dict[str, Any]:
             or not item["quad_source"] or type(item["selected_page"]) is not int or item["selected_page"] < 1):
         raise ValueError("hakodate_checkpoint_source_fields_invalid")
     _expected_cells(item["original_expected_sheet_cells"])
-    for key in ("header_axis_override", "row_axis_override"):
-        if item[key] is not None and not isinstance(item[key], dict):
+    for key in ("quad_override", "header_axis_override", "row_axis_override"):
+        if item.get(key) is not None and not isinstance(item.get(key), dict):
             raise ValueError("hakodate_checkpoint_source_fields_invalid")
     return {
         "selected_pdf_receipt": deepcopy(selected_pdf),
         "configured_input_digest": _digest(configured),
         "order_input_identity": identity,
-        "recognition_input_digest": _digest({key: item[key] for key in required}),
+        "recognition_input_digest": _digest({**{key: item[key] for key in required}, "quad_override": item.get("quad_override")}),
     }
 
 
@@ -90,7 +90,37 @@ def _regions(regions: list[dict[str, Any]], expected_sheet_cells: list[str]) -> 
     return deepcopy(regions)
 
 
-def persist_recognizer_checkpoint(*, item: dict[str, Any], raw_rectified_bgr: np.ndarray, regions: list[dict[str, Any]], expected_sheet_cells: list[str]) -> dict[str, Any]:
+def _resume_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Only retain canonical inputs needed after the pre-recognition boundary."""
+    keys = (
+        "order_id", "facility_code", "week_code", "configured_input",
+        "original_physical_draft", "original_target_semantics", "original_expected_sheet_cells",
+        "selected_page", "quad_px", "quad_source", "quad_override", "header_axis_override", "row_axis_override",
+    )
+    return {key: deepcopy(item.get(key)) for key in keys}
+
+
+def _metadata(value: dict[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        raise ValueError("hakodate_checkpoint_metadata_required")
+    if not isinstance(value, dict):
+        raise ValueError("hakodate_checkpoint_metadata_invalid")
+    required = ("axis_evidence", "rectified_quad_points", "snap_debug")
+    if any(key not in value for key in required):
+        raise ValueError("hakodate_checkpoint_metadata_required")
+    if not isinstance(value["axis_evidence"], dict) or not isinstance(value["snap_debug"], dict):
+        raise ValueError("hakodate_checkpoint_metadata_invalid")
+    points = value["rectified_quad_points"]
+    if (not isinstance(points, (list, tuple)) or len(points) != 4
+            or any(not isinstance(p, (list, tuple)) or len(p) != 2
+                   or any(type(v) not in (int, float) or not math.isfinite(v) for v in p) for p in points)):
+        raise ValueError("hakodate_checkpoint_metadata_invalid")
+    frozen = {key: deepcopy(value[key]) for key in required}
+    _json_bytes(frozen)
+    return frozen
+
+
+def persist_recognizer_checkpoint(*, item: dict[str, Any], raw_rectified_bgr: np.ndarray, regions: list[dict[str, Any]], expected_sheet_cells: list[str], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     """Store the exact pre-recognition image and its canonical cell identities."""
     source = _source(item)
     frozen_regions = _regions(regions, expected_sheet_cells)
@@ -107,6 +137,8 @@ def persist_recognizer_checkpoint(*, item: dict[str, Any], raw_rectified_bgr: np
         "source": source,
         "expected_sheet_cells": list(expected_sheet_cells),
         "regions": frozen_regions,
+        "resume_item": _resume_item(item),
+        "metadata": _metadata(metadata) if metadata is not None else None,
         "image": None,
     }
     _json_bytes(manifest)
@@ -131,7 +163,20 @@ def load_recognizer_checkpoint(*, checkpoint: dict[str, Any], item: dict[str, An
     decoded = cv2.imdecode(np.frombuffer(image, dtype=np.uint8), cv2.IMREAD_COLOR)
     if decoded is None:
         raise ValueError("hakodate_checkpoint_image_invalid")
-    return {"raw_rectified": decoded, "regions": regions, "expected_sheet_cells": list(manifest["expected_sheet_cells"])}
+    if manifest.get("resume_item") != _resume_item(item):
+        raise ValueError("hakodate_checkpoint_input_changed")
+    metadata = _metadata(manifest["metadata"]) if manifest.get("metadata") is not None else None
+    return {
+        "raw_rectified": decoded,
+        "regions": regions,
+        "expected_sheet_cells": list(manifest["expected_sheet_cells"]),
+        "resume_item": {**deepcopy(manifest["resume_item"]),
+                        "selected_pdf_receipt": deepcopy(manifest["source"]["selected_pdf_receipt"])},
+        "metadata": metadata,
+        "axis_evidence": deepcopy(metadata["axis_evidence"]) if metadata is not None else None,
+        "rectified_quad_points": deepcopy(metadata["rectified_quad_points"]) if metadata is not None else None,
+        "snap_debug": deepcopy(metadata["snap_debug"]) if metadata is not None else None,
+    }
 
 
 def resume_recognizer_from_checkpoint(*, checkpoint: dict[str, Any], item: dict[str, Any], recognize: Callable[..., Any]) -> Any:
