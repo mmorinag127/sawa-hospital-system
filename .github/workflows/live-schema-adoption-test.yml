@@ -1,0 +1,87 @@
+name: Live schema adoption PostgreSQL contract
+
+on:
+  push:
+    branches:
+      - codex/live-schema-adoption-20261014
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-schema-adoption:
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/codex/live-schema-adoption-20261014' && github.event.repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PG_BIN: /usr/lib/postgresql/16/bin
+      EVIDENCE_DIR: ${{ runner.temp }}/live-schema-adoption-evidence
+      PYTHONPATH: backend
+      AUTH_DISABLED: "true"
+      DB_URI: sqlite:///${{ github.workspace }}/.live-schema-adoption/runtime.sqlite
+      DATABASE_URL: sqlite:///${{ github.workspace }}/.live-schema-adoption/runtime.sqlite
+      ALEMBIC_DB_URI: sqlite:///${{ github.workspace }}/.live-schema-adoption/runtime.sqlite
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install PostgreSQL 16 and test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-16
+          python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest
+      - name: Generate fresh PostgreSQL 0035 contract and run adoption tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          proof="$EVIDENCE_DIR/proof"
+          pg_root="/tmp/sawa-adopt-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$proof"
+          test ! -e "$pg_root"
+          mkdir -p "$EVIDENCE_DIR" "$pg_root"
+          git rev-parse HEAD > "$EVIDENCE_DIR/source-sha.txt"
+          export GITHUB_ACTIONS=true
+          export OWNED_POSTGRES_PG_BIN="$PG_BIN"
+          export OWNED_POSTGRES_TMPDIR="$pg_root"
+          status=0
+          (
+            python backend/tests/integration/live_schema_adoption_support.py \
+              --proof "$proof" \
+              --contract "$proof/catalog_contracts.generated.json"
+          ) 2>&1 | tee "$EVIDENCE_DIR/generate.log" || status=$?
+          printf '%s\n' "$status" > "$EVIDENCE_DIR/generate-exit.txt"
+          if [[ "$status" == 0 ]]; then
+            LIVE_SCHEMA_ADOPTION_CONTRACT="$proof/catalog_contracts.generated.json" \
+              python -m pytest -p no:cacheprovider backend/tests/integration/test_live_schema_adoption.py \
+              --basetemp="$EVIDENCE_DIR/tests" \
+              --junitxml="$EVIDENCE_DIR/results.xml" -vv \
+              2>&1 | tee "$EVIDENCE_DIR/pytest.log" || status=$?
+          else
+            printf '%s\n' 'not run because fresh PostgreSQL contract generation failed' > "$EVIDENCE_DIR/pytest.log"
+          fi
+          mkdir -p "$EVIDENCE_DIR/postgres-logs"
+          while IFS= read -r log; do
+            root_name="$(basename "$(dirname "$log")")"
+            mkdir -p "$EVIDENCE_DIR/postgres-logs/$root_name"
+            cp "$log" "$EVIDENCE_DIR/postgres-logs/$root_name/$(basename "$log")"
+          done < <(find "$pg_root" -type f \( -name commands.log -o -name postgres.log -o -name lifecycle.json \))
+          printf '%s\n' "$status" > "$EVIDENCE_DIR/exit-code.txt"
+          exit "$status"
+      - name: Preserve contract and PostgreSQL lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-schema-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: ${{ runner.temp }}/live-schema-adoption-evidence/
+          if-no-files-found: warn
+          retention-days: 14

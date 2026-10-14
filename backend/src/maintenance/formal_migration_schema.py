@@ -256,12 +256,36 @@ def _without_identity(shape, dialect):
     return shape
 
 
+def _named_columns(shape):
+    """Apply an explicitly declared PostgreSQL column-identity policy."""
+    result = dict(shape)
+    result["columns"] = sorted(shape["columns"], key=lambda column: column["name"])
+    result["native"] = _ordered([
+        {key: value for key, value in item.items()
+         if not (key == "ordinal" and "column_name" in item)}
+        for item in shape["native"]
+    ])
+    return result
+
+
+def column_identity_policy(expected, dialect, revision):
+    if int(revision) >= 35 and "column_identity" not in expected:
+        raise RuntimeError("catalog blocked: explicit column identity policy required")
+    policy = expected.get("column_identity", "position")
+    if policy not in {"position", "name"} or (policy == "name" and dialect != "postgresql"):
+        raise RuntimeError("catalog blocked: unsupported column identity policy")
+    if int(revision) < 35 and policy != "position":
+        raise RuntimeError("catalog blocked: historical revision requires physical column order")
+    return policy
+
+
 def require_revision_catalog(connection, revision):
     dialect = connection.dialect.name
     contract = json.loads(CONTRACT.read_text())
     expected = contract["revisions"].get(dialect, {}).get(revision)
     if expected is None:
         raise RuntimeError(f"catalog blocked: revision {revision} has no observed {dialect} contract")
+    policy = column_identity_policy(expected, dialect, revision)
     catalog = read_catalog(connection)
     actual = table_shapes(catalog, dialect)
     missing_tables = sorted(set(expected["tables"]) - set(actual))
@@ -271,6 +295,9 @@ def require_revision_catalog(connection, revision):
         raise RuntimeError(f"catalog is partial or incompatible: revision {revision} table/view set mismatch")
     for name, reference in expected["tables"].items():
         shape = _normalize_reflected_index_aliases(contract["shapes"][reference], dialect)
+        if policy == "name":
+            shape = _named_columns(shape)
+            actual[name] = _named_columns(actual[name])
         if actual[name] == shape:
             continue
         missing_columns = sorted({item["name"] for item in shape["columns"]} - {item["name"] for item in actual[name]["columns"]})

@@ -165,8 +165,8 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
       - uses: google-github-actions/setup-gcloud@v3
-      - name: Verify prior schema and explicitly apply menu master revision
-        run: uv run --project backend --extra dev --frozen python scripts/run_stg_menu_master_migration.py
+      - name: Explicitly adopt reviewed live schema and apply formal migrations
+        run: uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py
       - name: Preflight runtime schema readiness
         run: uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py
 
