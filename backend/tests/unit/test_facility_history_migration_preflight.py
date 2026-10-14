@@ -25,18 +25,24 @@ def inputs():
         "active_order_bindings": [{"order_id": "order", "facility_id": "F", "template_version_id": "old",
                                    "week_code": "2026-01@2026-01-12~2026-01-18"}],
     }}
-    return inventory, master
+    current = {"inventory_sha256": "captured-inventory", "facilities": [
+        {"facility_id": "F", "prepared_facility": deepcopy(version["facility"])}]}
+    return inventory, master, current
+
+
+def check(inventory, master, current):
+    return migration.check_history(inventory, master, current, inventory_sha256="captured-inventory")
 
 
 def test_preflight_neither_rebinds_nor_claims_historical_full_config_parity():
-    inventory, master = inputs()
-    before = deepcopy((inventory, master))
-    report = migration.check_history(inventory, master)
+    inventory, master, current = inputs()
+    before = deepcopy((inventory, master, current))
+    report = check(inventory, master, current)
     assert report["ready_for_explicit_reselection_count"] == 1
     assert report["automatic_rebinding_performed"] is False
-    assert report["orders"][0]["historical_full_config_available"] is False
+    assert report["orders"][0]["legacy_config_object_recorded"] is False
     assert report["orders"][0]["authored_version_id"] == "human-A"
-    assert (inventory, master) == before
+    assert (inventory, master, current) == before
 
 
 @pytest.mark.parametrize("change,error", [
@@ -44,13 +50,12 @@ def test_preflight_neither_rebinds_nor_claims_historical_full_config_parity():
     ("overlap", "facility_version_period_overlap"),
     ("no_legacy", "migration_legacy_version_unresolved"),
     ("foreign_legacy", "migration_legacy_version_unresolved"),
-    ("columns", "migration_template_columns_changed"),
-    ("cells", "migration_template_cells_changed"),
-    ("identity", "migration_template_identity_changed"),
+    ("content", "migration_current_configuration_changed"),
+    ("no_current", "migration_current_capture_facility_missing"),
     ("month_only", "migration_order_period_required"),
 ])
 def test_missing_and_changed_sources_block_without_guessing(change, error):
-    inventory, master = inputs()
+    inventory, master, current = inputs()
     source = inventory["source"]
     versions = master["facilities"][0]["versions"]
     if change == "no_period":
@@ -61,19 +66,21 @@ def test_missing_and_changed_sources_block_without_guessing(change, error):
         source["facility_template_versions"].clear()
     elif change == "foreign_legacy":
         source["facility_template_versions"][0]["facility_id"] = "other"
-    elif change in ("columns", "cells", "identity"):
-        source["facility_template_versions"][0][{"columns": "columns_json", "cells": "cells_json", "identity": "template_id"}[change]] = [] if change != "identity" else "other"
+    elif change == "content":
+        versions[0]["facility"]["facility_name"] = "Changed"
+    elif change == "no_current":
+        current["facilities"].clear()
     elif change == "month_only":
         source["active_order_bindings"][0]["week_code"] = "2026-01"
-    before = deepcopy((inventory, master))
-    report = migration.check_history(inventory, master)
+    before = deepcopy((inventory, master, current))
+    report = check(inventory, master, current)
     assert report["ready_for_explicit_reselection_count"] == 0
     assert report["orders"][0]["error"]["error"] == error
-    assert (inventory, master) == before
+    assert (inventory, master, current) == before
 
 
 def test_before_and_after_month_faxes_resolve_separately_not_from_week_start():
-    inventory, master = inputs()
+    inventory, master, current = inputs()
     master["facilities"][0]["versions"] = [authored("September", "2026-09-01", "2026-09-30"),
                                            authored("October", "2026-10-01", "2026-10-31")]
     original = inventory["source"]["active_order_bindings"][0]
@@ -82,27 +89,50 @@ def test_before_and_after_month_faxes_resolve_separately_not_from_week_start():
         {**original, "order_id": "after", "week_code": "2026-10@2026-10-01~2026-10-03"},
         {**original, "order_id": "crossing", "week_code": "2026-09@2026-09-27~2026-10-03"},
     ]
-    rows = {row["order_id"]: row for row in migration.check_history(inventory, master)["orders"]}
+    rows = {row["order_id"]: row for row in check(inventory, master, current)["orders"]}
     assert rows["before"]["authored_version_id"] == "September"
     assert rows["after"]["authored_version_id"] == "October"
     assert rows["crossing"]["error"]["error"] == "migration_order_spans_facility_versions"
 
 
-def test_duplicate_legacy_identity_is_not_resolved_by_first_candidate():
-    inventory, master = inputs()
-    inventory["source"]["facility_template_versions"] *= 2
+@pytest.mark.parametrize("dataset", ["legacy", "current"])
+def test_duplicate_identity_is_not_resolved_by_first_candidate(dataset):
+    inventory, master, current = inputs()
+    if dataset == "legacy":
+        inventory["source"]["facility_template_versions"] *= 2
+    else:
+        current["facilities"] *= 2
     with pytest.raises(ValueError, match="migration_inventory_identity_invalid"):
-        migration.check_history(inventory, master)
+        check(inventory, master, current)
+
+
+def test_unused_legacy_cells_and_columns_are_not_migrated_or_used_as_authority():
+    inventory, master, current = inputs()
+    inventory["source"]["facility_template_versions"][0].update(cells_json=[], columns_json=[])
+    report = check(inventory, master, current)
+    assert report["ready_for_explicit_reselection_count"] == 1
+    assert inventory["source"]["facility_template_versions"][0]["cells_json"] == []
+
+
+def test_current_capture_must_belong_to_this_inventory():
+    inventory, master, current = inputs()
+    current["inventory_sha256"] = "foreign"
+    with pytest.raises(ValueError, match="migration_current_capture_source_mismatch"):
+        check(inventory, master, current)
 
 
 def test_cli_hash_and_exclusive_output_preserve_inputs(tmp_path):
-    inventory, master = inputs()
-    paths = [tmp_path / name for name in ("inventory.json", "master.json", "report.json")]
-    for path, value in zip(paths, (inventory, master)):
+    inventory, master, current = inputs()
+    paths = [tmp_path / name for name in ("inventory.json", "master.json", "report.json", "current.json")]
+    for path, value in zip(paths[:2], (inventory, master)):
         path.write_text(json.dumps(value))
     hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths[:2]]
+    current["inventory_sha256"] = hashes[0]
+    paths[3].write_text(json.dumps(current))
     args = ["--inventory", str(paths[0]), "--inventory-sha256", hashes[0], "--master", str(paths[1]),
-            "--master-sha256", hashes[1], "--output", str(paths[2])]
+            "--master-sha256", hashes[1], "--current-configs", str(paths[3]),
+            "--current-configs-sha256", hashlib.sha256(paths[3].read_bytes()).hexdigest(),
+            "--output", str(paths[2])]
     assert migration.main(args) == 0
     saved = paths[2].read_bytes()
     with pytest.raises(SystemExit) as duplicate:

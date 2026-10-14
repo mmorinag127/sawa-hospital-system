@@ -23,13 +23,16 @@ def unique_rows(rows, key):
     return result
 
 
-def check_history(inventory, master):
+def check_history(inventory, master, current_configs, *, inventory_sha256):
     if inventory.get("read_only") is not True or not isinstance(inventory.get("source"), dict):
         raise ValueError("readonly_migration_inventory_required")
     source = inventory["source"]
     facilities = unique_rows(source.get("facilities"), "id")
     legacy = unique_rows(source.get("facility_template_versions"), "id")
     orders = unique_rows(source.get("active_order_bindings"), "order_id")
+    if current_configs.get("inventory_sha256") != inventory_sha256:
+        raise ValueError("migration_current_capture_source_mismatch")
+    current = unique_rows(current_configs.get("facilities"), "facility_id")
     snapshot = store.MasterSnapshot(master, "offline-preflight", "explicit_file")
     reports = []
     for order_id, order in sorted(orders.items()):
@@ -49,16 +52,17 @@ def check_history(inventory, master):
             last = store.resolve_facility_version(snapshot, facility_id, end)["version"]
             if first["version_id"] != last["version_id"]:
                 raise ValueError("migration_order_spans_facility_versions")
-            template = first["facility"]["fax_template"]
-            if previous.get("template_id") != template["template_id"]:
-                raise ValueError("migration_template_identity_changed")
-            if digest(previous.get("columns_json")) != digest(template["columns"]):
-                raise ValueError("migration_template_columns_changed")
-            if digest(previous.get("cells_json")) != digest(template.get("cells")):
-                raise ValueError("migration_template_cells_changed")
+            captured = current.get(facility_id)
+            if not isinstance(captured, dict) or not isinstance(captured.get("prepared_facility"), dict):
+                raise ValueError("migration_current_capture_facility_missing")
+            if captured["prepared_facility"].get("facility_id") != facility_id:
+                raise ValueError("migration_current_capture_facility_mismatch")
+            # Old FTV cell/column serialization is not Hakodate's processing input.
+            if digest(first["facility"]) != digest(captured["prepared_facility"]):
+                raise ValueError("migration_current_configuration_changed")
             report.update(status="ready_for_explicit_reselection", authored_version_id=first["version_id"],
                           authored_version_digest=digest(first),
-                          historical_full_config_available=isinstance(previous.get("config_json"), dict))
+                          legacy_config_object_recorded=isinstance(previous.get("config_json"), dict))
         except store.CanonicalStoreError as exc:
             report.update(status="blocked", error=exc.detail)
         except ValueError as exc:
@@ -84,17 +88,23 @@ def main(argv=None):
     parser.add_argument("--inventory-sha256", required=True)
     parser.add_argument("--master", type=Path, required=True)
     parser.add_argument("--master-sha256", required=True)
+    parser.add_argument("--current-configs", type=Path, required=True)
+    parser.add_argument("--current-configs-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if len({path.resolve() for path in (args.inventory, args.master, args.output)}) != 3:
+        if len({path.resolve() for path in (args.inventory, args.master, args.current_configs, args.output)}) != 4:
             raise ValueError("migration_paths_must_be_distinct")
         if args.output.exists():
             raise FileExistsError("migration_output_already_exists")
         result = check_history(read_checked(args.inventory, args.inventory_sha256),
-                               read_checked(args.master, args.master_sha256))
+                               read_checked(args.master, args.master_sha256),
+                               read_checked(args.current_configs, args.current_configs_sha256),
+                               inventory_sha256=args.inventory_sha256)
         result["inputs"] = {"inventory": str(args.inventory.resolve()), "inventory_sha256": args.inventory_sha256,
-                            "master": str(args.master.resolve()), "master_sha256": args.master_sha256}
+                            "master": str(args.master.resolve()), "master_sha256": args.master_sha256,
+                            "current_configs": str(args.current_configs.resolve()),
+                            "current_configs_sha256": args.current_configs_sha256}
         with args.output.open("x") as handle:
             json.dump(result, handle, ensure_ascii=False, indent=2, allow_nan=False)
     except (ValueError, OSError, store.CanonicalStoreError) as exc:
