@@ -9,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
+from tests.contract.auth_support import hospital_admin, hospital_operator  # noqa: E402, F401
 from src.db import Base, session_scope  # noqa: E402
 from src.models.facility import Facility, FacilityArea, FacilityConfig  # noqa: E402
 from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
@@ -80,9 +81,9 @@ def _unversioned_columns(payload, master_path, facility_id):
     return payload["resolved_config"]["fax_template_override"]["columns"]
 
 
-def test_facility_config_update_contract(owned_master):
+def test_facility_config_update_contract(owned_master, hospital_admin):
     _clear_facilities()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_admin.headers)
     body = {"name": "Alpha Facility", "areas": [{"id": "ARE001", "name": "Unit A"}]}
     _assert_cas_refused(client, "POST", "/facilities", body, owned_master)
     revision = _revision(client)
@@ -106,9 +107,9 @@ def test_facility_config_update_contract(owned_master):
     assert payload["config"]["label_profile_override"]["storage_mode"] == "frozen"
 
 
-def test_facility_list_exposes_master_facilities_without_db_sync():
+def test_facility_list_exposes_master_facilities_without_db_sync(hospital_operator):
     _clear_facilities()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
 
     fetched = client.get("/facilities")
 
@@ -119,7 +120,7 @@ def test_facility_list_exposes_master_facilities_without_db_sync():
         assert session.query(Facility).count() == 0
 
 
-def test_user_added_master_facility_is_available_for_order_step1_options(owned_master):
+def test_user_added_master_facility_is_available_for_order_step1_options(owned_master, hospital_operator):
     _clear_facilities()
     source = config_service.load_facility_master()
     next_master = {
@@ -138,7 +139,7 @@ def test_user_added_master_facility_is_available_for_order_step1_options(owned_m
     }
     owned_master.write_text(json.dumps(next_master, ensure_ascii=False), encoding="utf-8")
     config_service.reload_configs()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
 
     listed = client.get("/facilities")
     fetched = client.get("/facilities/FAC99991")
@@ -152,10 +153,10 @@ def test_user_added_master_facility_is_available_for_order_step1_options(owned_m
     assert payload["resolved_config"]["facility_id"] == "FAC99991"
 
 
-def test_facility_master_save_materializes_new_facility_rows(owned_master):
+def test_facility_master_save_materializes_new_facility_rows(owned_master, hospital_operator):
     _clear_facilities()
     source = config_service.load_facility_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
 
     next_master = {
         **source,
@@ -189,10 +190,10 @@ def test_facility_master_save_materializes_new_facility_rows(owned_master):
         assert [area.name for area in facility.areas] == ["2F"]
 
 
-def test_facility_master_save_materializes_facility_config():
+def test_facility_master_save_materializes_facility_config(hospital_operator):
     _clear_facilities()
     source = config_service.load_facility_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
 
     next_master = {
         **source,
@@ -222,13 +223,13 @@ def test_facility_master_save_materializes_facility_config():
         assert "facility_template_source" not in config.config_json
 
 
-def test_facility_get_does_not_create_template_version_from_resolved_config():
+def test_facility_get_does_not_create_template_version_from_resolved_config(hospital_operator):
     _clear_facilities()
     facility_id = "FAC_READ_NO_CREATE"
     with session_scope() as session:
         session.add(Facility(id=facility_id, name="Read No Create Facility"))
         session.add(FacilityConfig(facility_id=facility_id, config_json={"fax_template_id": "fax_layout_regular_forbidden_v1"}))
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     before = _database_rows()
 
     fetched = client.get(f"/facilities/{facility_id}")
@@ -245,7 +246,7 @@ def test_facility_get_does_not_create_template_version_from_resolved_config():
         assert versions == []
 
 
-def test_operator_override_columns_preserve_master_body_merge_policy():
+def test_operator_override_columns_preserve_master_body_merge_policy(hospital_operator):
     _clear_facilities()
     facility_id = "FAC00007"
     master = config_service.load_facility_master()
@@ -271,7 +272,7 @@ def test_operator_override_columns_preserve_master_body_merge_policy():
             )
         )
 
-    fetched = TestClient(app).get(f"/facilities/{facility_id}")
+    fetched = TestClient(app, headers=hospital_operator.headers).get(f"/facilities/{facility_id}")
     assert fetched.status_code == 200
     resolved = fetched.json()["resolved_config"]
 
@@ -281,9 +282,9 @@ def test_operator_override_columns_preserve_master_body_merge_policy():
     assert "fax_template" not in resolved
 
 
-def test_facility_template_registration_materializes_master_facility():
+def test_facility_template_registration_materializes_master_facility(hospital_operator):
     _clear_facilities()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
 
     update = client.put(
         "/facilities/FAC00002/fax-template",
@@ -314,9 +315,9 @@ def test_active_template_version_import_does_not_sync_master_for_missing_facilit
         assert session.query(FacilityTemplateVersion).count() == 0
 
 
-def test_facility_scoped_fax_template_registration_contract():
+def test_facility_scoped_fax_template_registration_contract(hospital_admin):
     _clear_facilities()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_admin.headers)
     res = client.post("/facilities", json={"name": "Template Missing Facility", "areas": [], "expected_revision": _revision(client)})
     assert res.status_code == 201
     facility_id = res.json()["facility"]["id"]
@@ -356,10 +357,10 @@ def test_facility_scoped_fax_template_registration_contract():
     assert missing.json()["detail"]["error"] == "legacy_fax_template_registry_disabled"
 
 
-def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
+def test_fac00005_facility_contract_exposes_official_current_sheet_schema(hospital_operator):
     _clear_facilities()
     _seed_facilities_from_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00005")
     assert fetched.status_code == 200
@@ -382,10 +383,10 @@ def test_fac00005_facility_contract_exposes_official_current_sheet_schema():
     ]
 
 
-def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column(owned_master):
+def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column(owned_master, hospital_operator):
     _clear_facilities()
     _seed_facilities_from_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00002")
     assert fetched.status_code == 200
@@ -413,10 +414,10 @@ def test_fac00002_facility_contract_keeps_unknown_placeholder_quantity_column(ow
     assert "column_id" not in placeholder and "semantic" not in placeholder
 
 
-def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column(owned_master):
+def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column(owned_master, hospital_operator):
     _clear_facilities()
     _seed_facilities_from_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00007")
     assert fetched.status_code == 200
@@ -444,10 +445,10 @@ def test_fac00007_facility_contract_keeps_repo_canonical_placeholder_column(owne
     assert "column_id" not in placeholder and "semantic" not in placeholder
 
 
-def test_fac00004_current_columns_preserve_physical_source_indexes(owned_master):
+def test_fac00004_current_columns_preserve_physical_source_indexes(owned_master, hospital_operator):
     _clear_facilities()
     _seed_facilities_from_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     assert client.get("/facilities").status_code == 200
     fetched = client.get("/facilities/FAC00004")
     assert fetched.status_code == 200
@@ -486,7 +487,7 @@ def test_facility_master_columns_define_source_indexes_without_runtime_enrichmen
     assert missing == []
 
 
-def test_facility_config_does_not_enrich_missing_source_indexes_from_source_workbook(owned_master):
+def test_facility_config_does_not_enrich_missing_source_indexes_from_source_workbook(owned_master, hospital_operator):
     _clear_facilities()
     facility_id = "FAC_SOURCE_INDEX_BLOCK"
     with session_scope() as session:
@@ -519,7 +520,7 @@ def test_facility_config_does_not_enrich_missing_source_indexes_from_source_work
     before = owned_master.read_bytes(), _database_rows()
     with pytest.raises(ValueError, match="^facility_not_found$"):
         config_service.get_facility_config(facility_id)
-    response = TestClient(app).get(f"/facilities/{facility_id}")
+    response = TestClient(app, headers=hospital_operator.headers).get(f"/facilities/{facility_id}")
     assert response.status_code == 404
     assert response.json()["detail"]["error"] == "facility_not_found"
     assert (owned_master.read_bytes(), _database_rows()) == before
@@ -531,10 +532,10 @@ def test_facility_config_does_not_enrich_missing_source_indexes_from_source_work
     assert "template_source_index_missing" in validation["errors"]
 
 
-def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns(owned_master):
+def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns(owned_master, hospital_operator):
     _clear_facilities()
     _seed_facilities_from_master()
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     assert client.get("/facilities").status_code == 200
     stale_override = {
         "fax_template_id": "fax_layout_floor_2f3f_v1",
@@ -595,7 +596,7 @@ def test_fac00003_stale_non_authoritative_override_uses_repo_canonical_columns(o
     ]
 
 
-def test_all_original_metadata_reads_are_readonly_without_implicit_date_resolution(owned_master, monkeypatch):
+def test_all_original_metadata_reads_are_readonly_without_implicit_date_resolution(owned_master, monkeypatch, hospital_operator):
     from unittest.mock import Mock
 
     master = json.loads(owned_master.read_bytes())
@@ -603,7 +604,7 @@ def test_all_original_metadata_reads_are_readonly_without_implicit_date_resoluti
     before = owned_master.read_bytes(), _database_rows()
     resolver = Mock(wraps=facility_template_version_service.get_active_template_version)
     monkeypatch.setattr(facility_template_version_service, "get_active_template_version", resolver)
-    client = TestClient(app)
+    client = TestClient(app, headers=hospital_operator.headers)
     for facility in master["facilities"]:
         response = client.get(f"/facilities/{facility['facility_id']}")
         assert response.status_code == 200

@@ -15,7 +15,7 @@ def test_facility_unresolved_sets_unknown():
         pdf_uri="file://dummy.pdf",
         received_at="2025-12-23T12:00:00",
         facility_hint=None,
-        week_hint="WEK2025W52",
+        week_hint="2025-12@2025-12-22~2025-12-28",
     )
     order_service.create_order_from_ingest(payload)
     orders = order_service.list_orders()
