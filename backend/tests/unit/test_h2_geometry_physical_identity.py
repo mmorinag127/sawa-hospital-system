@@ -64,18 +64,31 @@ def test_same_slot_variants_survive_digest_and_json_roundtrip(monkeypatch):
     monkeypatch.setattr(order_service, "_clip_entries_to_sheet_week_range", lambda entries, week: entries)
     entries = order_service._build_position_menu_entries("2026-10", "fixture")
     assert len(entries) == 1
-    assert "menu_name" not in entries[0]
+    assert entries[0]["menu_name"] == "normal own"
+    assert entries[0]["diet_type"] == "regular"
     serialized = json.loads(_canonical_payload_json(entries))
     assert _canonical_payload_digest(serialized) == _canonical_payload_digest(entries)
     assert physical.physical_row_ids_from_entries(serialized) == ["2026-10-07__昼__0"]
     from src.services import master_order_form_template_service as master
+    normalized = master._normalize_week_menu_entries(entries=serialized, week_value="2026-10@2026-10-07~2026-10-07")
+    assert len(normalized) == 1
+    assert normalized[0]["name"] == "normal own"
+    lines = [{"date": "2026-10-07", "daypart": "lunch", "menu_name": name,
+              "diet_type": diet, "source_row_index": 0}
+             for diet, name in [("regular", "normal own"), ("soft", "soft own"), ("mixer", "mixer own")]]
+    assert order_service._validate_reparse_lines_against_weekly_menu(
+        lines=lines, week_id="2026-10", facility_id="fixture", ocr_rows=None,
+        template={}, entries_override=serialized,
+    ) == (None, None)
+    missing_name = deepcopy(serialized)
+    missing_name[0].pop("name")
+    missing_name[0].pop("menu_name")
     with pytest.raises(ValueError, match="physical_menu_common_name_unresolved"):
-        master._normalize_week_menu_entries(entries=serialized, week_value="2026-10@2026-10-07~2026-10-07")
+        master._normalize_week_menu_entries(entries=missing_name, week_value="2026-10@2026-10-07~2026-10-07")
     with pytest.raises(ValueError, match="physical_menu_common_name_unresolved"):
         order_service._validate_reparse_lines_against_weekly_menu(
-            lines=[{"menu_name": "soft own", "diet_type": "soft"}],
-            week_id="2026-10", facility_id="fixture", ocr_rows=None,
-            template={}, entries_override=serialized,
+            lines=lines, week_id="2026-10", facility_id="fixture", ocr_rows=None,
+            template={}, entries_override=missing_name,
         )
     for diet, name in [("regular", "normal own"), ("soft", "soft own"), ("mixer", "mixer own")]:
         assert physical.entry_for_explicit_diet(serialized[0], diet)["menu_name"] == name
