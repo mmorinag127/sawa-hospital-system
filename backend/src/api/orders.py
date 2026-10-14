@@ -146,6 +146,8 @@ class WorkflowV2RowAxisReviewBody(BaseModel):
     corrected_ys: list[float]
     coordinate_space: dict
     source_receipt: dict | None = None
+    body_day_boundary_indexes: list[int] | None = None
+    day_labels: list[str] | None = None
 
 
 class WorkflowV2FinalConfirmBody(BaseModel):
@@ -1523,6 +1525,8 @@ def save_order_workflow_v2_row_axis_review(order_id: str, body: WorkflowV2RowAxi
             corrected_ys=body.corrected_ys,
             coordinate_space=body.coordinate_space,
             source_receipt=body.source_receipt,
+            body_day_boundary_indexes=body.body_day_boundary_indexes,
+            day_labels=body.day_labels,
             expected_revision=expected_revision,
         )
     )

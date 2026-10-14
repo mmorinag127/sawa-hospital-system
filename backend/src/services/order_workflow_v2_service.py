@@ -4,6 +4,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import tempfile
 from contextvars import ContextVar
@@ -1889,9 +1890,9 @@ def save_header_axis_review_decision(
             x = float(raw)
         except (TypeError, ValueError):
             return None, "header_axis_xs_invalid"
-        if x < 0 or x > float(width):
+        if not math.isfinite(x) or x < 0 or x > float(width):
             return None, "header_axis_xs_invalid"
-        normalized_xs.append(round(x, 3))
+        normalized_xs.append(x)
     if any(b <= a for a, b in zip(normalized_xs, normalized_xs[1:])):
         return None, "header_axis_xs_not_monotonic"
     with session_scope() as session:
@@ -1960,9 +1961,30 @@ def save_row_axis_review_decision(
     corrected_ys: object,
     coordinate_space: object,
     source_receipt: dict | None = None,
+    body_day_boundary_indexes: object = None,
+    day_labels: object = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(source_receipt, dict):
         return None, "axis_source_receipt_required"
+    from src.services import ocr_row_recovery_service as recovery
+    authored = {"corrected_ys": corrected_ys, "coordinate_space": coordinate_space,
+                "body_day_boundary_indexes": body_day_boundary_indexes, "day_labels": day_labels}
+    try:
+        recovery.coordinates(authored)
+    except ValueError as exc:
+        return None, str(exc)
+    review, review_error = get_row_axis_review(
+        order_id, document_id=(source_receipt.get("selected_pdf_receipt") or {}).get("document_id")
+    )
+    if review_error or not review or not review.get("calendar_days"):
+        return None, review_error or "row_axis_calendar_source_unresolved"
+    if coordinate_space != review.get("coordinate_space"):
+        return None, "row_axis_canvas_changed"
+    try:
+        recovery.validate_days(authored, days=review["calendar_days"],
+                               body_count=len(corrected_ys) - review["header_band_count"] - 1)
+    except ValueError as exc:
+        return None, str(exc)
     if not isinstance(corrected_ys, list) or len(corrected_ys) < 2:
         return None, "row_axis_ys_invalid"
     if not isinstance(coordinate_space, dict):
@@ -1980,7 +2002,7 @@ def save_row_axis_review_decision(
             return None, "row_axis_ys_invalid"
         if y < 0 or y > float(height):
             return None, "row_axis_ys_invalid"
-        normalized_ys.append(round(y, 3))
+        normalized_ys.append(y)
     if any(b <= a for a, b in zip(normalized_ys, normalized_ys[1:])):
         return None, "row_axis_ys_not_monotonic"
     with session_scope() as session:
@@ -1995,6 +2017,8 @@ def save_row_axis_review_decision(
         meta["row_axis_override"] = {
             "source_receipt": copy.deepcopy(source_receipt),
             "corrected_ys": normalized_ys,
+            "body_day_boundary_indexes": copy.deepcopy(body_day_boundary_indexes),
+            "day_labels": copy.deepcopy(day_labels),
             "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
             "source": "operator_row_axis_override",
             "created_at": _now().isoformat(),
@@ -2298,12 +2322,10 @@ def mark_ocr_run_queued(
         )
         if lineage_error:
             return finalize_queue_blocker(lineage_error, ocr_job)
-        workflow.evidence_run_id = None
-        workflow.draft_id = None
-        workflow.confirmed_snapshot_id = None
+        # A rerun creates a candidate. Existing operator work is not replaced
+        # until the operator explicitly selects the new evidence.
         workflow.template_version_id = template_version.id
         session.flush()
-        _delete_downstream_after_ocr_change(session, order.id)
         workflow.state = "ocr_running"
         workflow.headline = "OCR処理を実行中です"
         workflow.primary_action = "wait_ocr"
@@ -2452,7 +2474,8 @@ def mark_ocr_run_completed(
                 return stop_with_blocker(template_error)
         if normalized_error:
             workflow.state = "ocr_failed"
-            workflow.headline = "OCR処理に失敗しました。Step1から再実行してください"
+            detail = _normalize_id((ocr_job.metrics or {}).get("error_detail")) or normalized_error
+            workflow.headline = f"OCR停止: {detail}"
             workflow.primary_action = "run_ocr"
             workflow.blockers_json = [normalized_error]
             workflow.warnings_json = []
@@ -2462,9 +2485,6 @@ def mark_ocr_run_completed(
             workflow.primary_action = "select_ocr"
             workflow.blockers_json = []
             workflow.warnings_json = []
-        workflow.evidence_run_id = None
-        workflow.draft_id = None
-        workflow.confirmed_snapshot_id = None
         workflow.template_version_id = workflow_template_version_id or workflow.template_version_id
         workflow.last_transition_at = _now()
         meta["ocr_job_id"] = normalized_job_id

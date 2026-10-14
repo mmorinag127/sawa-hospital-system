@@ -2048,13 +2048,15 @@ def normalize_header_axis_override(
         return None
     xs: list[float] = []
     for raw in raw_xs:
+        if type(raw) not in (int, float):
+            return None
         try:
             x = float(raw)
         except (TypeError, ValueError):
             return None
-        if x < 0 or x > float(canvas_width):
+        if not np.isfinite(x) or x < 0 or x > float(canvas_width):
             return None
-        xs.append(round(x, 3))
+        xs.append(x)
     if not np.all(np.diff(np.array(xs, dtype=np.float32)) > 0):
         return None
     return xs
@@ -2066,42 +2068,10 @@ def normalize_row_axis_override(
     expected_count: int,
     canvas_height: int,
 ) -> list[float] | None:
-    if not isinstance(value, dict):
+    if value is None:
         return None
-    coordinate_space = value.get("coordinate_space")
-    if not isinstance(coordinate_space, dict):
-        return None
-    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
-        return None
-    try:
-        height_value = int(coordinate_space.get("height"))
-    except (TypeError, ValueError):
-        return None
-    if height_value != int(canvas_height):
-        return None
-    raw_ys = value.get("corrected_ys")
-    if not isinstance(raw_ys, list) or len(raw_ys) < int(expected_count):
-        return None
-    ys: list[float] = []
-    for raw in raw_ys:
-        try:
-            y = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if y < 0 or y > float(canvas_height):
-            return None
-        ys.append(round(y, 3))
-    if not np.all(np.diff(np.array(ys, dtype=np.float32)) > 0):
-        return None
-    if len(ys) > int(expected_count):
-        fitted, _fit_evidence = _fit_extra_y_clusters_to_template_count(
-            template_ys=[float(value) for value in range(int(expected_count))],
-            clusters=[float(value) for value in ys],
-        )
-        if fitted is None or len(fitted) != int(expected_count):
-            return None
-        return [round(float(value), 3) for value in fitted]
-    return ys
+    from src.services.ocr_row_recovery_service import coordinates
+    return coordinates(value, canvas_height=canvas_height)
 
 
 def _row_height_quality_score(row_edges: list[float]) -> tuple[int, float, float]:
@@ -2231,6 +2201,43 @@ def _filter_structural_y_clusters(y_clusters: list[dict[str, Any]]) -> list[dict
     return accepted
 
 
+def _restore_supported_ruling_junctions(inv, horizontal, vertical, *, opening_width):
+    """Restore observed short arms lost by opening, not pixels in a missing gap.
+
+    Both a vertical ruling and a surviving collinear horizontal ruling must
+    support the arm. The interruption cannot exceed the local ruling thickness.
+    """
+    restored = horizontal.copy()
+    for y in np.flatnonzero(np.any(horizontal > 0, axis=1)):
+        columns = np.flatnonzero(vertical[y] > 0)
+        if not columns.size:
+            continue
+        spans = np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1)
+        for span in spans:
+            thickness = len(span)
+            for direction, edge in ((1, int(span[-1])), (-1, int(span[0]))):
+                ray = edge + direction * np.arange(1, opening_width + 1)
+                ray = ray[(ray >= 0) & (ray < inv.shape[1])]
+                hits = np.flatnonzero((horizontal[y, ray] > 0) & (inv[y, ray] > 0))
+                if not hits.size:
+                    continue
+                stop = int(hits[0])
+                raw = inv[y, ray[:stop]] > 0
+                gaps = np.flatnonzero(~raw)
+                if not gaps.size or gaps[0] < thickness * 2:
+                    continue
+                interruptions = np.split(gaps, np.flatnonzero(np.diff(gaps) > 1) + 1)
+                if (any(len(gap) > thickness for gap in interruptions)
+                        or any(right[0] - left[-1] - 1 < thickness * 2
+                               for left, right in zip(interruptions, interruptions[1:]))):
+                    continue
+                # Copy only existing ink. A disconnected mark or absent arm is
+                # never promoted into a date boundary.
+                restored[y, ray[:stop][raw]] = inv[y, ray[:stop][raw]]
+                restored[y, span] = inv[y, span]
+    return restored
+
+
 def _detect_table_intersections_for_row_axis(
     rectified_bgr: np.ndarray,
     *,
@@ -2244,6 +2251,9 @@ def _detect_table_intersections_for_row_axis(
     joined = cv2.morphologyEx(inv, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1)))
     h_mask = cv2.morphologyEx(joined, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(18, inv.shape[1] // 55), 1)))
     v_mask = cv2.morphologyEx(inv, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(18, inv.shape[0] // 75))))
+    h_mask = _restore_supported_ruling_junctions(
+        inv, h_mask, v_mask, opening_width=max(18, inv.shape[1] // 55),
+    )
     x0 = max(0, int(round(float(corrected_xs[0]))) - 14)
     x1 = min(rectified_bgr.shape[1], int(round(float(corrected_xs[-1]))) + 14)
     y0 = max(0, int(round(float(template_ys[0]))) - 18)
@@ -2544,7 +2554,7 @@ def _row_intersection_correct_ys(
     }
     if not partial_period and observed_body_count != len(physical_plan):
         return None, {"used": False, "reason": "fax_physical_body_count_changed",
-                      "canonical_day_source": day_source, **detection}
+                      "canonical_day_source": day_source, **detection, "corrected_ys": corrected}
     canonical_date_boundaries = workbook_pdf_renderer.worksheet_date_column_boundary_indexes(
         worksheet, body_start_row=physical_plan[0]["worksheet_row"],
         body_end_row=physical_plan[-1]["worksheet_row"],
@@ -2566,7 +2576,8 @@ def _row_intersection_correct_ys(
                 physical_plan, canonical_date_boundaries, observed_date_boundaries, observed_body_count,
             )
         except ValueError as exc:
-            return None, {"used": False, "reason": str(exc), "canonical_day_source": day_source, **detection}
+            return None, {"used": False, "reason": str(exc), "canonical_day_source": day_source,
+                          **detection, "corrected_ys": corrected}
         first_day = (date.fromisoformat(dates[0]) - calendar_start).days
         offset = day_boundaries[first_day]
         canonical_date_boundaries = [edge + offset for edge in canonical_date_boundaries]
@@ -2578,7 +2589,7 @@ def _row_intersection_correct_ys(
                       "canonical_day_source": day_source,
                       "missing_date_column_boundary_indexes": sorted(set(day_boundaries) - set(observed_date_boundaries)),
                       "extra_date_column_boundary_indexes": sorted(set(observed_date_boundaries) - set(canonical_date_boundaries)),
-                      **detection}
+                      **detection, "corrected_ys": corrected}
     target_day_boundaries = [0, *(index for index in range(1, len(dates)) if dates[index] != dates[index - 1]), len(dates)]
     offset = day_source.get("target_body_row_offset", 0)
     day_source["days"] = [
@@ -3281,25 +3292,65 @@ def _align_axes(
     fax_template: dict[str, Any] | None = None,
     header_axis_override: dict[str, Any] | None = None,
     row_axis_override: dict[str, Any] | None = None,
+    diagnostic_only: bool = False,
 ) -> tuple[list[float], list[float], dict[str, Any], Image.Image]:
-    table_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
-    source_x, source_y, grid_evidence = _nearest_line_positions_in_rectified(rectified_fax, template_xs, template_ys)
-    fax_x_candidates = _detect_vertical_candidates(rectified_fax, table_bbox)
-    matched_xs, x_match = _gap_order_match(template_xs, fax_x_candidates)
-    if not x_match.get("used"):
-        matched_xs = np.maximum.accumulate(np.median(source_x, axis=0)).astype(np.float32).tolist()
-    header_corrected_xs, header_x_match = _header_intersection_correct_xs(
-        rectified_fax=rectified_fax,
-        template_xs=template_xs,
-        template_ys=template_ys,
+    from src.services import ocr_row_recovery_service as recovery
+
+    manual_header_xs = normalize_header_axis_override(
+        header_axis_override, expected_count=len(template_xs), canvas_width=rectified_fax.shape[1],
     )
+    if header_axis_override is not None and (manual_header_xs is None
+            or header_axis_override["coordinate_space"].get("height") != rectified_fax.shape[0]):
+        if diagnostic_only:
+            return [], [], {
+                "header_intersection_x_match": {"used": False, "diagnostic_only": True,
+                    "reason": "header_axis_override_invalid", "corrected_xs": []},
+                "row_intersection_y_match": {},
+            }, Image.fromarray(cv2.cvtColor(rectified_fax, cv2.COLOR_BGR2RGB))
+        raise ValueError("header_axis_override_invalid")
+    table_bbox = [template_xs[0], template_ys[0], template_xs[-1], template_ys[-1]]
+    if manual_header_xs is None:
+        grid_evidence = {"method": "header_intersection_structural_x_axis_correction"}
+        fax_x_candidates = _detect_vertical_candidates(rectified_fax, table_bbox)
+        matched_xs = []
+        x_match = {"used": False, "reason": "header_intersection_is_authoritative"}
+        header_corrected_xs, header_x_match = _header_intersection_correct_xs(
+            rectified_fax=rectified_fax, template_xs=template_xs, template_ys=template_ys,
+        )
+    else:
+        grid_evidence = {"method": "operator_header_axis_override"}
+        fax_x_candidates = []
+        matched_xs = list(manual_header_xs)
+        x_match = {"used": False, "reason": "operator_header_axis_preserved"}
+        header_corrected_xs, header_x_match = manual_header_xs, {}
+    if manual_header_xs is None and header_corrected_xs is None:
+        reason = str(header_x_match.get("reason") or "header_boundaries_unresolved")
+        detected_xs = recovery.header_candidates(header_x_match)
+        axis_image = _draw_axis_match(
+            rectified_fax,
+            template_xs=template_xs,
+            template_ys=template_ys,
+            fax_x_candidates=fax_x_candidates,
+            matched_xs=detected_xs,
+            adjusted_ys=[],
+            header_x_match=header_x_match,
+        )
+        evidence = {
+            "x_match": x_match,
+            "header_intersection_x_match": header_x_match,
+            "row_intersection_y_match": {},
+            "post_menu_x_match": {"used": False, "reason": "header_axis_unresolved"},
+            "grid": grid_evidence,
+            "x_gaps": [round(float(b - a), 3) for a, b in zip(detected_xs, detected_xs[1:])],
+            "y_gaps": [],
+            "counts": {"template_x": len(template_xs), "aligned_x": len(detected_xs),
+                       "template_y": len(template_ys), "aligned_y": 0},
+        }
+        if diagnostic_only:
+            return detected_xs, [], evidence, axis_image
+        raise ValueError(f"header_axis_unresolved:{reason}")
     if header_corrected_xs is not None:
         matched_xs = [float(value) for value in header_corrected_xs]
-    manual_header_xs = normalize_header_axis_override(
-        header_axis_override,
-        expected_count=len(template_xs),
-        canvas_width=rectified_fax.shape[1],
-    )
     if manual_header_xs is not None:
         matched_xs = [float(value) for value in manual_header_xs]
         header_x_match = {
@@ -3307,7 +3358,7 @@ def _align_axes(
             "used": True,
             "method": "operator_header_axis_override",
             "reason": "applied_operator_header_axis_override",
-            "corrected_xs": [round(float(value), 3) for value in matched_xs],
+            "corrected_xs": list(matched_xs),
             "template_x_count": len(template_xs),
             "coordinate_space": {
                 "mode": "template_canvas",
@@ -3315,43 +3366,47 @@ def _align_axes(
                 "height": int(rectified_fax.shape[0]),
             },
         }
-    matched_xs, post_menu_x_match = _post_menu_boundary_preserving_xs(
-        worksheet=worksheet,
-        matched_xs=[float(value) for value in matched_xs],
-        fax_x_candidates=fax_x_candidates,
-        fax_template=fax_template,
-    )
-    adjusted_ys = np.maximum.accumulate(np.median(source_y, axis=1)).astype(np.float32).tolist()
-    row_corrected_ys, row_y_match = _row_intersection_correct_ys(
-        rectified_fax=rectified_fax,
-        corrected_xs=[float(value) for value in matched_xs],
-        template_ys=template_ys,
-        worksheet=worksheet,
-    )
-    if row_corrected_ys is None:
-        raise ValueError(str(row_y_match.get("reason") or "fax_row_boundaries_unresolved"))
-    adjusted_ys = [float(value) for value in row_corrected_ys]
-    manual_row_ys = normalize_row_axis_override(
-        row_axis_override,
-        expected_count=len(adjusted_ys),
-        canvas_height=rectified_fax.shape[0],
-    )
-    if manual_row_ys is not None:
-        adjusted_ys = [float(value) for value in manual_row_ys]
-        row_y_match = {
-            **(row_y_match if isinstance(row_y_match, dict) else {}),
-            "used": True,
-            "method": "operator_row_axis_override",
-            "reason": "applied_operator_row_axis_override",
-            "corrected_ys": [round(float(value), 3) for value in adjusted_ys],
-            "template_y_count": len(template_ys),
-            "row_height_quality": _row_height_outlier_evidence(adjusted_ys),
-            "coordinate_space": {
-                "mode": "template_canvas",
-                "width": int(rectified_fax.shape[1]),
-                "height": int(rectified_fax.shape[0]),
-            },
-        }
+    if manual_header_xs is None:
+        matched_xs, post_menu_x_match = _post_menu_boundary_preserving_xs(
+            worksheet=worksheet, matched_xs=[float(value) for value in matched_xs],
+            fax_x_candidates=fax_x_candidates, fax_template=fax_template,
+        )
+    else:
+        post_menu_x_match = {"used": False, "reason": "operator_header_axis_preserved"}
+    row_y_match = {}
+    adjusted_ys = []
+    try:
+        if row_axis_override is not None:
+            adjusted_ys, row_y_match = recovery.manual_match(
+                row_axis_override,
+                physical_plan=master_order_form_template_service.validated_body_row_plan(worksheet),
+                header_bands=STEP_REVIEW_HEADER_BANDS,
+                canvas_height=rectified_fax.shape[0], canvas_width=rectified_fax.shape[1],
+            )
+        else:
+            row_corrected_ys, row_y_match = _row_intersection_correct_ys(
+                rectified_fax=rectified_fax, corrected_xs=[float(value) for value in matched_xs],
+                template_ys=template_ys, worksheet=worksheet,
+            )
+            if row_corrected_ys is None:
+                raise ValueError(str(row_y_match.get("reason") or "fax_row_boundaries_unresolved"))
+            adjusted_ys = list(row_corrected_ys)
+    except ValueError as exc:
+        if not diagnostic_only:
+            raise
+        row_y_match = {**row_y_match, "used": False, "reason": str(exc), "diagnostic_only": True}
+        # Old authored coordinates remain visible even when their day mapping needs repair.
+        if row_axis_override is not None:
+            try:
+                adjusted_ys = recovery.coordinates(row_axis_override, canvas_height=rectified_fax.shape[0])
+            except ValueError:
+                adjusted_ys = []
+        elif isinstance(row_y_match.get("corrected_ys"), list):
+            # Observed lines remain diagnostic candidates, never successful OCR input.
+            adjusted_ys = list(row_y_match["corrected_ys"])
+    if adjusted_ys:
+        row_y_match["corrected_ys"] = list(adjusted_ys)
+        row_y_match["row_height_quality"] = _row_height_outlier_evidence(adjusted_ys)
     axis_image = _draw_axis_match(
         rectified_fax,
         template_xs=template_xs,

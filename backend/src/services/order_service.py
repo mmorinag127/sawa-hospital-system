@@ -437,38 +437,7 @@ def _normalize_operator_header_axis_override(value: object, *, selected_pdf_rece
         return None
     session_kwargs = {"session": session} if session is not None else {}
     _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
-    coordinate_space = value.get("coordinate_space")
-    if not isinstance(coordinate_space, dict):
-        return None
-    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
-        return None
-    try:
-        width = int(coordinate_space.get("width"))
-        height = int(coordinate_space.get("height"))
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    raw_xs = value.get("corrected_xs")
-    if not isinstance(raw_xs, list) or len(raw_xs) < 2:
-        return None
-    corrected_xs: list[float] = []
-    for raw in raw_xs:
-        try:
-            x = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if x < 0 or x > float(width):
-            return None
-        corrected_xs.append(round(x, 3))
-    if any(b <= a for a, b in zip(corrected_xs, corrected_xs[1:])):
-        return None
-    return {
-        "corrected_xs": corrected_xs,
-        "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
-        "source": str(value.get("source") or "operator_header_axis_override"),
-        "source_receipt": deepcopy(value["source_receipt"]),
-    }
+    return deepcopy(value)
 
 
 def _normalize_operator_row_axis_override(value: object, *, selected_pdf_receipt=None, configured_input=None, order_input_identity=None, session=None) -> dict[str, Any] | None:
@@ -476,38 +445,9 @@ def _normalize_operator_row_axis_override(value: object, *, selected_pdf_receipt
         return None
     session_kwargs = {"session": session} if session is not None else {}
     _validate_axis_source(value, selected_pdf_receipt, configured_input, order_input_identity, **session_kwargs)
-    coordinate_space = value.get("coordinate_space")
-    if not isinstance(coordinate_space, dict):
-        return None
-    if str(coordinate_space.get("mode") or "").strip() != "template_canvas":
-        return None
-    try:
-        width = int(coordinate_space.get("width"))
-        height = int(coordinate_space.get("height"))
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    raw_ys = value.get("corrected_ys")
-    if not isinstance(raw_ys, list) or len(raw_ys) < 2:
-        return None
-    corrected_ys: list[float] = []
-    for raw in raw_ys:
-        try:
-            y = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if y < 0 or y > float(height):
-            return None
-        corrected_ys.append(round(y, 3))
-    if any(b <= a for a, b in zip(corrected_ys, corrected_ys[1:])):
-        return None
-    return {
-        "corrected_ys": corrected_ys,
-        "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
-        "source": str(value.get("source") or "operator_row_axis_override"),
-        "source_receipt": deepcopy(value["source_receipt"]),
-    }
+    # Validate geometry in the shared pipeline; never silently replace saved input
+    # with automatic estimation, including older edits lacking day boundaries.
+    return deepcopy(value)
 
 
 def _parse_sheet_week_value(value: object) -> tuple[str | None, date | None, date | None]:
@@ -9441,7 +9381,6 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             week_sheet_name=week_sheet_name,
         )
         fax_template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(runtime_item, facility_id)  # noqa: SLF001
-        horizontal_line_mask, _vertical_line_mask = hakodate_cell_ocr_batch_service._split_line_masks(rectified_fax)  # noqa: SLF001
         aligned_xs, aligned_ys, axis_evidence, _axis_match_image = hakodate_cell_ocr_batch_service._align_axes(  # noqa: SLF001
             rectified_fax=rectified_fax,
             template_xs=template_xs,
@@ -9454,30 +9393,10 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             row_axis_override=runtime_item.get("row_axis_override")
             if isinstance(runtime_item.get("row_axis_override"), dict)
             else None,
-        )
-        grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
-            worksheet=worksheet,
-            rectified_fax=rectified_fax,
-            xs=aligned_xs,
-            ys=aligned_ys,
-            horizontal_line_mask=horizontal_line_mask,
-        )
-        target_regions, _target_evidence = hakodate_cell_ocr_batch_service._post_menu_target_regions(  # noqa: SLF001
-            worksheet=worksheet,
-            column_edges=[float(value) for value in aligned_xs],
-            row_edges=[float(value) for value in aligned_ys],
-            fax_template=fax_template,
-            horizontal_line_mask=horizontal_line_mask,
-            draft_sheet=runtime_item["original_physical_draft"],
-            menu_body_row_indexes=hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], axis_evidence["row_intersection_y_match"]),
-        )
-        hakodate_cell_ocr_batch_service.validate_original_target_plan(runtime_item, target_regions)
-        image = hakodate_cell_ocr_batch_service._draw_target_regions(  # noqa: SLF001
-            grid_overlay=grid_overlay,
-            regions=target_regions,
+            diagnostic_only=True,
         )
         image = hakodate_cell_ocr_batch_service._draw_header_intersections_overlay(  # noqa: SLF001
-            image=image,
+            image=_axis_match_image,
             axis_evidence=axis_evidence,
         ).convert("RGB")
         match = axis_evidence.get("header_intersection_x_match") if isinstance(axis_evidence, dict) else {}
@@ -9504,14 +9423,12 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             clusters = match.get("fax_x_clusters")
             if isinstance(clusters, list):
                 corrected_xs = [cluster.get("value") for cluster in clusters if isinstance(cluster, dict)]
-        if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
-            corrected_xs = list(runtime_item.get("template_axes_x") or [])
+        if not isinstance(corrected_xs, list):
+            corrected_xs = []
         xs: list[float] = []
         for raw in corrected_xs:
-            try:
-                xs.append(round(float(raw), 3))
-            except (TypeError, ValueError):
-                continue
+            if type(raw) in (int, float) and math.isfinite(raw):
+                xs.append(float(raw))
         y_clusters = match.get("fax_y_clusters")
         y_levels: list[float] = []
         if isinstance(y_clusters, list):
@@ -9522,12 +9439,11 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
                     y_levels.append(round(float(cluster.get("value")), 3))
                 except (TypeError, ValueError):
                     continue
-        if not y_levels:
-            y_levels = [float(value) for value in list(runtime_item.get("template_axes_y") or [])[:3]]
         _validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], start_input["configured_input"], source_receipt["order_input_identity"])
         return {
             "order_id": order_id,
-            "status": "ready",
+            "status": "ready" if match.get("used") else "needs_correction",
+            "error_detail": None if match.get("used") else match.get("reason"),
             "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "image_size": [crop.width, crop.height],
             "crop_box": crop_box,
@@ -9580,7 +9496,6 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             week_sheet_name=week_sheet_name,
         )
         fax_template = hakodate_cell_ocr_batch_service._fax_template_for_manifest_item(runtime_item, facility_id)  # noqa: SLF001
-        horizontal_line_mask, _vertical_line_mask = hakodate_cell_ocr_batch_service._split_line_masks(rectified_fax)  # noqa: SLF001
         aligned_xs, aligned_ys, axis_evidence, _axis_match_image = hakodate_cell_ocr_batch_service._align_axes(  # noqa: SLF001
             rectified_fax=rectified_fax,
             template_xs=template_xs,
@@ -9593,19 +9508,25 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             row_axis_override=runtime_item.get("row_axis_override")
             if isinstance(runtime_item.get("row_axis_override"), dict)
             else None,
-        )
-        grid_overlay, _merge_evidence = hakodate_cell_ocr_batch_service._draw_merge_aware_grid(  # noqa: SLF001
-            worksheet=worksheet,
-            rectified_fax=rectified_fax,
-            xs=aligned_xs,
-            ys=aligned_ys,
-            horizontal_line_mask=horizontal_line_mask,
+            diagnostic_only=True,
         )
         image = hakodate_cell_ocr_batch_service._draw_row_intersections_overlay(  # noqa: SLF001
-            image=grid_overlay,
+            image=_axis_match_image,
             axis_evidence=axis_evidence,
         ).convert("RGB")
-        hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], axis_evidence["row_intersection_y_match"])
+        match = axis_evidence["row_intersection_y_match"]
+        diagnostic_error = match.get("reason") if match.get("diagnostic_only") else None
+        if diagnostic_error is None:
+            try:
+                hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], match)
+            except ValueError as exc:
+                diagnostic_error = str(exc)
+        from src.services import ocr_row_recovery_service, master_order_form_template_service
+        days = ocr_row_recovery_service.calendar_contract(
+            master_order_form_template_service.validated_body_row_plan(worksheet)
+        )
+        structural = match.get("structural_match") or {}
+        day_source = match.get("canonical_day_source") or structural.get("canonical_day_source") or {}
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         match = axis_evidence.get("row_intersection_y_match") if isinstance(axis_evidence, dict) else {}
@@ -9623,7 +9544,17 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
         _validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"], start_input["configured_input"], source_receipt["order_input_identity"])
         return {
             "order_id": order_id,
-            "status": "ready",
+            "status": "needs_correction" if diagnostic_error else "ready",
+            "error_detail": diagnostic_error,
+            "calendar_days": days,
+            "boundary_diagnostics": {
+                "expected": day_source.get("canonical_date_column_boundary_indexes"),
+                "actual": day_source.get("observed_date_column_boundary_indexes"),
+                "missing": match.get("missing_date_column_boundary_indexes"),
+                "extra": match.get("extra_date_column_boundary_indexes"),
+            },
+            "body_day_boundary_indexes": (match.get("structural_match") or {}).get("body_day_boundary_indexes"),
+            "header_band_count": len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS),
             "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "image_size": [image.width, image.height],
             "canvas_size": [image.width, image.height],
@@ -13314,8 +13245,12 @@ def _rerun_ocr_evidence_only_with_input(
 
     def _hakodate_rerun_failure_payload(exc: Exception) -> dict[str, Any]:
         from src.services.hakodate_fixed_quad_registration_service import QuadEstimationError
+        from src.services.ocr_row_recovery_service import failure_details
 
         raw_message = str(exc).strip()
+        geometry_failure = failure_details(raw_message)
+        if geometry_failure is not None:
+            return geometry_failure
         if isinstance(exc, QuadEstimationError):
             return {
                 "error": "quad_estimation_failed",

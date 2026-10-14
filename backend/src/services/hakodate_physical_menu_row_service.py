@@ -89,6 +89,10 @@ def resolve_fax_menu_row_indexes(sheet: dict[str, Any], row_match: dict[str, Any
         raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")
     boundaries = structural.get("body_day_boundary_indexes")
     day_count = (calendar_end - calendar_start).days + 1
+    if structural.get("source") == "operator_row_axis_override" and structural.get("day_labels") != [
+        (calendar_start + timedelta(days=i)).isoformat() for i in range(day_count)
+    ]:
+        raise ValueError("row_axis_calendar_days_changed")
     if (
         not isinstance(boundaries, list)
         or len(boundaries) != day_count + 1

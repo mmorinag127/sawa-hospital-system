@@ -155,6 +155,7 @@ type HeaderAxisReviewPayload = {
   order_id: string;
   source_receipt?: Record<string, unknown> | null;
   status?: string | null;
+  error_detail?: string | null;
   image_png_base64?: string | null;
   image_size?: number[] | null;
   crop_box?: number[] | null;
@@ -174,6 +175,11 @@ type RowAxisReviewPayload = {
   order_id: string;
   source_receipt?: Record<string, unknown> | null;
   status?: string | null;
+  error_detail?: string | null;
+  calendar_days?: Array<{date: string; expected_band_count: number | null}>;
+  body_day_boundary_indexes?: number[] | null;
+  header_band_count?: number;
+  boundary_diagnostics?: {expected?: number[] | null; actual?: number[] | null; missing?: number[] | null; extra?: number[] | null};
   image_png_base64?: string | null;
   image_size?: number[] | null;
   canvas_size?: number[] | null;
@@ -182,6 +188,8 @@ type RowAxisReviewPayload = {
   saved_override?: {
     source_receipt?: Record<string, unknown> | null;
     corrected_ys?: number[];
+    body_day_boundary_indexes?: number[];
+    day_labels?: string[];
     coordinate_space?: { mode?: string; width?: number; height?: number };
   } | null;
   axis_evidence?: Record<string, unknown> | null;
@@ -1322,6 +1330,7 @@ export default function OrderWorkflowV2Page() {
   const [rowAxisLoading, setRowAxisLoading] = useState(false);
   const [rowAxisMessage, setRowAxisMessage] = useState("");
   const [rowAxisYs, setRowAxisYs] = useState<number[]>([]);
+  const [rowDayBoundaries, setRowDayBoundaries] = useState<string[]>([]);
   const [draggingRowAxisIndex, setDraggingRowAxisIndex] = useState<number | null>(null);
   const [selectedRowAxisIndex, setSelectedRowAxisIndex] = useState<number | null>(null);
   const [rowAxisAddMode, setRowAxisAddMode] = useState(false);
@@ -2998,7 +3007,12 @@ export default function OrderWorkflowV2Page() {
         const next=validSource?(validSaved?saved:detected):[];
         const points=(Array.isArray(next)?next:[]).map(value=>Number(value)).filter(Number.isFinite);
         if (axis==="header") { setHeaderAxisXs(points); setSelectedHeaderAxisIndex(null); setHeaderAxisAddMode(false); }
-        else { setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false); }
+        else {
+          const rowReview = review as RowAxisReviewPayload;
+          const boundaries = validSource ? rowReview.saved_override?.body_day_boundary_indexes ?? rowReview.body_day_boundary_indexes : null;
+          setRowDayBoundaries(Array.from({length: 8}, (_, index) => boundaries?.[index]?.toString() ?? ""));
+          setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false);
+        }
         if (!validSource) message("保存済み補正のPDF・入力の正本を確認できません。補正点は反映していません。");
       }
     } catch(err:any) { if (current()) message(formatApiError(err,"交点確認データの取得に失敗しました")); }
@@ -3018,6 +3032,9 @@ export default function OrderWorkflowV2Page() {
     }
     const coordinateSpace=review?.coordinate_space;
     if (points.length<2 || !coordinateSpace?.width || !coordinateSpace.height) { message("交点または座標系が不足しています。"); return; }
+    if (axis === "row" && (rowDayBoundaries.length !== 8 || rowDayBoundaries.some(value => !/^\d+$/.test(value)))) {
+      message("7日分の日境界と最終境界を整数で指定してください。"); return;
+    }
     if (axis==="header") {
       const expectedCount=getHeaderAxisExpectedCount();
       if (expectedCount>0 && points.length!==expectedCount && typeof window!=="undefined"
@@ -3035,7 +3052,8 @@ export default function OrderWorkflowV2Page() {
       if (!current()) return;
       if (captured.revision!==receipt.workflow_revision) throw new Error("交点確認後にworkflow版が変わりました。元の入力は保存していません。");
       const response=await apiClient.put(`/orders/${own.context.orderId}/workflow-v2/${axis}-axis-review`,
-        {...(axis==="header"?{corrected_xs:points}:{corrected_ys:points}),coordinate_space:coordinateSpace,source_receipt:receipt},
+        {...(axis==="header"?{corrected_xs:points}:{corrected_ys:points,
+          body_day_boundary_indexes:rowDayBoundaries.map(Number), day_labels:rowAxisReview?.calendar_days?.map(day => day.date)}),coordinate_space:coordinateSpace,source_receipt:receipt},
         workflowMutationConfig(captured,{timeout:getHeaderAxisTimeoutMs()}));
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(response.data,captured)) throw new Error("補正保存中に入力が変更されました。");
@@ -3047,7 +3065,7 @@ export default function OrderWorkflowV2Page() {
         {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId},workflowMutationConfig(rerunInputVersion,{timeout:getHeaderAxisTimeoutMs()}));
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(rerun.data,rerunInputVersion)) throw new Error("OCR再実行中に入力が変更されました。");
-      finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis]; discardSheetDraft();
+      finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis];
       setSheetAutoEditResult(null); setLocalAnomalyReview(null); setSelectedAnomalyIndex(null); setSelectedAutoEditIndex(null);
       setMessage(axis==="header"?"ヘッダー交点補正を保存し、OCRを再実行しました。":"行境界補正を保存し、OCRを再実行しました。"); setVisibleStep(2);
     } catch(err:any) { if (current()) setError(formatApiError(err,"交点補正の保存またはOCR再実行に失敗しました")); }
@@ -3167,8 +3185,8 @@ export default function OrderWorkflowV2Page() {
       .sort((a, b) => a - b);
     const normalized: number[] = [];
     for (const value of sorted) {
-      if (normalized.length && Math.abs(value - normalized[normalized.length - 1]) < 1) continue;
-      normalized.push(Number(value.toFixed(3)));
+      if (normalized.length && value === normalized[normalized.length - 1]) continue;
+      normalized.push(value);
     }
     return normalized;
   };
@@ -4124,6 +4142,19 @@ export default function OrderWorkflowV2Page() {
           <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{stateLabel(workflow?.state)}</h2>
           <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          {workflow?.state === "ocr_failed" ? <div role="alert">
+            <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
+            {[
+              {stage: "row_day_boundaries", action: "review_row_day_boundaries", step: 1.7, label: "行・日境界の画像を開いて訂正"},
+              {stage: "header_boundaries", action: "review_header_boundaries", step: 1.6, label: "ヘッダー境界を訂正"},
+              {stage: "quad_estimation", action: "review_or_edit_quad", step: 1.5, label: "表外枠4点を訂正"},
+              {stage: "template_resolution", action: "review_facility_template", step: 1, label: "施設テンプレートを確認"},
+            ].filter(item => item.stage === workflow.ocr_job?.processing_stage && item.action === workflow.ocr_job?.recovery_action).map(item => (
+              <Button key={item.action} type="button" className="btn ghost workflow-ordinary-control" disabled={Boolean(busy)} onClick={() => setVisibleStep(item.step)}>
+                {item.label}
+              </Button>
+            ))}
+          </div> : null}
           {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
@@ -4904,6 +4935,7 @@ export default function OrderWorkflowV2Page() {
             縦軸をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に縦軸を追加します。
           </p>
           {headerAxisMessage ? <div className="notice error">{headerAxisMessage}</div> : null}
+          {headerAxisReview?.error_detail ? <div className="notice error" role="alert">ヘッダー境界の検証停止: {headerAxisReview.error_detail}</div> : null}
           <div className="header-axis-canvas-wrap">
             {headerAxisImageSrc ? (
               <div className="header-axis-canvas">
@@ -5006,6 +5038,35 @@ export default function OrderWorkflowV2Page() {
             </div>
           </header>
           {rowAxisWarning ? <div className="notice warning">{rowAxisWarning}</div> : null}
+          {rowAxisReview?.error_detail ? <div className="notice error" role="alert">
+            行・日境界の検証停止: {rowAxisReview.error_detail}
+          </div> : null}
+          {rowAxisReview?.boundary_diagnostics ? <p>
+            日付欄の期待境界: {rowAxisReview.boundary_diagnostics.expected?.join(", ") ?? "未確定"} / 検出境界: {rowAxisReview.boundary_diagnostics.actual?.join(", ") ?? "未検出"}
+          </p> : null}
+          <p className="subtle">本文の先頭境界は0です。ヘッダーは{rowAxisReview?.header_band_count ?? "未確認"}帯。対象外の日も空欄帯を残します。</p>
+          <div className="row-actions">
+            {rowAxisReview?.calendar_days?.map((day, index) => (
+              <label key={day.date}>
+                {day.date} 開始境界
+                <input type="number" min={0} step={1} value={rowDayBoundaries[index] ?? ""}
+                  disabled={Boolean(busy)} onChange={event => {
+                    beginWorkflowEditorEdit("row", true);
+                    setRowDayBoundaries(current => current.map((value, i) => i === index ? event.target.value : value));
+                  }} />
+                <span>期待 {day.expected_band_count ?? "対象外（原画像で確認）"}帯 / 現在 {
+                  rowDayBoundaries[index] !== "" && rowDayBoundaries[index + 1] !== ""
+                    ? Number(rowDayBoundaries[index + 1]) - Number(rowDayBoundaries[index]) : "未指定"}帯</span>
+              </label>
+            ))}
+            <label>最終境界
+              <input type="number" min={0} step={1} value={rowDayBoundaries[7] ?? ""}
+                disabled={Boolean(busy)} onChange={event => {
+                  beginWorkflowEditorEdit("row", true);
+                  setRowDayBoundaries(current => current.map((value, i) => i === 7 ? event.target.value : value));
+                }} />
+            </label>
+          </div>
           <p className="subtle">
             現在 {rowAxisYs.length} 本。横線をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に行境界を追加します。
           </p>
@@ -5054,7 +5115,10 @@ export default function OrderWorkflowV2Page() {
                             setRowAxisAddMode(false);
                           }}
                         >
-                          {idx + 1}
+                          {idx < (rowAxisReview?.header_band_count ?? 0) ? `H${idx}` : `本文${idx - (rowAxisReview?.header_band_count ?? 0)}`}
+                          {rowAxisReview?.calendar_days?.map((day, dayIndex) =>
+                            rowDayBoundaries[dayIndex] !== "" && Number(rowDayBoundaries[dayIndex]) + (rowAxisReview.header_band_count ?? 0) === idx
+                              ? ` ${day.date}` : "").join("")}
                         </text>
                       </g>
                     );
