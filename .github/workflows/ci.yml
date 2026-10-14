@@ -97,6 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-test-logs
+          include-hidden-files: true
           path: backend/.logs
       - name: Backend log summary
         if: always()
@@ -113,6 +114,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: "20"
@@ -132,7 +135,10 @@ jobs:
           npm run lint 2>&1 | tee .logs/lint.log
       - name: Frontend route contract tests
         working-directory: frontend
-        run: npm run test:config
+        run: |
+          set -euo pipefail
+          mkdir -p .logs
+          npm run test:config 2>&1 | tee .logs/test-config.log
       - name: Frontend typecheck
         working-directory: frontend
         run: |
@@ -143,6 +149,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: frontend-test-logs
+          include-hidden-files: true
           path: frontend/.logs
       - name: Frontend log summary
         if: always()
