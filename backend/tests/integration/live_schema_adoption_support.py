@@ -90,6 +90,17 @@ def target(url):
 def restore_captured(conn, shapes):
     """Construct the captured physical schema, not an approximation of a numbered revision."""
     quote = conn.dialect.identifier_preparer.quote
+    contract = json.loads(schema.CONTRACT.read_text())
+    scripts = ScriptDirectory.from_config(Config(str(schema.ALEMBIC_CONFIG)))
+    statuses = scripts.get_revision("0016").module._STATUS_VALUES
+    # Replaying pg_get_constraintdef can distribute array casts. Use the original
+    # migration DDL only for exact matching formal constraints; verify the full catalog afterwards.
+    original_checks = {
+        ("facility_template_versions", "ck_facility_template_versions_status"):
+            f"CHECK (status IN {tuple(statuses)!r})",
+        ("user_system_access", "ck_user_system_access_system_key"):
+            "CHECK (system_key IN ('hospital', 'shift', 'school-lunch'))",
+    }
     for table, shape in shapes.items():
         natives = {item["column_name"]: item for item in shape["native"] if "column_name" in item}
         columns = []
@@ -105,8 +116,16 @@ def restore_captured(conn, shapes):
         for table, shape in shapes.items():
             for item in shape["native"]:
                 if item.get("contype") == kind:
+                    definition = item["definition"]
+                    key = (table, item["constraint_name"])
+                    if key in original_checks:
+                        reference = contract["shapes"][contract["revisions"]["postgresql"]["0028"]["tables"][table]]
+                        formal = next(value for value in reference["native"]
+                                      if value.get("constraint_name") == item["constraint_name"])
+                        if item == formal:
+                            definition = original_checks[key]
                     conn.exec_driver_sql("ALTER TABLE " + quote(table) + " ADD CONSTRAINT "
-                                         + quote(item["constraint_name"]) + " " + item["definition"])
+                                         + quote(item["constraint_name"]) + " " + definition)
     for shape in shapes.values():
         seen = set()
         for item in shape["native"]:

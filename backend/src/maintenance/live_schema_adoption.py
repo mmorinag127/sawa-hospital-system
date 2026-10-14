@@ -84,10 +84,11 @@ def _normalize(connection, contract, actual):
     connection.exec_driver_sql("ALTER TABLE facility_areas DROP CONSTRAINT facility_areas_pkey")
     connection.exec_driver_sql("ALTER TABLE facility_areas ADD CONSTRAINT facility_areas_pkey PRIMARY KEY (facility_id,id)")
     connection.exec_driver_sql("ALTER TABLE menu_masters ADD CONSTRAINT uq_menu_masters_normalized_name UNIQUE USING INDEX ix_menu_masters_normalized_name")
-    target = _shape(contract, "0028", "facility_template_versions")
-    check = next(item for item in target["checks"] if item["name"] == "ck_facility_template_versions_status")
+    scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
+    statuses = scripts.get_revision("0016").module._STATUS_VALUES
     connection.exec_driver_sql("ALTER TABLE facility_template_versions DROP CONSTRAINT ck_facility_template_versions_status")
-    connection.exec_driver_sql("ALTER TABLE facility_template_versions ADD CONSTRAINT ck_facility_template_versions_status CHECK (" + check["sqltext"] + ")")
+    connection.exec_driver_sql("ALTER TABLE facility_template_versions ADD CONSTRAINT ck_facility_template_versions_status "
+                               + f"CHECK (status IN {tuple(statuses)!r})")
 
 
 def adopt(connection):
