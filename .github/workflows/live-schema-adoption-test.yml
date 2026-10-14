@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     env:
       PG_BIN: /usr/lib/postgresql/16/bin
-      PYTHONPATH: backend
+      PYTHONPATH: backend:backend/tests/unit:scripts
       AUTH_DISABLED: "true"
       DB_URI: sqlite:///${{ github.workspace }}/.live-schema-adoption/runtime.sqlite
       DATABASE_URL: sqlite:///${{ github.workspace }}/.live-schema-adoption/runtime.sqlite
@@ -63,6 +63,8 @@ jobs:
           if [[ "$status" == 0 ]]; then
             LIVE_SCHEMA_ADOPTION_CONTRACT="$proof/catalog_contracts.generated.json" \
               python -m pytest -p no:cacheprovider backend/tests/integration/test_live_schema_adoption.py \
+              backend/tests/unit/test_prepare_stg_saved_import.py \
+              backend/tests/integration/test_stg_saved_import_transport.py \
               --basetemp="$EVIDENCE_DIR/tests" \
               --junitxml="$EVIDENCE_DIR/results.xml" -vv \
               2>&1 | tee "$EVIDENCE_DIR/pytest.log" || status=$?

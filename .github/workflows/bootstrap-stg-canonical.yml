@@ -1,0 +1,127 @@
+name: Initialize staging canonical source
+
+on:
+  workflow_dispatch:
+    inputs:
+      initial_uri:
+        description: Reviewed initial facility JSON in the staging template bucket
+        required: true
+        type: string
+      initial_sha256:
+        description: SHA256 of the reviewed initial facility JSON
+        required: true
+        type: string
+      policy_uri:
+        description: Captured existing ingest policy in the staging template bucket
+        required: true
+        type: string
+      policy_sha256:
+        description: SHA256 of the captured ingest policy
+        required: true
+        type: string
+      orders_uri:
+        description: Explicit saved-order ID array in the staging template bucket
+        required: true
+        type: string
+      orders_sha256:
+        description: SHA256 of the saved-order ID array
+        required: true
+        type: string
+      master_uri:
+        description: New canonical JSON object in the staging template bucket; never overwritten
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-stg
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: sawahospitalsystem
+  REGION: asia-northeast2
+  WEB_SERVICE: web-stg
+  WORKER_SERVICE: worker-stg
+  INITIAL_URI: ${{ inputs.initial_uri }}
+  INITIAL_SHA256: ${{ inputs.initial_sha256 }}
+  POLICY_URI: ${{ inputs.policy_uri }}
+  POLICY_SHA256: ${{ inputs.policy_sha256 }}
+  ORDERS_URI: ${{ inputs.orders_uri }}
+  ORDERS_SHA256: ${{ inputs.orders_sha256 }}
+  MASTER_URI: ${{ inputs.master_uri }}
+
+jobs:
+  initialize:
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify source and bounded staging object paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = develop
+          git fetch origin "+refs/heads/develop:refs/remotes/origin/develop"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"
+          test -z "$(git status --porcelain)"
+          for key in INITIAL_URI POLICY_URI ORDERS_URI MASTER_URI; do
+            [[ "${!key}" =~ ^gs://sawahospitalsystem-stg-templates/[A-Za-z0-9_./-]+\.json$ ]]
+            [[ "${!key}" != *"/../"* ]]
+          done
+          test "$MASTER_URI" != "$INITIAL_URI"
+          test "$MASTER_URI" != "$POLICY_URI"
+          test "$MASTER_URI" != "$ORDERS_URI"
+          for key in INITIAL_SHA256 POLICY_SHA256 ORDERS_SHA256; do
+            [[ "${!key}" =~ ^[a-f0-9]{64}$ ]]
+          done
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Download and verify explicit reviewed inputs before database migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/canonical-bootstrap
+          gcloud storage cp "$INITIAL_URI" tmp/canonical-bootstrap/initial.json
+          gcloud storage cp "$POLICY_URI" tmp/canonical-bootstrap/policy.json
+          gcloud storage cp "$ORDERS_URI" tmp/canonical-bootstrap/orders.json
+          printf '%s  %s\n' "$INITIAL_SHA256" tmp/canonical-bootstrap/initial.json | sha256sum --check
+          printf '%s  %s\n' "$POLICY_SHA256" tmp/canonical-bootstrap/policy.json | sha256sum --check
+          printf '%s  %s\n' "$ORDERS_SHA256" tmp/canonical-bootstrap/orders.json | sha256sum --check
+      - name: Adopt reviewed staging schema through formal migrations
+        run: uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py
+      - name: Capture saved results without changing quantities or confirmations
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --project backend --extra dev --frozen python scripts/prepare_stg_saved_import.py \
+            --initial tmp/canonical-bootstrap/initial.json --initial-sha256 "$INITIAL_SHA256" \
+            --policy tmp/canonical-bootstrap/policy.json --policy-sha256 "$POLICY_SHA256" \
+            --orders tmp/canonical-bootstrap/orders.json --orders-sha256 "$ORDERS_SHA256" \
+            --source-sha "$GITHUB_SHA" --output tmp/canonical-bootstrap/master.json \
+            > tmp/canonical-bootstrap/receipt.json
+      - name: Publish new object without overwriting an existing canonical source
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud storage cp --if-generation-match=0 --content-type=application/json \
+            tmp/canonical-bootstrap/master.json "$MASTER_URI"
+          gcloud storage cp "$MASTER_URI" tmp/canonical-bootstrap/downloaded.json
+          cmp tmp/canonical-bootstrap/master.json tmp/canonical-bootstrap/downloaded.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: staging-canonical-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/canonical-bootstrap/receipt.json
+          if-no-files-found: warn
+          retention-days: 14

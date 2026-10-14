@@ -1,0 +1,134 @@
+"""Capture explicitly selected staging saved results without modifying the database."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
+
+def checked_inputs(args):
+    from src.services.canonical_facility_store import _unique_object, _invalid_constant
+
+    paths = [getattr(args, name).resolve() for name in ("initial", "policy", "orders")]
+    output = args.output.resolve()
+    if len(set(paths + [output])) != 4 or output.exists():
+        raise ValueError("saved_import_paths_must_be_distinct_and_output_new")
+    values = []
+    for name, path in zip(("initial", "policy", "orders"), paths):
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != getattr(args, name + "_sha256"):
+            raise ValueError("saved_import_input_hash_mismatch:" + name)
+        values.append(json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_invalid_constant))
+    initial, policy, orders = values
+    if not isinstance(initial, dict) or not isinstance(policy, dict):
+        raise ValueError("saved_import_configuration_object_required")
+    if (not isinstance(orders, list) or not orders
+            or any(not isinstance(value, str) or not value or value != value.strip() for value in orders)
+            or len(set(orders)) != len(orders)):
+        raise ValueError("saved_import_unique_explicit_order_ids_required")
+    return initial, policy, orders
+
+
+def capture(connection, initial, policy, orders):
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from staging_db_target import verify_connection_target
+    from src.maintenance.formal_migration_schema import require_formal_head
+    from src.services.initial_saved_source_service import capture_saved_source
+    from src.services.initial_saved_import_service import prepare_import_master
+    from src.models.order import Order
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_workflow_state import OrderWorkflowState
+
+    if connection.in_transaction():
+        raise RuntimeError("saved_import_owned_transaction_required")
+    transaction = connection.begin()
+    try:
+        connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        connection.exec_driver_sql("SET LOCAL statement_timeout = '60s'")
+        if connection.exec_driver_sql("SHOW transaction_read_only").scalar_one() != "on":
+            raise RuntimeError("saved_import_read_only_required")
+        verify_connection_target(connection)
+        require_formal_head(connection)
+        with Session(bind=connection, autoflush=False, join_transaction_mode="rollback_only") as session:
+            selected = session.execute(
+                select(Order.id).join(OrderWorkflowState, OrderWorkflowState.order_id == Order.id)
+                .join(OrderSheetDraft, OrderSheetDraft.id == OrderWorkflowState.draft_id)
+                .where(Order.archived_at.is_(None), OrderSheetDraft.draft_state == "saved")
+            ).scalars().all()
+            if set(selected) != set(orders):
+                raise ValueError("saved_import_selected_order_inventory_changed")
+            snapshots = [capture_saved_source(session, order_id) for order_id in orders]
+            return prepare_import_master(initial, snapshots, policy)
+    finally:
+        if transaction.is_active:
+            transaction.rollback()
+
+
+def run(args):
+    from run_stg_menu_master_migration import (
+        require_staging_context, cloud_sql_proxy, _load_service_db_config,
+        STAGING_INSTANCE, STAGING_DATABASE,
+    )
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import URL
+
+    require_staging_context()
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if sha != args.source_sha or sha != os.environ.get("GITHUB_SHA"):
+        raise ValueError("saved_import_actions_source_sha_mismatch")
+    initial, policy, orders = checked_inputs(args)
+    configs = [_load_service_db_config(os.environ["PROJECT_ID"], os.environ["REGION"], os.environ[key])
+               for key in ("WEB_SERVICE", "WORKER_SERVICE")]
+    for config in configs:
+        if (config.instance_connection_name, config.db_name, config.db_user) != (
+                STAGING_INSTANCE, STAGING_DATABASE, "orders_app"):
+            raise ValueError("saved_import_staging_target_required")
+    web = configs[0]
+    with cloud_sql_proxy(web.instance_connection_name):
+        url = URL.create("postgresql+psycopg2", username=web.db_user, password=web.db_password,
+                         host="127.0.0.1", port=5432, database=web.db_name,
+                         query={"options": "-c default_transaction_read_only=on"})
+        engine = create_engine(url, hide_parameters=True)
+        previous = os.environ.get("DB_URI")
+        os.environ["DB_URI"] = url.render_as_string(hide_password=False)
+        try:
+            with engine.connect() as connection:
+                result = capture(connection, initial, policy, orders)
+        finally:
+            engine.dispose()
+            if previous is None:
+                os.environ.pop("DB_URI", None)
+            else:
+                os.environ["DB_URI"] = previous
+    raw = (json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
+    with args.output.open("xb") as stream:
+        stream.write(raw)
+    print(json.dumps({"source_sha": sha, "orders": len(orders),
+                      "sha256": hashlib.sha256(raw).hexdigest(), "database_modified": False}))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("initial", "policy", "orders"):
+        parser.add_argument("--" + name, required=True, type=Path)
+        parser.add_argument("--" + name + "-sha256", required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args()
+    try:
+        run(args)
+    except Exception:
+        print("Staging saved import failed; cloud, database and saved contents suppressed", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
