@@ -19,7 +19,6 @@ jobs:
     timeout-minutes: 45
     env:
       PG_BIN: /usr/lib/postgresql/16/bin
-      EVIDENCE_DIR: ${{ runner.temp }}/live-schema-adoption-evidence
       PYTHONPATH: backend
       AUTH_DISABLED: "true"
       DB_URI: sqlite:///${{ github.workspace }}/.live-schema-adoption/runtime.sqlite
@@ -40,6 +39,8 @@ jobs:
           sudo apt-get install --yes postgresql-16
           python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest
       - name: Generate fresh PostgreSQL 0035 contract and run adoption tests
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/live-schema-adoption-evidence
         shell: bash
         run: |
           set -uo pipefail
