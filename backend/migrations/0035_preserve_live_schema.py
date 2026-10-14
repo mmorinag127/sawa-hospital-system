@@ -8,8 +8,8 @@ branch_labels = None
 depends_on = None
 
 EXTRA_INDEXES = {
-    "ocr_training_samples": ("facility_code", "message_id", "order_id"),
-    "order_ocr_revisions": ("order_id",),
+    "ocr_training_samples": {"facility_code": False, "message_id": False, "order_id": True},
+    "order_ocr_revisions": {"order_id": False},
 }
 MASTER_FK = "monthly_menu_items_menu_master_id_fkey"
 
@@ -24,13 +24,13 @@ def upgrade():
                 batch.alter_column("created_at", existing_type=sa.DateTime(), nullable=True)
     for table, columns in EXTRA_INDEXES.items():
         existing = {item["name"]: item for item in sa.inspect(bind).get_indexes(table)}
-        for column in columns:
+        for column, unique in columns.items():
             name = f"ix_{table}_{column}"
             if name in existing:
-                if existing[name]["column_names"] != [column] or existing[name]["unique"]:
+                if existing[name]["column_names"] != [column] or existing[name]["unique"] != unique:
                     raise RuntimeError("0035 incompatible existing index: " + name)
             else:
-                op.create_index(name, table, [column])
+                op.create_index(name, table, [column], unique=unique)
     fks = sa.inspect(bind).get_foreign_keys("monthly_menu_items")
     matching = [fk for fk in fks if fk["name"] == MASTER_FK]
     if matching:
