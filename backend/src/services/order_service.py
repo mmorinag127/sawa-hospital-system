@@ -175,9 +175,24 @@ def _capture_selected_order_config(session: Any, order: Order) -> dict[str, Any]
     return _order_execution_input(session, order, lock=True)["configured_input"]
 
 
-def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None) -> dict[str, Any] | None:
+def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False) -> dict[str, Any] | None:
     """Capture the exact operator-read inputs required for a later cache CAS."""
     with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
+        from src.services.initial_saved_import_service import get_binding, execution_input, processing_input
+        from src.services.initial_saved_source_service import source_receipt
+        imported = get_binding(session, order_id)
+        if imported is not None:
+            captured = processing_input(session, imported) if for_materialization else execution_input(session, imported)
+            snapshot = imported["snapshot"]
+            return {"order_id": order_id, "workflow_revision": snapshot["workflow"]["revision"],
+                    "workflow_meta": deepcopy(snapshot["workflow"]["secondary_actions_json"]),
+                    "draft_id": snapshot["draft"]["id"], "evidence_run_id": snapshot["evidence"]["id"],
+                    "draft_base_evidence_run_id": snapshot["draft"]["base_evidence_run_id"],
+                    "evidence": snapshot["evidence"], "draft": snapshot["draft"],
+                    "configured_input": captured["configured_input"], "physical_menu_entries": captured["physical_menu_entries"],
+                    "input_versions": {"order_lines": snapshot["lines"], "draft": snapshot["draft"], "evidence": snapshot["evidence"]},
+                    "initial_saved_import": captured["initial_saved_import"],
+                    "initial_saved_source_receipt": source_receipt(snapshot)}
         order = session.get(Order, order_id)
         workflow = session.get(OrderWorkflowState, order_id)
         if order is None or workflow is None or not isinstance(workflow.revision, int):
@@ -244,6 +259,25 @@ def _synchronous_cache_write_fence(
 ) -> bool:
     if not isinstance(write_input, dict) or write_input.get("order_id") != order_id:
         return False
+    if write_input.get("initial_saved_import") is not None:
+        from src.services.workflow_attempt_guard_service import lock_order_execution_input, lock_current_execution_write
+        from src.services.initial_saved_import_service import materialization_input_matches
+        try:
+            if not materialization_input_matches(session, order_id, write_input):
+                return False
+            if write_input.get("physical_menu_entries") and not snapshots_equal(
+                    write_input["physical_menu_entries"], _json_snapshot(_build_position_menu_entries_safe(
+                        session.get(Order, order_id).week_code, session.get(Order, order_id).facility_code, session=session))):
+                return False
+            if "output_ocr_menu_defaults" in write_input:
+                names = list(dict.fromkeys(str(entry.get("menu_name") or "").strip() for entry in write_input["output_ocr_menu_entries"]))
+                if not snapshots_equal(write_input["output_ocr_menu_defaults"], menu_service.resolve_menu_defaults_in_session(
+                        session, names, session.get(Order, order_id).facility_code)[0] if names else {}):
+                    return False
+            return (lock_order_execution_input(session, order_id) is not None
+                    and lock_current_execution_write(session, order_id))
+        except (ValueError, KeyError):
+            return False
     order = session.get(Order, order_id)
     if order is None or not config_service.captured_processing_config_matches(order.facility_code, write_input.get("configured_input")):
         return False
@@ -6504,9 +6538,15 @@ def _materialize_confirmed_lines_from_candidate(
             f"latest draft cannot be confirmed: {candidate_error}",
         )
     configured = candidate.get("configured_input")
-    if not config_service.captured_processing_config_matches(order.facility_code, configured):
-        raise ConfirmMaterializationError("materialization_configured_input_changed", "captured authored configuration changed before adoption")
     write_input = candidate.get("synchronous_write_input")
+    from src.services.initial_saved_import_service import processing_configuration_matches
+    def configuration_matches():
+        if isinstance(write_input, dict) and write_input.get("initial_saved_import") is not None:
+            return (snapshots_equal(configured, write_input.get("configured_input"))
+                    and processing_configuration_matches(session, order.id, write_input))
+        return config_service.captured_processing_config_matches(order.facility_code, configured)
+    if not configuration_matches():
+        raise ConfirmMaterializationError("materialization_configured_input_changed", "captured authored configuration changed before adoption")
     if not isinstance(write_input, dict) or not _synchronous_cache_write_fence(session, order.id, write_input):
         raise ConfirmMaterializationError("synchronous_input_conflict", "captured materialization input changed before adoption")
     serialized_lines = candidate.get("lines")
@@ -6544,7 +6584,7 @@ def _materialize_confirmed_lines_from_candidate(
         )
 
     normalized_lines = _ensure_unique_line_ids(materialized_lines, exclude_order_id=order.id)
-    if not config_service.captured_processing_config_matches(order.facility_code, configured) or not _synchronous_cache_write_fence(session, order.id, write_input):
+    if not configuration_matches() or not _synchronous_cache_write_fence(session, order.id, write_input):
         raise ConfirmMaterializationError("synchronous_input_conflict", "captured materialization input changed before adoption")
     session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
     for line in normalized_lines:
@@ -12422,6 +12462,18 @@ def _bind_blocked_current_sheet_context(order_id: str, context: dict[str, Any] |
     return bound
 
 
+def _initial_saved_sheet_context(order_id, boundary_input):
+    from src.services.initial_saved_import_service import sheet_context
+    from src.services.workflow_attempt_guard_service import bind_current_sheet_input, validate_current_sheet_input
+
+    context = sheet_context({"snapshot": {key: boundary_input[key] for key in ("order", "draft")}})
+    context["order_payload"] = get_order_by_id(order_id, allow_unresolved_menu_amount=True)
+    bound = bind_current_sheet_input(context, boundary_input)
+    with session_scope() as session:
+        validate_current_sheet_input(session, order_id, bound)
+    return bound
+
+
 def refresh_current_sheet_context(
     order_id: str,
     *,
@@ -12435,6 +12487,8 @@ def refresh_current_sheet_context(
         return None
     from src.services.workflow_attempt_guard_service import capture_current_sheet_input
     boundary_input = capture_current_sheet_input(normalized_order_id)
+    if boundary_input.get("initial_saved_import") is not None:
+        return _initial_saved_sheet_context(normalized_order_id, boundary_input)
     stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
     if stopped:
         return _bind_blocked_current_sheet_context(normalized_order_id, blocked_context, boundary_input)
@@ -12494,6 +12548,8 @@ def get_current_sheet_context(
         return None
     from src.services.workflow_attempt_guard_service import capture_current_sheet_input
     boundary_input = capture_current_sheet_input(normalized_order_id)
+    if boundary_input.get("initial_saved_import") is not None:
+        return _initial_saved_sheet_context(normalized_order_id, boundary_input)
     stopped, blocked_context = _current_sheet_template_read_boundary(normalized_order_id)
     if stopped:
         return _bind_blocked_current_sheet_context(normalized_order_id, blocked_context, boundary_input)
@@ -23293,6 +23349,11 @@ def get_ocr_sheet(
     synchronous_write_input: dict[str, Any] | None = None,
 ):
     with session_scope() as session:
+        from src.services.initial_saved_import_service import get_binding
+        from src.services.initial_saved_source_service import current_sheet_payload
+        imported = get_binding(session, order_id)
+        if imported is not None and evidence_run_override is None:
+            return current_sheet_payload(imported["snapshot"]), None
         if session.get(Order, order_id) is None:
             return None, "order_not_found"
     if _unresolved_order_week_context(order_id) is not None:

@@ -3,8 +3,11 @@
 from copy import deepcopy
 from datetime import date, datetime
 import json
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, event, insert, select, update
 from sqlalchemy.orm import Session
 
@@ -27,14 +30,20 @@ SHEET = {"fields": ["unknown", "qty.regular_x", "remarks"],
 
 
 @pytest.fixture
-def saved():
-    engine = create_engine("sqlite://")
+def saved(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///" + str(tmp_path / "saved-source.sqlite"))
     @event.listens_for(engine, "connect")
     def foreign_keys(dbapi, _):
         dbapi.execute("PRAGMA foreign_keys=ON")
         assert dbapi.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
-    Facility.metadata.create_all(engine, tables=[model.__table__ for model in MODELS])
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    with monkeypatch.context() as migration_environment:
+        migration_environment.setenv("ALEMBIC_DB_URI", str(engine.url))
+        migration_environment.setenv("DB_URI", str(engine.url))
+        with engine.connect() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
     with Session(engine, autoflush=True) as session:
         def add(model, **values):
             session.execute(insert(model.__table__).values(**values))
@@ -43,7 +52,7 @@ def saved():
             add(FacilityTemplateVersion, id=identity, facility_id="F", version=identity,
                 status="archived", template_id="old-template", source="saved-old",
                 columns_json=[{"name": "qty.regular_x"}], cells_json=[{"raw": 0}],
-                config_json={"unknown": None}, template_digest="original-digest",
+                config_json={"unknown": None}, template_digest="original-digest" if identity == "T" else "unselected-digest",
                 valid_from=None, valid_to=None)
         for identity in ("O", "OTHER"):
             add(Order, id=identity, facility_code="F", template_version_id="T",
@@ -51,7 +60,7 @@ def saved():
         for identity in ("E", "E-new"):
             add(OrderOcrEvidenceRun, id=identity, order_id="O", template_version_id="T",
                 schema_version="old", source="saved-old-ocr", payload_json={"raw": "unchanged"},
-                artifact_digest="saved-digest")
+                artifact_digest="saved-digest" if identity == "E" else "unselected-evidence-digest")
         for identity, evidence in (("D", "E"), ("D-new", "E-new")):
             add(OrderSheetDraft, id=identity, order_id="O", template_version_id="T",
                 base_evidence_run_id=evidence, draft_sheet_json=deepcopy(SHEET), draft_state="saved")

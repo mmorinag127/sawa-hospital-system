@@ -82,6 +82,7 @@ _WORKFLOW_V2_CANONICAL_STATES = {
     "legacy_ocr_evidence_not_selectable",
 }
 _expected_workflow_revision: ContextVar[int | None] = ContextVar("expected_workflow_revision", default=None)
+_workflow_command_identity: ContextVar[dict | None] = ContextVar("workflow_command_identity", default=None)
 
 
 class _WorkflowRevisionError(Exception):
@@ -100,6 +101,7 @@ def workflow_command(func):
         if type(expected_revision) is not int or expected_revision < 0:
             return None, WORKFLOW_REVISION_INVALID
         token = _expected_workflow_revision.set(expected_revision)
+        command_token = _workflow_command_identity.set({"order_id": order_id, "command": func.__name__, "token": uuid4().hex})
         conflict_error = None
         try:
             result = func(*args, **kwargs)
@@ -109,6 +111,7 @@ def workflow_command(func):
             conflict_error = WORKFLOW_REVISION_CONFLICT
         finally:
             _expected_workflow_revision.reset(token)
+            _workflow_command_identity.reset(command_token)
         if conflict_error:
             if kwargs.get("write_session") is not None:
                 return None, conflict_error
@@ -773,6 +776,10 @@ def _require_workflow_template_version_from_context(
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
 ) -> tuple[str | None, str | None]:
+    from src.services.initial_saved_import_service import get_binding
+    imported = get_binding(session, order.id)
+    if imported is not None:
+        return imported["snapshot"]["template"]["id"], None
     template_version_id, identity_error = _workflow_template_version_identity(workflow, meta)
     if identity_error == "template_version_mismatch":
         return None, identity_error
@@ -1187,6 +1194,10 @@ def _workflow_lineage_error(
     meta_override: dict[str, Any] | None = None,
 ) -> str | None:
     meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(workflow)
+    from src.services.initial_saved_import_service import get_binding
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    if imported is not None:
+        return None
     state = _canonical_workflow_v2_state(workflow, meta)
     if _workflow_template_selection_pending(workflow, meta):
         return None
@@ -1330,6 +1341,7 @@ def _get_or_create_workflow(session: Any, order_id: str) -> OrderWorkflowState:
     row = session.get(OrderWorkflowState, order_id)
     if row is not None:
         _assert_command_revision(row)
+        _begin_initial_saved_command(session, row)
         return row
     expected_revision = _expected_workflow_revision.get()
     if expected_revision is not None and expected_revision != 0:
@@ -1370,7 +1382,14 @@ def _get_workflow(session: Any, order_id: str) -> OrderWorkflowState | None:
     row = session.get(OrderWorkflowState, order_id)
     if row is not None:
         _assert_command_revision(row)
+        _begin_initial_saved_command(session, row)
     return row
+
+
+def _begin_initial_saved_command(session, workflow):
+    from src.services.initial_saved_import_service import begin_owned_import, _owner
+    if _owner(workflow.order_id) is not None:
+        begin_owned_import(session, workflow.order_id, expected_revision=_workflow_revision(workflow))
 
 
 def _get_workflow_readonly(session: Any, order_id: str) -> OrderWorkflowState | None:
@@ -1434,7 +1453,11 @@ def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> s
     configured = session.info.get("materialization_configured_input")
     if configured is not None:
         facility_id, captured = configured
-        if not config_service.captured_processing_config_matches(facility_id, captured):
+        imported_input = session.info.get("materialization_initial_saved_input")
+        from src.services.initial_saved_import_service import processing_configuration_matches
+        matches = (processing_configuration_matches(session, workflow.order_id, imported_input)
+                   if imported_input is not None else config_service.captured_processing_config_matches(facility_id, captured))
+        if not matches:
             session.rollback()
             return "materialization_configured_input_changed"
     menu_defaults = session.info.get("materialization_menu_defaults")
@@ -1450,6 +1473,8 @@ def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> s
     except StaleDataError:
         session.rollback()
         return WORKFLOW_REVISION_CONFLICT
+    from src.services.initial_saved_import_service import finish_owned_import
+    finish_owned_import(session, workflow.order_id, expected_revision=_workflow_revision(workflow))
     return None
 
 
@@ -1488,6 +1513,10 @@ def _require_existing_workflow_template_version(
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
 ) -> tuple[str | None, str | None]:
+    from src.services.initial_saved_import_service import get_binding
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    if imported is not None:
+        return imported["snapshot"]["template"]["id"], None
     with session.no_autoflush:
         template_version_id, error = _workflow_template_version_identity(workflow, meta)
         if error:
@@ -1534,6 +1563,10 @@ def _selected_workflow_template_error(session, order, workflow):
 
 
 def _workflow_menu_amount_resolution(session, order, workflow):
+    from src.services.initial_saved_import_service import get_binding
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    if imported is not None:
+        return {"status": "preserved", "source": "initial_saved_import/v1", "affected_lines": []}
     if workflow is None:
         return menu_amount_resolution(order)
     template_error = _selected_workflow_template_error(session, order, workflow)
@@ -2137,6 +2170,12 @@ def mark_ocr_run_queued(
             expected_workflow_revision=_expected_workflow_revision.get(),
         ):
             return _serialize_workflow(workflow), WORKFLOW_REVISION_CONFLICT
+        from src.services.initial_saved_import_service import prepare_new_ocr_selection
+        try:
+            prepare_new_ocr_selection(session, order, workflow)
+        except ValueError as exc:
+            session.rollback()
+            return None, str(exc)
         meta = _workflow_meta(workflow)
 
         def finalize_queue_blocker(blocker: str, job: OcrJob | None = None, *, prerequisite: bool = False, invalidate_sources: bool = True) -> tuple[dict[str, Any], str | None]:
@@ -2895,7 +2934,9 @@ def save_sheet(
         workflow_meta = _workflow_meta(workflow)
         if require_pre_save_checks and not _pre_save_checks_completed(workflow_meta):
             return None, "sheet_pre_save_checks_required"
-        context_error = _workflow_v2_projection_context_error(workflow_meta)
+        from src.services.initial_saved_import_service import get_binding
+        imported = get_binding(session, order.id)
+        context_error = None if imported is not None else _workflow_v2_projection_context_error(workflow_meta)
         if context_error:
             revision_error = _finalize_workflow_blocker(session, workflow, context_error)
             return _serialize_workflow(workflow), revision_error or context_error
@@ -3479,13 +3520,23 @@ def _build_materialization_candidate_for_saved_sheet(
     if _normalize_id(saved_sheet.template_version_id) != version:
         return {"error": "saved_sheet_template_mismatch", "lines": []}
     order_service_module = _get_order_service_module()
-    captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session)
+    try:
+        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True)
+    except ValueError as exc:
+        return {"error": str(exc), "lines": []}
     if not isinstance(captured, dict) or captured.get("draft_id") != saved_sheet.id:
         return {"error": "synchronous_input_conflict", "lines": []}
     configured = copy.deepcopy(captured["configured_input"])
     session.info["materialization_configured_input"] = (order.facility_code, copy.deepcopy(configured))
     from src.services import output_builder, menu_service
-    original_meta = output_builder._build_ocr_menu_meta(_build_order_payload_for_outputs(order=order, lines=captured["input_versions"]["order_lines"]), configured["facility"], parsed_input=captured["evidence"]["payload_json"])
+    if captured.get("initial_saved_import") is not None:
+        session.info["materialization_initial_saved_input"] = captured
+        original_meta = {"entries": [{"date": entry["menu_date"], "daypart": entry["daypart_key"],
+                                      "menu_name": entry["menu_name"], "source": "monthly_menu"}
+                                     for entry in captured["physical_menu_entries"]]}
+    else:
+        session.info.pop("materialization_initial_saved_input", None)
+        original_meta = output_builder._build_ocr_menu_meta(_build_order_payload_for_outputs(order=order, lines=captured["input_versions"]["order_lines"]), configured["facility"], parsed_input=captured["evidence"]["payload_json"])
     names = list(dict.fromkeys(str(entry.get("menu_name") or "").strip() for entry in original_meta.get("entries", [])))
     captured["output_ocr_menu_entries"] = copy.deepcopy(original_meta.get("entries", []))
     captured["output_ocr_menu_defaults"] = menu_service.resolve_menu_defaults_in_session(session, names, order.facility_code)[0] if names else {}
@@ -3758,6 +3809,16 @@ def _build_sheet_from_selected_ocr(
     order_id: str, *, evidence_run_override: dict[str, Any] | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    from src.services.initial_saved_import_service import get_binding
+    from src.services.initial_saved_source_service import current_sheet_payload
+    with session_scope() as session:
+        imported = get_binding(session, order_id)
+        if imported is not None:
+            snapshot = imported["snapshot"]
+            if evidence_run_override is not None and evidence_run_override.get("id") != snapshot["evidence"]["id"]:
+                return None, "initial_saved_import_candidate_not_selected"
+            return {"order_id": order_id, "selected_ocr_result_id": snapshot["evidence"]["id"],
+                    "sheet": current_sheet_payload(snapshot), "source": "initial_saved_import/v1"}, None
     from src.services.workflow_attempt_guard_service import (
         capture_current_sheet_input, bind_current_sheet_input, validate_current_sheet_input, snapshots_equal,
     )

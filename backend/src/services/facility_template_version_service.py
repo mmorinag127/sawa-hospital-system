@@ -175,9 +175,14 @@ def template_version_applies_on(row: FacilityTemplateVersion | None, effective_d
     if row is None:
         return False
     try:
-        verify_projection(row)
+        receipt = verify_projection(row)
         day = canonical_date(effective_date, "effective_date")
-        return row.valid_from <= day and (row.valid_to is None or day <= row.valid_to)
+        authored = receipt["authored_version"]
+        from src.services.canonical_facility_store import version_start
+        start = version_start(authored)
+        end = None if authored["valid_to"] is None else canonical_date(authored["valid_to"], "valid_to")
+        return ((start is None or start <= day) and (end is None or day <= end)
+                and row.valid_from == start and row.valid_to == end)
     except CanonicalStoreError:
         return False
 

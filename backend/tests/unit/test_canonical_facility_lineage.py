@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.services import canonical_facility_store as store, facility_master_service
 from src.services import facility_template_version_service as service
-from src.services.canonical_facility_lineage import verify_projection, read_projection
+from src.services.canonical_facility_lineage import verify_projection, read_projection, projection_values, digest
 
 def authored(identity="human-A", start="2026-01-01", end="2026-01-31"):
     return {"version_id": identity, "valid_from": start, "valid_to": end, "unknown_version": None,
@@ -246,6 +246,67 @@ def test_legacy_unknown_and_lazy_backfill_remain_blocked():
         with pytest.raises(store.CanonicalStoreError, match="disabled"):
             action()
     assert session.statements == []
+
+
+def test_verified_initial_projection_applies_without_inventing_a_date():
+    from src.services.facility_template_version_service import template_version_applies_on
+    from src.services import canonical_facility_store as store
+
+    initial = store.initial_facility_version(authored()["facility"], "a" * 64)
+    receipt = {"facility_id": "F", "authored_version_id": initial["version_id"],
+               "snapshot_digest": digest(initial), "source": "canonical_json",
+               "authored_version": initial}
+    row = SimpleNamespace(**projection_values(receipt), materialized=False)
+    assert row.valid_from is None and row.valid_to is None
+    assert all(template_version_applies_on(row, day)
+               for day in ("2000-01-01", "2026-10-14", "2027-01-01"))
+
+
+def test_verified_closed_initial_projection_honors_authored_end_date():
+    from src.services.facility_template_version_service import template_version_applies_on
+    from src.services import canonical_facility_store as store
+
+    initial = store.initial_facility_version(authored()["facility"], "a" * 64)
+    initial["valid_to"] = "2026-10-20"
+    receipt = {"facility_id": "F", "authored_version_id": initial["version_id"],
+               "snapshot_digest": digest(initial), "source": "canonical_json",
+               "authored_version": initial}
+    row = SimpleNamespace(**projection_values(receipt), materialized=False)
+    assert row.valid_from is None
+    assert template_version_applies_on(row, "1900-01-01")
+    assert template_version_applies_on(row, "2026-10-20")
+    assert not template_version_applies_on(row, "2026-10-21")
+
+    row.valid_to = None
+    assert not template_version_applies_on(row, "2026-10-20")
+
+
+def test_initial_applicability_rejects_invalid_initial_marker_and_dated_intervals_stay_bounded():
+    from src.services.facility_template_version_service import template_version_applies_on
+    from src.services import canonical_facility_store as store
+
+    initial = store.initial_facility_version(authored()["facility"], "a" * 64)
+    invalid = deepcopy(initial)
+    invalid["initial_snapshot"]["source_sha256"] = "b" * 64
+    invalid_receipt = {"facility_id": "F", "authored_version_id": invalid["version_id"],
+                       "snapshot_digest": digest(invalid), "source": "canonical_json",
+                       "authored_version": invalid}
+    invalid_values = projection_values({**invalid_receipt, "authored_version": initial})
+    invalid_values["validation_json"]["canonical_lineage"] = invalid_receipt
+    invalid_row = SimpleNamespace(**invalid_values, materialized=False)
+    assert not template_version_applies_on(invalid_row, "2026-10-14")
+
+    dated = deepcopy(authored())
+    dated["version_id"] = "bounded"
+    dated["valid_from"], dated["valid_to"] = "2026-10-10", "2026-10-20"
+    dated_receipt = {"facility_id": "F", "authored_version_id": dated["version_id"],
+                     "snapshot_digest": digest(dated), "source": "canonical_json",
+                     "authored_version": dated}
+    dated_row = SimpleNamespace(**projection_values(dated_receipt), materialized=False)
+    assert not template_version_applies_on(dated_row, "2026-10-09")
+    assert template_version_applies_on(dated_row, "2026-10-10")
+    assert template_version_applies_on(dated_row, "2026-10-20")
+    assert not template_version_applies_on(dated_row, "2026-10-21")
 
 
 def test_authored_id_remains_facility_scoped(monkeypatch):

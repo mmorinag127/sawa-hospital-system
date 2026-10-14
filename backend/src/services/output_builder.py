@@ -1856,6 +1856,10 @@ def _accepted_output_candidate(order: dict, *, write_session=None) -> dict:
     if not order_id:
         raise ValueError("accepted output order missing")
     with (nullcontext(write_session) if write_session is not None else session_scope()) as session, session.no_autoflush:
+        from src.services.initial_saved_import_service import get_binding, output_candidate
+        imported = get_binding(session, order_id, template_version_id=order.get("template_version_id"))
+        if imported is not None:
+            return output_candidate(imported)
         workflow = session.get(OrderWorkflowState, order_id)
         if workflow is None or not workflow.draft_id:
             raise ValueError("accepted saved sheet missing")
@@ -1994,7 +1998,8 @@ def _capture_output_adoption(order_id: str, session) -> dict:
     original = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
     if original is None:
         raise ValueError("output original ownership input missing")
-    order = get_order_by_id(order_id, read_session=session)
+    order = get_order_by_id(order_id, read_session=session,
+                            allow_unresolved_menu_amount=original.get("initial_saved_import") is not None)
     if not order:
         raise ValueError("order not found")
     candidate = _accepted_output_candidate(order, write_session=session)
@@ -2005,6 +2010,11 @@ def _capture_output_adoption(order_id: str, session) -> dict:
 
 def _accepted_output_origin(session, order_id, current_input, candidate, *, lock=False):
     from src.services.workflow_attempt_guard_service import snapshots_equal
+    from src.services.initial_saved_import_service import get_binding
+    from src.services.initial_saved_source_service import source_receipt
+    imported = get_binding(session, order_id)
+    if imported is not None:
+        return source_receipt(imported["snapshot"])
     workflow = session.get(OrderWorkflowState, order_id)
     meta = (workflow.secondary_actions_json or {}).get("workflow_v2", {})
     if workflow.confirmed_snapshot_id:
@@ -2110,6 +2120,10 @@ def _workflow_v2_materialization_candidate(
     workflow: OrderWorkflowState,
     draft: OrderSheetDraft,
 ) -> dict | None:
+    from src.services.initial_saved_import_service import get_binding, output_candidate
+    imported = get_binding(session, order["id"], template_version_id=order.get("template_version_id"))
+    if imported is not None:
+        return output_candidate(imported)
     meta = workflow.secondary_actions_json if isinstance(workflow.secondary_actions_json, dict) else {}
     workflow_meta = meta.get("workflow_v2") if isinstance(meta.get("workflow_v2"), dict) else {}
     workflow_meta = order_output_artifact_service.enrich_workflow_meta_with_artifacts(session, workflow_meta, expected_order_id=order["id"])
@@ -6176,6 +6190,9 @@ def _prepare_output_context(
     facility_id = order.get("facility")
     facility_started = time.perf_counter()
     accepted_candidate = original_adoption["candidate"] if original_adoption is not None else _accepted_output_candidate(order)
+    imported = accepted_candidate.get("initial_saved_import") is not None
+    if imported:
+        include_ocr_menu_meta = False
     facility_config = accepted_candidate["configured_input"]["facility"]
     if timings is not None:
         timings["prepare_facility_config_ms"] = round((time.perf_counter() - facility_started) * 1000, 1)
@@ -6229,7 +6246,7 @@ def _prepare_output_context(
     bags = []
     if include_bags:
         bags_started = time.perf_counter()
-        bags = _build_final_label_bags(
+        bags = deepcopy(accepted_candidate["initial_saved_bag_rows"]) if imported else _build_final_label_bags(
             order_for_outputs,
             packaging_policy=packaging_policy,
             quantity_rules=quantity_rules,

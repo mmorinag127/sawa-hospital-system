@@ -192,6 +192,10 @@ def _current_sheet_read_owner_matches(session: Any, order_id: str) -> bool:
 
 
 def _current_sheet_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: Any = None) -> dict[str, Any]:
+    from src.services.initial_saved_import_service import get_binding, execution_input
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    if imported is not None:
+        return execution_input(session, imported)
     from src.services.sheet_week_service import normalize_sheet_week_value
     # No selected template is a legitimate pre-sheet workflow state, not a
     # license to reconstruct a sheet from another source.
@@ -303,6 +307,10 @@ def validate_current_sheet_input(session: Any, order_id: str, context: Any, *, w
 
 
 def _order_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: dict[str, Any] | None = None) -> dict[str, Any]:
+    from src.services.initial_saved_import_service import get_binding, execution_input
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    if imported is not None:
+        return execution_input(session, imported)
     from src.services import canonical_facility_lineage as lineage
     from src.models.facility_template_version import FacilityTemplateVersion
     from src.services.config_service import capture_authored_processing_config, captured_processing_config_matches
@@ -465,6 +473,10 @@ def processing_start_pdf_receipt():
 
 
 def capture_reparse_read_input(session, order):
+    from src.services.initial_saved_import_service import get_binding, processing_input
+    imported = get_binding(session, order.id)
+    if imported is not None:
+        return processing_input(session, imported)
     return _order_execution_input(session, order, lock=True)
 
 
@@ -814,7 +826,19 @@ def lock_current_workflow_attempt(
     captured = (job.metrics or {}).get("reparse_read_input")
     from src.services.config_service import captured_processing_config_matches
     order = session.get(Order, order_id, populate_existing=True)
-    if not isinstance(captured, dict) or order is None or not captured_processing_config_matches(order.facility_code, captured.get("configured_input")):
+    if not isinstance(captured, dict) or order is None:
+        return False
+    if captured.get("initial_saved_import") is not None:
+        from src.services.initial_saved_import_service import processing_configuration_matches
+        from src.services.initial_saved_source_service import validate_saved_source
+        try:
+            if (not processing_configuration_matches(session, order_id, captured)
+                    or not captured.get("physical_menu_entries")):
+                return False
+            validate_saved_source(session, captured["initial_saved_source_receipt"])
+        except (ValueError, KeyError):
+            return False
+    elif not captured_processing_config_matches(order.facility_code, captured.get("configured_input")):
         return False
     from src.services.order_service import _build_position_menu_entries_safe
     if not snapshots_equal(captured.get("physical_menu_entries"), _build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)):
