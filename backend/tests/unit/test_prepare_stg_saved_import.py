@@ -153,6 +153,7 @@ def staged_run(inputs, monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(transport.subprocess, "check_output", lambda *a, **k: inputs.source_sha + "\n")
+    monkeypatch.setattr(transport, "verify_live_initial", MagicMock())
     config = SimpleNamespace(instance_connection_name=migration.STAGING_INSTANCE,
                              db_name=migration.STAGING_DATABASE, db_user="orders_app", db_password="test-secret")
     reader = MagicMock(return_value=config)
@@ -242,3 +243,38 @@ def test_bootstrap_workflow_is_develop_owner_only_and_does_not_deploy_or_overwri
     assert all("gcloud run deploy" not in run and "gcloud run services update" not in run for run in runs)
     uploads = [step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"]
     assert [step["with"]["path"] for step in uploads] == ["tmp/canonical-bootstrap/receipt.json"]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_live_current_definition_matches_except_explicit_endpoint_metadata(monkeypatch, changed):
+    from copy import deepcopy
+    from test_canonical_facility_lineage import authored
+    from src.services import canonical_facility_store as store
+    import staging_db_target
+
+    expected = authored()["facility"]
+    initial = {"facilities": [{"facility_id": "F", "versions": [store.initial_facility_version(expected, "a" * 64)]}]}
+    actual = deepcopy(expected)
+    actual["facility_template_version_id"] = "legacy-db-version"
+    actual["facility_template_version"] = {"id": "legacy-db-version"}
+    actual["fax_template"]["facility_template_version_id"] = "legacy-db-version"
+    actual["fax_template"]["facility_template_version_digest"] = "legacy-digest"
+    if changed:
+        actual["facility_name"] = "Different configuration"
+    request = MagicMock(side_effect=[
+        (200, json.dumps({"facilities": [{"id": "F"}]}).encode()),
+        (200, json.dumps({"resolved_config": actual}).encode()),
+    ])
+    monkeypatch.setattr(staging_db_target, "read_http", request)
+    if changed:
+        with pytest.raises(ValueError, match="live_facility_configuration_changed"):
+            transport.verify_live_initial(initial, "test-token")
+    else:
+        transport.verify_live_initial(initial, "test-token")
+    assert request.call_count == 2
+    request.assert_called_with("https://web-stg-avlnzjjrca-dt.a.run.app/api/facilities/F", "test-token")
+
+
+def test_live_read_cannot_be_skipped_without_token():
+    with pytest.raises(ValueError, match="live_verification_token_required"):
+        transport.verify_live_initial({}, "")

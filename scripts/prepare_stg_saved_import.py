@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from copy import deepcopy
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -33,6 +35,44 @@ def checked_inputs(args):
             or len(set(orders)) != len(orders)):
         raise ValueError("saved_import_unique_explicit_order_ids_required")
     return initial, policy, orders
+
+
+def verify_live_initial(initial, token):
+    from staging_db_target import read_http
+    from src.services.canonical_facility_store import _encode
+
+    if not token:
+        raise ValueError("saved_import_live_verification_token_required")
+    _encode(initial)
+    facilities = initial["facilities"]
+    if not facilities:
+        raise ValueError("saved_import_initial_facilities_required")
+    status, body = read_http("https://web-stg-avlnzjjrca-dt.a.run.app/api/facilities", token)
+    if status != 200:
+        raise ValueError("saved_import_live_facility_read_failed")
+    live_ids = [entry["id"] for entry in json.loads(body)["facilities"]]
+    if len(live_ids) != len(facilities) or set(live_ids) != {entry["facility_id"] for entry in facilities}:
+        raise ValueError("saved_import_live_facility_inventory_changed")
+    for entry in facilities:
+        versions = entry.get("versions")
+        if not isinstance(versions, list) or len(versions) != 1 or "initial_snapshot" not in versions[0]:
+            raise ValueError("saved_import_single_initial_snapshot_required")
+        expected = versions[0]["facility"]
+        status, body = read_http("https://web-stg-avlnzjjrca-dt.a.run.app/api/facilities/"
+                                 + quote(entry["facility_id"], safe=""), token)
+        if status != 200:
+            raise ValueError("saved_import_live_facility_read_failed")
+        actual = deepcopy(json.loads(body)["resolved_config"])
+        # The legacy endpoint decorates the configured input with DB-version identity metadata.
+        actual.pop("facility_template_version_id", None)
+        actual.pop("facility_template_version", None)
+        template = actual["fax_template"]
+        template.pop("facility_template_version_id", None)
+        template.pop("facility_template_version_digest", None)
+        if "template_id" not in template:
+            template["template_id"] = actual["fax_template_id"]
+        if actual != expected:
+            raise ValueError("saved_import_live_facility_configuration_changed:" + entry["facility_id"])
 
 
 def capture(connection, initial, policy, orders):
@@ -84,6 +124,7 @@ def run(args):
     if sha != args.source_sha or sha != os.environ.get("GITHUB_SHA"):
         raise ValueError("saved_import_actions_source_sha_mismatch")
     initial, policy, orders = checked_inputs(args)
+    verify_live_initial(initial, os.environ.get("LIVE_ID_TOKEN", ""))
     configs = [_load_service_db_config(os.environ["PROJECT_ID"], os.environ["REGION"], os.environ[key])
                for key in ("WEB_SERVICE", "WORKER_SERVICE")]
     for config in configs:
