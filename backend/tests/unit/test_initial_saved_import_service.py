@@ -595,6 +595,7 @@ def test_readonly_prepare_tool_checks_all_source_hashes(imported, tmp_path):
 def test_prepare_cli_writes_only_new_output_and_hash_report(imported, tmp_path, monkeypatch):
     _, prepared, snapshot = imported
     import hashlib
+    import subprocess
     import sys
     spec = importlib.util.spec_from_file_location("prepare_initial_saved_cli", Path(__file__).resolve().parents[3] / "scripts/prepare_initial_saved_import.py")
     module = importlib.util.module_from_spec(spec)
@@ -611,12 +612,44 @@ def test_prepare_cli_writes_only_new_output_and_hash_report(imported, tmp_path, 
         inputs[path] = raw
         argv += ["--" + name, str(path), "--" + name + "-sha256", hashlib.sha256(raw).hexdigest()]
     output, report = tmp_path / "prepared.json", tmp_path / "report.json"
-    argv += ["--source-sha", "2a62a1d403c7ec84b4d0128e2717b9161c0562a5", "--output", str(output), "--report", str(report)]
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=module.ROOT, text=True).strip()
+    argv += ["--source-sha", source_sha, "--output", str(output), "--report", str(report)]
     monkeypatch.setattr(sys, "argv", argv)
     module.main()
     result = json.loads(report.read_text())
     assert result["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
-    assert result["orders"] == 1 and result["source_sha"] == argv[-5]
+    assert result["orders"] == 1 and result["source_sha"] == source_sha
     assert all(path.read_bytes() == raw for path, raw in inputs.items())
     with pytest.raises(ValueError, match="output_exists"):
         module.main()
+
+
+def test_prepare_cli_rejects_wrong_source_sha_without_output(imported, tmp_path, monkeypatch):
+    _, prepared, snapshot = imported
+    import hashlib
+    import subprocess
+    import sys
+    spec = importlib.util.spec_from_file_location("prepare_initial_saved_cli_wrong_sha", Path(__file__).resolve().parents[3] / "scripts/prepare_initial_saved_import.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    master = deepcopy(prepared)
+    master.pop(service.IMPORTS)
+    master.pop(service.CONFIGURATIONS)
+    argv = [str(module.__file__)]
+    inputs = {}
+    for name, value in (("initial", master), ("snapshots", [snapshot]), ("policy", {"explicit": True})):
+        path = tmp_path / (name + ".json")
+        raw = json.dumps(value).encode()
+        path.write_bytes(raw)
+        inputs[path] = raw
+        argv += ["--" + name, str(path), "--" + name + "-sha256", hashlib.sha256(raw).hexdigest()]
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=module.ROOT, text=True).strip()
+    wrong_sha = ("1" if source_sha[0] == "0" else "0") + source_sha[1:]
+    output, report = tmp_path / "prepared.json", tmp_path / "report.json"
+    argv += ["--source-sha", wrong_sha, "--output", str(output), "--report", str(report)]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(ValueError, match="^initial_saved_import_source_sha_mismatch$"):
+        module.main()
+    assert not output.exists()
+    assert not report.exists()
+    assert all(path.read_bytes() == raw for path, raw in inputs.items())
