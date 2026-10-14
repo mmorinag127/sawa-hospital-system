@@ -10,7 +10,7 @@ from sqlalchemy import select, insert
 from sqlalchemy.exc import IntegrityError
 from src.models.facility import Facility
 from src.models.facility_template_version import FacilityTemplateVersion
-from src.services.canonical_facility_store import CanonicalStoreError, canonical_date
+from src.services.canonical_facility_store import CanonicalStoreError, canonical_date, version_start
 
 SOURCE = "canonical-json-lineage-v2"
 
@@ -71,9 +71,9 @@ def validate_source_proof(proof, authored):
             not isinstance(proof.get("revision"), str) or not proof["revision"]:
         raise CanonicalStoreError("canonical_lineage_selection_proof_missing", status_code=409)
     day = canonical_date(proof.get("effective_date"), "effective_date")
-    start = canonical_date(authored["valid_from"], "valid_from")
+    start = version_start(authored)
     end = None if authored["valid_to"] is None else canonical_date(authored["valid_to"], "valid_to")
-    if day < start or (end is not None and day > end):
+    if (start is not None and day < start) or (end is not None and day > end):
         raise CanonicalStoreError("canonical_lineage_selection_date_mismatch", status_code=409)
 
 
@@ -90,7 +90,7 @@ def projection_values(receipt):
                 validation_json={"canonical_lineage": deepcopy(receipt),
                                  "cells_presence": cells_presence(template),
                                  "authored_template_digest": digest(template)},
-                valid_from=canonical_date(authored["valid_from"], "valid_from"),
+                valid_from=version_start(authored),
                 valid_to=None if authored["valid_to"] is None else canonical_date(authored["valid_to"], "valid_to"),
                 created_by=SOURCE, created_at=None, activated_at=None, archived_at=None)
 

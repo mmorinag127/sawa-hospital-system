@@ -172,7 +172,11 @@ def test_real_sql_receipt_reads_frozen_setting_not_current_json(monkeypatch, tmp
     path = tmp_path / "authored-facilities.json"
     current = json.loads(path.read_text())
     current["facilities"][0]["daily_label_comparable_diet_types"] = []
-    current["facilities"][0]["versions"][0]["facility"]["daily_label_comparable_diet_types"] = []
+    original = current["facilities"][0]["versions"][0]
+    future = {**deepcopy(original), "version_id": "future-display-change", "valid_from": "2026-11-01", "valid_to": None}
+    future["facility"]["daily_label_comparable_diet_types"] = []
+    from src.services import canonical_facility_store
+    current["facilities"][0]["versions"] = canonical_facility_store.append_facility_version([original], future)
     path.write_text(json.dumps(current))
 
     def snapshot():

@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timedelta
 import fcntl
 import hashlib
 import json
@@ -13,6 +13,7 @@ from pathlib import Path
 import tempfile
 from typing import Callable
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from src.services.storage_service import _get_thread_gcs_client
 
@@ -47,6 +48,97 @@ def canonical_date(value: object, field: str) -> date:
     return parsed
 
 
+def initial_facility_version(facility: dict, source_sha256: str) -> dict:
+    from src.services.canonical_facility_lineage import digest
+
+    proof = {"source_sha256": source_sha256, "configuration_sha256": digest(facility)}
+    return {"version_id": "initial-" + digest(proof), "valid_from": None, "valid_to": None,
+            "initial_snapshot": proof, "facility": deepcopy(facility)}
+
+
+def version_start(version: dict) -> date | None:
+    if "initial_snapshot" not in version:
+        return canonical_date(version.get("valid_from"), "valid_from")
+    from src.services.canonical_facility_lineage import digest
+
+    proof = version["initial_snapshot"]
+    if (version.get("valid_from") is not None or "valid_from" not in version
+            or not isinstance(proof, dict) or set(proof) != {"source_sha256", "configuration_sha256"}
+            or not isinstance(proof.get("source_sha256"), str) or len(proof["source_sha256"]) != 64
+            or any(char not in "0123456789abcdef" for char in proof["source_sha256"])
+            or proof.get("configuration_sha256") != digest(version.get("facility"))
+            or version.get("version_id") != "initial-" + digest(proof)):
+        raise CanonicalStoreError("facility_initial_snapshot_invalid", status_code=422)
+    return None
+
+
+def selected_version_matches(current: dict, selected: dict) -> bool:
+    """Closing applicability never changes an already selected configuration."""
+    if {key: value for key, value in current.items() if key != "valid_to"} != \
+            {key: value for key, value in selected.items() if key != "valid_to"}:
+        return False
+    if "valid_to" not in current or "valid_to" not in selected:
+        return False
+    current_end = None if current["valid_to"] is None else canonical_date(current["valid_to"], "valid_to")
+    selected_end = None if selected["valid_to"] is None else canonical_date(selected["valid_to"], "valid_to")
+    return (current_end == selected_end or
+            (current_end is not None and (selected_end is None or current_end < selected_end)))
+
+
+def facility_change_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Tokyo")).date()
+
+
+def require_prospective_start(version: dict) -> date:
+    start = version_start(version)
+    if start is None:
+        raise CanonicalStoreError("facility_initial_snapshot_import_only", status_code=409)
+    if start < facility_change_today():
+        raise CanonicalStoreError("facility_version_retroactive_change_forbidden", status_code=409)
+    return start
+
+
+def append_facility_version(existing: list[dict], version: dict) -> list[dict]:
+    """New definitions are prospective; close the preceding interval atomically."""
+    start = require_prospective_start(version)
+    result = deepcopy(existing)
+    for previous in result:
+        previous_start = version_start(previous)
+        if previous_start is not None and start <= previous_start:
+            raise CanonicalStoreError("facility_version_must_follow_existing", status_code=409)
+        if previous["valid_to"] is None or start <= canonical_date(previous["valid_to"], "valid_to"):
+            if start == date.min:
+                raise CanonicalStoreError("facility_version_period_invalid", status_code=422)
+            previous["valid_to"] = (start - timedelta(days=1)).isoformat()
+    return [*result, deepcopy(version)]
+
+
+def validate_prospective_update(previous: dict, updated: dict) -> None:
+    next_entries = {entry["facility_id"]: entry for entry in updated["facilities"]}
+    previous_entries = {entry["facility_id"]: entry for entry in previous["facilities"]}
+    for facility_id, target in next_entries.items():
+        old_ids = {version["version_id"] for version in previous_entries.get(facility_id, {}).get("versions", [])}
+        for version in facility_versions(updated, facility_id):
+            if version["version_id"] not in old_ids and "initial_snapshot" not in version:
+                require_prospective_start(version)
+    for entry in previous["facilities"]:
+        existing = facility_versions(previous, entry["facility_id"])
+        if not existing:
+            continue
+        target = next_entries.get(entry["facility_id"])
+        if target is None:
+            raise CanonicalStoreError("facility_version_history_required", status_code=409)
+        versions = facility_versions(updated, entry["facility_id"])
+        old_ids = {version["version_id"] for version in existing}
+        added = [version for version in versions if version["version_id"] not in old_ids]
+        expected = deepcopy(existing)
+        for version in sorted(added, key=lambda item: version_start(item) or date.min):
+            expected = append_facility_version(expected, version)
+        if {version["version_id"]: version for version in versions} != \
+                {version["version_id"]: version for version in expected}:
+            raise CanonicalStoreError("facility_version_requires_new_version", status_code=409)
+
+
 def facility_versions(master: dict, facility_id: str) -> list[dict]:
     entries = master.get("facilities")
     if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
@@ -67,11 +159,11 @@ def facility_versions(master: dict, facility_id: str) -> list[dict]:
         if not isinstance(version_id, str) or not version_id.strip() or version_id in ids:
             raise CanonicalStoreError("facility_version_identity_invalid", status_code=422)
         ids.add(version_id)
-        start = canonical_date(version.get("valid_from"), "valid_from")
+        start = version_start(version)
         if "valid_to" not in version:
             raise CanonicalStoreError("facility_version_date_required", status_code=422, field="valid_to")
         end = None if version["valid_to"] is None else canonical_date(version["valid_to"], "valid_to")
-        if end is not None and end < start:
+        if end is not None and start is not None and end < start:
             raise CanonicalStoreError("facility_version_period_invalid", status_code=422)
         content = version.get("facility")
         if not isinstance(content, dict) or content.get("facility_id") != facility_id or \
@@ -84,7 +176,7 @@ def facility_versions(master: dict, facility_id: str) -> list[dict]:
             if field in content and content[field] != version[field]:
                 raise CanonicalStoreError("facility_version_period_mismatch", status_code=422, field=field)
         for old_start, old_end in ranges:
-            if (old_end is None or start <= old_end) and (end is None or old_start <= end):
+            if (start is None or old_end is None or start <= old_end) and (old_start is None or end is None or old_start <= end):
                 raise CanonicalStoreError("facility_version_period_overlap", status_code=409)
         ranges.append((start, end))
     return deepcopy(versions)
@@ -257,7 +349,7 @@ def resolve_facility_version(snapshot: MasterSnapshot, facility_id: str, effecti
     selected_date = canonical_date(effective_date, "effective_date")
     versions = facility_versions(snapshot.master, facility_id)
     matches = [version for version in versions
-               if canonical_date(version["valid_from"], "valid_from") <= selected_date and
+               if (version_start(version) is None or version_start(version) <= selected_date) and
                (version["valid_to"] is None or selected_date <= canonical_date(version["valid_to"], "valid_to"))]
     if len(matches) != 1:
         raise CanonicalStoreError("facility_version_date_unrecorded" if not matches else "facility_version_date_ambiguous",
@@ -400,7 +492,9 @@ def update_snapshot(expected_revision: str, transform: Callable[[dict], dict]) -
 
             current = _read_gcs(source)
             check_revision(current, expected_revision)
-            data = _encode(transform(current.master))
+            updated = transform(deepcopy(current.master))
+            data = _encode(updated)
+            validate_prospective_update(current.master, updated)
             blob = _gcs_blob(source)
             try:
                 blob.upload_from_string(
@@ -417,7 +511,9 @@ def update_snapshot(expected_revision: str, transform: Callable[[dict], dict]) -
         with _local_lock(source, exclusive=True):
             current = _read_local(source)
             check_revision(current, expected_revision)
-            data = _encode(transform(current.master))
+            updated = transform(deepcopy(current.master))
+            data = _encode(updated)
+            validate_prospective_update(current.master, updated)
             path = Path(source)
             temporary = None
             try:

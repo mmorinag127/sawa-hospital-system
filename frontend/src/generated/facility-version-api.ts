@@ -88,7 +88,7 @@ export interface components {
                 [key: string]: unknown;
             };
             /** Valid From */
-            valid_from: string;
+            valid_from: string | null;
             /** Valid To */
             valid_to: string | null;
             /** Version Id */
@@ -246,7 +246,7 @@ export interface operations {
                             [key: string]: unknown;
                         };
                         /** Valid From */
-                        valid_from: string;
+                        valid_from: string | null;
                         /** Valid To */
                         valid_to: string | null;
                         /** Version Id */
@@ -293,7 +293,7 @@ export interface operations {
                             [key: string]: unknown;
                         };
                         /** Valid From */
-                        valid_from: string;
+                        valid_from: string | null;
                         /** Valid To */
                         valid_to: string | null;
                         /** Version Id */

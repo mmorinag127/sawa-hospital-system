@@ -355,8 +355,9 @@ def test_config_common_entry_reads_exactly_one_snapshot(monkeypatch):
     assert result["revision"] == "fixed-revision"
 
 
-def test_version_edit_uses_cas_own_result_and_keeps_reference_and_siblings(monkeypatch):
+def test_version_append_uses_cas_own_result_and_keeps_prior_settings(monkeypatch):
     from src.services import facility_master_service, facility_service
+    monkeypatch.setattr(store, "facility_change_today", lambda: date(2026, 1, 1))
 
     read = snapshot([version(), version("operator-B", "2026-02-01", None)])
     original = deepcopy(read.master)
@@ -368,14 +369,16 @@ def test_version_edit_uses_cas_own_result_and_keeps_reference_and_siblings(monke
         saved.append(master)
         return {"facility_master": master, "revision": "own-revision", "projection": {"status": "reconcile_required", "revision": "own-revision"}}
     monkeypatch.setattr(facility_master_service, "mutate_master", mutate)
-    edited = version()
+    edited = version("operator-C", "2026-03-01", None)
     edited["facility"]["facility_name"] = "Explicit edit"
-    response = facility_service.save_facility_version("F", "operator-A", edited, expected_revision=read.revision, create=False)
+    response = facility_service.save_facility_version("F", "operator-C", edited, expected_revision=read.revision, create=True)
     assert response["version"] == edited
     assert response["revision"] == "own-revision"
-    assert response["versions"][1] == original["facilities"][0]["versions"][1]
+    assert response["versions"][0] == original["facilities"][0]["versions"][0]
+    assert response["versions"][1] == {**original["facilities"][0]["versions"][1], "valid_to": "2026-02-28"}
     expected = deepcopy(original)
-    expected["facilities"][0]["versions"][0] = edited
+    expected["facilities"][0]["versions"][1]["valid_to"] = "2026-02-28"
+    expected["facilities"][0]["versions"].append(edited)
     assert saved == [expected]
     assert read.master == original
     with pytest.raises(store.CanonicalStoreError, match="edit_target_missing"):
@@ -384,6 +387,7 @@ def test_version_edit_uses_cas_own_result_and_keeps_reference_and_siblings(monke
 
 def test_version_command_actual_store_cas_and_second_own_revision(tmp_path, monkeypatch):
     from src.services import facility_master_service, facility_service
+    monkeypatch.setattr(store, "facility_change_today", lambda: date(2026, 1, 1))
 
     path = tmp_path / "explicit-test-master.json"
     path.write_text(json.dumps(snapshot([version()]).master), encoding="utf-8")
@@ -393,15 +397,16 @@ def test_version_command_actual_store_cas_and_second_own_revision(tmp_path, monk
     monkeypatch.setattr(facility_master_service, "_project_snapshot", lambda saved: {
         "status": "reconcile_required", "revision": saved.revision})
     first = store.read_snapshot()
-    edited = version()
+    edited = version("operator-B", "2026-02-01", None)
     edited["facility"]["facility_name"] = "Edited"
-    own = facility_service.save_facility_version("F", "operator-A", edited, expected_revision=first.revision, create=False)
-    second = facility_service.save_facility_version("F", "operator-A", edited, expected_revision=own["revision"], create=False)
+    own = facility_service.save_facility_version("F", "operator-B", edited, expected_revision=first.revision, create=True)
+    second = facility_service.save_facility_version("F", "operator-B", edited, expected_revision=own["revision"], create=False)
+    assert second["versions"][0] == version()
     assert second["version"] == edited
     assert second["revision"] != own["revision"]
     before = path.read_bytes()
     for expected, status in [(None, 428), (first.revision, 409)]:
         with pytest.raises(store.CanonicalStoreError) as error:
-            facility_service.save_facility_version("F", "operator-A", edited, expected_revision=expected, create=False)
+            facility_service.save_facility_version("F", "operator-B", edited, expected_revision=expected, create=False)
         assert error.value.status_code == status
         assert path.read_bytes() == before

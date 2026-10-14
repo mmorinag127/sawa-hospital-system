@@ -56,8 +56,15 @@
             "type": "object"
           },
           "valid_from": {
-            "title": "Valid From",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
           },
           "valid_to": {
             "anyOf": [
@@ -324,8 +331,15 @@
                         "type": "object"
                       },
                       "valid_from": {
-                        "title": "Valid From",
-                        "type": "string"
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Valid From"
                       },
                       "valid_to": {
                         "anyOf": [
@@ -418,8 +432,15 @@
                         "type": "object"
                       },
                       "valid_from": {
-                        "title": "Valid From",
-                        "type": "string"
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Valid From"
                       },
                       "valid_to": {
                         "anyOf": [

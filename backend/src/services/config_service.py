@@ -69,7 +69,8 @@ def validate_selected_authored_facility_config(
         raise ValueError("facility_template_ambiguous" if matches else "facility_not_found")
     versions = matches[0].get("versions")
     matching = [item for item in versions if isinstance(item, dict) and item.get("version_id") == selected_authored_version.get("version_id")] if isinstance(versions, list) else []
-    if len(matching) != 1 or not snapshots_equal(matching[0], selected_authored_version):
+    from src.services.canonical_facility_store import selected_version_matches
+    if len(matching) != 1 or not selected_version_matches(matching[0], selected_authored_version):
         raise ValueError("original_template_configured_source_mismatch")
     facility = _validate_authored_facility_config(deepcopy(selected_authored_version["facility"]), None)
     if facility.get("facility_id") != facility_id:
@@ -120,7 +121,8 @@ def captured_processing_config_matches(facility_id: str, captured: Any) -> bool:
     if len(matches) != 1 or not isinstance(matches[0].get("versions"), list):
         return False
     versions = [item for item in matches[0]["versions"] if isinstance(item, dict) and item.get("version_id") == authored.get("version_id")]
-    return (len(versions) == 1 and snapshots_equal(versions[0], authored)
+    from src.services.canonical_facility_store import selected_version_matches
+    return (len(versions) == 1 and selected_version_matches(versions[0], authored)
             and isinstance(authored.get("facility"), dict)
             and authored["facility"].get("facility_id") == facility_id
             and snapshots_equal(captured.get("facility"), authored["facility"])

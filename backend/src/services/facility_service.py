@@ -129,6 +129,9 @@ def save_facility_version(facility_id: str, version_id: str, version: dict, *, e
 
     if not isinstance(version, dict) or version.get("version_id") != version_id:
         raise canonical_facility_store.CanonicalStoreError("facility_version_target_mismatch", status_code=422)
+    canonical_facility_store.facility_versions(
+        {"facilities": [{"facility_id": facility_id, "versions": [version]}]}, facility_id,
+    )
     def transform(master: dict) -> dict:
         entry = next((item for item in master["facilities"] if item["facility_id"] == facility_id), None)
         if entry is None:
@@ -141,8 +144,10 @@ def save_facility_version(facility_id: str, version_id: str, version: dict, *, e
             raise canonical_facility_store.CanonicalStoreError("facility_version_create_conflict" if create else "facility_version_edit_target_missing", status_code=409)
         next_versions = deepcopy(existing)
         if create:
-            next_versions.append(deepcopy(version))
+            next_versions = canonical_facility_store.append_facility_version(existing, version)
         else:
+            if existing[targets[0]] != version:
+                raise canonical_facility_store.CanonicalStoreError("facility_version_requires_new_version", status_code=409)
             next_versions[targets[0]] = deepcopy(version)
         entry["versions"] = next_versions
         return master

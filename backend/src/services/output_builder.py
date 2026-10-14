@@ -2141,6 +2141,15 @@ def _workflow_v2_materialization_candidate(
     configured = candidate["configured_input"]
     if not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
         raise ValueError("saved-sheet acceptance configuration incomplete")
+    authored = configured.get("selected_authored_version")
+    if not isinstance(authored, dict):
+        raise ValueError("saved-sheet acceptance authored version missing")
+    selected = config_service.validate_selected_authored_facility_config(
+        configured["facility"].get("facility_id"), authored,
+    )
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+    if not snapshots_equal(selected, configured["facility"]):
+        raise ValueError("saved-sheet acceptance configuration mismatch")
     from copy import deepcopy
     return deepcopy(candidate)
 

@@ -9,7 +9,7 @@ class FacilityVersion(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     version_id: str
-    valid_from: str
+    valid_from: str | None
     valid_to: str | None
     facility: dict[str, Any]
 

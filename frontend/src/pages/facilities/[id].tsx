@@ -323,6 +323,21 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
     setVersionDirty(false);
     setVersionMessage("");
   };
+  const copyVersionForChange = () => {
+    if (!versionOriginal.current || versionBusy || versionBlocked) return;
+    const content = versionOriginal.current.facility;
+    versionGeneration.current += 1;
+    inputGeneration.current += 1;
+    versionOriginal.current = null;
+    setVersionExisting(false);
+    setVersionId(`facility-${crypto.randomUUID()}`);
+    setVersionFrom(new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" }).format(new Date()));
+    setVersionTo("");
+    setVersionOpenEnd(true);
+    setVersionText(prettyJson(content));
+    setVersionDirty(true);
+    setVersionMessage("");
+  };
   const saveVersion = async () => {
     if (!facility || facility.id !== targetRef.current || versionBusyOwner.current !== 0 || versionBusy || versionBlocked) return;
     const target = facility.id;
@@ -358,7 +373,7 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
       setVersionSnapshot(res.data);
       versionOriginal.current = own;
       setVersionExisting(true);
-      setVersionFrom(own.valid_from); setVersionTo(own.valid_to ?? ""); setVersionText(prettyJson(own.facility));
+      setVersionFrom(own.valid_from ?? ""); setVersionTo(own.valid_to ?? ""); setVersionText(prettyJson(own.facility));
       setVersionOpenEnd(own.valid_to === null);
       setVersionDirty(false);
       setVersionMessage(`施設版を保存しました。${notice}`);
@@ -687,11 +702,11 @@ function FacilityConfigScreen({ authenticated }: { authenticated: boolean }) {
             <div className="form-grid">
               <label className="field"><span className="field-label">編集対象</span><NativeSelect className="input" value={versionExisting ? versionId : ""} onChange={(e) => selectVersion(e.target.value)} disabled={versionBusy || !versionSnapshot}><option value="">新規版</option>{versionSnapshot?.versions.map((version) => <option key={version.version_id} value={version.version_id}>{version.version_id} ({version.valid_from} - {version.valid_to ?? "終了日なし"})</option>)}</NativeSelect></label>
               <label className="field"><span className="field-label">版ID</span><Input disableUnderline className="input" value={versionId} onChange={(e) => editVersion(setVersionId, e.target.value)} disabled={versionBusy || versionExisting} /></label>
-              <label className="field"><span className="field-label">開始日（含む）</span><Input disableUnderline className="input" type="date" value={versionFrom} onChange={(e) => editVersion(setVersionFrom, e.target.value)} disabled={versionBusy} /></label>
-              <label className="field"><span className="field-label">終了日（含む）</span><Input disableUnderline className="input" type="date" value={versionTo} onChange={(e) => editVersion(setVersionTo, e.target.value)} disabled={versionBusy || versionOpenEnd} /><span><Checkbox checked={versionOpenEnd} disabled={versionBusy} onChange={(e) => { versionGeneration.current += 1; inputGeneration.current += 1; setVersionDirty(true); setVersionOpenEnd(e.target.checked); }} />終了日なし</span></label>
-              <label className="field"><span className="field-label">完全施設版（名称・区域・設定・テンプレート）</span><Input disableUnderline multiline className="textarea json-textarea" rows={12} value={versionText} onChange={(e) => editVersion(setVersionText, e.target.value)} disabled={versionBusy} /></label>
+              <label className="field"><span className="field-label">開始日（含む）</span><Input disableUnderline className="input" type="date" value={versionFrom} onChange={(e) => editVersion(setVersionFrom, e.target.value)} disabled={versionBusy || versionExisting} /></label>
+              <label className="field"><span className="field-label">終了日（含む）</span><Input disableUnderline className="input" type="date" value={versionTo} onChange={(e) => editVersion(setVersionTo, e.target.value)} disabled={versionBusy || versionExisting || versionOpenEnd} /><span><Checkbox checked={versionOpenEnd} disabled={versionBusy || versionExisting} onChange={(e) => { versionGeneration.current += 1; inputGeneration.current += 1; setVersionDirty(true); setVersionOpenEnd(e.target.checked); }} />終了日なし</span></label>
+              <label className="field"><span className="field-label">完全施設版（名称・区域・設定・テンプレート）</span><Input disableUnderline multiline className="textarea json-textarea" rows={12} value={versionText} onChange={(e) => editVersion(setVersionText, e.target.value)} disabled={versionBusy || versionExisting} /></label>
             </div>
-            <Button className="btn" type="button" onClick={() => void saveVersion()} disabled={versionBusy || versionBlocked || !versionSnapshot}>施設版を保存</Button>
+            {versionExisting ? <Button className="btn" type="button" onClick={copyVersionForChange} disabled={versionBusy || versionBlocked}>新しい版として変更</Button> : <Button className="btn" type="button" onClick={() => void saveVersion()} disabled={versionBusy || versionBlocked || !versionSnapshot}>施設版を保存</Button>}
             <div className="form-grid"><label className="field"><span className="field-label">参照日</span><Input disableUnderline className="input" type="date" disabled={versionBusy} value={effectiveDate} onChange={(e) => { previewGeneration.current += 1; setEffectiveDate(e.target.value); setDatedResult(""); }} /></label></div>
             <Button className="btn ghost" type="button" disabled={versionBusy} onClick={() => void resolveVersionDate()}>指定日の版を取得</Button>
             {versionMessage ? <p className="message">{versionMessage}</p> : null}
