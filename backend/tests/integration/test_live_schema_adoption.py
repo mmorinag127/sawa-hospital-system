@@ -160,6 +160,15 @@ def restore(engine, environment="stg"):
     with engine.begin() as conn:
         restore_captured(conn, captured(environment))
         contract = json.loads(schema.CONTRACT.read_text())
+        actual = schema.table_shapes(schema.read_catalog(conn), "postgresql")
+        expected = captured(environment)
+        differences = {
+            table: {key: {"expected": expected[table].get(key), "actual": actual[table].get(key)}
+                    for key in expected[table] if expected[table].get(key) != actual[table].get(key)}
+            for table in expected if actual[table] != expected[table]
+        }
+        if differences:
+            print("RESTORED_CATALOG_DIFFERENCES=" + json.dumps(differences, sort_keys=True))
         assert adoption._require_baseline(conn, contract)[0] == "live-20261014-" + environment
         conn.exec_driver_sql("INSERT INTO audit_logs(id,actor,action,target,created_at) VALUES ('old','operator','saved','order',NULL)")
         for number in range(5):
