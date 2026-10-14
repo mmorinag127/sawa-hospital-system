@@ -51,6 +51,15 @@ LOCAL_WORKSPACE_PREFIX = "/Users/mmorinag/Sawa/2025.12/workspace/"
 _TEXT_RECOGNIZER = None
 
 
+class HakodateRecognizerCheckpointError(RuntimeError):
+    """Recognition failed after a durable, input-bound checkpoint was created."""
+
+    def __init__(self, *, checkpoint_reference: Any):
+        super().__init__("hakodate_recognizer_failed_after_checkpoint")
+        self.stage = "recognition"
+        self.checkpoint_reference = checkpoint_reference
+
+
 def _get_text_recognizer():
     global _TEXT_RECOGNIZER
     if _TEXT_RECOGNIZER is None:
@@ -773,6 +782,7 @@ def build_best_method_for_manifest_item(
     draft_sheet: dict[str, Any],
     output_dir: Path,
     render_width: int = 1864,
+    checkpoint_callback: Any | None = None,
 ) -> tuple[dict[str, Any], Image.Image]:
     item = _resolve_item_paths(item)
     facility_code = str(item.get("facility_code") or "")
@@ -805,11 +815,26 @@ def build_best_method_for_manifest_item(
     facility_dir.mkdir(parents=True, exist_ok=True)
     if [region.get("sheet_cell") for region in snapped_regions] != expected_sheet_cells:
         raise ValueError("hakodate_expected_cells_changed")
-    records, ocr_metrics, contact_sheet = _run_text_recognizer_records(
-        raw_rectified_bgr=pre["raw_rectified"],
-        regions=snapped_regions,
-        truth=truth,
-    )
+    checkpoint_reference = None
+    if checkpoint_callback is not None:
+        checkpoint_reference = checkpoint_callback(
+            item=item,
+            raw_rectified_bgr=pre["raw_rectified"],
+            regions=snapped_regions,
+            expected_sheet_cells=expected_sheet_cells,
+        )
+    try:
+        records, ocr_metrics, contact_sheet = _run_text_recognizer_records(
+            raw_rectified_bgr=pre["raw_rectified"],
+            regions=snapped_regions,
+            truth=truth,
+        )
+    except Exception as exc:
+        if checkpoint_callback is None:
+            raise
+        raise HakodateRecognizerCheckpointError(
+            checkpoint_reference=checkpoint_reference,
+        ) from exc
     records = _restore_display_bboxes(records, snapped_regions)
     metrics = cmp._evaluate(records)
     metrics["expected_sheet_cells"] = expected_sheet_cells
@@ -956,6 +981,7 @@ def build_best_method_for_manifest_item(
         "method": "fax_line_snap_current_frame_noise_text_recognizer_topk",
         "engine": TEXT_RECOGNIZER_ENGINE,
         "postprocess": "none",
+        "recognition_checkpoint": checkpoint_reference,
         "field_by_col": field_by_col,
         "metrics": metrics,
         "snap_debug": snap_debug,
