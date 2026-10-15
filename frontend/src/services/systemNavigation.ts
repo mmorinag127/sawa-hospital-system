@@ -4,7 +4,7 @@ import { getStoredAuthHeader } from "./apiClient";
 import { publishSchoolLunchSessionGeneration } from "./browserSession";
 import { loginUrlFor, validateLoginDestination } from "./loginDestination";
 
-const SCHOOL_LUNCH_HOME = "/school-lunch/implementation-price-tables";
+const SCHOOL_LUNCH_HOME = "/school-lunch";
 const SCHOOL_LUNCH_SESSION_ENDPOINT = "/school-lunch/api/backend/shared-auth/me";
 
 export class LoginNavigationError extends Error {
