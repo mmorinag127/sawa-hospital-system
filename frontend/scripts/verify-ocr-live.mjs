@@ -146,7 +146,7 @@ export function verificationIdentities(folder) {
 
 export function expectedWorkflowRead(pathname, orderId) {
   return pathname === `/api/orders/${orderId}/workflow-v2`
-    || pathname === `/api/orders/${orderId}/workflow-v2/ocr-results`
+    || pathname === `/api/orders/${orderId}/workflow-v2/inspection`
     || pathname === `/api/orders/${orderId}`;
 }
 
@@ -208,7 +208,8 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     const ocrResultsRead = settleResponse(page.waitForResponse(response => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/orders/${identity.orderId}/workflow-v2/ocr-results`;
+        && url.pathname === `/api/orders/${identity.orderId}/workflow-v2/inspection`
+        && url.searchParams.get('include_ocr_results') === 'true';
     }));
     const orderRead = settleResponse(page.waitForResponse(response => {
       const url = new URL(response.url());
@@ -226,12 +227,15 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.equal(ocrResultsReceipt.ok, true);
     assert.equal(orderReceipt.ok, true);
     const [liveWorkflowResponse, liveOcrResultsResponse, liveOrderResponse] = [workflowReceipt.response, ocrResultsReceipt.response, orderReceipt.response];
-    const [liveWorkflow, liveOcrResults, liveOrder] = await Promise.all([
+    const [liveWorkflow, liveInspection, liveOrder] = await Promise.all([
       liveWorkflowResponse.json(), liveOcrResultsResponse.json(), liveOrderResponse.json(),
     ]);
+    const liveOcrResults = liveInspection.ocr_candidates;
+    assert.equal(liveOcrResults?.order_id, identity.orderId);
+    assert.ok(Array.isArray(liveOcrResults?.results));
     const expectedReads = result.http.filter(item => expectedWorkflowRead(item.pathname, identity.orderId));
     assert.ok(expectedReads.some(item => item.pathname.endsWith('/workflow-v2') && item.status === 200));
-    assert.ok(expectedReads.some(item => item.pathname.endsWith('/ocr-results') && item.status === 200));
+    assert.ok(expectedReads.some(item => item.pathname.endsWith('/inspection') && item.status === 200));
     assert.ok(expectedReads.some(item => item.pathname === `/api/orders/${identity.orderId}` && item.status === 200));
     diagnostics.begin('verify-live-identity');
     assert.equal(liveWorkflow.order_id, identity.orderId);

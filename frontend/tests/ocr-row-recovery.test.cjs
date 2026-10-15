@@ -80,7 +80,7 @@ for (const [stage, action, label] of [
     headline: 'generic failure', blockers: ['generic-code'], ocr_job: {order_id: id, ocr_job_id: 'job',
       processing_stage: stage, recovery_action: action, error_detail: 'exact-original-cause'}}}));
   t.on('get', `${root}/workflow-v2/ocr-results`, () => ({data: {results: []}}));
-  t.on('get', `${root}/workflow-v2/inspection`, () => ({data: {saved_sheet: null, pre_save_checks: {}}}));
+  t.on('get', `${root}/workflow-v2/inspection?include_ocr_results=true`, () => ({data: { ocr_candidates: require('./helpers/ocr-candidates.cjs')(id),saved_sheet: null, pre_save_checks: {}}}));
   t.on('get', root, () => ({data: {id, current_version: {document_id: 'pdf'}, versions: [{document_id: 'pdf', is_current: true}]}}));
   t.on('get', `${root}/week-options`, () => ({data: {options: []}}));
   t.on('get', `${root}/document`, () => ({data: new Blob(['synthetic bytes'])}));

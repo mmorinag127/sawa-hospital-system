@@ -43,6 +43,7 @@ function probeFor() {
     'runAnomalyReview', 'showSheetReview', 'finalConfirm', 'saveFacilityTemplateColumns',
     'updateExpandedCellCopyMode', 'refreshAll', 'updateSheetCell', 'setSelectedDocumentId',
     'setBusy', 'setMessage', 'setError', 'setVisibleStep', 'editorVersion',
+    'ocrResults', 'inspection', 'applyWeekValue', 'flushPendingSheetCellEdits',
   ] };
 }
 function fixture() {
@@ -65,10 +66,11 @@ function fixture() {
     const root = `/orders/${id}/workflow-v2`;
     t.on('get', `${root}/facility-config`, () => ({ data: facilityConfig(workflow(id)) }));
     t.on('get', root, () => ({ data: workflow(id) }));
-    t.on('get', `${root}/ocr-results`, () => ({ data: { results: [SELECTED, NEXT].map(ocr_result_id => ({
+    const candidateResults = () => [SELECTED, NEXT].map(ocr_result_id => ({
       ocr_result_id, status: 'completed', selected: ocr_result_id === state.workflow.selected_ocr_result_id,
-    })) } }));
-    t.on('get', `${root}/inspection`, () => ({ data: { workflow: workflow(id),
+    }));
+    t.on('get', `${root}/inspection?include_ocr_results=true`, () => ({ data: { workflow: workflow(id),
+      ocr_candidates: require('./helpers/ocr-candidates.cjs')(id, candidateResults(), workflow(id)),
       pre_save_checks: clone(checks), pre_save_status: clone(status),
       anomaly_review: { warnings: [clone(warning)] },
       saved_sheet: state.saved ? { saved_sheet_id: 'saved-A',
@@ -143,6 +145,61 @@ async function start(h, action) {
   return { promise };
 }
 const calls = (f, method, path) => f.t.calls.filter(c => c.method === method && c.url === path);
+
+test('combined read preserves dirty quantities and excludes sidecar from displayed inspection', async () => {
+  const f = await setup();
+  try {
+    assert.equal(calls(f, 'get', `${BASE}/ocr-results`).length, 0);
+    assert.ok(calls(f, 'get', `${BASE}/inspection?include_ocr_results=true`).length > 0);
+    assert.equal(Object.hasOwn(f.probe.current.inspection, 'ocr_candidates'), false);
+    await f.h.settle(() => f.probe.current.updateSheetCell(0, 4, '19'));
+    await f.h.settle(() => f.probe.current.refreshAll());
+    assert.equal(f.probe.current.pendingSheetCellEditsRef.current.get('0:4').value, '19');
+    await f.h.settle(() => f.probe.current.flushPendingSheetCellEdits());
+    await f.h.settle(() => f.probe.current.refreshAll());
+    assert.equal(f.probe.current.sheetPayload.rows[0][4], '19');
+    assert.equal(f.probe.current.sheetDirty, true);
+    assert.equal(f.probe.current.ocrResults.length, 2);
+  } finally { await f.h.close(); }
+});
+
+for (const candidate of [undefined, null, {}, {order_id: OTHER, results: []},
+  { ...require('./helpers/ocr-candidates.cjs')(ORDER), hidden_template_mismatch_result_count: -1 }]) {
+  test(`invalid combined sidecar ${JSON.stringify(candidate)} explicitly rejects without adoption/fallback`, async () => {
+    const f = await setup();
+    try {
+      const before = snapshot(f), results = f.probe.current.ocrResults;
+      f.t.on('get', `${BASE}/inspection?include_ocr_results=true`, () => ({data: {ocr_candidates: candidate}}));
+      await f.h.settle(async () => {
+        await assert.rejects(f.probe.current.refreshAll(), /OCR候補の読取応答が不正/);
+      });
+      unchanged(f, before);
+      assert.equal(f.probe.current.ocrResults, results);
+      assert.equal(calls(f, 'get', `${BASE}/ocr-results`).length, 0);
+    } finally { await f.h.close(); }
+  });
+}
+
+for (const boundary of ['order', 'pdf', 'auth', 'route', 'week']) {
+  test(`combined sidecar late malformed response after ${boundary} cannot adopt or throw`, async () => {
+    const f = await setup(), pending = deferred();
+    try {
+      const successor = await f.t.api.get(`${BASE}/inspection?include_ocr_results=true`);
+      let first = true;
+      f.t.on('get', `${BASE}/inspection?include_ocr_results=true`, () => {
+        if (first) { first = false; return pending.promise; }
+        return successor;
+      });
+      const operation = await start(f.h, () => f.probe.current.refreshAll());
+      if (boundary === 'week') await f.h.settle(() => f.probe.current.applyWeekValue('2026-04@2026-04-01~2026-04-07'));
+      else await retire(f, boundary);
+      const before = snapshot(f);
+      await f.h.settle(() => pending.resolve({data: {ocr_candidates: null}}));
+      await operation.promise;
+      unchanged(f, before);
+    } finally { await f.h.close(); }
+  });
+}
 function snapshot(f) {
   const p = f.probe.current;
   return { sheet: p.sheetPayload, workflow: p.workflow, revision: clone(p.workflowRevisionRef.current),

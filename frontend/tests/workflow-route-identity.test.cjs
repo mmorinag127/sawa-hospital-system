@@ -5,8 +5,8 @@ const { mount, transport, deferred } = require('./helpers/modernization-react-do
 // Mounted production page; only router/session/HTTP are synthetic component inputs.
 const PAGE = 'src/pages/orders/[id]/workflow-v2.tsx';
 const ORDER = 'explicit-order', OTHER = 'second-explicit-order';
-const reads = id => [`/orders/${id}/workflow-v2`, `/orders/${id}/workflow-v2/ocr-results`,
-  `/orders/${id}/workflow-v2/inspection`, `/orders/${id}`];
+const reads = id => [`/orders/${id}/workflow-v2`,
+  `/orders/${id}/workflow-v2/inspection?include_ocr_results=true`, `/orders/${id}`];
 const orderCalls = t => t.calls.filter(call => /^\/(orders|outputs)(\/|\?)/.test(call.url));
 const value = (id, revision = 7) => ({ order_id: id, revision, state: 'ocr_failed',
   headline: `Owned ${id}`, blockers: [], warnings: [], selected_ocr_result_id: null,
@@ -17,10 +17,10 @@ async function setup(routerState, route = `/hospital/orders/${ORDER}/workflow-v2
   t.on('get', '/auth/me', () => ({ data: { role: 'operator' } }));
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic', facilities: [] } }));
   for (const id of [ORDER, OTHER]) {
-    const [workflow, ocr, inspection, order] = reads(id);
+    const [workflow, inspection, order] = reads(id);
     t.on('get', workflow, () => pending.get(id)?.promise || { data: value(id) });
-    t.on('get', ocr, () => ({ data: { results: [] } }));
-    t.on('get', inspection, () => ({ data: { saved_sheet: null, pre_save_checks: {} } }));
+    t.on('get', inspection, () => ({ data: { saved_sheet: null, pre_save_checks: {},
+      ocr_candidates: require('./helpers/ocr-candidates.cjs')(id, [], value(id)) } }));
     t.on('get', order, () => ({ data: { id, current_version: { document_id: `pdf-${id}` },
       versions: [{ document_id: `pdf-${id}`, is_current: true }] } }));
     t.on('get', `${order}/week-options`, () => ({ data: { options: [] } }));

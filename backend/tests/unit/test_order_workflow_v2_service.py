@@ -1541,7 +1541,7 @@ def test_context_confirm_normalizes_legacy_non_dict_workflow_meta(authored_april
         assert row.secondary_actions_json["workflow_v2"]["facility_id"] == "FAC00001"
 
 
-def test_mark_ocr_run_queued_requires_context_and_clears_downstream(monkeypatch, authored_april_context, tmp_path, record_property) -> None:
+def test_mark_ocr_run_queued_requires_context_and_preserves_operator_work(monkeypatch, authored_april_context, tmp_path, record_property) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     # Transport intention only; no dispatcher or external provider is invoked.
     for key, value in {
@@ -1598,6 +1598,7 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream(monkeypatch,
         )
 
     input_reference = _attach_context_pdf(order_id, tmp_path)
+    before_rerun = database_snapshot()
     queued, error = order_workflow_v2_service.mark_ocr_run_queued(
         order_id, "OCR-job", input_reference=input_reference, request_mode="ocr_rerun",
         expected_revision=_current_workflow_revision(order_id),
@@ -1606,14 +1607,17 @@ def test_mark_ocr_run_queued_requires_context_and_clears_downstream(monkeypatch,
     assert error is None
     queued = queued["workflow"]
     assert queued["state"] == "ocr_running"
-    assert queued["selected_ocr_result_id"] is None
-    assert queued["saved_sheet_id"] is None
+    assert queued["selected_ocr_result_id"] == evidence_id_1
+    assert queued["saved_sheet_id"] == saved_sheet_id
     with session_scope() as session:
-        assert session.get(OrderSheetDraft, saved_sheet_id) is None
+        assert session.get(OrderSheetDraft, saved_sheet_id) is not None
         current_state = session.get(OrderCurrentState, order_id)
         assert current_state is not None
-        assert current_state.draft_id is None
-        assert current_state.evidence_run_id is None
+        assert current_state.draft_id == saved_sheet_id
+        assert current_state.evidence_run_id == evidence_id_1
+    after_rerun = database_snapshot()
+    for table in ("order_sheet_drafts", "order_current_states", "order_ocr_evidence_runs"):
+        assert after_rerun[table] == before_rerun[table], table
 
     assert initial_error == "context_not_confirmed"
     assert initial_queued is None
