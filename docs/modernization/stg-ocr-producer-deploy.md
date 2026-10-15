@@ -109,3 +109,22 @@ preservation, source/target rejection, denied authority, revision/traffic/digest
 checks, identity mismatches and null-marker states are covered. Parent must still
 integrate, run authorized Actions, and inspect actual staging OCR and STEP2. Local
 tests are not evidence of deployment or user-visible OCR completion.
+# Explicit Existing-Order Hakodate Verification
+
+Manifest `verification_mode: existing_order_hakodate` requires explicit
+`existing_uploaded_pdf_id`, `expected_order_id`, and `expected_document_id`.
+It verifies the current upload/order/document ownership, stored PDF SHA256,
+facility/week, canonical selection and non-running upload lease on every poll.
+Only explicitly unselected context may be confirmed using the canonical
+`version.facility.fax_template.template_id` and the workflow revision. Matching
+context is not rewritten; mixed context or selected results stop execution.
+After confirmation the API is reread before the ordinary `mode: hakodate` OCR
+request. No upload retry or upload status mutation occurs in this mode.
+
+`verification-scope.json` explicitly records that this is not upload-to-OCR
+success and does not verify the legacy first pass. STEP2 verification uses
+the existing `verify-ocr-live.mjs` OCR results, overlay and screenshot;
+local unit tests are not live verification. Upload artifacts recursively omit
+`lease_token` and `lease_owner`; upload-stop exceptions do not print raw state.
+Without this explicit mode, the existing new-upload and retry paths remain in
+ force. Unknown modes stop rather than falling back.

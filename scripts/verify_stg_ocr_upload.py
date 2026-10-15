@@ -2,7 +2,7 @@
 
 import argparse
 import base64
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -56,7 +56,13 @@ def download(uri, path):
 
 
 def save_json(folder, name, value):
-    (folder / name).write_text(json.dumps(value, ensure_ascii=False, indent=2))
+    def public(item):
+        if isinstance(item, dict):
+            return {key: public(val) for key, val in item.items() if key not in ('lease_token', 'lease_owner')}
+        if isinstance(item, list):
+            return [public(val) for val in item]
+        return item
+    (folder / name).write_text(json.dumps(public(value), ensure_ascii=False, indent=2))
 
 
 def resolve_selection(case):
@@ -111,6 +117,65 @@ def canonical_projection_id(case, selection):
 
 UNSELECTED_RESULT_FIELDS = ('selected_ocr_result_id', 'saved_sheet_id', 'confirmed_snapshot_id',
                           'ocr_job', 'output_bundle_id', 'bagging_result_id')
+
+
+def verify_hakodate_existing(case, selection, folder, *, require_context=False):
+    state = request('/ingest/uploads/' + quote(case['existing_uploaded_pdf_id'], safe=''))
+    save_json(folder, 'upload-state.json', state)
+    oid = quote(case['expected_order_id'], safe='')
+    order = request(f'/orders/{oid}')
+    workflow = request(f'/orders/{oid}/workflow-v2')
+    verify_resume_identity(case, selection, state, order, workflow, folder)
+    if 'lease_expires_at' not in state:
+        raise ValueError('Upload lease state missing')
+    expiry = state['lease_expires_at']
+    if expiry is not None:
+        try:
+            until = datetime.fromisoformat(expiry)
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise ValueError('Upload lease expiry invalid') from None
+        if until > datetime.now(timezone.utc):
+            raise ValueError('Upload lease is running')
+    if state.get('status') == 'processing':
+        raise ValueError('Upload processing must stop before existing-order verification')
+    current_pdf = folder / 'existing-original.pdf'
+    download(state['storage_uri'], current_pdf)
+    if hashlib.sha256(current_pdf.read_bytes()).hexdigest() != case['sha256']:
+        raise ValueError('Existing stored FAX hash mismatch')
+    if resolve_selection(case) != selection:
+        raise ValueError('Canonical facility selection changed')
+    if require_context and workflow.get('template_version_id') != canonical_projection_id(case, selection):
+        raise ValueError('Selected workflow context required after confirmation')
+    return state, order, workflow
+
+
+def prepare_existing_hakodate(case, selection, folder):
+    state, order, workflow = verify_hakodate_existing(case, selection, folder)
+    if any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS):
+        raise ValueError('Existing selected workflow results must not be overwritten')
+    start, end = case['week_id'].split('@', 1)[1].split('~')
+    if workflow['template_version_id'] is None:
+        at_start = resolve_selection({**case, 'effective_date': start})
+        if at_start['version'] != selection['version'] or at_start['revision'] != selection['revision']:
+            raise ValueError('Context date canonical selection mismatch')
+        template_id = selection['version']['facility']['fax_template'].get('template_id')
+        if not isinstance(template_id, str) or not template_id:
+            raise ValueError('Canonical context template required')
+        body = {'facility_id': case['facility_id'], 'week_start': start,
+                'week_end': end, 'template_id': template_id}
+        confirmed = request(f'/orders/{order["id"]}/workflow-v2/context',
+                            json.dumps(body).encode(), 'application/json',
+                            revision=workflow_revision(workflow, order['id']))
+        verify_resume_identity(case, selection, state, order, confirmed, folder)
+        if confirmed.get('template_version_id') != canonical_projection_id(case, selection):
+            raise ValueError('Context confirmation did not select canonical version')
+        save_json(folder, 'context-confirm.json', confirmed)
+    _, _, workflow = verify_hakodate_existing(case, selection, folder, require_context=True)
+    if any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS):
+        raise ValueError('Existing selected workflow results must not be overwritten')
+    return workflow
 
 
 def verify_resume_identity(case, selection, state, order, workflow, folder=None):
@@ -322,7 +387,21 @@ def main():
         selection = resolve_selection(case)
         save_json(folder, 'facility-selection.json', selection)
         resume_keys = ('existing_uploaded_pdf_id', 'expected_order_id', 'expected_document_id')
-        if any(key in case for key in resume_keys):
+        explicit_hakodate = case.get('verification_mode') == 'existing_order_hakodate'
+        if 'verification_mode' in case and not explicit_hakodate:
+            raise ValueError('Unknown explicit verification mode')
+        if explicit_hakodate:
+            if any(not isinstance(case.get(key), str) or not case[key].strip() for key in resume_keys):
+                raise ValueError('Explicit existing upload/order/document identities required')
+            save_json(folder, 'verification-scope.json', {
+                'verification_mode': 'existing_order_hakodate',
+                'upload_to_ocr_success': False, 'legacy_firstpass_verified': False,
+                'upload_status_mutation': False,
+            })
+            verify_hakodate_existing(case, selection, folder)
+            upload = {'uploaded_pdf_id': case['existing_uploaded_pdf_id'],
+                      'verification_mode': 'existing_order_hakodate'}
+        elif any(key in case for key in resume_keys):
             upload = resume_upload(case, selection, folder)
         else:
             upload = upload_new(case, selection, raw)
@@ -339,13 +418,16 @@ def main():
         deadline = time.monotonic() + 1200
         while time.monotonic() < deadline:
             state = request('/ingest/uploads/' + uploaded_id)
-            (folder / 'upload-state.json').write_text(json.dumps(state, ensure_ascii=False, indent=2))
+            save_json(folder, 'upload-state.json', state)
             oid = state.get('current_order_id')
             if oid:
                 order = request(f'/orders/{oid}')
                 save_json(folder, 'order.json', order)
                 document_id = verify_owner(case, state, order)
                 workflow = request(f'/orders/{oid}/workflow-v2')
+                if explicit_hakodate:
+                    state, order, workflow = verify_hakodate_existing(
+                        case, selection, folder, require_context=canonical_started)
                 if any(key in case for key in resume_keys):
                     verify_resume_identity(case, selection, state, order, workflow, folder)
                 save_json(folder, 'workflow.json', workflow)
@@ -357,18 +439,28 @@ def main():
                     evidence = None
                 if evidence:
                     (folder / 'evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
-                if state.get('status') == 'completed' and not canonical_started:
+                if (explicit_hakodate or state.get('status') == 'completed') and not canonical_started:
+                    if explicit_hakodate:
+                        workflow = prepare_existing_hakodate(case, selection, folder)
                     previous_evidence_id = evidence.get('id') if evidence else None
                     quad_review = apply_verified_quad(case, oid, document_id, folder)
                     if quad_review is not None:
                         (folder / 'quad-review.json').write_text(json.dumps(quad_review, ensure_ascii=False, indent=2))
                         workflow = quad_review['workflow']
+                    if explicit_hakodate:
+                        _, _, workflow = verify_hakodate_existing(case, selection, folder, require_context=True)
+                        if any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS):
+                            raise ValueError('Existing selected workflow results must not be overwritten')
                     started = request(f'/orders/{oid}/workflow-v2/ocr-runs', json.dumps({
                         'mode': 'hakodate', 'document_id': document_id, 'stale_action': 'retry', 'force': True,
                     }).encode(), 'application/json', revision=workflow_revision(workflow, oid))
                     (folder / 'ocr-start.json').write_text(json.dumps(started, ensure_ascii=False, indent=2))
                     started_workflow = started['workflow']
                     workflow_revision(started_workflow, oid)
+                    if explicit_hakodate:
+                        verify_resume_identity(case, selection, state, order, started_workflow, folder)
+                        if started_workflow.get('template_version_id') != canonical_projection_id(case, selection):
+                            raise ValueError('OCR start context mismatch')
                     canonical_started = True
                     deadline = time.monotonic() + 1200
                     evidence = None
@@ -377,8 +469,8 @@ def main():
                     break
                 if canonical_started and (workflow.get('ocr_job') or {}).get('status') == 'failed':
                     raise RuntimeError('OCR failed; workflow and evidence saved for review')
-            if state.get('status') in ('failed', 'error', 'manual_review'):
-                raise RuntimeError('Upload stopped: ' + json.dumps(state, ensure_ascii=False))
+            if not explicit_hakodate and state.get('status') in ('failed', 'error', 'manual_review'):
+                raise RuntimeError('Upload stopped; sanitized upload-state artifact saved')
             time.sleep(15)
         if not canonical_started or not evidence or not completed_evidence(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id):
             raise TimeoutError('OCR evidence did not complete')
@@ -386,6 +478,8 @@ def main():
         (folder / 'workflow.json').write_text(json.dumps(workflow, ensure_ascii=False, indent=2))
         payload = evidence['payload_json']
         save_json(folder, 'ocr-payload.json', payload)
+        if explicit_hakodate:
+            verify_hakodate_existing(case, selection, folder, require_context=True)
         download(payload['hakodate_overlay']['uri'], folder / 'overlay.png')
         download(payload['hakodate_overlay']['sheet_review_base_uri'], folder / 'corrected.png')
         metrics = payload['hakodate_canonical_pipeline']['metrics']
