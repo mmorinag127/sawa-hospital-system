@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'scripts'), str(ROOT / 'backend')]
 
 from stg_image_protection import (require, require_context, immutable_image, ensure_policy,
-                                 protect_image, protect_current)
+                                 protect_image, protect_current, PREFIX)
 from stg_ocr_producer_deploy import Blocked, cloud, PROJECT, REGION, comparable, ready_revision
 from staging_db_target import image_config, _access_token, resolve_runtime, load_service_db_config
 from run_stg_runtime_schema_preflight import validate_catalog, run as runtime_preflight
@@ -73,6 +73,34 @@ def verify_candidate_database(template, config):
             engine.dispose()
 
 
+def verify_original_runtime(before, revision, expected_revision, expected_image):
+    template = before['spec']['template']
+    require(revision.get('metadata', {}).get('name') == expected_revision
+            and template.get('metadata', {}).get('name', expected_revision) == expected_revision,
+            'exported_revision_mismatch')
+    requested = template['spec']
+    observed = deepcopy(revision.get('spec', {}))
+    containers = observed.get('containers', [])
+    require(len(requested.get('containers', [])) == 1 and len(containers) == 1,
+            'single_container_required')
+    require(containers[0].get('image') == expected_image
+            and revision.get('status', {}).get('imageDigest') == expected_image,
+            'original_image_changed')
+    source = requested['containers'][0]
+    require(bool(re.fullmatch(re.escape(PREFIX + 'frontend') +
+            r'(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})',
+            source.get('image', ''))), 'original_image_reference_rejected')
+    if '@' in source['image']:
+        require(source['image'] == expected_image, 'original_image_changed')
+    # The named active revision binds the requested tag to its resolved digest.
+    containers[0]['image'] = source['image']
+    if 'name' not in source:
+        require(containers[0].get('name') in (None, 'frontend-1'),
+                'unrecognized_generated_container_name')
+        containers[0].pop('name', None)
+    require(requested == observed, 'original_runtime_mismatch')
+
+
 def recover(image, expected_revision, expected_image):
     global PHASE
     require_context()
@@ -99,7 +127,7 @@ def recover(image, expected_revision, expected_image):
     project = cloud('projects', 'describe', PROJECT)
     desired = replacement(before, image, project['projectNumber'])
     # Compare the original active revision with the complete exported runtime settings.
-    require(before['spec']['template']['spec'] == revision.get('spec'), 'original_runtime_mismatch')
+    verify_original_runtime(before, revision, expected_revision, expected_image)
     require(resolve_runtime(revision, config, SERVICE) ==
             resolve_runtime(desired['spec']['template'], config, SERVICE), 'original_runtime_annotation_mismatch')
     PHASE = 'candidate_database_read_only'
