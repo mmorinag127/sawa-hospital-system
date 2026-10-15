@@ -104,10 +104,10 @@ export function verificationIdentities(folder) {
   return sourceCases.map(sourceCase => verificationIdentityForCase(folder, sourceCase));
 }
 
-function expectedWorkflowRead(pathname, orderId) {
-  return pathname === `/api/hospital/orders/${orderId}/workflow-v2`
-    || pathname === `/api/hospital/orders/${orderId}/workflow-v2/ocr-results`
-    || pathname === `/api/hospital/orders/${orderId}`;
+export function expectedWorkflowRead(pathname, orderId) {
+  return pathname === `/api/orders/${orderId}/workflow-v2`
+    || pathname === `/api/orders/${orderId}/workflow-v2/ocr-results`
+    || pathname === `/api/orders/${orderId}`;
 }
 
 export async function verifyOcrBrowser({ origin, token, identity, source, output }) {
@@ -161,17 +161,17 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     const workflowRead = settleResponse(page.waitForResponse(response => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/hospital/orders/${identity.orderId}/workflow-v2`;
+        && url.pathname === `/api/orders/${identity.orderId}/workflow-v2`;
     }));
     const ocrResultsRead = settleResponse(page.waitForResponse(response => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/hospital/orders/${identity.orderId}/workflow-v2/ocr-results`;
+        && url.pathname === `/api/orders/${identity.orderId}/workflow-v2/ocr-results`;
     }));
     const orderRead = settleResponse(page.waitForResponse(response => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/hospital/orders/${identity.orderId}`;
+        && url.pathname === `/api/orders/${identity.orderId}`;
     }));
     result.phase = 'open-workflow';
     const workflowResponse = await page.goto(`${origin}/hospital/orders/${encodeURIComponent(identity.orderId)}/workflow-v2`, { waitUntil: 'domcontentloaded' });
@@ -190,7 +190,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     const expectedReads = result.http.filter(item => expectedWorkflowRead(item.pathname, identity.orderId));
     assert.ok(expectedReads.some(item => item.pathname.endsWith('/workflow-v2') && item.status === 200));
     assert.ok(expectedReads.some(item => item.pathname.endsWith('/ocr-results') && item.status === 200));
-    assert.ok(expectedReads.some(item => item.pathname === `/api/hospital/orders/${identity.orderId}` && item.status === 200));
+    assert.ok(expectedReads.some(item => item.pathname === `/api/orders/${identity.orderId}` && item.status === 200));
     result.phase = 'verify-live-identity';
     assert.equal(liveWorkflow.order_id, identity.orderId);
     assert.equal(liveWorkflow.ocr_job?.order_id, identity.orderId);
