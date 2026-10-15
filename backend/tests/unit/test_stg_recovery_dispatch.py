@@ -33,6 +33,32 @@ def test_normal_jobs_dependencies_and_checks_unchanged():
                 assert len(matches) == 1
                 assert matches[0]['run'].count(original) == 1
                 matches[0]['run'] = matches[0]['run'].replace(original, replacement)
+            if name == 'deploy-frontend':
+                job['permissions']['actions'] = 'read'
+                expanded = {
+                    'Initialize opted-in OCR UI evidence',
+                    'Prepare opted-in OCR UI verification',
+                    'Verify opted-in existing OCR workflow-v2 Step2 UI',
+                }
+                for step in job['steps']:
+                    if (step.get('name') in expanded or
+                        (step.get('uses') == 'actions/setup-node@v4' and "inputs.ocr_verification_manifest" in step.get('if', '')) or
+                        step.get('with', {}).get('name') == 'live-ocr-ui-stg-${{ github.run_id }}-${{ github.run_attempt }}'):
+                        assert "inputs.ocr_verification_manifest != ''" in step['if']
+                        step['if'] = step['if'].replace("inputs.ocr_verification_manifest != ''",
+                            "(inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')")
+                index = next(i for i, step in enumerate(job['steps']) if step.get('uses') == 'actions/download-artifact@v4' and step.get('with', {}).get('name') == 'live-ocr-stg') + 1
+                job['steps'][index:index] = [
+                    {'name': 'Validate existing staging OCR artifact provenance',
+                     'if': "github.event_name == 'workflow_dispatch' && inputs.ocr_existing_artifact_run_id != ''",
+                     'env': {'GH_TOKEN': '${{ github.token }}', 'OCR_EXISTING_RUN': '${{ inputs.ocr_existing_artifact_run_id }}'},
+                     'run': 'python3 scripts/verify_existing_ocr_artifact.py "$OCR_EXISTING_RUN"'},
+                    {'uses': 'actions/download-artifact@v4',
+                     'if': "github.event_name == 'workflow_dispatch' && inputs.ocr_existing_artifact_run_id != ''",
+                     'with': {'name': 'live-ocr-stg', 'path': 'tmp/ocr-verification',
+                              'run-id': '${{ inputs.ocr_existing_artifact_run_id }}', 'github-token': '${{ github.token }}',
+                              'repository': 'mmorinag127/sawa-hospital-system'}},
+                ]
             assert new['jobs'][name] == job
     old_steps = old['jobs']['source-gate']['steps']
     new_steps = new['jobs']['source-gate']['steps'][1:]
