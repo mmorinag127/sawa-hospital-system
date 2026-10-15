@@ -19,7 +19,7 @@ function harness(){
   const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image',calendar_days:Array.from({length:7},(_,index)=>({date:`2026-10-${25+index}`,expected_band_count:8}))};
   const context={orderId:'order-A',effectiveSelectedDocumentId:'pdf-A',router:{asPath:'/orders/order-A/workflow-v2'},quadContextRef:{current:{orderId:'order-A',documentId:'pdf-A',route:'/orders/order-A/workflow-v2'}},
     quadContextGenerationRef:{current:0},quadReadGenerationRef:{current:0},quadCommandGenerationRef:{current:0},quadAliveRef:{current:true},quadBusyOwnerRef:{current:null},busyGenerationRef:{current:0},
-    workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},
+    workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},facilitySaveReadOwnerRef:{current:null},
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
     selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},

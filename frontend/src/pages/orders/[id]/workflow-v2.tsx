@@ -1850,6 +1850,7 @@ export default function OrderWorkflowV2Page() {
     workflowContextConfirmed, workflow?.facility_id, workflow?.week_start, workflow?.week_end, workflow?.template_version_id, workflow?.revision]);
   const facilityConfigReadKeyRef = useRef(facilityConfigReadKey);
   facilityConfigReadKeyRef.current = facilityConfigReadKey;
+  const facilitySaveReadOwnerRef = useRef<(() => boolean) | null>(null);
   const [facilityConfigLoadedKey, setFacilityConfigLoadedKey] = useState("");
   const workflowBlockers = Array.isArray(workflow?.blockers)
     ? workflow.blockers.map((item) => String(item || "").trim()).filter(Boolean)
@@ -2426,10 +2427,19 @@ export default function OrderWorkflowV2Page() {
     void loadRowAxisReview();
   }, [router.isReady, orderId, visibleStep,effectiveSelectedDocumentId]);
 
-  const loadFacilityTemplateStatus = async (facilityId: string, callerCurrent: () => boolean = () => true) => {
+  const loadFacilityTemplateStatus = async (facilityId: string, callerCurrent: () => boolean = () => true, acceptedWorkflow: WorkflowV2 | null = null) => {
     const own=capturePageOwner(), request=++facilityReadGenerationRef.current;
-    const readKey = facilityConfigReadKey;
-    const current=()=>request===facilityReadGenerationRef.current && readKey===facilityConfigReadKeyRef.current && ownsPageInput(own) && callerCurrent();
+    const readWorkflow = acceptedWorkflow || workflow;
+    const readKey = acceptedWorkflow ? JSON.stringify([orderId, contextForm.facility_id, effectiveWeekStart, effectiveWeekEnd,
+      workflowContextConfirmed, acceptedWorkflow.facility_id, acceptedWorkflow.week_start, acceptedWorkflow.week_end,
+      acceptedWorkflow.template_version_id, acceptedWorkflow.revision]) : facilityConfigReadKey;
+    // React may not have rendered this operation's accepted revision yet.
+    // Only the checked caller and its exact adopted revision may bridge that render.
+    const current=()=>request===facilityReadGenerationRef.current
+      && (readKey===facilityConfigReadKeyRef.current || (acceptedWorkflow !== null
+        && facilityConfigReadKey===facilityConfigReadKeyRef.current
+        && workflowRevisionRef.current.revision===acceptedWorkflow.revision))
+      && ownsPageInput(own) && callerCurrent();
     if (!current()) return;
     const normalizedFacilityId = facilityId.trim();
     if (!normalizedFacilityId) {
@@ -2458,7 +2468,7 @@ export default function OrderWorkflowV2Page() {
       error: "",
     }));
     try {
-      const selection = facilityReadSelection(orderId, normalizedFacilityId, effectiveWeekStart, effectiveWeekEnd, workflow, workflowContextConfirmed);
+      const selection = facilityReadSelection(orderId, normalizedFacilityId, effectiveWeekStart, effectiveWeekEnd, readWorkflow, workflowContextConfirmed);
       const res = await apiClient.get(selection.url);
       if (!current()) return;
       const resolved = facilityReadConfig(selection, res.data);
@@ -2475,7 +2485,6 @@ export default function OrderWorkflowV2Page() {
         setFacilityTemplateColumnDraft(resolvedColumns);
         setFacilityTemplateSwapLeft("");
         setFacilityTemplateSwapRight("");
-        setFacilityTemplateMessage("");
       }
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
@@ -2545,6 +2554,7 @@ export default function OrderWorkflowV2Page() {
   }, []);
 
   useEffect(() => {
+    if (facilitySaveReadOwnerRef.current?.()) return;
     void loadFacilityTemplateStatus(contextForm.facility_id);
   }, [facilityConfigReadKey]);
 
@@ -2864,6 +2874,9 @@ export default function OrderWorkflowV2Page() {
       return;
     }
     setFacilityTemplateSaving(true);
+    const saveReadOwner = current;
+    facilitySaveReadOwnerRef.current = saveReadOwner;
+    ++facilityReadGenerationRef.current;
     setFacilityTemplateMessage("施設区分列を保存中...");
     setError("");
     try {
@@ -2881,7 +2894,13 @@ export default function OrderWorkflowV2Page() {
       });
       const refreshed = await refreshAll(current, null, adopt);
       if (!refreshed || !current()) return;
-      const templateLoaded = await loadFacilityTemplateStatus(facilityId,current);
+      const acceptedWorkflow = response.data?.workflow as WorkflowV2 | undefined;
+      if (!acceptedWorkflow || acceptedWorkflow.order_id !== orderId
+        || acceptedWorkflow.facility_id !== facilityId || acceptedWorkflow.week_start !== effectiveWeekStart
+        || acceptedWorkflow.week_end !== effectiveWeekEnd || !acceptedWorkflow.template_version_id) {
+        throw new Error("保存応答の注文・施設・週・版が一致しません。");
+      }
+      const templateLoaded = await loadFacilityTemplateStatus(facilityId,current,acceptedWorkflow);
       if (!templateLoaded || !current()) return;
       adopt(() => {
         setFacilityTemplateMessage(
@@ -2891,6 +2910,7 @@ export default function OrderWorkflowV2Page() {
     } catch (err: any) {
       if (current()) setFacilityTemplateMessage(formatApiError(err, "施設区分列の保存に失敗しました"));
     } finally {
+      if (facilitySaveReadOwnerRef.current === saveReadOwner) facilitySaveReadOwnerRef.current = null;
       if (operation===facilitySaveGenerationRef.current && quadAliveRef.current) setFacilityTemplateSaving(false);
     }
   };

@@ -66,6 +66,16 @@ async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOption
       await route.fulfill({ status: 200, json: pollUpdate ? { ...workflowPayload, ...pollUpdate } : workflowPayload });
       return;
     }
+    if (path.endsWith(`/orders/${orderId}/workflow-v2/facility-config`) && method === "GET") {
+      const current = requestCounts[`GET /api/orders/${orderId}/workflow-v2`] > 1
+        ? { ...workflowPayload, ...options.polledWorkflow } : workflowPayload;
+      await route.fulfill({ status: 200, json: {
+        source: "canonical_json", order_id: orderId, facility_id: current.facility_id,
+        week_start: current.week_start, week_end: current.week_end,
+        template_version_id: current.template_version_id, config: { fax_template: { columns: [] } },
+      } });
+      return;
+    }
     if (path.endsWith(`/orders/${orderId}/workflow-v2/ocr-results`) && method === "GET") {
       await route.fulfill({
         status: 200,
@@ -187,14 +197,15 @@ async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOption
       });
       return;
     }
-    if (path.startsWith("/api/facilities/") && method === "GET") {
+    if (path.startsWith("/api/facilities/") && path.endsWith("/resolved") && method === "GET") {
       await route.fulfill({
         status: 200,
         json: {
-          id: path.split("/").at(-1),
-          name: "Workflow Sheet E2E Facility",
-          config: {},
-          resolved_config: { fax_template: { columns: [] } },
+          source: "canonical_json",
+          facility_id: path.split("/").at(-2),
+          effective_date: url.searchParams.get("effective_date"),
+          version: { version_id: "authored-e2e-version" },
+          config: { fax_template: { columns: [] } },
         },
       });
       return;

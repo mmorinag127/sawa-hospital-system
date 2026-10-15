@@ -73,3 +73,23 @@ test('same facility different week reads again and rejects the first response af
   await old;assert.deepEqual(h.state.columns,['next']);assert.equal(h.state.loaded,'new-week');
   assert.equal(h.state.status.loading,false);
 });
+
+for (const retirement of ['none', 'week', 'revision', 'owner']) test(`accepted save read before render: ${retirement}`,async()=>{
+  const h=harness({dirty:true});
+  const accepted={order_id:'O',...saved,template_version_id:'saved-new',revision:8};
+  Object.assign(h.context,{contextForm:{facility_id:'F'},workflowRevisionRef:{current:{revision:8}}});
+  let resolve;
+  h.context.apiClient.get=()=>new Promise(r=>{resolve=r;});
+  let owned=true;
+  const run=compile(`exports.run=${expression}`,h.context).run;
+  const waiting=run('F',()=>owned,accepted);
+  assert.equal(typeof resolve,'function','accepted new revision may read before React renders');
+  if(retirement==='week')h.context.facilityConfigReadKeyRef.current='other-week';
+  if(retirement==='revision')h.context.workflowRevisionRef.current.revision=9;
+  if(retirement==='owner')owned=false;
+  resolve({data:{source:'canonical_json',...accepted,config:{fax_template:{columns:['new-saved']}}}});
+  await waiting;
+  assert.deepEqual(h.state.draft,['operator-edit']);
+  if(retirement==='none')assert.deepEqual(h.state.columns,['new-saved']);
+  else assert.equal(h.state.config,undefined);
+});
