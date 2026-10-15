@@ -518,8 +518,7 @@ def _enqueue_order_reparse_job(
     order, selected_version = _resolve_order_document_version(order_id, selected_document_id)
     if not order.get("facility"):
         raise HTTPException(status_code=400, detail="facility missing")
-    if not config_service.get_facility_config(order.get("facility")):
-        raise HTTPException(status_code=404, detail="facility not found")
+    # The queue service validates the confirmed dated canonical template and capture.
 
     ocr_job_id = f"OCR-{order_id}"
     input_reference = str(selected_version.get("storage_uri") or "").strip()
@@ -1383,8 +1382,7 @@ def _enqueue_workflow_v2_evidence_rerun(
     order, selected_version = _resolve_order_document_version(order_id, selected_document_id)
     if not order.get("facility"):
         raise HTTPException(status_code=400, detail="facility missing")
-    if not config_service.get_facility_config(order.get("facility")):
-        raise HTTPException(status_code=404, detail="facility not found")
+    # The queue service validates the confirmed dated canonical template and capture.
 
     ocr_job_id = f"OCR-{order_id}"
     input_reference = str(selected_version.get("storage_uri") or "").strip()
