@@ -70,7 +70,7 @@ def test_existing_context_date_applicability(monkeypatch, day, allowed):
     selection, _ = selected(monkeypatch)
     session = Session()
     _, projection = templates.materialize_facility_version_lineage(session, selection)
-    order = SimpleNamespace(facility_code="F", received_at=None,
+    order = SimpleNamespace(id="own-order", facility_code="F", received_at=None,
                             template_version_id=projection.id, week_code=f"{day[:7]}@{day}~{day}")
     state = SimpleNamespace(template_version_id=projection.id)
     meta = {"facility_id": "F", "week_start": day, "week_end": day}

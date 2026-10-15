@@ -1320,6 +1320,15 @@ def _raise_workflow_v2_ocr_prerequisite_error(error: str, workflow: dict | None 
     )
 
 
+@router.get("/{order_id}/workflow-v2/facility-config", dependencies=[Depends(require_role("operator"))])
+def read_order_facility_config(order_id: str):
+    try:
+        return order_service.get_order_facility_config(order_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "order_not_found" else 409,
+                            detail={"error": str(exc)}) from exc
+
+
 def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
     raise HTTPException(
         status_code=410,

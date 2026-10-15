@@ -38,7 +38,10 @@ test('missing or invalid outer config is never optional override absence', () =>
 function liveDeclaration(name) {
   const root = path.join(__dirname, '../..');
   const file = 'frontend/src/pages/orders/[id]/workflow-v2.tsx';
-  const base = execFileSync('git', ['show', '4d0e6319d3e84e392389755041a89a872ff97d29:' + file], { cwd: root, encoding: 'utf8' });
+  const reference = name === 'saveFacilityTemplateColumns'
+    ? '938da9f6a32ba3c7d7628968bdd47d5d3d0258e2'
+    : '4d0e6319d3e84e392389755041a89a872ff97d29:' + file;
+  const base = execFileSync('git', ['show', reference], { cwd: root, encoding: 'utf8' });
   const declaration = text => {
     const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     assert.equal(parsed.parseDiagnostics.length, 0);

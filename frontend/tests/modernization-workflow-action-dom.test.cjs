@@ -28,6 +28,9 @@ const columns = fields.map((field, index) => ({ index, source_index: index,
   ...(field.startsWith('qty.') ? { diet_type: ['regular', 'no_meat', 'no_fish', 'staff'][index - 4], area_id: 'X' } : {}) }));
 const resolvedConfig = { fax_template_id: 'template-A', fax_template_ids: ['template-A'],
   facility_template_id: 'facility-template-A', fax_template: { columns } };
+const facilityConfig = (workflow) => ({ source: 'canonical_json', order_id: workflow.order_id,
+  facility_id: workflow.facility_id, week_start: workflow.week_start, week_end: workflow.week_end,
+  template_version_id: workflow.template_version_id, config: clone(resolvedConfig) });
 function probeFor() {
   return { component: 'OrderWorkflowV2Page', bindings: [
     'workflow', 'workflowRevisionRef', 'effectiveSelectedDocumentId', 'contextFacilityResolution',
@@ -58,9 +61,9 @@ function fixture() {
   t.on('get', '/auth/me', () => ({ data: { role: 'operator' } }));
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic-master',
     facilities: [{ id: 'facility-A', name: 'Synthetic authored facility' }] } }));
-  t.on('get', '/facilities/facility-A', () => ({ data: { resolved_config: clone(resolvedConfig) } }));
   for (const id of [ORDER, OTHER]) {
     const root = `/orders/${id}/workflow-v2`;
+    t.on('get', `${root}/facility-config`, () => ({ data: facilityConfig(workflow(id)) }));
     t.on('get', root, () => ({ data: workflow(id) }));
     t.on('get', `${root}/ocr-results`, () => ({ data: { results: [SELECTED, NEXT].map(ocr_result_id => ({
       ocr_result_id, status: 'completed', selected: ocr_result_id === state.workflow.selected_ocr_result_id,
@@ -513,7 +516,7 @@ for (const outcome of ['success', 'error']) test(`AI initial POST late ${outcome
 
 for (const stage of ['refresh', 'load']) test(`facility save ${stage} failure is visible and cannot publish successful completion`, async () => {
   const f = await setup(), failure = `synthetic follow-up ${stage} failure`;
-  const path = stage === 'refresh' ? BASE : '/facilities/facility-A';
+  const path = stage === 'refresh' ? BASE : `${BASE}/facility-config`;
   const raw = f.probe.current.sheetPayload, beforeRows = clone(raw.rows);
   try {
     const priorReads = calls(f, 'get', path).length;
@@ -536,7 +539,7 @@ for (const stage of ['refresh', 'load'])
 for (const boundary of ['route', 'auth'])
 for (const outcome of ['success', 'error']) test(`facility save ${stage} late ${outcome} after ${boundary} cannot publish completion`, async () => {
   const f = await setup(), pending = deferred(); let operation;
-  const path = stage === 'refresh' ? BASE : '/facilities/facility-A';
+  const path = stage === 'refresh' ? BASE : `${BASE}/facility-config`;
   try {
     const priorReads = calls(f, 'get', path).length;
     f.t.on('get', path, () => pending.promise);
@@ -549,19 +552,19 @@ for (const outcome of ['success', 'error']) test(`facility save ${stage} late ${
     assert.equal(f.probe.current.sheetPayload, null, 'normal own save intentionally discarded sheet');
     assert.ok(!f.probe.current.facilityTemplateMessage.includes('施設区分列を保存しました'));
     const response = stage === 'refresh' ? { data: f.workflow() }
-      : { data: { resolved_config: clone(resolvedConfig) } };
+      : { data: facilityConfig(f.workflow()) };
     await retire(f, boundary);
     const before = snapshot(f), beforeMessage = f.probe.current.facilityTemplateMessage;
     const beforeColumns = f.probe.current.facilityTemplateColumnDraft;
-    const templateReads = calls(f, 'get', '/facilities/facility-A').length;
+    const templateReads = calls(f, 'get', `${BASE}/facility-config`).length;
     await settleOld(f, pending, operation, outcome, response);
     unchanged(f, before);
     assert.equal(f.probe.current.facilityTemplateMessage, beforeMessage);
     assert.equal(f.probe.current.facilityTemplateColumnDraft, beforeColumns);
     assert.ok(!f.h.document.body.textContent.includes('施設区分列を保存しました'));
-    assert.equal(calls(f, 'get', '/facilities/facility-A').length, templateReads,
+    assert.equal(calls(f, 'get', `${BASE}/facility-config`).length, templateReads,
       'retired follow-up cannot start another template read');
-  } finally { pending.resolve({ data: stage === 'refresh' ? f.workflow() : { resolved_config: clone(resolvedConfig) } });
+  } finally { pending.resolve({ data: stage === 'refresh' ? f.workflow() : facilityConfig(f.workflow()) });
     if (operation) await operation.promise; await f.h.close(); }
 });
 

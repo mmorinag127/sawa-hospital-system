@@ -35,6 +35,7 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     return text.replace(from,to);
   };
   let compatible=source;
+  compatible=replaceOnce(compatible,'facilitySaveReadOwnerRef:{current:null},','');
   compatible=replaceOnce(compatible,`  if(axis==='row'){
     h.review.coordinate_space.height=560;
     h.review.header_band_count=0;
@@ -72,7 +73,7 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   assert.equal(approvedBefore,execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
-  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','2f00c12633b42ef9bb0822df72b846a022155880:frontend/'+production],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards remain exact');
+  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','938da9f6a32ba3c7d7628968bdd47d5d3d0258e2'],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards and exact saved or dated facility reads remain exact');
   execFileSync('git',['merge-base','--is-ancestor','d26febd','HEAD']);
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
   const after=source.slice(source.indexOf('function actual('),source.indexOf('\nconst plain='));

@@ -6,6 +6,7 @@ import { useRouter } from "next/router";
 import Link from "next/link";
 
 import { apiClient, hasActiveSessionAuthHeader } from "../../../services/apiClient";
+import { facilityReadSelection, facilityReadConfig } from "../../../services/orderFacilityRead";
 import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
 import TopNav from "../../../components/TopNav";
 import OutputHistoryPanel from "../../../components/OutputHistoryPanel";
@@ -1845,6 +1846,12 @@ export default function OrderWorkflowV2Page() {
       && workflow?.week_end
       && !["uploaded", "facility_template_unresolved"].includes(String(workflow?.state || "")),
   );
+  const facilityConfigReadKey = JSON.stringify([orderId, contextForm.facility_id, effectiveWeekStart, effectiveWeekEnd,
+    workflowContextConfirmed, workflow?.facility_id, workflow?.week_start, workflow?.week_end, workflow?.template_version_id, workflow?.revision]);
+  const facilityConfigReadKeyRef = useRef(facilityConfigReadKey);
+  facilityConfigReadKeyRef.current = facilityConfigReadKey;
+  const facilitySaveReadOwnerRef = useRef<(() => boolean) | null>(null);
+  const [facilityConfigLoadedKey, setFacilityConfigLoadedKey] = useState("");
   const workflowBlockers = Array.isArray(workflow?.blockers)
     ? workflow.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
@@ -1931,6 +1938,7 @@ export default function OrderWorkflowV2Page() {
   );
   const facilityTemplateReadyForOcr = Boolean(
     contextForm.facility_id
+      && facilityConfigLoadedKey === facilityConfigReadKey
       && !facilityTemplateStatus.loading
       && facilityTemplateStatus.facilityId === contextForm.facility_id
       && facilityTemplateStatus.templateId
@@ -2419,9 +2427,19 @@ export default function OrderWorkflowV2Page() {
     void loadRowAxisReview();
   }, [router.isReady, orderId, visibleStep,effectiveSelectedDocumentId]);
 
-  const loadFacilityTemplateStatus = async (facilityId: string, callerCurrent: () => boolean = () => true) => {
+  const loadFacilityTemplateStatus = async (facilityId: string, callerCurrent: () => boolean = () => true, acceptedWorkflow: WorkflowV2 | null = null) => {
     const own=capturePageOwner(), request=++facilityReadGenerationRef.current;
-    const current=()=>request===facilityReadGenerationRef.current && ownsPageInput(own) && callerCurrent();
+    const readWorkflow = acceptedWorkflow || workflow;
+    const readKey = acceptedWorkflow ? JSON.stringify([orderId, contextForm.facility_id, effectiveWeekStart, effectiveWeekEnd,
+      workflowContextConfirmed, acceptedWorkflow.facility_id, acceptedWorkflow.week_start, acceptedWorkflow.week_end,
+      acceptedWorkflow.template_version_id, acceptedWorkflow.revision]) : facilityConfigReadKey;
+    // React may not have rendered this operation's accepted revision yet.
+    // Only the checked caller and its exact adopted revision may bridge that render.
+    const current=()=>request===facilityReadGenerationRef.current
+      && (readKey===facilityConfigReadKeyRef.current || (acceptedWorkflow !== null
+        && facilityConfigReadKey===facilityConfigReadKeyRef.current
+        && workflowRevisionRef.current.revision===acceptedWorkflow.revision))
+      && ownsPageInput(own) && callerCurrent();
     if (!current()) return;
     const normalizedFacilityId = facilityId.trim();
     if (!normalizedFacilityId) {
@@ -2450,9 +2468,10 @@ export default function OrderWorkflowV2Page() {
       error: "",
     }));
     try {
-      const res = await apiClient.get(`/facilities/${normalizedFacilityId}`);
+      const selection = facilityReadSelection(orderId, normalizedFacilityId, effectiveWeekStart, effectiveWeekEnd, readWorkflow, workflowContextConfirmed);
+      const res = await apiClient.get(selection.url);
       if (!current()) return;
-      const resolved = res.data?.resolved_config || {};
+      const resolved = facilityReadConfig(selection, res.data);
       const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns);
       const templateId = String(resolved?.fax_template_id || "").trim();
       const templateIds = Array.isArray(resolved?.fax_template_ids)
@@ -2460,12 +2479,12 @@ export default function OrderWorkflowV2Page() {
         : [];
       const facilityTemplateId = String(resolved?.facility_template_id || resolved?.facility_template_name || "").trim();
       setFacilityResolvedConfig(resolved);
+      setFacilityConfigLoadedKey(readKey);
       setFacilityTemplateColumns(resolvedColumns);
       if (canAdoptReadEditorInput("templateColumns")) {
         setFacilityTemplateColumnDraft(resolvedColumns);
         setFacilityTemplateSwapLeft("");
         setFacilityTemplateSwapRight("");
-        setFacilityTemplateMessage("");
       }
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
@@ -2478,6 +2497,7 @@ export default function OrderWorkflowV2Page() {
       return true;
     } catch (err: any) {
       if (!current()) return;
+      setFacilityConfigLoadedKey("");
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
         templateId: "",
@@ -2494,7 +2514,7 @@ export default function OrderWorkflowV2Page() {
         setFacilityTemplateSwapRight("");
       }
     } finally {
-      if (request===facilityReadGenerationRef.current && quadAliveRef.current) {
+      if (current() && quadAliveRef.current) {
         setFacilityTemplateStatus(status=>({...status,loading:false}));
       }
     }
@@ -2534,8 +2554,9 @@ export default function OrderWorkflowV2Page() {
   }, []);
 
   useEffect(() => {
+    if (facilitySaveReadOwnerRef.current?.()) return;
     void loadFacilityTemplateStatus(contextForm.facility_id);
-  }, [contextForm.facility_id]);
+  }, [facilityConfigReadKey]);
 
   useEffect(() => {
     const indices = new Set(facilityTemplateColumnDraft.map((column, idx) => String(column.index ?? idx)));
@@ -2853,6 +2874,9 @@ export default function OrderWorkflowV2Page() {
       return;
     }
     setFacilityTemplateSaving(true);
+    const saveReadOwner = current;
+    facilitySaveReadOwnerRef.current = saveReadOwner;
+    ++facilityReadGenerationRef.current;
     setFacilityTemplateMessage("施設区分列を保存中...");
     setError("");
     try {
@@ -2870,7 +2894,13 @@ export default function OrderWorkflowV2Page() {
       });
       const refreshed = await refreshAll(current, null, adopt);
       if (!refreshed || !current()) return;
-      const templateLoaded = await loadFacilityTemplateStatus(facilityId,current);
+      const acceptedWorkflow = response.data?.workflow as WorkflowV2 | undefined;
+      if (!acceptedWorkflow || acceptedWorkflow.order_id !== orderId
+        || acceptedWorkflow.facility_id !== facilityId || acceptedWorkflow.week_start !== effectiveWeekStart
+        || acceptedWorkflow.week_end !== effectiveWeekEnd || !acceptedWorkflow.template_version_id) {
+        throw new Error("保存応答の注文・施設・週・版が一致しません。");
+      }
+      const templateLoaded = await loadFacilityTemplateStatus(facilityId,current,acceptedWorkflow);
       if (!templateLoaded || !current()) return;
       adopt(() => {
         setFacilityTemplateMessage(
@@ -2880,6 +2910,7 @@ export default function OrderWorkflowV2Page() {
     } catch (err: any) {
       if (current()) setFacilityTemplateMessage(formatApiError(err, "施設区分列の保存に失敗しました"));
     } finally {
+      if (facilitySaveReadOwnerRef.current === saveReadOwner) facilitySaveReadOwnerRef.current = null;
       if (operation===facilitySaveGenerationRef.current && quadAliveRef.current) setFacilityTemplateSaving(false);
     }
   };

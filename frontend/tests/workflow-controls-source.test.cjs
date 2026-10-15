@@ -14,7 +14,7 @@ const migration = 'd55763365c3d2159dc976b130e0cc7a6de5f162f';
 const current = cp.execFileSync('git', ['show', migration + ':' + filename], { cwd: root, encoding: 'utf8' });
 test('current approved output owner/history/action AI/feedback/PDF refusal functions remain exact', () => {
   assert.equal(fs.readFileSync(path.join(root, filename), 'utf8'),
-    cp.execFileSync('git', ['show', '2f00c12633b42ef9bb0822df72b846a022155880:' + filename], { cwd: root, encoding: 'utf8' }),
+    cp.execFileSync('git', ['show', '938da9f6a32ba3c7d7628968bdd47d5d3d0258e2'], { cwd: root, encoding: 'utf8' }),
     'Full current functions, protected grid, render callbacks, receipt and owner guards remain exact');
   const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'd26febd', 'HEAD'];
   for (let i = 1; i < lineage.length; i++)
