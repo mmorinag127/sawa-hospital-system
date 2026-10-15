@@ -73,6 +73,29 @@ def _current_confirmation(snapshot):
     return confirmed
 
 
+def _explicit_saved_fixture(order, workflow, draft):
+    sheet = draft["draft_sheet_json"]
+    if not (isinstance(sheet, dict) and sheet.get("source") == "codex_stg_verification"
+            and draft.get("edited_by") == "codex-stg-verification"):
+        return False
+    actions = workflow["secondary_actions_json"]
+    metadata = actions.get("workflow_v2", {}) if isinstance(actions, dict) else {}
+    if (order["status"] != "sheet_saved" or workflow["state"] != "sheet_saved"
+            or draft["draft_state"] != "saved"
+            or any(row["template_version_id"] is not None for row in (order, workflow, draft))
+            or workflow["evidence_run_id"] is not None or draft["base_evidence_run_id"] is not None
+            or workflow["confirmed_snapshot_id"] is not None
+            or not isinstance(metadata, dict)
+            or any(metadata.get(key) is not None for key in (
+                "bagging_result_id", "output_bundle_id", "template_version_id"))
+            or any(draft.get(key) is not None for key in (
+                "base_menu_snapshot_id", "base_template_resolution_id", "latest_patch_candidate_id"))
+            or "row_ids" in sheet
+            or sheet.get("resolved_week_id") != order["week_code"]):
+        raise ValueError("initial_saved_source_fixture_selection_mismatch")
+    return True
+
+
 def capture_saved_source(session, order_id):
     """Core reads avoid identity-cache state and never flush caller mutations."""
     order_id = _id(order_id)
@@ -91,8 +114,9 @@ def capture_saved_source(session, order_id):
         order = read(Order, order_id)
         workflow = read(OrderWorkflowState, order_id, "order_id")
         draft = read(OrderSheetDraft, workflow["draft_id"])
-        evidence = read(OrderOcrEvidenceRun, workflow["evidence_run_id"])
-        template = read(FacilityTemplateVersion, order["template_version_id"])
+        fixture = _explicit_saved_fixture(order, workflow, draft)
+        evidence = read(OrderOcrEvidenceRun, workflow["evidence_run_id"], optional=fixture)
+        template = read(FacilityTemplateVersion, order["template_version_id"], optional=fixture)
         confirmed = read(OrderConfirmedSnapshot, workflow["confirmed_snapshot_id"], optional=True)
         actions = workflow["secondary_actions_json"]
         if actions is not None and not isinstance(actions, dict):
@@ -112,19 +136,19 @@ def capture_saved_source(session, order_id):
     for row in (workflow, draft, evidence, confirmed, bagging, output):
         if row is not None and row["order_id"] != order_id:
             raise ValueError("initial_saved_source_foreign_order")
-    if template["facility_id"] != order["facility_code"]:
+    if not fixture and template["facility_id"] != order["facility_code"]:
         raise ValueError("initial_saved_source_foreign_facility")
-    if any(row["template_version_id"] != template["id"] for row in (order, workflow, draft, evidence)):
+    if not fixture and any(row["template_version_id"] != template["id"] for row in (order, workflow, draft, evidence)):
         raise ValueError("initial_saved_source_template_mismatch")
-    if draft["base_evidence_run_id"] != evidence["id"]:
+    if not fixture and draft["base_evidence_run_id"] != evidence["id"]:
         raise ValueError("initial_saved_source_evidence_mismatch")
     sheet = draft["draft_sheet_json"]
     if (draft["draft_state"] != "saved" or not isinstance(sheet, dict)
-            or any(not isinstance(sheet.get(key), list) or not sheet[key] for key in ("fields", "rows", "row_ids"))
+            or any(not isinstance(sheet.get(key), list) or not sheet[key] for key in (("fields", "rows") if fixture else ("fields", "rows", "row_ids")))
             or any(not isinstance(row, list) for row in sheet["rows"])
-            or len(sheet["rows"]) != len(sheet["row_ids"])
-            or any(not isinstance(value, str) or not value for value in sheet["row_ids"])
-            or len(set(sheet["row_ids"])) != len(sheet["row_ids"])):
+            or (not fixture and (len(sheet["rows"]) != len(sheet["row_ids"])
+                or any(not isinstance(value, str) or not value for value in sheet["row_ids"])
+                or len(set(sheet["row_ids"])) != len(sheet["row_ids"])))):
         raise ValueError("initial_saved_source_saved_sheet_invalid")
     for row in (bagging, output):
         if row is not None and (row["source_saved_sheet_id"] != draft["id"]
@@ -160,10 +184,11 @@ def validate_saved_source(session, receipt):
                 or set(receipt["selected"]) != set(SELECTED_KEYS)):
             raise ValueError("invalid receipt")
         _id(receipt["order_id"])
+        snapshot = capture_saved_source(session, receipt["order_id"])
         for key in SELECTED_KEYS:
             _id(receipt["selected"][key], optional=key in {
-                "confirmed_snapshot_id", "bagging_result_id", "output_bundle_id"})
-        snapshot = capture_saved_source(session, receipt["order_id"])
+                "confirmed_snapshot_id", "bagging_result_id", "output_bundle_id"}
+                or (snapshot["evidence"] is None and key in {"evidence_run_id", "template_version_id"}))
         if receipt != source_receipt(snapshot):
             raise ValueError("changed receipt")
     except (ValueError, KeyError, TypeError) as exc:
@@ -176,6 +201,8 @@ def current_sheet_payload(snapshot):
 
 
 def accepted_output_payload(snapshot):
+    if snapshot["evidence"] is None:
+        raise ValueError("selected_ocr_required")
     bagging = snapshot["bagging"]
     if not isinstance(bagging, dict) or not isinstance(bagging.get("payload_json"), dict):
         raise ValueError("initial_saved_source_output_invalid")

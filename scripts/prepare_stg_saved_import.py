@@ -80,7 +80,7 @@ def verify_live_initial(initial, token):
             raise ValueError("saved_import_live_facility_configuration_changed:" + entry["facility_id"])
 
 
-def capture(connection, initial, policy, orders):
+def capture(connection, initial, policy, orders, *, snapshots_out=None):
     from sqlalchemy import select
     from sqlalchemy.orm import Session
     from staging_db_target import verify_connection_target
@@ -110,10 +110,54 @@ def capture(connection, initial, policy, orders):
             if set(selected) != set(orders):
                 raise ValueError("saved_import_selected_order_inventory_changed")
             snapshots = [capture_saved_source(session, order_id) for order_id in orders]
-            return prepare_import_master(initial, snapshots, policy)
+            result = prepare_import_master(initial, snapshots, policy)
+            if snapshots_out is not None:
+                snapshots_out.extend(snapshots)
+            return result
     finally:
         if transaction.is_active:
             transaction.rollback()
+
+
+def read_http_evidence(snapshots, token, source_sha):
+    from staging_db_target import read_http
+
+    if not token:
+        raise ValueError("saved_import_live_verification_token_required")
+    fixtures = [s for s in snapshots if s["evidence"] is None]
+    normal = [s for s in snapshots if s["evidence"] is not None]
+    targets = fixtures + normal[:1]
+    evidence = {"source_sha": source_sha, "phase": "before_import_publication", "orders": []}
+    for snapshot in targets:
+        order_id = snapshot["order"]["id"]
+        original = snapshot["draft"]["draft_sheet_json"]
+        record = {"order_id": order_id, "saved_sheet": deepcopy(original), "responses": []}
+        for suffix in ("", "/workflow-v2", "/workflow-v2/sheet"):
+            path = "/api/orders/" + quote(order_id, safe="") + suffix
+            status, raw = read_http("https://web-stg-avlnzjjrca-dt.a.run.app" + path, token)
+            response = {"path": path, "status": status, "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                        "raw_bytes": len(raw), "sheets": []}
+            try:
+                payload = json.loads(raw)
+            except (ValueError, UnicodeError):
+                payload = None
+            def inspect(value, location):
+                if isinstance(value, dict):
+                    if "fields" in value and "rows" in value:
+                        response["sheets"].append({"path": location,
+                            "fields": value["fields"], "rows": value["rows"],
+                            "fields_equal": value["fields"] == original.get("fields"),
+                            "rows_equal": value["rows"] == original.get("rows"),
+                            "whole_sheet_equal": value == original})
+                    for key, item in value.items():
+                        inspect(item, location + "/" + key.replace("~", "~0").replace("/", "~1"))
+                elif isinstance(value, list):
+                    for index, item in enumerate(value):
+                        inspect(item, location + "/" + str(index))
+            inspect(payload, "")
+            record["responses"].append(response)
+        evidence["orders"].append(record)
+    return evidence
 
 
 def run(args):
@@ -156,19 +200,31 @@ def run(args):
         try:
             with engine.connect() as connection:
                 _phase = "saved_capture"
-                result = capture(connection, initial, policy, orders)
+                snapshots = []
+                result = capture(connection, initial, policy, orders, snapshots_out=snapshots)
         finally:
             engine.dispose()
             if previous is None:
                 os.environ.pop("DB_URI", None)
             else:
                 os.environ["DB_URI"] = previous
+    evidence = None
+    if getattr(args, "capture_http_evidence", False):
+        _phase = "http_read_evidence"
+        token = os.environ.get("LIVE_ID_TOKEN", "")
+        evidence = read_http_evidence(snapshots, token, sha)
+        serialized = json.dumps(evidence, ensure_ascii=False, indent=2, allow_nan=False)
+        if token in serialized:
+            raise ValueError("saved_import_http_evidence_credential_rejected")
     _phase = "write_output"
     raw = (json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
     with args.output.open("xb") as stream:
         stream.write(raw)
-    print(json.dumps({"source_sha": sha, "orders": len(orders),
-                      "sha256": hashlib.sha256(raw).hexdigest(), "database_modified": False}))
+    receipt = {"source_sha": sha, "orders": len(orders),
+               "sha256": hashlib.sha256(raw).hexdigest(), "database_modified": False}
+    if evidence is not None:
+        receipt["http_evidence"] = evidence
+    print(json.dumps(receipt, ensure_ascii=False, allow_nan=False))
 
 
 def main():
@@ -178,6 +234,7 @@ def main():
         parser.add_argument("--" + name + "-sha256", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--capture-http-evidence", action="store_true")
     args = parser.parse_args()
     try:
         run(args)

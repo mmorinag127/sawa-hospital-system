@@ -185,6 +185,8 @@ def processing_input(session, binding):
     from src.services.order_service import _build_position_menu_entries_safe
     from src.services.initial_saved_source_service import source_receipt
     from src.services.workflow_attempt_guard_service import _json_snapshot
+    if binding["snapshot"]["evidence"] is None:
+        raise ValueError("selected_ocr_required")
     captured = execution_input(session, binding)
     order = binding["snapshot"]["order"]
     entries = _build_position_menu_entries_safe(order["week_code"], order["facility_code"], session=session)
@@ -209,7 +211,7 @@ def materialization_input_matches(session, order_id, captured):
         return False
     snapshot = binding["snapshot"]
     versions = captured.get("input_versions")
-    return (isinstance(versions, dict)
+    return (snapshot["evidence"] is not None and isinstance(versions, dict)
             and captured.get("draft_id") == snapshot["draft"]["id"]
             and captured.get("evidence_run_id") == snapshot["evidence"]["id"]
             and versions.get("draft") == snapshot["draft"]

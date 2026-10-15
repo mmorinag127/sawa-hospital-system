@@ -186,7 +186,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
             snapshot = imported["snapshot"]
             return {"order_id": order_id, "workflow_revision": snapshot["workflow"]["revision"],
                     "workflow_meta": deepcopy(snapshot["workflow"]["secondary_actions_json"]),
-                    "draft_id": snapshot["draft"]["id"], "evidence_run_id": snapshot["evidence"]["id"],
+                    "draft_id": snapshot["draft"]["id"], "evidence_run_id": snapshot["workflow"]["evidence_run_id"],
                     "draft_base_evidence_run_id": snapshot["draft"]["base_evidence_run_id"],
                     "evidence": snapshot["evidence"], "draft": snapshot["draft"],
                     "configured_input": captured["configured_input"], "physical_menu_entries": captured["physical_menu_entries"],
