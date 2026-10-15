@@ -14,7 +14,7 @@ test('data-writing C1 verification is dispatch opt-in after successful web deplo
     required: false, type: 'boolean', default: false,
   });
   const job = workflow.jobs['deploy-frontend'];
-  assert.deepEqual(job.permissions, { contents: 'read', 'id-token': 'write' });
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read', 'id-token': 'write' });
   const steps = job.steps, deploy = steps.findIndex(s => s.name === 'Deploy web-stg');
   const extra = steps.slice(deploy + 1, deploy + 8);
   assert.equal(extra.length, 7);
