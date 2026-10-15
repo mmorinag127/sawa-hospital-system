@@ -327,6 +327,14 @@ jobs:
           id_token_include_email: true
       - uses: google-github-actions/setup-gcloud@v3
       - uses: astral-sh/setup-uv@v8.1.0
+      - name: Protect current and candidate staging producer images
+        env:
+          PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --current
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$PRODUCER_IMAGE" --component ocr-pipeline
       - name: Deploy and verify same-source OCR producer before worker
         env:
           PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
@@ -351,6 +359,8 @@ jobs:
           set -euo pipefail
           test -n "${HOSPITAL_DELIVERY_ENV:-}"
           test "$(cat hospital-delivery-artifacts/verified-env.txt)" = "$HOSPITAL_DELIVERY_ENV"
+          IMAGE="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT_ID" --format='value(image_summary.fully_qualified_digest)')"
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component backend
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$WORKER_SERVICE" WEB_SERVICE="$WEB_SERVICE" WEB_URL="$WEB_URL" \
           GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
@@ -434,6 +444,7 @@ jobs:
           id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
           id_token_include_email: true
       - uses: google-github-actions/setup-gcloud@v3
+      - uses: astral-sh/setup-uv@v8.1.0
       - name: Deploy web-stg
         env:
           IMAGE: ${{ needs.build-frontend.outputs.image }}
@@ -441,6 +452,10 @@ jobs:
           DEPLOY_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
         run: |
           set -euo pipefail
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          IMAGE="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT_ID" --format='value(image_summary.fully_qualified_digest)')"
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --current
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component frontend
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" WEB_SERVICE="$WEB_SERVICE" WORKER_SERVICE="$WORKER_SERVICE" \
           WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" IMAGE="$IMAGE" ALLOW_WEB_IMAGE_PROMOTION=1 ALLOW_UNAUTHENTICATED_WEB=1 \
           STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" WORKFLOW_V2_DEPLOY_CHECK="$WORKFLOW_V2_DEPLOY_CHECK" \
