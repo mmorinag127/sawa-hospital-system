@@ -17,6 +17,8 @@ def existing(inputs, monkeypatch):
     workflow.update(blockers=['template_unresolved'], revision=2)
     workflow.update(dict.fromkeys(mod.UNSELECTED_RESULT_FIELDS))
     calls = []
+    job = {'ocr_job_id': 'job', 'workflow_attempt_id': 'attempt', 'status': 'done',
+           'order_id': order['id'], 'order_document_id': order['document_id']}
     def request(path, body=None, content_type=None, **kwargs):
         calls.append((path, body, kwargs))
         if path.endswith('/context'):
@@ -29,10 +31,23 @@ def existing(inputs, monkeypatch):
         if path.endswith('/ocr-runs'):
             assert json.loads(body)['mode'] == 'hakodate'
             assert kwargs == {'revision': 3}
-            workflow.update(revision=4, ocr_job={'status': 'done'})
+            workflow.update(revision=4, ocr_job=copy.deepcopy(job))
             return {'workflow': copy.deepcopy(workflow)}
-        if path.endswith('/evidence'):
-            return {'id': 'evidence', 'payload_json': {'hakodate_overlay': {
+        if path == '/orders/' + order['id'] + '/evidence':
+            assert workflow.get('ocr_job') is None
+            return {'id': 'previous-evidence'}
+        if path == '/orders/' + order['id'] + '/workflow-v2/ocr-results':
+            assert workflow['ocr_job'] == job
+            return {'results': [{'ocr_result_id': 'evidence', 'execution_lineage': {
+                'job_id': job['ocr_job_id'], 'workflow_attempt_id': job['workflow_attempt_id']}}]}
+        if path == '/orders/' + order['id'] + '/workflow-v2/ocr-results/evidence':
+            assert workflow['ocr_job'] == job
+            return {'id': 'evidence', 'order_id': order['id'], 'status': 'done',
+                'producer_version': 'hakodate_best_method_pipeline',
+                'payload_json': {'_ocr_execution': {
+                    'job_id': job['ocr_job_id'], 'workflow_attempt_id': job['workflow_attempt_id'],
+                    'evidence_run_id': 'evidence', 'selected_pdf_receipt': {
+                        'order_id': order['id'], 'document_id': order['document_id']}}, 'hakodate_overlay': {
                 'uri': mod.BUCKET + 'overlay.png', 'sheet_review_base_uri': mod.BUCKET + 'corrected.png'},
                 'hakodate_canonical_pipeline': {'metrics': {'row_axis_source': 'fax_intersections',
                     'row_axis_draft_body_row_count': 4, 'row_axis': []}}}}
@@ -46,6 +61,7 @@ def existing(inputs, monkeypatch):
         return copy.deepcopy(state)
     monkeypatch.setattr(mod, 'request', request)
     monkeypatch.setattr(mod, 'download', lambda uri, path: path.write_bytes(raw))
+    monkeypatch.setattr(mod.time, 'sleep', lambda _: pytest.fail('Unexpected polling delay'))
     return inputs, calls
 
 
@@ -105,12 +121,13 @@ def test_failed_upload_explicit_main_runs_hakodate_without_retry(existing, monke
         else:
             real_download(uri, path)
     monkeypatch.setattr(mod, 'download', download)
-    monkeypatch.setattr(mod, 'completed_evidence', lambda *args: True)
     monkeypatch.setattr(sys, 'argv', ['verify', '--manifest', 'manifest', '--output-dir', str(tmp_path / 'out')])
     mod.main()
     assert state['status'] == 'failed'
     writes = [c[0] for c in calls if c[1] is not None]
     assert writes == ['/orders/ORD581f55d6/workflow-v2/context', '/orders/ORD581f55d6/workflow-v2/ocr-runs']
+    assert any(c[0] == '/orders/ORD581f55d6/workflow-v2/ocr-results' for c in calls)
+    assert any(c[0] == '/orders/ORD581f55d6/workflow-v2/ocr-results/evidence' for c in calls)
     folder = tmp_path / 'out' / case['source_order_id']
     scope = json.loads((folder / 'verification-scope.json').read_text())
     assert scope['upload_to_ocr_success'] is False
