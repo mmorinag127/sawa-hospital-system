@@ -92,6 +92,16 @@ jobs:
             tests/integration/test_facility_config_apply.py \
             --junitxml=.logs/pytest-junit.xml \
             -vv 2>&1 | tee .logs/pytest.log
+      - name: Verify initial saved-source preservation
+        working-directory: backend
+        run: |
+          python -m pytest --confcutdir=tests/unit \
+            tests/unit/test_initial_saved_source_service.py \
+            tests/unit/test_initial_saved_import_service.py \
+            tests/unit/test_prepare_stg_saved_import.py \
+            tests/unit/test_initial_saved_fixture_preservation.py \
+            tests/unit/test_saved_fixture_http_evidence.py \
+            --junitxml=.logs/saved-source-junit.xml -q
       - name: Upload backend logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -115,6 +115,7 @@ jobs:
             --policy tmp/canonical-bootstrap/policy.json --policy-sha256 "$POLICY_SHA256" \
             --orders tmp/canonical-bootstrap/orders.json --orders-sha256 "$ORDERS_SHA256" \
             --source-sha "$GITHUB_SHA" --output tmp/canonical-bootstrap/master.json \
+            --capture-http-evidence \
             > tmp/canonical-bootstrap/receipt.json
       - name: Publish new object without overwriting an existing canonical source
         shell: bash

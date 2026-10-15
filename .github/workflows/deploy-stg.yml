@@ -513,3 +513,36 @@ jobs:
           path: tmp/output-source-live/
           retention-days: 7
           if-no-files-found: error
+
+      - name: Initialize opted-in OCR UI evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        run: |
+          mkdir -p tmp/ocr-live
+          python3 -c 'import json,os,pathlib; pathlib.Path("tmp/ocr-live/result.json").write_text(json.dumps({"status":"not-verified","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in staging GET-only workflow-v2 Step2 OCR verification"}))'
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        with:
+          name: live-ocr-stg
+          path: tmp/ocr-verification
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        with:
+          node-version: '20'
+      - name: Prepare opted-in OCR UI verification
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+      - name: Verify opted-in existing OCR workflow-v2 Step2 UI
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        env:
+          LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
+        run: node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        with:
+          name: live-ocr-ui-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/ocr-live/
+          retention-days: 7
+          if-no-files-found: error

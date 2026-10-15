@@ -780,6 +780,8 @@ def _require_workflow_template_version_from_context(
     from src.services.initial_saved_import_service import get_binding
     imported = get_binding(session, order.id)
     if imported is not None:
+        if imported["snapshot"]["template"] is None:
+            return None, "template_version_required"
         return imported["snapshot"]["template"]["id"], None
     template_version_id, identity_error = _workflow_template_version_identity(workflow, meta)
     if identity_error == "template_version_mismatch":
@@ -1518,6 +1520,8 @@ def _require_existing_workflow_template_version(
     from src.services.initial_saved_import_service import get_binding
     imported = get_binding(session, order.id, template_version_id=order.template_version_id)
     if imported is not None:
+        if imported["snapshot"]["template"] is None:
+            return None, "template_version_required"
         return imported["snapshot"]["template"]["id"], None
     with session.no_autoflush:
         template_version_id, error = _workflow_template_version_identity(workflow, meta)
@@ -3876,10 +3880,21 @@ def _recover_confirmed_artifacts_from_snapshot(
 
 
 def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    from copy import deepcopy
     with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
+        from src.services.initial_saved_import_service import get_binding
+        imported = get_binding(session, order_id)
+        if imported is not None and imported["snapshot"]["evidence"] is None:
+            draft = imported["snapshot"]["draft"]
+            return {"saved_sheet_id": draft["id"], "order_id": draft["order_id"],
+                    "template_version_id": draft["template_version_id"],
+                    "source_ocr_result_id": draft["base_evidence_run_id"],
+                    "sheet": deepcopy(draft["draft_sheet_json"]), "state": draft["draft_state"],
+                    "edited_by": draft["edited_by"], "edited_at": draft["edited_at"],
+                    "created_at": draft["created_at"]}, None
         workflow = _get_workflow_readonly(session, order.id)
         if workflow is None:
             return None, "workflow_not_initialized"
@@ -3927,6 +3942,8 @@ def _build_sheet_from_selected_ocr(
         imported = get_binding(session, order_id)
         if imported is not None:
             snapshot = imported["snapshot"]
+            if snapshot["evidence"] is None:
+                return None, "selected_ocr_required"
             if evidence_run_override is not None and evidence_run_override.get("id") != snapshot["evidence"]["id"]:
                 return None, "initial_saved_import_candidate_not_selected"
             return {"order_id": order_id, "selected_ocr_result_id": snapshot["evidence"]["id"],
