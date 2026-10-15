@@ -147,7 +147,7 @@ def test_entrypoint_resolves_repo_packages_without_cwd_or_pythonpath_and_stops_b
     env.pop("GITHUB_ACTIONS", None)
     completed = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "verify_stg_output_source.py"), "--output", str(output)],
-        cwd=Path("/private/tmp"),
+        cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
