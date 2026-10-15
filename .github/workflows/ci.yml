@@ -96,6 +96,7 @@ jobs:
         working-directory: backend
         run: |
           python -m pytest --confcutdir=tests/unit \
+            tests/unit/test_menu_normalization_import.py \
             tests/unit/test_initial_saved_source_service.py \
             tests/unit/test_initial_saved_import_service.py \
             tests/unit/test_prepare_stg_saved_import.py \
