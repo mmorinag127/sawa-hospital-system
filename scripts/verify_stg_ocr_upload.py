@@ -4,6 +4,7 @@ import argparse
 import base64
 from datetime import date
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -17,6 +18,10 @@ import uuid
 
 BASE = 'https://web-stg-avlnzjjrca-dt.a.run.app/api'
 BUCKET = 'gs://sawahospitalsystem-stg-raw/'
+_codec_spec = importlib.util.spec_from_file_location(
+    'verification_storage_uri', Path(__file__).resolve().parents[1] / 'ocr_pipeline/app/storage_uri.py')
+_codec = importlib.util.module_from_spec(_codec_spec)
+_codec_spec.loader.exec_module(_codec)
 
 
 def request(path, body=None, content_type=None, method=None, revision=None):
@@ -35,9 +40,19 @@ def request(path, body=None, content_type=None, method=None, revision=None):
 
 
 def download(uri, path):
-    if not uri.startswith(BUCKET):
+    source = _codec.parse_gcs_uri(uri)
+    if source.bucket != 'sawahospitalsystem-stg-raw':
         raise ValueError('Verification artifacts must belong to staging')
-    subprocess.run(['gcloud', 'storage', 'cp', uri, str(path)], check=True)
+    expected_query = '' if source.generation is None else 'generation=' + source.generation
+    if source.query != expected_query or '#' in uri:
+        raise ValueError('Verification artifact query/fragment is not an exact storage identity')
+    if any(char in source.object_name for char in '*?[]#') or any(
+            ord(char) < 32 or ord(char) == 127 for char in source.object_name):
+        raise ValueError('Verification artifact object contains ambiguous CLI characters')
+    cli_uri = 'gs://' + source.bucket + '/' + source.object_name
+    if source.generation is not None:
+        cli_uri += '#' + source.generation
+    subprocess.run(['gcloud', 'storage', 'cp', cli_uri, str(path)], check=True)
 
 
 def save_json(folder, name, value):
@@ -82,6 +97,89 @@ def workflow_revision(workflow, order_id):
     if workflow.get('order_id') != order_id or type(revision) is not int or revision < 1:
         raise ValueError('Workflow owner/revision mismatch')
     return revision
+
+
+def canonical_projection_id(case, selection):
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                         separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    # Internal canonical_facility_lineage projection identity, checked against real artifacts.
+    return 'CFV' + digest({'facility_id': case['facility_id'],
+                          'authored_version_id': selection['version']['version_id'],
+                          'snapshot_digest': digest(selection['version'])})
+
+
+def verify_resume_identity(case, selection, state, order, workflow):
+    for key in ('existing_uploaded_pdf_id', 'expected_order_id', 'expected_document_id'):
+        if not isinstance(case.get(key), str) or not case[key].strip():
+            raise ValueError('Explicit existing upload/order/document identities required')
+    document_id = verify_owner(case, state, order)
+    version = order.get('current_version') or {}
+    selected_input = version.get('selected_version_input')
+    identity_keys = ('document_id', 'order_id', 'facility_code', 'week_code',
+                     'is_current', 'message_id', 'storage_uri')
+    if not isinstance(selected_input, dict) or any(selected_input.get(key) != version.get(key) for key in identity_keys):
+        raise ValueError('Current version selected input identity mismatch')
+    start, end = case['week_id'].split('@', 1)[1].split('~')
+    projection = canonical_projection_id(case, selection)
+    if (state.get('id') != case['existing_uploaded_pdf_id']
+            or state.get('current_order_id') != case['expected_order_id']
+            or document_id != case['expected_document_id']
+            or state.get('skip_ocr') is not False
+            or state.get('facility_hint') != case['facility_id']
+            or state.get('week_hint') != case['week_id']
+            or not state.get('message_id') or order.get('message_id') != state['message_id']
+            or version.get('message_id') != state['message_id']
+            or version.get('order_id') != order['id'] or version.get('is_current') is not True
+            or version.get('facility_code') != case['facility_id'] or version.get('week_code') != case['week_id']
+            or not state.get('storage_uri') or order.get('document') != state['storage_uri']
+            or version.get('storage_uri') != state['storage_uri']
+            or order.get('template_version_id') != projection):
+        raise ValueError('Existing upload identity/canonical selection mismatch')
+    expected_context = {'facility_id': case['facility_id'], 'week_start': start,
+                        'week_end': end, 'template_version_id': projection}
+    if not all(key in workflow for key in expected_context):
+        raise ValueError('Workflow context fields missing')
+    observed_context = {key: workflow.get(key) for key in expected_context}
+    marker = 'workflow_not_initialized' in (workflow.get('blockers') or [])
+    if marker:
+        if workflow.get('state') != 'uploaded' or any(value is not None for value in observed_context.values()):
+            raise ValueError('Uninitialized workflow marker/context mismatch')
+    elif observed_context != expected_context:
+        raise ValueError('Existing workflow selection conflicts with upload owner')
+    workflow_revision(workflow, case['expected_order_id'])
+
+
+def resume_upload(case, selection, folder):
+    if case.get('identity_verified') is not True:
+        raise ValueError('FAX facility/week must be visually verified before retry')
+    for key in ('existing_uploaded_pdf_id', 'expected_order_id', 'expected_document_id'):
+        if not isinstance(case.get(key), str) or not case[key].strip():
+            raise ValueError('Explicit existing upload/order/document identities required')
+    uploaded_id = case['existing_uploaded_pdf_id']
+    path = '/ingest/uploads/' + quote(uploaded_id, safe='')
+    state = request(path)
+    oid = quote(case['expected_order_id'], safe='')
+    order = request(f'/orders/{oid}')
+    workflow = request(f'/orders/{oid}/workflow-v2')
+    verify_resume_identity(case, selection, state, order, workflow)
+    current_pdf = folder / 'existing-original.pdf'
+    download(state['storage_uri'], current_pdf)
+    if hashlib.sha256(current_pdf.read_bytes()).hexdigest() != case['sha256']:
+        raise ValueError('Existing stored FAX hash mismatch')
+    if resolve_selection(case) != selection:
+        raise ValueError('Canonical facility selection changed before retry')
+    public_state = {key: value for key, value in state.items() if key not in ('lease_owner', 'lease_token')}
+    save_json(folder, 'resume-before.json', {'upload': public_state, 'order': order, 'workflow': workflow})
+    if state.get('status') != 'completed':
+        # No lease override or fallback upload: the operator API owns restart guards.
+        result = request(path + '/retry', method='POST')
+        if result.get('accepted') is not True or (result.get('item') or {}).get('id') != uploaded_id:
+            raise RuntimeError('Existing upload retry not accepted')
+        public_result = {**result, 'item': {key: value for key, value in result['item'].items()
+                                          if key not in ('lease_owner', 'lease_token')}}
+        save_json(folder, 'resume-retry.json', public_result)
+    return {'uploaded_pdf_id': uploaded_id, 'resumed': True}
 
 
 def apply_verified_quad(case, order_id, document_id=None, folder=None):
@@ -165,17 +263,12 @@ def main():
             raise ValueError('FAX facility/week must be visually verified before upload')
         selection = resolve_selection(case)
         save_json(folder, 'facility-selection.json', selection)
-        boundary = uuid.uuid4().hex
-        parts = []
-        for name, value in [('facility_hint', case['facility_id']), ('week_hint', case['week_id']),
-                            ('effective_date', case['effective_date']),
-                            ('expected_canonical_revision', selection['revision']),
-                            ('selected_version_id', selection['version']['version_id'])]:
-            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="pdf_file"; filename="{case["source_order_id"]}.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode() + raw + b'\r\n')
-        parts.append(f'--{boundary}--\r\n'.encode())
-        upload = request('/ingest/upload', b''.join(parts), 'multipart/form-data; boundary=' + boundary)
-        (folder / 'upload.json').write_text(json.dumps(upload, ensure_ascii=False, indent=2))
+        resume_keys = ('existing_uploaded_pdf_id', 'expected_order_id', 'expected_document_id')
+        if any(key in case for key in resume_keys):
+            upload = resume_upload(case, selection, folder)
+        else:
+            upload = upload_new(case, selection, raw)
+        save_json(folder, 'upload.json', upload)
         if upload.get('duplicate_blocked'):
             raise RuntimeError('Duplicate FAX; no implicit rerun is permitted')
         uploaded_id = upload['uploaded_pdf_id']
@@ -195,6 +288,8 @@ def main():
                 save_json(folder, 'order.json', order)
                 document_id = verify_owner(case, state, order)
                 workflow = request(f'/orders/{oid}/workflow-v2')
+                if any(key in case for key in resume_keys):
+                    verify_resume_identity(case, selection, state, order, workflow)
                 save_json(folder, 'workflow.json', workflow)
                 try:
                     evidence = request(f'/orders/{oid}/evidence')
@@ -239,6 +334,19 @@ def main():
         assert metrics['row_axis_source'] == 'fax_intersections', metrics
         assert metrics['row_axis_draft_body_row_count'] == case['expected_menu_rows'], metrics
         print(json.dumps({'source_order':case['source_order_id'], 'stg_order':oid, 'commit':os.environ.get('GITHUB_SHA'), 'row_axis':metrics['row_axis']}, ensure_ascii=False), flush=True)
+
+
+def upload_new(case, selection, raw):
+    boundary = uuid.uuid4().hex
+    parts = []
+    for name, value in [('facility_hint', case['facility_id']), ('week_hint', case['week_id']),
+                        ('effective_date', case['effective_date']),
+                        ('expected_canonical_revision', selection['revision']),
+                        ('selected_version_id', selection['version']['version_id'])]:
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="pdf_file"; filename="{case["source_order_id"]}.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode() + raw + b'\r\n')
+    parts.append(f'--{boundary}--\r\n'.encode())
+    return request('/ingest/upload', b''.join(parts), 'multipart/form-data; boundary=' + boundary)
 
 
 if __name__ == '__main__':
