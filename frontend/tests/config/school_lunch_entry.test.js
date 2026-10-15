@@ -12,7 +12,7 @@ test("school lunch links establish the shared HttpOnly session before navigation
   const shell = read("frontend/src/components/UnifiedShell.tsx");
 
   assert.match(navigation, /getStoredAuthHeader\(\)/);
-  assert.match(navigation, /SCHOOL_LUNCH_HOME = "\/school-lunch\/implementation-price-tables"/);
+  assert.match(navigation, /SCHOOL_LUNCH_HOME = "\/school-lunch"/);
   assert.match(navigation, /\/school-lunch\/api\/backend\/shared-auth\/me/);
   assert.match(navigation, /headers: \{ Authorization: authorization \}/);
   assert.match(navigation, /credentials: "same-origin"/);
