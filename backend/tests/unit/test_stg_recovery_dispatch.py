@@ -26,6 +26,13 @@ def test_normal_jobs_dependencies_and_checks_unchanged():
     assert new['env'] == old['env']
     for name, job in old['jobs'].items():
         if name != 'source-gate':
+            if name in ('deploy-backend', 'deploy-frontend'):
+                original = 'IMAGE="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT_ID" --format=\'value(image_summary.fully_qualified_digest)\')"'
+                replacement = 'IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"'
+                matches = [step for step in job['steps'] if original in step.get('run', '')]
+                assert len(matches) == 1
+                assert matches[0]['run'].count(original) == 1
+                matches[0]['run'] = matches[0]['run'].replace(original, replacement)
             assert new['jobs'][name] == job
     old_steps = old['jobs']['source-gate']['steps']
     new_steps = new['jobs']['source-gate']['steps'][1:]
@@ -42,7 +49,12 @@ def test_recovery_is_in_authorized_workflow_with_original_steps():
     current = workflow()
     recovery = current['jobs']['recover-web']
     old = baseline('.github/workflows/recover-stg-web-image.yml')
-    assert recovery['steps'] == old['jobs']['recover-web']['steps']
+    expected_steps = old['jobs']['recover-web']['steps']
+    build = next(step for step in expected_steps if step.get('id') == 'build')
+    build['run'] = build['run'].replace(
+        'gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" --format=\'value(image_summary.fully_qualified_digest)\'',
+        'docker image inspect "$image" --format \'{{index .RepoDigests 0}}\'')
+    assert recovery['steps'] == expected_steps
     assert recovery['needs'] == 'source-gate'
     assert recovery['permissions'] == old['permissions']
     assert recovery['if'] == ("github.ref == 'refs/heads/develop' && "

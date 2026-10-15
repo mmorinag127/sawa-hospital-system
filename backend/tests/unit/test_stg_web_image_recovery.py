@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT))
 p = importlib.import_module('stg_image_protection')
+r_digest = importlib.import_module('registry_image_digest')
 r = importlib.import_module('recover_stg_web_image')
 IMAGE = p.PREFIX + 'frontend@sha256:' + 'a' * 64
 OLD_IMAGE = p.PREFIX + 'frontend@sha256:' + 'b' * 64
@@ -110,15 +111,33 @@ def test_policy_race_stops_before_write(monkeypatch):
 
 
 def test_tag_exact_digest_no_delete_or_iam(monkeypatch):
-    cloud = Mock(return_value={'image_summary': {'digest': 'sha256:' + 'a' * 64}})
+    import hashlib
+    manifest = b'{"schemaVersion":2}'
+    digest = hashlib.sha256(manifest).hexdigest()
+    image = p.PREFIX + 'frontend@sha256:' + digest
+    cloud = Mock(side_effect=AssertionError('No metadata or IAM API is needed'))
     command = Mock(return_value='')
     monkeypatch.setattr(p, 'cloud', cloud)
     monkeypatch.setattr(p, 'command', command)
-    p.protect_image(IMAGE, 'frontend')
-    tag = p.PREFIX + 'frontend:stg-protected-' + 'a' * 64
-    command.assert_called_once_with(['gcloud', 'artifacts', 'docker', 'tags', 'add', IMAGE, tag,
+    read = Mock(return_value=(200, manifest))
+    monkeypatch.setattr(r_digest, 'read_http', read)
+    monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
+    p.protect_image(image, 'frontend')
+    tag = p.PREFIX + 'frontend:stg-protected-' + digest
+    command.assert_called_once_with(['gcloud', 'artifacts', 'docker', 'tags', 'add', image, tag,
                                      f'--project={p.PROJECT}', '--quiet'])
-    assert all('delete' not in c.args and 'iam' not in c.args for c in cloud.call_args_list)
+    cloud.assert_not_called()
+    assert read.call_args.args == (f'https://{r_digest.REGISTRY}/v2/{p.PROJECT}/backend/frontend/manifests/stg-protected-{digest}', 'test-token')
+
+
+@pytest.mark.parametrize('status,manifest', [(404, b'not found'), (403, b'denied'), (200, b'wrong manifest')])
+def test_tag_digest_mismatch_or_registry_failure_stops(monkeypatch, status, manifest):
+    monkeypatch.setattr(p, 'command', Mock(return_value=''))
+    monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
+    monkeypatch.setattr(r_digest, 'read_http', Mock(return_value=(status, manifest)))
+    expected = 'protected_tag_digest_mismatch' if status == 200 else 'registry_manifest_http_failure'
+    with pytest.raises(r.Blocked, match=expected):
+        p.protect_image(IMAGE, 'frontend')
 
 
 @pytest.fixture

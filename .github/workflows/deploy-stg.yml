@@ -141,7 +141,7 @@ jobs:
             --label "sawa.git_sha=$GITHUB_SHA" --label sawa.release_branch=develop \
             -t "$image" "$deploy_dir"
           docker push "$image"
-          digest="$(gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" --format='value(image_summary.fully_qualified_digest)')"
+          digest="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
           echo "image=$digest" >> "$GITHUB_OUTPUT"
       - name: Recover image only and verify runtime database and cleanup protection
         env:
@@ -481,7 +481,7 @@ jobs:
           set -euo pipefail
           test -n "${HOSPITAL_DELIVERY_ENV:-}"
           test "$(cat hospital-delivery-artifacts/verified-env.txt)" = "$HOSPITAL_DELIVERY_ENV"
-          IMAGE="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT_ID" --format='value(image_summary.fully_qualified_digest)')"
+          IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"
           uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component backend
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$WORKER_SERVICE" WEB_SERVICE="$WEB_SERVICE" WEB_URL="$WEB_URL" \
           GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
@@ -575,7 +575,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
-          IMAGE="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT_ID" --format='value(image_summary.fully_qualified_digest)')"
+          IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"
           uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --current
           uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component frontend
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" WEB_SERVICE="$WEB_SERVICE" WORKER_SERVICE="$WORKER_SERVICE" \
