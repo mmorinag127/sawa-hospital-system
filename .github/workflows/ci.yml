@@ -102,6 +102,7 @@ jobs:
             tests/unit/test_initial_saved_fixture_preservation.py \
             tests/unit/test_saved_fixture_http_evidence.py \
             tests/unit/test_stg_preflight_entrypoint.py \
+            tests/unit/test_hospital_delivery_config.py \
             --junitxml=.logs/saved-source-junit.xml -q
       - name: Upload backend logs
         if: always()
