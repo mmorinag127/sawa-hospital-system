@@ -668,13 +668,15 @@ def _materialize_facility_template_for_template_id(
     return deepcopy(authored["fax_template"])
 
 
-def _read_order_authored_facility_config(order_id: str, facility_id: str | None = None) -> dict[str, Any]:
+def _read_order_authored_facility_config(order_id: str, facility_id: str | None = None, *, include_context: bool = False) -> dict[str, Any]:
     from src.services import canonical_facility_lineage as lineage
     from src.services.canonical_facility_store import CanonicalStoreError
     from src.services.workflow_attempt_guard_service import current_workflow_execution
 
     try:
         configured_execution = current_nonworkflow_execution() is not None or current_workflow_execution() is not None
+        if include_context and configured_execution:
+            raise ValueError("order_facility_read_execution_context_invalid")
         if configured_execution and facility_id is not None:
             return config_service.get_authored_facility_config(facility_id)
         with session_scope() as session, session.no_autoflush:
@@ -695,9 +697,21 @@ def _read_order_authored_facility_config(order_id: str, facility_id: str | None 
             receipt = lineage.verify_projection(projection)
             if receipt["facility_id"] != owner:
                 raise ValueError("original_template_configured_source_mismatch")
-            return config_service.validate_selected_authored_facility_config(owner, receipt["authored_version"])
+            config = config_service.validate_selected_authored_facility_config(owner, receipt["authored_version"])
+            if include_context:
+                _, start, end = _parse_sheet_week_value(order.week_code)
+                if start is None or end is None:
+                    raise ValueError("week_range_required")
+                return {"order_id": order.id, "facility_id": owner, "template_version_id": selected_id,
+                        "week_start": start.isoformat(), "week_end": end.isoformat(),
+                        "source": "canonical_json", "config": config}
+            return config
     except CanonicalStoreError as exc:
         raise ValueError(str(exc)) from exc
+
+
+def get_order_facility_config(order_id: str) -> dict[str, Any]:
+    return _read_order_authored_facility_config(order_id, include_context=True)
 
 
 def _resolve_effective_sheet_template(

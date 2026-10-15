@@ -6,6 +6,7 @@ import { useRouter } from "next/router";
 import Link from "next/link";
 
 import { apiClient, hasActiveSessionAuthHeader } from "../../../services/apiClient";
+import { facilityReadSelection, facilityReadConfig } from "../../../services/orderFacilityRead";
 import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
 import TopNav from "../../../components/TopNav";
 import OutputHistoryPanel from "../../../components/OutputHistoryPanel";
@@ -1845,6 +1846,11 @@ export default function OrderWorkflowV2Page() {
       && workflow?.week_end
       && !["uploaded", "facility_template_unresolved"].includes(String(workflow?.state || "")),
   );
+  const facilityConfigReadKey = JSON.stringify([orderId, contextForm.facility_id, effectiveWeekStart, effectiveWeekEnd,
+    workflowContextConfirmed, workflow?.facility_id, workflow?.week_start, workflow?.week_end, workflow?.template_version_id, workflow?.revision]);
+  const facilityConfigReadKeyRef = useRef(facilityConfigReadKey);
+  facilityConfigReadKeyRef.current = facilityConfigReadKey;
+  const [facilityConfigLoadedKey, setFacilityConfigLoadedKey] = useState("");
   const workflowBlockers = Array.isArray(workflow?.blockers)
     ? workflow.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
@@ -1931,6 +1937,7 @@ export default function OrderWorkflowV2Page() {
   );
   const facilityTemplateReadyForOcr = Boolean(
     contextForm.facility_id
+      && facilityConfigLoadedKey === facilityConfigReadKey
       && !facilityTemplateStatus.loading
       && facilityTemplateStatus.facilityId === contextForm.facility_id
       && facilityTemplateStatus.templateId
@@ -2421,7 +2428,8 @@ export default function OrderWorkflowV2Page() {
 
   const loadFacilityTemplateStatus = async (facilityId: string, callerCurrent: () => boolean = () => true) => {
     const own=capturePageOwner(), request=++facilityReadGenerationRef.current;
-    const current=()=>request===facilityReadGenerationRef.current && ownsPageInput(own) && callerCurrent();
+    const readKey = facilityConfigReadKey;
+    const current=()=>request===facilityReadGenerationRef.current && readKey===facilityConfigReadKeyRef.current && ownsPageInput(own) && callerCurrent();
     if (!current()) return;
     const normalizedFacilityId = facilityId.trim();
     if (!normalizedFacilityId) {
@@ -2450,9 +2458,10 @@ export default function OrderWorkflowV2Page() {
       error: "",
     }));
     try {
-      const res = await apiClient.get(`/facilities/${normalizedFacilityId}`);
+      const selection = facilityReadSelection(orderId, normalizedFacilityId, effectiveWeekStart, effectiveWeekEnd, workflow, workflowContextConfirmed);
+      const res = await apiClient.get(selection.url);
       if (!current()) return;
-      const resolved = res.data?.resolved_config || {};
+      const resolved = facilityReadConfig(selection, res.data);
       const resolvedColumns = normalizeFacilityTemplateColumns(resolved?.fax_template?.columns);
       const templateId = String(resolved?.fax_template_id || "").trim();
       const templateIds = Array.isArray(resolved?.fax_template_ids)
@@ -2460,6 +2469,7 @@ export default function OrderWorkflowV2Page() {
         : [];
       const facilityTemplateId = String(resolved?.facility_template_id || resolved?.facility_template_name || "").trim();
       setFacilityResolvedConfig(resolved);
+      setFacilityConfigLoadedKey(readKey);
       setFacilityTemplateColumns(resolvedColumns);
       if (canAdoptReadEditorInput("templateColumns")) {
         setFacilityTemplateColumnDraft(resolvedColumns);
@@ -2478,6 +2488,7 @@ export default function OrderWorkflowV2Page() {
       return true;
     } catch (err: any) {
       if (!current()) return;
+      setFacilityConfigLoadedKey("");
       setFacilityTemplateStatus({
         facilityId: normalizedFacilityId,
         templateId: "",
@@ -2494,7 +2505,7 @@ export default function OrderWorkflowV2Page() {
         setFacilityTemplateSwapRight("");
       }
     } finally {
-      if (request===facilityReadGenerationRef.current && quadAliveRef.current) {
+      if (current() && quadAliveRef.current) {
         setFacilityTemplateStatus(status=>({...status,loading:false}));
       }
     }
@@ -2535,7 +2546,7 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     void loadFacilityTemplateStatus(contextForm.facility_id);
-  }, [contextForm.facility_id]);
+  }, [facilityConfigReadKey]);
 
   useEffect(() => {
     const indices = new Set(facilityTemplateColumnDraft.map((column, idx) => String(column.index ?? idx)));
