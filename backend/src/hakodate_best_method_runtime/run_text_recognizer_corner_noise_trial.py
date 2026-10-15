@@ -52,6 +52,7 @@ from src.services.yomitoku_text_recognizer_topk import (  # noqa: E402
     YomitokuTextRecognizerTopKWrapper,
     validate_recognizer_result,
 )
+from src.services.recognizer_diagnostics import diagnosed  # noqa: E402
 
 
 DEFAULT_BASE = WORKSPACE / "tmp" / "outer_quad_eval_correct_20260426"
@@ -69,6 +70,7 @@ TRIAL_ENGINE = "yomitoku_text_recognizer_corner_noise_trial"
 DEFAULT_RECOGNIZER_MODES = ("raw", "clean", "corner_cc")
 
 
+@diagnosed("initialize")
 def _load_text_recognizer(device: str):
     from yomitoku import TextRecognizer  # noqa: PLC0415
 

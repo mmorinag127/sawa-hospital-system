@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from src.services.recognizer_diagnostics import diagnosed, phase
+
 
 def _validate_point_identity(points: Any, expected_points: Any) -> None:
     try:
@@ -96,13 +98,15 @@ class YomitokuTextRecognizerTopKWrapper:
         self.sequence_top_k = max(1, int(sequence_top_k))
         self.max_decode_steps = max(1, int(max_decode_steps))
 
+    @diagnosed("recognize")
     def recognize(self, image_bgr: np.ndarray, *, points: list[list[list[int]]] | None) -> dict[str, Any]:
         requested_points = deepcopy(points)
         if requested_points is not None:
             _validate_point_identity(points, requested_points)
             if len(requested_points) == 0:
                 return {"contents": [], "scores": [], "directions": [], "candidates": [], "points": []}
-        preprocess_result = self.recognizer.preprocess(image_bgr, points)
+        with phase("preprocess"):
+            preprocess_result = self.recognizer.preprocess(image_bgr, points)
         if not isinstance(preprocess_result, tuple):
             raise TypeError("TextRecognizer.preprocess returned non-tuple result")
         if len(preprocess_result) == 3:
@@ -121,21 +125,24 @@ class YomitokuTextRecognizerTopKWrapper:
             batch_points = points[offset : offset + len(data)]
             if len(batch_points) != len(data):
                 raise ValueError("recognizer_result_batch_cardinality_invalid")
-            probs = self._run_inference(data)
+            with phase("inference"):
+                probs = self._run_inference(data)
             if len(probs) != len(batch_points):
                 raise ValueError("recognizer_result_batch_cardinality_invalid")
-            postprocessed = self.recognizer.postprocess(probs, batch_points)
+            with phase("postprocess"):
+                postprocessed = self.recognizer.postprocess(probs, batch_points)
             if not isinstance(postprocessed, (tuple, list)) or len(postprocessed) != 3:
                 raise ValueError("recognizer_postprocess_result_invalid")
             batch_contents, batch_scores, batch_directions = postprocessed
             batch_candidates = []
-            for row in probs.detach().cpu():
-                batch_candidates.append(
-                    [
-                        candidate.__dict__
-                        for candidate in self._sequence_candidates(row)
-                    ]
-                )
+            with phase("candidates"):
+                for row in probs.detach().cpu():
+                    batch_candidates.append(
+                        [
+                            candidate.__dict__
+                            for candidate in self._sequence_candidates(row)
+                        ]
+                    )
             validate_recognizer_result(
                 {"contents": batch_contents, "scores": batch_scores, "directions": batch_directions,
                  "candidates": batch_candidates, "points": batch_points},
