@@ -10,7 +10,47 @@ const phases = new Set([
   'verify-deploy-version', 'await-workflow-reads', 'verify-live-identity',
   'verify-visible-ocr-image', 'capture-visible-ocr-image', 'capture-workflow-page',
   'validate-readonly', 'finished',
+  'await-network-idle', 'verify-review-state', 'open-step2', 'verify-review-controls', 'verify-evidence-text',
 ]);
+
+export function diagnosticTimeline(result, now = () => Date.now()) {
+  let active;
+  const end = () => {
+    if (!active) return;
+    active.endedAt = now();
+    active.elapsedMs = active.endedAt - active.startedAt;
+    active = null;
+  };
+  return {
+    begin(check) {
+      assert.ok(phases.has(check));
+      end();
+      result.phase = check;
+      active = { check, startedAt: now() };
+      (result.timings ||= []).push(active);
+    },
+    end,
+    fail(error) {
+      end();
+      result.failure = { check: phases.has(result.phase) ? result.phase : 'unknown-phase',
+        type: error?.name === 'TimeoutError' ? 'TimeoutError'
+          : error?.name === 'AssertionError' ? 'AssertionError' : 'other' };
+    },
+  };
+}
+
+export async function captureFailureScreen(page, origin, orderId, output) {
+  if (!page) return false;
+  try {
+    const url = new URL(page.url());
+    if (url.origin !== origin || url.pathname !== `/hospital/orders/${encodeURIComponent(orderId)}/workflow-v2`) return false;
+    if (await page.locator('input[type="password"], input[autocomplete="username"], input[autocomplete="current-password"]').count()) return false;
+    if (await page.getByRole('button', { name: /ログイン|sign in|log in/i }).count()) return false;
+    if (await page.locator('main .step-nav').count() !== 1) return false;
+    await page.screenshot({ path: resolve(output, 'failure-workflow.png'), fullPage: true, timeout: 5000 });
+    return true;
+  } catch { return false; }
+}
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -119,6 +159,8 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
   };
   let browser;
   let context;
+  let page;
+  const diagnostics = diagnosticTimeline(result);
   let releaseExternalRequests = () => {};
   try {
     assert.equal(isAllowedOutputSourceOrigin(origin), true);
@@ -157,7 +199,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       }
       return route.continue();
     });
-    const page = await context.newPage();
+    page = await context.newPage();
     const workflowRead = settleResponse(page.waitForResponse(response => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.origin === origin
@@ -191,7 +233,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.ok(expectedReads.some(item => item.pathname.endsWith('/workflow-v2') && item.status === 200));
     assert.ok(expectedReads.some(item => item.pathname.endsWith('/ocr-results') && item.status === 200));
     assert.ok(expectedReads.some(item => item.pathname === `/api/orders/${identity.orderId}` && item.status === 200));
-    result.phase = 'verify-live-identity';
+    diagnostics.begin('verify-live-identity');
     assert.equal(liveWorkflow.order_id, identity.orderId);
     assert.equal(liveWorkflow.ocr_job?.order_id, identity.orderId);
     assert.equal(liveWorkflow.ocr_job?.order_document_id, identity.documentId);
@@ -206,21 +248,28 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     const verifiedOverlayUrl = nonEmpty(liveEvidence.overlay_url, 'live-overlay-url');
     allowedExternalUrls.add(verifiedOverlayUrl);
     releaseExternalRequests();
+    diagnostics.begin('await-network-idle');
     await page.waitForLoadState('networkidle');
+    diagnostics.end();
     if (identity.expectedOutcome === 'recognition_review_required') {
+      diagnostics.begin('verify-review-state');
       assert.equal(liveWorkflow.ocr_job?.status, 'failed');
       assert.equal(liveWorkflow.ocr_job?.result_state, 'review_required');
       assert.equal(liveEvidence.selectable, false);
       assert.deepEqual(liveEvidence.recognition_review, identity.review);
+      diagnostics.begin('open-step2');
       await page.locator('.step-nav button').filter({hasText: 'OCR選択'}).click();
+      diagnostics.begin('verify-review-controls');
       const card = page.locator('.ocr-card').filter({hasText: identity.evidenceId});
       await expect(card.getByRole('alert')).toContainText(`要確認: ${identity.review.count}セル`);
       await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();
       await expect(card.getByRole('button', {name: 'セル画像を確認・訂正', exact: true})).toBeVisible();
       result.review = {count: identity.review.count, selectionBlocked: true};
     }
+    diagnostics.begin('verify-evidence-text');
     const identityText = await page.locator('main').innerText();
     assert.ok(identityText.includes(identity.evidenceId));
+    diagnostics.end();
     result.phase = 'verify-visible-ocr-image';
     const image = page.locator(`img[alt="${identity.evidenceId} overlay"]`);
     await expect(image).toBeVisible();
@@ -239,8 +288,10 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     result.finalPathname = new URL(page.url()).pathname;
     result.status = 'passed';
     result.phase = 'finished';
-  } catch {
+  } catch (error) {
+    diagnostics.fail(error);
     result.code = sanitizedFailureCode(result.phase);
+    result.failureScreenshotSaved = await captureFailureScreen(page, origin, identity.orderId, output);
   } finally {
     releaseExternalRequests();
     try { if (context) await context.close(); }
