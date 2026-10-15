@@ -10,12 +10,14 @@ test('Step2 preserves raw prediction, shows review and disables unselectable evi
   t.on('get', '/auth/me', () => ({data: {role: 'operator'}}));
   t.on('get', '/facilities', () => ({data: {source: 'canonical_json', revision: 'test', facilities: []}}));
   t.on('get', `${root}/workflow-v2`, () => ({data: workflow}));
-  t.on('get', `${root}/workflow-v2/ocr-results`, () => ({data: {results: [
+  const results = [
     {ocr_result_id: 'blocked-result', selectable: false, recognition_review: {count: 1, cells}},
     {ocr_result_id: 'ready-result', selectable: true},
     {ocr_result_id: 'unknown-result'},
-  ]}}));
-  t.on('get', `${root}/workflow-v2/inspection`, () => ({data: {saved_sheet: null}}));
+  ];
+  t.on('get', `${root}/workflow-v2/inspection?include_ocr_results=true`, () => ({data: {
+    saved_sheet: null, ocr_candidates: require('./helpers/ocr-candidates.cjs')(order, results, workflow),
+  }}));
   t.on('get', root, () => ({data: {id: order, current_version: {document_id: 'pdf'},
     versions: [{document_id: 'pdf', is_current: true}]}}));
   t.on('get', `${root}/week-options`, () => ({data: {options: []}}));

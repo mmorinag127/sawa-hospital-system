@@ -6,7 +6,7 @@ from sqlalchemy import text
 
 from src.api import auth as auth_module
 from src.api import portal
-from src.db import engine
+from src import db
 from src.main import app
 
 
@@ -15,7 +15,7 @@ client = TestClient(app)
 
 def _seed_user(account: str, *, role: str = "operator", status: str = "active", systems: tuple[str, ...] = ("hospital",)) -> str:
     user_id = str(uuid.uuid4())
-    with engine.begin() as connection:
+    with db.engine.begin() as connection:
         connection.execute(
             text(
                 """CREATE TABLE IF NOT EXISTS user_system_access (
@@ -42,7 +42,7 @@ def _seed_user(account: str, *, role: str = "operator", status: str = "active", 
 
 
 def _cleanup(user_id: str) -> None:
-    with engine.begin() as connection:
+    with db.engine.begin() as connection:
         connection.execute(text("DELETE FROM user_system_access WHERE user_id=:id"), {"id": user_id})
         connection.execute(text("DELETE FROM users WHERE id=:id"), {"id": user_id})
     auth_module.invalidate_user_cache()

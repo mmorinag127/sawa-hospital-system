@@ -35,6 +35,15 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     return text.replace(from,to);
   };
   let compatible=source;
+  compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,3);cleanup();", "  h.timer.tick();await settle();assert.equal(calls,4);cleanup();");
+  compatible=replaceOnce(compatible, "  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,3);", "  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,4);");
+  compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,6);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);", "  h.timer.tick();await settle();assert.equal(calls,8);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);");
+  compatible=replaceOnce(compatible, "  await settle();h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'current-error');cleanup();", "  await settle();h.timer.tick();await settle();assert.equal(calls,4);assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'current-error');cleanup();");
+  compatible=replaceOnce(compatible, "  const cleanup=h.start();h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');", "  const cleanup=h.start();h.timer.tick();await settle();assert.equal(calls,4);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');");
+  compatible=replaceOnce(compatible, "  assert.match(h.state.error,/jobが変更/);assert.equal(h.timer.cleared,1);h.timer.tick();await settle();assert.equal(calls,3);cleanup();", "  assert.match(h.state.error,/jobが変更/);assert.equal(h.timer.cleared,1);h.timer.tick();await settle();assert.equal(calls,4);cleanup();");
+  compatible=replaceOnce(compatible,
+    "url.endsWith('/inspection?include_ocr_results=true')?{saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}: {id:'order-A'}});",
+    "url.endsWith('/ocr-results')?{results:[]} : url.endsWith('/inspection')?{saved_sheet:null}: {id:'order-A'}});");
   compatible=replaceOnce(compatible,'facilitySaveReadOwnerRef:{current:null},','');
   compatible=replaceOnce(compatible,`  if(axis==='row'){
     h.review.coordinate_space.height=560;
@@ -73,7 +82,9 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   assert.equal(approvedBefore,execFileSync('git',['show','cd14d8bd36fbddd63fb70cbb1c4088be544cd6b1:frontend/'+production],{encoding:'utf8'}));
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
-  assert.equal(fs.readFileSync(path.join(__dirname,'..',production),'utf8'),execFileSync('git',['show','938da9f6a32ba3c7d7628968bdd47d5d3d0258e2'],{encoding:'utf8'}),'current approved ownership/action/history/feedback/PDF guards and exact saved or dated facility reads remain exact');
+  assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname,'..',production))).digest('hex'),
+    'c9951f953f5c05f87e297d54e582cde514dab8f588f99e0ba675d37626aca269',
+    'exact revised source: approved single-read sidecar with ownership/action/history/feedback/PDF and facility guards');
   execFileSync('git',['merge-base','--is-ancestor','d26febd','HEAD']);
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
   const after=source.slice(source.indexOf('function actual('),source.indexOf('\nconst plain='));

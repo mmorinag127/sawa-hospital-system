@@ -345,7 +345,7 @@ function refreshHarness(){
     setSheetPayload:()=>{},setSheetJsonStale:()=>{},setContextForm:()=>{},setWeekDraft:()=>{},weekValueFromRange:()=>'',emptyContext:{facility_id:'',week_start:'',week_end:''}});
   h.context.refreshAll=(...args)=>actual('refreshAll',h.context)(...args);
   h.response=url=>({data:url.endsWith('/workflow-v2')?{order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued',attempt_count:0}}:
-    url.endsWith('/ocr-results')?{results:[]} : url.endsWith('/inspection')?{saved_sheet:null}: {id:'order-A'}});
+    url.endsWith('/inspection?include_ocr_results=true')?{saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}: {id:'order-A'}});
   return h;
 }
 function refreshEffect(context,marker){
@@ -391,7 +391,7 @@ test('actual polling same job different returned attempt cannot adopt response o
   h.context.apiClient.get=async url=>{calls++;const response=h.response(url);if(url.endsWith('/workflow-v2'))response.data.ocr_job.workflow_attempt_id='replacement-attempt';return response;};
   const cleanup=h.start();h.timer.tick();await settle();
   assert.equal(h.state.workflow.ocr_job.workflow_attempt_id,'recorded-attempt');assert.match(h.state.error,/attempt/);
-  h.timer.tick();await settle();assert.equal(calls,4);cleanup();
+  h.timer.tick();await settle();assert.equal(calls,3);cleanup();
 });
 
 test('actual polling missing recorded attempt does not dispatch',()=>{
@@ -408,7 +408,7 @@ test('actual polling same-job replacement attempt before first tick never dispat
 for(const edit of ['manual','sheet'])for(const outcome of ['success','error'])test(`actual polling ${edit} edit retires old ${outcome} but next tick reads same job without rebasing/resetting dirty editor`,async()=>{
   const h=pollingHarness(),pending=deferred();let calls=0;
   h.context.sheetDirtyRef.current=true;h.context.pendingSheetCellEditsRef.current.set('own-cell',{quantity:0});
-  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,4);
+  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,3);
   h.retire(edit);const editor=edit==='manual'?'quad':'sheet';const base=h.context.editorVersion(editor).baseRevision;
   h.state.error='new-input-error';
   if(outcome==='success')pending.resolve(h.response('/orders/order-A/workflow-v2'));else pending.reject(Error('old-input-failure'));
@@ -418,7 +418,7 @@ for(const edit of ['manual','sheet'])for(const outcome of ['success','error'])te
     if(url.endsWith('/workflow-v2')){response.data.revision=9;response.data.ocr_job.status='running';response.data.ocr_job.progress_step=2;}
     return response;
   };
-  h.timer.tick();await settle();assert.equal(calls,8);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
+  h.timer.tick();await settle();assert.equal(calls,6);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
   assert.equal(h.state.discard,0);assert.equal(h.context.pendingSheetCellEditsRef.current.get('own-cell').quantity,0);
   assert.equal(h.context.editorVersion(editor).dirty,true);assert.equal(h.context.editorVersion(editor).baseRevision,base);
   assert.equal(h.context.captureWorkflowInputVersion(editor).revision,base);assert.equal(h.context.workflowRevisionRef.current.revision,9);
@@ -433,14 +433,14 @@ for(const kind of ['pdf','order','route','auth','job','attempt','unmount','clean
   else if(kind==='cleanup')cleanup();else h.retire(kind);
   h.state.error='current-error';
   if(outcome==='success')pending.resolve(h.response('/orders/order-A/workflow-v2'));else pending.reject(Error('old'));
-  await settle();h.timer.tick();await settle();assert.equal(calls,4);assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'current-error');cleanup();
+  await settle();h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'current-error');cleanup();
 });
 
 test('actual polling stops on returned different queued job rather than adopting it under old job ownership',async()=>{
   const h=pollingHarness();let calls=0;h.state.workflow=h.context.workflow;
   h.context.apiClient.get=async url=>{calls++;const response=h.response(url);if(url.endsWith('/workflow-v2'))response.data.ocr_job.ocr_job_id='different-recorded-job';return response;};
-  const cleanup=h.start();h.timer.tick();await settle();assert.equal(calls,4);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');
-  assert.match(h.state.error,/jobが変更/);assert.equal(h.timer.cleared,1);h.timer.tick();await settle();assert.equal(calls,4);cleanup();
+  const cleanup=h.start();h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');
+  assert.match(h.state.error,/jobが変更/);assert.equal(h.timer.cleared,1);h.timer.tick();await settle();assert.equal(calls,3);cleanup();
 });
 
 test('actual polling missing job stops without guessing, and current transient rejection permits next same-job read',async()=>{

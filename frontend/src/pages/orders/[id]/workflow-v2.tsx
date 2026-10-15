@@ -261,6 +261,15 @@ type OcrResult = {
 };
 
 type InspectionPayload = {
+  ocr_candidates?: {
+    order_id: string;
+    selected_ocr_result_id: string | null;
+    workflow_state: string;
+    blockers: string[];
+    candidate_template_version_id: string | null;
+    hidden_template_mismatch_result_count: number;
+    results: OcrResult[];
+  };
   workflow?: WorkflowV2;
   ocr_results?: OcrResult[];
   saved_sheet?: {
@@ -2262,8 +2271,7 @@ export default function OrderWorkflowV2Page() {
     refreshGenerationRef.current = refreshGeneration;
     const responses = await Promise.all([
       apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`),
-      apiClient.get<{ results: OcrResult[] }>(`/orders/${orderId}/workflow-v2/ocr-results`),
-      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
+      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true`),
       apiClient.get<OrderDetail>(`/orders/${orderId}`),
     ]).catch(err=>{
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
@@ -2271,13 +2279,25 @@ export default function OrderWorkflowV2Page() {
       return null;
     });
     if (!responses) return;
-    const [workflowRes, ocrRes, inspectionRes, orderRes]=responses;
+    const [workflowRes, inspectionRes, orderRes]=responses;
     if (
       refreshGeneration !== refreshGenerationRef.current
       || requestedOrderId !== activeOrderIdRef.current
       || !ownsPageInput(own) || !callerCurrent()
     ) return;
     if (expectedJob!==null && (workflowRes.data.ocr_job?.ocr_job_id!==expectedJob.jobId || workflowRes.data.ocr_job?.workflow_attempt_id!==expectedJob.attemptId)) return false;
+    const {ocr_candidates: candidates, ...inspectionData} = inspectionRes.data;
+    if (!candidates || candidates.order_id !== requestedOrderId
+      || !Array.isArray(candidates.results)
+      || candidates.results.some(item => !item || typeof item.ocr_result_id !== "string")
+      || typeof candidates.workflow_state !== "string"
+      || !Array.isArray(candidates.blockers) || candidates.blockers.some(item => typeof item !== "string")
+      || !(candidates.selected_ocr_result_id === null || typeof candidates.selected_ocr_result_id === "string")
+      || !(candidates.candidate_template_version_id === null || typeof candidates.candidate_template_version_id === "string")
+      || !Number.isInteger(candidates.hidden_template_mismatch_result_count)
+      || candidates.hidden_template_mismatch_result_count < 0) {
+      throw new Error("OCR候補の読取応答が不正です。");
+    }
     return adopt(() => {
       adoptReadWorkflow(workflowRes.data);
       setOrderDetail(orderRes.data);
@@ -2288,8 +2308,8 @@ export default function OrderWorkflowV2Page() {
       if (canAdoptReadEditorInput("expandedCellCopy")) {
         setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
       }
-      setOcrResults(Array.isArray(ocrRes.data.results) ? ocrRes.data.results : []);
-      setInspection(inspectionRes.data);
+      setOcrResults(candidates.results);
+      setInspection(inspectionData);
       const savedSheet = inspectionRes.data.saved_sheet?.sheet;
       const canReplaceSheet = !sheetDirtyRef.current && pendingSheetCellEditsRef.current.size === 0;
       if (savedSheet && canReplaceSheet) {
