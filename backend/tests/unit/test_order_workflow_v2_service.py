@@ -536,6 +536,8 @@ def april_output_context(tmp_path, monkeypatch, record_property):
 @pytest.fixture
 def april_projection(monkeypatch, tmp_path, april_output_context):
     """Real captured producer/projection; external rendered OCR files are component doubles."""
+    monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "canonical-artifacts"))
+    monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
     from src.services import hakodate_cell_ocr_batch_service as batch
     from src.services.storage_service import load_selected_pdf_bytes
     from test_h2_operator_repair_revision import _provider_output_files
@@ -807,6 +809,74 @@ def test_list_ocr_results_only_returns_current_template_candidates(authored_apri
     assert results["hidden_template_mismatch_result_count"] == 2
     assert [item["ocr_result_id"] for item in results["results"]] == [current_evidence_id]
     assert results["results"][0]["template_version_id"] == current_template_version_id
+
+
+def test_exact_diagnostic_ocr_result_api_is_scoped_authenticated_and_readonly(april_projection, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from src.main import app
+    from tests.contract.auth_support import registered_hospital_operator
+
+    order_id, _, selected_evidence_id, template_version_id = april_projection
+    diagnostic_id, stale_id, foreign_order_id, foreign_id = (
+        _id("OEVdiagnostic"), _id("OEVstale"), _id("ORDforeign"), _id("OEVforeign")
+    )
+    payload = {
+        "_ocr_execution": {
+            "job_id": "OCR-diagnostic", "workflow_attempt_id": "attempt-diagnostic",
+            "evidence_run_id": diagnostic_id,
+            "selected_pdf_receipt": {"order_id": order_id, "document_id": "diagnostic-document"},
+        },
+        "hakodate_recognition_review": {"count": 1, "cells": [{"sheet_cell": "F11", "raw_text": "1"}]},
+        "hakodate_ocr_evidence_records": [{"raw_text": "1"}],
+    }
+    with session_scope() as session:
+        session.add_all([
+            OrderOcrEvidenceRun(
+                id=diagnostic_id, order_id=order_id, template_version_id=template_version_id,
+                schema_version="workflow-v2-test", producer_version="hakodate_best_method_pipeline",
+                source="test", status="diagnostic_only", payload_json=payload,
+                artifact_manifest_json={"records": "exact-records"}, artifact_digest="diagnostic-digest",
+                capabilities_json={}, degraded_reasons_json=[], created_at=datetime.utcnow(),
+            ),
+            OrderOcrEvidenceRun(
+                id=stale_id, order_id=order_id, template_version_id=None,
+                schema_version="workflow-v2-test", producer_version="test", source="test", status="ready",
+                payload_json={"stale": True}, artifact_manifest_json={}, artifact_digest="stale-digest",
+                capabilities_json={}, degraded_reasons_json=[], created_at=datetime.utcnow(),
+            ),
+            Order(
+                id=foreign_order_id, facility_code="FAC_TEST", week_code="2026-04-26", status="要確認",
+                document_uri=f"file:///{foreign_order_id}.pdf", message_id=f"msg-{foreign_order_id}",
+                received_at=datetime.utcnow(),
+            ),
+            OrderOcrEvidenceRun(
+                id=foreign_id, order_id=foreign_order_id, template_version_id=template_version_id,
+                schema_version="workflow-v2-test", producer_version="test", source="test", status="diagnostic_only",
+                payload_json={"foreign": True}, artifact_manifest_json={}, artifact_digest="foreign-digest",
+                capabilities_json={}, degraded_reasons_json=[], created_at=datetime.utcnow(),
+            ),
+        ])
+
+    root = f"/orders/{order_id}/workflow-v2/ocr-results"
+    with registered_hospital_operator(monkeypatch) as operator:
+        client = TestClient(app)
+        assert client.get(f"{root}/{diagnostic_id}").status_code == 401
+        before = database_snapshot()
+        response = client.get(f"{root}/{diagnostic_id}", headers=operator.headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["id"] == diagnostic_id
+        assert response.json()["order_id"] == order_id
+        assert response.json()["template_version_id"] == template_version_id
+        assert response.json()["status"] == "diagnostic_only"
+        assert response.json()["payload_json"] == payload
+        for refused_id in (stale_id, foreign_id, "missing"):
+            refused = client.get(f"{root}/{refused_id}", headers=operator.headers)
+            assert refused.status_code == 404, refused.text
+        assert database_snapshot() == before
+
+    workflow, error = order_workflow_v2_service.get_workflow(order_id)
+    assert error is None
+    assert workflow["selected_ocr_result_id"] == selected_evidence_id
 
 
 def test_get_workflow_does_not_refresh_prerequisite_state(monkeypatch, authored_april_context) -> None:

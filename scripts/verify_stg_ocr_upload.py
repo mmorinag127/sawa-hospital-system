@@ -411,6 +411,37 @@ def review_required_evidence(evidence, workflow, started, order_id, document_id,
     return bool(expected and cells == expected and len({cell['sheet_cell'] for cell in cells}) == len(cells))
 
 
+def fetch_own_evidence(order_id, workflow, started):
+    """Fetch only the exact candidate emitted by this workflow attempt."""
+    job = workflow.get('ocr_job') or {}
+    own = started.get('ocr_job') or {}
+    own_job_id = own.get('ocr_job_id')
+    own_attempt_id = own.get('workflow_attempt_id')
+    if (not isinstance(own_job_id, str) or not own_job_id
+            or not isinstance(own_attempt_id, str) or not own_attempt_id
+            or job.get('ocr_job_id') != own_job_id
+            or job.get('workflow_attempt_id') != own_attempt_id):
+        return None
+    candidates = request(f'/orders/{quote(order_id, safe="")}/workflow-v2/ocr-results')
+    matching = [candidate for candidate in candidates.get('results', [])
+                if isinstance(candidate, dict)
+                and (candidate.get('execution_lineage') or {}).get('job_id') == own_job_id
+                and (candidate.get('execution_lineage') or {}).get('workflow_attempt_id') == own_attempt_id]
+    if len(matching) > 1:
+        raise ValueError('Multiple OCR evidence candidates match own execution')
+    if not matching:
+        return None
+    evidence_id = matching[0].get('ocr_result_id')
+    if not isinstance(evidence_id, str) or not evidence_id:
+        raise ValueError('Exact OCR evidence id missing from own candidate')
+    evidence = request(f'/orders/{quote(order_id, safe="")}/workflow-v2/ocr-results/{quote(evidence_id, safe="")}')
+    execution = (evidence.get('payload_json') or {}).get('_ocr_execution') or {}
+    if (evidence.get('id') != evidence_id or evidence.get('order_id') != order_id
+            or execution.get('job_id') != own_job_id or execution.get('workflow_attempt_id') != own_attempt_id):
+        raise ValueError('Exact OCR evidence retrieval identity mismatch')
+    return evidence
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', required=True)
@@ -480,12 +511,15 @@ def main():
                 if any(key in case for key in resume_keys):
                     verify_resume_identity(case, selection, state, order, workflow, folder)
                 save_json(folder, 'workflow.json', workflow)
-                try:
-                    evidence = request(f'/orders/{oid}/evidence')
-                except urllib.error.HTTPError as error:
-                    if error.code != 404:
-                        raise
-                    evidence = None
+                if canonical_started:
+                    evidence = fetch_own_evidence(oid, workflow, started_workflow)
+                else:
+                    try:
+                        evidence = request(f'/orders/{oid}/evidence')
+                    except urllib.error.HTTPError as error:
+                        if error.code != 404:
+                            raise
+                        evidence = None
                 if evidence:
                     (folder / 'evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
                 if (explicit_hakodate or state.get('status') == 'completed') and not canonical_started:

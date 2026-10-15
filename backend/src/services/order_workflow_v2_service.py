@@ -2765,6 +2765,41 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         }, None
 
 
+def get_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Return one current-template OCR candidate with its exact persisted payload."""
+    normalized_result_id = _normalize_id(ocr_result_id)
+    if not normalized_result_id:
+        return None, "ocr_result_not_found"
+    with session_scope() as session, session.no_autoflush:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_workflow_readonly(session, order.id)
+        if workflow is None:
+            return None, "workflow_not_initialized"
+        workflow_meta = _workflow_meta(workflow)
+        workflow_template_version_id = _effective_workflow_template_version_id(workflow, workflow_meta)
+        if not workflow_template_version_id:
+            return None, "template_unresolved"
+        workflow_template_version_id, template_error = _require_existing_workflow_template_version(
+            session, order=order, workflow=workflow, meta=workflow_meta,
+        )
+        if template_error:
+            return None, template_error
+        row = (
+            session.query(OrderOcrEvidenceRun)
+            .filter(
+                OrderOcrEvidenceRun.id == normalized_result_id,
+                OrderOcrEvidenceRun.order_id == order.id,
+                OrderOcrEvidenceRun.template_version_id == workflow_template_version_id,
+            )
+            .one_or_none()
+        )
+        if row is None:
+            return None, "ocr_result_not_found"
+        return ocr_evidence_service._serialize_evidence_run(row, include_payload=True), None
+
+
 def _clear_downstream_references_before_delete(
     session: Any,
     order_id: str,

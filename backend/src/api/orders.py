@@ -1557,6 +1557,14 @@ def list_order_workflow_v2_ocr_results(order_id: str):
     return _workflow_v2_or_404(order_workflow_v2_service.list_ocr_results(order_id))
 
 
+@router.get("/{order_id}/workflow-v2/ocr-results/{ocr_result_id}", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_ocr_result(order_id: str, ocr_result_id: str):
+    payload, error = order_workflow_v2_service.get_ocr_result(order_id, ocr_result_id)
+    if error == "ocr_result_not_found":
+        raise HTTPException(status_code=404, detail=error)
+    return _workflow_v2_or_404((payload, error))
+
+
 @router.post("/{order_id}/workflow-v2/ocr-results/{ocr_result_id}/select", dependencies=[Depends(require_role("operator"))])
 def select_order_workflow_v2_ocr_result(
     order_id: str, ocr_result_id: str, expected_revision: int = Depends(_require_workflow_if_match)
