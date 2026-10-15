@@ -36,11 +36,13 @@ test('real DataTable page change displays RequestState until the owned new page,
   t.on('get', '/outputs/history', call => call.config.params.page === 1 ? { data: page() } : pending.promise);
   const h = await mount('src/components/OutputHistoryPanel.tsx', { api: t.api, props: props() });
   try {
-    await h.settle(); await h.click(h.document.querySelector('button[aria-label="次のページ"]'));
+    await h.waitFor(() => h.document.querySelector('table'), 'initial history page');
+    await h.click(h.document.querySelector('button[aria-label="次のページ"]'));
     assert.equal(t.calls.at(-1).config.params.page, 2);
     assert.equal(h.document.querySelector('table'), null);
     assert.ok(h.document.querySelector('[role="status"]'));
     await h.settle(() => pending.resolve({ data: page(2) }));
+    await h.waitFor(() => h.document.querySelector('table'), 'owned second history page');
     assert.match(h.document.querySelector('table').textContent, /old-history/);
     assert.doesNotMatch(h.document.querySelector('table').textContent, /newest-not-current/);
   } finally { await h.close(); }
