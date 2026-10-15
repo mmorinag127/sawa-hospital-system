@@ -29,6 +29,8 @@ BACKEND_ROOT = _resolve_backend_root()
 WORKSPACE = BACKEND_ROOT.parent if (BACKEND_ROOT.parent / "tmp").exists() else BACKEND_ROOT
 sys.path.insert(0, str(BACKEND_ROOT))
 
+from src.services.hakodate_recognizer_input_evidence import contact_crop_evidence  # noqa: E402
+
 from src.services.hakodate_cell_ocr_batch_service import (  # noqa: E402
     _normalize_digits,
     _expanded_cell_box,
@@ -632,6 +634,10 @@ def run_text_recognizer_direct(
                 "recognizer_decision_source": decision_source,
             }
         )
+        input_evidence = contact_crop_evidence(contact_sheet, requested_polygons[index])
+        assigned[-1]["recognizer_input_evidence"] = input_evidence
+        if input_evidence["all_white"] and (raw_text or text):
+            assigned[-1]["quantity_source_issue"] = "hakodate_blank_input_nonempty_prediction"
     repaired_assigned = apply_column_context_digit_repair(assigned) if enable_context_repair else assigned
     repair_count = sum(1 for region in repaired_assigned if region.get("recognizer_context_repair"))
     return repaired_assigned, {

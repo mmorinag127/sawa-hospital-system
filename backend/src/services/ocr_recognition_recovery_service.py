@@ -45,10 +45,29 @@ def operator_values(values, cells):
     return dict(values)
 
 
-def _failed_checkpoint(session, order, state):
+def _failed_checkpoint(session, order, state, ocr_result_id=None):
     job_id = workflow._workflow_meta(state).get("ocr_job_id")
     job = session.get(workflow.OcrJob, job_id) if job_id else None
-    if job is None or job.order_id != order.id or job.status != "failed":
+    if job is None or job.order_id != order.id:
+        raise ValueError("recognition_failed_job_required")
+    if ocr_result_id is not None:
+        if job.status not in {"done", "failed"} or workflow._workflow_meta(state).get("latest_ocr_result_id") != ocr_result_id:
+            raise ValueError("recognition_review_result_changed")
+        evidence = session.get(workflow.OrderOcrEvidenceRun, ocr_result_id)
+        payload = evidence.payload_json if evidence is not None else None
+        if evidence is None or evidence.order_id != order.id or not isinstance(payload, dict):
+            raise ValueError("recognition_review_result_changed")
+        execution = payload.get("_ocr_execution")
+        review = payload.get("hakodate_recognition_review")
+        if (not isinstance(execution, dict) or execution.get("job_id") != job.id
+                or execution.get("evidence_run_id") != ocr_result_id
+                or not (job.metrics or {}).get("workflow_attempt_id")
+                or execution.get("workflow_attempt_id") != job.metrics["workflow_attempt_id"]
+                or not isinstance(review, dict) or not isinstance(review.get("cells"), list)
+                or not review["cells"] or type(review.get("count")) is not int
+                or review["count"] != len(review["cells"])):
+            raise ValueError("recognition_review_result_changed")
+    elif job.status != "failed":
         raise ValueError("recognition_failed_job_required")
     checkpoint = (job.metrics or {}).get("recognition_checkpoint")
     if not isinstance(checkpoint, dict):
@@ -56,7 +75,7 @@ def _failed_checkpoint(session, order, state):
     return job, deepcopy(checkpoint)
 
 
-def get_review(order_id, *, document_id=None):
+def get_review(order_id, *, document_id=None, ocr_result_id=None):
     with workflow.session_scope() as session:
         order, error = workflow._get_order_or_error(session, order_id)
         if error:
@@ -65,10 +84,12 @@ def get_review(order_id, *, document_id=None):
         if state is None:
             return None, "workflow_not_initialized"
         try:
-            job, checkpoint = _failed_checkpoint(session, order, state)
+            job, checkpoint = _failed_checkpoint(session, order, state, ocr_result_id)
             receipt, captured = workflow._axis_source_receipt(session, order, state, document_id)
             receipt["recognition_checkpoint_digest"] = workflow._stable_json_hash(checkpoint)
             receipt["recognition_job_id"] = job.id
+            if ocr_result_id is not None:
+                receipt["recognition_evidence_run_id"] = ocr_result_id
             detail = (job.metrics or {}).get("error_detail") or job.error_message
         except ValueError as exc:
             return None, str(exc)
@@ -107,7 +128,7 @@ def save_review(order_id, *, source_receipt, values, edited_by):
         if error:
             return None, error
         try:
-            job, checkpoint = _failed_checkpoint(session, order, state)
+            job, checkpoint = _failed_checkpoint(session, order, state, source_receipt.get("recognition_evidence_run_id"))
             if (source_receipt.get("recognition_job_id") != job.id
                     or source_receipt.get("recognition_checkpoint_digest") != workflow._stable_json_hash(checkpoint)):
                 raise ValueError("recognition_checkpoint_changed")

@@ -64,7 +64,6 @@ class OwnedProducer:
         monkeypatch.setattr(db, "SessionLocal", self.sessions)
         monkeypatch.setattr(db, "engine", self.engine)
         monkeypatch.setattr(menu_service, "engine", self.engine)
-        monkeypatch.setattr(facility_template_version_service, "engine", self.engine)
         for name in ("FACILITY_MASTER_URI", "OCR_OUTPUT_BUCKET", "RAW_BUCKET", "K_SERVICE"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("OCR_ARTIFACT_DIR", str(root / "owned-published"))

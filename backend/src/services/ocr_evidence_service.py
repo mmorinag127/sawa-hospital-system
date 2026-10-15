@@ -74,6 +74,7 @@ _EVIDENCE_ARTIFACT_KEYS = (
     "hakodate_ocr_evidence_records",
     "hakodate_overlay",
     "hakodate_canonical_pipeline",
+    "hakodate_recognition_review",
 )
 
 _HIGH_RISK_NUMERIC_ISSUE_CODES = {
@@ -762,6 +763,12 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
             if not isinstance(original_source, dict):
                 return "evidence_unusable"
             order_service._validate_hakodate_owned_artifacts(payload, original_source)
+            assignment = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
+                evidence_records=_extract_hakodate_evidence_records(payload),
+                target_cells=_extract_hakodate_target_cells(payload),
+            )
+            if assignment.get("blockers"):
+                return "evidence_unusable"
         except (ValueError, KeyError, TypeError) as exc:
             return str(exc) if isinstance(exc, ValueError) and str(exc) else "evidence_unusable"
     if _has_failed_evidence_status(row.status, payload.get("status"), payload.get("stage")):

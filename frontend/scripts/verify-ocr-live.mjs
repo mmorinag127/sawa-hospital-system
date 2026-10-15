@@ -75,6 +75,18 @@ function verificationIdentityForCase(folder, sourceCase) {
   assert.equal(workflow.order_id, orderId);
   assert.equal(workflow.ocr_job?.order_id, orderId);
   assert.equal(workflow.ocr_job?.order_document_id, documentId);
+  const expectedOutcome = sourceCase.expected_outcome ?? 'done';
+  assert.ok(['done', 'recognition_review_required'].includes(expectedOutcome));
+  if (expectedOutcome === 'recognition_review_required') {
+    assert.equal(workflow.ocr_job?.status, 'failed');
+    assert.equal(workflow.ocr_job?.result_state, 'review_required');
+    assert.equal(evidence.status, 'diagnostic_only');
+    assert.equal(evidence.selectable, false);
+    const review = evidence.payload_json?.hakodate_recognition_review;
+    assert.ok(Array.isArray(review?.cells) && review.cells.length > 0);
+    assert.equal(review.count, review.cells.length);
+    return { orderId, documentId, evidenceId, sourcePDFhash, expectedOutcome, review };
+  }
   assert.equal(workflow.ocr_job?.status, 'done');
   return { orderId, documentId, evidenceId, sourcePDFhash };
 }
@@ -195,6 +207,18 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     allowedExternalUrls.add(verifiedOverlayUrl);
     releaseExternalRequests();
     await page.waitForLoadState('networkidle');
+    if (identity.expectedOutcome === 'recognition_review_required') {
+      assert.equal(liveWorkflow.ocr_job?.status, 'failed');
+      assert.equal(liveWorkflow.ocr_job?.result_state, 'review_required');
+      assert.equal(liveEvidence.selectable, false);
+      assert.deepEqual(liveEvidence.recognition_review, identity.review);
+      await page.locator('.step-nav button').filter({hasText: 'OCR選択'}).click();
+      const card = page.locator('.ocr-card').filter({hasText: identity.evidenceId});
+      await expect(card.getByRole('alert')).toContainText(`要確認: ${identity.review.count}セル`);
+      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();
+      await expect(card.getByRole('button', {name: 'セル画像を確認・訂正', exact: true})).toBeVisible();
+      result.review = {count: identity.review.count, selectionBlocked: true};
+    }
     const identityText = await page.locator('main').innerText();
     assert.ok(identityText.includes(identity.evidenceId));
     result.phase = 'verify-visible-ocr-image';

@@ -51,7 +51,7 @@ def validate_payload(payload):
     order_id = selected_pdf.get("order_id") if isinstance(selected_pdf, dict) else None
     if not order_id or pipeline.get("requested_order_id") != order_id:
         raise ValueError("canonical_artifact_source_changed")
-    validate_packet(
+    verified_inputs = validate_packet(
         pipeline.get("artifact_packet"), source_receipt=source,
         outputs=pipeline.get("outputs"), expected_sheet_cells=pipeline.get("expected_sheet_cells"),
         producer_version=pipeline.get("version"), order_id=order_id,
@@ -68,6 +68,7 @@ def validate_payload(payload):
             or any(not isinstance(record, dict)
                    or record.get("raw_payload_ref") != outputs["records"] for record in records)):
         raise ValueError("canonical_artifact_evidence_reference_changed")
+    return verified_inputs
 
 
 def persist_outputs(*, order_id, outputs, source_receipt, expected_sheet_cells, producer_version, workspace):
@@ -121,6 +122,7 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
     metadata = {key: value for key, value in packet.items() if key != "metadata"}
     if _verify(packet.get("metadata")) != _json_bytes(metadata):
         raise ValueError("canonical_artifact_metadata_changed")
+    verified_inputs = {}
     for key, receipt in receipts.items():
         if not isinstance(receipt, dict) or outputs[key] != receipt.get("uri"):
             raise ValueError("canonical_artifact_reference_changed")
@@ -133,3 +135,6 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
             raise ValueError("canonical_artifact_content_invalid")
         if key == "pdf" and not data.startswith(b"%PDF-"):
             raise ValueError("canonical_artifact_content_invalid")
+        if key in ("records", "contact_sheet"):
+            verified_inputs[key] = data
+    return verified_inputs
