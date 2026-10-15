@@ -48,6 +48,7 @@ from src.services.hakodate_step_review_pipeline_service import (  # noqa: E402
     _write_pdf_from_pages,
 )
 from src.services.yomitoku_text_recognizer_topk import YomitokuTextRecognizerTopKWrapper  # noqa: E402
+from src.services.recognizer_diagnostics import diagnosed  # noqa: E402
 
 
 DEFAULT_BASE = WORKSPACE / "tmp" / "outer_quad_eval_correct_20260426"
@@ -59,6 +60,7 @@ TRIAL_ENGINE = "yomitoku_text_recognizer_direct"
 RECOGNIZER_MODES = ("raw", "clean", "dynamic")
 
 
+@diagnosed("initialize")
 def _load_text_recognizer(device: str):
     from yomitoku import TextRecognizer  # noqa: PLC0415
 
