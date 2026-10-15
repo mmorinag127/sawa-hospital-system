@@ -234,7 +234,7 @@ def test_main_automatic_detection_saves_new_execution(monkeypatch, tmp_path):
                                  'selected_pdf_receipt': {'order_id': 'ord', 'document_id': 'doc'}},
                'hakodate_overlay': {'uri': verification.BUCKET + 'overlay.png', 'sheet_review_base_uri': verification.BUCKET + 'corrected.png'},
                'hakodate_canonical_pipeline': {'metrics': {'row_axis_source': 'fax_intersections', 'row_axis_draft_body_row_count': 2, 'row_axis': []}}}
-    evidence = {'id': 'new', 'status': 'done', 'producer_version': 'hakodate_best_method_pipeline', 'payload_json': payload}
+    evidence = {'id': 'new', 'order_id': 'ord', 'status': 'done', 'producer_version': 'hakodate_best_method_pipeline', 'payload_json': payload}
     started = False
 
     def request(path, body=None, content_type=None, **kwargs):
@@ -250,6 +250,9 @@ def test_main_automatic_detection_saves_new_execution(monkeypatch, tmp_path):
         if path == '/orders/ord': return order
         if path == '/orders/ord/workflow-v2': return workflow
         if path == '/orders/ord/evidence': return evidence if started else {'id': 'previous'}
+        if path == '/orders/ord/workflow-v2/ocr-results':
+            return {'results': [{'ocr_result_id': evidence['id'], 'execution_lineage': payload['_ocr_execution']}] if started else []}
+        if path == '/orders/ord/workflow-v2/ocr-results/new': return evidence
         if path == '/orders/ord/workflow-v2/ocr-runs':
             assert kwargs == {'revision': 7}
             assert json.loads(body) == {'mode': 'hakodate', 'document_id': 'doc', 'stale_action': 'retry', 'force': True}

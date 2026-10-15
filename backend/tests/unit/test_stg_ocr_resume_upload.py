@@ -213,9 +213,15 @@ def test_completed_resume_continues_existing_hakodate_path(monkeypatch, inputs, 
         if path.endswith('/workflow-v2'):
             return {**workflow, 'ocr_job': job if started else None}
         if path.endswith('/evidence'):
-            if not started:
-                raise urllib.error.HTTPError(path, 404, 'none', {}, None)
-            return {'id': 'new-evidence', 'status': 'done', 'producer_version': 'hakodate_best_method_pipeline',
+            assert not started
+            raise urllib.error.HTTPError(path, 404, 'none', {}, None)
+        if path == '/orders/' + order['id'] + '/workflow-v2/ocr-results':
+            assert started
+            return {'results': [{'ocr_result_id': 'new-evidence', 'execution_lineage': {
+                'job_id': 'job', 'workflow_attempt_id': 'attempt'}}]}
+        if path == '/orders/' + order['id'] + '/workflow-v2/ocr-results/new-evidence':
+            assert started
+            return {'id': 'new-evidence', 'order_id': order['id'], 'status': 'done', 'producer_version': 'hakodate_best_method_pipeline',
                     'payload_json': {'_ocr_execution': {'job_id': 'job', 'workflow_attempt_id': 'attempt',
                     'evidence_run_id': 'new-evidence', 'selected_pdf_receipt': {'order_id': order['id'], 'document_id': order['document_id']}},
                     'hakodate_overlay': {'uri': mod.BUCKET + 'overlay', 'sheet_review_base_uri': mod.BUCKET + 'corrected'},
@@ -235,6 +241,8 @@ def test_completed_resume_continues_existing_hakodate_path(monkeypatch, inputs, 
     mod.main()
     assert started
     assert not any(path == '/ingest/upload' or path.endswith('/retry') for path in calls)
+    assert '/orders/' + order['id'] + '/workflow-v2/ocr-results' in calls
+    assert '/orders/' + order['id'] + '/workflow-v2/ocr-results/new-evidence' in calls
 
 
 @pytest.mark.skipif(not os.environ.get('STG_OCR_RECOVERY_ARTIFACT_DIR'), reason='explicit read-only real artifact check')
