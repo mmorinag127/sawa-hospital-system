@@ -306,3 +306,79 @@ def test_real_registered_uri_converts_to_exact_cli_generation(monkeypatch, tmp_p
     mod.download(uri, tmp_path / 'original.pdf')
     assert calls[0][3] == (mod.BUCKET + 'manual-uploads/2026/10/15/'
                           'acafa4eacc0fe0d82aff29c0-ORD3d234696.pdf#1792028285165557')
+
+
+@pytest.fixture
+def persisted_unselected(inputs):
+    inputs[2]['status'] = 'failed'
+    workflow = inputs[4]
+    workflow.update(revision=2, state='uploaded', blockers=[
+        'evidence_view_unavailable', 'evidence_edit_unavailable', 'template_unresolved',
+        'draft_rows_empty', 'selected_ocr_required', 'rows_empty'])
+    for key in mod.UNSELECTED_RESULT_FIELDS:
+        workflow[key] = None
+    return inputs
+
+
+def test_persisted_unselected_failure_can_use_operator_retry(monkeypatch, persisted_unselected, tmp_path):
+    posts = install_api(monkeypatch, persisted_unselected)
+    case, selection, *_ = persisted_unselected
+    assert mod.resume_upload(case, selection, tmp_path)['resumed'] is True
+    assert posts == ['/ingest/uploads/UPL2f6c937d/retry']
+
+
+@pytest.mark.parametrize('key', ['facility_id', 'week_start', 'week_end', 'template_version_id',
+    'selected_ocr_result_id', 'saved_sheet_id', 'confirmed_snapshot_id', 'ocr_job', 'output_bundle_id', 'bagging_result_id'])
+@pytest.mark.parametrize('mutation', ['missing', 'nonnull'])
+def test_persisted_unselected_requires_all_fields_explicitly_null(monkeypatch, persisted_unselected, tmp_path, key, mutation):
+    posts = install_api(monkeypatch, persisted_unselected)
+    case, selection, _, _, workflow, _ = persisted_unselected
+    if mutation == 'missing':
+        del workflow[key]
+    else:
+        workflow[key] = 'unexpected-selection'
+    with pytest.raises(ValueError):
+        mod.resume_upload(case, selection, tmp_path)
+    assert not posts
+    diagnostic = json.loads((tmp_path / 'resume-identity-failure.json').read_text())
+    assert diagnostic['workflow_fields'][key]['present'] is (mutation != 'missing')
+    assert diagnostic['workflow_fields'][key]['is_null'] is (mutation == 'missing')
+
+
+@pytest.mark.parametrize('change', ['no-marker', 'unknown-marker', 'string-marker', 'wrong-state'])
+def test_persisted_unselected_requires_explicit_state_and_marker(monkeypatch, persisted_unselected, tmp_path, change):
+    posts = install_api(monkeypatch, persisted_unselected)
+    case, selection, _, _, workflow, _ = persisted_unselected
+    if change == 'wrong-state':
+        workflow['state'] = 'context_ready'
+    else:
+        workflow['blockers'] = {'no-marker': [], 'unknown-marker': ['unknown'],
+                                'string-marker': 'template_unresolved'}[change]
+    with pytest.raises(ValueError):
+        mod.resume_upload(case, selection, tmp_path)
+    assert not posts
+
+
+@pytest.mark.parametrize('owner,key', [('state', 'content_sha256'), ('state', 'current_order_id'),
+    ('state', 'current_document_id'), ('state', 'skip_ocr'), ('order', 'facility'), ('order', 'week_value'),
+    ('order', 'template_version_id')])
+def test_unselected_state_does_not_relax_owner_checks(monkeypatch, persisted_unselected, tmp_path, owner, key):
+    posts = install_api(monkeypatch, persisted_unselected)
+    case, selection, state, order, *_ = persisted_unselected
+    {'state': state, 'order': order}[owner][key] = 'SECRET_DO_NOT_PERSIST'
+    state['lease_token'] = 'SECRET_DO_NOT_PERSIST'
+    persisted_unselected[4]['context_suggestion'] = {'secret': 'SECRET_DO_NOT_PERSIST'}
+    with pytest.raises(ValueError):
+        mod.resume_upload(case, selection, tmp_path)
+    assert not posts
+    assert 'SECRET_DO_NOT_PERSIST' not in (tmp_path / 'resume-identity-failure.json').read_text()
+    assert 'SECRET_DO_NOT_PERSIST' not in (tmp_path / 'resume-failure.json').read_text()
+
+
+def test_unselected_retry_api_failure_has_safe_stop_artifact(monkeypatch, persisted_unselected, tmp_path):
+    posts = install_api(monkeypatch, persisted_unselected, deny=True)
+    with pytest.raises(urllib.error.HTTPError):
+        mod.resume_upload(persisted_unselected[0], persisted_unselected[1], tmp_path)
+    assert posts == ['/ingest/uploads/UPL2f6c937d/retry']
+    assert json.loads((tmp_path / 'resume-failure.json').read_text()) == {
+        'phase': 'resume_upload', 'reason': 'resume_stopped'}
