@@ -104,6 +104,8 @@ jobs:
             tests/unit/test_stg_preflight_entrypoint.py \
             tests/unit/test_hospital_delivery_config.py \
             tests/unit/test_hospital_delivery_cli.py \
+            tests/unit/test_stg_ocr_producer_deploy.py \
+            tests/unit/test_stg_ocr_resume_upload.py \
             --junitxml=.logs/saved-source-junit.xml -q
       - name: Upload backend logs
         if: always()
