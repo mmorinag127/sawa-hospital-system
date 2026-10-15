@@ -201,14 +201,21 @@ def test_dispatch_confirmation_required(recovery, monkeypatch):
 
 def test_workflows_preserve_normal_schema_gate_and_recovery_is_web_only():
     normal = yaml.safe_load((ROOT / '.github/workflows/deploy-stg.yml').read_text())
-    recovery = yaml.safe_load((ROOT / '.github/workflows/recover-stg-web-image.yml').read_text())
-    assert normal['concurrency'] == recovery['concurrency']
+    recovery = normal['jobs']['recover-web']
+    assert normal['concurrency'] == {'group': 'deploy-stg', 'cancel-in-progress': False}
+    assert 'concurrency' not in recovery
+    assert recovery['needs'] == 'source-gate'
+    assert recovery['if'] == ("github.ref == 'refs/heads/develop' && "
+                              "github.event_name == 'workflow_dispatch' && "
+                              "inputs.mode == 'recover-web-image'")
+    assert 'uses' not in recovery
+    assert recovery['permissions'] == {'contents': 'read', 'id-token': 'write'}
     assert 'menu-master-migration' in normal['jobs']['deploy-frontend']['needs']
-    text = (ROOT / '.github/workflows/recover-stg-web-image.yml').read_text()
-    assert 'workflow_dispatch' in text and 'refs/heads/develop' in text
+    text = yaml.safe_dump(recovery)
     assert 'recover_stg_web_image.py' in text
     assert 'run_stg_schema_adoption' not in text and 'deploy_worker' not in text
     assert 'upload-artifact' not in text and 'set-iam-policy' not in text
+    assert 'add-iam-policy-binding' not in text and 'remove-iam-policy-binding' not in text
     steps = normal['jobs']['deploy-frontend']['steps']
     uv = next(i for i, step in enumerate(steps) if step.get('uses', '').startswith('astral-sh/setup-uv'))
     deploy = next(i for i, step in enumerate(steps) if step.get('name') == 'Deploy web-stg')

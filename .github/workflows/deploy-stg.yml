@@ -13,6 +13,26 @@ on:
       - ".github/workflows/deploy-stg.yml"
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Normal deployment or explicitly approved web image recovery"
+        required: true
+        type: choice
+        default: normal
+        options:
+          - normal
+          - recover-web-image
+      confirmation:
+        description: "Recovery only: RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES"
+        required: false
+        type: string
+      expected_revision:
+        description: "Recovery only: reviewed current web-stg revision"
+        required: false
+        type: string
+      expected_image:
+        description: "Recovery only: reviewed frontend repository@sha256 digest"
+        required: false
+        type: string
       ocr_verification_manifest:
         description: "Optional staging GCS manifest of identity-verified FAX uploads"
         required: false
@@ -68,12 +88,107 @@ env:
   SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
 
 jobs:
+  recover-web:
+    needs: source-gate
+    permissions:
+      contents: read
+      id-token: write
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-web-image'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require explicit staging source and recovery approval
+        env:
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          test "$GITHUB_REF" = refs/heads/develop
+          test "$RECOVERY_CONFIRMATION" = RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES
+          test -z "$(git status --porcelain)"
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git rev-parse origin/develop)"
+          test -n "$GOOGLE_OAUTH_CLIENT_ID"
+          test "$GOOGLE_OAUTH_CLIENT_ID" != 167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com
+          [[ "$GOOGLE_OAUTH_CLIENT_ID" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - id: build
+        name: Build immutable frontend from current develop
+        run: |
+          set -euo pipefail
+          deploy_dir="$(./scripts/prepare_web_deploy_source.sh ci-stg-web-recovery "$RUNNER_TEMP/web-source")"
+          ./scripts/validate_web_deploy_source.sh "$deploy_dir"
+          image="${REGION}-docker.pkg.dev/${PROJECT_ID}/backend/frontend:stg-recovery-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --build-arg NEXT_PUBLIC_API_BASE_URL=/api/hospital \
+            --build-arg API_PROXY_TARGET=https://worker-stg-avlnzjjrca-dt.a.run.app \
+            --build-arg SHIFT_WEB_PROXY_TARGET=https://shift-web-stg-avlnzjjrca-dt.a.run.app \
+            --build-arg SCHOOL_LUNCH_WEB_PROXY_TARGET=https://price-web-stg-avlnzjjrca-dt.a.run.app \
+            --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=$GOOGLE_OAUTH_CLIENT_ID" \
+            --build-arg "NEXT_PUBLIC_GIT_SHA=$GITHUB_SHA" \
+            --build-arg "NEXT_PUBLIC_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "sawa.git_sha=$GITHUB_SHA" --label sawa.release_branch=develop \
+            -t "$image" "$deploy_dir"
+          docker push "$image"
+          digest="$(gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" --format='value(image_summary.fully_qualified_digest)')"
+          echo "image=$digest" >> "$GITHUB_OUTPUT"
+      - name: Recover image only and verify runtime database and cleanup protection
+        env:
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          uv run --project backend --extra dev --frozen python scripts/recover_stg_web_image.py \
+            --image "$IMAGE" --expected-revision "$EXPECTED_REVISION" --expected-image "$EXPECTED_IMAGE"
+
   source-gate:
     runs-on: ubuntu-latest
     outputs:
       backend_changed: ${{ steps.changes.outputs.backend_changed }}
       frontend_changed: ${{ steps.changes.outputs.frontend_changed }}
     steps:
+      - name: Validate deployment mode and recovery inputs
+        env:
+          DEPLOY_MODE: ${{ inputs.mode }}
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          OCR_MANIFEST: ${{ inputs.ocr_verification_manifest }}
+          MENU_MANIFEST: ${{ inputs.menu_verification_manifest }}
+          VERIFY_MENU: ${{ inputs.verify_menu_master_ui }}
+          OUTPUT_ORDER: ${{ inputs.verify_output_source_order_id }}
+          OUTPUT_DATE: ${{ inputs.verify_output_source_date }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          test "$GITHUB_REF" = refs/heads/develop
+          case "$GITHUB_EVENT_NAME:${DEPLOY_MODE:-normal}" in
+            push:normal|workflow_dispatch:normal)
+              test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE"
+              ;;
+            workflow_dispatch:recover-web-image)
+              test "$RECOVERY_CONFIRMATION" = RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES
+              [[ "$EXPECTED_REVISION" =~ ^web-stg-[a-z0-9-]+$ ]] || exit 1
+              [[ "$EXPECTED_IMAGE" =~ ^asia-northeast2-docker\.pkg\.dev/sawahospitalsystem/backend/frontend@sha256:[a-f0-9]{64}$ ]] || exit 1
+              test -z "$OCR_MANIFEST$MENU_MANIFEST$OUTPUT_ORDER$OUTPUT_DATE"
+              test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
+              ;;
+            *) echo "invalid_deployment_mode" >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -98,8 +213,15 @@ jobs:
           fi
       - id: changes
         name: Detect changed deploy surfaces
+        env:
+          DEPLOY_MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = "recover-web-image" ]; then
+            echo "backend_changed=false" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
             echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
