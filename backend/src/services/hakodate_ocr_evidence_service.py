@@ -65,6 +65,47 @@ def normalize_ocr_value(value: object) -> str:
     return str(value if value is not None else "")
 
 
+def recognition_input_issue(source: dict[str, Any]) -> str | None:
+    evidence = source.get("recognizer_input_evidence")
+    if "recognizer_input_evidence" not in source:
+        return source.get("quantity_source_issue") or None
+    if (not isinstance(evidence, dict) or evidence.get("contract") != "hakodate_contact_crop/v1"
+            or type(evidence.get("all_white")) is not bool
+            or not isinstance(evidence.get("bbox"), list) or len(evidence["bbox"]) != 4
+            or any(type(v) is not int for v in evidence["bbox"])
+            or type(evidence.get("width")) is not int or evidence["width"] <= 0
+            or type(evidence.get("height")) is not int or evidence["height"] <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", str(evidence.get("rgb_sha256") or ""))):
+        raise ValueError("hakodate_recognizer_input_evidence_invalid")
+    x0, y0, x1, y1 = evidence["bbox"]
+    if x0 < 0 or y0 < 0 or x1 - x0 != evidence["width"] or y1 - y0 != evidence["height"]:
+        raise ValueError("hakodate_recognizer_input_evidence_invalid")
+    if evidence["all_white"] and any(str(source.get(key) or "").strip() for key in
+            ("raw_text", "text", "recognizer_raw_text", "ocr_text", "ocr_normalized", "pred_digits")):
+        return "hakodate_blank_input_nonempty_prediction"
+    return source.get("quantity_source_issue") or None
+
+
+def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
+    cells = []
+    seen = set()
+    for record in records:
+        metadata = record.get("engine_metadata") or {}
+        source = metadata.get("recognizer_output")
+        if not isinstance(source, dict):
+            continue
+        issue = recognition_input_issue(source)
+        if issue is None:
+            continue
+        cell = metadata.get("sheet_cell")
+        if (issue != "hakodate_blank_input_nonempty_prediction" or not isinstance(cell, str)
+                or not cell or cell in seen or not isinstance(record.get("raw_text"), str)):
+            raise ValueError("hakodate_recognition_review_invalid")
+        seen.add(cell)
+        cells.append({"sheet_cell": cell, "raw_text": record["raw_text"], "reason": issue})
+    return {"cells": cells, "count": len(cells)}
+
+
 def validate_ocr_quantity_source(record: dict[str, Any]) -> str:
     sources = [record]
     metadata = record.get("engine_metadata")
@@ -79,6 +120,8 @@ def validate_ocr_quantity_source(record: dict[str, Any]) -> str:
             sources.append(original_values)
     values = []
     for source in sources:
+        if recognition_input_issue(source):
+            raise ValueError("hakodate_ocr_quantity_unresolved")
         raw_keys = [key for key in ("raw_text", "text", "recognizer_raw_text", "ocr_text") if key in source]
         if not raw_keys:
             raise ValueError("hakodate_ocr_quantity_source_missing")
@@ -137,6 +180,8 @@ def validate_ocr_source_for_role(record: dict[str, Any], role: str) -> str:
         raise ValueError("hakodate_target_role_unresolved")
     values = []
     for source in sources:
+        if recognition_input_issue(source):
+            raise ValueError("hakodate_ocr_quantity_unresolved")
         raw_keys = [key for key in ("raw_text", "text", "recognizer_raw_text", "ocr_text") if key in source]
         if not raw_keys:
             raise ValueError("hakodate_ocr_quantity_source_missing")

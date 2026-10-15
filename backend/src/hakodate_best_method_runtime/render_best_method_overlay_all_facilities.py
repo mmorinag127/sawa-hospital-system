@@ -1015,6 +1015,9 @@ def build_best_method_for_manifest_item(
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
     for original, serialized in zip(records, records_json):
+        for key in ("recognizer_input_evidence", "quantity_source_issue"):
+            if key in original:
+                serialized[key] = original[key]
         if original.get("recognition_source") == "operator":
             serialized.update(operator_value=original["operator_value"], recognition_source="operator", ocr_engine="operator")
     records_path.write_text(json.dumps(records_json, ensure_ascii=False, indent=2), encoding="utf-8")

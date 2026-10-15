@@ -697,7 +697,7 @@ _JOB_STAGE_METRIC_FIELDS = frozenset({
     "ocr_slot_wait_started_at", "ocr_slot_acquired_at", "ocr_slot_wait_seconds", "ocr_execution_slot",
     "requested_provider", "effective_provider", "llm_assist", "quality_track",
     "reparse_origin", "feedback_retry_depth", "error", "error_detail",
-    "error_user_message", "recovery_action", "stage_timeout_seconds",
+    "error_user_message", "recovery_action", "recognition_checkpoint", "stage_timeout_seconds",
     "awaiting_output_since", "ocr_started_at", "next_recovery_at", "failed_cells",
     "facility_id", "preferred_template_id", "preferred_template_ids", "output_reference",
     "confirmed_lines_retained", "reused_first_pass", "pipeline_run_skipped",

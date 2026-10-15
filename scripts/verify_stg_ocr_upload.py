@@ -376,6 +376,41 @@ def completed_evidence(evidence, workflow, started, order_id, document_id, previ
         and pdf.get('order_id') == order_id and pdf.get('document_id') == document_id)
 
 
+def review_required_evidence(evidence, workflow, started, order_id, document_id, previous_id):
+    job = workflow.get('ocr_job') or {}
+    own = started.get('ocr_job') or {}
+    payload = evidence.get('payload_json') or {}
+    execution = payload.get('_ocr_execution') or {}
+    pdf = execution.get('selected_pdf_receipt') or {}
+    review = payload.get('hakodate_recognition_review') or {}
+    cells = review.get('cells')
+    if not (own.get('ocr_job_id') and own.get('workflow_attempt_id')
+            and workflow.get('order_id') == order_id
+            and job.get('order_id') == order_id and job.get('order_document_id') == document_id
+            and job.get('ocr_job_id') == own['ocr_job_id']
+            and job.get('workflow_attempt_id') == own['workflow_attempt_id']
+            and job.get('status') == 'failed' and job.get('result_state') == 'review_required'
+            and job.get('recovery_action') == 'review_recognition_cells'
+            and evidence.get('id') and evidence['id'] != previous_id
+            and evidence.get('status') == 'diagnostic_only' and evidence.get('selectable') is False
+            and evidence.get('producer_version') == 'hakodate_best_method_pipeline'
+            and execution.get('job_id') == own['ocr_job_id']
+            and execution.get('workflow_attempt_id') == own['workflow_attempt_id']
+            and execution.get('evidence_run_id') == evidence['id']
+            and pdf.get('order_id') == order_id and pdf.get('document_id') == document_id
+            and isinstance(cells, list) and cells and type(review.get('count')) is int
+            and review['count'] == len(cells)):
+        return False
+    expected = []
+    for record in payload.get('hakodate_ocr_evidence_records', []):
+        metadata = record.get('engine_metadata') or {}
+        source = metadata.get('recognizer_output') or {}
+        if (source.get('recognizer_input_evidence') or {}).get('all_white') is True and source.get('recognizer_raw_text'):
+            expected.append({'sheet_cell': metadata.get('sheet_cell'), 'raw_text': record.get('raw_text'),
+                             'reason': 'hakodate_blank_input_nonempty_prediction'})
+    return bool(expected and cells == expected and len({cell['sheet_cell'] for cell in cells}) == len(cells))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', required=True)
@@ -385,6 +420,10 @@ def main():
     manifest_path = args.output_dir / 'manifest.json'
     download(args.manifest, manifest_path)
     for case in json.loads(manifest_path.read_text())['cases']:
+        outcome = case.get('expected_outcome', 'done')
+        if outcome not in ('done', 'recognition_review_required'):
+            raise ValueError('Unknown expected OCR outcome')
+        verify_result = review_required_evidence if outcome == 'recognition_review_required' else completed_evidence
         folder = args.output_dir / case['source_order_id']
         folder.mkdir(exist_ok=True)
         pdf = folder / 'original.pdf'
@@ -474,14 +513,14 @@ def main():
                     deadline = time.monotonic() + 1200
                     evidence = None
                     continue
-                if canonical_started and evidence and completed_evidence(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id):
+                if canonical_started and evidence and verify_result(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id):
                     break
                 if canonical_started and (workflow.get('ocr_job') or {}).get('status') == 'failed':
                     raise RuntimeError('OCR failed; workflow and evidence saved for review')
             if not explicit_hakodate and state.get('status') in ('failed', 'error', 'manual_review'):
                 raise RuntimeError('Upload stopped; sanitized upload-state artifact saved')
             time.sleep(15)
-        if not canonical_started or not evidence or not completed_evidence(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id):
+        if not canonical_started or not evidence or not verify_result(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id):
             raise TimeoutError('OCR evidence did not complete')
         (folder / 'evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
         (folder / 'workflow.json').write_text(json.dumps(workflow, ensure_ascii=False, indent=2))
@@ -491,6 +530,18 @@ def main():
             verify_hakodate_existing(case, selection, folder, require_context=True)
         download(payload['hakodate_overlay']['uri'], folder / 'overlay.png')
         download(payload['hakodate_overlay']['sheet_review_base_uri'], folder / 'corrected.png')
+        if outcome == 'recognition_review_required':
+            outputs = payload['hakodate_canonical_pipeline']['outputs']
+            download(outputs['records'], folder / 'recognizer-records.json')
+            download(outputs['contact_sheet'], folder / 'recognizer-contact.png')
+            review = request(f'/orders/{oid}/workflow-v2/recognition-review?'
+                            + urlencode({'document_id': document_id, 'ocr_result_id': evidence['id']}))
+            receipt = review.get('source_receipt') or {}
+            if (review.get('order_id') != oid or receipt.get('recognition_evidence_run_id') != evidence['id']
+                    or (receipt.get('selected_pdf_receipt') or {}).get('document_id') != document_id
+                    or not review.get('cells')):
+                raise ValueError('Recognition review result identity mismatch')
+            save_json(folder, 'recognition-review.json', review)
         metrics = payload['hakodate_canonical_pipeline']['metrics']
         assert metrics['row_axis_source'] == 'fax_intersections', metrics
         assert metrics['row_axis_draft_body_row_count'] == case['expected_menu_rows'], metrics

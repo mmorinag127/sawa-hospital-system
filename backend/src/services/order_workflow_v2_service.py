@@ -2629,6 +2629,7 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "execution_lineage": copy.deepcopy(payload.get("_ocr_execution")),
         "result_disposition": payload["_ocr_execution"].get("disposition") if isinstance(payload.get("_ocr_execution"), dict) else None,
         "selectable": ocr_evidence_service.evidence_run_is_selectable(row),
+        "recognition_review": copy.deepcopy(payload.get("hakodate_recognition_review")),
         "artifact_manifest": manifest,
         "artifact_digest": row.artifact_digest,
         "pipeline_version": payload.get("pipeline_version") or row.producer_version,

@@ -1503,9 +1503,9 @@ def get_order_workflow_v2_header_axis_review(order_id: str, document_id: str | N
 
 
 @router.get("/{order_id}/workflow-v2/recognition-review", dependencies=[Depends(require_role("operator"))])
-def get_order_recognition_review(order_id: str, document_id: str | None = None):
+def get_order_recognition_review(order_id: str, document_id: str | None = None, ocr_result_id: str | None = None):
     from src.services import ocr_recognition_recovery_service
-    return _workflow_v2_or_404(ocr_recognition_recovery_service.get_review(order_id, document_id=document_id))
+    return _workflow_v2_or_404(ocr_recognition_recovery_service.get_review(order_id, document_id=document_id, ocr_result_id=ocr_result_id))
 
 
 @router.put("/{order_id}/workflow-v2/recognition-review")
