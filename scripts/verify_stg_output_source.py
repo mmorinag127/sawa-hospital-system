@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from urllib.parse import parse_qs, quote, urlsplit
+from urllib.error import URLError
 
 ROOT = Path(__file__).resolve().parents[1]
 for entry in (ROOT / "backend", ROOT):
@@ -107,7 +108,14 @@ def get(path: str, token: str) -> tuple[int, object | None, str]:
             and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", query["date"][0])) and query["include_order_refs"] == ["true"])
     )
     require(allowed, "GET-path-rejected")
-    status, body = read_http(WEB + path, token)
+    try:
+        status, body = read_http(WEB + path, token, timeout=60)
+    except TimeoutError:
+        raise Blocked("verification-transport-timeout-details-withheld") from None
+    except URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise Blocked("verification-transport-timeout-details-withheld") from None
+        raise
     digest = hashlib.sha256(body).hexdigest()
     if not body:
         return status, None, digest

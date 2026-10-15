@@ -14,6 +14,49 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import verify_stg_output_source as verifier
 
 
+def test_output_get_explicit_timeout_preserves_body_hash(monkeypatch):
+    import hashlib
+    from unittest.mock import Mock
+    body = b'{"quantity":17}'
+    read = Mock(return_value=(200, body))
+    monkeypatch.setattr(verifier, 'read_http', read)
+    path = '/api/orders/daily-output-context?date=2026-09-13&facility=FAC00001'
+    assert verifier.get(path, 'private-token') == (200, {'quantity': 17}, hashlib.sha256(body).hexdigest())
+    read.assert_called_once_with(verifier.WEB + path, 'private-token', timeout=60)
+
+
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_output_timeout_is_sanitized_and_never_retried(monkeypatch, wrapped, capsys):
+    import traceback
+    from unittest.mock import Mock
+    error = TimeoutError('private-token https://private.invalid/secret response-secret')
+    if wrapped:
+        error = verifier.URLError(error)
+    read = Mock(side_effect=error)
+    monkeypatch.setattr(verifier, 'read_http', read)
+    with pytest.raises(verifier.Blocked) as caught:
+        verifier.get('/api/orders/ORDfixture', 'private-token')
+    assert str(caught.value) == 'verification-transport-timeout-details-withheld'
+    diagnostic = ''.join(traceback.format_exception_only(caught.type, caught.value))
+    output = capsys.readouterr()
+    assert 'private-token' not in diagnostic + output.out + output.err
+    assert 'private.invalid' not in diagnostic + output.out + output.err
+    assert 'response-secret' not in diagnostic + output.out + output.err
+    assert caught.value.__suppress_context__
+    read.assert_called_once_with(verifier.WEB + '/api/orders/ORDfixture', 'private-token', timeout=60)
+
+
+def test_output_non_timeout_transport_failure_not_misclassified(monkeypatch):
+    from unittest.mock import Mock
+    error = verifier.URLError('connection refused')
+    read = Mock(side_effect=error)
+    monkeypatch.setattr(verifier, 'read_http', read)
+    with pytest.raises(verifier.URLError) as caught:
+        verifier.get('/api/orders/ORDfixture', 'private-token')
+    assert caught.value is error
+    read.assert_called_once()
+
+
 SHA = "a" * 40
 CONTEXT = {
     "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/develop",
@@ -68,7 +111,7 @@ def test_case_is_captured_only_after_explicit_date_and_exact_saved_sheet_lineage
     "/api/totals?date=2026-10-05&include_order_refs=true",
 ])
 def test_get_allows_only_current_get_routes(path, monkeypatch):
-    monkeypatch.setattr(verifier, "read_http", lambda _url, _token: (200, b"{}"))
+    monkeypatch.setattr(verifier, "read_http", lambda _url, _token, *, timeout: (200, b"{}"))
     assert verifier.get(path, "token")[0] == 200
 
 

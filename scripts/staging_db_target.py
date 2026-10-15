@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import re
 import subprocess
 import urllib.error
@@ -44,12 +45,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def read_http(url, token=None, *, accept='application/json', blob_redirect=False):
+def read_http(url, token=None, *, accept='application/json', blob_redirect=False, timeout=20):
+    require(type(timeout) in (int, float) and math.isfinite(timeout) and timeout > 0,
+            'http-timeout-invalid')
     headers = {'Accept': accept}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     try:
-        response = urllib.request.build_opener(NoRedirect()).open(urllib.request.Request(url, headers=headers), timeout=20)
+        response = urllib.request.build_opener(NoRedirect()).open(urllib.request.Request(url, headers=headers), timeout=timeout)
     except urllib.error.HTTPError as error:
         response = error
     with response:
@@ -58,7 +61,7 @@ def read_http(url, token=None, *, accept='application/json', blob_redirect=False
             require(target.scheme == 'https' and target.hostname == 'storage.googleapis.com'
                     and target.port in (None, 443) and not target.username and not target.password
                     and target.path.startswith('/') and not target.fragment, 'registry-blob-redirect-target-rejected')
-            return read_http(target.geturl(), accept=accept)  # Never forward registry Authorization.
+            return read_http(target.geturl(), accept=accept, timeout=timeout)  # Never forward registry Authorization.
         body = response.read(2_000_001)
         require(len(body) <= 2_000_000, 'response-size-unexpected')
         return response.status, body
