@@ -13,6 +13,53 @@ import verify_stg_menu_master_ui as live
 import run_stg_menu_master_migration as migration
 
 
+@pytest.mark.parametrize('options, expected', [({}, 20), ({'timeout': 60}, 60)])
+def test_http_timeout_and_complete_body_preserved(monkeypatch, options, expected):
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.status = 200
+    response.read.return_value = b'{"complete":true}'
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(gate.urllib.request, 'build_opener', Mock(return_value=opener))
+    assert gate.read_http('https://example.invalid', 'private-token', **options) == (200, b'{"complete":true}')
+    opener.open.assert_called_once()
+    assert opener.open.call_args.kwargs == {'timeout': expected}
+    assert opener.open.call_args.args[0].get_header('Authorization') == 'Bearer private-token'
+    response.read.assert_called_once_with(2_000_001)
+
+
+@pytest.mark.parametrize('timeout', [0, -1, float('nan'), float('inf'), -float('inf'), True, None, '60'])
+def test_http_invalid_timeout_stops_before_transport(monkeypatch, timeout):
+    build = Mock()
+    monkeypatch.setattr(gate.urllib.request, 'build_opener', build)
+    with pytest.raises(gate.StagingConfigBlocked, match='^staging-db-http-timeout-invalid$'):
+        gate.read_http('https://example.invalid', timeout=timeout)
+    build.assert_not_called()
+
+
+@pytest.mark.parametrize('phase', ['open', 'body'])
+def test_http_timeout_propagates_without_retry(monkeypatch, phase):
+    from unittest.mock import MagicMock
+    error = TimeoutError('private-token')
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.status = 200
+    opener = Mock()
+    opener.open.return_value = response
+    if phase == 'open':
+        opener.open.side_effect = error
+    else:
+        response.read.side_effect = error
+    monkeypatch.setattr(gate.urllib.request, 'build_opener', Mock(return_value=opener))
+    with pytest.raises(TimeoutError) as caught:
+        gate.read_http('https://example.invalid', timeout=60)
+    assert caught.value is error
+    opener.open.assert_called_once()
+    assert response.read.call_count == (1 if phase == 'body' else 0)
+
+
 def install_cloud(monkeypatch):
     documents, images, calls = {}, {}, []
     for service, component in [('web-stg', 'frontend'), ('worker-stg', 'backend')]:
