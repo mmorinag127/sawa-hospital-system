@@ -174,15 +174,33 @@ def read_catalog(connection):
         if routines:
             raise RuntimeError("catalog blocked: unsupported routine or standalone type")
     tables = {}
-    for name in sorted(inspector.get_table_names()):
-        tables[name] = _clean({
-            "columns": inspector.get_columns(name),
-            "pk": inspector.get_pk_constraint(name),
-            "unique": inspector.get_unique_constraints(name),
-            "fk": inspector.get_foreign_keys(name),
-            "checks": inspector.get_check_constraints(name),
-            "indexes": inspector.get_indexes(name),
-        })
+    names = sorted(inspector.get_table_names())
+    if connection.dialect.name == "postgresql" and names:
+        # Match the PostgreSQL single-table reflection wrappers' scope/kind.
+        options = dict(schema=None, filter_names=names,
+                       scope=sa.engine.reflection.ObjectScope.ANY,
+                       kind=sa.engine.reflection.ObjectKind.ANY)
+        reflected = {
+            "columns": inspector.get_multi_columns(**options),
+            "pk": inspector.get_multi_pk_constraint(**options),
+            "unique": inspector.get_multi_unique_constraints(**options),
+            "fk": inspector.get_multi_foreign_keys(**options),
+            "checks": inspector.get_multi_check_constraints(**options),
+            "indexes": inspector.get_multi_indexes(**options),
+        }
+        for name in names:
+            # Missing reflection entries are failures, never empty constraints.
+            tables[name] = _clean({key: values[(None, name)] for key, values in reflected.items()})
+    else:
+        for name in names:
+            tables[name] = _clean({
+                "columns": inspector.get_columns(name),
+                "pk": inspector.get_pk_constraint(name),
+                "unique": inspector.get_unique_constraints(name),
+                "fk": inspector.get_foreign_keys(name),
+                "checks": inspector.get_check_constraints(name),
+                "indexes": inspector.get_indexes(name),
+            })
     if connection.dialect.name == "sqlite":
         native = list(connection.exec_driver_sql(
             "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' "
