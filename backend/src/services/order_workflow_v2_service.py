@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+from time import perf_counter
 from contextvars import ContextVar
 from contextlib import nullcontext
 from functools import wraps
@@ -18,6 +19,7 @@ from uuid import uuid4
 from sqlalchemy import or_
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.exc import IntegrityError
+from loguru import logger
 
 from src.db import session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
@@ -48,6 +50,54 @@ from src.services.workflow_attempt_guard_service import (
     capture_selected_pdf_receipt,
     verify_selected_pdf_receipt,
 )
+
+_inspection_timing: ContextVar[dict | None] = ContextVar("inspection_timing", default=None)
+
+
+def _inspection_record(name, elapsed, count=1):
+    timing = _inspection_timing.get()
+    if timing is not None:
+        metric = timing["metrics"].setdefault(name, {"seconds": 0.0, "count": 0})
+        metric["seconds"] += elapsed
+        metric["count"] += count
+
+
+def _inspection_next(name, count=1):
+    timing = _inspection_timing.get()
+    if timing is not None:
+        now = perf_counter()
+        _inspection_record(timing["phase"], now - timing["started"], count)
+        timing["phase"], timing["started"] = name, now
+
+
+def _inspection_call(name, function, *args, **kwargs):
+    if _inspection_timing.get() is None:
+        return function(*args, **kwargs)
+    started = perf_counter()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        _inspection_record(name, perf_counter() - started)
+
+
+def _measure_inspection(function):
+    @wraps(function)
+    def measured(*args, **kwargs):
+        timing = {"phase": "session", "started": perf_counter(), "metrics": {}}
+        token = _inspection_timing.set(timing)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _inspection_next("finished")
+            _inspection_timing.reset(token)
+            # Fixed phase names and numeric metrics only, including on exceptions.
+            # Logging failure must not replace the original return or exception.
+            try:
+                logger.info("inspection_timing {}", json.dumps(timing["metrics"], sort_keys=True))
+            except Exception:
+                pass
+    return measured
+
 
 WORKFLOW_V2_META_KEY = "workflow_v2"
 WORKFLOW_REVISION_REQUIRED = "workflow_revision_required"
@@ -2611,10 +2661,10 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
     sheet_review_base_uri = _normalize_id(hakodate_overlay.get("sheet_review_base_uri"))
     sheet_review_base_url = _normalize_id(hakodate_overlay.get("sheet_review_base_url"))
     if overlay_uri and not overlay_url:
-        signed_url = getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None)(overlay_uri)
+        signed_url = _inspection_call("sign_url", getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), overlay_uri)
         overlay_url = _normalize_id(signed_url)
     if sheet_review_base_uri and not sheet_review_base_url:
-        signed_url = getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None)(sheet_review_base_uri)
+        signed_url = _inspection_call("sign_url", getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), sheet_review_base_uri)
         sheet_review_base_url = _normalize_id(signed_url)
     overlay_status = "ready" if overlay_url else "missing"
     return {
@@ -2628,7 +2678,7 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "selected": selected,
         "execution_lineage": copy.deepcopy(payload.get("_ocr_execution")),
         "result_disposition": payload["_ocr_execution"].get("disposition") if isinstance(payload.get("_ocr_execution"), dict) else None,
-        "selectable": ocr_evidence_service.evidence_run_is_selectable(row),
+        "selectable": _inspection_call("selectability", ocr_evidence_service.evidence_run_is_selectable, row),
         "recognition_review": copy.deepcopy(payload.get("hakodate_recognition_review")),
         "artifact_manifest": manifest,
         "artifact_digest": row.artifact_digest,
@@ -4543,22 +4593,27 @@ def final_confirm(
         }, None
 
 
+@_measure_inspection
 def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session, session.no_autoflush:
+        _inspection_next("order")
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
+        _inspection_next("workflow_template")
         workflow = _get_workflow_readonly(session, order.id)
         if workflow is not None:
             template_error = _selected_workflow_template_error(session, order, workflow)
             if template_error:
                 return None, template_error
+        _inspection_next("history_query")
         ocr_results = (
             session.query(OrderOcrEvidenceRun)
             .filter(OrderOcrEvidenceRun.order_id == order.id)
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .all()
         )
+        _inspection_next("saved_sheet", count=len(ocr_results))
         saved_sheet = None
         saved_sheet_hash = ""
         if workflow is not None and workflow.draft_id:
@@ -4578,6 +4633,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
                 )
                 saved_sheet_payload = saved_sheet.get("sheet") if isinstance(saved_sheet, dict) else None
                 saved_sheet_hash = _stable_json_hash(saved_sheet_payload) if isinstance(saved_sheet_payload, dict) else ""
+        _inspection_next("artifacts")
         inspection_meta = (
             _recover_confirmed_artifacts_from_snapshot(
                 order=order,
@@ -4589,17 +4645,18 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
             if workflow is not None
             else {}
         )
+        _inspection_next("response_serialization")
         result = {
             "order_id": order.id,
             "source": "workflow_v2_inspection",
             "workflow": (
-                _serialize_workflow_checked(session, order=order, workflow=workflow)
+                _inspection_call("workflow_serialize", _serialize_workflow_checked, session, order=order, workflow=workflow)
                 if workflow is not None
-                else _serialize_uninitialized_workflow(order)
+                else _inspection_call("workflow_serialize", _serialize_uninitialized_workflow, order)
             ),
             "ocr_results": [
-                _serialize_ocr_result(
-                    row, selected=row.id == (workflow.evidence_run_id if workflow is not None else None),
+                _inspection_call(
+                    "ocr_row_serialize", _serialize_ocr_result, row, selected=row.id == (workflow.evidence_run_id if workflow is not None else None),
                 )
                 for row in ocr_results
             ],
@@ -4629,6 +4686,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
             "output_bundle": inspection_meta.get("output_bundle") if workflow is not None else None,
         }
         if include_ocr_results:
+            _inspection_next("candidate_projection")
             serialized_rows = {row.id: serialized for row, serialized in zip(ocr_results, result["ocr_results"])}
             candidates, error = _project_ocr_candidates(
                 session, order=order, workflow=workflow, rows=ocr_results, serialized_rows=serialized_rows,
@@ -4636,4 +4694,5 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
             if error:
                 return None, error
             result["ocr_candidates"] = candidates
+        _inspection_next("session_exit")
         return result, None
