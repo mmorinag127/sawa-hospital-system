@@ -54,7 +54,11 @@ test('original verification asserts, wait and readonly/external gates remain in 
       ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/inspection')") : line;
     assert.ok(current.includes(expected), expected);
   }
-  assert.ok(current.includes("url.searchParams.get('include_ocr_results') === 'true'"));
+  assert.ok(current.includes("watchRead('ocr-candidates', '/workflow-v2/inspection?include_ocr_results=true')"));
+  const firstRequest = readFileSync(new URL('../../scripts/ocr-first-request.mjs', import.meta.url), 'utf8');
+  assert.ok(firstRequest.includes('url.search !== expected.search'));
+  assert.ok(firstRequest.includes("request.method() !== 'GET'"));
+  assert.ok(firstRequest.includes('url.origin !== expected.origin || url.pathname !== expected.pathname'));
   assert.ok(current.includes('assert.equal(liveOcrResults?.order_id, identity.orderId)'));
   assert.ok(current.includes('assert.ok(Array.isArray(liveOcrResults?.results))'));
   let offset = 0;

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isAllowedOutputSourceOrigin, STG_OUTPUT_SOURCE_ORIGIN } from './output-source-live-origin.mjs';
+import { firstJsonRequest } from './ocr-first-request.mjs';
 
 const allowedMethods = new Set(['GET', 'HEAD']);
 const phases = new Set([
@@ -160,6 +161,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
   let browser;
   let context;
   let page;
+  const readWatchers = [];
   const diagnostics = diagnosticTimeline(result);
   let releaseExternalRequests = () => {};
   try {
@@ -200,22 +202,17 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       return route.continue();
     });
     page = await context.newPage();
-    const workflowRead = settleResponse(page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/orders/${identity.orderId}/workflow-v2`;
-    }));
-    const ocrResultsRead = settleResponse(page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/orders/${identity.orderId}/workflow-v2/inspection`
-        && url.searchParams.get('include_ocr_results') === 'true';
-    }));
-    const orderRead = settleResponse(page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return response.request().method() === 'GET' && url.origin === origin
-        && url.pathname === `/api/orders/${identity.orderId}`;
-    }));
+    result.readTimings = {};
+    const watchRead = (name, suffix) => {
+      const timing = {};
+      result.readTimings[name] = timing;
+      const watcher = firstJsonRequest(page, `${origin}/api/orders/${identity.orderId}${suffix}`, timing);
+      readWatchers.push(watcher);
+      return settleResponse(watcher.promise);
+    };
+    const workflowRead = watchRead('workflow', '/workflow-v2');
+    const ocrResultsRead = watchRead('ocr-candidates', '/workflow-v2/inspection?include_ocr_results=true');
+    const orderRead = watchRead('order', '');
     result.phase = 'open-workflow';
     const workflowResponse = await page.goto(`${origin}/hospital/orders/${encodeURIComponent(identity.orderId)}/workflow-v2`, { waitUntil: 'domcontentloaded' });
     assert.equal(workflowResponse?.status(), 200);
@@ -297,6 +294,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     result.code = sanitizedFailureCode(result.phase);
     result.failureScreenshotSaved = await captureFailureScreen(page, origin, identity.orderId, output);
   } finally {
+    for (const watcher of readWatchers) watcher.cancel();
     releaseExternalRequests();
     try { if (context) await context.close(); }
     finally {
