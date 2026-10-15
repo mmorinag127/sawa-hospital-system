@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any, Iterable
 
 from sqlalchemy import or_, select
+from sqlalchemy.orm import object_session
 
 from src.db import session_scope
 from src.models.order import Order, OrderLine
@@ -12,7 +13,6 @@ from src.services import config_service
 from src.services import order_service
 from src.services import output_builder
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
-from src.services.order_serialization_service import serialize_order
 
 _MEAL_PERIOD_LABELS = {
     "朝": "朝食",
@@ -102,7 +102,7 @@ def _final_quantity(quantity_corrected: object, quantity_original: object, zero_
 def build_totals(date_from: date | None, date_to: date | None, include_order_refs: bool = False) -> list[dict]:
     grouped: dict[tuple, dict] = {}
     for order in _iter_confirmed_orders(date_from, date_to):
-        order_payload = serialize_order(order)
+        order_payload = order_service.get_order_for_output_read(order.id, read_session=object_session(order))
         accepted = output_builder._accepted_output_candidate(order_payload)
         quantity_rules = accepted["configured_input"]["policy"].get("quantity_rules", {})
         zero_as_empty = quantity_rules.get("zero_as_empty", True)

@@ -6919,6 +6919,19 @@ def get_order_by_id(order_id: str, *, allow_unresolved_menu_amount: bool = False
         return payload
 
 
+def get_order_for_output_read(order_id: str, *, read_session: Any = None):
+    from src.services.initial_saved_import_service import get_binding
+
+    with (nullcontext(read_session) if read_session is not None else session_scope()) as session:
+        if session.get(Order, order_id) is None:
+            return None
+        binding = get_binding(session, order_id)
+        return get_order_by_id(
+            order_id, read_session=session,
+            allow_unresolved_menu_amount=binding is not None,
+        )
+
+
 def get_order_week_options(order_id: str) -> tuple[list[dict[str, Any]] | None, str | None]:
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -8034,7 +8047,7 @@ def get_daily_bag_summary(
         order_id = str(order_summary.get("id") or "").strip()
         if not order_id:
             continue
-        order_payload = get_order_by_id(order_id)
+        order_payload = get_order_for_output_read(order_id)
         if not isinstance(order_payload, dict):
             continue
         from src.services.output_builder import _accepted_output_candidate
@@ -8770,7 +8783,7 @@ def get_bag_summary(order_id: str):
         ]
     should_rebuild = False
     rebuild_reason: str | None = None
-    order_payload = get_order_by_id(order_id)
+    order_payload = get_order_for_output_read(order_id)
     applied_overrides: list[dict[str, Any]] = []
     order_lines: list[dict[str, Any]] | None = None
     accepted_candidate = None

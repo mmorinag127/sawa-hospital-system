@@ -1966,7 +1966,7 @@ def _capture_accepted_output_read(order_id: str, session) -> dict:
     from src.models.uploaded_pdf import UploadedPdf
     from src.models.order_ocr_cache import OrderOcrCache
 
-    order = get_order_by_id(order_id, read_session=session)
+    order = order_service.get_order_for_output_read(order_id, read_session=session)
     if not order:
         raise ValueError("order not found")
     candidate = _accepted_output_candidate(order, write_session=session)
@@ -1998,8 +1998,7 @@ def _capture_output_adoption(order_id: str, session) -> dict:
     original = order_service._capture_synchronous_cache_write_input(order_id, write_session=session)
     if original is None:
         raise ValueError("output original ownership input missing")
-    order = get_order_by_id(order_id, read_session=session,
-                            allow_unresolved_menu_amount=original.get("initial_saved_import") is not None)
+    order = order_service.get_order_for_output_read(order_id, read_session=session)
     if not order:
         raise ValueError("order not found")
     candidate = _accepted_output_candidate(order, write_session=session)
@@ -6181,7 +6180,7 @@ def _prepare_output_context(
     require_invoice: bool = True,
 ) -> dict:
     order_started = time.perf_counter()
-    order = original_adoption["order"] if original_adoption is not None else get_order_by_id(order_id)
+    order = original_adoption["order"] if original_adoption is not None else order_service.get_order_for_output_read(order_id)
     if timings is not None:
         timings["prepare_get_order_ms"] = round((time.perf_counter() - order_started) * 1000, 1)
     if not order:
