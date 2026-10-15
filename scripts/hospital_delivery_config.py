@@ -66,14 +66,16 @@ def descriptor(account):
 
 
 def resource_command(*args):
-    """Translate resource-first IAM helpers into gcloud's verb-first syntax."""
+    """Place the IAM verb and resource before command-specific flags."""
     args = list(args)
     for verb in ("get-iam-policy", "add-iam-policy-binding"):
         if verb in args:
             index = args.index(verb)
-            args[index - 1:index + 1] = [verb, args[index - 1]]
-            break
-    return gcloud(*args)
+            if index < 3 or args[index - 1].startswith("--"):
+                raise Blocked("IAM command resource required")
+            return gcloud(*args[:2], verb, args[index - 1],
+                          *args[2:index - 1], *args[index + 1:])
+    raise Blocked("supported IAM command verb required")
 
 
 def ensure_binding(resource, member, role):
