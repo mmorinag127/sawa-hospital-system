@@ -39,6 +39,7 @@ from src.services.monthly_menu_identity_schema import (
     require_canonical_identity_schema,
 )
 from src.services.menu_vocabulary import normalize_diet_type
+from src.services.menu_name_normalization import _MENU_TRANSLATION, _normalize_menu_name
 from src.services.storage_service import load_bytes_from_uri
 
 
@@ -73,11 +74,6 @@ SKIP_MENU_NAMES = {
     "ごはん半量",
     "ご飯半量",
 }
-
-_MENU_TRANSLATION = str.maketrans(
-    "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ",
-    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
-)
 
 _MASTER_FIELDS = (
     "unit_type",
@@ -372,18 +368,6 @@ def _resolve_menu_name_column(columns: list[str]) -> str:
             if candidate.lower() in col.lower():
                 return col
     return columns[0] if columns else "menu"
-
-
-def _normalize_menu_name(value: str) -> str:
-    if not value:
-        return ""
-    normalized = unicodedata.normalize("NFKC", value).translate(_MENU_TRANSLATION)
-    normalized = re.sub(r"\s+", "", normalized)
-    normalized = normalized.replace("・", "").replace("／", "/")
-    normalized = re.sub(r"[‐‑‒–—―ーｰ]+", "-", normalized)
-    normalized = normalized.translate(str.maketrans({"（": "(", "）": ")", "［": "[", "］": "]"}))
-    normalized = re.sub(r"[()\\[\\]{}「」『』<>＜＞]", "", normalized)
-    return normalized.strip().lower()
 
 
 def _normalize_temp_type(value: object) -> str | None:

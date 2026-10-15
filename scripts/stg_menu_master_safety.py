@@ -183,7 +183,7 @@ def cleanup_owned(engine, initial, ledger, proof):
     if current is None:
         return {"status": "no-write", "deleted": []}
     # Reuse the application's canonical name comparison, without calling CRUD/schema helpers.
-    from src.services.menu_service import _normalize_menu_name
+    from src.services.menu_name_normalization import _normalize_menu_name
     with engine.begin() as connection:
         lock_tables(connection)
         deadline = time.monotonic() + 10
