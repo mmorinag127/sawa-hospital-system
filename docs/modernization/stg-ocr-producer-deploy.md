@@ -1,5 +1,22 @@
 # Staging OCR producer contract deployment
 
+## Persisted Unselected Workflow After Ingest Failure
+
+The read-only API can serialize an existing row without a
+`workflow_not_initialized` marker. The resume identity check also accepts the
+explicit `template_unresolved` blocker with `state=uploaded`, all four context
+fields present and null, and all six result fields present and null:
+`selected_ocr_result_id`, `saved_sheet_id`, `confirmed_snapshot_id`, `ocr_job`,
+`output_bundle_id`, `bagging_result_id`. Missing fields, mixed context, nonnull
+results, or unknown markerless states still stop. All owner/hash/canonical checks
+remain mandatory. `context_suggestion` is never adopted as evidence.
+
+On identity failure, `resume-identity-failure.json` records only match predicates,
+field presence/null flags, and the two recognized marker predicates. It does not
+contain raw API values, lease credentials, suggestions, or exception messages.
+`resume-failure.json` also records a fixed stop phase/reason for other resume
+failures. These files are diagnostics, not permission to retry or bypass the API.
+
 Failure class: worker and producer from different source contracts. A legacy
 `output/<input>.json` cannot satisfy the current generation/owner-specific output
 name and lineage validation. No legacy output adoption or recognition tuning is added.
@@ -73,8 +90,9 @@ Any future change to canonical projection identity requires coordinated verifica
 No context_suggestion is used as canonical evidence.
 
 The observed uninitialized workflow has `state=uploaded`, blocker
-`workflow_not_initialized`, and all four selection fields explicitly null. Only
-that complete combination is accepted as uninitialized. Otherwise all four fields
+`workflow_not_initialized`, and all four selection fields explicitly null. That
+combination remains accepted; persisted unselected rows must instead satisfy the
+strict `template_unresolved` contract documented above. Otherwise all four fields
 must match; missing fields, mixed nulls and inconsistent markers stop execution.
 Ownership is rechecked while polling after retry. Already-completed uploads skip
 retry after ownership checks and continue the existing Hakodate verification flow.

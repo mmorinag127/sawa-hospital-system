@@ -109,7 +109,49 @@ def canonical_projection_id(case, selection):
                           'snapshot_digest': digest(selection['version'])})
 
 
-def verify_resume_identity(case, selection, state, order, workflow):
+UNSELECTED_RESULT_FIELDS = ('selected_ocr_result_id', 'saved_sheet_id', 'confirmed_snapshot_id',
+                          'ocr_job', 'output_bundle_id', 'bagging_result_id')
+
+
+def verify_resume_identity(case, selection, state, order, workflow, folder=None):
+    try:
+        _verify_resume_identity(case, selection, state, order, workflow)
+    except Exception:
+        if folder is not None:
+            # Predicates only: never persist raw API payloads, suggestions or lease credentials.
+            comparisons = {
+                'upload_id': (state.get('id'), case.get('existing_uploaded_pdf_id')),
+                'order_id': (order.get('id'), case.get('expected_order_id')),
+                'upload_order_id': (state.get('current_order_id'), case.get('expected_order_id')),
+                'document_id': (order.get('document_id'), case.get('expected_document_id')),
+                'upload_document_id': (state.get('current_document_id'), case.get('expected_document_id')),
+                'hash': (state.get('content_sha256'), case.get('sha256')),
+                'facility': (order.get('facility'), case.get('facility_id')),
+                'week': (order.get('week_value'), case.get('week_id')),
+                'skip_ocr': (state.get('skip_ocr'), False),
+                'workflow_order_id': (workflow.get('order_id'), case.get('expected_order_id')),
+            }
+            fields = ('facility_id', 'week_start', 'week_end', 'template_version_id', *UNSELECTED_RESULT_FIELDS)
+            blockers = workflow.get('blockers')
+            try:
+                canonical_matches = order.get('template_version_id') == canonical_projection_id(case, selection)
+            except Exception:
+                canonical_matches = False
+            save_json(folder, 'resume-identity-failure.json', {
+                'phase': 'verify_resume_identity', 'reason': 'identity_validation_failed',
+                'matches': {key: type(actual) is type(expected) and actual == expected
+                            for key, (actual, expected) in comparisons.items()},
+                'workflow_uploaded': workflow.get('state') == 'uploaded',
+                'canonical_projection_matches': canonical_matches,
+                'markers': {key: isinstance(blockers, list) and key in blockers
+                            for key in ('workflow_not_initialized', 'template_unresolved')},
+                'workflow_fields': {key: {'present': key in workflow, 'is_null': workflow.get(key) is None}
+                                    for key in fields},
+            })
+        raise
+
+
+def _verify_resume_identity(case, selection, state, order, workflow):
     for key in ('existing_uploaded_pdf_id', 'expected_order_id', 'expected_document_id'):
         if not isinstance(case.get(key), str) or not case[key].strip():
             raise ValueError('Explicit existing upload/order/document identities required')
@@ -141,16 +183,32 @@ def verify_resume_identity(case, selection, state, order, workflow):
     if not all(key in workflow for key in expected_context):
         raise ValueError('Workflow context fields missing')
     observed_context = {key: workflow.get(key) for key in expected_context}
-    marker = 'workflow_not_initialized' in (workflow.get('blockers') or [])
+    blockers = workflow.get('blockers')
+    if not isinstance(blockers, list):
+        raise ValueError('Workflow blockers must be an explicit list')
+    marker = 'workflow_not_initialized' in blockers
     if marker:
         if workflow.get('state') != 'uploaded' or any(value is not None for value in observed_context.values()):
             raise ValueError('Uninitialized workflow marker/context mismatch')
+    elif ('template_unresolved' in blockers
+          and all(value is None for value in observed_context.values())):
+        if (workflow.get('state') != 'uploaded'
+                or any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS)):
+            raise ValueError('Unselected workflow result/state mismatch')
     elif observed_context != expected_context:
         raise ValueError('Existing workflow selection conflicts with upload owner')
     workflow_revision(workflow, case['expected_order_id'])
 
 
 def resume_upload(case, selection, folder):
+    try:
+        return _resume_upload(case, selection, folder)
+    except Exception:
+        save_json(folder, 'resume-failure.json', {'phase': 'resume_upload', 'reason': 'resume_stopped'})
+        raise
+
+
+def _resume_upload(case, selection, folder):
     if case.get('identity_verified') is not True:
         raise ValueError('FAX facility/week must be visually verified before retry')
     for key in ('existing_uploaded_pdf_id', 'expected_order_id', 'expected_document_id'):
@@ -162,7 +220,7 @@ def resume_upload(case, selection, folder):
     oid = quote(case['expected_order_id'], safe='')
     order = request(f'/orders/{oid}')
     workflow = request(f'/orders/{oid}/workflow-v2')
-    verify_resume_identity(case, selection, state, order, workflow)
+    verify_resume_identity(case, selection, state, order, workflow, folder)
     current_pdf = folder / 'existing-original.pdf'
     download(state['storage_uri'], current_pdf)
     if hashlib.sha256(current_pdf.read_bytes()).hexdigest() != case['sha256']:
@@ -289,7 +347,7 @@ def main():
                 document_id = verify_owner(case, state, order)
                 workflow = request(f'/orders/{oid}/workflow-v2')
                 if any(key in case for key in resume_keys):
-                    verify_resume_identity(case, selection, state, order, workflow)
+                    verify_resume_identity(case, selection, state, order, workflow, folder)
                 save_json(folder, 'workflow.json', workflow)
                 try:
                     evidence = request(f'/orders/{oid}/evidence')
