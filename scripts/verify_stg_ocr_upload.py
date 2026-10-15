@@ -119,6 +119,18 @@ UNSELECTED_RESULT_FIELDS = ('selected_ocr_result_id', 'saved_sheet_id', 'confirm
                           'ocr_job', 'output_bundle_id', 'bagging_result_id')
 
 
+def require_no_selected_results(workflow):
+    for key in UNSELECTED_RESULT_FIELDS:
+        if key not in workflow:
+            raise ValueError('Existing workflow result fields missing')
+        if key == 'ocr_job':
+            if workflow[key] is not None and (
+                    not isinstance(workflow[key], dict) or workflow.get('template_version_id') is None):
+                raise ValueError('Existing workflow job/context invalid')
+        elif workflow[key] is not None:
+            raise ValueError('Existing selected workflow results must not be overwritten')
+
+
 def verify_hakodate_existing(case, selection, folder, *, require_context=False):
     state = request('/ingest/uploads/' + quote(case['existing_uploaded_pdf_id'], safe=''))
     save_json(folder, 'upload-state.json', state)
@@ -153,8 +165,7 @@ def verify_hakodate_existing(case, selection, folder, *, require_context=False):
 
 def prepare_existing_hakodate(case, selection, folder):
     state, order, workflow = verify_hakodate_existing(case, selection, folder)
-    if any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS):
-        raise ValueError('Existing selected workflow results must not be overwritten')
+    require_no_selected_results(workflow)
     start, end = case['week_id'].split('@', 1)[1].split('~')
     if workflow['template_version_id'] is None:
         at_start = resolve_selection({**case, 'effective_date': start})
@@ -173,8 +184,7 @@ def prepare_existing_hakodate(case, selection, folder):
             raise ValueError('Context confirmation did not select canonical version')
         save_json(folder, 'context-confirm.json', confirmed)
     _, _, workflow = verify_hakodate_existing(case, selection, folder, require_context=True)
-    if any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS):
-        raise ValueError('Existing selected workflow results must not be overwritten')
+    require_no_selected_results(workflow)
     return workflow
 
 
@@ -449,10 +459,9 @@ def main():
                         workflow = quad_review['workflow']
                     if explicit_hakodate:
                         _, _, workflow = verify_hakodate_existing(case, selection, folder, require_context=True)
-                        if any(key not in workflow or workflow[key] is not None for key in UNSELECTED_RESULT_FIELDS):
-                            raise ValueError('Existing selected workflow results must not be overwritten')
+                        require_no_selected_results(workflow)
                     started = request(f'/orders/{oid}/workflow-v2/ocr-runs', json.dumps({
-                        'mode': 'hakodate', 'document_id': document_id, 'stale_action': 'retry', 'force': True,
+                        'mode': 'hakodate', 'document_id': document_id, 'stale_action': 'retry', 'force': not explicit_hakodate,
                     }).encode(), 'application/json', revision=workflow_revision(workflow, oid))
                     (folder / 'ocr-start.json').write_text(json.dumps(started, ensure_ascii=False, indent=2))
                     started_workflow = started['workflow']
