@@ -43,6 +43,83 @@ def test_replacement_changes_only_image_and_server_revision_name():
     assert before == spec()
 
 
+def runtime_pair():
+    before = spec()
+    before['spec']['template']['spec']['containers'][0]['image'] = p.PREFIX + 'frontend:stg-original'
+    revision = {'metadata': {'name': REV}, 'spec': deepcopy(before['spec']['template']['spec']),
+                'status': {'imageDigest': OLD_IMAGE}}
+    revision['spec']['containers'][0].update(image=OLD_IMAGE, name='frontend-1')
+    return before, revision
+
+
+def test_tag_resolution_and_generated_name_preserve_all_runtime_settings():
+    before, revision = runtime_pair()
+    originals = deepcopy((before, revision))
+    r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+    assert (before, revision) == originals
+
+
+def test_export_omits_server_revision_name_but_active_revision_is_still_required():
+    before, revision = runtime_pair()
+    del before['spec']['template']['metadata']['name']
+    r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+    revision['metadata']['name'] = 'web-stg-other'
+    with pytest.raises(r.Blocked, match='exported_revision_mismatch'):
+        r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('timeoutSeconds', 900), ('containerConcurrency', 1),
+    ('serviceAccountName', 'other@sawahospitalsystem.iam.gserviceaccount.com'),
+])
+def test_runtime_setting_change_still_blocks(field, value):
+    before, revision = runtime_pair()
+    revision['spec'][field] = value
+    with pytest.raises(r.Blocked, match='original_runtime_mismatch'):
+        r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('env', []), ('resources', {'limits': {'memory': '2Gi'}}),
+    ('command', ['changed']), ('ports', [{'containerPort': 9090}]),
+])
+def test_container_setting_change_still_blocks(field, value):
+    before, revision = runtime_pair()
+    revision['spec']['containers'][0][field] = value
+    with pytest.raises(r.Blocked, match='original_runtime_mismatch'):
+        r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
+def test_explicit_container_name_change_still_blocks():
+    before, revision = runtime_pair()
+    before['spec']['template']['spec']['containers'][0]['name'] = 'explicit-name'
+    with pytest.raises(r.Blocked, match='original_runtime_mismatch'):
+        r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
+def test_unknown_generated_container_name_stops():
+    before, revision = runtime_pair()
+    revision['spec']['containers'][0]['name'] = 'unknown-container'
+    with pytest.raises(r.Blocked, match='unrecognized_generated_container_name'):
+        r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
+@pytest.mark.parametrize('case', ['revision', 'resolved-image', 'status-image', 'requested-image', 'repository'])
+def test_original_revision_and_image_identity_are_required(case):
+    before, revision = runtime_pair()
+    if case == 'revision':
+        before['spec']['template']['metadata']['name'] = 'web-stg-other'
+    elif case == 'resolved-image':
+        revision['spec']['containers'][0]['image'] = IMAGE
+    elif case == 'status-image':
+        revision['status']['imageDigest'] = IMAGE
+    else:
+        before['spec']['template']['spec']['containers'][0]['image'] = (
+            IMAGE if case == 'requested-image' else 'other/repository:tag')
+    with pytest.raises(r.Blocked):
+        r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
 @pytest.mark.parametrize('path,value', [
     (('metadata', 'name'), 'web-prod'), (('metadata', 'namespace'), 'other'),
     (('spec', 'traffic'), [{'revisionName': REV, 'percent': 100}]),
@@ -162,7 +239,7 @@ def recovery(monkeypatch):
 
     def cloud(*args, **kwargs):
         if args[:3] == ('run', 'revisions', 'describe'):
-            return {'spec': spec()['spec']['template']['spec'],
+            return {'metadata': {'name': args[3]}, 'spec': spec()['spec']['template']['spec'],
                     'status': {'imageDigest': OLD_IMAGE if args[3] == REV else IMAGE}}
         if args[:2] == ('projects', 'describe'):
             return {'projectNumber': '167795504375'}
