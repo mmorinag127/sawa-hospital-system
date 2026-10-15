@@ -3,10 +3,16 @@ import argparse
 from copy import deepcopy
 import json
 import os
+from pathlib import Path
 import re
+import sys
 import urllib.request
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / 'backend')]
+
 from stg_ocr_producer_deploy import Blocked, cloud, command, PROJECT, REGION, DEPLOY
+from registry_image_digest import resolve_image_digest
 
 PREFIX = f'{REGION}-docker.pkg.dev/{PROJECT}/backend/'
 REPOSITORY = f'projects/{PROJECT}/locations/{REGION}/repositories/backend'
@@ -88,9 +94,7 @@ def protect_image(image, component):
     tag = image.split('@')[0] + ':stg-protected-' + image.split(':')[-1]
     command(['gcloud', 'artifacts', 'docker', 'tags', 'add', image, tag,
              f'--project={PROJECT}', '--quiet'])
-    described = cloud('artifacts', 'docker', 'images', 'describe', tag)
-    require(described.get('image_summary', {}).get('digest') == image.split('@')[1],
-            'protected_tag_digest_mismatch')
+    require(resolve_image_digest(tag) == image, 'protected_tag_digest_mismatch')
 
 
 def protect_current():
