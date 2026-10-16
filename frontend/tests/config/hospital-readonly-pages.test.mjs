@@ -1,9 +1,83 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { businessPath, observedBusinessLink, readonlyPageStatus, safeBusinessScreenshot, assertNoVisibleReadMessages, READONLY_MESSAGE_SURFACES } from '../../scripts/hospital-readonly-pages.mjs';
+import { businessPath, observedBusinessLink, readonlyPageStatus, safeBusinessScreenshot, assertNoVisibleReadMessages, READONLY_MESSAGE_SURFACES, openReadonlyDisclosure, readonlyFailureKind, READONLY_SUBPHASES } from '../../scripts/hospital-readonly-pages.mjs';
 
 const origin = 'https://web-stg-avlnzjjrca-dt.a.run.app';
+
+test('each content assertion has a distinct fixed diagnostic code', () => {
+  const source = readFileSync(new URL('../../scripts/hospital-readonly-pages.mjs', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('export async function verifyHospitalReadonlyPages'));
+  const lines = body.split('\n');
+  const codes = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*(?:assert\.(?:ok|equal|match|deepEqual)\(|await expect\(|await assertNoVisibleReadMessages\()/.test(lines[i])) continue;
+    if (lines[i].includes('READONLY_SUBPHASES.includes')) continue;
+    const before = lines[i - 1];
+    assert.match(before, /(?:mark\(|responseCheck = )/);
+    const code = before.match(/'readonly-check-\d{3}'/);
+    assert.ok(code, lines[i]);
+    codes.push(code[0]);
+  }
+  assert.equal(codes.length, 50);
+  assert.equal(new Set(codes).size, codes.length);
+  assert.ok(source.includes('entry.failedCheck = entry.checkCode;'));
+  assert.ok(source.includes('failedCheck: responseCheck'));
+  assert.ok(source.includes("responseCheck = 'response-json'"));
+});
+
+test('link failures retain only the exact fixed failing assertion code', () => {
+  for (const [href, expectedCode] of [
+    ['https://evil.test/hospital/orders', 'link-origin'],
+    ['/login', 'link-business-path'],
+    ['/hospital/menus', 'link-destination'],
+    ['/hospital/orders?secret=hidden', 'link-query-empty'],
+    ['/hospital/orders#hidden', 'link-fragment-empty'],
+  ]) {
+    let code;
+    assert.throws(() => observedBusinessLink(origin, href, '/hospital/orders', value => { code = value; }));
+    assert.equal(code, expectedCode);
+    assert.ok(!code.includes('hidden'));
+  }
+});
+
+test('collapsed menu disclosure is opened once and already open content is retained', async () => {
+  for (const initial of [null, '']) {
+    let open = initial;
+    let clicks = 0;
+    const locator = { getAttribute: async name => { assert.equal(name, 'open'); return open; },
+      locator: selector => { assert.equal(selector, 'summary'); return { click: async () => { open = ''; clicks++; } }; } };
+    await openReadonlyDisclosure(locator);
+    await openReadonlyDisclosure(locator);
+    assert.equal(clicks, initial === null ? 1 : 0);
+  }
+});
+
+test('fixed diagnostic phases and error kinds never retain exception details', () => {
+  assert.equal(readonlyFailureKind({ name: 'TimeoutError', message: 'secret' }), 'timeout');
+  assert.equal(readonlyFailureKind({ name: 'AssertionError', message: 'secret' }), 'assertion');
+  assert.equal(readonlyFailureKind({ name: 'secret', message: 'secret' }), 'other');
+  for (const name of ['navigation-link', 'response', 'content', 'network-idle', 'source-sha', 'loading', 'visible-errors', 'page-errors', 'screenshot']) assert.ok(READONLY_SUBPHASES.includes(name));
+});
+
+test('disclosure and redirect corrections follow product contracts without suppressing dashboard errors', () => {
+  const read = path => readFileSync(new URL('../../src/' + path, import.meta.url), 'utf8');
+  const orders = read('pages/orders/index.tsx');
+  assert.ok(orders.includes('useState<Record<string, boolean>>({})'));
+  assert.ok(orders.includes('aria-expanded={expanded}'));
+  const menu = read('pages/menus/[monthId].tsx');
+  assert.ok(menu.includes('<details className="menu-list-details">'));
+  assert.ok(menu.includes('<summary>メニュー一覧</summary>'));
+  const proxy = read('proxy.ts');
+  assert.ok(proxy.includes('url.pathname = `/hospital${pathname}`'));
+  assert.ok(proxy.includes('NextResponse.redirect(url, 308)'));
+  const dashboard = read('pages/hospital-dashboard.tsx');
+  assert.ok(dashboard.includes('className="system-meta warn"'));
+  assert.ok(dashboard.includes('エラー: {systemStatus.ocr_pipeline.last_error}'));
+  assert.ok(READONLY_MESSAGE_SURFACES.includes('.system-meta.warn'));
+  assert.equal(readonlyPageStatus([{ status: 404 }], true), 'failed');
+  assert.equal(businessPath('/hospital/facilities/FAC00015'), true);
+});
 
 test('visible nonempty message rejects despite existing content; hidden and empty messages do not', async () => {
   function page(rows) {
