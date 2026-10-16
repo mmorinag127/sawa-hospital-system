@@ -581,6 +581,7 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v3
       - uses: astral-sh/setup-uv@v8.1.0
       - name: Deploy web-stg
+        id: deploy-web
         env:
           IMAGE: ${{ needs.build-frontend.outputs.image }}
           GOOGLE_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
@@ -696,23 +697,27 @@ jobs:
           if-no-files-found: error
 
       - name: Initialize opted-in OCR UI evidence
-        if: github.event_name == 'workflow_dispatch' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')
+        id: ocr-ui-init
+        if: "!cancelled() && needs.source-gate.result == 'success' && steps.auth-frontend.outcome == 'success' && steps.deploy-web.outcome == 'success' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')"
         run: |
           mkdir -p tmp/ocr-live
           python3 -c 'import json,os,pathlib; pathlib.Path("tmp/ocr-live/result.json").write_text(json.dumps({"status":"not-verified","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in staging GET-only workflow-v2 Step2 OCR verification"}))'
       - uses: actions/download-artifact@v4
-        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        id: ocr-ui-new-artifact
+        if: "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_verification_manifest != '' && inputs.ocr_existing_artifact_run_id == '' && needs.deploy-backend.result == 'success'"
         with:
           name: live-ocr-stg
           path: tmp/ocr-verification
       - name: Validate existing staging OCR artifact provenance
-        if: github.event_name == 'workflow_dispatch' && inputs.ocr_existing_artifact_run_id != ''
+        id: ocr-ui-provenance
+        if: "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_existing_artifact_run_id != '' && inputs.ocr_verification_manifest == ''"
         env:
           GH_TOKEN: ${{ github.token }}
           OCR_EXISTING_RUN: ${{ inputs.ocr_existing_artifact_run_id }}
         run: python3 scripts/verify_existing_ocr_artifact.py "$OCR_EXISTING_RUN"
       - uses: actions/download-artifact@v4
-        if: github.event_name == 'workflow_dispatch' && inputs.ocr_existing_artifact_run_id != ''
+        id: ocr-ui-existing-artifact
+        if: "!cancelled() && steps.ocr-ui-provenance.outcome == 'success'"
         with:
           name: live-ocr-stg
           path: tmp/ocr-verification
@@ -720,17 +725,20 @@ jobs:
           github-token: ${{ github.token }}
           repository: mmorinag127/sawa-hospital-system
       - uses: actions/setup-node@v4
-        if: github.event_name == 'workflow_dispatch' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')
+        id: ocr-ui-node
+        if: "!cancelled() && (steps.ocr-ui-new-artifact.outcome == 'success' || steps.ocr-ui-existing-artifact.outcome == 'success')"
         with:
           node-version: '20'
       - name: Prepare opted-in OCR UI verification
-        if: github.event_name == 'workflow_dispatch' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')
+        id: ocr-ui-deps
+        if: "!cancelled() && steps.ocr-ui-node.outcome == 'success'"
         run: |
           npm ci --prefix frontend --ignore-scripts
           cd frontend
           npx --no-install playwright install --with-deps webkit
       - name: Verify opted-in existing OCR workflow-v2 Step2 UI
-        if: github.event_name == 'workflow_dispatch' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')
+        id: ocr-ui-verify
+        if: "!cancelled() && steps.ocr-ui-deps.outcome == 'success'"
         env:
           LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
         run: node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live

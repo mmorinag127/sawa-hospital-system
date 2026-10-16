@@ -75,6 +75,18 @@ def test_normal_deploy_and_verifier_commands_unchanged():
     before = old['jobs']['deploy-frontend']; after = new['jobs']['deploy-frontend']
     assert after['needs'] == before['needs'] and after['if'] == before['if']
     for step in before['steps']:
+        approved_ids = {
+            'Deploy web-stg': 'deploy-web',
+            'Initialize opted-in OCR UI evidence': 'ocr-ui-init',
+            'Prepare opted-in OCR UI verification': 'ocr-ui-deps',
+            'Verify opted-in existing OCR workflow-v2 Step2 UI': 'ocr-ui-verify',
+        }
+        if step.get('name') in approved_ids:
+            step['id'] = approved_ids[step['name']]
+        elif step.get('uses') == 'actions/download-artifact@v4' and step.get('with', {}).get('name') == 'live-ocr-stg':
+            step['id'] = 'ocr-ui-new-artifact'
+        elif step.get('uses') == 'actions/setup-node@v4' and 'inputs.ocr_verification_manifest' in step.get('if', ''):
+            step['id'] = 'ocr-ui-node'
         matches = [s for s in after['steps'] if s.get('name') == step.get('name') and s.get('uses') == step.get('uses')]
         assert any({k:v for k,v in candidate.items() if k != 'if'} == {k:v for k,v in step.items() if k != 'if'} for candidate in matches)
     downloads = [s for s in after['steps'] if s.get('uses') == 'actions/download-artifact@v4' and 'run-id' in s.get('with', {})]
