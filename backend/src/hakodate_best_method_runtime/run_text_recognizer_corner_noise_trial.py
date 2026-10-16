@@ -30,6 +30,7 @@ WORKSPACE = BACKEND_ROOT.parent if (BACKEND_ROOT.parent / "tmp").exists() else B
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from src.services.hakodate_recognizer_input_evidence import contact_crop_evidence  # noqa: E402
+from src.services.hakodate_ocr_evidence_service import recognition_resolution  # noqa: E402
 
 from src.services.hakodate_cell_ocr_batch_service import (  # noqa: E402
     _normalize_digits,
@@ -504,6 +505,10 @@ def build_recognizer_contact_sheet(
             "recognizer_ink_stats": ink_stats,
             "recognizer_candidate": True,
         }
+        sx0, sy0, sx1, sy1 = source_px_box
+        prepared_region["recognizer_preprocess_ink_removed"] = bool(
+            crop_image.convert("RGB").getextrema() == ((255, 255), (255, 255), (255, 255))
+            and np.any(rectified_fax_bgr[sy0:sy1, sx0:sx1] < 255))
         candidate_items.append((slot_index, prepared_region, crop_image, source_px_box, ink_stats))
     row_count = max(1, (len(candidate_items) + columns - 1) // columns)
     sheet = Image.new("RGB", (columns * slot_width, row_count * slot_height), "white")
@@ -636,9 +641,22 @@ def run_text_recognizer_direct(
         )
         input_evidence = contact_crop_evidence(contact_sheet, requested_polygons[index])
         assigned[-1]["recognizer_input_evidence"] = input_evidence
-        if input_evidence["all_white"] and (raw_text or text):
-            assigned[-1]["quantity_source_issue"] = "hakodate_blank_input_nonempty_prediction"
+        resolution = recognition_resolution(assigned[-1])
+        assigned[-1].update(resolution)
+        if resolution["resolution_state"] == "review_required":
+            assigned[-1].update(ocr_text=None, ocr_normalized=None,
+                                recognizer_accepted=False, recognizer_candidate_accepted=False,
+                                recognizer_decision_source="review_required")
+            accepted_count -= int(accepted)
+            candidate_digit_accept_count -= int(candidate_accepted and not accepted)
+        elif region.get("role") == "note":
+            assigned[-1].update(ocr_text=raw_text, ocr_normalized=raw_text)
     repaired_assigned = apply_column_context_digit_repair(assigned) if enable_context_repair else assigned
+    for original, repaired in zip(assigned, repaired_assigned):
+        if original["resolution_state"] == "review_required":
+            repaired.update(ocr_text=None, ocr_normalized=None, resolved_value=None,
+                            resolution_state="review_required", recognizer_accepted=False,
+                            recognizer_candidate_accepted=False, recognizer_decision_source="review_required")
     repair_count = sum(1 for region in repaired_assigned if region.get("recognizer_context_repair"))
     return repaired_assigned, {
         "engine": TRIAL_ENGINE,

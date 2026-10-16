@@ -346,7 +346,7 @@ def _run_text_recognizer_records(
             "expected_digits": str((truth.get(sheet_cell) or {}).get("expected_digits") or ""),
             "ocr_engine": TEXT_RECOGNIZER_ENGINE,
             "raw_text": str(region.get("recognizer_raw_text") or region.get("ocr_text") or "").strip(),
-            "pred_digits": str(region.get("ocr_normalized") or "").strip(),
+            "pred_digits": None if region.get("resolution_state") == "review_required" else str(region.get("ocr_normalized") or "").strip(),
             "score": _confidence_score_for_region(region),
             "ocr_candidate": bool(region.get("recognizer_candidate")),
             "supervised_label_source": "",
@@ -446,7 +446,7 @@ def _draw_overlay(
         record = by_cell.get(str(region.get("sheet_cell")))
         if not record:
             continue
-        value = str(record.get("pred_digits") or "").strip()
+        value = "?" if record.get("resolution_state") == "review_required" else str(record.get("pred_digits") or "").strip()
         if not value:
             continue
         center = _region_center(region)
@@ -1015,7 +1015,7 @@ def build_best_method_for_manifest_item(
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
     for original, serialized in zip(records, records_json):
-        for key in ("recognizer_input_evidence", "quantity_source_issue"):
+        for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed"):
             if key in original:
                 serialized[key] = original[key]
         if original.get("recognition_source") == "operator":
@@ -1025,8 +1025,9 @@ def build_best_method_for_manifest_item(
     for original_record, record in zip(records, records_json):
         region = dict(record)
         operator_record = original_record.get("recognition_source") == "operator"
-        region["ocr_text"] = "" if operator_record else str(record.get("raw_text") or record.get("pred_digits") or "").strip()
-        region["ocr_normalized"] = str(record.get("pred_digits") or "").strip()
+        review_required = record.get("resolution_state") == "review_required"
+        region["ocr_text"] = None if review_required else "" if operator_record else str(record.get("raw_text") or record.get("pred_digits") or "").strip()
+        region["ocr_normalized"] = None if review_required else str(record.get("pred_digits") or "").strip()
         region["ocr_engine"] = "operator" if operator_record else "opencv_knn_leave_one_out_k5"
         region["source"] = "operator" if operator_record else "render_best_method_overlay_all_facilities.py"
         if operator_record:

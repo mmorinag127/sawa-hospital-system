@@ -8972,6 +8972,15 @@ def _validate_hakodate_recognition_review(payload, records, verified_inputs):
             observed = contact_crop_evidence(contact, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
             if evidence != observed or original.get("ocr_contact_crop_box") != evidence["bbox"]:
                 raise ValueError("hakodate_recognizer_input_evidence_changed")
+            if "resolution_state" in original:
+                state = "review_required" if hakodate_ocr_evidence_service.recognition_input_issue(original) else "resolved"
+                if original["resolution_state"] != state or record.get("resolution_state") != state:
+                    raise ValueError("hakodate_ocr_quantity_source_conflict")
+            if original.get("resolution_state") == "review_required":
+                if (not hakodate_ocr_evidence_service.recognition_input_issue(original)
+                        or any(original.get(key) is not None for key in ("resolved_value", "ocr_text", "ocr_normalized", "pred_digits"))
+                        or record.get("normalized_value") is not None):
+                    raise ValueError("hakodate_ocr_quantity_source_conflict")
     expected = hakodate_ocr_evidence_service.recognition_review(records)
     if payload.get("hakodate_recognition_review") != expected:
         raise ValueError("hakodate_recognition_review_invalid")
@@ -9877,7 +9886,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             raw_evidence_records.append(
                 {
                     "text": raw_text,
-                    "normalized_value": raw_text,
+                    "normalized_value": None if region.get("resolution_state") == "review_required" else raw_text,
                     "bbox": box,
                     "center": center,
                     "confidence": confidence_source,
