@@ -1,7 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { STG_OUTPUT_SOURCE_ORIGIN, isAllowedOutputSourceOrigin } from '../../scripts/output-source-live-origin.mjs';
 import { DAILY_OUTPUT_SECTIONS, OPERATOR_DAILY_DELIVERY_PATH, OUTPUT_SECTION_PNGS, hasCompleteDailyOutputReceipt, recordAllowedResponse, sanitizedFailureCode, sameOriginPathname, settleDailyOutputReceipts } from '../../scripts/verify-output-source-live.mjs';
+
+test('verifier exact idle and loading selectors match the real daily output control', () => {
+  const page = readFileSync(new URL('../../src/pages/daily-delivery-notes.tsx', import.meta.url), 'utf8');
+  const verifier = readFileSync(new URL('../../scripts/verify-output-source-live.mjs', import.meta.url), 'utf8');
+  const labels = page.match(/\{loading \? "([^"]+)" : "([^"]+)"\}/);
+  assert.ok(labels, 'real loading/idle control must remain identifiable');
+  const idle = verifier.match(/const fetchButton = page\.getByRole\('button', \{ name: '([^']+)', exact: true \}\);/);
+  const loading = verifier.match(/await expect\(page\.getByRole\('button', \{ name: '([^']+)', exact: true \}\)\)\.toHaveCount\(0\);/);
+  assert.ok(idle);
+  assert.ok(loading);
+  assert.equal(idle[1], labels[2]);
+  assert.equal(loading[1], labels[1]);
+  assert.equal(idle[1], '表示・集計');
+  assert.equal(loading[1], '集計中...');
+  assert.ok(verifier.includes('await expect(fetchButton).toBeVisible();'));
+  assert.ok(verifier.includes('await fetchButton.click();'));
+  assert.ok(verifier.includes('await expect(fetchButton).toBeEnabled();'));
+});
 
 test('output-source browser verifier only accepts the exact staging origin', () => {
   assert.equal(OPERATOR_DAILY_DELIVERY_PATH, '/hospital/daily-delivery-notes');
