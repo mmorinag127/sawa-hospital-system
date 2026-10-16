@@ -97,6 +97,7 @@ jobs:
         run: |
           python -m pytest --confcutdir=tests/unit \
             tests/unit/test_menu_normalization_import.py \
+            tests/unit/test_monthly_menu_read_batch.py \
             tests/unit/test_initial_saved_source_service.py \
             tests/unit/test_initial_saved_import_service.py \
             tests/unit/test_output_read_import_policy.py \
