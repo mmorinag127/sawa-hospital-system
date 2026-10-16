@@ -3682,21 +3682,51 @@ def _readonly_monthly_items(session, month_id, items, entries, facility_id=None)
             "bag_max_qty": None, "bag_max_unit": None,
         })
     scope_ids = _resolve_override_scope_ids(session, facility_id) if facility_id else []
+    scopes_by_facility = {}
     for payload in payloads:
-        payload_scope_ids = scope_ids if facility_id else _resolve_override_scope_ids(
-            session, payload.get("facility_override")
-        )
+        scope = payload.get("facility_override")
+        if not facility_id and scope not in scopes_by_facility:
+            scopes_by_facility[scope] = _resolve_override_scope_ids(session, scope)
+    master_ids = {payload["menu_master_id"] for payload in payloads if payload.get("menu_master_id")}
+    masters = {}
+    missing_master_ids = set()
+    mapper = inspect(MenuMaster)
+    for master_id in master_ids:
+        master = session.identity_map.get(mapper.identity_key_from_primary_key((master_id,)))
+        if master is not None and not inspect(master).expired:
+            masters[master_id] = master
+        else:
+            missing_master_ids.add(master_id)
+    if missing_master_ids:
+        masters.update({row.id: row for row in session.query(MenuMaster).filter(
+            MenuMaster.id.in_(missing_master_ids),
+        ).all()})
+    all_scope_ids = set(scope_ids)
+    for resolved in scopes_by_facility.values():
+        all_scope_ids.update(resolved)
+    overrides_by_master = {}
+    if masters and all_scope_ids:
+        for db_master_id, db_facility_id, row in session.query(
+            MenuFacilityOverride.menu_master_id,
+            MenuFacilityOverride.facility_id,
+            MenuFacilityOverride,
+        ).filter(
+            MenuFacilityOverride.menu_master_id.in_(masters),
+            MenuFacilityOverride.facility_id.in_(all_scope_ids),
+        ).all():
+            # SQL membership is distinct from unflushed ORM attribute values.
+            overrides_by_master.setdefault(db_master_id, []).append((db_facility_id, row))
+    for payload in payloads:
+        payload_scope_ids = scope_ids if facility_id else scopes_by_facility[payload.get("facility_override")]
         missing = []
         master_id = payload.get("menu_master_id")
         if master_id:
-            master = session.get(MenuMaster, master_id)
+            master = masters.get(master_id)
             if master is None:
                 missing.append("menu_master_id")
             else:
-                overrides = session.query(MenuFacilityOverride).filter(
-                    MenuFacilityOverride.menu_master_id == master_id,
-                    MenuFacilityOverride.facility_id.in_(payload_scope_ids),
-                ).all() if payload_scope_ids else []
+                overrides = [row for db_facility_id, row in overrides_by_master.get(master_id, [])
+                             if db_facility_id in payload_scope_ids]
                 candidates = []
                 if overrides:
                     best = min(payload_scope_ids.index(row.facility_id) for row in overrides)
