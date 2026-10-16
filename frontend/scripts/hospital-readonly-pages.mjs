@@ -37,6 +37,63 @@ export async function openReadonlyDisclosure(locator) {
   if (await locator.getAttribute('open') === null) await locator.locator('summary').click();
 }
 
+export async function readMonthlyDetailWithHistory({ page, origin, month, button, mark }) {
+  const path = `/api/monthly-menus/${month}`;
+  const wait = (suffix, code) => page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.origin === origin && url.pathname === path + suffix && response.request().method() === 'GET';
+  }).then(async response => {
+    if (response.status() !== 200) throw new Error(code + '-http');
+    try { return await response.json(); } catch { throw new Error(code + '-body'); }
+  });
+  // Register both before navigation: uploads is requested after the menu body is consumed.
+  const ready = Promise.all([wait('', 'monthly-menu'), wait('/uploads', 'monthly-history')])
+    .then(values => ({ values }), error => ({ error }));
+  if (new URL(page.url()).pathname === `/hospital/menus/${month}`) {
+    mark('monthly-existing-navigation');
+    const href = observedBusinessLink(origin, page.url(), `/hospital/menus/${month}`, mark);
+    await page.goto(href);
+  } else {
+    mark('monthly-select');
+    await button.click();
+  }
+  mark('monthly-responses');
+  const outcome = await ready;
+  if (outcome.error) {
+    const allowed = ['monthly-menu-http', 'monthly-menu-body', 'monthly-history-http', 'monthly-history-body'];
+    mark(allowed.includes(outcome.error.message) ? outcome.error.message : 'monthly-response-wait');
+    throw new Error('monthly-response-failed');
+  }
+  return outcome.values;
+}
+
+export async function verifyMonthlyHistory({ page, expect, history, month, mark }) {
+  mark('monthly-history-shape');
+  assert.ok(history && Array.isArray(history.items));
+  for (const row of history.items) {
+    assert.ok(row && typeof row.id === 'string' && row.id.length);
+    assert.equal(row.month_id, month);
+    assert.ok(row.filename === null || row.filename === undefined || typeof row.filename === 'string');
+  }
+  const table = page.getByRole('table', { name: '取込履歴', exact: true });
+  mark('monthly-history-table');
+  await expect(table).toBeVisible();
+  const visible = history.items.slice(0, 25);
+  mark('monthly-history-row-count');
+  await expect(table.locator('tbody tr')).toHaveCount(Math.max(1, visible.length));
+  mark('monthly-history-total');
+  await expect(table.locator('../..').locator('.MuiTablePagination-displayedRows'))
+    .toHaveText(`${visible.length ? 1 : 0}–${visible.length} / ${history.items.length} 件`);
+  if (!visible.length) {
+    mark('monthly-history-empty');
+    await expect(table.locator('tbody')).toHaveText('該当データがありません。');
+  }
+  for (let i = 0; i < visible.length; i++) {
+    mark('monthly-history-filename');
+    await expect(table.locator('tbody tr').nth(i).locator('td').nth(1)).toHaveText(visible[i].filename || '-');
+  }
+}
+
 export function readonlyFailureKind(error) {
   if (error?.name === 'TimeoutError') return 'timeout';
   if (error?.name === 'AssertionError') return 'assertion';
@@ -233,16 +290,12 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
     const button = page.locator('[aria-label="登録済み月次"] button').filter({ hasText: monthLabel });
     mark('readonly-check-026');
     await expect(button).toHaveCount(1);
-    // Selecting the already displayed month need not trigger another request.
-    if (!new URL(page.url()).pathname.endsWith('/menus/' + month)) {
-      const data = await receipt('/api/monthly-menus/' + month, () => button.click());
-      mark('readonly-check-027');
-      assert.equal(data.menu?.id, month);
-      mark('readonly-check-028');
-      assert.ok(data.items?.length || data.entries?.length);
-    } else {
-      await button.click();
-    }
+    const [data, history] = await readMonthlyDetailWithHistory({ page, origin, month, button, mark });
+    mark('readonly-check-027');
+    assert.equal(data.menu?.id, month);
+    mark('readonly-check-028');
+    assert.ok(data.items?.length || data.entries?.length);
+    await verifyMonthlyHistory({ page, expect, history, month, mark });
     mark('readonly-check-029');
     await expect(page.getByRole('heading', { name: '月次メニュー編集', exact: true })).toBeVisible();
     phase('expand-menu-list');
