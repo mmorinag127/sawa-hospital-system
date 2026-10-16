@@ -64,6 +64,59 @@ export function orderFormOptions(data, kind) {
   });
 }
 
+export function orderFormSelect(page, label) {
+  return page.locator('label.field').filter({
+    has: page.locator('span.field-label').filter({ hasText: new RegExp(`^${label}$`) }),
+  }).locator('select');
+}
+
+export async function verifiedProcessHistory({ page, expect, rows, items, mark }) {
+  assert.equal(new Set(items.map(item => item.id)).size, items.length);
+  for (const item of items) assert.ok(typeof item.id === 'string' && item.id.length);
+  const handles = [];
+  const detail = page.locator('[aria-label="処理ログ詳細"]');
+  async function select(index) {
+    const item = items[index];
+    mark('process-history-selection');
+    await rows.nth(index).click();
+    await expect(rows).toHaveCount(items.length);
+    await expect(page.locator('[aria-label="処理ログ一覧"] button.log-row.active')).toHaveCount(1);
+    await expect(rows.nth(index)).toHaveClass(/\bactive\b/);
+    mark('process-history-detail');
+    await expect(detail.getByRole('heading', { name: item.title || item.id, exact: true })).toBeVisible();
+    await expect(detail.locator('pre.json')).toHaveText(JSON.stringify(item.details || item, null, 2));
+    for (const [offset, value] of [item.target || '-', item.actor || '-', item.source, item.summary || '-'].entries()) {
+      assert.equal(typeof value, 'string');
+      await expect(detail.locator('.detail-list dd').nth(offset + 1)).toHaveText(value);
+    }
+  }
+  const failed = items.flatMap((item, index) => ['failed', 'error', 'hard_failed'].includes(item.status) ? [index] : []);
+  for (const index of failed) {
+    await select(index);
+    mark('process-history-status');
+    const badge = rows.nth(index).locator('span.status.error');
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toHaveText('失敗');
+    await expect(detail.locator('.detail-head > span.status.error')).toHaveText('失敗');
+    handles.push(await badge.elementHandle());
+  }
+  // Restore the existing inspected row; only its own detail badge may be exempted.
+  const selectedIndex = items.length > 1 ? 1 : 0;
+  if (items.length) {
+    await select(selectedIndex);
+    if (failed.includes(selectedIndex)) handles.push(await detail.locator('.detail-head > span.status.error').elementHandle());
+  }
+  return async element => {
+    if (!['/system-process-logs', '/hospital/system-process-logs'].includes(new URL(page.url()).pathname)) return false;
+    for (const handle of handles) {
+      if (await element.evaluate((node, known) => node === known && node.isConnected
+        && node.matches('span.status.error') && !node.hasAttribute('role')
+        && node.textContent === '失敗', handle)) return true;
+    }
+    return false;
+  };
+}
+
 export function shippingSuccess(data, history = false) {
   assert.ok(data && data.summary);
   for (const field of ['total', 'pending', 'delivered', 'errors']) assert.ok(Number.isInteger(data.summary[field]) && data.summary[field] >= 0);
@@ -185,8 +238,9 @@ export async function verifyAdditionalReadonlyPages(ctx) {
       mark(`order-forms-${kind}-shape`);
       const options = orderFormOptions(data, kind);
       if (kind === 'patterns') options.unshift({ value: '', text: '施設既定を使う' });
-      const select = page.getByLabel(label, { exact: true });
+      const select = orderFormSelect(page, label);
       mark(`order-forms-${kind}-options`);
+      await expect(select).toHaveCount(1);
       await expect(select.locator('option')).toHaveText(options.map(option => option.text));
       assert.deepEqual(await select.locator('option').evaluateAll(nodes => nodes.map(node => node.value)), options.map(option => option.value));
     }
@@ -237,5 +291,6 @@ export async function verifyAdditionalReadonlyPages(ctx) {
     }
     mark('process-logs-detail-body');
     await expect(detail.locator('pre.json')).toHaveText(JSON.stringify(selected.details || selected, null, 2));
+    return { processHistory: await verifiedProcessHistory({ page, expect, rows, items: data.items, mark }) };
   });
 }

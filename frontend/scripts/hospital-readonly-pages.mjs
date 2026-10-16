@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { verifyManualLibrary } from './manual-library-readonly.mjs';
 import { verifyAdditionalReadonlyPages } from './hospital-additional-readonly-pages.mjs';
+import { verifySavedWorkflowPages } from './saved-workflow-readonly.mjs';
 
 export function businessPath(path) {
   return /^(?:\/hospital)?(?:\/daily-delivery-notes|\/hospital-dashboard|\/orders|\/facility-orders|\/menus(?:\/\d{4}-\d{2})?|\/facility-master|\/facilities\/[A-Za-z0-9_-]+|\/menu-masters)$/.test(path)
     || /^(?:\/hospital)?\/(?:base-menus|menu-rules|order-forms|shipping-history|system-process-logs)$/.test(path)
+    || /^(?:\/hospital)?\/orders\/[A-Za-z0-9_-]+\/workflow-v2$/.test(path)
     || path === '/hospital' || path === '/manual-library' || path === '/hospital/manual-library';
 }
 
@@ -124,11 +126,12 @@ export async function loadReadonlyFacilityVersions({ page, receipt, navigate, fa
     page.getByRole('button', { name: '版一覧を再読込', exact: true }).click());
 }
 
-export async function assertNoVisibleReadMessages(page, diagnostic = {}, shippingMessage) {
+export async function assertNoVisibleReadMessages(page, diagnostic = {}, shippingMessage, processHistory) {
   const messages = page.locator(READONLY_MESSAGE_SURFACES);
   for (let index = 0; index < await messages.count(); index++) {
     const message = messages.nth(index);
     if (await message.isVisible() && (await message.innerText()).trim()) {
+      if (processHistory && await processHistory(message)) continue;
       if (shippingMessage && new URL(page.url()).pathname === '/hospital/shipping-history'
           && await message.evaluate(element => element.matches('p.message') && !element.matches('.error, .error-box, .archive-feedback-error, .pending-meta.warn, .system-meta.warn, [role="alert"]'))
           && await message.innerText() === shippingMessage) continue;
@@ -225,11 +228,22 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
       await expect(page.getByText(/^(読み込み中\.\.\.|Loading\.\.\.|ログインを確認しています。)$/)).toHaveCount(0);
       phase('visible-errors');
       const visibleErrors = page.locator(READONLY_VISIBLE_ERRORS);
-      if (await visibleErrors.count()) await recordReadonlyErrorElement(visibleErrors.first(), entry);
       mark('readonly-check-009');
-      await expect(visibleErrors).toHaveCount(0);
+      const processHistory = name === 'system-process-logs' ? checked?.processHistory : undefined;
+      if (processHistory) {
+        for (let index = 0; index < await visibleErrors.count(); index++) {
+          const known = await processHistory(visibleErrors.nth(index));
+          if (!known) await recordReadonlyErrorElement(visibleErrors.nth(index), entry);
+          mark('readonly-check-051');
+          assert.equal(known, true);
+        }
+      } else {
+        if (await visibleErrors.count()) await recordReadonlyErrorElement(visibleErrors.first(), entry);
+        mark('readonly-check-009');
+        await expect(visibleErrors).toHaveCount(0);
+      }
       mark('readonly-check-010');
-      await assertNoVisibleReadMessages(page, entry, name === 'shipping-history' ? checked?.shippingMessage : undefined);
+      await assertNoVisibleReadMessages(page, entry, name === 'shipping-history' ? checked?.shippingMessage : undefined, processHistory);
       phase('page-errors');
       mark('readonly-check-011');
       assert.equal(result.pageErrorCount, errorsBefore);
@@ -373,6 +387,7 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
     assert.ok(await table.locator('tbody tr').count());
   });
   await verifyAdditionalReadonlyPages({ page, expect, check, receipt, navigate, mark });
+  await verifySavedWorkflowPages({ page, expect, origin, orderId, check, receipt, navigate, mark });
   await check('manual-library', async () => {
     await navigate('/hospital');
     await navigate('/manual-library');

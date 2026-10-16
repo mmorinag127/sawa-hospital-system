@@ -21,7 +21,7 @@ test('each content assertion has a distinct fixed diagnostic code', () => {
     assert.ok(code, lines[i]);
     codes.push(code[0]);
   }
-  assert.equal(codes.length, 50);
+  assert.equal(codes.length, 51);
   assert.equal(new Set(codes).size, codes.length);
   assert.ok(source.includes('entry.failedCheck = entry.checkCode;'));
   assert.ok(source.includes('failedCheck: responseCheck'));
