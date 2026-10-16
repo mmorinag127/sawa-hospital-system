@@ -28,6 +28,7 @@ def _collect_menu_items_for_week(
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
             continue
+        entries_by_identity = None
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
@@ -35,10 +36,24 @@ def _collect_menu_items_for_week(
             if not name:
                 continue
             payload_item = dict(item)
-            payload_item["menu_dates"] = [
-                entry.get("menu_date") for entry in payload.get("entries", [])
-                if menu_service._monthly_item_identity_key_from_payload(entry)[:4] == menu_service._monthly_item_identity_key_from_payload(item)[:4]
-            ]
+            if entries_by_identity is None:
+                # Build while reading the first item, preserving entry/error order.
+                entries_by_identity = {}
+                item_identity = None
+                menu_dates = []
+                for entry in payload.get("entries", []):
+                    identity = menu_service._monthly_item_identity_key_from_payload(entry)[:4]
+                    if item_identity is None:
+                        item_identity = menu_service._monthly_item_identity_key_from_payload(item)[:4]
+                    entries_by_identity.setdefault(identity, []).append(entry)
+                    if identity == item_identity:
+                        menu_dates.append(entry.get("menu_date"))
+            elif entries_by_identity:
+                item_identity = menu_service._monthly_item_identity_key_from_payload(item)[:4]
+                menu_dates = [entry.get("menu_date") for entry in entries_by_identity.get(item_identity, [])]
+            else:
+                menu_dates = []
+            payload_item["menu_dates"] = menu_dates
             items.append(payload_item)
     return items
 
