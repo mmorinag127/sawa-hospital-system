@@ -59,6 +59,27 @@ def test_normal_jobs_dependencies_and_checks_unchanged():
                               'run-id': '${{ inputs.ocr_existing_artifact_run_id }}', 'github-token': '${{ github.token }}',
                               'repository': 'mmorinag127/sawa-hospital-system'}},
                 ]
+                continuation = {
+                    'Initialize opted-in OCR UI evidence': ('ocr-ui-init', "!cancelled() && needs.source-gate.result == 'success' && steps.auth-frontend.outcome == 'success' && steps.deploy-web.outcome == 'success' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')"),
+                    'Validate existing staging OCR artifact provenance': ('ocr-ui-provenance', "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_existing_artifact_run_id != '' && inputs.ocr_verification_manifest == ''"),
+                    'Prepare opted-in OCR UI verification': ('ocr-ui-deps', "!cancelled() && steps.ocr-ui-node.outcome == 'success'"),
+                    'Verify opted-in existing OCR workflow-v2 Step2 UI': ('ocr-ui-verify', "!cancelled() && steps.ocr-ui-deps.outcome == 'success'"),
+                }
+                for step in job['steps']:
+                    if step.get('name') == 'Deploy web-stg':
+                        step['id'] = 'deploy-web'
+                    if step.get('name') in continuation:
+                        step['id'], step['if'] = continuation[step['name']]
+                    elif step.get('uses') == 'actions/download-artifact@v4' and step.get('with', {}).get('name') == 'live-ocr-stg':
+                        if 'run-id' in step['with']:
+                            step['id'] = 'ocr-ui-existing-artifact'
+                            step['if'] = "!cancelled() && steps.ocr-ui-provenance.outcome == 'success'"
+                        else:
+                            step['id'] = 'ocr-ui-new-artifact'
+                            step['if'] = "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_verification_manifest != '' && inputs.ocr_existing_artifact_run_id == '' && needs.deploy-backend.result == 'success'"
+                    elif step.get('uses') == 'actions/setup-node@v4' and 'inputs.ocr_verification_manifest' in step.get('if', ''):
+                        step['id'] = 'ocr-ui-node'
+                        step['if'] = "!cancelled() && (steps.ocr-ui-new-artifact.outcome == 'success' || steps.ocr-ui-existing-artifact.outcome == 'success')"
             assert new['jobs'][name] == job
     old_steps = old['jobs']['source-gate']['steps']
     new_steps = new['jobs']['source-gate']['steps'][1:]
