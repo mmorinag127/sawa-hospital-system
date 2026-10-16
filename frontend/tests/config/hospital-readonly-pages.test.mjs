@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { READONLY_VISIBLE_ERRORS, loadReadonlyFacilityVersions } from '../../scripts/hospital-readonly-pages.mjs';
 import { businessPath, observedBusinessLink, readonlyPageStatus, safeBusinessScreenshot, assertNoVisibleReadMessages, READONLY_MESSAGE_SURFACES, openReadonlyDisclosure, readonlyFailureKind, READONLY_SUBPHASES } from '../../scripts/hospital-readonly-pages.mjs';
 
 const origin = 'https://web-stg-avlnzjjrca-dt.a.run.app';
@@ -86,6 +88,7 @@ test('visible nonempty message rejects despite existing content; hidden and empt
       return { count: async () => rows.length, nth: index => ({
         isVisible: async () => rows[index].visible,
         innerText: async () => rows[index].text,
+        getAttribute: async () => null,
       }) };
     } };
   }
@@ -107,7 +110,72 @@ test('product message surfaces are covered before page success is recorded', () 
   assert.ok(READONLY_MESSAGE_SURFACES.split(', ').includes('p.message'));
   for (const selector of ['.error-box', '.archive-feedback-error', '.pending-meta.warn', '[role="alert"]']) assert.ok(READONLY_MESSAGE_SURFACES.includes(selector));
   const helper = readFileSync(new URL('../../scripts/hospital-readonly-pages.mjs', import.meta.url), 'utf8');
-  assert.ok(helper.indexOf('await assertNoVisibleReadMessages(page);') < helper.indexOf('entry.loadingFinished = true;'));
+  assert.ok(helper.indexOf('await assertNoVisibleReadMessages(page, entry);') < helper.indexOf('entry.loadingFinished = true;'));
+});
+
+test('only the exact Next announcer is excluded; business alerts and dashboard errors still fail', async () => {
+  const require = createRequire(import.meta.url);
+  const nextSource = readFileSync(require.resolve('next/dist/client/route-announcer.js'), 'utf8');
+  for (const contract of ['id: "__next-route-announcer__"', 'role: "alert"', '"aria-live": "assertive"']) assert.ok(nextSource.includes(contract));
+  const { webkit } = require('playwright');
+  const browser = await webkit.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<p id="__next-route-announcer__" role="alert" aria-live="assertive" style="width:1px;height:1px;clip:rect(0,0,0,0);position:absolute">Page title</p>');
+    assert.equal(await page.locator('[role="alert"]:visible').count(), 1);
+    assert.equal(await page.locator(READONLY_VISIBLE_ERRORS).count(), 0);
+    await assertNoVisibleReadMessages(page);
+    await page.evaluate(() => {
+      const alert = document.createElement('p');
+      alert.setAttribute('role', 'alert');
+      alert.textContent = 'synthetic business failure';
+      document.body.appendChild(alert);
+    });
+    assert.equal(await page.locator('[role="alert"]:visible').count(), 2);
+    assert.equal(await page.locator(READONLY_VISIBLE_ERRORS).count(), 1);
+    const simultaneous = {};
+    await assert.rejects(assertNoVisibleReadMessages(page, simultaneous), { message: 'readonly-visible-message' });
+    assert.deepEqual(simultaneous, { errorElement: { kind: 'business-alert', id: 'other-or-absent' } });
+    for (const markup of [
+      '<p role="alert" id="secret-token">secret-error</p>',
+      '<p id="__next-route-announcer__" role="alert" aria-live="polite">secret-error</p>',
+      '<p id="other" role="alert" aria-live="assertive">secret-error</p>',
+      '<p class="system-meta warn">secret-error</p>',
+      '<p class="message">secret-error</p>',
+      '<p class="error" id="__next-route-announcer__" role="alert" aria-live="assertive">secret-error</p>',
+    ]) {
+      await page.setContent(markup);
+      const diagnostic = {};
+      await assert.rejects(assertNoVisibleReadMessages(page, diagnostic), { message: 'readonly-visible-message' });
+      assert.ok(diagnostic.errorElement);
+      assert.equal(JSON.stringify(diagnostic).includes('secret'), false);
+      if (markup.includes('role="alert"')) assert.equal(await page.locator(READONLY_VISIBLE_ERRORS).count(), 1);
+    }
+  } finally { await browser.close(); }
+});
+
+test('facility initial receipt completes before explicit version reload and its receipt', async () => {
+  const events = [];
+  const facilityId = 'FAC00015';
+  const page = { getByRole(role, options) {
+    assert.equal(role, 'button');
+    assert.deepEqual(options, { name: '版一覧を再読込', exact: true });
+    return { click: async () => { events.push('click'); } };
+  } };
+  const navigate = async path => { events.push(path); };
+  const receipt = async (path, action) => {
+    events.push('wait:' + path);
+    await action();
+    events.push('received:' + path);
+  };
+  await loadReadonlyFacilityVersions({ page, receipt, navigate, facilityId });
+  assert.deepEqual(events, ['wait:/api/facilities/FAC00015', '/facilities/FAC00015', 'received:/api/facilities/FAC00015', 'wait:/api/facilities/FAC00015/versions', 'click', 'received:/api/facilities/FAC00015/versions']);
+  events.length = 0;
+  await assert.rejects(loadReadonlyFacilityVersions({ page, navigate, facilityId, receipt: async () => { throw new Error('initial-read-failed'); } }), /initial-read-failed/);
+  assert.deepEqual(events, []);
+  const source = readFileSync(new URL('../../src/pages/facilities/[id].tsx', import.meta.url), 'utf8');
+  assert.ok(source.includes('onClick={() => void loadVersions()}>版一覧を再読込'));
+  assert.ok(source.includes('`/facilities/${target}/versions`'));
 });
 test('screenshots allow only enumerated business paths, never login or arbitrary pages', () => {
   for (const path of ['/hospital', '/hospital/orders', '/hospital/facility-orders', '/hospital/menus/2026-09', '/facilities/FAC00015', '/hospital/menu-masters', '/hospital/daily-delivery-notes']) assert.equal(businessPath(path), true);
