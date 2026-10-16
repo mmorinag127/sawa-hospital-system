@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isAllowedOutputSourceOrigin } from './output-source-live-origin.mjs';
+import { waitForDailyOutputReceipt } from './daily-output-request-deadline.mjs';
 import { safeBusinessScreenshot, verifyHospitalReadonlyPages } from './hospital-readonly-pages.mjs';
 
 const allowedMethods = new Set(['GET', 'HEAD']);
@@ -121,17 +122,11 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
     result.phase = 'set-target-date';
     await dateInput.fill(targetDate);
     result.phase = 'await-daily-output-context';
-    const sectionWaiters = Object.fromEntries(Object.keys(DAILY_OUTPUT_SECTIONS).map(section => [section,
-      page.waitForResponse(response => {
-        const url = new URL(response.url());
-        return response.request().method() === 'GET' && url.origin === origin
-          && url.pathname === '/api/orders/daily-output-context'
-          && url.searchParams.get('date') === targetDate && url.searchParams.get('section') === section;
-      }),
-    ]));
-    const receiptsReady = settleDailyOutputReceipts(Object.keys(DAILY_OUTPUT_SECTIONS).map(async section => {
-      const response = await sectionWaiters[section];
-      return { section, response, receipt: await response.json() };
+    result.dailyOutputRequests = {};
+    const receiptsReady = settleDailyOutputReceipts(Object.keys(DAILY_OUTPUT_SECTIONS).map(section => {
+      const diagnostic = {};
+      result.dailyOutputRequests[section] = diagnostic;
+      return waitForDailyOutputReceipt(page, { origin, targetDate, section, diagnostic });
     }));
     await fetchButton.click();
     const receiptResult = await receiptsReady;
