@@ -237,7 +237,7 @@ def test_resolved_enrichment_keeps_exact_output_and_quantities(readonly_database
         assert [row["quantity"] for row in produced] == [19]
         order_payload = order_workflow_v2_service._build_order_payload_for_outputs(
             order=order, lines=producer_candidate["output_lines"])
-        label_bags = output_builder.build_bag_rows_for_outputs(
+        label_bags = output_builder.build_bag_rows_for_materialization(
             order_payload, order_lines=producer_candidate["output_lines"],
             configured_input=producer_candidate["configured_input"])
         assert [bag["quantity"] for bag in label_bags] == [19]
@@ -825,7 +825,7 @@ def test_zero_quantity_builder_empty_bag_rows_are_preserved(readonly_database, m
 def test_nonlist_bag_builder_result_is_an_explicit_stop(readonly_database, monkeypatch):
     seed()
     seed_order()
-    monkeypatch.setattr(output_builder, "build_bag_payload_for_outputs", lambda *args, **kwargs: {"invalid": True})
+    monkeypatch.setattr(output_builder, "build_bag_payload_for_materialization", lambda *args, **kwargs: {"invalid": True})
     with db.session_scope() as session:
         order = session.get(Order, "operator-order")
         draft = canonical_inputs.save_source(session, order)

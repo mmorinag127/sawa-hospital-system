@@ -46,7 +46,7 @@ def captured(owned_bagging, surface):
 
 
 def produce(order, configured, lines):
-    bags = output.build_bag_rows_for_outputs(order, configured_input=configured, order_lines=lines)
+    bags = output.build_bag_rows_for_materialization(order, configured_input=configured, order_lines=lines)
     context = {"order_for_outputs": order, "order_lines": lines, "facility_config": configured["facility"]}
     return output._append_zero_quantity_label_bags_for_order_context(bags, context, DAY)
 

@@ -100,6 +100,7 @@ jobs:
             tests/unit/test_initial_saved_source_service.py \
             tests/unit/test_initial_saved_import_service.py \
             tests/unit/test_output_read_import_policy.py \
+            tests/unit/test_saved_bag_read_parity.py \
             tests/unit/test_prepare_stg_saved_import.py \
             tests/unit/test_initial_saved_fixture_preservation.py \
             tests/unit/test_saved_fixture_http_evidence.py \
