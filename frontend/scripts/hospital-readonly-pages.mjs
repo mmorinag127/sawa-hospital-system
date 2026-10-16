@@ -4,8 +4,10 @@ import { verifyManualLibrary } from './manual-library-readonly.mjs';
 import { verifyAdditionalReadonlyPages } from './hospital-additional-readonly-pages.mjs';
 import { verifySavedWorkflowPages } from './saved-workflow-readonly.mjs';
 import { verifyOcrAdminReadonlyPages } from './ocr-admin-readonly-pages.mjs';
+import { verifyOperatorEntryPages } from './operator-entry-readonly-pages.mjs';
 
 export function businessPath(path) {
+  if (/^(?:\/hospital)?\/(?:shipping|pdf-upload|weekly-weight-output|system-status)$/.test(path)) return true;
   if (/^(?:\/hospital)?\/ocr-(?:queue|results|training-data)$/.test(path)) return true;
   return /^(?:\/hospital)?(?:\/daily-delivery-notes|\/hospital-dashboard|\/orders|\/facility-orders|\/menus(?:\/\d{4}-\d{2})?|\/facility-master|\/facilities\/[A-Za-z0-9_-]+|\/menu-masters)$/.test(path)
     || /^(?:\/hospital)?\/(?:base-menus|menu-rules|order-forms|shipping-history|system-process-logs)$/.test(path)
@@ -395,6 +397,7 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
   await verifyAdditionalReadonlyPages({ page, expect, check, receipt, navigate, mark });
   await verifySavedWorkflowPages({ page, expect, origin, orderId, check, receipt, navigate, mark });
   await verifyOcrAdminReadonlyPages({ page, expect, origin, check, receipt, navigate, mark });
+  await verifyOperatorEntryPages({ page, expect, check, receipt, navigate, mark });
   await check('manual-library', async () => {
     await navigate('/hospital');
     await navigate('/manual-library');
