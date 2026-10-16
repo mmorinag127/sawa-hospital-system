@@ -3,7 +3,8 @@ import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isAllowedOutputSourceOrigin } from './output-source-live-origin.mjs';
 import { waitForDailyOutputReceipt } from './daily-output-request-deadline.mjs';
-import { safeBusinessScreenshot, verifyHospitalReadonlyPages } from './hospital-readonly-pages.mjs';
+import { businessPath, safeBusinessScreenshot, verifyHospitalReadonlyPages } from './hospital-readonly-pages.mjs';
+import { attachPageErrorDiagnostics } from './readonly-pageerror-diagnostics.mjs';
 
 const allowedMethods = new Set(['GET', 'HEAD']);
 export const OPERATOR_DAILY_DELIVERY_PATH = '/hospital/daily-delivery-notes';
@@ -92,7 +93,7 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
       sessionStorage.setItem('sawa_auth_generation', localStorage.getItem('sawa_logout_generation') || '');
       sessionStorage.setItem('sawa_auth_cache_generation', 'output-source-live-private-context');
     }, { token, origin });
-    context.on('page', page => page.on('pageerror', () => result.pageErrorCount++));
+    attachPageErrorDiagnostics(context, result, { origin, phases, businessPath });
     context.on('response', response => {
       recordAllowedResponse(result, { origin, url: response.url(), method: response.request().method(), status: response.status() });
     });
