@@ -2,6 +2,7 @@ import { Button } from "@mui/material";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
+import { classifyDashboardMenuRead, type MenuInfo } from "../services/dashboardMenuInfo";
 import TopNav from "../components/TopNav";
 import {
   fetchFacilityNameMap,
@@ -30,13 +31,6 @@ type Order = {
       } | null;
     } | null;
   } | null;
-};
-
-type MenuInfo = {
-  status: "登録済み" | "未登録" | "確認中";
-  itemCount?: number;
-  filename?: string | null;
-  displayName?: string | null;
 };
 
 type SystemStatus = {
@@ -304,18 +298,9 @@ export default function HomePage() {
         weekList.map(async (week) => {
           try {
             const res = await apiClient.get(`/monthly-menus/${week}`);
-            const items = res.data?.items || [];
-            return [
-              week,
-              {
-                status: "登録済み",
-                itemCount: items.length,
-                filename: res.data?.menu?.filename || null,
-                displayName: res.data?.menu?.display_name || res.data?.menu?.filename || null,
-              },
-            ] as const;
-          } catch {
-            return [week, { status: "未登録" }] as const;
+            return [week, classifyDashboardMenuRead(week, res)] as const;
+          } catch (error: any) {
+            return [week, classifyDashboardMenuRead(week, error?.response)] as const;
           }
         })
       );
@@ -702,7 +687,7 @@ export default function HomePage() {
           ) : (
             weekList.map((week) => {
               const info = menuInfo[week];
-              const status = info?.status || "未登録";
+              const status = info?.status || "確認中";
               const statusClass =
                 status === "登録済み" ? "status-ok" : status === "未登録" ? "status-missing" : "status-pending";
               return (
@@ -713,6 +698,7 @@ export default function HomePage() {
                       {status === "登録済み" ? `登録済み (${info?.itemCount ?? 0}件)` : status}
                     </p>
                     {info?.displayName && <p className="menu-file">{info.displayName}</p>}
+                    {status === "取得失敗" && <p className="message" role="alert">月次メニューの取得に失敗しました。</p>}
                   </div>
                   <span className={`menu-status ${statusClass}`}>{status}</span>
                 </Link>
