@@ -152,7 +152,18 @@ export async function safeBusinessScreenshot(page, origin, path) {
   const url = new URL(page.url());
   if (url.origin !== origin || !businessPath(url.pathname)) return false;
   if (await page.locator('input[type="password"]').count()) return false;
-  if (await page.getByRole('heading', { name: /ログイン|Sign in|Login/i }).count()) return false;
+  const loginHeadings = page.getByRole('heading', { name: /ログイン|Sign in|Login/i });
+  const loginHeadingCount = await loginHeadings.count();
+  if (loginHeadingCount) {
+    if (!['/system-status', '/hospital/system-status'].includes(url.pathname)) return false;
+    const title = page.getByRole('heading', { level: 1, name: 'システム状態と復帰手順', exact: true });
+    if (await title.count() !== 1 || !await title.isVisible()) return false;
+    for (let index = 0; index < loginHeadingCount; index++) {
+      const instruction = await loginHeadings.nth(index).evaluate(element =>
+        element.tagName === 'H3' && element.textContent === '2. Google ログインの確認');
+      if (!instruction) return false;
+    }
+  }
   await page.screenshot({ path, fullPage: true });
   return true;
 }
