@@ -3810,7 +3810,7 @@ def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]], 
         materialization_candidate["output_lines"] = copy.deepcopy(enriched_lines)
         materialization_candidate["output_menu_entries"] = copy.deepcopy(producer_input["output_menu_entries"])
         materialization_candidate["output_source_snapshot"] = copy.deepcopy(producer_input["output_source_snapshot"])
-        bag_rows = output_builder.build_bag_payload_for_outputs(order_payload, order_lines=enriched_lines, configured_input=materialization_candidate["configured_input"])
+        bag_rows = output_builder.build_bag_payload_for_materialization(order_payload, order_lines=enriched_lines, configured_input=materialization_candidate["configured_input"])
         if not isinstance(bag_rows, list):
             raise BaggingOutputUnresolved("bagging_output_invalid")
         return bag_rows

@@ -1406,7 +1406,7 @@ def test_monthly_entry_override_keeps_regular_and_soft_mixer_menu_items(monkeypa
     assert lines[4]["menu_name"] == "ブロッコリーｺﾞﾏﾄﾞﾚ和え"
     assert lines[4]["menu_category"] == "副菜2"
 
-    bags = output_builder.build_bag_rows_for_outputs(
+    bags = output_builder.build_bag_rows_for_materialization(
         {
             "id": "ORD-test",
             "facility": "FAC00009",

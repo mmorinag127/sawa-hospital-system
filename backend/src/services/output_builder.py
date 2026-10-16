@@ -2496,6 +2496,25 @@ def _serialize_bag_payload_rows(rows: list[dict]) -> list[dict]:
     return payload
 
 
+def _initial_saved_bag_rows(candidate: dict, *, native_dates: bool = False) -> list[dict]:
+    rows = candidate.get("initial_saved_bag_rows")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("initial_saved_source_output_invalid")
+    # These are already serialized, accepted rows, including dates and source_refs.
+    result = deepcopy(rows)
+    if native_dates:
+        for row in result:
+            if row.get("date") is not None:
+                raw = row["date"]
+                if not isinstance(raw, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw) is None:
+                    raise ValueError("initial_saved_source_output_invalid")
+                try:
+                    row["date"] = dt_date.fromisoformat(raw)
+                except ValueError:
+                    raise ValueError("initial_saved_source_output_invalid") from None
+    return result
+
+
 def build_bag_rows_for_outputs(
     order: dict,
     *,
@@ -2504,29 +2523,39 @@ def build_bag_rows_for_outputs(
     configured_input: dict | None = None,
     accepted_candidate: dict | None = None,
 ) -> list[dict]:
-    facility_id = order.get("facility")
-    accepted = accepted_candidate
-    if configured_input is None:
-        accepted = accepted if accepted is not None else _accepted_output_candidate(order)
-        configured = accepted["configured_input"]
-        frozen_lines = build_order_lines_for_outputs(order, accepted_candidate=accepted)
-        if order_lines is not None and order_lines != frozen_lines:
-            raise ValueError("accepted output lines mismatch")
-        order_lines = frozen_lines
-    else:
-        configured = configured_input
-        if accepted is not None and configured != accepted["configured_input"]:
-            raise ValueError("accepted output configuration mismatch")
-        if not isinstance(order_lines, list):
-            raise ValueError("producer output lines required")
+    accepted = accepted_candidate if accepted_candidate is not None else _accepted_output_candidate(order)
+    configured = accepted["configured_input"]
+    if configured_input is not None and configured_input != configured:
+        raise ValueError("accepted output configuration mismatch")
+    frozen_lines = build_order_lines_for_outputs(order, accepted_candidate=accepted)
+    if order_lines is not None and order_lines != frozen_lines:
+        raise ValueError("accepted output lines mismatch")
     if not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
         raise ValueError("accepted bag configuration missing")
     resolved_facility_config = configured["facility"]
     if facility_config is not None and facility_config != resolved_facility_config:
         raise ValueError("accepted bag configuration mismatch")
 
+    if accepted.get("initial_saved_import") is not None:
+        return _initial_saved_bag_rows(accepted, native_dates=True)
+    return build_bag_rows_for_materialization(order, order_lines=frozen_lines, configured_input=configured)
+
+
+def build_bag_rows_for_materialization(
+    order: dict, *, order_lines: list[dict], configured_input: dict, facility_config: dict | None = None,
+) -> list[dict]:
+    """Generate new rows only for an explicit materialization command."""
+    if not isinstance(order_lines, list):
+        raise ValueError("producer output lines required")
+    if not isinstance(configured_input.get("facility"), dict) or not isinstance(configured_input.get("policy"), dict):
+        raise ValueError("accepted bag configuration missing")
+    resolved_facility_config = configured_input["facility"]
+    if facility_config is not None and facility_config != resolved_facility_config:
+        raise ValueError("accepted bag configuration mismatch")
+    facility_id = order.get("facility")
+
     packaging_policy = resolved_facility_config.get("packaging_policy", {})
-    quantity_rules = configured["policy"].get("quantity_rules", {})
+    quantity_rules = configured_input["policy"].get("quantity_rules", {})
 
     resolved_lines = order_lines
     order_for_outputs = {**order, "lines": resolved_lines}
@@ -2548,6 +2577,13 @@ def build_bag_rows_for_outputs(
     )
 
 
+def build_bag_payload_for_materialization(order: dict, *, order_lines: list[dict], configured_input: dict) -> list[dict]:
+    """Explicit producer for a new command, never an accepted saved-data read."""
+    return _serialize_bag_payload_rows(build_bag_rows_for_materialization(
+        order, order_lines=order_lines, configured_input=configured_input,
+    ))
+
+
 def build_bag_payload_for_outputs(
     order: dict,
     *,
@@ -2556,15 +2592,19 @@ def build_bag_payload_for_outputs(
     configured_input: dict | None = None,
     accepted_candidate: dict | None = None,
 ) -> list[dict]:
-    return _serialize_bag_payload_rows(
-        build_bag_rows_for_outputs(
-            order,
-            order_lines=order_lines,
-            facility_config=facility_config,
-            configured_input=configured_input,
-            accepted_candidate=accepted_candidate,
-        )
+    accepted = accepted_candidate
+    if accepted is None:
+        accepted = _accepted_output_candidate(order)
+    rows = build_bag_rows_for_outputs(
+        order,
+        order_lines=order_lines,
+        facility_config=facility_config,
+        configured_input=configured_input,
+        accepted_candidate=accepted,
     )
+    if accepted is not None and accepted.get("initial_saved_import") is not None:
+        return _initial_saved_bag_rows(accepted)
+    return _serialize_bag_payload_rows(rows)
 
 
 def _label_display_category(daypart: object, category: str) -> str:
@@ -6245,7 +6285,7 @@ def _prepare_output_context(
     bags = []
     if include_bags:
         bags_started = time.perf_counter()
-        bags = deepcopy(accepted_candidate["initial_saved_bag_rows"]) if imported else _build_final_label_bags(
+        bags = _initial_saved_bag_rows(accepted_candidate, native_dates=True) if imported else _build_final_label_bags(
             order_for_outputs,
             packaging_policy=packaging_policy,
             quantity_rules=quantity_rules,
@@ -6565,8 +6605,8 @@ def rebuild_bags(order_id: str, *, write_session=None, original_adoption: dict |
     order_lines = build_order_lines_for_outputs(order, accepted_candidate=accepted_candidate)
     with daily_output_override_service.use_write_session(write_session):
         order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
-    bags = build_bag_rows_for_outputs(order, order_lines=order_lines, facility_config=facility_config,
-                                     configured_input=accepted_candidate["configured_input"], accepted_candidate=accepted_candidate)
+    bags = build_bag_rows_for_materialization(order, order_lines=order_lines,
+                             configured_input=accepted_candidate["configured_input"])
     payload = []
 
     with nullcontext(write_session) as session:
