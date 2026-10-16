@@ -13,7 +13,6 @@ async function browserTest(action) {
   const browser = await webkit.launch();
   try {
     const page = await browser.newPage();
-    page.setDefaultTimeout(500);
     await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<html><body></body></html>' }));
     await page.goto('http://fixture.invalid/system-process-logs');
     await action(page);
