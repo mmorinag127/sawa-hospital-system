@@ -20,13 +20,33 @@ export const requireDatedFacility = (data: CanonicalDatedFacility, target: strin
   return revision;
 };
 
+const isCanonicalDate = (value: unknown): value is string => {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000-")) return false;
+  const parsed = new Date(value + "T00:00:00.000Z");
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+
+const hasCanonicalVersionDates = (version: CanonicalFacilityVersion): boolean => {
+  if (!("valid_to" in version) || (version.valid_to !== null && !isCanonicalDate(version.valid_to))) return false;
+  if (!("initial_snapshot" in version)) {
+    return isCanonicalDate(version.valid_from) && (version.valid_to === null || version.valid_to >= version.valid_from);
+  }
+  // The canonical API verifies the proof hashes against the saved facility. Do not invent a start date.
+  const proof = version.initial_snapshot;
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) return false;
+  const fields = proof as Record<string, unknown>;
+  return version.valid_from === null && /^initial-[0-9a-f]{64}$/.test(version.version_id) &&
+    Object.keys(fields).length === 2 &&
+    ["source_sha256", "configuration_sha256"].every(key =>
+      typeof fields[key] === "string" && /^[0-9a-f]{64}$/.test(fields[key] as string));
+};
+
 export const requireFacilityVersions = (data: CanonicalFacilityVersions, target: string): string => {
   const revision = requireCanonicalRevision(data);
   if (data.facility_id !== target || !Array.isArray(data.versions) || !data.reference || data.reference.facility_id !== target ||
       data.reference_status !== "unversioned_reference_only" ||
       data.versions.some((version) => !version || typeof version.version_id !== "string" || !version.version_id ||
-        typeof version.valid_from !== "string" || !("valid_to" in version) ||
-        (version.valid_to !== null && typeof version.valid_to !== "string") ||
+        !hasCanonicalVersionDates(version) ||
         !version.facility || version.facility.facility_id !== target) ||
       new Set(data.versions.map((version) => version.version_id)).size !== data.versions.length) {
     throw new Error("施設版と正本 revision の組を確認できません。明示的に再読込してください。");
