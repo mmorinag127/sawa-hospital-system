@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { verifyManualLibrary } from './manual-library-readonly.mjs';
 import { verifyAdditionalReadonlyPages } from './hospital-additional-readonly-pages.mjs';
+import { verifySavedWorkflowPages } from './saved-workflow-readonly.mjs';
 
 export function businessPath(path) {
   return /^(?:\/hospital)?(?:\/daily-delivery-notes|\/hospital-dashboard|\/orders|\/facility-orders|\/menus(?:\/\d{4}-\d{2})?|\/facility-master|\/facilities\/[A-Za-z0-9_-]+|\/menu-masters)$/.test(path)
     || /^(?:\/hospital)?\/(?:base-menus|menu-rules|order-forms|shipping-history|system-process-logs)$/.test(path)
+    || /^(?:\/hospital)?\/orders\/[A-Za-z0-9_-]+\/workflow-v2$/.test(path)
     || path === '/hospital' || path === '/manual-library' || path === '/hospital/manual-library';
 }
 
@@ -373,6 +375,7 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
     assert.ok(await table.locator('tbody tr').count());
   });
   await verifyAdditionalReadonlyPages({ page, expect, check, receipt, navigate, mark });
+  await verifySavedWorkflowPages({ page, expect, origin, orderId, check, receipt, navigate, mark });
   await check('manual-library', async () => {
     await navigate('/hospital');
     await navigate('/manual-library');
