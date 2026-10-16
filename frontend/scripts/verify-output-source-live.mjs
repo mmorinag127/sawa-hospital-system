@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isAllowedOutputSourceOrigin } from './output-source-live-origin.mjs';
+import { safeBusinessScreenshot, verifyHospitalReadonlyPages } from './hospital-readonly-pages.mjs';
 
 const allowedMethods = new Set(['GET', 'HEAD']);
 export const OPERATOR_DAILY_DELIVERY_PATH = '/hospital/daily-delivery-notes';
@@ -18,7 +19,7 @@ const phases = new Set([
   'validate-input', 'launch-browser', 'configure-private-context', 'open-daily-delivery-notes',
   'verify-deploy-version', 'verify-controls', 'set-target-date', 'await-daily-output-context',
   'verify-primary-receipt', 'verify-bags-receipt', 'verify-totals-receipt',
-  'verify-rendered-output', 'capture-full-page', 'capture-section-pngs', 'validate-readonly', 'finished',
+  'verify-rendered-output', 'capture-full-page', 'capture-section-pngs', 'verify-readonly-pages', 'validate-readonly', 'finished',
 ]);
 
 function writeJson(path, data) {
@@ -160,6 +161,8 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
       await section.screenshot({ path: resolve(output, filename) });
       result.sectionPngs.push(filename);
     }
+    await verifyHospitalReadonlyPages({ page, expect, origin, source, output, result, targetDate, orderId,
+      dailyOrders: receiptResult.receipts.find(row => row.section === 'primary').receipt.sections.orders.data.orders });
     result.finalPathname = sameOriginPathname(origin, page.url());
     result.phase = 'validate-readonly';
     assert.equal(result.unexpectedWriteCount, 0);
@@ -170,8 +173,9 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
     result.finalPathname = sameOriginPathname(origin, page?.url());
     try {
       if (page && result.finalPathname) {
-        await page.screenshot({ path: resolve(output, 'failed-own-page-full.png'), fullPage: true });
-        result.failurePng = 'failed-own-page-full.png';
+        if (await safeBusinessScreenshot(page, origin, resolve(output, 'failed-own-page-full.png'))) {
+          result.failurePng = 'failed-own-page-full.png';
+        }
       }
     } catch { /* Never persist browser exception details. */ }
   } finally {
