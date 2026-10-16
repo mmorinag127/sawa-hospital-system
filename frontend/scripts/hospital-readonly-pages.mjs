@@ -27,7 +27,10 @@ export function readonlyPageStatus(http, ok) {
   return ok && !http.some(row => row.status >= 400) ? 'passed' : 'failed';
 }
 
-export const READONLY_MESSAGE_SURFACES = 'p.message, .error, .error-box, .archive-feedback-error, .pending-meta.warn, .system-meta.warn, [role="alert"]';
+export const NEXT_ROUTE_ANNOUNCER = '[id="__next-route-announcer__"][role="alert"][aria-live="assertive"]';
+export const BUSINESS_ALERT = `[role="alert"]:not(${NEXT_ROUTE_ANNOUNCER})`;
+export const READONLY_VISIBLE_ERRORS = `.error:visible, ${BUSINESS_ALERT}:visible`;
+export const READONLY_MESSAGE_SURFACES = `p.message, .error, .error-box, .archive-feedback-error, .pending-meta.warn, .system-meta.warn, ${BUSINESS_ALERT}`;
 export const READONLY_SUBPHASES = Object.freeze(['navigation-link', 'navigation', 'response', 'content', 'expand-orders', 'expand-menu-list', 'facility-selection', 'facility-date', 'network-idle', 'source-sha', 'loading', 'visible-errors', 'page-errors', 'screenshot']);
 
 export async function openReadonlyDisclosure(locator) {
@@ -40,11 +43,27 @@ export function readonlyFailureKind(error) {
   return 'other';
 }
 
-export async function assertNoVisibleReadMessages(page) {
+export async function recordReadonlyErrorElement(element, diagnostic) {
+  const id = await element.getAttribute('id');
+  const role = await element.getAttribute('role');
+  diagnostic.errorElement = {
+    kind: role === 'alert' ? 'business-alert' : 'business-message',
+    id: id === '__next-route-announcer__' ? '__next-route-announcer__' : 'other-or-absent',
+  };
+}
+
+export async function loadReadonlyFacilityVersions({ page, receipt, navigate, facilityId }) {
+  await receipt(`/api/facilities/${facilityId}`, () => navigate(`/facilities/${facilityId}`));
+  await receipt(`/api/facilities/${facilityId}/versions`, () =>
+    page.getByRole('button', { name: '版一覧を再読込', exact: true }).click());
+}
+
+export async function assertNoVisibleReadMessages(page, diagnostic = {}) {
   const messages = page.locator(READONLY_MESSAGE_SURFACES);
   for (let index = 0; index < await messages.count(); index++) {
     const message = messages.nth(index);
     if (await message.isVisible() && (await message.innerText()).trim()) {
+      await recordReadonlyErrorElement(message, diagnostic);
       throw new Error('readonly-visible-message');
     }
   }
@@ -137,10 +156,12 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
       mark('readonly-check-008');
       await expect(page.getByText(/^(読み込み中\.\.\.|Loading\.\.\.|ログインを確認しています。)$/)).toHaveCount(0);
       phase('visible-errors');
+      const visibleErrors = page.locator(READONLY_VISIBLE_ERRORS);
+      if (await visibleErrors.count()) await recordReadonlyErrorElement(visibleErrors.first(), entry);
       mark('readonly-check-009');
-      await expect(page.locator('.error:visible, [role="alert"]:visible')).toHaveCount(0);
+      await expect(visibleErrors).toHaveCount(0);
       mark('readonly-check-010');
-      await assertNoVisibleReadMessages(page);
+      await assertNoVisibleReadMessages(page, entry);
       phase('page-errors');
       mark('readonly-check-011');
       assert.equal(result.pageErrorCount, errorsBefore);
@@ -254,7 +275,7 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
   await check('facility-detail', async () => {
     mark('readonly-check-037');
     assert.ok(facilityName);
-    await receipt(`/api/facilities/${facilityId}/versions`, () => navigate(`/facilities/${facilityId}`));
+    await loadReadonlyFacilityVersions({ page, receipt, navigate, facilityId });
     mark('readonly-check-038');
     await expect(page).toHaveURL(origin + `/hospital/facilities/${facilityId}`);
     mark('readonly-check-039');
