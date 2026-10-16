@@ -5,6 +5,7 @@ import { verifyAdditionalReadonlyPages } from './hospital-additional-readonly-pa
 import { verifySavedWorkflowPages } from './saved-workflow-readonly.mjs';
 import { verifyOcrAdminReadonlyPages } from './ocr-admin-readonly-pages.mjs';
 import { verifyOperatorEntryPages } from './operator-entry-readonly-pages.mjs';
+import { verifyUploadListPage } from './upload-list-readonly.mjs';
 
 export function businessPath(path) {
   if (/^(?:\/hospital)?\/(?:shipping|pdf-upload|weekly-weight-output|system-status)$/.test(path)) return true;
@@ -409,6 +410,7 @@ export async function verifyHospitalReadonlyPages({ page, expect, origin, source
   await verifySavedWorkflowPages({ page, expect, origin, orderId, check, receipt, navigate, mark });
   await verifyOcrAdminReadonlyPages({ page, expect, origin, check, receipt, navigate, mark });
   await verifyOperatorEntryPages({ page, expect, check, receipt, navigate, mark });
+  await verifyUploadListPage({ page, expect, check, receipt, navigate, mark });
   await check('manual-library', async () => {
     await navigate('/hospital');
     await navigate('/manual-library');

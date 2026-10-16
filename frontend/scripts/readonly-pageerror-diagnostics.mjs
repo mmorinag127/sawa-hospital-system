@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const names = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'SecurityError', 'AbortError', 'NetworkError']);
+const names = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'SecurityError', 'AbortError', 'NetworkError', 'ChunkLoadError']);
 const staticJs = /^\/_next\/static\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.js$/;
 const manual = /^\/manuals\/current-stg-20260519\/[A-Za-z0-9_-]+\.(?:pdf|md)$/;
 export const PAGEERROR_DIAGNOSTIC_LIMIT = 100;
@@ -15,9 +15,12 @@ export function diagnosticPath(value, origin, businessPath) {
 
 export function sanitizePageError(error, origin) {
   const message = typeof error?.message === 'string' ? error.message : '';
-  const name = names.has(error?.name) ? error.name : 'unknown';
+  const webkitChunk = error?.name === 'Unhandled Promise Rejection'
+    && message.startsWith('ChunkLoadError: Failed to load chunk');
+  const name = names.has(error?.name) || webkitChunk ? error.name : 'unknown';
+  const chunk = webkitChunk || (name === 'ChunkLoadError' && message.startsWith('Failed to load chunk'));
   const react = message.match(/^Minified React error #(\d+);/);
-  const classification = react ? 'react-minified' : message === 'Load failed' ? 'load-failed'
+  const classification = chunk ? 'chunk-load-failed' : react ? 'react-minified' : message === 'Load failed' ? 'load-failed'
     : name === 'SecurityError' ? 'security-error' : 'unknown';
   const stack = [];
   if (classification !== 'unknown' && typeof error?.stack === 'string') {
