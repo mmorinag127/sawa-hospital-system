@@ -376,7 +376,7 @@ def completed_evidence(evidence, workflow, started, order_id, document_id, previ
         and pdf.get('order_id') == order_id and pdf.get('document_id') == document_id)
 
 
-def review_required_evidence(evidence, workflow, started, order_id, document_id, previous_id):
+def review_required_evidence(evidence, workflow, started, order_id, document_id, previous_id, *, review_resolution=False):
     job = workflow.get('ocr_job') or {}
     own = started.get('ocr_job') or {}
     payload = evidence.get('payload_json') or {}
@@ -405,10 +405,76 @@ def review_required_evidence(evidence, workflow, started, order_id, document_id,
     for record in payload.get('hakodate_ocr_evidence_records', []):
         metadata = record.get('engine_metadata') or {}
         source = metadata.get('recognizer_output') or {}
-        if (source.get('recognizer_input_evidence') or {}).get('all_white') is True and source.get('recognizer_raw_text'):
+        if review_resolution and source.get('resolution_state') == 'review_required':
+            expected.append({'sheet_cell': metadata.get('sheet_cell'), 'raw_text': record.get('raw_text'),
+                             'reason': source.get('quantity_source_issue')})
+        elif not review_resolution and (source.get('recognizer_input_evidence') or {}).get('all_white') is True and source.get('recognizer_raw_text'):
             expected.append({'sheet_cell': metadata.get('sheet_cell'), 'raw_text': record.get('raw_text'),
                              'reason': 'hakodate_blank_input_nonempty_prediction'})
     return bool(expected and cells == expected and len({cell['sheet_cell'] for cell in cells}) == len(cells))
+
+
+def verify_review_resolution(expected, records, payload, contact):
+    """Explicit new-producer acceptance; old review verification stays unchanged."""
+    from PIL import Image
+    white = expected['blank_cells']
+    numeric = expected['numeric_cells']
+    nonnumeric = expected['review_cells']
+    if (len(white) != 325 or len(set(white)) != 325 or len(numeric) != 57 or len(nonnumeric) != 10
+            or set(white) & set(numeric) or set(white) & set(nonnumeric) or set(numeric) & set(nonnumeric)
+            or expected.get('blank_raw_text') != '1' or numeric.get('E31') != '26' or numeric.get('E63') != '26'
+            or expected.get('note_cells') != {}):
+        raise ValueError('Review resolution expectation invalid')
+    by_cell = {row['sheet_cell']: row for row in records}
+    evidence = payload['hakodate_ocr_evidence_records']
+    api = {(row.get('engine_metadata') or {}).get('sheet_cell'): row for row in evidence}
+    if (len(records) != 392 or len(by_cell) != 392 or len(evidence) != 392
+            or set(by_cell) != set(white) | set(numeric) | set(nonnumeric) or set(api) != set(by_cell)
+            or payload['hakodate_ocr_evidence']['records'] != evidence
+            or payload['hakodate_canonical_pipeline']['metrics']['raw_prediction_count'] != 392):
+        raise ValueError('Review resolution record identities mismatch')
+    observed_white = set()
+    expected_review = []
+    with Image.open(contact) as image:
+        image = image.convert('RGB')
+        for cell, source in by_cell.items():
+            record = api[cell]
+            if record['engine_metadata']['recognizer_output'] != source:
+                raise ValueError('Review resolution artifact API mismatch')
+            score = source.get('recognizer_score')
+            if (isinstance(score, bool) or not isinstance(score, (int,float)) or not math.isfinite(score)
+                    or not isinstance(source.get('recognizer_candidates'), list)):
+                raise ValueError('Review resolution model diagnostics missing')
+            x0, y0, x1, y1 = source['ocr_contact_crop_box']
+            if not (0 <= x0 < x1 <= image.width and 0 <= y0 < y1 <= image.height):
+                raise ValueError('Review resolution contact bounds invalid')
+            crop = image.crop((x0, y0, x1, y1))
+            proof = source['recognizer_input_evidence']
+            all_white = crop.getextrema() == ((255,255),(255,255),(255,255))
+            if (proof != {'contract': 'hakodate_contact_crop/v1', 'bbox': [x0,y0,x1,y1],
+                          'width': x1-x0, 'height': y1-y0, 'all_white': all_white,
+                          'rgb_sha256': hashlib.sha256(crop.tobytes()).hexdigest()}):
+                raise ValueError('Review resolution contact proof mismatch')
+            if all_white:
+                observed_white.add(cell)
+            raw = '1' if cell in white else numeric[cell] if cell in numeric else nonnumeric[cell]
+            if source['recognizer_raw_text'] != raw or source['raw_text'] != raw or record['raw_text'] != raw:
+                raise ValueError('Review resolution raw changed')
+            if 'blank_decision' in source or record['normalized_value'] == '1':
+                raise ValueError('Review resolution automatic value prohibited')
+            if cell in numeric:
+                if source['resolution_state'] != 'resolved' or record.get('resolution_state') != 'resolved' or source['resolved_value'] != raw or source['pred_digits'] != raw or record['normalized_value'] != raw:
+                    raise ValueError('Review resolution numeric changed')
+            else:
+                reason = 'hakodate_blank_input_nonempty_prediction' if cell in white else 'hakodate_ocr_quantity_non_numeric'
+                if (source['resolution_state'] != 'review_required' or record.get('resolution_state') != 'review_required' or source['resolved_value'] is not None
+                        or source['pred_digits'] is not None or record['normalized_value'] is not None
+                        or source['quantity_source_issue'] != reason):
+                    raise ValueError('Review resolution unresolved quantity adopted')
+                expected_review.append({'sheet_cell': cell, 'raw_text': raw, 'reason': reason})
+    if observed_white != set(white) or payload['hakodate_recognition_review'] != {'count': 335, 'cells': expected_review}:
+        raise ValueError('Review resolution review or white cells mismatch')
+    return {'white_pixels': 325, 'review_required': 335, 'numeric': 57, 'automatic_blank': 0, 'adopted_one': 0}
 
 
 def fetch_own_evidence(order_id, workflow, started):
@@ -455,6 +521,10 @@ def main():
         if outcome not in ('done', 'recognition_review_required'):
             raise ValueError('Unknown expected OCR outcome')
         verify_result = review_required_evidence if outcome == 'recognition_review_required' else completed_evidence
+        if 'review_resolution' in case:
+            if outcome != 'recognition_review_required' or not isinstance(case['review_resolution'], dict):
+                raise ValueError('Review resolution requires explicit review outcome')
+            verify_result = lambda *values: review_required_evidence(*values, review_resolution=True)
         folder = args.output_dir / case['source_order_id']
         folder.mkdir(exist_ok=True)
         pdf = folder / 'original.pdf'
@@ -568,6 +638,11 @@ def main():
             outputs = payload['hakodate_canonical_pipeline']['outputs']
             download(outputs['records'], folder / 'recognizer-records.json')
             download(outputs['contact_sheet'], folder / 'recognizer-contact.png')
+            if 'review_resolution' in case:
+                result = verify_review_resolution(case['review_resolution'],
+                    json.loads((folder / 'recognizer-records.json').read_text()), payload,
+                    folder / 'recognizer-contact.png')
+                save_json(folder, 'review-resolution.json', result)
             review = request(f'/orders/{oid}/workflow-v2/recognition-review?'
                             + urlencode({'document_id': document_id, 'ocr_result_id': evidence['id']}))
             receipt = review.get('source_receipt') or {}

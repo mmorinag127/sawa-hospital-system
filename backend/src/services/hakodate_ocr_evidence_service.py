@@ -19,7 +19,7 @@ class OcrEvidenceRecord:
     engine: str
     source_scope: str
     raw_text: str
-    normalized_value: str
+    normalized_value: str | None
     confidence: float | None = None
     source_bbox: list[float] | None = None
     center: list[float] | None = None
@@ -48,7 +48,7 @@ class AssignedOcrResult:
     worksheet_col: int
     semantic_field: str
     evidence_ids: list[str]
-    assigned_value: str
+    assigned_value: str | None
     assignment_confidence: float | None
     assignment_state: str
     raw_texts: list[str]
@@ -83,7 +83,25 @@ def recognition_input_issue(source: dict[str, Any]) -> str | None:
     if evidence["all_white"] and any(str(source.get(key) or "").strip() for key in
             ("raw_text", "text", "recognizer_raw_text", "ocr_text", "ocr_normalized", "pred_digits")):
         return "hakodate_blank_input_nonempty_prediction"
+    if source.get("recognizer_preprocess_ink_removed") is True:
+        return "hakodate_preprocess_ink_loss"
+    if source.get("role") == "quantity":
+        raw = normalize_ocr_value(source.get("recognizer_raw_text", source.get("raw_text", "")))
+        if raw and not re.fullmatch(r"[0-9]+", raw):
+            return "hakodate_ocr_quantity_non_numeric"
     return source.get("quantity_source_issue") or None
+
+
+def recognition_resolution(source: dict[str, Any]) -> dict[str, Any]:
+    """Keep model diagnostics separate from a usable cell value."""
+    issue = recognition_input_issue(source)
+    if issue:
+        return {"resolution_state": "review_required", "resolved_value": None,
+                "quantity_source_issue": issue}
+    value = source.get("ocr_normalized")
+    if source.get("role") == "note":
+        value = source.get("recognizer_raw_text", source.get("raw_text", ""))
+    return {"resolution_state": "resolved", "resolved_value": value}
 
 
 def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -98,7 +116,7 @@ def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
         if issue is None:
             continue
         cell = metadata.get("sheet_cell")
-        if (issue != "hakodate_blank_input_nonempty_prediction" or not isinstance(cell, str)
+        if (issue not in {"hakodate_blank_input_nonempty_prediction", "hakodate_ocr_quantity_non_numeric", "hakodate_preprocess_ink_loss"} or not isinstance(cell, str)
                 or not cell or cell in seen or not isinstance(record.get("raw_text"), str)):
             raise ValueError("hakodate_recognition_review_invalid")
         seen.add(cell)
@@ -297,7 +315,9 @@ def evidence_from_records(
             "raw_text", "text", "recognizer_raw_text", "ocr_text", "normalized_value",
             "ocr_normalized", "pred_digits", "recognizer_accepted_candidate", "role", "field", "semantic_field",
         ) if key in record})
-        normalized_value = raw_text
+        original = metadata.get("recognizer_output")
+        review_required = isinstance(original, dict) and recognition_input_issue(original) is not None
+        normalized_value = None if review_required else raw_text
         source_bbox = _as_float_box(record.get("source_bbox") or record.get("bbox"))
         center = _as_center(record.get("center"), fallback_box=source_bbox)
         evidence_id = str(
@@ -329,6 +349,8 @@ def evidence_from_records(
                 )
             )
         )
+        if isinstance(original, dict) and "resolution_state" in original:
+            evidence[-1]["resolution_state"] = "review_required" if review_required else "resolved"
     return evidence
 
 
@@ -490,6 +512,8 @@ def assign_evidence_to_target_cells(
                 )
             )
         )
+        if unresolved and any((record.get("engine_metadata") or {}).get("recognizer_output", {}).get("resolution_state") == "review_required" for record in records):
+            assignments[-1].update(assigned_value=None, resolution_state="review_required")
 
     return {
         "assignments": assignments,
@@ -585,7 +609,7 @@ def sheet_output_from_assigned_results(
             assigned_value = validate_assigned_ocr_value(assignment)
         except ValueError as exc:
             output_blockers.append(str(exc))
-            assigned_value = ""
+            assigned_value = None if assignment.get("resolution_state") == "review_required" else ""
             state = "conflict" if state == "conflict" else "unresolved"
         try:
             targets = _logical_sheet_targets_for_assignment(assignment)
@@ -639,6 +663,8 @@ def sheet_output_from_assigned_results(
                 "evidence_ids": list(assignment.get("evidence_ids") or []),
                 "raw_texts": list(assignment.get("raw_texts") or []),
             }
+            if assignment.get("resolution_state") == "review_required":
+                cells[sheet_cell]["resolution_state"] = "review_required"
 
     sorted_cols = sorted(col_indexes)
     rows: list[dict[str, Any]] = []
@@ -650,7 +676,7 @@ def sheet_output_from_assigned_results(
             col_letter = get_column_letter(col_index)
             sheet_cell = f"{col_letter}{row_index}"
             cell = cells.get(sheet_cell)
-            values_by_column[col_letter] = str((cell or {}).get("value_text") or "")
+            values_by_column[col_letter] = None if (cell or {}).get("resolution_state") == "review_required" else str((cell or {}).get("value_text") or "")
             states_by_column[col_letter] = str((cell or {}).get("assignment_state") or "missing")
             if cell is not None:
                 cells_by_column[col_letter] = cell

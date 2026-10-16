@@ -116,6 +116,20 @@ jobs:
             tests/integration/test_staging_db_target.py \
             tests/integration/test_verify_stg_output_source.py \
             --junitxml=.logs/saved-source-junit.xml -q
+      - name: Verify OCR review-resolution root regression
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          mkdir -p .logs
+          python -m pytest \
+            tests/unit/test_hakodate_review_resolution_root.py \
+            tests/unit/test_hakodate_blank_input_review.py \
+            tests/unit/test_hakodate_blank_review_persistence.py \
+            tests/unit/test_hakodate_text_recognizer_preprocess.py \
+            tests/unit/test_yomitoku_text_recognizer_topk.py \
+            tests/unit/test_stg_recognition_review_verification.py \
+            --junitxml=.logs/review-resolution-junit.xml \
+            -q -rs 2>&1 | tee .logs/review-resolution.log
       - name: Upload backend logs
         if: always()
         uses: actions/upload-artifact@v4
