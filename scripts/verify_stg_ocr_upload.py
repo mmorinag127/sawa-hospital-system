@@ -22,6 +22,10 @@ _codec_spec = importlib.util.spec_from_file_location(
     'verification_storage_uri', Path(__file__).resolve().parents[1] / 'ocr_pipeline/app/storage_uri.py')
 _codec = importlib.util.module_from_spec(_codec_spec)
 _codec_spec.loader.exec_module(_codec)
+_blank_spec = importlib.util.spec_from_file_location(
+    'verify_hakodate_blank_resolution', Path(__file__).with_name('verify_hakodate_blank_resolution.py'))
+_blank_verification = importlib.util.module_from_spec(_blank_spec)
+_blank_spec.loader.exec_module(_blank_verification)
 
 
 def request(path, body=None, content_type=None, method=None, revision=None):
@@ -376,7 +380,7 @@ def completed_evidence(evidence, workflow, started, order_id, document_id, previ
         and pdf.get('order_id') == order_id and pdf.get('document_id') == document_id)
 
 
-def review_required_evidence(evidence, workflow, started, order_id, document_id, previous_id):
+def review_required_evidence(evidence, workflow, started, order_id, document_id, previous_id, blank_expectations=None):
     job = workflow.get('ocr_job') or {}
     own = started.get('ocr_job') or {}
     payload = evidence.get('payload_json') or {}
@@ -401,6 +405,11 @@ def review_required_evidence(evidence, workflow, started, order_id, document_id,
             and isinstance(cells, list) and cells and type(review.get('count')) is int
             and review['count'] == len(cells)):
         return False
+    if blank_expectations is not None:
+        try:
+            return cells == _blank_verification.verify_blank_resolution(payload, blank_expectations)
+        except (AssertionError, KeyError, TypeError, ValueError):
+            return False
     expected = []
     for record in payload.get('hakodate_ocr_evidence_records', []):
         metadata = record.get('engine_metadata') or {}
@@ -454,7 +463,12 @@ def main():
         outcome = case.get('expected_outcome', 'done')
         if outcome not in ('done', 'recognition_review_required'):
             raise ValueError('Unknown expected OCR outcome')
-        verify_result = review_required_evidence if outcome == 'recognition_review_required' else completed_evidence
+        if case.get('blank_resolution') is not None:
+            if outcome != 'recognition_review_required':
+                raise ValueError('Explicit blank-resolution case requires unresolved-cell review verification')
+            verify_result = lambda *values: review_required_evidence(*values, blank_expectations=case['blank_resolution'])
+        else:
+            verify_result = review_required_evidence if outcome == 'recognition_review_required' else completed_evidence
         folder = args.output_dir / case['source_order_id']
         folder.mkdir(exist_ok=True)
         pdf = folder / 'original.pdf'
@@ -568,6 +582,11 @@ def main():
             outputs = payload['hakodate_canonical_pipeline']['outputs']
             download(outputs['records'], folder / 'recognizer-records.json')
             download(outputs['contact_sheet'], folder / 'recognizer-contact.png')
+            if case.get('blank_resolution') is not None:
+                from PIL import Image
+                with Image.open(folder / 'recognizer-contact.png') as contact:
+                    _blank_verification.verify_blank_resolution(payload, case['blank_resolution'], contact,
+                        json.loads((folder / 'recognizer-records.json').read_text()))
             review = request(f'/orders/{oid}/workflow-v2/recognition-review?'
                             + urlencode({'document_id': document_id, 'ocr_result_id': evidence['id']}))
             receipt = review.get('source_receipt') or {}
