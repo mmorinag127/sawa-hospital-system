@@ -539,7 +539,7 @@ jobs:
         env:
           VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
           OCR_MANIFEST: ${{ inputs.ocr_verification_manifest }}
-        run: python3 scripts/verify_stg_ocr_upload.py --manifest "$OCR_MANIFEST" --output-dir ocr-verification
+        run: uv run --project backend --extra dev --frozen python scripts/verify_stg_ocr_upload.py --manifest "$OCR_MANIFEST" --output-dir ocr-verification
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
         with:
