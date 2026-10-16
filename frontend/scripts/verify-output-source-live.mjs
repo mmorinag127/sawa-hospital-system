@@ -112,7 +112,7 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
     result.phase = 'verify-controls';
     await page.waitForLoadState('networkidle');
     const dateInput = page.locator('input[type="date"]');
-    const fetchButton = page.getByRole('button', { name: '取得', exact: true });
+    const fetchButton = page.getByRole('button', { name: '表示・集計', exact: true });
     await expect(dateInput).toBeVisible();
     await expect(fetchButton).toBeVisible();
     result.ui.dateInputPresent = true;
@@ -145,7 +145,7 @@ export async function verifyOutputSourceBrowser({ origin, token, orderId, target
     result.phase = 'verify-rendered-output';
     await expect(dateInput).toHaveValue(targetDate);
     await expect(fetchButton).toBeEnabled();
-    await expect(page.getByRole('button', { name: '取得中...', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '集計中...', exact: true })).toHaveCount(0);
     await expect(dateInput).toBeEnabled();
     result.ui.dateInputValue = await dateInput.inputValue();
     result.ui.loadingFinished = true;
