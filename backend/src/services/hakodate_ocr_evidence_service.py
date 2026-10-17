@@ -84,7 +84,7 @@ def _quantity_recognizer_issue(source: dict[str, Any]) -> str | None:
                            for key in ("text", "normalized_digits"))))
             or source.get("recognizer_decision_source") == "topk_digits"
             or any(key in source and source[key] is not None and normalize_ocr_value(source[key]) != raw
-                   for key in ("ocr_text", "ocr_normalized", "pred_digits"))
+                   for key in ("ocr_text", "ocr_normalized", "pred_digits", "resolved_value"))
             or (isinstance(candidate, dict) and any(
                 key in candidate and normalize_ocr_value(candidate[key]) != raw
                 for key in ("text", "normalized_digits")))):
@@ -180,7 +180,7 @@ def validate_ocr_quantity_source(record: dict[str, Any]) -> str:
             if value and not re.fullmatch(r"[0-9]+", value):
                 raise ValueError("hakodate_ocr_quantity_unresolved")
             values.append(value)
-        for key in ("normalized_value", "ocr_normalized", "pred_digits"):
+        for key in ("normalized_value", "ocr_normalized", "pred_digits", "resolved_value"):
             if key in source and source[key] is not None:
                 value = normalize_ocr_value(source[key])
                 if value and not re.fullmatch(r"[0-9]+", value):
@@ -345,7 +345,7 @@ def evidence_from_records(
         # Preserve source aliases until the authored target supplies the cell role.
         metadata.setdefault("source_values", {key: record[key] for key in (
             "raw_text", "text", "recognizer_raw_text", "ocr_text", "normalized_value",
-            "ocr_normalized", "pred_digits", "recognizer_accepted_candidate", "role", "field", "semantic_field",
+            "ocr_normalized", "pred_digits", "resolved_value", "recognizer_accepted_candidate", "role", "field", "semantic_field",
         ) if key in record})
         original = metadata.get("recognizer_output")
         review_required = isinstance(original, dict) and recognition_input_issue(original) is not None
