@@ -75,9 +75,9 @@ DEFAULT_RECOGNIZER_MODES = ("raw", "clean", "corner_cc")
 
 @diagnosed("initialize")
 def _load_text_recognizer(device: str):
-    from yomitoku import TextRecognizer  # noqa: PLC0415
+    from src.services.hakodate_empty_sequence_model import load_empty_sequence_recognizer
 
-    return TextRecognizer(device=device, visualize=False)
+    return load_empty_sequence_recognizer(device)
 
 
 def _clean_text_for_number(value: object) -> str:
@@ -672,6 +672,8 @@ def run_text_recognizer_direct(
         "digit_score_threshold": digit_score_threshold,
         "candidate_digit_score_threshold": candidate_digit_score_threshold,
         "sequence_top_k": sequence_top_k,
+        **({"recognition_model_metadata": deepcopy(recognizer.recognition_model_metadata)}
+           if hasattr(recognizer, "recognition_model_metadata") else {}),
     }
 
 
