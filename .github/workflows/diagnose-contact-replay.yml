@@ -2,15 +2,13 @@ name: Diagnose saved staging contact replay
 
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/hospital-contact-replay-20261017]
 
 permissions:
   contents: read
 
 jobs:
   diagnose:
-    if: github.actor == github.repository_owner && github.ref == 'refs/heads/codex/hospital-contact-replay-20261017'
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
