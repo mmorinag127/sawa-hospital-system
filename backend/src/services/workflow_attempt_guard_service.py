@@ -509,6 +509,7 @@ def capture_nonworkflow_execution(
     expected_order: dict[str, Any] | None = None,
     selected_version_input: dict[str, Any] | None = None,
     expected_document_id: str | None = None,
+    ingest_ocr_mode: str | None = None,
 ) -> dict[str, Any]:
     """Claim a real execution and snapshot inputs before any OCR computation.
 
@@ -546,6 +547,9 @@ def capture_nonworkflow_execution(
             raise ValueError("ocr_execution_owner_changed")
         if ingest_lease is not None and (job.metrics or {}).get("ingest_lease") != ingest_lease:
             raise ValueError("ingest_attempt_changed")
+        if ingest_ocr_mode is not None and (ingest_lease is None or ingest_ocr_mode not in {"hakodate", "registration_only"}
+                or (job.metrics or {}).get("ingest_ocr_mode") != ingest_ocr_mode):
+            raise ValueError("ingest_ocr_mode_changed")
         if order_id is not None and job.order_id not in {None, order_id}:
             raise ValueError("ocr_execution_order_mismatch")
         selected_order_id = order_id if order_id is not None else job.order_id
@@ -569,6 +573,7 @@ def capture_nonworkflow_execution(
                 "expected_target_semantics": canonical_target_semantics(plan),
             })
         boundary = {
+            "ingest_ocr_mode": ingest_ocr_mode,
             "ingest_lease": ingest_lease,
             "job_id": job_id, "execution_id": uuid4().hex,
             "input_reference": job.input_reference,
@@ -691,6 +696,9 @@ def lock_nonworkflow_execution_job(session: Any, boundary: dict[str, Any] | None
     return bool(
         job is not None and (job.metrics or {}).get("workflow_attempt_id") is None
         and isinstance(stored, dict) and stored.get("execution_id") == boundary["execution_id"]
+        and stored.get("ingest_ocr_mode") == boundary.get("ingest_ocr_mode")
+        and (boundary.get("ingest_ocr_mode") != "hakodate"
+             or snapshots_equal((job.metrics or {}).get("ingest_lease"), boundary.get("ingest_lease")))
         and snapshots_equal(stored.get("start_orders"), boundary.get("start_orders"))
         and snapshots_equal(stored.get("selected_pdf_receipt"), boundary.get("selected_pdf_receipt"))
         and job.input_reference == boundary.get("input_reference")
@@ -947,6 +955,9 @@ def lock_actual_write_ownership(
         not bool(str(current_attempt or "").strip())
         and isinstance(stored_boundary, dict)
         and stored_boundary.get("execution_id") == boundary.get("execution_id")
+        and stored_boundary.get("ingest_ocr_mode") == boundary.get("ingest_ocr_mode")
+        and (boundary.get("ingest_ocr_mode") != "hakodate"
+             or snapshots_equal((job.metrics or {}).get("ingest_lease"), boundary.get("ingest_lease")))
         and snapshots_equal(stored_boundary.get("start_orders"), boundary.get("start_orders"))
         and snapshots_equal(stored_boundary.get("selected_pdf_receipt"), boundary.get("selected_pdf_receipt"))
         and job.input_reference == boundary.get("input_reference")

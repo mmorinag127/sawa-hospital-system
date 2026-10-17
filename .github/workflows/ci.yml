@@ -143,6 +143,8 @@ jobs:
             tests/unit/test_stg_recognition_review_verification.py \
             tests/unit/test_stg_ocr_native_empty_resolution.py \
             tests/unit/test_stg_ocr_verified_source_case.py \
+            tests/unit/test_native_ingest_boundary.py \
+            tests/unit/test_native_ingest_sql_component.py \
             --junitxml=.logs/review-resolution-junit.xml \
             -q -rs 2>&1 | tee .logs/review-resolution.log
       - name: Upload backend logs

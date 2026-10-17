@@ -337,6 +337,20 @@ def _recover_captured_ocr_job(job: dict) -> bool:
     job_id = str(job.get("id") or "").strip()
     if not job_id:
         return False
+    captured = current_nonworkflow_execution()
+    if isinstance(captured, dict) and captured.get("ingest_ocr_mode") == "hakodate":
+        from src.models.ocr_job import OcrJob
+        with order_service.session_scope() as session:
+            receipt = ingest_job_service.ingest_terminal_receipt(session, session.get(OcrJob, job_id), captured)
+        if receipt is not None:
+            order_service.finalize_first_pass_side_effects(job_id=job_id, order_id=captured["order_id"],
+                message_id=captured["ingest_lease"]["id"])
+            return True
+        payload = parse_ingest_payload(captured["ingest_lease"]["payload"])
+        payload.order_id = captured["order_id"]
+        payload.order_document_id = captured["orders"][payload.order_id]["document"]["id"]
+        result = _process_ingest_captured(payload, job_id, captured)
+        return isinstance(result.get("terminal_receipt"), dict)
     output_reference = str(job.get("output_reference") or "").strip() or None
     if output_reference:
         try:
@@ -381,6 +395,8 @@ def _looks_like_first_pass_ocr_payload(payload: object) -> bool:
 
 def _run_auto_llm_reparse(order_id: str, *, job_id: str, execution_input: dict, own_payload: dict,
     provider: str | None = None, original_request: dict) -> None:
+    if execution_input.get("ingest_ocr_mode") == "hakodate":
+        raise ValueError("native_ingest_llm_successor_forbidden")
     from src.services import order_service
 
     updated = None
@@ -441,6 +457,8 @@ def _enqueue_auto_llm_reparse(
     own_job: dict | None,
 ) -> None:
     # Acceptance already occurred with evidence/terminal in the producer transaction.
+    if execution_input.get("ingest_ocr_mode") == "hakodate":
+        raise ValueError("native_ingest_llm_successor_forbidden")
     # The independent drain dispatches it after predecessor ACK, without this call.
     from src.models.ingest_delivery_successor import IngestDeliverySuccessor
     from src.services.ingest_delivery_service import transaction
@@ -636,7 +654,12 @@ def process_ingest_job(job_id: str, *, generation: str, input_digest: str, uploa
                 raise
             if result is None:
                 return None
-            terminal = result.get("first_pass_terminal_receipt") or result.get("non_ocr_terminal_receipt")
+            keys = [key for key in ("terminal_receipt", "first_pass_terminal_receipt", "non_ocr_terminal_receipt") if result.get(key) is not None]
+            if not keys:
+                raise ValueError("first_pass_terminal_receipt_missing")
+            if len(keys) > 1:
+                raise ValueError("ingest_terminal_receipt_ambiguous")
+            terminal = result[keys[0]]
             if not isinstance(terminal, dict) or terminal.get("status") not in {"done", "failed"}:
                 raise ValueError("first_pass_terminal_receipt_missing")
             from src.services.ingest_delivery_service import persist_runner_receipt
@@ -703,6 +726,8 @@ def _process_ingest_inline(**kwargs):
         ocr_job_id = payload.ocr_job_id if payload.ocr_job_id is not None else f"OCR-{payload.order_id}"
     else:
         ocr_job_id = payload.ocr_job_id if payload.ocr_job_id is not None else f"OCR-{payload.message_id}"
+    if lease.get("recovery_claim_id") is None and not payload.skip_ocr and payload.ocr_job_id is None:
+        ocr_job_id = f"{ocr_job_id}-{lease['generation']}"
     if not isinstance(ocr_job_id, str) or not ocr_job_id.strip():
         raise ValueError("ocr_job_identity_required")
     prepared = ingest_job_service.prepare_ingest_ocr_job(lease, ocr_job_id, payload)
@@ -718,12 +743,15 @@ def _capture_and_process_ingest(payload, ocr_job_id, lease, *, original=None, pr
     if original is not None:
         payload.order_id = original["order_id"]
         if prepared["status"] in {"done", "failed"}:
-            receipt = prepared["metrics"].get("first_pass_terminal_receipt") or prepared["metrics"].get("non_ocr_terminal_receipt")
+            from src.models.ocr_job import OcrJob
+            with order_service.session_scope() as session:
+                receipt = ingest_job_service.ingest_terminal_receipt(session, session.get(OcrJob, ocr_job_id), original)
             if not isinstance(receipt, dict) or receipt.get("execution_id") != original["execution_id"] or receipt.get("job_id") != ocr_job_id:
                 raise ValueError("ingest_recovery_terminal_receipt_missing")
             with nonworkflow_execution_context(original):
                 finalize_first_pass_side_effects(job_id=ocr_job_id, order_id=payload.order_id, message_id=payload.message_id)
-            return {"id": payload.order_id, "non_ocr_terminal_receipt": receipt}
+            key = "terminal_receipt" if original.get("ingest_ocr_mode") == "hakodate" else "non_ocr_terminal_receipt"
+            return {"id": payload.order_id, key: receipt}
     if original is None:
         registered = create_order_from_ingest(
             payload, lines=None, ocr_attempts=0,
@@ -739,8 +767,16 @@ def _capture_and_process_ingest(payload, ocr_job_id, lease, *, original=None, pr
             if refresh_uploaded_pdf_links(lease["uploaded_lease"]["id"], lease=lease["uploaded_lease"],
                 order_id=receipt["order_id"], document_id=receipt["document_id"]) is None:
                 raise ValueError("uploaded_pdf_attempt_changed")
+    if original is None and not payload.skip_ocr:
+        from src.services import order_workflow_v2_service
+        with order_service.session_scope() as session:
+            order = order_service.lock_order_execution_input(session, payload.order_id)
+            if order is None:
+                raise ValueError("ingest_registered_order_missing")
+            order_workflow_v2_service.initialize_ingest_context(session, order, payload.facility_selection, ocr_job_id)
     execution_input = original if original is not None else capture_nonworkflow_execution(ocr_job_id, order_id=payload.order_id,
-        input_reference=payload.pdf_uri, expected_document_id=payload.order_document_id)
+        input_reference=payload.pdf_uri, expected_document_id=payload.order_document_id,
+        ingest_ocr_mode="registration_only" if payload.skip_ocr else "hakodate")
     with nonworkflow_execution_context(execution_input):
         try:
             if execution_input.get("selected_pdf_error"):
@@ -752,6 +788,13 @@ def _capture_and_process_ingest(payload, ocr_job_id, lease, *, original=None, pr
                 if receipt is not None:
                     return {"id": payload.order_id, "document_status": "error", "non_ocr_terminal_receipt": receipt}
                 raise
+            if execution_input.get("ingest_ocr_mode") == "hakodate" and isinstance(exc, Exception):
+                result, _ = order_service._persist_ocr_rerun_completion(
+                    payload.order_id, ocr_job_id, None, error=str(exc),
+                    metrics_patch={"processing_stage": "native_ingest_failed", "result_state": "hard_failed"},
+                    source="ingest-hakodate")
+                order_service.finalize_first_pass_side_effects(job_id=ocr_job_id, order_id=payload.order_id, message_id=payload.message_id)
+                return {"id": payload.order_id, "terminal_receipt": result["terminal_receipt"]}
             try:
                 failed = create_order_from_ingest(
                     payload, lines=None, ocr_attempts=0,
@@ -847,6 +890,24 @@ def map_own_ingest_result(payload, pdf_bytes, pipeline_result, mapping_input):
 
 
 def _process_ingest_captured(payload, ocr_job_id: str, execution_input: dict):
+    mode = execution_input.get("ingest_ocr_mode")
+    if mode == "hakodate":
+        if payload.skip_ocr:
+            raise ValueError("native_ingest_skip_ocr_forbidden")
+        week = require_explicit_ingest_week(payload.week_hint)
+        captured = execution_input["orders"][payload.order_id]
+        if captured["order"]["week_code"] != week or captured["document"]["id"] != payload.order_document_id:
+            raise ValueError("native_ingest_registered_input_changed")
+        result, error = order_service.rerun_ocr_evidence_only(payload.order_id, job_id=ocr_job_id,
+            project_sheet=False, refresh_workflow=False, selected_document_id=payload.order_document_id)
+        if not isinstance(result, dict) or not isinstance(result.get("terminal_receipt"), dict):
+            raise ValueError("native_ingest_terminal_receipt_missing")
+        order_service.finalize_first_pass_side_effects(job_id=ocr_job_id, order_id=payload.order_id, message_id=payload.message_id)
+        return {"id": payload.order_id, "terminal_receipt": result["terminal_receipt"]}
+    if mode == "registration_only" and not payload.skip_ocr:
+        raise ValueError("ingest_registration_mode_changed")
+    if mode not in (None, "registration_only"):
+        raise ValueError("ingest_ocr_mode_unknown")
     week = require_explicit_ingest_week(payload.week_hint)
     captured_order = execution_input.get("orders", {}).get(payload.order_id, {}).get("order")
     if not isinstance(captured_order, dict) or captured_order.get("week_code") != week:

@@ -4661,6 +4661,8 @@ def create_order_from_ingest(
                 "document_id": document.id, "status": job.status,
                 "result_state": "skipped" if skipped else "hard_failed",
             }
+            job.metrics = {**job.metrics,
+                "non_ocr_terminal_receipt": deepcopy(serialized["non_ocr_terminal_receipt"])}
         if isinstance(pipeline_result, dict):
             serialized["first_pass_evidence"] = _persist_ingest_pipeline_evidence(
                 session, order, pipeline_result, document_status,
@@ -12858,10 +12860,35 @@ def _persist_ocr_rerun_completion(
             job.output_reference = output_reference
         if isinstance(own_payload, dict):
             job.template_id = own_payload.get("template_id")
+        execution = current_nonworkflow_execution()
+        native_hard_failure = False
+        if execution is not None and execution.get("ingest_ocr_mode") == "hakodate" and error:
+            review = (own_payload or {}).get("hakodate_recognition_review") if isinstance(own_payload, dict) else None
+            if evidence is not None and isinstance(review, dict) and review.get("cells"):
+                _validate_hakodate_owned_artifacts(own_payload,
+                    _hakodate_owned_source(processing_start_configured_input(), processing_start_pdf_receipt()), allow_review=True)
+            else:
+                native_hard_failure = True
+                metrics_patch = {**(metrics_patch or {}), "processing_stage": "native_ingest_failed", "result_state": "hard_failed"}
         receipt = _complete_ocr_rerun_in_session(
             session, order_id, job_id, evidence, error=error,
             metrics_patch=metrics_patch or {},
+            failure_metrics_override=native_hard_failure,
         )
+        if execution is not None and execution.get("ingest_ocr_mode") == "hakodate":
+            from src.services.order_workflow_v2_service import complete_native_ingest_context
+            complete_native_ingest_context(session, order_id, job_id,
+                evidence.get("id") if evidence is not None else None, error)
+            order = session.get(Order, order_id)
+            source = execution["orders"][order_id]["document"]
+            document = session.get(OrderDocument, source["id"])
+            if (order is None or document is None or order.current_document_id != document.id
+                    or document.storage_uri != execution["selected_pdf_receipt"]["storage_uri"]):
+                raise ValueError("native_ingest_document_changed")
+            document.status = "error" if error else "success"
+            document.error_message = error
+            _record_current_order_version(session, order, document)
+            advance_nonworkflow_order_input(session, execution, order)
         result = deepcopy(evidence) if evidence is not None else {}
         result["terminal_receipt"] = receipt
     return result, receipt["error"]
@@ -13114,6 +13141,8 @@ def _finalize_async_first_pass_side_effects(
     order_id: str | None,
     message_id: str | None,
 ) -> None:
+    original = current_nonworkflow_execution()
+    strict_native = isinstance(original, dict) and original.get("ingest_ocr_mode") == "hakodate"
     normalized_message_id = str(message_id or "").strip()
     if normalized_message_id:
         try:
@@ -13121,6 +13150,8 @@ def _finalize_async_first_pass_side_effects(
             execution = current_nonworkflow_execution()
             settled = ingest_job_service.settle_ingest_ocr_terminal(execution) if isinstance(execution, dict) and execution.get("job_id") == job_id and execution.get("order_id") == order_id and (execution.get("ingest_lease") or {}).get("id") == normalized_message_id else None
         except Exception as exc:  # noqa: BLE001
+            if strict_native:
+                raise
             logger.warning(
                 "Ingest job completion sync failed after OCR reconcile",
                 job_id=job_id,
@@ -13128,15 +13159,23 @@ def _finalize_async_first_pass_side_effects(
                 error=str(exc),
             )
             settled = None
+        if strict_native and settled is None:
+            raise ValueError("native_ingest_settlement_missing")
         try:
             from src.services.uploaded_pdf_service import mark_uploaded_pdf_completed_by_message_id_if_ready, schedule_uploaded_pdf_retry
             uploaded = settled["lease"].get("uploaded_lease") if settled is not None else None
             if uploaded is not None and settled["status"] == "done":
-                mark_uploaded_pdf_completed_by_message_id_if_ready(normalized_message_id, lease=uploaded, completion=settled)
+                completed = mark_uploaded_pdf_completed_by_message_id_if_ready(normalized_message_id, lease=uploaded, completion=settled)
+                if strict_native and completed is None:
+                    raise ValueError("native_ingest_upload_settlement_refused")
             elif uploaded is not None and settled["status"] == "failed":
-                schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
+                rejected = schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
                     error_code="ingest_failed", error_message=settled["error"], terminal=True)
+                if strict_native and rejected is None:
+                    raise ValueError("native_ingest_upload_settlement_refused")
         except Exception as exc:  # noqa: BLE001
+            if strict_native:
+                raise
             logger.warning(
                 "Uploaded PDF completion sync failed after OCR reconcile",
                 job_id=job_id,
@@ -13177,6 +13216,11 @@ def reconcile_completed_ocr_job(job_id: str, *, execution_input: dict[str, Any] 
 
 
 def _reconcile_completed_ocr_job_with_input(job_id: str) -> bool:
+    captured = current_nonworkflow_execution()
+    if isinstance(captured, dict) and captured.get("ingest_ocr_mode") == "hakodate":
+        from src.workers.ingest_worker import _recover_captured_ocr_job
+        job = get_ocr_job(job_id)
+        return _recover_captured_ocr_job(job) if isinstance(job, dict) else False
     normalized_job_id = str(job_id or "").strip()
     if not normalized_job_id:
         return False
