@@ -25148,7 +25148,7 @@ def detect_order_grid(
     except ValueError as exc:
         return None, str(exc), {"reason": str(exc)}
     import fitz
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as selected_document:
+    with fitz.open(stream=bytes(pdf_bytes), filetype="pdf") as selected_document:
         if selected_page > selected_document.page_count:
             return None, "selected_pdf_page_invalid", {"reason": "authored_page_absent"}
     template_to_use["page"] = selected_page
