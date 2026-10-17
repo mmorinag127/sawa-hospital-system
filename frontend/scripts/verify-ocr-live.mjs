@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isAllowedOutputSourceOrigin, STG_OUTPUT_SOURCE_ORIGIN } from './output-source-live-origin.mjs';
@@ -92,8 +92,64 @@ export function settleResponse(waiter) {
   return waiter.then(response => ({ ok: true, response }), () => ({ ok: false, response: null }));
 }
 
+export function verificationCaseId(sourceCase) {
+  assert.ok(sourceCase && typeof sourceCase === 'object' && !Array.isArray(sourceCase));
+  const keys = ['source_order_id', 'case_id'].filter(key => Object.hasOwn(sourceCase, key));
+  assert.equal(keys.length, 1, 'Exactly one verification case identity required');
+  const value = sourceCase[keys[0]];
+  assert.equal(typeof value, 'string');
+  assert.match(value, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+  return value;
+}
+
+export function verificationOutcome(sourceCase, workflow, evidence) {
+  const policy = sourceCase.expected_outcome ?? 'done';
+  assert.ok(['done', 'recognition_review_required', 'done_or_review_required'].includes(policy));
+  if (policy !== 'done_or_review_required') return policy;
+  verificationCaseId(sourceCase);
+  assert.ok(Object.hasOwn(sourceCase, 'case_id') && !Object.hasOwn(sourceCase, 'source_order_id'));
+  assert.ok(!['native_empty_resolution', 'review_resolution', 'blank_resolution'].some(key => Object.hasOwn(sourceCase, key)));
+  assert.ok(Array.isArray(sourceCase.required_raw_cells) && sourceCase.required_raw_cells.length > 0);
+  const job = workflow.ocr_job;
+  const payload = evidence.payload_json;
+  const execution = payload?._ocr_execution;
+  assert.equal(nonEmpty(job?.ocr_job_id, 'job-id'), execution?.job_id);
+  assert.equal(nonEmpty(job?.workflow_attempt_id, 'attempt-id'), execution?.workflow_attempt_id);
+  assert.equal(evidence.producer_version, 'hakodate_best_method_pipeline');
+  const records = payload.hakodate_ocr_evidence_records;
+  assert.ok(Array.isArray(records));
+  const expectedReview = records.filter(row => row.engine_metadata?.recognizer_output?.resolution_state === 'review_required')
+    .map(row => ({ sheet_cell: row.engine_metadata.sheet_cell, raw_text: row.raw_text,
+      reason: row.engine_metadata.recognizer_output.quantity_source_issue }));
+  const review = payload.hakodate_recognition_review;
+  if (job.status === 'done') {
+    assert.equal(evidence.status, 'done');
+    assert.equal(job.result_state, 'evidence_ready');
+    assert.equal(job.processing_stage, 'evidence_ready');
+    for (const key of ['error', 'error_message', 'error_detail', 'error_user_message']) {
+      assert.ok(Object.hasOwn(job, key));
+      assert.equal(job[key], null);
+    }
+    assert.equal(expectedReview.length, 0);
+    assert.ok(!review?.cells?.length);
+    return 'done';
+  }
+  assert.equal(job.status, 'failed');
+  assert.equal(job.result_state, 'review_required');
+  assert.equal(job.recovery_action, 'review_recognition_cells');
+  assert.equal(evidence.status, 'diagnostic_only');
+  assert.equal(evidence.selectable, false);
+  assert.ok(expectedReview.length > 0);
+  assert.deepEqual(review?.cells, expectedReview);
+  assert.equal(review.count, expectedReview.length);
+  assert.equal(new Set(expectedReview.map(cell => cell.sheet_cell)).size, expectedReview.length);
+  return 'recognition_review_required';
+}
+
 function verificationIdentityForCase(folder, sourceCase) {
-  const caseFolder = resolve(folder, sourceCase.source_order_id);
+  const label = verificationCaseId(sourceCase);
+  const caseFolder = resolve(folder, label);
+  assert.equal(realpathSync(caseFolder), resolve(realpathSync(folder), label));
   const order = readJson(resolve(caseFolder, 'order.json'));
   const workflow = readJson(resolve(caseFolder, 'workflow.json'));
   const evidence = readJson(resolve(caseFolder, 'evidence.json'));
@@ -116,8 +172,35 @@ function verificationIdentityForCase(folder, sourceCase) {
   assert.equal(workflow.order_id, orderId);
   assert.equal(workflow.ocr_job?.order_id, orderId);
   assert.equal(workflow.ocr_job?.order_document_id, documentId);
-  const expectedOutcome = sourceCase.expected_outcome ?? 'done';
+  const expectedOutcome = verificationOutcome(sourceCase, workflow, evidence);
   assert.ok(['done', 'recognition_review_required'].includes(expectedOutcome));
+  const union = sourceCase.expected_outcome === 'done_or_review_required';
+  const policyIdentity = union ? { manifestPolicy: sourceCase.expected_outcome, expectedOutcome } : {};
+  if (union) {
+    assert.deepEqual(readJson(resolve(caseFolder, 'verification-outcome.json')),
+      { manifest_policy: sourceCase.expected_outcome, actual_outcome: expectedOutcome });
+  }
+  if (Object.hasOwn(sourceCase, 'required_raw_cells')) {
+    const identities = new Set();
+    for (const cell of sourceCase.required_raw_cells) {
+      assert.deepEqual(Object.keys(cell).sort(), ['date', 'daypart', 'expected_raw', 'field', 'menu_name']);
+      assert.ok(Object.values(cell).every(value => typeof value === 'string' && value.length > 0));
+      assert.equal(cell.expected_raw, '1');
+      const keys = ['date', 'daypart', 'menu_name', 'field'];
+      const key = JSON.stringify(keys.map(name => cell[name]));
+      assert.ok(!identities.has(key)); identities.add(key);
+      const matches = evidence.payload_json.hakodate_ocr_evidence_records.filter(row =>
+        keys.every(name => row.engine_metadata?.recognizer_output?.[name] === cell[name]));
+      assert.equal(matches.length, 1);
+      const row = matches[0]; const raw = row.engine_metadata.recognizer_output;
+      for (const name of ['recognizer_raw_text', 'raw_text', 'resolved_value']) assert.equal(raw[name], cell.expected_raw);
+      assert.equal(row.raw_text, cell.expected_raw);
+      assert.equal(row.normalized_value, cell.expected_raw);
+    }
+    assert.ok(identities.size > 0);
+    assert.deepEqual(readJson(resolve(caseFolder, 'required-raw-cells.json')),
+      { count: identities.size, cells: sourceCase.required_raw_cells });
+  }
   if (expectedOutcome === 'recognition_review_required') {
     assert.equal(workflow.ocr_job?.status, 'failed');
     assert.equal(workflow.ocr_job?.result_state, 'review_required');
@@ -126,10 +209,14 @@ function verificationIdentityForCase(folder, sourceCase) {
     const review = evidence.payload_json?.hakodate_recognition_review;
     assert.ok(Array.isArray(review?.cells) && review.cells.length > 0);
     assert.equal(review.count, review.cells.length);
-    return { orderId, documentId, evidenceId, sourcePDFhash, expectedOutcome, review };
+    return { orderId, documentId, evidenceId, sourcePDFhash, expectedOutcome, review,
+      ...policyIdentity,
+      ...(Object.hasOwn(sourceCase, 'case_id') ? { caseId: sourceCase.case_id } : {}) };
   }
   assert.equal(workflow.ocr_job?.status, 'done');
-  return { orderId, documentId, evidenceId, sourcePDFhash };
+  return { orderId, documentId, evidenceId, sourcePDFhash,
+    ...policyIdentity,
+    ...(Object.hasOwn(sourceCase, 'case_id') ? { caseId: sourceCase.case_id } : {}) };
 }
 
 export function verificationIdentities(folder) {
@@ -140,8 +227,13 @@ export function verificationIdentities(folder) {
     .map(entry => entry.name)
     .sort();
   assert.ok(sourceCases.length > 0);
-  assert.equal(new Set(sourceCases.map(item => item?.source_order_id)).size, sourceCases.length);
-  assert.deepEqual(caseDirectories, sourceCases.map(item => item?.source_order_id).sort());
+  const labels = sourceCases.map(verificationCaseId);
+  if (sourceCases.every(item => Object.hasOwn(item, 'source_order_id'))) {
+    assert.equal(new Set(sourceCases.map(item => item?.source_order_id)).size, sourceCases.length);
+    assert.deepEqual(caseDirectories, sourceCases.map(item => item?.source_order_id).sort());
+  }
+  assert.equal(new Set(labels).size, sourceCases.length);
+  assert.deepEqual(caseDirectories, labels.sort());
   return sourceCases.map(sourceCase => verificationIdentityForCase(folder, sourceCase));
 }
 
@@ -158,6 +250,11 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     evidenceId: identity.evidenceId, sourcePDFhash: identity.sourcePDFhash, unexpectedWriteCount: 0,
     pageErrorCount: 0, http: [], ui: { imageVisible: false, naturalWidth: 0, naturalHeight: 0 }, finalPathname: null,
   };
+  if (Object.hasOwn(identity, 'caseId')) result.caseId = identity.caseId;
+  if (Object.hasOwn(identity, 'manifestPolicy')) {
+    result.manifestPolicy = identity.manifestPolicy;
+    result.actualOutcome = identity.expectedOutcome;
+  }
   let browser;
   let context;
   let page;
@@ -330,6 +427,7 @@ async function main() {
     const results = [];
     for (const [index, identity] of identities.entries()) {
       const caseOutput = resolve(output, `case-${index + 1}`);
+      if (existsSync(caseOutput)) assert.equal(realpathSync(caseOutput), caseOutput);
       mkdirSync(caseOutput, { recursive: true });
       results.push(await verifyOcrBrowser({ origin: STG_OUTPUT_SOURCE_ORIGIN, token: process.env.LIVE_ID_TOKEN,
         identity, source: process.env.GITHUB_SHA, output: caseOutput }));
@@ -339,7 +437,9 @@ async function main() {
       scope: 'GET-only workflow-v2 Step2 OCR evidence; service-principal auth, not human login',
       sourceSHA: process.env.GITHUB_SHA,
       cases: results.map(result => ({ status: result.status, orderId: result.orderId, documentId: result.documentId,
-        evidenceId: result.evidenceId, sourcePDFhash: result.sourcePDFhash, code: result.code || null })),
+        evidenceId: result.evidenceId, sourcePDFhash: result.sourcePDFhash, code: result.code || null,
+        ...(Object.hasOwn(result, 'manifestPolicy') ? { manifestPolicy: result.manifestPolicy, actualOutcome: result.actualOutcome } : {}),
+        ...(Object.hasOwn(result, 'caseId') ? { caseId: result.caseId } : {}) })),
     });
     process.exitCode = results.every(result => result.status === 'passed') ? 0 : 1;
   }

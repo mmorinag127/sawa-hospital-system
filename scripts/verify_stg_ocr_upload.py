@@ -84,6 +84,82 @@ def save_json(folder, name, value):
     (folder / name).write_text(json.dumps(public(value), ensure_ascii=False, indent=2))
 
 
+def verification_case_id(case):
+    """An output label only; never an order, upload or document owner."""
+    if not isinstance(case, dict):
+        raise ValueError('Verification case identity invalid')
+    keys = [key for key in ('source_order_id', 'case_id') if key in case]
+    if len(keys) != 1:
+        raise ValueError('Exactly one verification case identity required')
+    value = case[keys[0]]
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', value):
+        raise ValueError('Verification case identity unsafe')
+    return value
+
+
+def verification_case_folder(root, case):
+    folder = root / verification_case_id(case)
+    if folder.is_symlink() or folder.resolve().parent != root.resolve():
+        raise ValueError('Verification case folder escapes output root')
+    return folder
+
+
+def required_raw_expectations(expected):
+    if not isinstance(expected, list) or not expected:
+        raise ValueError('Required raw cells invalid')
+    identities = []
+    for cell in expected:
+        if (not isinstance(cell, dict) or set(cell) != {'date', 'daypart', 'menu_name', 'field', 'expected_raw'}
+                or any(not isinstance(cell[key], str) or not cell[key] for key in cell)
+                or cell['expected_raw'] != '1'):
+            raise ValueError('Required raw cell expectation invalid')
+        if date.fromisoformat(cell['date']).isoformat() != cell['date']:
+            raise ValueError('Required raw cell date invalid')
+        identities.append(tuple(cell[key] for key in ('date', 'daypart', 'menu_name', 'field')))
+    if len(set(identities)) != len(identities):
+        raise ValueError('Required raw cell expectations duplicate')
+    return identities
+
+
+def reject_unmatched_terminal(workflow, evidence, expected_outcome):
+    status = (workflow.get('ocr_job') or {}).get('status')
+    expected_status = 'failed' if expected_outcome == 'recognition_review_required' else 'done'
+    if evidence and status in ('done', 'failed', 'error', 'cancelled', 'canceled') and (
+            expected_outcome == 'done_or_review_required' or status != expected_status):
+        raise RuntimeError('Unexpected terminal OCR outcome; workflow and evidence saved for review')
+
+
+def case_expectation(case):
+    if not isinstance(case, dict):
+        raise ValueError('Verification case invalid')
+    outcome = case.get('expected_outcome', 'done')
+    if outcome not in ('done', 'recognition_review_required', 'done_or_review_required'):
+        raise ValueError('Unknown expected OCR outcome')
+    if outcome == 'done_or_review_required':
+        if ('case_id' not in case or 'source_order_id' in case or 'required_raw_cells' not in case
+                or any(key in case for key in ('native_empty_resolution', 'review_resolution', 'blank_resolution'))):
+            raise ValueError('Union outcome requires exclusive verified source case')
+        verification_case_id(case)
+        required_raw_expectations(case['required_raw_cells'])
+        return outcome, lambda *values: actual_case_outcome(*values) is not None
+    verify_result = review_required_evidence if outcome == 'recognition_review_required' else completed_evidence
+    if 'native_empty_resolution' in case:
+        if 'review_resolution' in case or 'blank_resolution' in case or outcome != 'recognition_review_required':
+            raise ValueError('Native empty resolution requires exclusive review outcome')
+        if not isinstance(case['native_empty_resolution'], dict):
+            raise ValueError('Native empty expectation invalid')
+        verify_result = lambda *values: review_required_evidence(*values, review_resolution=True)
+    if 'review_resolution' in case:
+        if outcome != 'recognition_review_required' or not isinstance(case['review_resolution'], dict):
+            raise ValueError('Review resolution requires explicit review outcome')
+        verify_result = lambda *values: review_required_evidence(*values, review_resolution=True)
+    if 'required_raw_cells' in case:
+        required_raw_expectations(case['required_raw_cells'])
+        if outcome == 'recognition_review_required':
+            verify_result = lambda *values: review_required_evidence(*values, review_resolution=True)
+    return outcome, verify_result
+
+
 def resolve_selection(case):
     if case.get('identity_verified') is not True:
         raise ValueError('FAX facility/week must be visually verified before upload')
@@ -433,6 +509,29 @@ def review_required_evidence(evidence, workflow, started, order_id, document_id,
     return bool(expected and cells == expected and len({cell['sheet_cell'] for cell in cells}) == len(cells))
 
 
+def actual_case_outcome(*values):
+    """The new case policy accepts two contracts, never an ambiguous terminal."""
+    evidence, workflow = values[:2]
+    payload = evidence.get('payload_json') or {}
+    done = completed_evidence(*values)
+    review = review_required_evidence(*values, review_resolution=True)
+    if done:
+        job = workflow.get('ocr_job') or {}
+        if (job.get('result_state') != 'evidence_ready' or job.get('processing_stage') != 'evidence_ready'
+                or any(key not in job or job[key] is not None
+                       for key in ('error', 'error_message', 'error_detail', 'error_user_message'))):
+            return None
+        cells = (payload.get('hakodate_recognition_review') or {}).get('cells')
+        sources = [(row.get('engine_metadata') or {}).get('recognizer_output') or {}
+                   for row in payload.get('hakodate_ocr_evidence_records', [])]
+        if (cells or (workflow.get('ocr_job') or {}).get('result_state') == 'review_required'
+                or any(source.get('resolution_state') == 'review_required' for source in sources)):
+            return None
+    if done == review:
+        return None
+    return 'done' if done else 'recognition_review_required'
+
+
 def verify_review_resolution(expected, records, payload, contact):
     """Explicit new-producer acceptance; old review verification stays unchanged."""
     from PIL import Image
@@ -598,7 +697,7 @@ def _native_empty_records(expected, records, payload, contact):
             'numeric':len(numbers), 'review_required':len(reviews)}
 
 
-def verify_native_empty_resolution(expected, records, payload, contact):
+def _verified_observation_bytes(payload):
     # Canonical loaders can also read local files and non-staging buckets.
     # Fence every supplied receipt before entering that shared boundary.
     validate_staging_artifact_uris(payload)
@@ -614,7 +713,11 @@ def verify_native_empty_resolution(expected, records, payload, contact):
             or hashlib.sha256(observation_bytes).hexdigest() != receipt.get('sha256')):
         raise ValueError('Native empty observation bytes changed')
     validate_staging_artifact_uris(json.loads(observation_bytes))
-    result = _native_empty_records(expected, records, payload, contact)
+    return observation_bytes
+
+
+def _verify_record_source(records, payload, contact, observation_bytes):
+    pipeline = payload['hakodate_canonical_pipeline']
     if (payload.get('_ocr_execution') or {}).get('selected_pdf_receipt') != payload['hakodate_repair_source_receipt']['selected_pdf_receipt']:
         raise ValueError('canonical_artifact_execution_source_changed')
     import sys
@@ -629,7 +732,41 @@ def verify_native_empty_resolution(expected, records, payload, contact):
     except ImportError as exc:
         raise ValueError('Native empty observation validator unavailable') from exc
     validate_artifact(observation_bytes, records, verified['contact_sheet'], payload['hakodate_repair_source_receipt'])
+
+
+def verify_native_empty_resolution(expected, records, payload, contact):
+    observation_bytes = _verified_observation_bytes(payload)
+    result = _native_empty_records(expected, records, payload, contact)
+    _verify_record_source(records, payload, contact, observation_bytes)
     return result
+
+
+def verify_required_raw_cells(expected, records, payload, contact):
+    """Match authored business identities, not guessed worksheet addresses."""
+    identities = required_raw_expectations(expected)
+    observation_bytes = _verified_observation_bytes(payload)
+    _verify_record_source(records, payload, contact, observation_bytes)
+    evidence = payload['hakodate_ocr_evidence_records']
+    if not isinstance(records, list) or not isinstance(evidence, list):
+        raise ValueError('Required raw records invalid')
+    checked = []
+    for cell, identity in zip(expected, identities):
+        matches = [row for row in records if isinstance(row, dict)
+                   and tuple(row.get(key) for key in ('date', 'daypart', 'menu_name', 'field')) == identity]
+        api_matches = [row for row in evidence if isinstance(row, dict)
+                       and isinstance((row.get('engine_metadata') or {}).get('recognizer_output'), dict)
+                       and tuple(row['engine_metadata']['recognizer_output'].get(key)
+                                 for key in ('date', 'daypart', 'menu_name', 'field')) == identity]
+        if len(matches) != 1 or len(api_matches) != 1:
+            raise ValueError('Required raw cell identity missing or ambiguous')
+        source, api = matches[0], api_matches[0]
+        raw = cell['expected_raw']
+        if (api['engine_metadata']['recognizer_output'] != source
+                or any(source.get(key) != raw for key in ('recognizer_raw_text', 'raw_text', 'resolved_value'))
+                or api.get('raw_text') != raw or api.get('normalized_value') != raw):
+            raise ValueError('Required raw cell value changed')
+        checked.append(dict(cell))
+    return {'count': len(checked), 'cells': checked}
 
 
 def fetch_own_evidence(order_id, workflow, started):
@@ -671,22 +808,13 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.output_dir / 'manifest.json'
     download(args.manifest, manifest_path)
-    for case in json.loads(manifest_path.read_text())['cases']:
-        outcome = case.get('expected_outcome', 'done')
-        if outcome not in ('done', 'recognition_review_required'):
-            raise ValueError('Unknown expected OCR outcome')
-        verify_result = review_required_evidence if outcome == 'recognition_review_required' else completed_evidence
-        if 'native_empty_resolution' in case:
-            if 'review_resolution' in case or 'blank_resolution' in case or outcome != 'recognition_review_required':
-                raise ValueError('Native empty resolution requires exclusive review outcome')
-            if not isinstance(case['native_empty_resolution'], dict):
-                raise ValueError('Native empty expectation invalid')
-            verify_result = lambda *values: review_required_evidence(*values, review_resolution=True)
-        if 'review_resolution' in case:
-            if outcome != 'recognition_review_required' or not isinstance(case['review_resolution'], dict):
-                raise ValueError('Review resolution requires explicit review outcome')
-            verify_result = lambda *values: review_required_evidence(*values, review_resolution=True)
-        folder = args.output_dir / case['source_order_id']
+    cases = json.loads(manifest_path.read_text())['cases']
+    expectations = [case_expectation(case) for case in cases]
+    labels = [verification_case_id(case) for case in cases]
+    if len(labels) != len(set(labels)):
+        raise ValueError('Verification case identity collision')
+    for case, label, (outcome, verify_result) in zip(cases, labels, expectations):
+        folder = verification_case_folder(args.output_dir, case)
         folder.mkdir(exist_ok=True)
         pdf = folder / 'original.pdf'
         download(case['pdf_uri'], pdf)
@@ -782,6 +910,8 @@ def main():
                     break
                 if canonical_started and (workflow.get('ocr_job') or {}).get('status') == 'failed':
                     raise RuntimeError('OCR failed; workflow and evidence saved for review')
+                if canonical_started:
+                    reject_unmatched_terminal(workflow, evidence, outcome)
             if not explicit_hakodate and state.get('status') in ('failed', 'error', 'manual_review'):
                 raise RuntimeError('Upload stopped; sanitized upload-state artifact saved')
             time.sleep(15)
@@ -790,15 +920,28 @@ def main():
         (folder / 'evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2))
         (folder / 'workflow.json').write_text(json.dumps(workflow, ensure_ascii=False, indent=2))
         payload = evidence['payload_json']
+        if outcome == 'done_or_review_required':
+            actual_outcome = actual_case_outcome(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id)
+            if actual_outcome is None:
+                raise ValueError('Ambiguous terminal OCR contract')
+            save_json(folder, 'verification-outcome.json', {'manifest_policy': outcome, 'actual_outcome': actual_outcome})
+        else:
+            actual_outcome = outcome
         save_json(folder, 'ocr-payload.json', payload)
         if explicit_hakodate:
             verify_hakodate_existing(case, selection, folder, require_context=True)
         download(payload['hakodate_overlay']['uri'], folder / 'overlay.png')
         download(payload['hakodate_overlay']['sheet_review_base_uri'], folder / 'corrected.png')
-        if outcome == 'recognition_review_required':
+        if outcome == 'recognition_review_required' or 'required_raw_cells' in case:
             outputs = payload['hakodate_canonical_pipeline']['outputs']
             download(outputs['records'], folder / 'recognizer-records.json')
             download(outputs['contact_sheet'], folder / 'recognizer-contact.png')
+        if 'required_raw_cells' in case:
+            result = verify_required_raw_cells(case['required_raw_cells'],
+                json.loads((folder / 'recognizer-records.json').read_text()), payload,
+                folder / 'recognizer-contact.png')
+            save_json(folder, 'required-raw-cells.json', result)
+        if actual_outcome == 'recognition_review_required':
             if 'native_empty_resolution' in case:
                 result = verify_native_empty_resolution(case['native_empty_resolution'],
                     json.loads((folder / 'recognizer-records.json').read_text()), payload,
@@ -820,7 +963,8 @@ def main():
         metrics = payload['hakodate_canonical_pipeline']['metrics']
         assert metrics['row_axis_source'] == 'fax_intersections', metrics
         assert metrics['row_axis_draft_body_row_count'] == case['expected_menu_rows'], metrics
-        print(json.dumps({'source_order':case['source_order_id'], 'stg_order':oid, 'commit':os.environ.get('GITHUB_SHA'), 'row_axis':metrics['row_axis']}, ensure_ascii=False), flush=True)
+        label_key = 'source_order' if 'source_order_id' in case else 'case_id'
+        print(json.dumps({label_key:label, 'stg_order':oid, 'commit':os.environ.get('GITHUB_SHA'), 'row_axis':metrics['row_axis']}, ensure_ascii=False), flush=True)
 
 
 def upload_new(case, selection, raw):
@@ -831,7 +975,7 @@ def upload_new(case, selection, raw):
                         ('expected_canonical_revision', selection['revision']),
                         ('selected_version_id', selection['version']['version_id'])]:
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="pdf_file"; filename="{case["source_order_id"]}.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode() + raw + b'\r\n')
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="pdf_file"; filename="{verification_case_id(case)}.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode() + raw + b'\r\n')
     parts.append(f'--{boundary}--\r\n'.encode())
     return request('/ingest/upload', b''.join(parts), 'multipart/form-data; boundary=' + boundary)
 
