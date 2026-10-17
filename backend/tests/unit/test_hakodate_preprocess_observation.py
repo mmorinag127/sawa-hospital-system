@@ -165,6 +165,8 @@ def test_actual_392_pixels_and_saved_raw_replay_not_native_inference(monkeypatch
     assert sha256((root/'original.pdf').read_bytes()).hexdigest() == checkpoint['source']['selected_pdf_receipt']['sha256']
     originals = json.loads((root/'recognizer-records.json').read_text())
     expected = json.loads(Path(os.environ['OBSERVATION_MANIFEST_PATH']).read_text())['cases'][0]['blank_resolution']
+    source_blanks = set(expected['blank_cells'])
+    assert len(source_blanks) == 325
     pixels = cv2.imread(str(root/'rectified.png'))
     before,_,_,_ = baseline().build_recognizer_contact_sheet(rectified_fax_bgr=pixels,regions=checkpoint['regions'],line_mask=None,mode='corner_cc')
     contact,regions,polygons,skipped = prepare(pixels,checkpoint['regions'])
@@ -174,13 +176,15 @@ def test_actual_392_pixels_and_saved_raw_replay_not_native_inference(monkeypatch
         [r['recognizer_score'] for r in originals],[r['recognizer_candidates'] for r in originals])
     report = {'base':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
         'verification':'preprocessing and saved raw replay; not native model inference',
-        'cells':392,'white':0,'numeric':0,'raw_unchanged':0,'historical_differences':[],'white_state_differences':[]}
+        'cells':392,'source_blank_cells':len(source_blanks),'white':0,'numeric':0,'raw_unchanged':0,'historical_differences':[],'white_state_differences':[]}
     with Image.open(root/'recognizer-contact.png') as historical:
         for old,row in zip(originals,rows):
             cell = row['sheet_cell']; crop = contact.crop(row['ocr_contact_crop_box'])
             old_crop = historical.crop(old['ocr_contact_crop_box']).convert('RGB')
             white = crop.getextrema() == ((255,255),)*3
             report['white'] += white
+            if white:
+                assert cell in source_blanks
             assert all(row[k] == old[k] for k in ('recognizer_raw_text','recognizer_score','recognizer_candidates'))
             report['raw_unchanged'] += 1
             if cell in expected['numeric_cells']:
@@ -190,7 +194,7 @@ def test_actual_392_pixels_and_saved_raw_replay_not_native_inference(monkeypatch
             if white != (old_crop.getextrema() == ((255,255),)*3): report['white_state_differences'].append(cell)
     report['input_hash_differences'] = 0
     Path(os.environ['OBSERVATION_REPORT']).write_text(json.dumps(report,indent=2)+'\n')
-    assert report['white'] == 325 and report['numeric'] == 57 and report['raw_unchanged'] == 392
+    assert report['numeric'] == 57 and report['raw_unchanged'] == 392
 
 
 @pytest.mark.skipif(not os.environ.get('OBSERVATION_REAL_INPUTS'),reason='explicit verified real zero/one source paths required')
