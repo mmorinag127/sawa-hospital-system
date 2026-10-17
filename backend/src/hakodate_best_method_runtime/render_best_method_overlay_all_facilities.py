@@ -901,6 +901,8 @@ def build_best_method_for_manifest_item(
             "candidate_digit_accept_count": ocr_metrics.get("candidate_digit_accept_count"),
             "digit_score_threshold": ocr_metrics.get("digit_score_threshold"),
             "candidate_digit_score_threshold": ocr_metrics.get("candidate_digit_score_threshold"),
+            **({"recognition_model_metadata": dict(ocr_metrics["recognition_model_metadata"])}
+               if "recognition_model_metadata" in ocr_metrics else {}),
             "preprocess_seconds": round(float(preprocess_seconds), 4),
             "snap_seconds": round(float(snap_seconds), 4),
             "contact_sheet_seconds": ocr_metrics.get("contact_sheet_seconds"),

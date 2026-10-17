@@ -1,0 +1,20 @@
+{
+  "adapter_sha256": "e465f15f1bab9addd0b6ac3fae520abf232a2eae71c0bd740c5c4ea7a85a6280",
+  "architecture": "parseqv2/refine_iters=1",
+  "base_sha256": "0fbc62e8654c1ed3d565cce0471b998e42a3bcb40b3dcc8d936a59b480a8b139",
+  "changed_logits": "initial EOS only",
+  "contract": "hakodate_initial_eos_parseq_v1",
+  "learned_source_sha256": "42e759e442f9e75ae3b31a49714461fcc9abb19f67dc5c5bf35a9ae83a9745ff",
+  "native_version": "0.9.5",
+  "training": {
+    "fonts": [
+      "Arial.ttf",
+      "Courier New.ttf",
+      "Arial Narrow.ttf"
+    ],
+    "images": 384,
+    "seed": 1742,
+    "source": "synthetic only; no FAX training"
+  },
+  "training_source_sha256": "5893063043188ef952366536824e190bd2cea4fb0ab99fcd3ebfff46669bf4d4"
+}
