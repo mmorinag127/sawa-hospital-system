@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 import pytest
 
 from src.hakodate_best_method_runtime import run_text_recognizer_corner_noise_trial as runtime
+from src.services import hakodate_recognizer_contact_sheet as contact_sheet
 from src.services import hakodate_ocr_evidence_service as evidence
 from src.services import hakodate_preprocess_observation as observation
 from src.services import hakodate_ocr_checkpoint_service as checkpoints
@@ -81,7 +82,7 @@ def test_actual_warp_mismatch_stops_even_for_empty_raw_or_nonwhite_final(monkeyp
     wrong = np.full((60,80,3),255,np.uint8)
     if not white:
         cv2.putText(wrong,'1',(30,40),cv2.FONT_HERSHEY_SIMPLEX,.8,(0,0,0),2)
-    monkeypatch.setattr(runtime,'_warp_polygon_cell_to_axis_aligned_crop',lambda *args:(
+    monkeypatch.setattr(contact_sheet,'_warp_polygon_cell_to_axis_aligned_crop',lambda *args:(
         wrong,[0.,0.,80.,60.],(0,0,80,60),(80,80,160,140)))
     contact,regions,polygons,_ = prepare(image('26'))
     rows,_ = recognize(monkeypatch,contact,regions,polygons,['' if white else '1'],[.99])
@@ -281,7 +282,7 @@ def test_real_producer_serializer_packet_persistence_never_selects_or_overrides_
     if wrong_warp:
         # This fixture has authored axis-aligned cells. Corrupt the actual
         # pre-clean crop, not the independent prescribed-source computation.
-        monkeypatch.setattr(runtime,'_mask_crop_to_region_polygon',
+        monkeypatch.setattr(contact_sheet,'_mask_crop_to_region_polygon',
             lambda crop,**kwargs:np.zeros_like(crop))
     def state():
         with session_scope() as session:
