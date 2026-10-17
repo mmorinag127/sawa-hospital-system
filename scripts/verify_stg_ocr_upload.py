@@ -401,7 +401,8 @@ def _resume_upload(case, selection, folder):
     save_json(folder, 'resume-before.json', {'upload': public_state, 'order': order, 'workflow': workflow})
     if state.get('status') != 'completed':
         # No lease override or fallback upload: the operator API owns restart guards.
-        result = request(path + '/retry', method='POST')
+        protocol_query = '?intake_protocol=native_ingest_v2' if case.get('expected_execution_mode') == 'native_ingest' else ''
+        result = request(path + '/retry' + protocol_query, method='POST')
         if result.get('accepted') is not True or (result.get('item') or {}).get('id') != uploaded_id:
             raise RuntimeError('Existing upload retry not accepted')
         public_result = {**result, 'item': {key: value for key, value in result['item'].items()
@@ -530,6 +531,59 @@ def actual_case_outcome(*values):
     if done == review:
         return None
     return 'done' if done else 'recognition_review_required'
+
+
+def native_ingest_outcome(evidence, workflow, case):
+    job = workflow.get('ocr_job') or {}
+    native = job.get('native_ingest') or {}
+    terminal = native.get('terminal_receipt')
+    payload = evidence.get('payload_json') or {}
+    execution = payload.get('_ocr_execution') or {}
+    pdf = execution.get('selected_pdf_receipt') or {}
+    if (case.get('expected_execution_mode') != 'native_ingest'
+            or native.get('mode') != 'hakodate' or native.get('intake_protocol') != 'native_ingest_v2' or not isinstance(terminal, dict)
+            or not native.get('execution_id') or terminal.get('execution_id') != native['execution_id']
+            or terminal.get('job_id') != job.get('ocr_job_id')
+            or terminal.get('order_id') != workflow.get('order_id') or terminal.get('status') != job.get('status')
+            or terminal.get('error') != job.get('error_message')
+            or terminal.get('evidence_run_id') != evidence.get('id')
+            or execution.get('job_id') != job.get('ocr_job_id')
+            or execution.get('nonworkflow_execution_id') != native['execution_id']
+            or execution.get('workflow_attempt_id') is not None or terminal.get('workflow_attempt_id') is not None
+            or execution.get('evidence_run_id') != evidence.get('id')
+            or pdf.get('order_id') != workflow.get('order_id') or pdf.get('document_id') != job.get('order_document_id')
+            or pdf.get('sha256') != case['sha256']
+            or evidence.get('producer_version') != 'hakodate_best_method_pipeline'):
+        return None
+    if job.get('status') == 'done':
+        if (job.get('result_state') != 'evidence_ready' or job.get('processing_stage') != 'evidence_ready'
+                or terminal.get('error') is not None or evidence.get('status') != 'done'
+                or any(key not in job or job[key] is not None
+                       for key in ('error', 'error_message', 'error_detail', 'error_user_message'))
+                or (payload.get('hakodate_recognition_review') or {}).get('cells')
+                or any(((row.get('engine_metadata') or {}).get('recognizer_output') or {}).get('resolution_state') == 'review_required'
+                       for row in payload.get('hakodate_ocr_evidence_records', []))):
+            return None
+        return 'done'
+    if (job.get('status') != 'failed' or job.get('result_state') != 'review_required'
+            or not job.get('error_message')
+            or job.get('recovery_action') != 'review_recognition_cells'
+            or evidence.get('status') != 'diagnostic_only' or evidence.get('selectable') is not False):
+        return None
+    review = payload.get('hakodate_recognition_review') or {}
+    expected = []
+    resolved_review = any(key in case for key in ('native_empty_resolution', 'review_resolution', 'required_raw_cells'))
+    for row in payload.get('hakodate_ocr_evidence_records', []):
+        metadata = row.get('engine_metadata') or {}
+        source = metadata.get('recognizer_output') or {}
+        if resolved_review and source.get('resolution_state') == 'review_required':
+            expected.append({'sheet_cell': metadata.get('sheet_cell'), 'raw_text': row.get('raw_text'), 'reason': source.get('quantity_source_issue')})
+        elif not resolved_review and (source.get('recognizer_input_evidence') or {}).get('all_white') is True and source.get('recognizer_raw_text'):
+            expected.append({'sheet_cell': metadata.get('sheet_cell'), 'raw_text': row.get('raw_text'), 'reason': 'hakodate_blank_input_nonempty_prediction'})
+    if (not expected or review.get('cells') != expected or type(review.get('count')) is not int
+            or review['count'] != len(expected) or len({row['sheet_cell'] for row in expected}) != len(expected)):
+        return None
+    return 'recognition_review_required'
 
 
 def verify_review_resolution(expected, records, payload, contact):
@@ -829,6 +883,14 @@ def main():
         explicit_hakodate = case.get('verification_mode') == 'existing_order_hakodate'
         if 'verification_mode' in case and not explicit_hakodate:
             raise ValueError('Unknown explicit verification mode')
+        if 'expected_execution_mode' in case and case['expected_execution_mode'] != 'native_ingest':
+            raise ValueError('Unknown expected execution mode')
+        native_expected = not explicit_hakodate and case.get('expected_execution_mode') == 'native_ingest'
+        if not explicit_hakodate:
+            save_json(folder, 'verification-scope.json', {
+                'verification_mode': 'native_ingest' if native_expected else 'v1_workflow_owned',
+                'normal_native_ingest_verified': False,
+            })
         if explicit_hakodate:
             if any(not isinstance(case.get(key), str) or not case[key].strip() for key in resume_keys):
                 raise ValueError('Explicit existing upload/order/document identities required')
@@ -854,6 +916,7 @@ def main():
         document_id = None
         started_workflow = {}
         workflow = {}
+        native_flow = False
         deadline = time.monotonic() + 1200
         while time.monotonic() < deadline:
             state = request('/ingest/uploads/' + uploaded_id)
@@ -870,6 +933,43 @@ def main():
                 if any(key in case for key in resume_keys):
                     verify_resume_identity(case, selection, state, order, workflow, folder)
                 save_json(folder, 'workflow.json', workflow)
+                if not native_expected and not explicit_hakodate and 'native_ingest' in (workflow.get('ocr_job') or {}):
+                    raise RuntimeError('V1 workflow executor cannot adopt native ingest lineage')
+                if native_expected and 'native_ingest' not in (workflow.get('ocr_job') or {}):
+                    if (state.get('status') in ('completed', 'failed', 'error', 'manual_review')
+                            or (workflow.get('ocr_job') or {}).get('status') in ('done', 'failed', 'error')):
+                        raise RuntimeError('Normal upload native lineage missing; no second OCR permitted')
+                    time.sleep(15)
+                    continue
+                if native_expected and 'native_ingest' in (workflow.get('ocr_job') or {}):
+                    native = workflow['ocr_job']['native_ingest']
+                    if (not isinstance(native, dict) or native.get('mode') != 'hakodate' or native.get('intake_protocol') != 'native_ingest_v2'
+                            or not isinstance(native.get('execution_id'), str) or not native['execution_id']):
+                        raise RuntimeError('Normal upload native mode or execution invalid')
+                    native_flow = True
+                    canonical_started = True
+                    verify_result = lambda value, current, *_: native_ingest_outcome(value, current, case) in (
+                        ('done', 'recognition_review_required') if outcome == 'done_or_review_required' else (outcome,))
+                    terminal = workflow['ocr_job']['native_ingest'].get('terminal_receipt')
+                    if isinstance(terminal, dict):
+                        evidence_id = terminal.get('evidence_run_id')
+                        if not isinstance(evidence_id, str) or not evidence_id:
+                            raise RuntimeError('Native ingest stopped without evidence; workflow saved')
+                        try:
+                            evidence = request(f'/orders/{oid}/workflow-v2/ocr-results/{quote(evidence_id, safe="")}')
+                        except urllib.error.HTTPError as error:
+                            if error.code != 404:
+                                raise
+                            time.sleep(15)
+                            continue
+                        save_json(folder, 'evidence.json', evidence)
+                        if verify_result(evidence, workflow):
+                            break
+                        raise RuntimeError('Native ingest terminal contract mismatch; evidence saved')
+                    if workflow['ocr_job'].get('status') in ('done', 'failed', 'error'):
+                        raise RuntimeError('Native ingest terminal receipt missing')
+                    time.sleep(15)
+                    continue
                 if canonical_started:
                     evidence = fetch_own_evidence(oid, workflow, started_workflow)
                 else:
@@ -921,7 +1021,8 @@ def main():
         (folder / 'workflow.json').write_text(json.dumps(workflow, ensure_ascii=False, indent=2))
         payload = evidence['payload_json']
         if outcome == 'done_or_review_required':
-            actual_outcome = actual_case_outcome(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id)
+            actual_outcome = (native_ingest_outcome(evidence, workflow, case) if native_flow else
+                actual_case_outcome(evidence, workflow, started_workflow, oid, document_id, previous_evidence_id))
             if actual_outcome is None:
                 raise ValueError('Ambiguous terminal OCR contract')
             save_json(folder, 'verification-outcome.json', {'manifest_policy': outcome, 'actual_outcome': actual_outcome})
@@ -963,6 +1064,10 @@ def main():
         metrics = payload['hakodate_canonical_pipeline']['metrics']
         assert metrics['row_axis_source'] == 'fax_intersections', metrics
         assert metrics['row_axis_draft_body_row_count'] == case['expected_menu_rows'], metrics
+        if native_flow:
+            save_json(folder, 'verification-scope.json', {
+                'verification_mode': 'native_ingest', 'normal_native_ingest_verified': True,
+            })
         label_key = 'source_order' if 'source_order_id' in case else 'case_id'
         print(json.dumps({label_key:label, 'stg_order':oid, 'commit':os.environ.get('GITHUB_SHA'), 'row_axis':metrics['row_axis']}, ensure_ascii=False), flush=True)
 
@@ -977,7 +1082,8 @@ def upload_new(case, selection, raw):
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
     parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="pdf_file"; filename="{verification_case_id(case)}.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode() + raw + b'\r\n')
     parts.append(f'--{boundary}--\r\n'.encode())
-    return request('/ingest/upload', b''.join(parts), 'multipart/form-data; boundary=' + boundary)
+    protocol_query = '?intake_protocol=native_ingest_v2' if case.get('expected_execution_mode') == 'native_ingest' else ''
+    return request('/ingest/upload' + protocol_query, b''.join(parts), 'multipart/form-data; boundary=' + boundary)
 
 
 if __name__ == '__main__':

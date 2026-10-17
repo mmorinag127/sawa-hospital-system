@@ -3,18 +3,10 @@
 import argparse
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 from pathlib import Path
 import sys
-
-import cv2
-import numpy as np
-from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from src.services.hakodate_preprocess_observation import geometry_hash, pixels
-from src.services.hakodate_recognizer_contact_sheet import build_recognizer_contact_sheet
-
 
 def checked_bytes(path, receipt):
     data = path.read_bytes()
@@ -23,13 +15,64 @@ def checked_bytes(path, receipt):
     return data
 
 
+def canonical_packet_replay(args):
+    script = Path(__file__).with_name("verify_stg_ocr_upload.py")
+    spec = importlib.util.spec_from_file_location("saved_staging_ocr_verifier", script)
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    payload = json.loads((args.artifact_dir / "ocr-payload.json").read_bytes())
+    receipt = payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]["preprocess_observation"]
+    if receipt["sha256"] != "5a5bccf8e5c71d309fd99619786a1fff7fb9f6b6054768ccebe88a87a67a06cd":
+        raise ValueError("diagnostic_case_changed")
+    checked_bytes(args.observation, receipt)
+    cases = json.loads((args.artifact_dir.parent / "manifest.json").read_bytes())["cases"]
+    if len(cases) != 1 or cases[0]["case_id"] != "FAC00004-20261018-real-one-d173c698":
+        raise ValueError("diagnostic_case_changed")
+    expected = cases[0]["required_raw_cells"]
+    if (len(expected) != 1 or expected[0]["date"] != "2026-10-24"
+            or expected[0]["field"] != "qty.no_meat_x" or expected[0]["expected_raw"] != "1"):
+        raise ValueError("diagnostic_authored_expectation_changed")
+    result = {"scope": "saved-artifact full canonical replay only, not live acceptance",
+              "source_run": 39031990552}
+    try:
+        result["required_raw_cells"] = verifier.verify_required_raw_cells(expected,
+            json.loads((args.artifact_dir / "recognizer-records.json").read_bytes()), payload,
+            args.artifact_dir / "recognizer-contact.png")
+        result["validation_status"] = "passed"
+    except Exception as error:
+        import traceback
+        message = str(error)
+        result.update(validation_status="failed", error_type=type(error).__name__,
+            error=message if message.startswith(("hakodate_", "canonical_")) else "unexpected validation failure",
+            trace=[{"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+                   for frame in traceback.extract_tb(error.__traceback__)])
+    if "cv2" in sys.modules:
+        cv = sys.modules["cv2"]
+        result.update(opencv=cv.__version__, cpu_features=cv.getCPUFeaturesLine())
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(result, ensure_ascii=False))
+    if result["validation_status"] != "passed":
+        raise SystemExit(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--observation", type=Path, required=True)
     parser.add_argument("--checkpoint-image", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--canonical-packet-only", action="store_true")
     args = parser.parse_args()
+    if args.canonical_packet_only:
+        canonical_packet_replay(args)
+        return
+    import cv2
+    import numpy as np
+    from PIL import Image
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+    from src.services.hakodate_preprocess_observation import geometry_hash, pixels
+    from src.services.hakodate_recognizer_contact_sheet import build_recognizer_contact_sheet
     payload = json.loads((args.artifact_dir / "ocr-payload.json").read_bytes())
     packet = payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]
     observation_bytes = checked_bytes(args.observation, packet["preprocess_observation"])

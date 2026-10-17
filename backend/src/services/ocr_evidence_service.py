@@ -183,6 +183,7 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
         blockers.append("hakodate_ocr_evidence_missing")
 
     assigned_target_count = 0
+    resolved_blank_targets = False
     assignment_blockers: list[str] = []
     if target_cells and evidence_records:
         assignment_result = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
@@ -191,13 +192,14 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
         )
         summary = assignment_result.get("summary") if isinstance(assignment_result, dict) else {}
         assigned_target_count = int((summary or {}).get("assigned_target_count") or 0)
+        resolved_blank_targets = hakodate_ocr_evidence_service.has_resolved_blank_targets(assignment_result)
         assignment_blockers = [
             str(item).strip()
             for item in (assignment_result.get("blockers") or [])
             if str(item).strip()
         ]
         blockers.extend(assignment_blockers)
-        if assigned_target_count <= 0:
+        if assigned_target_count <= 0 and not resolved_blank_targets:
             blockers.append("hakodate_assignment_missing")
 
     if isinstance(canonical_pipeline, dict) and str(canonical_pipeline.get("status") or "").strip().lower() == "blocked":
@@ -215,6 +217,7 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
         "target_cell_count": len(target_cells),
         "evidence_record_count": len(evidence_records),
         "assigned_target_count": assigned_target_count,
+        "resolved_blank_targets": resolved_blank_targets,
         "assignment_blockers": assignment_blockers,
         "blockers": deduped_blockers,
     }
@@ -278,7 +281,7 @@ def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict
                 "status": status or None,
                 "stage": stage or None,
             }
-        if int(hakodate_state.get("assigned_target_count") or 0) > 0:
+        if int(hakodate_state.get("assigned_target_count") or 0) > 0 or hakodate_state.get("resolved_blank_targets"):
             return {
                 "persistable": True,
                 "status": status or None,
@@ -391,7 +394,7 @@ def _build_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
     hakodate_ready = bool(
         isinstance(hakodate_state, dict)
         and not list(hakodate_state.get("blockers") or [])
-        and int(hakodate_state.get("assigned_target_count") or 0) > 0
+        and (int(hakodate_state.get("assigned_target_count") or 0) > 0 or hakodate_state.get("resolved_blank_targets"))
     )
     hakodate_overlay = bool(
         str(

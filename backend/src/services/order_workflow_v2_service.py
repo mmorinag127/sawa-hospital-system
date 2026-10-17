@@ -774,6 +774,12 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "error_detail": error_detail,
         "error_user_message": error_user_message,
         "recovery_action": recovery_action,
+        **({"native_ingest": {
+            "mode": "hakodate", "execution_id": metrics["nonworkflow_execution"]["execution_id"],
+            "intake_protocol": metrics["nonworkflow_execution"].get("intake_protocol"),
+            "terminal_receipt": copy.deepcopy(metrics.get("rerun_terminal_receipt")),
+        }} if isinstance(metrics.get("nonworkflow_execution"), dict)
+            and metrics["nonworkflow_execution"].get("ingest_ocr_mode") == "hakodate" else {}),
         **progress,
     }
 
@@ -2223,6 +2229,169 @@ def record_context_suggestion(
         return _serialize_workflow(row, ocr_job=ocr_job), None
 
 
+def _apply_context_selection(session, order, row, template_version, facility_id, week_start, week_end):
+    current_meta = _workflow_meta(row)
+    expanded = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
+    order.facility_code = facility_id
+    order.week_code = _format_week_code_from_range(week_start, week_end)
+    row.state = "context_confirmed"
+    row.headline = "施設・週次・テンプレートが確定しました"
+    row.primary_action = "run_ocr"
+    row.template_version_id = template_version.id
+    row.evidence_run_id = None
+    row.draft_id = None
+    row.confirmed_snapshot_id = None
+    order.template_version_id = template_version.id
+    row.blockers_json = []
+    row.warnings_json = []
+    row.last_transition_at = _now()
+    _write_workflow_meta(row, {
+        "facility_id": facility_id, "week_start": week_start, "week_end": week_end,
+        "week_code": order.week_code, "effective_facility_config_date": week_start,
+        "template_id": _normalize_id(template_version.template_id) or None,
+        "template_version_id": template_version.id, "template_version_digest": template_version.template_digest,
+        "template_source": "facility_template_version", "expanded_cell_copy_mode": expanded,
+        "bagging_result_id": None, "output_bundle_id": None,
+    })
+    return _finalize_workflow_mutation(session, row)
+
+
+def _ingest_has_selected_downstream(row, meta):
+    return bool(row.evidence_run_id or row.draft_id or row.confirmed_snapshot_id
+        or any(meta.get(key) for key in ("bagging_result_id", "output_bundle_id", "bagging_result", "output_bundle")))
+
+
+def initialize_ingest_context(session, order, selection, job_id):
+    """Apply the operator's recorded JSON selection before the OCR snapshot."""
+    from src.services.ingest_facility_selection_service import require_order_selection
+    from src.services.ingest_job_service import current_ingest_lease, lock_ingest_lease
+    from src.services.sheet_week_service import parse_sheet_week_value
+    lease = current_ingest_lease()
+    if not isinstance(lease, dict) or not lock_ingest_lease(session, lease):
+        raise ValueError("ingest_attempt_changed")
+    if lease.get("payload", {}).get("intake_protocol") != "native_ingest_v2":
+        raise ValueError("intake_protocol_mismatch")
+    if lock_order_execution_input(session, order.id) is None:
+        raise ValueError("ingest_context_owner_changed")
+    require_order_selection(session, order, selection)
+    job = session.get(OcrJob, job_id, populate_existing=True, with_for_update=True)
+    from src.models.document import OrderDocument
+    document = session.get(OrderDocument, order.current_document_id)
+    if (job is None or job.order_id not in (None, order.id)
+            or (job.metrics or {}).get("ingest_lease") != lease
+            or job.status != "running"
+            or document is None or document.source_email_id != lease["id"]
+            or document.storage_uri != job.input_reference
+            or job.order_document_id not in (None, document.id)
+            or (job.metrics or {}).get("ingest_ocr_mode") != "hakodate"
+            or (job.metrics or {}).get("workflow_attempt_id") is not None):
+        raise ValueError("ingest_context_job_changed")
+    job.order_id = order.id
+    job.order_document_id = document.id
+    _, start, end = parse_sheet_week_value(order.week_code)
+    version = session.get(FacilityTemplateVersion, order.template_version_id)
+    if version is None:
+        raise ValueError("ingest_order_facility_projection_missing")
+    if not facility_template_version_service.template_version_applies_on(version, start):
+        raise ValueError("ingest_context_template_period_mismatch")
+    row = _get_workflow_readonly(session, order.id)
+    meta = _workflow_meta(row) if row is not None else {}
+    original_meta = copy.deepcopy(meta)
+    if row is not None and _workflow_meta_has_confirmed_context(meta):
+        if (meta.get("facility_id") != order.facility_code or meta.get("week_code") != order.week_code
+                or row.template_version_id != order.template_version_id):
+            raise ValueError("ingest_context_changed")
+        if _ingest_has_selected_downstream(row, meta):
+            raise ValueError("ingest_context_in_use")
+        previous_id = meta.get("ocr_job_id")
+        if previous_id and previous_id != job_id:
+            previous = session.get(OcrJob, previous_id, populate_existing=True, with_for_update=True)
+            same_source = previous is not None and previous.order_document_id == job.order_document_id and previous.input_artifact_digest == job.input_artifact_digest
+            transition = (job.metrics or {}).get("ingest_document_transition")
+            transition_valid = False
+            if isinstance(transition, dict) and previous is not None:
+                from src.models.order_version import OrderVersion
+                from src.services.workflow_attempt_guard_service import _json_snapshot
+                old_version = session.get(OrderVersion, (transition.get("old_version") or {}).get("id"))
+                source = transition.get("old_source") or {}
+                transition_valid = (old_version is not None and transition.get("order_id") == order.id
+                    and transition.get("business_generation") == lease["generation"]
+                    and transition.get("new_document_id") == document.id
+                    and transition.get("new_message_id") == document.source_email_id
+                    and transition.get("new_storage_uri") == document.storage_uri
+                    and transition.get("new_sha256") == job.input_artifact_digest
+                    and source.get("document_id") == previous.order_document_id
+                    and source.get("sha256") == previous.input_artifact_digest
+                    and old_version.order_id == order.id and old_version.document_id == previous.order_document_id
+                    and not old_version.is_current
+                    and _json_snapshot({column.key: getattr(old_version, column.key) for column in old_version.__table__.columns if column.key != "is_current"})
+                        == {key: value for key, value in transition["old_version"].items() if key != "is_current"})
+            if (previous is None or previous.status not in {"failed", "done"}
+                    or previous.order_id != order.id or not (same_source or transition_valid)):
+                raise ValueError("ingest_context_foreign_job")
+        token = _expected_workflow_revision.set(_workflow_revision(row))
+        try:
+            meta["ocr_job_id"] = job_id
+            meta.pop("ocr_job_attempt_id", None)
+            _write_workflow_meta(row, meta)
+            error = _finalize_workflow_mutation(session, row)
+            if error:
+                raise ValueError(error)
+        finally:
+            _expected_workflow_revision.reset(token)
+        return
+    if row is not None and (row.state != "uploaded" or _ingest_has_selected_downstream(row, meta)
+            or set(meta) - {"context_suggestion", "expanded_cell_copy_mode"}):
+        raise ValueError("ingest_context_not_initial")
+    token = _expected_workflow_revision.set(_workflow_revision(row) if row is not None else 0)
+    try:
+        row = _get_or_create_workflow(session, order.id)
+        error = _apply_context_selection(session, order, row, version, order.facility_code,
+            start.isoformat(), end.isoformat())
+        if error:
+            raise ValueError(error)
+        meta = _workflow_meta(row)
+        if "context_suggestion" in original_meta:
+            meta["context_suggestion"] = copy.deepcopy(original_meta["context_suggestion"])
+        meta["ocr_job_id"] = job_id
+        _write_workflow_meta(row, meta)
+    finally:
+        _expected_workflow_revision.reset(token)
+
+
+def complete_native_ingest_context(session, order_id, job_id, evidence_id, error):
+    """Publish the actual native candidate, without selecting or adopting it."""
+    execution = current_nonworkflow_execution()
+    if (not isinstance(execution, dict) or execution.get("ingest_ocr_mode") != "hakodate"
+            or execution.get("job_id") != job_id or execution.get("order_id") != order_id
+            or not lock_actual_write_ownership(session, job_id=job_id, order_id=order_id,
+                workflow_attempt_id=None, expected_workflow_revision=None)):
+        raise ValueError("native_ingest_workflow_owner_changed")
+    row = _get_workflow_readonly(session, order_id)
+    original = execution["orders"][order_id]
+    meta = _workflow_meta(row) if row is not None else {}
+    if (row is None or _workflow_revision(row) != original["workflow_revision"]
+            or meta.get("ocr_job_id") != job_id or meta.get("ocr_job_attempt_id") is not None
+            or row.template_version_id != original["order"]["template_version_id"]
+            or _ingest_has_selected_downstream(row, meta)):
+        raise ValueError("native_ingest_workflow_changed")
+    token = _expected_workflow_revision.set(original["workflow_revision"])
+    try:
+        row.state = "ocr_failed" if error else "ocr_completed"
+        row.headline = "OCR停止: " + error if error else "OCR結果が作成されました。正解OCRを一つ選択してください"
+        row.primary_action = "run_ocr" if error else "select_ocr"
+        row.blockers_json = [error] if error else []
+        row.last_transition_at = _now()
+        meta["latest_ocr_result_id"] = evidence_id
+        meta["latest_ocr_error"] = error
+        _write_workflow_meta(row, meta)
+        mutation_error = _finalize_workflow_mutation(session, row)
+        if mutation_error:
+            raise ValueError(mutation_error)
+    finally:
+        _expected_workflow_revision.reset(token)
+
+
 @workflow_command
 def confirm_context(
     *,
@@ -2269,42 +2438,10 @@ def confirm_context(
             return None, exc.detail["error"]
 
         row = existing_workflow or _get_or_create_workflow(session, order.id)
-        order.facility_code = normalized_facility_id
-        order.week_code = normalized_week_code
-        current_meta = _workflow_meta(row)
-        expanded_cell_copy_mode = _normalize_expanded_cell_copy_mode(current_meta.get("expanded_cell_copy_mode"))
         if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
             _delete_all_ocr_and_downstream_after_template_change(session, order.id)
-
-        row.state = "context_confirmed"
-        row.headline = "施設・週次・テンプレートが確定しました"
-        row.primary_action = "run_ocr"
-        row.template_version_id = template_version.id
-        row.evidence_run_id = None
-        row.draft_id = None
-        row.confirmed_snapshot_id = None
-        order.template_version_id = template_version.id
-        row.blockers_json = []
-        row.warnings_json = []
-        row.last_transition_at = _now()
-        _write_workflow_meta(
-            row,
-            {
-                "facility_id": normalized_facility_id,
-                "week_start": normalized_week_start,
-                "week_end": normalized_week_end,
-                "week_code": normalized_week_code,
-                "effective_facility_config_date": normalized_week_start,
-                "template_id": _normalize_id(template_version.template_id) or None,
-                "template_version_id": template_version.id,
-                "template_version_digest": template_version.template_digest,
-                "template_source": "facility_template_version",
-                "expanded_cell_copy_mode": expanded_cell_copy_mode,
-                "bagging_result_id": None,
-                "output_bundle_id": None,
-            },
-        )
-        revision_error = _finalize_workflow_mutation(session, row)
+        revision_error = _apply_context_selection(session, order, row, template_version,
+            normalized_facility_id, normalized_week_start, normalized_week_end)
         if revision_error:
             return _serialize_workflow(row), revision_error
         return _serialize_workflow(row), None

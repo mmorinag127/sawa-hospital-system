@@ -102,19 +102,57 @@ export function verificationCaseId(sourceCase) {
   return value;
 }
 
+export function assertNativeIngestOwner(sourceCase, workflow, evidence) {
+  assert.equal(sourceCase.expected_execution_mode, 'native_ingest');
+  const job = workflow.ocr_job;
+  const native = job?.native_ingest;
+  assert.equal(native?.mode, 'hakodate');
+  assert.equal(native?.intake_protocol, 'native_ingest_v2');
+  const terminal = native.terminal_receipt;
+  const execution = evidence.payload_json?._ocr_execution;
+  const pdf = execution?.selected_pdf_receipt;
+  assert.equal(nonEmpty(job.ocr_job_id, 'job-id'), execution?.job_id);
+  assert.equal(nonEmpty(native.execution_id, 'execution-id'), execution?.nonworkflow_execution_id);
+  assert.equal(terminal?.execution_id, native.execution_id);
+  assert.equal(terminal?.job_id, job.ocr_job_id);
+  assert.equal(terminal?.order_id, workflow.order_id);
+  assert.equal(terminal?.status, job.status);
+  assert.equal(nonEmpty(terminal?.evidence_run_id, 'terminal-evidence-id'), evidence.id);
+  assert.equal(execution?.evidence_run_id, evidence.id);
+  assert.equal(job.order_id, workflow.order_id);
+  assert.equal(pdf?.order_id, workflow.order_id);
+  assert.equal(pdf?.document_id, nonEmpty(job.order_document_id, 'document-id'));
+  assert.equal(pdf?.sha256, sourceCase.sha256);
+  assert.equal(job.workflow_attempt_id, null);
+  assert.ok(execution.workflow_attempt_id == null);
+  assert.ok(terminal.workflow_attempt_id == null);
+  assert.equal(evidence.producer_version, 'hakodate_best_method_pipeline');
+  assert.equal(terminal.error, job.status === 'done' ? null : job.error_message);
+  assert.equal(workflow.state, job.status === 'done' ? 'ocr_completed' : 'ocr_failed');
+}
+
 export function verificationOutcome(sourceCase, workflow, evidence) {
   const policy = sourceCase.expected_outcome ?? 'done';
   assert.ok(['done', 'recognition_review_required', 'done_or_review_required'].includes(policy));
-  if (policy !== 'done_or_review_required') return policy;
-  verificationCaseId(sourceCase);
-  assert.ok(Object.hasOwn(sourceCase, 'case_id') && !Object.hasOwn(sourceCase, 'source_order_id'));
-  assert.ok(!['native_empty_resolution', 'review_resolution', 'blank_resolution'].some(key => Object.hasOwn(sourceCase, key)));
-  assert.ok(Array.isArray(sourceCase.required_raw_cells) && sourceCase.required_raw_cells.length > 0);
+  const nativeMode = sourceCase.expected_execution_mode === 'native_ingest';
+  if (Object.hasOwn(sourceCase, 'expected_execution_mode')) assert.equal(sourceCase.expected_execution_mode, 'native_ingest');
+  if (Object.hasOwn(workflow.ocr_job ?? {}, 'native_ingest')) assert.equal(nativeMode, true);
+  if (policy !== 'done_or_review_required' && !nativeMode) return policy;
+  if (policy === 'done_or_review_required') {
+    verificationCaseId(sourceCase);
+    assert.ok(Object.hasOwn(sourceCase, 'case_id') && !Object.hasOwn(sourceCase, 'source_order_id'));
+    assert.ok(!['native_empty_resolution', 'review_resolution', 'blank_resolution'].some(key => Object.hasOwn(sourceCase, key)));
+    assert.ok(Array.isArray(sourceCase.required_raw_cells) && sourceCase.required_raw_cells.length > 0);
+  }
   const job = workflow.ocr_job;
   const payload = evidence.payload_json;
   const execution = payload?._ocr_execution;
-  assert.equal(nonEmpty(job?.ocr_job_id, 'job-id'), execution?.job_id);
-  assert.equal(nonEmpty(job?.workflow_attempt_id, 'attempt-id'), execution?.workflow_attempt_id);
+  if (nativeMode) {
+    assertNativeIngestOwner(sourceCase, workflow, evidence);
+  } else {
+    assert.equal(nonEmpty(job?.ocr_job_id, 'job-id'), execution?.job_id);
+    assert.equal(nonEmpty(job?.workflow_attempt_id, 'attempt-id'), execution?.workflow_attempt_id);
+  }
   assert.equal(evidence.producer_version, 'hakodate_best_method_pipeline');
   const records = payload.hakodate_ocr_evidence_records;
   assert.ok(Array.isArray(records));
@@ -132,6 +170,7 @@ export function verificationOutcome(sourceCase, workflow, evidence) {
     }
     assert.equal(expectedReview.length, 0);
     assert.ok(!review?.cells?.length);
+    assert.ok(policy === 'done_or_review_required' || policy === 'done');
     return 'done';
   }
   assert.equal(job.status, 'failed');
@@ -143,6 +182,7 @@ export function verificationOutcome(sourceCase, workflow, evidence) {
   assert.deepEqual(review?.cells, expectedReview);
   assert.equal(review.count, expectedReview.length);
   assert.equal(new Set(expectedReview.map(cell => cell.sheet_cell)).size, expectedReview.length);
+  assert.ok(policy === 'done_or_review_required' || policy === 'recognition_review_required');
   return 'recognition_review_required';
 }
 
@@ -176,6 +216,10 @@ function verificationIdentityForCase(folder, sourceCase) {
   assert.ok(['done', 'recognition_review_required'].includes(expectedOutcome));
   const union = sourceCase.expected_outcome === 'done_or_review_required';
   const policyIdentity = union ? { manifestPolicy: sourceCase.expected_outcome, expectedOutcome } : {};
+  if (sourceCase.expected_execution_mode === 'native_ingest') {
+    policyIdentity.nativeIngest = workflow.ocr_job.native_ingest;
+    policyIdentity.expectedOutcome = expectedOutcome;
+  }
   if (union) {
     assert.deepEqual(readJson(resolve(caseFolder, 'verification-outcome.json')),
       { manifest_policy: sourceCase.expected_outcome, actual_outcome: expectedOutcome });
@@ -343,6 +387,12 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.equal(liveEvidence.execution_lineage?.evidence_run_id, identity.evidenceId);
     assert.equal(liveEvidence.execution_lineage?.selected_pdf_receipt?.document_id, identity.documentId);
     assert.equal(liveEvidence.execution_lineage?.selected_pdf_receipt?.sha256, identity.sourcePDFhash);
+    if (identity.nativeIngest) {
+      assert.deepEqual(liveWorkflow.ocr_job?.native_ingest, identity.nativeIngest);
+      assertNativeIngestOwner({ expected_execution_mode: 'native_ingest', sha256: identity.sourcePDFhash }, liveWorkflow,
+        { id: liveEvidence.ocr_result_id, producer_version: liveEvidence.producer_version,
+          payload_json: { _ocr_execution: liveEvidence.execution_lineage } });
+    }
     const verifiedOverlayUrl = nonEmpty(liveEvidence.overlay_url, 'live-overlay-url');
     allowedExternalUrls.add(verifiedOverlayUrl);
     releaseExternalRequests();

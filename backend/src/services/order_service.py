@@ -4405,6 +4405,96 @@ def _complete_first_pass_job_in_session(session, order, document, execution_inpu
     return receipt
 
 
+def _require_v1_initial_lines_owner(session, order):
+    if order.lines_updated_at is None:
+        raise ValueError("native_ingest_v1_initial_proof_changed")
+    owners = session.execute(select(OcrJob).where(OcrJob.order_id == order.id, OcrJob.status == "done",
+        OcrJob.metrics["first_pass_terminal_receipt"]["document_id"].as_string() == order.current_document_id,
+        OcrJob.metrics["first_pass_terminal_receipt"]["status"].as_string() == "done",
+        OcrJob.metrics["first_pass_terminal_receipt"]["result_state"].as_string() == "evidence_ready",
+        OcrJob.metrics["nonworkflow_execution"]["ingest_ocr_mode"].as_string().is_(None),
+        OcrJob.metrics["nonworkflow_execution"]["intake_protocol"].as_string().is_(None),
+        OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]["payload"]["intake_protocol"].as_string().is_(None),
+        OcrJob.metrics["nonworkflow_execution"]["orders"][order.id]["order"]["lines_updated_at"].as_string()
+            == _json_snapshot(order.lines_updated_at),
+        OcrJob.metrics["nonworkflow_execution"]["orders"][order.id]["document"]["id"].as_string()
+            == order.current_document_id).with_for_update()).scalars().all()
+    if len(owners) != 1:
+        raise ValueError("native_ingest_v1_initial_owner_missing" if not owners else "native_ingest_v1_initial_owner_ambiguous")
+    owner = owners[0]
+    metrics = owner.metrics or {}
+    captured = metrics["nonworkflow_execution"]
+    final = captured["orders"][order.id]
+    recorded_order = final.get("order") or {}
+    lease = captured.get("ingest_lease") or {}
+    if not isinstance(recorded_order, dict) or not isinstance(lease, dict) or not isinstance(lease.get("payload"), dict):
+        raise ValueError("native_ingest_v1_initial_proof_changed")
+    receipt = metrics.get("first_pass_terminal_receipt")
+    source = capture_selected_pdf_receipt(session, order)
+    document = session.get(OrderDocument, order.current_document_id)
+    current_lines = session.execute(select(OrderLine).where(OrderLine.order_id == order.id)
+        .order_by(OrderLine.id).with_for_update()).scalars().all()
+    from src.services.ingest_job_service import payload_digest
+    if (captured.get("ingest_ocr_mode") is not None or captured.get("intake_protocol") is not None
+            or lease.get("payload", {}).get("intake_protocol") is not None
+            or metrics.get("workflow_attempt_id") is not None or owner.status != "done" or owner.error_message is not None
+            or metrics.get("result_state") != "evidence_ready" or metrics.get("processing_stage") != "evidence_ready"
+            or metrics.get("adopted") is not False or metrics.get("ingest_lease") != lease
+            or lease.get("id") != document.source_email_id or not lease.get("input_digest")
+            or payload_digest(lease.get("payload")) != lease["input_digest"]
+            or captured.get("job_id") != owner.id or captured.get("order_id") != order.id
+            or captured.get("job_order_id") != order.id or not captured.get("execution_id")
+            or owner.input_reference != source["storage_uri"] or captured.get("input_reference") != source["storage_uri"]
+            or captured.get("selected_pdf_receipt") != source
+            or not isinstance(receipt, dict)
+            or receipt != {"job_id": owner.id, "execution_id": captured["execution_id"], "document_id": document.id,
+                "evidence_run_id": metrics.get("evidence_run_id"), "status": "done", "result_state": "evidence_ready"}
+            or any(metrics.get(key) is not None for key in ("non_ocr_terminal_receipt", "rerun_terminal_receipt", "source_failure_receipt"))
+            or any(recorded_order.get(key) != _json_snapshot(getattr(order, key)) for key in
+                ("id", "current_document_id", "document_uri", "message_id", "facility_code", "week_code",
+                 "template_version_id", "received_at", "lines_updated_at"))
+            or (final.get("document") or {}).get("status") != "success"
+            or any((final.get("document") or {}).get(key) != _json_snapshot(getattr(document, key)) for key in
+                ("id", "facility_code", "week_code", "storage_uri", "source_email_id", "received_at"))
+            or final.get("lines") != _json_snapshot([
+                {column.key: getattr(line, column.key) for column in line.__table__.columns} for line in current_lines])):
+        raise ValueError("native_ingest_v1_initial_proof_changed")
+    evidence = session.get(OrderOcrEvidenceRun, receipt["evidence_run_id"])
+    execution = evidence.payload_json.get("_ocr_execution") if evidence is not None and isinstance(evidence.payload_json, dict) else None
+    if (evidence is None or evidence.order_id != order.id or evidence.template_version_id != order.template_version_id
+            or evidence.producer_version != "ocr_pipeline_ingest" or evidence.status != "ready"
+            or not isinstance(execution, dict) or execution.get("job_id") != owner.id
+            or execution.get("nonworkflow_execution_id") != captured["execution_id"]
+            or execution.get("workflow_attempt_id") is not None or execution.get("evidence_run_id") != evidence.id
+            or execution.get("selected_pdf_receipt") != source):
+        raise ValueError("native_ingest_v1_initial_evidence_changed")
+    from src.services.workflow_attempt_guard_service import verify_selected_pdf_receipt
+    if not verify_selected_pdf_receipt(session, source):
+        raise ValueError("native_ingest_v1_initial_source_changed")
+
+
+def _require_native_initial_lines_replaceable(session, order):
+    row = session.get(OrderWorkflowState, order.id)
+    meta = ((row.secondary_actions_json or {}).get("workflow_v2") or {}) if row is not None else {}
+    if (order.status == "確定" or (row is not None and (row.evidence_run_id or row.draft_id or row.confirmed_snapshot_id))
+            or session.query(OrderSheetDraft.id).filter(OrderSheetDraft.order_id == order.id).first() is not None):
+        raise ValueError("native_ingest_operator_state_in_use")
+    cache = session.get(OrderOcrCache, order.id)
+    if cache is not None and isinstance((cache.payload or {}).get("_edited_ocr"), dict):
+        raise ValueError("native_ingest_operator_state_in_use")
+    lines = _snapshot_order_lines(session, order.id)
+    recorded = meta.get("initial_lines_receipt")
+    if any(line["quantity_corrected"] is not None for line in lines):
+        raise ValueError("native_ingest_operator_lines_in_use")
+    if lines:
+        if recorded is None:
+            _require_v1_initial_lines_owner(session, order)
+        elif (not isinstance(recorded, dict) or recorded.get("document_id") != order.current_document_id
+                or recorded.get("lines") != lines or recorded.get("lines_updated_at") != _json_snapshot(order.lines_updated_at)):
+            raise ValueError("native_ingest_operator_lines_in_use")
+    return lines
+
+
 def create_order_from_ingest(
     payload: IngestEmailPayload,
     lines: Optional[list[dict]] = None,
@@ -4575,6 +4665,21 @@ def create_order_from_ingest(
             session.add(document)
         if existing and continuation_document is None:
             order = existing
+            native_transition = None
+            if payload.intake_protocol == "native_ingest_v2" and not payload.skip_ocr and execution_input is None:
+                _require_native_initial_lines_replaceable(session, order)
+                previous_document = session.get(OrderDocument, order.current_document_id)
+                if previous_document is None or registration_job_id is None:
+                    raise ValueError("native_ingest_previous_source_required")
+                previous_source = capture_selected_pdf_receipt(session, order)
+                _record_current_order_version(session, order, previous_document)
+                previous_version = session.query(OrderVersion).filter_by(document_id=previous_document.id).one()
+                native_transition = {"order_id": order.id, "old_source": previous_source,
+                    "old_version": _json_snapshot({column.key: getattr(previous_version, column.key) for column in previous_version.__table__.columns}),
+                    "new_document_id": doc_id, "new_message_id": payload.message_id,
+                    "new_storage_uri": payload.pdf_uri, "new_sha256": payload.content_sha256,
+                    "business_generation": ingest_lease["generation"]}
+                session.execute(delete(OrderLine).where(OrderLine.order_id == order.id))
             _ensure_legacy_current_order_version(session, order)
             if order.current_document_id:
                 prior = order.superseded_document_ids or []
@@ -4588,6 +4693,11 @@ def create_order_from_ingest(
             order.current_document_id = doc_id
             order.archived_at = None
             order.archived_by = None
+            if native_transition is not None:
+                prepared = session.get(OcrJob, registration_job_id)
+                if prepared is None or (prepared.metrics or {}).get("ingest_lease") != ingest_lease:
+                    raise ValueError("native_ingest_registration_owner_changed")
+                prepared.metrics = {**prepared.metrics, "ingest_document_transition": native_transition}
             logger.info("Order superseded and updated", order_id=order.id, match_reason=match_reason)
         elif existing is None:
             order = Order(
@@ -4661,6 +4771,8 @@ def create_order_from_ingest(
                 "document_id": document.id, "status": job.status,
                 "result_state": "skipped" if skipped else "hard_failed",
             }
+            job.metrics = {**job.metrics,
+                "non_ocr_terminal_receipt": deepcopy(serialized["non_ocr_terminal_receipt"])}
         if isinstance(pipeline_result, dict):
             serialized["first_pass_evidence"] = _persist_ingest_pipeline_evidence(
                 session, order, pipeline_result, document_status,
@@ -9964,7 +10076,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             if str(item).strip()
         )
         assigned_target_count = int((assignment_result.get("summary") or {}).get("assigned_target_count") or 0)
-        if assigned_target_count <= 0:
+        if assigned_target_count <= 0 and not hakodate_ocr_evidence_service.has_resolved_blank_targets(assignment_result):
             canonical_blockers.append("hakodate_assignment_missing")
         canonical_blockers = list(dict.fromkeys(item for item in canonical_blockers if item))
         overlay_fingerprint = _hakodate_overlay_fingerprint(
@@ -12803,6 +12915,9 @@ def _persist_ocr_rerun_completion(
         job = session.get(OcrJob, job_id)
         if job is None or job.status in {"done", "completed", "success"} or (job.metrics or {}).get("rerun_terminal_receipt"):
             raise ValueError("ocr_rerun_already_terminal")
+        execution = current_nonworkflow_execution()
+        if not error and execution is not None and execution.get("ingest_ocr_mode") == "hakodate":
+            _require_native_initial_lines_replaceable(session, session.get(Order, order_id))
         evidence = None
         if isinstance(own_payload, dict):
             evidence = persist_ocr_evidence_run(
@@ -12826,6 +12941,30 @@ def _persist_ocr_rerun_completion(
             )
             if cache_result is None:
                 raise ValueError("reparse_cache_persist_failed")
+            execution = current_nonworkflow_execution()
+            if execution is not None and execution.get("ingest_ocr_mode") == "hakodate":
+                order = session.get(Order, order_id)
+                bundle, projection_error = build_order_hakodate_projected_sheet(
+                    order_id, evidence_run_override=evidence, allow_artifact_repair=False)
+                sheet = (bundle or {}).get("projected_sheet")
+                if projection_error or not isinstance(sheet, dict) or sheet.get("blockers"):
+                    raise ValueError(projection_error or "native_ingest_projection_blocked")
+                original = processing_start_read_input()
+                configured = original["configured_input"]
+                lines = _build_materialization_lines_from_sheet_rows(
+                    fields=sheet.get("fields"), rows_payload=sheet.get("rows"),
+                    cell_confidence_rows=sheet.get("cell_confidence_rows"),
+                    cell_score_rows=sheet.get("cell_score_rows"),
+                    cell_provenance_rows=sheet.get("cell_provenance_rows"),
+                    received_at=_normalize_received_at(original["order"]["received_at"]),
+                    date_policy=configured["policy"],
+                    template=configured["facility"]["fax_template"], existing_week_code=original["order"]["week_code"])
+                session.execute(delete(OrderLine).where(OrderLine.order_id == order_id))
+                for line in lines:
+                    session.add(OrderLine(id=_make_line_id(), order_id=order_id,
+                        **{key: line.get(key) for key in ("date", "daypart", "menu_name", "diet_type", "area_id", "bag_type", "quantity_original", "quantity_corrected", "change_note")}))
+                order.lines_updated_at = datetime.utcnow()
+                advance_nonworkflow_order_input(session, execution, order)
             if project_sheet:
                 captured = _captured_reparse_read_input(order_id, write_session=session)
                 if captured is None:
@@ -12858,10 +12997,44 @@ def _persist_ocr_rerun_completion(
             job.output_reference = output_reference
         if isinstance(own_payload, dict):
             job.template_id = own_payload.get("template_id")
+        execution = current_nonworkflow_execution()
+        native_hard_failure = False
+        if execution is not None and execution.get("ingest_ocr_mode") == "hakodate" and error:
+            review = (own_payload or {}).get("hakodate_recognition_review") if isinstance(own_payload, dict) else None
+            if evidence is not None and isinstance(review, dict) and review.get("cells"):
+                _validate_hakodate_owned_artifacts(own_payload,
+                    _hakodate_owned_source(processing_start_configured_input(), processing_start_pdf_receipt()), allow_review=True)
+            else:
+                native_hard_failure = True
+                metrics_patch = {**(metrics_patch or {}), "processing_stage": "native_ingest_failed", "result_state": "hard_failed"}
         receipt = _complete_ocr_rerun_in_session(
             session, order_id, job_id, evidence, error=error,
             metrics_patch=metrics_patch or {},
+            failure_metrics_override=native_hard_failure,
         )
+        if execution is not None and execution.get("ingest_ocr_mode") == "hakodate":
+            from src.services.order_workflow_v2_service import complete_native_ingest_context
+            complete_native_ingest_context(session, order_id, job_id,
+                evidence.get("id") if evidence is not None else None, error)
+            order = session.get(Order, order_id)
+            source = execution["orders"][order_id]["document"]
+            document = session.get(OrderDocument, source["id"])
+            if (order is None or document is None or order.current_document_id != document.id
+                    or document.storage_uri != execution["selected_pdf_receipt"]["storage_uri"]):
+                raise ValueError("native_ingest_document_changed")
+            document.status = "error" if error else "success"
+            document.error_message = error
+            if not error:
+                row = session.get(OrderWorkflowState, order_id)
+                secondary = deepcopy(row.secondary_actions_json or {})
+                meta = dict(secondary.get("workflow_v2") or {})
+                meta["initial_lines_receipt"] = {"document_id": document.id,
+                    "evidence_run_id": evidence["id"], "lines": _snapshot_order_lines(session, order_id),
+                    "lines_updated_at": _json_snapshot(order.lines_updated_at)}
+                secondary["workflow_v2"] = meta
+                row.secondary_actions_json = secondary
+            _record_current_order_version(session, order, document)
+            advance_nonworkflow_order_input(session, execution, order)
         result = deepcopy(evidence) if evidence is not None else {}
         result["terminal_receipt"] = receipt
     return result, receipt["error"]
@@ -13114,6 +13287,8 @@ def _finalize_async_first_pass_side_effects(
     order_id: str | None,
     message_id: str | None,
 ) -> None:
+    original = current_nonworkflow_execution()
+    strict_native = isinstance(original, dict) and original.get("ingest_ocr_mode") == "hakodate"
     normalized_message_id = str(message_id or "").strip()
     if normalized_message_id:
         try:
@@ -13121,6 +13296,8 @@ def _finalize_async_first_pass_side_effects(
             execution = current_nonworkflow_execution()
             settled = ingest_job_service.settle_ingest_ocr_terminal(execution) if isinstance(execution, dict) and execution.get("job_id") == job_id and execution.get("order_id") == order_id and (execution.get("ingest_lease") or {}).get("id") == normalized_message_id else None
         except Exception as exc:  # noqa: BLE001
+            if strict_native:
+                raise
             logger.warning(
                 "Ingest job completion sync failed after OCR reconcile",
                 job_id=job_id,
@@ -13128,15 +13305,23 @@ def _finalize_async_first_pass_side_effects(
                 error=str(exc),
             )
             settled = None
+        if strict_native and settled is None:
+            raise ValueError("native_ingest_settlement_missing")
         try:
             from src.services.uploaded_pdf_service import mark_uploaded_pdf_completed_by_message_id_if_ready, schedule_uploaded_pdf_retry
             uploaded = settled["lease"].get("uploaded_lease") if settled is not None else None
             if uploaded is not None and settled["status"] == "done":
-                mark_uploaded_pdf_completed_by_message_id_if_ready(normalized_message_id, lease=uploaded, completion=settled)
+                completed = mark_uploaded_pdf_completed_by_message_id_if_ready(normalized_message_id, lease=uploaded, completion=settled)
+                if strict_native and completed is None:
+                    raise ValueError("native_ingest_upload_settlement_refused")
             elif uploaded is not None and settled["status"] == "failed":
-                schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
+                rejected = schedule_uploaded_pdf_retry(uploaded["id"], lease=uploaded, worker_instance=uploaded["lease_owner"],
                     error_code="ingest_failed", error_message=settled["error"], terminal=True)
+                if strict_native and rejected is None:
+                    raise ValueError("native_ingest_upload_settlement_refused")
         except Exception as exc:  # noqa: BLE001
+            if strict_native:
+                raise
             logger.warning(
                 "Uploaded PDF completion sync failed after OCR reconcile",
                 job_id=job_id,
@@ -13177,6 +13362,11 @@ def reconcile_completed_ocr_job(job_id: str, *, execution_input: dict[str, Any] 
 
 
 def _reconcile_completed_ocr_job_with_input(job_id: str) -> bool:
+    captured = current_nonworkflow_execution()
+    if isinstance(captured, dict) and captured.get("ingest_ocr_mode") == "hakodate":
+        from src.workers.ingest_worker import _recover_captured_ocr_job
+        job = get_ocr_job(job_id)
+        return _recover_captured_ocr_job(job) if isinstance(job, dict) else False
     normalized_job_id = str(job_id or "").strip()
     if not normalized_job_id:
         return False
@@ -23909,7 +24099,8 @@ def _build_hakodate_evidence_assignment_from_payload(
     )
     output_blockers = list(sheet_output.get("blockers") or [])
     assigned_count = int((assignment_result.get("summary") or {}).get("assigned_target_count") or 0)
-    status = "auto_assignable" if assigned_count > 0 and not output_blockers else "blocked"
+    resolved = assigned_count > 0 or hakodate_ocr_evidence_service.has_resolved_blank_targets(assignment_result)
+    status = "auto_assignable" if resolved and not output_blockers else "blocked"
     if assigned_count > 0 and output_blockers:
         status = "review_required"
     return {
@@ -24682,6 +24873,7 @@ def build_order_hakodate_assignment(
             order_id=order_id,
             payload=payload,
             template=template_to_use,
+            **({"synchronous_write_input": processing_input} if current_nonworkflow_execution() is not None else {}),
         )
     except _CanonicalOcrProjectionError as exc:
         return None, str(exc)
@@ -24873,8 +25065,10 @@ def build_order_hakodate_projected_sheet(
     evidence_run_override: dict[str, Any] | None = None,
     expected_revision: int | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
+    allow_artifact_repair: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    if evidence_run_override is None and _workflow_ocr_job_id.get() is None and synchronous_write_input is None:
+    job_owned = _workflow_ocr_job_id.get() is not None or current_nonworkflow_execution() is not None
+    if evidence_run_override is None and not job_owned and synchronous_write_input is None:
         if expected_revision is None:
             return None, "workflow_revision_required"
         if type(expected_revision) is not int or expected_revision < 1:
@@ -24886,7 +25080,7 @@ def build_order_hakodate_projected_sheet(
             synchronous_write_input = _capture_synchronous_cache_write_input(order_id, write_session=session)
         if synchronous_write_input is None:
             return None, "synchronous_input_missing"
-    processing_input = processing_start_read_input() if synchronous_write_input is None and _workflow_ocr_job_id.get() is not None else None
+    processing_input = processing_start_read_input() if synchronous_write_input is None and job_owned else None
     if synchronous_write_input is None and processing_input is None:
         return None, "synchronous_input_missing"
     if synchronous_write_input is not None and "hakodate_base_sheet" in synchronous_write_input:
@@ -24902,6 +25096,7 @@ def build_order_hakodate_projected_sheet(
         strategy=strategy,
         grid_params=grid_params,
         evidence_run_override=evidence_run_override,
+        allow_artifact_repair=allow_artifact_repair,
         persist_artifact_repair=evidence_run_override is None,
         expected_revision=expected_revision,
         synchronous_write_input=synchronous_write_input,
