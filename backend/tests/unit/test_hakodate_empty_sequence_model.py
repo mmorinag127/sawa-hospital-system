@@ -111,12 +111,15 @@ class LearnedHeadMechanism(unittest.TestCase):
                     adapter._load_adapter(root)
 
     def test_loader_pins_download_and_rejects_integrity_before_construction(self):
-        import yomitoku
+        import sys
+
+        yomitoku = SimpleNamespace(TextRecognizer=None)
 
         # Synthetic loader boundaries, not native recognition evidence.
         for digest, keys in [('wrong', ([], [])), (adapter.BASE_SHA256, (['missing'], [])),
                              (adapter.BASE_SHA256, ([], ['extra']))]:
-            with patch.object(adapter, 'hf_hub_download', return_value='pinned') as download, \
+            with patch.dict(sys.modules, {'yomitoku':yomitoku}), \
+                    patch.object(adapter, 'hf_hub_download', return_value='pinned') as download, \
                     patch.object(adapter, 'file_sha256', return_value=digest), \
                     patch.object(yomitoku, 'TextRecognizer') as constructor, \
                     patch.object(adapter, 'load_model', return_value=keys), \
