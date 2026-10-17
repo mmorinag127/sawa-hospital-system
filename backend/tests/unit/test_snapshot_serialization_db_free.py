@@ -100,7 +100,10 @@ def test_new_process_validates_canonical_artifact_without_db_imports(tmp_path):
         completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(child_root)],
                                    env=environment, cwd=ROOT, text=True, capture_output=True)
         assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert json.loads(completed.stdout)['forbidden_imports'] == []
+        result_path = child_root / 'probe-result.json'
+        assert result_path.is_file(), completed.stdout + completed.stderr
+        assert json.loads(result_path.read_text()) == {
+            'forbidden_imports': [], 'artifact_validation': 'passed', 'source_guard': 'rejected'}, completed.stdout + completed.stderr
 
 
 def _probe(root):
@@ -170,8 +173,9 @@ def _probe(root):
         raise AssertionError('changed source accepted')
     imported = [name for name in sys.modules if any(name == prefix or name.startswith(prefix + '.') for prefix in forbidden)]
     assert imported == []
-    print(json.dumps({'forbidden_imports': imported, 'artifact_validation': 'passed', 'source_guard': 'rejected'}))
+    return {'forbidden_imports': imported, 'artifact_validation': 'passed', 'source_guard': 'rejected'}
 
 
 if __name__ == '__main__':
-    _probe(Path(sys.argv[1]))
+    child_root = Path(sys.argv[1])
+    (child_root / 'probe-result.json').write_text(json.dumps(_probe(child_root)))
