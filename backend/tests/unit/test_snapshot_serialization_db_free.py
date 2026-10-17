@@ -18,6 +18,26 @@ ORIGINAL_AST_SHA256 = {
     'canonical_snapshot_json': 'e7348a3cad1aaa7a59cb5a9134023ea818132f9aef8ff26f6ad5befce6c24127',
     'snapshots_equal': '936a88028e5e110fa1447d82528d5f219457cbf85ac25c339d0c6eb65c5821cb',
 }
+CONTACT_CLOSURE_AST_SHA256 = '43a4777c44b109fb0c77407807975e7aa34005c93cc4a90d5ad236d9fd65fada'
+
+
+def test_contact_closure_matches_pinned_original_and_runtime_aliases():
+    from src.services import hakodate_recognizer_contact_sheet as pure
+    from src.hakodate_best_method_runtime import run_text_recognizer_corner_noise_trial as runtime
+
+    tree = ast.parse((ROOT / 'backend/src/services/hakodate_recognizer_contact_sheet.py').read_text())
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    assert len(functions) == 13
+    assert hashlib.sha256(ast.dump(ast.Module(body=functions, type_ignores=[])).encode()).hexdigest() == CONTACT_CLOSURE_AST_SHA256
+    for node in functions:
+        assert getattr(runtime, node.name) is getattr(pure, node.name)
+
+    path = ROOT / 'backend/src/hakodate_best_method_runtime/run_text_recognizer_corner_noise_trial.py'
+    namespace = {'__name__': 'unregistered_contact_sheet_baseline', '__file__': str(path)}
+    assert namespace['__name__'] not in sys.modules
+    exec(compile(path.read_text(), str(path), 'exec'), namespace)
+    for node in functions:
+        assert namespace[node.name] is getattr(pure, node.name)
 
 
 def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
@@ -86,7 +106,7 @@ def test_master_lazy_menu_attribute_preserves_module_identity_and_rejects_unknow
         raise AssertionError('unknown module attribute accepted')
 
 
-def test_new_process_validates_canonical_artifact_without_db_imports(tmp_path):
+def test_new_process_validates_canonical_artifact_without_db_or_ml_imports(tmp_path):
     # An allowlist, rather than inherited DB variables, also excludes future DB selectors.
     for inherit_pythonpath in (True, False):
         child_root = tmp_path / ('inherited' if inherit_pythonpath else 'no-pythonpath')
@@ -111,14 +131,19 @@ def _probe(root):
     sys.path[1:1] = [path for path in os.environ.get('SNAPSHOT_PROBE_DEPENDENCY_PATH', '').split(os.pathsep) if path]
     import importlib.abc
 
-    forbidden = ('src.db', 'src.models', 'sqlalchemy')
+    forbidden = ('src.db', 'src.models', 'sqlalchemy', 'torch', 'yomitoku', 'timm', 'transformers',
+                 'src.services.yomitoku_text_recognizer_topk', 'src.services.hakodate_empty_sequence_model',
+                 'src.hakodate_best_method_runtime.run_text_recognizer_corner_noise_trial')
 
-    class RejectDatabaseImports(importlib.abc.MetaPathFinder):
+    attempted_forbidden_imports = []
+
+    class RejectDatabaseAndMLImports(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path=None, target=None):
             if any(fullname == name or fullname.startswith(name + '.') for name in forbidden):
-                raise AssertionError('DB-free validation imported ' + fullname)
+                attempted_forbidden_imports.append(fullname)
+                raise AssertionError('DB/ML-free validation imported ' + fullname)
 
-    sys.meta_path.insert(0, RejectDatabaseImports())
+    sys.meta_path.insert(0, RejectDatabaseAndMLImports())
     assert not any(name in os.environ for name in (
         'DATABASE_URL', 'DB_URI', 'SAWA_SQLITE_DB_PATH', 'ALEMBIC_DB_URI',
         'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_HOST', 'DB_PORT', 'DB_DRIVER'))
@@ -131,7 +156,7 @@ def _probe(root):
     else:
         raise AssertionError('invalid manifest accepted')
     from src.services import hakodate_ocr_checkpoint_service as checkpoints
-    from src.hakodate_best_method_runtime.run_text_recognizer_corner_noise_trial import build_recognizer_contact_sheet
+    from src.services.hakodate_recognizer_contact_sheet import build_recognizer_contact_sheet
     import numpy as np
 
     pdf = root / 'source.pdf'
@@ -173,6 +198,7 @@ def _probe(root):
         raise AssertionError('changed source accepted')
     imported = [name for name in sys.modules if any(name == prefix or name.startswith(prefix + '.') for prefix in forbidden)]
     assert imported == []
+    assert attempted_forbidden_imports == []
     return {'forbidden_imports': imported, 'artifact_validation': 'passed', 'source_guard': 'rejected'}
 
 

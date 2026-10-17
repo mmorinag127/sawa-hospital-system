@@ -98,7 +98,7 @@ def validate_artifact(data, records, contact_bytes, source_receipt):
     from PIL import Image
     from src.services.hakodate_ocr_checkpoint_service import load_recognizer_checkpoint
     from src.services.snapshot_serialization import canonical_snapshot_json
-    from src.hakodate_best_method_runtime.run_text_recognizer_corner_noise_trial import build_recognizer_contact_sheet
+    from src.services.hakodate_recognizer_contact_sheet import build_recognizer_contact_sheet
     manifest = json.loads(data)
     if not isinstance(manifest,dict) or manifest.get('contract') != CONTRACT:
         raise ValueError('hakodate_observation_artifact_invalid')

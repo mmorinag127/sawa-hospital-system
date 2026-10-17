@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 import pytest
 
 from src.hakodate_best_method_runtime import run_text_recognizer_corner_noise_trial as runtime
+from src.services import hakodate_recognizer_contact_sheet as contact_sheet
 from src.hakodate_best_method_runtime import render_best_method_overlay_all_facilities as renderer
 from src.services import hakodate_ocr_evidence_service as evidence
 from test_h2_operator_repair_revision import connected_physical_pipeline, _capture_reparse_job
@@ -121,7 +122,7 @@ def test_warp_digit_loss_stops_even_when_model_returns_empty(monkeypatch, raw):
     image = Image.new('RGB', (80,60), 'white')
     ImageDraw.Draw(image).text((0,10), '1', font=ImageFont.load_default(size=10), anchor='lt', fill='black')
     authored = {**region(), 'polygon': [[0.,0.],[80.,0.],[80.,60.],[0.,60.]]}
-    monkeypatch.setattr(runtime, '_warp_polygon_cell_to_axis_aligned_crop', lambda *args: (
+    monkeypatch.setattr(contact_sheet, '_warp_polygon_cell_to_axis_aligned_crop', lambda *args: (
         np.full((60,80,3),255,dtype=np.uint8), [0.,0.,80.,60.], (0,0,80,60), (0,0,80,60)))
     contact, regions, polygons, _ = runtime.build_recognizer_contact_sheet(
         rectified_fax_bgr=cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR), regions=[authored], line_mask=None, mode='corner_cc')
