@@ -92,6 +92,37 @@ def test_generic_content_preserves_zero_one_twenty_six_and_native_empty(content)
     assert content[1][1]['recognizer_preprocess_ink_removed'] is True
 
 
+@pytest.fixture
+def serialized_content(content):
+    expected, records, payload, contact = deepcopy(content)
+    for index, source in enumerate(records):
+        for key in ('ocr_text', 'ocr_normalized'):
+            source.pop(key)
+        payload['hakodate_ocr_evidence_records'][index]['engine_metadata']['recognizer_output'] = deepcopy(source)
+    payload['hakodate_ocr_evidence']['records'] = deepcopy(payload['hakodate_ocr_evidence_records'])
+    return expected, records, payload, contact
+
+
+@pytest.mark.parametrize('cell', ['B1', 'A1', 'C1', 'D1'])
+@pytest.mark.parametrize('field', ['ocr_text', 'ocr_normalized'])
+@pytest.mark.parametrize('state', ['absent', 'matching', 'null', 'mismatched'])
+def test_serialized_internal_fields_are_optional_but_never_coerced(serialized_content, cell, field, state):
+    expected, records, payload, contact = serialized_content
+    index = next(index for index, row in enumerate(records) if row['sheet_cell'] == cell)
+    source = records[index]
+    raw = '' if cell in expected['blank_cells'] else expected['numeric_cells'][cell]
+    if state != 'absent':
+        source[field] = raw if state == 'matching' else None if state == 'null' else '9'
+    payload['hakodate_ocr_evidence_records'][index]['engine_metadata']['recognizer_output'] = deepcopy(source)
+    payload['hakodate_ocr_evidence']['records'] = deepcopy(payload['hakodate_ocr_evidence_records'])
+    if state in ('null', 'mismatched'):
+        with pytest.raises(ValueError, match='Native empty resolved value changed'):
+            mod._native_empty_records(expected, records, payload, contact)
+    else:
+        assert mod._native_empty_records(expected, records, payload, contact) == {
+            'white_pixels': 1, 'source_blank_count': 1, 'numeric': 3, 'review_required': 1}
+
+
 @pytest.mark.parametrize('change',['raw1','number','extra_review','model','expected_model','pixel','bbox',
     'duplicate','score','candidate_nan','candidate_adoption','blank_decision','proof','api_raw','review_count',
     'low_confidence','api_score','source_geometry','warp','overlap','missing_cell'])
@@ -259,6 +290,12 @@ def test_nonwhite_source_blank_empty_raw_keeps_full_source_and_contact_validatio
     assert content[1][1]['recognizer_input_evidence']['all_white'] is False
     assert mod.verify_native_empty_resolution(*content) == {
         'white_pixels':0,'source_blank_count':1,'numeric':3,'review_required':1}
+
+
+def test_canonical_serialized_records_without_internal_fields_pass_full_boundary(serialized_content, tmp_path, staging):
+    canonical(serialized_content, tmp_path, staging)
+    assert mod.verify_native_empty_resolution(*serialized_content) == {
+        'white_pixels': 1, 'source_blank_count': 1, 'numeric': 3, 'review_required': 1}
 
 
 def test_white_real_one_is_not_adopted_even_with_consistent_pixel_receipts(content):

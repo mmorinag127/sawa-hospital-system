@@ -586,7 +586,8 @@ def _native_empty_records(expected, records, payload, contact):
                 review_rows.append({'sheet_cell':cell, 'raw_text':raw, 'reason':'hakodate_ocr_quantity_non_numeric'})
             elif (source.get('resolution_state') != 'resolved' or record.get('resolution_state') != 'resolved'
                     or any(value != raw for value in (source.get('resolved_value'), source.get('pred_digits'),
-                        source.get('ocr_text'), source.get('ocr_normalized'), record.get('normalized_value')))
+                        record.get('normalized_value')))
+                    or any(source[key] != raw for key in ('ocr_text', 'ocr_normalized') if key in source)
                     or source.get('quantity_source_issue')):
                 raise ValueError('Native empty resolved value changed')
             if cell not in reviews and validate_ocr_source_for_role(record, source.get('role')) != raw:
