@@ -434,6 +434,8 @@ def build_recognizer_contact_sheet(
 ) -> tuple[Image.Image, list[dict[str, Any]], list[list[list[int]]], list[dict[str, Any]]]:
     # Keep legacy ink arguments for callers, but never use them to skip recognition.
     height, width = rectified_fax_bgr.shape[:2]
+    from src.services.hakodate_preprocess_observation import observe, pixels
+    observation_source_hash = pixels(rectified_fax_bgr)['sha256']
     candidate_items: list[tuple[int, dict[str, Any], Image.Image, tuple[int, int, int, int], dict[str, Any]]] = []
     skipped_regions: list[dict[str, Any]] = []
     for slot_index, region in enumerate(regions):
@@ -509,6 +511,9 @@ def build_recognizer_contact_sheet(
         prepared_region["recognizer_preprocess_ink_removed"] = bool(
             crop_image.convert("RGB").getextrema() == ((255, 255), (255, 255), (255, 255))
             and np.any(rectified_fax_bgr[sy0:sy1, sx0:sx1] < 255))
+        if mode == 'corner_cc':
+            prepared_region['recognizer_preprocess_observation'] = observe(
+                rectified_fax_bgr,region,crop,source_px_box,observation_source_hash)
         candidate_items.append((slot_index, prepared_region, crop_image, source_px_box, ink_stats))
     row_count = max(1, (len(candidate_items) + columns - 1) // columns)
     sheet = Image.new("RGB", (columns * slot_width, row_count * slot_height), "white")
@@ -529,6 +534,8 @@ def build_recognizer_contact_sheet(
             [paste_x, paste_y + crop_image.height],
         ]
         polygons.append(polygon)
+        if 'recognizer_preprocess_observation' in prepared_region:
+            prepared_region['recognizer_preprocess_observation']['contact'] = contact_crop_evidence(sheet,polygon)
         usable_regions.append(
             {
                 **prepared_region,

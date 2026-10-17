@@ -65,6 +65,8 @@ jobs:
       - name: Check backend undefined names
         working-directory: backend
         run: python -m ruff check --no-cache --select F821 src
+      - name: Verify serving and frozen image dependency alignment
+        run: python scripts/test_runtime_cv_dependency_alignment.py -v
       - name: Backend dependency audit
         working-directory: backend
         run: |
@@ -134,9 +136,11 @@ jobs:
             tests/unit/test_hakodate_blank_review_persistence.py \
             tests/unit/test_hakodate_raw_authority.py \
             tests/unit/test_hakodate_empty_sequence_model.py \
+            tests/unit/test_hakodate_preprocess_observation.py \
             tests/unit/test_hakodate_text_recognizer_preprocess.py \
             tests/unit/test_yomitoku_text_recognizer_topk.py \
             tests/unit/test_stg_recognition_review_verification.py \
+            tests/unit/test_stg_ocr_native_empty_resolution.py \
             --junitxml=.logs/review-resolution-junit.xml \
             -q -rs 2>&1 | tee .logs/review-resolution.log
       - name: Upload backend logs
