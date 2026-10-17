@@ -43,6 +43,8 @@ from src.workers import ingest_worker
 
 @pytest.fixture
 def native_sql(store, tmp_path, monkeypatch, request):
+    monkeypatch.setenv("OCR_ARTIFACT_DIR", str((tmp_path / "artifacts").absolute()))
+    monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
     configured = {"facility": {"fax_template_id": "authored-component", "fax_template": {"template_id": "authored-component"}},
                   "policy": {"quantity_rules": {"minimum": 0}}}
     v1 = getattr(request, "param", None) in ("v1", "v1_note")
