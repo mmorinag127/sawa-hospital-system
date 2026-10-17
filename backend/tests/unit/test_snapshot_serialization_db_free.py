@@ -88,17 +88,24 @@ def test_master_lazy_menu_attribute_preserves_module_identity_and_rejects_unknow
 
 def test_new_process_validates_canonical_artifact_without_db_imports(tmp_path):
     # An allowlist, rather than inherited DB variables, also excludes future DB selectors.
-    environment = {key: os.environ[key] for key in ('PATH', 'PYTHONPATH') if key in os.environ}
-    environment.update(HOME=str(tmp_path), TMPDIR=str(tmp_path), PYTHONDONTWRITEBYTECODE='1',
-                       OCR_ARTIFACT_DIR=str(tmp_path / 'artifacts'), HF_HUB_OFFLINE='1',
-                       TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1')
-    completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(tmp_path)],
-                               env=environment, cwd=ROOT, text=True, capture_output=True)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert json.loads(completed.stdout)['forbidden_imports'] == []
+    for inherit_pythonpath in (True, False):
+        child_root = tmp_path / ('inherited' if inherit_pythonpath else 'no-pythonpath')
+        child_root.mkdir()
+        environment = {key: os.environ[key] for key in ('PATH', 'SNAPSHOT_PROBE_DEPENDENCY_PATH') if key in os.environ}
+        if inherit_pythonpath and 'PYTHONPATH' in os.environ:
+            environment['PYTHONPATH'] = os.environ['PYTHONPATH']
+        environment.update(HOME=str(child_root), TMPDIR=str(child_root), PYTHONDONTWRITEBYTECODE='1',
+                           OCR_ARTIFACT_DIR=str(child_root / 'artifacts'), HF_HUB_OFFLINE='1',
+                           TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1')
+        completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(child_root)],
+                                   env=environment, cwd=ROOT, text=True, capture_output=True)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert json.loads(completed.stdout)['forbidden_imports'] == []
 
 
 def _probe(root):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path[1:1] = [path for path in os.environ.get('SNAPSHOT_PROBE_DEPENDENCY_PATH', '').split(os.pathsep) if path]
     import importlib.abc
 
     forbidden = ('src.db', 'src.models', 'sqlalchemy')
