@@ -137,6 +137,7 @@ jobs:
             tests/unit/test_hakodate_raw_authority.py \
             tests/unit/test_hakodate_empty_sequence_model.py \
             tests/unit/test_hakodate_preprocess_observation.py \
+            tests/unit/test_snapshot_serialization_db_free.py \
             tests/unit/test_hakodate_text_recognizer_preprocess.py \
             tests/unit/test_yomitoku_text_recognizer_topk.py \
             tests/unit/test_stg_recognition_review_verification.py \
