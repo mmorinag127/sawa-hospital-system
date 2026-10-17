@@ -25,6 +25,7 @@ from src.models.order_critical_decision import OrderCriticalDecision
 from src.models.uploaded_pdf import UploadedPdf
 from src.db import session_scope
 from src.services.canonical_facility_store import CanonicalStoreError
+from src.services.snapshot_serialization import _json_snapshot, canonical_snapshot_json, snapshots_equal
 
 
 _nonworkflow_execution: ContextVar[dict[str, Any] | None] = ContextVar("nonworkflow_execution", default=None)
@@ -119,25 +120,6 @@ def _release_execution_input_after_commit(session: Any) -> None:
 def _restore_uncommitted_execution_input(session: Any, transaction: Any) -> None:
     if transaction.parent is None:
         _restore_execution_input_after_rollback(session)
-
-
-def _json_snapshot(value: Any) -> Any:
-    from datetime import date, datetime
-
-    def encode(item):
-        if isinstance(item, (date, datetime)):
-            return item.isoformat()
-        raise TypeError("execution_snapshot_non_json_value")
-
-    return json.loads(json.dumps(value, default=encode, allow_nan=False))
-
-
-def canonical_snapshot_json(value: Any) -> str:
-    return json.dumps(_json_snapshot(value), sort_keys=True, ensure_ascii=False, allow_nan=False)
-
-
-def snapshots_equal(left: Any, right: Any) -> bool:
-    return canonical_snapshot_json(left) == canonical_snapshot_json(right)
 
 
 class CurrentSheetInputChanged(ValueError):

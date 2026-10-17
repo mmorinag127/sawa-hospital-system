@@ -17,7 +17,15 @@ from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.worksheet.print_settings import PrintArea
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.services import config_service, menu_service, sheet_week_service
+from src.services import config_service, sheet_week_service
+
+
+def __getattr__(name: str):
+    if name == "menu_service":
+        from src.services import menu_service
+
+        return menu_service
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -869,6 +877,8 @@ def _collect_week_menu_entries(*, facility_id: str, week_value: object) -> list[
     month_id, start_date, end_date = sheet_week_service.parse_sheet_week_value(week_value)
     if not month_id or not isinstance(start_date, date) or not isinstance(end_date, date):
         return []
+    from src.services import menu_service
+
     payload = menu_service.get_menu_for_facility(month_id, facility_id)
     entries = payload.get("entries") if isinstance(payload, dict) else None
     return _normalize_week_menu_entries(entries=entries, week_value=week_value)
