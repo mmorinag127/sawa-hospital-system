@@ -84,7 +84,7 @@ def _page_has_placeholder_marker_only(page: fitz.Page) -> bool:
 
 def _is_placeholder_only_pdf(pdf_bytes: bytes) -> bool:
     try:
-        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        document = fitz.open(stream=bytes(pdf_bytes), filetype="pdf")
     except Exception:  # noqa: BLE001
         return False
     try:
@@ -196,7 +196,7 @@ def _resolve_storage_target(received_at: datetime) -> _ManualUploadStorageTarget
 
 def _split_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
     try:
-        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        document = fitz.open(stream=bytes(pdf_bytes), filetype="pdf")
     except Exception:  # noqa: BLE001
         return [pdf_bytes]
     try:
