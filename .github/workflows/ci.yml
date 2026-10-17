@@ -60,7 +60,7 @@ jobs:
         run: |
           # CI tensor contracts only; production OCR remains on its declared runtime.
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
-          python -m pip install "huggingface-hub==1.14.0" "safetensors==0.7.0"
+          python -m pip install "huggingface-hub==0.36.2" "safetensors==0.7.0"
           python -c 'import torch; assert torch.__version__ == "2.10.0+cpu"; assert torch.version.cuda is None'
       - name: Check backend undefined names
         working-directory: backend
