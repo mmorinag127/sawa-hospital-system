@@ -60,6 +60,7 @@ jobs:
         run: |
           # CI tensor contracts only; production OCR remains on its declared runtime.
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+          python -m pip install "huggingface-hub==0.36.2" "safetensors==0.7.0"
           python -c 'import torch; assert torch.__version__ == "2.10.0+cpu"; assert torch.version.cuda is None'
       - name: Check backend undefined names
         working-directory: backend
@@ -131,6 +132,8 @@ jobs:
             tests/unit/test_hakodate_review_resolution_root.py \
             tests/unit/test_hakodate_blank_input_review.py \
             tests/unit/test_hakodate_blank_review_persistence.py \
+            tests/unit/test_hakodate_raw_authority.py \
+            tests/unit/test_hakodate_empty_sequence_model.py \
             tests/unit/test_hakodate_text_recognizer_preprocess.py \
             tests/unit/test_yomitoku_text_recognizer_topk.py \
             tests/unit/test_stg_recognition_review_verification.py \

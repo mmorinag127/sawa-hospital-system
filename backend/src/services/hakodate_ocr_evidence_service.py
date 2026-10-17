@@ -65,10 +65,37 @@ def normalize_ocr_value(value: object) -> str:
     return str(value if value is not None else "")
 
 
+def _quantity_recognizer_issue(source: dict[str, Any]) -> str | None:
+    if source.get("role") != "quantity":
+        return None
+    raw = normalize_ocr_value(source.get("recognizer_raw_text", source.get("raw_text", "")))
+    if raw and not re.fullmatch(r"[0-9]+", raw):
+        return "hakodate_ocr_quantity_non_numeric"
+    if "recognizer_digit_score_threshold" in source:
+        threshold, score = source["recognizer_digit_score_threshold"], source.get("recognizer_score")
+        if any(type(value) not in (int, float) or not math.isfinite(value) for value in (threshold, score)):
+            raise ValueError("hakodate_recognizer_confidence_invalid")
+        if score < threshold:
+            return "hakodate_ocr_quantity_low_confidence"
+    candidate = source.get("recognizer_accepted_candidate")
+    if ((source.get("recognizer_candidate_accepted") is True and (
+                not isinstance(candidate, dict) or not raw
+                or not any(key in candidate and candidate[key] is not None
+                           for key in ("text", "normalized_digits"))))
+            or source.get("recognizer_decision_source") == "topk_digits"
+            or any(key in source and source[key] is not None and normalize_ocr_value(source[key]) != raw
+                   for key in ("ocr_text", "ocr_normalized", "pred_digits"))
+            or (isinstance(candidate, dict) and any(
+                key in candidate and normalize_ocr_value(candidate[key]) != raw
+                for key in ("text", "normalized_digits")))):
+        return "hakodate_ocr_quantity_candidate_conflict"
+    return None
+
+
 def recognition_input_issue(source: dict[str, Any]) -> str | None:
     evidence = source.get("recognizer_input_evidence")
     if "recognizer_input_evidence" not in source:
-        return source.get("quantity_source_issue") or None
+        return _quantity_recognizer_issue(source) or source.get("quantity_source_issue") or None
     if (not isinstance(evidence, dict) or evidence.get("contract") != "hakodate_contact_crop/v1"
             or type(evidence.get("all_white")) is not bool
             or not isinstance(evidence.get("bbox"), list) or len(evidence["bbox"]) != 4
@@ -85,11 +112,7 @@ def recognition_input_issue(source: dict[str, Any]) -> str | None:
         return "hakodate_blank_input_nonempty_prediction"
     if source.get("recognizer_preprocess_ink_removed") is True:
         return "hakodate_preprocess_ink_loss"
-    if source.get("role") == "quantity":
-        raw = normalize_ocr_value(source.get("recognizer_raw_text", source.get("raw_text", "")))
-        if raw and not re.fullmatch(r"[0-9]+", raw):
-            return "hakodate_ocr_quantity_non_numeric"
-    return source.get("quantity_source_issue") or None
+    return _quantity_recognizer_issue(source) or source.get("quantity_source_issue") or None
 
 
 def recognition_resolution(source: dict[str, Any]) -> dict[str, Any]:
@@ -99,7 +122,9 @@ def recognition_resolution(source: dict[str, Any]) -> dict[str, Any]:
         return {"resolution_state": "review_required", "resolved_value": None,
                 "quantity_source_issue": issue}
     value = source.get("ocr_normalized")
-    if source.get("role") == "note":
+    if source.get("role") == "quantity":
+        value = normalize_ocr_value(source.get("recognizer_raw_text", source.get("raw_text", "")))
+    elif source.get("role") == "note":
         value = source.get("recognizer_raw_text", source.get("raw_text", ""))
     return {"resolution_state": "resolved", "resolved_value": value}
 
@@ -116,7 +141,8 @@ def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
         if issue is None:
             continue
         cell = metadata.get("sheet_cell")
-        if (issue not in {"hakodate_blank_input_nonempty_prediction", "hakodate_ocr_quantity_non_numeric", "hakodate_preprocess_ink_loss"} or not isinstance(cell, str)
+        if (issue not in {"hakodate_blank_input_nonempty_prediction", "hakodate_ocr_quantity_non_numeric", "hakodate_preprocess_ink_loss",
+                          "hakodate_ocr_quantity_low_confidence", "hakodate_ocr_quantity_candidate_conflict"} or not isinstance(cell, str)
                 or not cell or cell in seen or not isinstance(record.get("raw_text"), str)):
             raise ValueError("hakodate_recognition_review_invalid")
         seen.add(cell)

@@ -901,6 +901,8 @@ def build_best_method_for_manifest_item(
             "candidate_digit_accept_count": ocr_metrics.get("candidate_digit_accept_count"),
             "digit_score_threshold": ocr_metrics.get("digit_score_threshold"),
             "candidate_digit_score_threshold": ocr_metrics.get("candidate_digit_score_threshold"),
+            **({"recognition_model_metadata": dict(ocr_metrics["recognition_model_metadata"])}
+               if "recognition_model_metadata" in ocr_metrics else {}),
             "preprocess_seconds": round(float(preprocess_seconds), 4),
             "snap_seconds": round(float(snap_seconds), 4),
             "contact_sheet_seconds": ocr_metrics.get("contact_sheet_seconds"),
@@ -1015,7 +1017,7 @@ def build_best_method_for_manifest_item(
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
     for original, serialized in zip(records, records_json):
-        for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed"):
+        for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed", "recognizer_digit_score_threshold"):
             if key in original:
                 serialized[key] = original[key]
         if original.get("recognition_source") == "operator":
@@ -1028,7 +1030,7 @@ def build_best_method_for_manifest_item(
         review_required = record.get("resolution_state") == "review_required"
         region["ocr_text"] = None if review_required else "" if operator_record else str(record.get("raw_text") or record.get("pred_digits") or "").strip()
         region["ocr_normalized"] = None if review_required else str(record.get("pred_digits") or "").strip()
-        region["ocr_engine"] = "operator" if operator_record else "opencv_knn_leave_one_out_k5"
+        region["ocr_engine"] = "operator" if operator_record else TEXT_RECOGNIZER_ENGINE
         region["source"] = "operator" if operator_record else "render_best_method_overlay_all_facilities.py"
         if operator_record:
             region["operator_value"] = original_record.get("operator_value")

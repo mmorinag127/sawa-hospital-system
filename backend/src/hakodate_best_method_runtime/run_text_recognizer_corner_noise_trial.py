@@ -30,7 +30,7 @@ WORKSPACE = BACKEND_ROOT.parent if (BACKEND_ROOT.parent / "tmp").exists() else B
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from src.services.hakodate_recognizer_input_evidence import contact_crop_evidence  # noqa: E402
-from src.services.hakodate_ocr_evidence_service import recognition_resolution  # noqa: E402
+from src.services.hakodate_ocr_evidence_service import normalize_ocr_value, recognition_resolution  # noqa: E402
 
 from src.services.hakodate_cell_ocr_batch_service import (  # noqa: E402
     _normalize_digits,
@@ -75,9 +75,9 @@ DEFAULT_RECOGNIZER_MODES = ("raw", "clean", "corner_cc")
 
 @diagnosed("initialize")
 def _load_text_recognizer(device: str):
-    from yomitoku import TextRecognizer  # noqa: PLC0415
+    from src.services.hakodate_empty_sequence_model import load_empty_sequence_recognizer
 
-    return TextRecognizer(device=device, visualize=False)
+    return load_empty_sequence_recognizer(device)
 
 
 def _clean_text_for_number(value: object) -> str:
@@ -585,35 +585,19 @@ def run_text_recognizer_direct(
         score = float(scores[index])
         direction = directions[index]
         candidates = list(candidates_by_region[index])
-        digits = _clean_text_for_number(raw_text)
+        normalized_raw = normalize_ocr_value(raw_text)
+        digits = normalized_raw if re.fullmatch(r"[0-9]+", normalized_raw) else ""
         if digits:
             digit_prediction_count += 1
-        accepted_candidate = next(
-            (
-                {
-                    **candidate,
-                    "normalized_digits": _clean_text_for_number(candidate.get("text")),
-                }
-                for candidate in candidates
-                if _clean_text_for_number(candidate.get("text"))
-                and float(candidate.get("score") or 0.0) >= candidate_digit_score_threshold
-            ),
-            None,
-        )
         if any(_clean_text_for_number(candidate.get("text")) for candidate in candidates):
             candidate_digit_prediction_count += 1
         accepted = bool(digits and score >= digit_score_threshold)
-        candidate_accepted = accepted_candidate is not None
         if accepted:
             accepted_count += 1
-        if candidate_accepted and not accepted:
-            candidate_digit_accept_count += 1
-        text = digits if accepted else str((accepted_candidate or {}).get("normalized_digits") or "")
+        text = normalized_raw
         decision_source = ""
         if accepted:
             decision_source = "raw_digits"
-        elif candidate_accepted:
-            decision_source = "topk_digits"
         assigned.append(
             {
                 **region,
@@ -631,11 +615,12 @@ def run_text_recognizer_direct(
                 "ocr_word_count": 1 if raw_text else 0,
                 "recognizer_raw_text": raw_text,
                 "recognizer_score": score,
+                "recognizer_digit_score_threshold": digit_score_threshold,
                 "recognizer_direction": direction,
                 "recognizer_accepted": accepted,
                 "recognizer_candidates": candidates,
-                "recognizer_candidate_accepted": candidate_accepted,
-                "recognizer_accepted_candidate": accepted_candidate,
+                "recognizer_candidate_accepted": False,
+                "recognizer_accepted_candidate": None,
                 "recognizer_decision_source": decision_source,
             }
         )
@@ -648,17 +633,10 @@ def run_text_recognizer_direct(
                                 recognizer_accepted=False, recognizer_candidate_accepted=False,
                                 recognizer_decision_source="review_required")
             accepted_count -= int(accepted)
-            candidate_digit_accept_count -= int(candidate_accepted and not accepted)
         elif region.get("role") == "note":
             assigned[-1].update(ocr_text=raw_text, ocr_normalized=raw_text)
-    repaired_assigned = apply_column_context_digit_repair(assigned) if enable_context_repair else assigned
-    for original, repaired in zip(assigned, repaired_assigned):
-        if original["resolution_state"] == "review_required":
-            repaired.update(ocr_text=None, ocr_normalized=None, resolved_value=None,
-                            resolution_state="review_required", recognizer_accepted=False,
-                            recognizer_candidate_accepted=False, recognizer_decision_source="review_required")
-    repair_count = sum(1 for region in repaired_assigned if region.get("recognizer_context_repair"))
-    return repaired_assigned, {
+    # Alternative candidates and column context never replace a model's raw value.
+    return assigned, {
         "engine": TRIAL_ENGINE,
         "ocr_seconds": round(float(elapsed), 3),
         "candidate_count": len(regions),
@@ -667,11 +645,13 @@ def run_text_recognizer_direct(
         "accepted_digit_count": accepted_count,
         "candidate_digit_prediction_count": candidate_digit_prediction_count,
         "candidate_digit_accept_count": candidate_digit_accept_count,
-        "context_repair_count": repair_count,
+        "context_repair_count": 0,
         "score_threshold": score_threshold,
         "digit_score_threshold": digit_score_threshold,
         "candidate_digit_score_threshold": candidate_digit_score_threshold,
         "sequence_top_k": sequence_top_k,
+        **({"recognition_model_metadata": deepcopy(recognizer.recognition_model_metadata)}
+           if hasattr(recognizer, "recognition_model_metadata") else {}),
     }
 
 
