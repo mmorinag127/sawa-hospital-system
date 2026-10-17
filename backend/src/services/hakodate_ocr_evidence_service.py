@@ -93,6 +93,10 @@ def _quantity_recognizer_issue(source: dict[str, Any]) -> str | None:
 
 
 def recognition_input_issue(source: dict[str, Any]) -> str | None:
+    observation_issue = None
+    if 'recognizer_preprocess_observation' in source:
+        from src.services.hakodate_preprocess_observation import validate_metadata
+        observation_issue = validate_metadata(source)
     evidence = source.get("recognizer_input_evidence")
     if "recognizer_input_evidence" not in source:
         return _quantity_recognizer_issue(source) or source.get("quantity_source_issue") or None
@@ -110,7 +114,9 @@ def recognition_input_issue(source: dict[str, Any]) -> str | None:
     if evidence["all_white"] and any(str(source.get(key) or "").strip() for key in
             ("raw_text", "text", "recognizer_raw_text", "ocr_text", "ocr_normalized", "pred_digits")):
         return "hakodate_blank_input_nonempty_prediction"
-    if source.get("recognizer_preprocess_ink_removed") is True:
+    if observation_issue:
+        return observation_issue
+    if source.get("recognizer_preprocess_ink_removed") is True and 'recognizer_preprocess_observation' not in source:
         return "hakodate_preprocess_ink_loss"
     return _quantity_recognizer_issue(source) or source.get("quantity_source_issue") or None
 

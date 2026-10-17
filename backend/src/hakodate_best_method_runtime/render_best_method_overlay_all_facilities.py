@@ -385,6 +385,8 @@ def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], 
         value = operator_values[cell]
         records.append({
             **region, "truth": truth.get(cell) or {}, "expected_digits": str((truth.get(cell) or {}).get("expected_digits") or ""),
+            **({"recognizer_input_evidence": region["recognizer_preprocess_observation"]["contact"]}
+               if "recognizer_preprocess_observation" in region else {}),
             "raw_text": "", "pred_digits": value, "score": None, "ocr_candidate": False,
             "ocr_engine": "operator", "recognition_source": "operator", "operator_value": value,
             "supervised_label_source": "operator",
@@ -1017,9 +1019,11 @@ def build_best_method_for_manifest_item(
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
     for original, serialized in zip(records, records_json):
-        for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed", "recognizer_digit_score_threshold"):
+        for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed", "recognizer_digit_score_threshold", "recognizer_preprocess_observation"):
             if key in original:
                 serialized[key] = original[key]
+        if 'recognizer_preprocess_observation' in original:
+            serialized['polygon'] = original.get('polygon')
         if original.get("recognition_source") == "operator":
             serialized.update(operator_value=original["operator_value"], recognition_source="operator", ocr_engine="operator")
     records_path.write_text(json.dumps(records_json, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1038,6 +1042,19 @@ def build_best_method_for_manifest_item(
     regions_path.write_text(json.dumps(ocr_regions, ensure_ascii=False, indent=2), encoding="utf-8")
     sheet_values_path.write_text(json.dumps({"cells": {}, "rows": [], "columns": []}, ensure_ascii=False, indent=2), encoding="utf-8")
     metrics["total_seconds"] = round(float(time.perf_counter() - total_t0), 4)
+    observation_outputs = {}
+    if any('recognizer_preprocess_observation' in record for record in records_json):
+        from src.services.hakodate_preprocess_observation import CONTRACT as OBSERVATION_CONTRACT
+        if checkpoint_reference is None:
+            from src.services.hakodate_ocr_checkpoint_service import persist_recognizer_checkpoint
+            checkpoint_reference = persist_recognizer_checkpoint(item=item,raw_rectified_bgr=pre['raw_rectified'],
+                regions=snapped_regions,expected_sheet_cells=expected_sheet_cells,
+                metadata={'axis_evidence':preprocess_axis_evidence,'rectified_quad_points':pre.get('rectified_quad_points'),'snap_debug':snap_debug})
+        observation_path = facility_dir / 'preprocess_observation.json'
+        observation_path.write_text(json.dumps({'contract':OBSERVATION_CONTRACT,'checkpoint':checkpoint_reference,
+            'observations':[record['recognizer_preprocess_observation'] for record in records_json]},
+            separators=(',',':')),encoding='utf-8')
+        observation_outputs['preprocess_observation'] = str(observation_path)
     summary = {
         "page": page_index,
         "expected_sheet_cells": expected_sheet_cells,
@@ -1052,6 +1069,7 @@ def build_best_method_for_manifest_item(
         "metrics": metrics,
         "snap_debug": snap_debug,
         "outputs": {
+            **observation_outputs,
             "pdf": str(page_pdf),
             "overlay": str(page_png),
             "overlay_png": str(page_png),

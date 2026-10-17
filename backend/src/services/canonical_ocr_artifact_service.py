@@ -137,4 +137,14 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
             raise ValueError("canonical_artifact_content_invalid")
         if key in ("records", "contact_sheet"):
             verified_inputs[key] = data
+        if key == 'preprocess_observation':
+            verified_inputs[key] = data
+    original_records = json.loads(verified_inputs['records'])
+    has_observation = any(isinstance(row,dict) and 'recognizer_preprocess_observation' in row for row in original_records)
+    if has_observation != ('preprocess_observation' in verified_inputs):
+        raise ValueError('hakodate_observation_artifact_required')
+    if has_observation:
+        from src.services.hakodate_preprocess_observation import validate_artifact
+        validate_artifact(verified_inputs['preprocess_observation'],original_records,
+            verified_inputs['contact_sheet'],source_receipt)
     return verified_inputs
