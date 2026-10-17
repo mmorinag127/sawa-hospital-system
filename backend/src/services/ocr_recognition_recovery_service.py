@@ -45,11 +45,96 @@ def operator_values(values, cells):
     return dict(values)
 
 
+def _native_owner(session, order, job):
+    from sqlalchemy import select
+    from src.models.ingest_delivery import IngestDelivery
+    from src.services import ingest_delivery_service as delivery
+    from src.services import workflow_attempt_guard_service as guard
+
+    metrics = job.metrics or {}
+    captured = metrics.get("nonworkflow_execution")
+    if (not isinstance(captured, dict) or captured.get("ingest_ocr_mode") != "hakodate"
+            or metrics.get("ingest_ocr_mode") != "hakodate"
+            or metrics.get("workflow_attempt_id") is not None
+            or captured.get("intake_protocol") != "native_ingest_v2"
+            or captured.get("order_id") != order.id or captured.get("job_order_id") != order.id
+            or captured.get("job_id") != job.id or not captured.get("execution_id")):
+        raise ValueError("recognition_native_owner_changed")
+    lease = captured.get("ingest_lease")
+    if (not isinstance(lease, dict) or not isinstance(lease.get("payload"), dict)
+            or metrics.get("ingest_lease") != lease):
+        raise ValueError("recognition_native_owner_changed")
+    orders = captured.get("orders")
+    owned = orders.get(order.id) if isinstance(orders, dict) else None
+    if (not isinstance(owned, dict) or set(orders) != {order.id}
+            or not isinstance(owned.get("order"), dict) or not isinstance(owned.get("document"), dict)):
+        raise ValueError("recognition_native_input_changed")
+    starts = captured.get("start_orders")
+    start = starts.get(order.id) if isinstance(starts, dict) else None
+    if not isinstance(start, dict) or not isinstance(start.get("processing_start_input"), dict):
+        raise ValueError("recognition_native_start_input_required")
+    with guard.nonworkflow_execution_context(captured):
+        start = guard.processing_start_read_input()
+    if any(not guard.snapshots_equal(start.get(key), owned.get(key))
+            for key in ("configured_input", "physical_menu_entries")):
+        raise ValueError("recognition_native_input_changed")
+    row = session.execute(select(IngestDelivery).where(
+        IngestDelivery.job_id == lease.get("id"),
+        IngestDelivery.business_generation == lease.get("generation"),
+    ).with_for_update()).scalar_one_or_none()
+    original = delivery._original(session, row, read_only=True) if row is not None else None
+    if (original is None or row is None
+            or original.status != ("done" if job.status == "done" else "error")
+            or original.claim_id != lease.get("claim_id") or original.attempts != lease.get("attempts")
+            or original.input_digest != lease.get("input_digest") or original.payload != lease.get("payload")
+            or row.state not in {"CLAIMED", "ACKNOWLEDGED"}):
+        raise ValueError("recognition_native_generation_changed")
+    kind, terminal = delivery._receipt(session, row, job)
+    if kind != "terminal" or terminal != row.terminal_receipt:
+        raise ValueError("recognition_native_terminal_changed")
+    if not isinstance(metrics.get("rerun_terminal_receipt"), dict):
+        raise ValueError("recognition_native_terminal_changed")
+    delivery._require_uploaded_terminal(session, row, "completed" if job.status == "done" else "failed")
+    # Workflow review metadata may advance, but the terminal's business/source
+    # snapshot must still be exact. Saving recovery never renews the old lease.
+    current = guard._order_execution_input(session, order, lock=True, original_input=owned)
+    for key in owned:
+        if key not in {"workflow", "workflow_revision"} and not guard.snapshots_equal(current.get(key), owned[key]):
+            raise ValueError("recognition_native_input_changed")
+    source = guard.capture_selected_pdf_receipt(session, order)
+    if (job.order_document_id != order.current_document_id
+            or source != captured.get("selected_pdf_receipt")
+            or job.input_artifact_digest != source["sha256"]
+            or not guard.verify_selected_pdf_receipt(session, source)):
+        raise ValueError("recognition_native_source_changed")
+    return workflow._stable_json_hash(terminal)
+
+
+def _is_native(job):
+    metrics = job.metrics or {}
+    captured = metrics.get("nonworkflow_execution")
+    lease = metrics.get("ingest_lease")
+    payload = lease.get("payload") if isinstance(lease, dict) else None
+    return (metrics.get("ingest_ocr_mode") is not None
+            or isinstance(captured, dict) and captured.get("ingest_ocr_mode") is not None
+            or isinstance(payload, dict) and payload.get("intake_protocol") == "native_ingest_v2")
+
+
 def _failed_checkpoint(session, order, state, ocr_result_id=None):
     job_id = workflow._workflow_meta(state).get("ocr_job_id")
     job = session.get(workflow.OcrJob, job_id) if job_id else None
-    if job is None or job.order_id != order.id:
+    if job is None or job.order_id != order.id or not isinstance(job.metrics, dict):
         raise ValueError("recognition_failed_job_required")
+    native = _is_native(job)
+    if native:
+        if workflow._workflow_meta(state).get("ocr_job_attempt_id") is not None:
+            raise ValueError("recognition_native_owner_changed")
+        _native_owner(session, order, job)
+        terminal_result = job.metrics["rerun_terminal_receipt"].get("evidence_run_id")
+        if workflow._workflow_meta(state).get("latest_ocr_result_id") != terminal_result:
+            raise ValueError("recognition_review_result_changed")
+        if ocr_result_id is None and job.status == "failed":
+            ocr_result_id = terminal_result
     if ocr_result_id is not None:
         if job.status not in {"done", "failed"} or workflow._workflow_meta(state).get("latest_ocr_result_id") != ocr_result_id:
             raise ValueError("recognition_review_result_changed")
@@ -61,8 +146,10 @@ def _failed_checkpoint(session, order, state, ocr_result_id=None):
         review = payload.get("hakodate_recognition_review")
         if (not isinstance(execution, dict) or execution.get("job_id") != job.id
                 or execution.get("evidence_run_id") != ocr_result_id
-                or not (job.metrics or {}).get("workflow_attempt_id")
-                or execution.get("workflow_attempt_id") != job.metrics["workflow_attempt_id"]
+                or (not native and (not (job.metrics or {}).get("workflow_attempt_id")
+                    or execution.get("workflow_attempt_id") != job.metrics["workflow_attempt_id"]))
+                or (native and (execution.get("workflow_attempt_id") is not None
+                    or (job.metrics or {}).get("rerun_terminal_receipt", {}).get("evidence_run_id") != ocr_result_id))
                 or not isinstance(review, dict) or not isinstance(review.get("cells"), list)
                 or not review["cells"] or type(review.get("count")) is not int
                 or review["count"] != len(review["cells"])):
@@ -90,6 +177,10 @@ def get_review(order_id, *, document_id=None, ocr_result_id=None):
             receipt["recognition_job_id"] = job.id
             if ocr_result_id is not None:
                 receipt["recognition_evidence_run_id"] = ocr_result_id
+            if _is_native(job):
+                receipt["native_recognition_owner"] = _native_owner(session, order, job)
+                if job.metrics["rerun_terminal_receipt"].get("evidence_run_id") is not None:
+                    receipt["recognition_evidence_run_id"] = job.metrics["rerun_terminal_receipt"]["evidence_run_id"]
             detail = (job.metrics or {}).get("error_detail") or job.error_message
         except ValueError as exc:
             return None, str(exc)
@@ -124,11 +215,14 @@ def save_review(order_id, *, source_receipt, values, edited_by):
         state = workflow._get_workflow(session, order_id)
         if state is None:
             return None, "workflow_not_initialized"
-        error = workflow._validate_axis_receipt(session, order, state, source_receipt)
-        if error:
-            return None, error
         try:
+            error = workflow._validate_axis_receipt(session, order, state, source_receipt)
+            if error:
+                return None, error
             job, checkpoint = _failed_checkpoint(session, order, state, source_receipt.get("recognition_evidence_run_id"))
+            if (_is_native(job) and source_receipt.get("native_recognition_owner") != _native_owner(session, order, job)
+                    or not _is_native(job) and "native_recognition_owner" in source_receipt):
+                raise ValueError("recognition_native_owner_changed")
             if (source_receipt.get("recognition_job_id") != job.id
                     or source_receipt.get("recognition_checkpoint_digest") != workflow._stable_json_hash(checkpoint)):
                 raise ValueError("recognition_checkpoint_changed")
