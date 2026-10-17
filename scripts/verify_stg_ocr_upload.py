@@ -401,7 +401,8 @@ def _resume_upload(case, selection, folder):
     save_json(folder, 'resume-before.json', {'upload': public_state, 'order': order, 'workflow': workflow})
     if state.get('status') != 'completed':
         # No lease override or fallback upload: the operator API owns restart guards.
-        result = request(path + '/retry', method='POST')
+        protocol_query = '?intake_protocol=native_ingest_v2' if case.get('expected_execution_mode') == 'native_ingest' else ''
+        result = request(path + '/retry' + protocol_query, method='POST')
         if result.get('accepted') is not True or (result.get('item') or {}).get('id') != uploaded_id:
             raise RuntimeError('Existing upload retry not accepted')
         public_result = {**result, 'item': {key: value for key, value in result['item'].items()
@@ -540,7 +541,7 @@ def native_ingest_outcome(evidence, workflow, case):
     execution = payload.get('_ocr_execution') or {}
     pdf = execution.get('selected_pdf_receipt') or {}
     if (case.get('expected_execution_mode') != 'native_ingest'
-            or native.get('mode') != 'hakodate' or not isinstance(terminal, dict)
+            or native.get('mode') != 'hakodate' or native.get('intake_protocol') != 'native_ingest_v2' or not isinstance(terminal, dict)
             or not native.get('execution_id') or terminal.get('execution_id') != native['execution_id']
             or terminal.get('job_id') != job.get('ocr_job_id')
             or terminal.get('order_id') != workflow.get('order_id') or terminal.get('status') != job.get('status')
@@ -942,7 +943,7 @@ def main():
                     continue
                 if native_expected and 'native_ingest' in (workflow.get('ocr_job') or {}):
                     native = workflow['ocr_job']['native_ingest']
-                    if (not isinstance(native, dict) or native.get('mode') != 'hakodate'
+                    if (not isinstance(native, dict) or native.get('mode') != 'hakodate' or native.get('intake_protocol') != 'native_ingest_v2'
                             or not isinstance(native.get('execution_id'), str) or not native['execution_id']):
                         raise RuntimeError('Normal upload native mode or execution invalid')
                     native_flow = True
@@ -1081,7 +1082,8 @@ def upload_new(case, selection, raw):
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
     parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="pdf_file"; filename="{verification_case_id(case)}.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode() + raw + b'\r\n')
     parts.append(f'--{boundary}--\r\n'.encode())
-    return request('/ingest/upload', b''.join(parts), 'multipart/form-data; boundary=' + boundary)
+    protocol_query = '?intake_protocol=native_ingest_v2' if case.get('expected_execution_mode') == 'native_ingest' else ''
+    return request('/ingest/upload' + protocol_query, b''.join(parts), 'multipart/form-data; boundary=' + boundary)
 
 
 if __name__ == '__main__':

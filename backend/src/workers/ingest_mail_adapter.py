@@ -21,6 +21,7 @@ class IngestEmailPayload:
     uploaded_pdf_id: Optional[str] = None
     order_document_id: Optional[str] = None
     facility_selection: Optional[dict] = None
+    intake_protocol: Optional[str] = None
 
 
 def parse_ingest_payload(data: dict) -> IngestEmailPayload:
@@ -45,12 +46,14 @@ def parse_ingest_payload(data: dict) -> IngestEmailPayload:
         uploaded_pdf_id=data.get("uploaded_pdf_id"),
         order_document_id=data.get("order_document_id"),
         facility_selection=data.get("facility_selection"),
+        intake_protocol=data.get("intake_protocol"),
     )
 
 
 def to_job_kwargs(payload: IngestEmailPayload) -> dict:
     """Serialize payload for enqueueing."""
     return {
+        **({"intake_protocol": payload.intake_protocol} if payload.intake_protocol is not None else {}),
         "message_id": payload.message_id,
         "pdf_uri": payload.pdf_uri,
         "received_at": payload.received_at.isoformat(),

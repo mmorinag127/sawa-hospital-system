@@ -726,7 +726,7 @@ def _process_ingest_inline(**kwargs):
         ocr_job_id = payload.ocr_job_id if payload.ocr_job_id is not None else f"OCR-{payload.order_id}"
     else:
         ocr_job_id = payload.ocr_job_id if payload.ocr_job_id is not None else f"OCR-{payload.message_id}"
-    if lease.get("recovery_claim_id") is None and not payload.skip_ocr and payload.ocr_job_id is None:
+    if lease.get("recovery_claim_id") is None and payload.ocr_job_id is None:
         ocr_job_id = f"{ocr_job_id}-{lease['generation']}"
     if not isinstance(ocr_job_id, str) or not ocr_job_id.strip():
         raise ValueError("ocr_job_identity_required")
@@ -767,7 +767,7 @@ def _capture_and_process_ingest(payload, ocr_job_id, lease, *, original=None, pr
             if refresh_uploaded_pdf_links(lease["uploaded_lease"]["id"], lease=lease["uploaded_lease"],
                 order_id=receipt["order_id"], document_id=receipt["document_id"]) is None:
                 raise ValueError("uploaded_pdf_attempt_changed")
-    if original is None and not payload.skip_ocr:
+    if original is None and payload.intake_protocol == "native_ingest_v2" and not payload.skip_ocr:
         from src.services import order_workflow_v2_service
         with order_service.session_scope() as session:
             order = order_service.lock_order_execution_input(session, payload.order_id)
@@ -776,7 +776,7 @@ def _capture_and_process_ingest(payload, ocr_job_id, lease, *, original=None, pr
             order_workflow_v2_service.initialize_ingest_context(session, order, payload.facility_selection, ocr_job_id)
     execution_input = original if original is not None else capture_nonworkflow_execution(ocr_job_id, order_id=payload.order_id,
         input_reference=payload.pdf_uri, expected_document_id=payload.order_document_id,
-        ingest_ocr_mode="registration_only" if payload.skip_ocr else "hakodate")
+        ingest_ocr_mode=("registration_only" if payload.skip_ocr else "hakodate") if payload.intake_protocol == "native_ingest_v2" else None)
     with nonworkflow_execution_context(execution_input):
         try:
             if execution_input.get("selected_pdf_error"):
@@ -891,6 +891,11 @@ def map_own_ingest_result(payload, pdf_bytes, pipeline_result, mapping_input):
 
 def _process_ingest_captured(payload, ocr_job_id: str, execution_input: dict):
     mode = execution_input.get("ingest_ocr_mode")
+    protocol = execution_input.get("ingest_lease", {}).get("payload", {}).get("intake_protocol")
+    if (protocol != payload.intake_protocol or protocol not in (None, "native_ingest_v2")
+            or (protocol == "native_ingest_v2") != (mode is not None)
+            or (mode is not None and execution_input.get("intake_protocol") != protocol)):
+        raise ValueError("intake_protocol_mismatch")
     if mode == "hakodate":
         if payload.skip_ocr:
             raise ValueError("native_ingest_skip_ocr_forbidden")

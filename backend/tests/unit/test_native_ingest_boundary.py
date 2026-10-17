@@ -18,6 +18,7 @@ from test_stg_ocr_resume_upload import mod as verifier
 def native_terminal(status='done'):
     pdf = {'order_id': 'order', 'document_id': 'document', 'sha256': 'a' * 64, 'storage_uri': 'owned-source'}
     capture = {'job_id': 'job', 'execution_id': 'execution', 'order_id': 'order', 'ingest_ocr_mode': 'hakodate',
+               'intake_protocol': 'native_ingest_v2', 'ingest_lease': {'payload': {'intake_protocol': 'native_ingest_v2'}},
                'selected_pdf_receipt': pdf, 'orders': {'order': {'order': {'template_version_id': 'CFVexplicit'}}}}
     terminal = {'job_id': 'job', 'execution_id': 'execution', 'order_id': 'order', 'status': status,
                 'evidence_run_id': 'evidence', 'workflow_attempt_id': None, 'error': None if status == 'done' else 'review'}
@@ -30,6 +31,19 @@ def native_terminal(status='done'):
         'result_state': 'evidence_ready' if status == 'done' else 'review_required', 'processing_stage': 'evidence_ready'})
     session = Row(get=lambda model, identity: evidence if identity == 'evidence' else None)
     return session, job, capture, evidence
+
+
+@pytest.mark.parametrize('change', [None, 'missing_evidence', 'missing_value', 'conflict', 'unassigned', 'blocker'])
+def test_resolved_blank_gate_requires_actual_evidence_for_every_target(change):
+    from src.services.hakodate_ocr_evidence_service import has_resolved_blank_targets
+    result = {'assignments': [{'assignment_state': 'blank_evidence', 'evidence_ids': ['authored-record']}],
+              'blockers': [], 'unassigned_evidence': []}
+    if change == 'missing_evidence': result['assignments'][0]['evidence_ids'] = []
+    elif change == 'missing_value': result['assignments'][0]['assignment_state'] = 'blank'
+    elif change == 'conflict': result['assignments'][0]['assignment_state'] = 'conflict'
+    elif change == 'unassigned': result['unassigned_evidence'] = [{'evidence_id': 'foreign'}]
+    elif change == 'blocker': result['blockers'] = ['unresolved target']
+    assert has_resolved_blank_targets(result) is (change is None)
 
 
 @pytest.mark.parametrize('status', ['done', 'failed'])
@@ -73,6 +87,7 @@ def test_saved_legacy_and_explicit_registration_receipts_keep_original_meaning()
     session, job, capture, _ = native_terminal()
     for mode in (None, 'registration_only'):
         capture['ingest_ocr_mode'] = mode
+        capture['ingest_lease']['payload'] = {'intake_protocol': 'native_ingest_v2'} if mode else {}
         capture['orders']['order']['document'] = {'id': 'document'}
         job.metrics = {'result_state': 'skipped', 'non_ocr_terminal_receipt': {
             'job_id': job.id, 'execution_id': capture['execution_id'], 'document_id': 'document',
@@ -137,6 +152,7 @@ def test_registration_only_rejects_conflicting_or_non_failure_source_aliases(cha
 def test_v1_none_keeps_its_existing_first_pass_receipt_semantics():
     session, job, capture, _ = native_terminal()
     capture['ingest_ocr_mode'] = None
+    capture['ingest_lease']['payload'] = {}
     receipt = deepcopy(job.metrics['rerun_terminal_receipt'])
     job.metrics = {'first_pass_terminal_receipt': receipt}
     assert ingest.ingest_terminal_receipt(session, job, capture) is receipt
@@ -146,7 +162,8 @@ def context_fixture(monkeypatch, active=True):
     from src.models.ocr_job import OcrJob
     from src.models.document import OrderDocument
     from src.services import ingest_facility_selection_service as selection
-    lease = {'id': 'message', 'generation': 'new-generation', 'claim_id': 'current-claim'}
+    lease = {'id': 'message', 'generation': 'new-generation', 'claim_id': 'current-claim',
+             'payload': {'intake_protocol': 'native_ingest_v2'}}
     order = Row(id='order', facility_code='FAC00004', week_code='2026-10@2026-10-18~2026-10-24',
                 current_document_id='document', template_version_id='CFVexplicit')
     job = Row(id='job', order_id=order.id, order_document_id='document', input_reference='owned-source', status='running',
@@ -229,10 +246,11 @@ def test_native_settlement_errors_are_not_warning_only(monkeypatch):
 
 
 def test_native_dispatch_does_not_enter_old_pipeline_or_auto_adopt(monkeypatch):
-    capture = {'ingest_ocr_mode': 'hakodate', 'orders': {'order': {
+    capture = {'ingest_ocr_mode': 'hakodate', 'intake_protocol': 'native_ingest_v2',
+        'ingest_lease': {'payload': {'intake_protocol': 'native_ingest_v2'}}, 'orders': {'order': {
         'order': {'week_code': '2026-10@2026-10-18~2026-10-24'}, 'document': {'id': 'document'}}}}
     payload = Row(skip_ocr=False, week_hint='2026-10@2026-10-18~2026-10-24', order_id='order',
-                  order_document_id='document', message_id='message')
+                  order_document_id='document', message_id='message', intake_protocol='native_ingest_v2')
     calls = []
     monkeypatch.setattr(order_service, 'rerun_ocr_evidence_only', lambda *args, **kwargs:
         calls.append(kwargs) or ({'terminal_receipt': {'status': 'done'}}, None))
@@ -406,7 +424,7 @@ def test_native_python_verifier_matches_exact_receipt_without_attempt(outcome):
         evidence['status'] = 'done'
         evidence['payload_json'].pop('hakodate_recognition_review')
         source['resolution_state'] = 'resolved'
-    job['native_ingest'] = {'mode': 'hakodate', 'execution_id': 'execution', 'terminal_receipt': {
+    job['native_ingest'] = {'mode': 'hakodate', 'intake_protocol': 'native_ingest_v2', 'execution_id': 'execution', 'terminal_receipt': {
         'job_id': 'job', 'execution_id': 'execution', 'order_id': 'order', 'status': job['status'],
         'evidence_run_id': evidence['id'], 'workflow_attempt_id': None, 'error': None if outcome == 'done' else 'review'}}
     expected = {'sha256': 'a' * 64, 'expected_execution_mode': 'native_ingest', 'required_raw_cells': []}
@@ -425,7 +443,7 @@ def test_new_generation_does_not_reinitialize_a_saved_legacy_capture(monkeypatch
     monkeypatch.setattr(ingest, 'session_scope', session_scope)
     monkeypatch.setattr(ingest, 'lock_ingest_lease', lambda *args: True)
     with pytest.raises(ValueError, match='original_job_reuse_forbidden'):
-        ingest.prepare_ingest_ocr_job({'id': 'message', 'generation': 'new-generation'}, 'old-job', Row())
+        ingest.prepare_ingest_ocr_job({'id': 'message', 'generation': 'new-generation', 'payload': {}}, 'old-job', Row(intake_protocol=None))
     assert vars(previous) == before
 
 

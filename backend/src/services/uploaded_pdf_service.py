@@ -181,6 +181,7 @@ def create_uploaded_pdf_from_upload(
     page_count: int | None = None,
     force: bool = False,
     facility_selection: dict | None = None,
+    intake_protocol: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     from src.services.ingest_delivery_dispatch_service import required_config
     from src.services.ingest_delivery_service import transaction
@@ -267,14 +268,16 @@ def create_uploaded_pdf_from_upload(
         serialized = _serialize_uploaded_pdf(row)
         if not duplicate_blocked:
             serialized["ingest_receipt"] = create_ingest_receipt(build_ingest_payload(serialized,
-                facility_selection=facility_selection),
+                facility_selection=facility_selection, intake_protocol=intake_protocol),
                 force=force, write_session=session)
         else:
             serialized["ingest_receipt"] = {"id": row.message_id, "enqueued": False}
     return serialized, duplicate_blocked
 
 
-def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=None, write_session=None) -> dict[str, Any]:
+def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=None, write_session=None, intake_protocol=None) -> dict[str, Any]:
+    if intake_protocol is not None and intake_protocol != "native_ingest_v2":
+        raise ValueError("intake_protocol_invalid")
     week_hint = require_explicit_ingest_week(uploaded_pdf.get("week_hint"))
     payload = {
         "message_id": uploaded_pdf.get("message_id"),
@@ -310,6 +313,10 @@ def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=Non
                 if job["payload"].get(key) != payload.get(key):
                     raise ValueError("uploaded_pdf_original_input_changed")
             facility_selection = job["payload"].get("facility_selection")
+            if "intake_protocol" in job["payload"]:
+                payload["intake_protocol"] = job["payload"]["intake_protocol"]
+    if intake_protocol is not None:
+        payload["intake_protocol"] = intake_protocol
     payload["facility_selection"] = validate_selection(facility_selection, payload["facility_hint"], week_hint)
     return payload
 
@@ -671,7 +678,9 @@ def schedule_uploaded_pdf_retry(
         return _serialize_uploaded_pdf(row)
 
 
-def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
+def requeue_uploaded_pdf(uploaded_pdf_id: str, *, intake_protocol=None) -> dict[str, Any] | None:
+    if intake_protocol is not None and intake_protocol != "native_ingest_v2":
+        raise ValueError("intake_protocol_invalid")
     from src.services.ingest_delivery_dispatch_service import required_config
     from src.services.ingest_delivery_service import transaction
     from src.services.ingest_job_service import restart_ingest_job
@@ -682,7 +691,19 @@ def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
         row = session.get(UploadedPdf, uploaded_pdf_id, populate_existing=True, with_for_update=True)
         if row is None:
             return None
-        build_ingest_payload(_serialize_uploaded_pdf(row), write_session=session)
+        original = build_ingest_payload(_serialize_uploaded_pdf(row), write_session=session)
+        if intake_protocol is None and original.get("intake_protocol") is not None:
+            raise ValueError("intake_protocol_mismatch")
+        if intake_protocol is not None:
+            from src.services.workflow_attempt_guard_service import capture_selected_pdf_receipt, verify_selected_pdf_receipt
+            order = session.get(Order, row.current_order_id, with_for_update=True) if row.current_order_id else None
+            if order is None or order.current_document_id != row.current_document_id:
+                raise ValueError("native_retry_source_owner_required")
+            from src.services.ingest_facility_selection_service import require_order_selection
+            require_order_selection(session, order, original["facility_selection"])
+            source = capture_selected_pdf_receipt(session, order, input_reference=row.storage_uri)
+            if not verify_selected_pdf_receipt(session, source):
+                raise ValueError("native_retry_source_changed")
         row.status = "pending"
         row.current_stage = "uploaded"
         row.lease_owner = None
@@ -693,7 +714,10 @@ def requeue_uploaded_pdf(uploaded_pdf_id: str) -> dict[str, Any] | None:
         row.last_error_message = None
         row.updated_at = now
         session.flush()
-        if not restart_ingest_job(row.message_id, write_session=session):
+        if intake_protocol is not None:
+            from src.services.ingest_job_service import create_ingest_receipt
+            create_ingest_receipt({**original, "intake_protocol": intake_protocol}, force=True, write_session=session)
+        elif not restart_ingest_job(row.message_id, write_session=session):
             raise ValueError("ingest_delivery_restart_original_missing")
         return _serialize_uploaded_pdf(row)
 

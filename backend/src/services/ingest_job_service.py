@@ -47,6 +47,10 @@ def ingest_terminal_receipt(session, job, captured):
     mode = captured.get("ingest_ocr_mode")
     if mode not in (None, "registration_only", "hakodate"):
         raise ValueError("ingest_ocr_mode_unknown")
+    protocol = (captured.get("ingest_lease") or {}).get("payload", {}).get("intake_protocol")
+    if ((mode is None and protocol is not None)
+            or (mode is not None and (protocol != "native_ingest_v2" or captured.get("intake_protocol") != protocol))):
+        raise ValueError("intake_protocol_mismatch")
     if mode is None:
         kinds = [key for key in ("first_pass_terminal_receipt", "non_ocr_terminal_receipt") if metrics.get(key) is not None]
         if len(kinds) > 1:
@@ -150,6 +154,9 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
     with session_scope() as session:
         if not lock_ingest_lease(session, lease):
             raise ValueError("ingest_attempt_changed")
+        protocol = lease["payload"].get("intake_protocol")
+        if protocol not in (None, "native_ingest_v2") or payload.intake_protocol != protocol:
+            raise ValueError("intake_protocol_mismatch")
         session.execute(update(OcrJob).where(OcrJob.id == job_id).values(status=OcrJob.status))
         job = session.get(OcrJob, job_id, populate_existing=True, with_for_update=True)
         if job is not None and (job.metrics or {}).get("workflow_attempt_id") is not None:
@@ -183,11 +190,12 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
         job.updated_at = datetime.utcnow()
         retained = {key: value for key, value in (job.metrics or {}).items() if key not in {
             "nonworkflow_execution", "pipeline_delivery_receipt", "pending_receipt", "first_pass_terminal_receipt",
-            "non_ocr_terminal_receipt", "source_failure_receipt", "rerun_terminal_receipt", "evidence_run_id", "reparse_evidence_run_id",
+            "non_ocr_terminal_receipt", "source_failure_receipt", "rerun_terminal_receipt", "evidence_run_id", "reparse_evidence_run_id", "ingest_ocr_mode",
         }}
         job.metrics = {**retained, "ingest_lease": deepcopy(lease), "result_state": "processing",
                        "processing_stage": "input_capture", "next_recovery_at": None,
-                       "ingest_ocr_mode": "registration_only" if payload.skip_ocr else "hakodate"}
+                       **({"ingest_ocr_mode": "registration_only" if payload.skip_ocr else "hakodate"}
+                          if lease["payload"].get("intake_protocol") == "native_ingest_v2" else {})}
         job.output_reference = None
         session.flush()
         return _job_to_dict(job)
@@ -250,6 +258,11 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     from src.services.ingest_policy import require_explicit_ingest_week
 
     normalized = dict(payload)
+    # The optional dataclass field is not a new key in the schema-1 protocol.
+    if normalized.get("intake_protocol") is None:
+        normalized.pop("intake_protocol", None)
+    if "intake_protocol" in normalized and normalized["intake_protocol"] != "native_ingest_v2":
+        raise ValueError("intake_protocol_invalid")
     normalized["week_hint"] = require_explicit_ingest_week(normalized.get("week_hint"))
     from src.services.ingest_facility_selection_service import validate_selection
     normalized["facility_selection"] = validate_selection(

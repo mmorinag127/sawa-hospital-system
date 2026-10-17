@@ -145,6 +145,7 @@ jobs:
             tests/unit/test_stg_ocr_verified_source_case.py \
             tests/unit/test_native_ingest_boundary.py \
             tests/unit/test_native_ingest_sql_component.py \
+            tests/unit/test_native_ingest_protocol.py \
             --junitxml=.logs/review-resolution-junit.xml \
             -q -rs 2>&1 | tee .logs/review-resolution.log
       - name: Upload backend logs

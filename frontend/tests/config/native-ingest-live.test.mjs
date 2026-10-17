@@ -9,7 +9,7 @@ function fixture(outcome = 'done') {
   const terminal = { job_id: 'native-job', execution_id: 'native-execution', order_id: 'order',
     evidence_run_id: 'evidence', workflow_attempt_id: null, status: review ? 'failed' : 'done', error: review ? 'review' : null };
   const job = { ocr_job_id: 'native-job', order_id: 'order', order_document_id: 'document', workflow_attempt_id: null,
-    native_ingest: { mode: 'hakodate', execution_id: 'native-execution', terminal_receipt: terminal },
+    native_ingest: { mode: 'hakodate', intake_protocol: 'native_ingest_v2', execution_id: 'native-execution', terminal_receipt: terminal },
     status: terminal.status, result_state: review ? 'review_required' : 'evidence_ready',
     processing_stage: review ? 'rejected_review_saved' : 'evidence_ready', recovery_action: review ? 'review_recognition_cells' : null,
     error: terminal.error, error_message: terminal.error, error_detail: null, error_user_message: null };
@@ -36,13 +36,15 @@ for (const outcome of ['done', 'recognition_review_required']) {
   });
 }
 
-for (const changed of ['marker', 'mode', 'execution', 'job', 'receipt', 'evidence', 'order', 'document', 'hash',
+for (const changed of ['marker', 'mode', 'protocol', 'missing_protocol', 'execution', 'job', 'receipt', 'evidence', 'order', 'document', 'hash',
   'attempt', 'hard_failure', 'unknown_state', 'not_renderable']) {
   test(`native rejects ${changed} rather than accepting legacy or foreign evidence`, () => {
     const { source, workflow, evidence } = fixture();
     const job = workflow.ocr_job;
     if (changed === 'marker') delete job.native_ingest;
     else if (changed === 'mode') job.native_ingest.mode = 'legacy';
+    else if (changed === 'protocol') job.native_ingest.intake_protocol = 'unknown';
+    else if (changed === 'missing_protocol') delete job.native_ingest.intake_protocol;
     else if (changed === 'execution') evidence.payload_json._ocr_execution.nonworkflow_execution_id = 'foreign';
     else if (changed === 'job') job.ocr_job_id = 'foreign';
     else if (changed === 'receipt') job.native_ingest.terminal_receipt = null;

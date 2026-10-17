@@ -776,6 +776,7 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "recovery_action": recovery_action,
         **({"native_ingest": {
             "mode": "hakodate", "execution_id": metrics["nonworkflow_execution"]["execution_id"],
+            "intake_protocol": metrics["nonworkflow_execution"].get("intake_protocol"),
             "terminal_receipt": copy.deepcopy(metrics.get("rerun_terminal_receipt")),
         }} if isinstance(metrics.get("nonworkflow_execution"), dict)
             and metrics["nonworkflow_execution"].get("ingest_ocr_mode") == "hakodate" else {}),
@@ -2268,6 +2269,8 @@ def initialize_ingest_context(session, order, selection, job_id):
     lease = current_ingest_lease()
     if not isinstance(lease, dict) or not lock_ingest_lease(session, lease):
         raise ValueError("ingest_attempt_changed")
+    if lease.get("payload", {}).get("intake_protocol") != "native_ingest_v2":
+        raise ValueError("intake_protocol_mismatch")
     if lock_order_execution_input(session, order.id) is None:
         raise ValueError("ingest_context_owner_changed")
     require_order_selection(session, order, selection)
@@ -2303,9 +2306,28 @@ def initialize_ingest_context(session, order, selection, job_id):
         previous_id = meta.get("ocr_job_id")
         if previous_id and previous_id != job_id:
             previous = session.get(OcrJob, previous_id, populate_existing=True, with_for_update=True)
+            same_source = previous is not None and previous.order_document_id == job.order_document_id and previous.input_artifact_digest == job.input_artifact_digest
+            transition = (job.metrics or {}).get("ingest_document_transition")
+            transition_valid = False
+            if isinstance(transition, dict) and previous is not None:
+                from src.models.order_version import OrderVersion
+                from src.services.workflow_attempt_guard_service import _json_snapshot
+                old_version = session.get(OrderVersion, (transition.get("old_version") or {}).get("id"))
+                source = transition.get("old_source") or {}
+                transition_valid = (old_version is not None and transition.get("order_id") == order.id
+                    and transition.get("business_generation") == lease["generation"]
+                    and transition.get("new_document_id") == document.id
+                    and transition.get("new_message_id") == document.source_email_id
+                    and transition.get("new_storage_uri") == document.storage_uri
+                    and transition.get("new_sha256") == job.input_artifact_digest
+                    and source.get("document_id") == previous.order_document_id
+                    and source.get("sha256") == previous.input_artifact_digest
+                    and old_version.order_id == order.id and old_version.document_id == previous.order_document_id
+                    and not old_version.is_current
+                    and _json_snapshot({column.key: getattr(old_version, column.key) for column in old_version.__table__.columns if column.key != "is_current"})
+                        == {key: value for key, value in transition["old_version"].items() if key != "is_current"})
             if (previous is None or previous.status not in {"failed", "done"}
-                    or previous.order_id != order.id or previous.order_document_id != job.order_document_id
-                    or previous.input_artifact_digest != job.input_artifact_digest):
+                    or previous.order_id != order.id or not (same_source or transition_valid)):
                 raise ValueError("ingest_context_foreign_job")
         token = _expected_workflow_revision.set(_workflow_revision(row))
         try:

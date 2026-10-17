@@ -562,6 +562,13 @@ def assign_evidence_to_target_cells(
     }
 
 
+def has_resolved_blank_targets(result: dict[str, Any]) -> bool:
+    """All targets have actual empty recognition evidence, not missing values."""
+    assignments = result.get("assignments") or []
+    return bool(assignments) and not result.get("blockers") and not result.get("unassigned_evidence") and all(
+        item.get("assignment_state") == "blank_evidence" and item.get("evidence_ids") for item in assignments)
+
+
 def _logical_sheet_targets_for_assignment(assignment: dict[str, Any]) -> list[dict[str, Any]]:
     metadata = assignment.get("target_metadata", {})
     if not isinstance(metadata, dict):

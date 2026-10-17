@@ -107,6 +107,7 @@ export function assertNativeIngestOwner(sourceCase, workflow, evidence) {
   const job = workflow.ocr_job;
   const native = job?.native_ingest;
   assert.equal(native?.mode, 'hakodate');
+  assert.equal(native?.intake_protocol, 'native_ingest_v2');
   const terminal = native.terminal_receipt;
   const execution = evidence.payload_json?._ocr_execution;
   const pdf = execution?.selected_pdf_receipt;
