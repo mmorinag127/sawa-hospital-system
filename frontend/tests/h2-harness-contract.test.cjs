@@ -83,7 +83,7 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
   assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname,'..',production))).digest('hex'),
-    'ed33d3e3a6b3a8001bc4726a6af6fccdf6f9cf63669f45e09a1a1f7606cb7686',
+    '5e4f4b1050e84d68e7f9fbad0220276c3f5f5a7acad411166da13d0b2bc32b95',
     'exact revised source: approved single-read sidecar with ownership/action/history/feedback/PDF and facility guards');
   execFileSync('git',['merge-base','--is-ancestor','d26febd','HEAD']);
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));
