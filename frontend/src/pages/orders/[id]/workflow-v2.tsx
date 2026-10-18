@@ -181,6 +181,8 @@ type HeaderAxisReviewPayload = {
 
 type RecognitionReviewPayload = {
   order_id: string;
+  mode: "diagnostic_subset/v1" | "full_manual/v1";
+  retained_cell_count: number;
   source_receipt: Record<string, any>;
   error_detail?: string;
   cells: Array<{cell: string; image_png_base64: string}>;
@@ -2812,14 +2814,18 @@ export default function OrderWorkflowV2Page() {
     }
   };
 
-  const loadRecognitionReview = (ocrResultId?: string) => runAction("セル画像取得", async ({assertCurrent, adopt}) => {
+  const loadRecognitionReview = (mode: RecognitionReviewPayload["mode"], ocrResultId?: string) => runAction("セル画像取得", async ({assertCurrent, adopt}) => {
     const response = await apiClient.get<RecognitionReviewPayload>(`/orders/${orderId}/workflow-v2/recognition-review`,
-      {params: {document_id: effectiveSelectedDocumentId, ocr_result_id: ocrResultId}});
+      {params: {document_id: effectiveSelectedDocumentId, ocr_result_id: ocrResultId, mode}});
     assertCurrent();
     const review = response.data;
     if (review.order_id !== orderId || review.source_receipt?.selected_pdf_receipt?.document_id !== effectiveSelectedDocumentId
         || (ocrResultId !== undefined && review.source_receipt.recognition_evidence_run_id !== ocrResultId)
-        || review.source_receipt.workflow_revision !== workflowRevisionRef.current?.revision || !Array.isArray(review.cells)) {
+        || review.source_receipt.workflow_revision !== workflowRevisionRef.current?.revision || !Array.isArray(review.cells)
+        || review.mode !== mode
+        || review.mode !== review.source_receipt.recognition_mode
+        || !Number.isInteger(review.retained_cell_count) || review.retained_cell_count < 0
+        || new Set(review.cells.map(cell => cell.cell)).size !== review.cells.length) {
       throw new Error("注文・PDF・入力版が変わりました。再取得してください。");
     }
     adopt(() => {setRecognitionReview(review); setRecognitionValues({});});
@@ -4312,7 +4318,10 @@ export default function OrderWorkflowV2Page() {
           </p> : null}
           {workflow?.state === "ocr_failed" ? <div role="alert">
             <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
-            {workflow.ocr_job?.recovery_action === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview()}>セル画像を確認・訂正</Button> : null}
+            {workflow.ocr_job?.recovery_action === "review_recognition_cells" ? <>
+              <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview("diagnostic_subset/v1")}>セル画像を確認・訂正</Button>
+              <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview("full_manual/v1")}>すべてのセルを手入力</Button>
+            </> : null}
             {[
               {stage: "row_day_boundaries", action: "review_row_day_boundaries", step: 1.7, label: "行・日境界の画像を開いて訂正"},
               {stage: "header_boundaries", action: "review_header_boundaries", step: 1.6, label: "ヘッダー境界を訂正"},
@@ -4328,6 +4337,7 @@ export default function OrderWorkflowV2Page() {
             <DialogTitle>セル画像の確認・訂正</DialogTitle>
             <DialogContent>
               <p role="alert">{recognitionReview?.error_detail}</p>
+              {recognitionReview?.mode === "diagnostic_subset/v1" ? <p>要確認セルのみ訂正します。認識済み{recognitionReview.retained_cell_count}セルは元の値を保持します。</p> : <p>すべてのセルを明示的に入力します。元の認識値は引き継ぎません。</p>}
               <p>未確認 {recognitionReview?.cells.filter(cell => !(cell.cell in recognitionValues)).length ?? 0} セル</p>
               <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12}}>
                 {recognitionReview?.cells.map(cell => <div key={cell.cell}>
@@ -5360,8 +5370,11 @@ export default function OrderWorkflowV2Page() {
                         <div className="notice warning" role="alert">
                           <strong>要確認: {item.recognition_review.count}セル</strong>
                           <p>認識画像と読み取り結果が一致しないため、数量は未確定です。</p>
-                          <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview(item.ocr_result_id)}>
+                          <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview("diagnostic_subset/v1", item.ocr_result_id)}>
                             セル画像を確認・訂正
+                          </Button>
+                          <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview("full_manual/v1", item.ocr_result_id)}>
+                            すべてのセルを手入力
                           </Button>
                           <details>
                             <summary>対象セルと読み取り結果</summary>

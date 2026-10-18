@@ -9209,14 +9209,14 @@ def _validate_selected_hakodate_artifacts(evidence, captured):
     _validate_hakodate_owned_artifacts(payload, {**source, "physical_menu_digest": expected["physical_menu_digest"], "expected_sheet_cells": expected["expected_sheet_cells"]})
 
 
-def _validate_hakodate_original_execution(payload):
+def _validate_hakodate_original_execution(payload, *, allow_review=False):
     execution = payload.get("_ocr_execution") if isinstance(payload, dict) else None
     start = execution.get("processing_start_input") if isinstance(execution, dict) else None
     if not isinstance(start, dict) or not isinstance(start.get("configured_input"), dict) or not execution.get("job_id"):
         raise ValueError("hakodate_original_expectation_required")
     expected = _hakodate_owned_source(start["configured_input"], execution.get("selected_pdf_receipt"), original_input=start)
     expected.update(job_id=execution["job_id"], execution_id=execution.get("nonworkflow_execution_id"), workflow_attempt_id=execution.get("workflow_attempt_id"), workflow_revision=execution.get("workflow_revision"), evidence_run_id=start.get("evidence_run_id"))
-    _validate_hakodate_owned_artifacts(payload, expected)
+    _validate_hakodate_owned_artifacts(payload, expected, allow_review=allow_review)
 
 
 def _classify_owned_evidence_payload(payload):
@@ -9881,6 +9881,7 @@ def _hakodate_canonical_payload_from_manifest_item(
     meta = ((captured.get("workflow") or {}).get("secondary_actions_json") or {}).get("workflow_v2") or {}
     recognition_override = meta.get("recognition_override")
     resume_options = {}
+    retained_evidence = {}
     with tempfile.TemporaryDirectory(prefix=f"hakodate_canonical_{order_id}_") as tmp:
         output_dir = Path(tmp)
         runtime_item = dict(item)
@@ -9905,12 +9906,21 @@ def _hakodate_canonical_payload_from_manifest_item(
                 pdf_bytes_override if pdf_bytes_override is not None
                 else load_selected_pdf_bytes(receipt["storage_uri"], receipt)
             )
-            resume_options = {
-                "recognition_checkpoint": recognition_override["checkpoint"],
-                "operator_values": recovery.operator_values(
-                    recognition_override.get("values"), runtime_item["original_expected_sheet_cells"],
-                ),
-            }
+            mode = recognition_override.get("mode")
+            source_receipt = recognition_override.get("source_receipt") or {}
+            if mode == recovery.DIAGNOSTIC_SUBSET:
+                records, original_evidence = recovery.resume_diagnostic_source(recognition_override, item=runtime_item, captured=captured)
+                required_cells = source_receipt["recognition_review_cells"]
+                resume_options["recognized_records"] = records
+                retained_evidence = {(row.get("engine_metadata") or {})["sheet_cell"]: row for row in original_evidence}
+            elif ((mode == recovery.FULL_MANUAL and source_receipt.get("recognition_mode") == mode)
+                  or (mode is None and "recognition_mode" not in source_receipt)):
+                # Stored pre-mode overrides have the original complete-manual contract.
+                required_cells = runtime_item["original_expected_sheet_cells"]
+            else:
+                raise ValueError("recognition_recovery_mode_changed")
+            resume_options.update(recognition_checkpoint=recognition_override["checkpoint"],
+                operator_values=recovery.operator_values(recognition_override.get("values"), required_cells))
         elif not all(str(runtime_item.get(key) or "").strip() for key in ("fax_pdf", "template_pdf", "step2_png")):
             if not facility_id:
                 raise ValueError("facility_missing")
@@ -9969,7 +9979,8 @@ def _hakodate_canonical_payload_from_manifest_item(
             if not isinstance(region, dict):
                 continue
             copied = dict(region)
-            copied["source"] = "operator" if recognition_override is not None else "hakodate_best_method_pipeline"
+            corrected = recognition_override is not None and region.get("sheet_cell") in resume_options["operator_values"]
+            copied["source"] = "operator" if corrected else "hakodate_best_method_pipeline"
             canonical_regions.append(copied)
         if not digit_records:
             raise ValueError("hakodate_own_recognizer_records_missing")
@@ -9988,7 +9999,8 @@ def _hakodate_canonical_payload_from_manifest_item(
         for index, region in enumerate(evidence_source_records):
             accepted_candidate = region.get("recognizer_accepted_candidate")
             accepted_candidate = accepted_candidate if isinstance(accepted_candidate, dict) else {}
-            if recognition_override is not None:
+            corrected = recognition_override is not None and region.get("sheet_cell") in resume_options["operator_values"]
+            if corrected:
                 cell = region.get("sheet_cell")
                 values = resume_options["operator_values"]
                 if (cell not in values or region.get("recognition_source") != "operator"
@@ -10035,7 +10047,7 @@ def _hakodate_canonical_payload_from_manifest_item(
                     },
                 }
             )
-            if recognition_override is not None:
+            if corrected:
                 raw_evidence_records[-1]["engine_metadata"] = {
                     "source": "operator", "edited_by": recognition_override["edited_by"],
                     "created_at": recognition_override["created_at"],
@@ -10044,7 +10056,8 @@ def _hakodate_canonical_payload_from_manifest_item(
                 }
         target_cells = hakodate_ocr_evidence_service.target_cells_from_regions(canonical_regions)
         for cell in target_cells:
-            cell["source"] = "operator" if recognition_override is not None else "hakodate_best_method_pipeline"
+            corrected = recognition_override is not None and cell.get("sheet_cell") in resume_options["operator_values"]
+            cell["source"] = "operator" if corrected else "hakodate_best_method_pipeline"
             cell["source_receipt"] = dict(cell_source)
         evidence_records = hakodate_ocr_evidence_service.evidence_from_records(
             raw_evidence_records,
@@ -10054,6 +10067,16 @@ def _hakodate_canonical_payload_from_manifest_item(
             raw_payload_ref=outputs["records"],
             retain_empty_records=True,
         )
+        for index, record in enumerate(evidence_records):
+            cell = record["engine_metadata"]["sheet_cell"]
+            if recognition_override is not None and cell in resume_options["operator_values"]:
+                record["engine"] = "operator"
+            if cell in retained_evidence and cell not in resume_options["operator_values"]:
+                # Only the new artifact/ownership envelope changes, not recognized content.
+                retained = deepcopy(retained_evidence[cell])
+                retained["raw_payload_ref"] = outputs["records"]
+                retained["engine_metadata"]["source_receipt"] = dict(cell_source)
+                evidence_records[index] = retained
         recognition_review = hakodate_ocr_evidence_service.recognition_review(evidence_records)
         _validate_hakodate_owned_artifacts(
             {
