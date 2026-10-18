@@ -34,7 +34,9 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     assert.equal(text.split(from).length-1,1,'Only the counted approved harness addition may be normalized');
     return text.replace(from,to);
   };
-  let compatible=source;
+  const approvedHarness=execFileSync('git',['show','1b0f3c28dd9a1e9b010f1bb72dd417b42f8b5c7a:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
+  assert.equal(source,approvedHarness,'Exact approved preservation harness, including actual pending-edit flush, quantities and CAS assertions');
+  let compatible=execFileSync('git',['show','6a543cc9a0d5f128a85d01f6bd8d7ccae82b9d77:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
   compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,3);cleanup();", "  h.timer.tick();await settle();assert.equal(calls,4);cleanup();");
   compatible=replaceOnce(compatible, "  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,3);", "  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,4);");
   compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,6);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);", "  h.timer.tick();await settle();assert.equal(calls,8);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);");
