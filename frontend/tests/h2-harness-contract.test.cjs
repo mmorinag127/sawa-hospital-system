@@ -34,7 +34,9 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     assert.equal(text.split(from).length-1,1,'Only the counted approved harness addition may be normalized');
     return text.replace(from,to);
   };
-  let compatible=source;
+  const approvedHarness=execFileSync('git',['show','1b0f3c28dd9a1e9b010f1bb72dd417b42f8b5c7a:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
+  assert.equal(source,approvedHarness,'Exact approved preservation harness, including actual pending-edit flush, quantities and CAS assertions');
+  let compatible=execFileSync('git',['show','6a543cc9a0d5f128a85d01f6bd8d7ccae82b9d77:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
   compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,3);cleanup();", "  h.timer.tick();await settle();assert.equal(calls,4);cleanup();");
   compatible=replaceOnce(compatible, "  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,3);", "  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,4);");
   compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,6);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);", "  h.timer.tick();await settle();assert.equal(calls,8);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);");
@@ -83,7 +85,7 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
   assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname,'..',production))).digest('hex'),
-    'ed33d3e3a6b3a8001bc4726a6af6fccdf6f9cf63669f45e09a1a1f7606cb7686',
+    '5e4f4b1050e84d68e7f9fbad0220276c3f5f5a7acad411166da13d0b2bc32b95',
     'exact revised source: approved single-read sidecar with ownership/action/history/feedback/PDF and facility guards');
   execFileSync('git',['merge-base','--is-ancestor','d26febd','HEAD']);
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));

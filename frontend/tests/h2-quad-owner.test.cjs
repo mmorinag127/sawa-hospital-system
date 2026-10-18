@@ -22,7 +22,8 @@ function harness(){
     workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},facilitySaveReadOwnerRef:{current:null},
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
-    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},
+    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},sheetDirtyRef:{current:false},sheetPayload:null,
+    setSheetPayload:value=>{state.sheetPayload=value;context.sheetPayload=value;},setSheetDirty:value=>{state.sheetDirty=value;},setSheetJsonStale:value=>{state.sheetJsonStale=value;},
     workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},
     setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},
     workflowJobRef:{current:{orderId:'order-A',jobId:null,attemptId:null,state:'context_confirmed'}},
@@ -48,7 +49,7 @@ function harness(){
       post:async(url,body,config)=>{state.calls.push({method:'POST',url,body,config});return{data:{workflow:{order_id:'order-A',revision:10}}};}}
   };
   // Ownership and adoption checks use production closures, not harness substitutes.
-  for(const name of ['sameRecordedValue','sameQuadOverrideSource','setBusy','setSelectedDocumentId','editorVersion','beginWorkflowEditorEdit','finishWorkflowEditorEdit','canAdoptReadEditorInput','captureWorkflowInputVersion','workflowMutationConfig','workflowFromMutationResponse','adoptReadWorkflow','adoptOwnWorkflowCommandResponse','capturePageOwner','ownsPageContext','ownsPageInput','outputEditorSignature','captureActionInput','ownsActionInput','createActionBoundary','retireOutput','captureQuadOwner','ownsQuadContext','ownsQuadInput','captureAxisOwner','ownsAxisInput','executeWorkflowMutation','loadAxisReview','saveAxisAndRerun','loadHeaderAxisReview','loadRowAxisReview','runAction'])context[name]=(...args)=>actual(name,context)(...args);
+  for(const name of ['sameRecordedValue','sameQuadOverrideSource','setBusy','setSelectedDocumentId','editorVersion','beginWorkflowEditorEdit','finishWorkflowEditorEdit','markSheetDirty','markSheetJsonStale','flushPendingSheetCellEdits','canAdoptReadEditorInput','captureWorkflowInputVersion','workflowMutationConfig','workflowFromMutationResponse','adoptReadWorkflow','adoptOwnWorkflowCommandResponse','capturePageOwner','ownsPageContext','ownsPageInput','outputEditorSignature','captureActionInput','ownsActionInput','createActionBoundary','retireOutput','captureQuadOwner','ownsQuadContext','ownsQuadInput','captureAxisOwner','ownsAxisInput','executeWorkflowMutation','loadAxisReview','saveAxisAndRerun','loadHeaderAxisReview','loadRowAxisReview','runAction'])context[name]=(...args)=>actual(name,context)(...args);
   const load=()=>actual('loadQuadReview',context)();
   const save=()=>actual('saveQuadAndRerun',context)('manual_override',receipt.suggested_quad_px);
   const seed=()=>{context.quadSourceRef.current={review,context:{...context.quadContextRef.current},generation:context.quadContextGenerationRef.current,auth:state.auth};state.review=review;};
@@ -205,8 +206,26 @@ for(const kind of ['pdf','order','route','auth','manual','sheet','unmount','busy
 test('normal columns/copy retain original payload and null/zero values; actual runOcr uses explicit PDF and CAS',async()=>{
   const columns=harness();await actual('saveFacilityTemplateColumns',columns.context)();
   assert.deepEqual(columns.state.calls[0].body,{columns:[{quantity:0,unknown:null}]});assert.equal(columns.state.calls[0].config.headers['If-Match'],'"8"');assert.equal(columns.state.discard,1);
-  const copy=harness();copy.context.apiClient.put=async(url,body,config)=>{copy.state.calls.push({method:'PUT',url,body,config});return{data:{workflow:{order_id:'order-A',revision:9},expanded_cell_copy_mode:'enabled'}};};
-  await actual('updateExpandedCellCopyMode',copy.context)('enabled');assert.equal(copy.state.copy,'enabled');assert.equal(copy.state.discard,1);
+  const copy=harness(),savedSheet={base_evidence_run_id:'own-evidence',template_version_id:'own-template',rows:[['7','1',0,null,'']],unknown:{zero:0,value:null}};
+  const originalSheet=plain(savedSheet);
+  copy.context.sheetPayload=copy.context.sheetPayloadRef.current=savedSheet;
+  copy.context.workflow={order_id:'order-A',revision:8,saved_sheet_id:'own-saved',selected_ocr_result_id:'own-evidence',template_version_id:'own-template'};
+  const originalWorkflow=plain(copy.context.workflow);
+  copy.context.pendingSheetCellEditsRef.current.set('0:0',{rowIndex:0,colIndex:0,value:'26'});
+  copy.context.apiClient.put=async(url,body,config)=>{
+    copy.state.calls.push({method:'PUT',url,body,config});
+    assert.equal(copy.context.pendingSheetCellEditsRef.current.size,0);
+    assert.deepEqual(plain(copy.context.sheetPayloadRef.current.rows),[['26','1',0,null,'']]);
+    return{data:{workflow:{...originalWorkflow,revision:9},selected_ocr_result_id:'own-evidence',expanded_cell_copy_mode:'enabled'}};
+  };
+  await actual('updateExpandedCellCopyMode',copy.context)('enabled');assert.equal(copy.state.copy,'enabled');assert.equal(copy.state.discard,0);
+  assert.equal(copy.state.calls.length,1);assert.deepEqual(copy.state.calls[0].body,{mode:'enabled'});assert.equal(copy.state.calls[0].config.headers['If-Match'],'"8"');
+  assert.equal(copy.context.pendingSheetCellEditsRef.current.size,0);assert.equal(copy.state.sheetDirty,true);assert.equal(copy.state.sheetJsonStale,true);
+  assert.equal(copy.state.sheetPayload,copy.context.sheetPayloadRef.current);
+  assert.deepEqual(plain(copy.context.sheetPayloadRef.current),{...originalSheet,rows:[['26','1',0,null,'']]});
+  assert.deepEqual(savedSheet,originalSheet);
+  assert.equal(copy.context.workflow.saved_sheet_id,'own-saved');assert.equal(copy.context.workflow.selected_ocr_result_id,'own-evidence');assert.equal(copy.context.workflow.template_version_id,'own-template');
+  assert.equal(copy.context.editorVersion('sheet').dirty,true);assert.equal(copy.context.editorVersion('sheet').baseRevision,9);assert.equal(copy.state.step,3);
   const ocr=harness();Object.assign(ocr.context,{ocrRunMode:'hakodate'});
   await actual('runOcr',ocr.context)();assert.equal(ocr.state.calls[0].body.document_id,'pdf-A');assert.equal(ocr.state.calls[0].config.headers['If-Match'],'"8"');assert.equal(ocr.state.step,2);
 });
