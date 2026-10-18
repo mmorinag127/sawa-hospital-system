@@ -125,7 +125,8 @@ def test_actor_must_be_unique_and_present(owned, kind, operation):
     else:
         with engine.begin() as connection:
             connection.exec_driver_sql("INSERT INTO users(id,account,role,status,created_at) VALUES('duplicate','admin@example.invalid','admin','active',CURRENT_TIMESTAMP)")
-    client.app.dependency_overrides[auth.get_current_user] = lambda: actor
+    # Portal keeps the registered dependency even when another test reloads auth.
+    client.app.dependency_overrides[portal.get_current_user] = lambda: actor
     before = snapshot(engine)
     assert submit(client, operation).status_code == 403
     assert snapshot(engine) == before
