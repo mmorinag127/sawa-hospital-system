@@ -174,9 +174,12 @@ def _portal_user(request: Request) -> UserContext | None:
     try:
         with urllib.request.urlopen(upstream, timeout=5) as response:  # noqa: S310
             payload = json.loads(response.read())
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid portal authentication response")
     except urllib.error.HTTPError as exc:
-        code = status.HTTP_403_FORBIDDEN if exc.code == 403 else status.HTTP_401_UNAUTHORIZED
-        raise HTTPException(status_code=code, detail="Portal authentication rejected") from exc
+        if exc.code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+            raise HTTPException(status_code=exc.code, detail="Portal authentication rejected") from exc
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Portal authentication unavailable") from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Portal authentication unavailable") from exc
     role = str(payload.get("role") or "").lower()
