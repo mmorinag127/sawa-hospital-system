@@ -1,6 +1,7 @@
 """Operator recovery of the current failed recognition, with input ownership."""
 from copy import deepcopy
 import base64
+import json
 from math import ceil
 import re
 
@@ -10,6 +11,151 @@ from src.services import hakodate_cell_ocr_batch_service as batch
 from src.services import hakodate_ocr_checkpoint_service as checkpoints
 from src.services import order_workflow_v2_service as workflow
 from src.services import hakodate_step_review_pipeline_service as geometry
+
+
+DIAGNOSTIC_SUBSET = "diagnostic_subset/v1"
+FULL_MANUAL = "full_manual/v1"
+
+
+def _workflow_terminal_owner(session, order, job, receipt):
+    from src.services import workflow_ocr_delivery_service as delivery
+
+    metrics = job.metrics or {}
+    row = delivery._locked(session, metrics.get("workflow_ocr_delivery_id"), read_only=True)
+    if row is None:
+        raise ValueError("recognition_workflow_delivery_required")
+    delivery._validate_identity(row)
+    terminal = metrics.get("rerun_terminal_receipt")
+    if (row.order_id != order.id or row.job_id != job.id
+            or row.workflow_attempt_id != metrics.get("workflow_attempt_id")
+            or row.selected_pdf_receipt != receipt
+            or receipt.get("document_id") != order.current_document_id
+            or metrics.get("selected_pdf_receipt") != receipt
+            or row.request_identity["reparse_read_input"] != metrics.get("reparse_read_input")
+            or not isinstance(terminal, dict) or terminal != row.result_receipt
+            or row.state not in {delivery.CLAIMED, delivery.ACKNOWLEDGED}
+            or terminal.get("job_id") != job.id or terminal.get("order_id") != order.id
+            or terminal.get("workflow_attempt_id") != row.workflow_attempt_id
+            or terminal.get("workflow_revision") != row.workflow_revision
+            or terminal.get("status") != job.status
+            or terminal.get("evidence_run_id") != metrics.get("evidence_run_id")
+            or terminal.get("workflow_delivery_owner") != {"delivery_id": row.id,
+                "generation": row.delivery_generation, "claim_token": row.claim_token}):
+        raise ValueError("recognition_workflow_terminal_changed")
+    return row
+
+
+def diagnostic_records(payload, *, checkpoint, item, loaded, captured):
+    """Only immutable canonical artifacts can supply the unedited recognition cells."""
+    from src.services import canonical_ocr_artifact_service as artifacts, order_service
+    from src.services.hakodate_recognizer_contact_sheet import build_recognizer_contact_sheet
+    from io import BytesIO
+    from PIL import Image
+
+    order_service._validate_hakodate_original_execution(payload, allow_review=True)
+    verified = artifacts.validate_payload(payload)
+    source = payload["hakodate_repair_source_receipt"]
+    current_source = order_service._hakodate_owned_source(item["configured_input"], item["selected_pdf_receipt"], original_input=captured)
+    if (any(source.get(key) != current_source[key] for key in (
+            "selected_pdf_receipt", "configured_input_digest", "physical_menu_digest",
+            "expected_sheet_cells", "expected_target_semantics"))
+            or source["expected_sheet_cells"] != loaded["expected_sheet_cells"]):
+        raise ValueError("recognition_diagnostic_source_changed")
+    records = json.loads(verified["records"])
+    cells = [record.get("sheet_cell") for record in records]
+    if cells != loaded["expected_sheet_cells"] or len(cells) != len(set(cells)):
+        raise ValueError("recognition_diagnostic_cells_changed")
+    if geometry.canonical_target_semantics(records) != geometry.canonical_target_semantics(loaded["regions"]):
+        raise ValueError("recognition_diagnostic_cells_changed")
+    if any(record.get("bbox") != region.get("bbox") for record, region in zip(records, loaded["regions"])):
+        raise ValueError("recognition_diagnostic_geometry_changed")
+    contact, _, _, skipped = build_recognizer_contact_sheet(
+        rectified_fax_bgr=loaded["raw_rectified"], regions=loaded["regions"], line_mask=None, mode="corner_cc")
+    with Image.open(BytesIO(verified["contact_sheet"])) as stored:
+        if skipped or contact.size != stored.size or contact.tobytes() != stored.convert("RGB").tobytes():
+            raise ValueError("recognition_diagnostic_contact_changed")
+    return records
+
+
+def _diagnostic_source(session, order, job, evidence_id, *, checkpoint, item, loaded, captured):
+    evidence = session.get(workflow.OrderOcrEvidenceRun, evidence_id)
+    if evidence is None or evidence.order_id != order.id:
+        raise ValueError("recognition_review_result_changed")
+    payload = evidence.payload_json
+    execution = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+    if (not isinstance(execution, dict) or execution.get("job_id") != job.id
+            or execution.get("evidence_run_id") != evidence_id):
+        raise ValueError("recognition_review_result_changed")
+    terminal = (job.metrics or {}).get("rerun_terminal_receipt")
+    if (not isinstance(terminal, dict) or terminal.get("job_id") != job.id
+            or terminal.get("order_id") != order.id or terminal.get("evidence_run_id") != evidence_id
+            or terminal.get("status") != job.status
+            or execution.get("selected_pdf_receipt") != item["selected_pdf_receipt"]):
+        raise ValueError("recognition_diagnostic_terminal_changed")
+    if _is_native(job):
+        capture = (job.metrics or {}).get("nonworkflow_execution") or {}
+        if (execution.get("nonworkflow_execution_id") != capture.get("execution_id")
+                or execution.get("workflow_attempt_id") is not None
+                or job.order_document_id != order.current_document_id
+                or job.input_artifact_digest != item["selected_pdf_receipt"]["sha256"]):
+            raise ValueError("recognition_native_owner_changed")
+    else:
+        owner = _workflow_terminal_owner(session, order, job, item["selected_pdf_receipt"])
+        if (execution.get("workflow_attempt_id") != owner.workflow_attempt_id
+                or execution.get("workflow_revision") != owner.workflow_revision
+                or execution.get("processing_start_input") != owner.request_identity["reparse_read_input"]):
+            raise ValueError("recognition_review_result_changed")
+    records = diagnostic_records(payload, checkpoint=checkpoint, item=item, loaded=loaded, captured=captured)
+    review = payload["hakodate_recognition_review"]
+    cells = [row["sheet_cell"] for row in review["cells"]]
+    if not cells or len(cells) != len(set(cells)):
+        raise ValueError("recognition_review_result_changed")
+    proof = {"recognition_mode": DIAGNOSTIC_SUBSET,
+             "recognition_payload_digest": workflow._stable_json_hash(payload),
+             "recognition_records_receipt": deepcopy(payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]["records"]),
+             "recognition_review_cells": cells}
+    return records, proof
+
+
+def resume_diagnostic_source(override, *, item, captured):
+    """Revalidate the explicitly captured original result, never the newest result."""
+    from src.services import ingest_delivery_service as delivery
+    from sqlalchemy import select
+    from src.models.ingest_delivery import IngestDelivery
+
+    receipt = override["source_receipt"]
+    with workflow.session_scope() as session:
+        order = session.get(workflow.Order, item["order_id"])
+        job = session.get(workflow.OcrJob, receipt.get("recognition_job_id"))
+        if order is None or job is None or job.order_id != order.id or job.status not in {"done", "failed"}:
+            raise ValueError("recognition_review_result_changed")
+        if (job.metrics or {}).get("recognition_checkpoint") != override["checkpoint"]:
+            raise ValueError("recognition_checkpoint_changed")
+        if _is_native(job):
+            capture = (job.metrics or {}).get("nonworkflow_execution") or {}
+            lease = capture.get("ingest_lease") or {}
+            row = session.execute(select(IngestDelivery).where(
+                IngestDelivery.job_id == lease.get("id"),
+                IngestDelivery.business_generation == lease.get("generation"))).scalar_one_or_none()
+            if row is None:
+                raise ValueError("recognition_native_generation_changed")
+            kind, terminal = delivery._receipt(session, row, job)
+            if (kind != "terminal" or terminal != row.terminal_receipt
+                    or receipt.get("native_recognition_owner") != workflow._stable_json_hash(terminal)):
+                raise ValueError("recognition_native_terminal_changed")
+            original = delivery._original(session, row, read_only=True)
+            if (original is None or original.generation != lease.get("generation")
+                    or original.claim_id != lease.get("claim_id") or original.input_digest != lease.get("input_digest")
+                    or original.payload != lease.get("payload") or original.attempts != lease.get("attempts")
+                    or original.status != ("done" if job.status == "done" else "error")):
+                raise ValueError("recognition_native_generation_changed")
+        loaded = checkpoints.load_recognizer_checkpoint(checkpoint=override["checkpoint"], item=item)
+        records, proof = _diagnostic_source(session, order, job, receipt.get("recognition_evidence_run_id"),
+            checkpoint=override["checkpoint"], item=item, loaded=loaded, captured=captured)
+        if any(receipt.get(key) != value for key, value in proof.items()):
+            raise ValueError("recognition_diagnostic_source_changed")
+        evidence = session.get(workflow.OrderOcrEvidenceRun, receipt["recognition_evidence_run_id"])
+        return records, deepcopy(evidence.payload_json["hakodate_ocr_evidence_records"])
 
 
 def current_item(checkpoint, captured, receipt, order_id):
@@ -135,6 +281,14 @@ def _failed_checkpoint(session, order, state, ocr_result_id=None):
             raise ValueError("recognition_review_result_changed")
         if ocr_result_id is None and job.status == "failed":
             ocr_result_id = terminal_result
+    elif ocr_result_id is None and job.status == "failed":
+        terminal = job.metrics.get("rerun_terminal_receipt")
+        if isinstance(terminal, dict) and terminal.get("evidence_run_id") is not None:
+            if (terminal.get("job_id") != job.id or terminal.get("order_id") != order.id
+                    or terminal.get("status") != job.status
+                    or terminal.get("workflow_attempt_id") != job.metrics.get("workflow_attempt_id")):
+                raise ValueError("recognition_review_result_changed")
+            ocr_result_id = terminal["evidence_run_id"]
     if ocr_result_id is not None:
         if job.status not in {"done", "failed"} or workflow._workflow_meta(state).get("latest_ocr_result_id") != ocr_result_id:
             raise ValueError("recognition_review_result_changed")
@@ -162,7 +316,9 @@ def _failed_checkpoint(session, order, state, ocr_result_id=None):
     return job, deepcopy(checkpoint)
 
 
-def get_review(order_id, *, document_id=None, ocr_result_id=None):
+def get_review(order_id, *, document_id=None, ocr_result_id=None, mode=FULL_MANUAL):
+    if mode not in {DIAGNOSTIC_SUBSET, FULL_MANUAL}:
+        return None, "recognition_recovery_mode_invalid"
     with workflow.session_scope() as session:
         order, error = workflow._get_order_or_error(session, order_id)
         if error:
@@ -177,19 +333,36 @@ def get_review(order_id, *, document_id=None, ocr_result_id=None):
             receipt["recognition_job_id"] = job.id
             if ocr_result_id is not None:
                 receipt["recognition_evidence_run_id"] = ocr_result_id
+            elif job.status == "failed":
+                terminal = job.metrics.get("rerun_terminal_receipt")
+                if isinstance(terminal, dict) and terminal.get("evidence_run_id") is not None:
+                    receipt["recognition_evidence_run_id"] = terminal["evidence_run_id"]
             if _is_native(job):
                 receipt["native_recognition_owner"] = _native_owner(session, order, job)
                 if job.metrics["rerun_terminal_receipt"].get("evidence_run_id") is not None:
                     receipt["recognition_evidence_run_id"] = job.metrics["rerun_terminal_receipt"]["evidence_run_id"]
             detail = (job.metrics or {}).get("error_detail") or job.error_message
+            item = current_item(checkpoint, captured, receipt, order_id)
+            loaded = checkpoints.load_recognizer_checkpoint(checkpoint=checkpoint, item=item)
+            evidence_id = receipt.get("recognition_evidence_run_id")
+            if mode == DIAGNOSTIC_SUBSET:
+                if evidence_id is None:
+                    raise ValueError("recognition_diagnostic_evidence_required_use_full_manual")
+                _, proof = _diagnostic_source(session, order, job, evidence_id,
+                    checkpoint=checkpoint, item=item, loaded=loaded, captured=captured)
+                receipt.update(proof)
+                required_cells = set(proof["recognition_review_cells"])
+            else:
+                receipt["recognition_mode"] = FULL_MANUAL
+                required_cells = set(loaded["expected_sheet_cells"])
         except ValueError as exc:
             return None, str(exc)
     try:
-        item = current_item(checkpoint, captured, receipt, order_id)
-        loaded = checkpoints.load_recognizer_checkpoint(checkpoint=checkpoint, item=item)
         image = loaded["raw_rectified"]
         cells = []
         for region in loaded["regions"]:
+            if region["sheet_cell"] not in required_cells:
+                continue
             x0, y0, x1, y1 = region["bbox"]
             x0, y0 = max(0, int(x0)), max(0, int(y0))
             x1, y1 = min(image.shape[1], ceil(x1)), min(image.shape[0], ceil(y1))
@@ -199,7 +372,8 @@ def get_review(order_id, *, document_id=None, ocr_result_id=None):
             if not ok:
                 raise ValueError("recognition_cell_image_invalid")
             cells.append({"cell": region["sheet_cell"], "image_png_base64": base64.b64encode(encoded).decode("ascii")})
-        return {"order_id": order_id, "source_receipt": receipt, "error_detail": detail, "cells": cells}, None
+        return {"order_id": order_id, "source_receipt": receipt, "error_detail": detail, "cells": cells,
+                "mode": receipt["recognition_mode"], "retained_cell_count": len(loaded["regions"]) - len(cells)}, None
     except ValueError as exc:
         return None, str(exc)
 
@@ -229,7 +403,21 @@ def save_review(order_id, *, source_receipt, values, edited_by):
             captured = workflow.capture_reparse_read_input(session, order)
             item = current_item(checkpoint, captured, source_receipt, order_id)
             loaded = checkpoints.load_recognizer_checkpoint(checkpoint=checkpoint, item=item)
-            authored = operator_values(values, loaded["expected_sheet_cells"])
+            evidence_id = source_receipt.get("recognition_evidence_run_id")
+            mode = source_receipt.get("recognition_mode")
+            if mode == DIAGNOSTIC_SUBSET:
+                if evidence_id is None:
+                    raise ValueError("recognition_diagnostic_evidence_required_use_full_manual")
+                _, proof = _diagnostic_source(session, order, job, evidence_id,
+                    checkpoint=checkpoint, item=item, loaded=loaded, captured=captured)
+                if any(source_receipt.get(key) != value for key, value in proof.items()):
+                    raise ValueError("recognition_diagnostic_source_changed")
+                required_cells = proof["recognition_review_cells"]
+            elif mode == FULL_MANUAL:
+                required_cells = loaded["expected_sheet_cells"]
+            else:
+                raise ValueError("recognition_recovery_mode_changed")
+            authored = operator_values(values, required_cells)
         except ValueError as exc:
             return None, str(exc)
         meta = workflow._workflow_meta(state)
@@ -237,7 +425,7 @@ def save_review(order_id, *, source_receipt, values, edited_by):
             workflow._validate_recognition_override_archive(meta)
         except ValueError as exc:
             return None, str(exc)
-        meta["recognition_override"] = {"checkpoint": checkpoint, "values": authored,
+        meta["recognition_override"] = {"checkpoint": checkpoint, "values": authored, "mode": mode,
             "source_receipt": deepcopy(source_receipt), "edited_by": edited_by,
             "source": "operator", "created_at": workflow._now().isoformat()}
         meta.pop("recognition_override_invalidation", None)
