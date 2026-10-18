@@ -44,6 +44,8 @@ def saved(tmp_path, monkeypatch):
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCR_ARTIFACT_DIR", str((tmp_path / "artifacts").absolute()))
+    monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
     def enforce(connection, _record):
         assert isinstance(connection, sqlite3.Connection)
         connection.execute("PRAGMA foreign_keys=ON")
