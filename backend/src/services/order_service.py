@@ -4326,6 +4326,25 @@ def _captured_order_document_selection(session, order, selected_document_id):
         job = session.get(OcrJob, job_id)
         selected = (job.metrics or {}).get("selected_version_input") if job is not None else None
         uri = job.input_reference if job is not None else None
+    if boundary is not None and (boundary.get("intake_protocol") is not None or boundary.get("ingest_ocr_mode") is not None):
+        if (boundary.get("intake_protocol") != "native_ingest_v2"
+                or boundary.get("ingest_ocr_mode") != "hakodate"
+                or _workflow_ocr_attempt_id.get() is not None or selected is not None):
+            return None, {"error": "selected_document_input_changed"}
+        # Native registration owns a PDF receipt, not a mutable OrderVersion snapshot.
+        receipt = processing_start_pdf_receipt()
+        original = processing_start_read_input()
+        document = original.get("document")
+        if not selected_document_id or not isinstance(receipt, dict) or not uri:
+            return None, {"error": "selected_document_input_missing"}
+        if (receipt.get("order_id") != order.id
+                or receipt.get("document_id") != selected_document_id
+                or receipt.get("storage_uri") != uri
+                or order.current_document_id != selected_document_id
+                or not isinstance(document, dict) or document.get("id") != selected_document_id
+                or document.get("storage_uri") != uri):
+            return None, {"error": "selected_document_input_changed"}
+        return uri, {"selected_document_id": selected_document_id, "selected_document_version": None}
     if selected_document_id and (not selected or selected.get("document_id") != selected_document_id):
         return None, {"error": "selected_document_input_missing"}
     if selected is not None:
