@@ -150,6 +150,11 @@ jobs:
               --observation replay-input/observation.json --checkpoint-image replay-input/rectified.png \
               --output "replay-diagnostic/$build.json"
           done
+          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
+          backend/.venv/bin/python scripts/diagnose_saved_contact_replay.py --canonical-packet-only \
+            --artifact-dir replay-source/FAC00004-20261018-real-one-d173c698 \
+            --observation replay-input/observation.json --checkpoint-image replay-input/rectified.png \
+            --output replay-diagnostic/full-canonical.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

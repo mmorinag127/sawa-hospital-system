@@ -490,7 +490,8 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         and bool(execution_input["start_orders"][execution_input.get("order_id")].get("input_sha256"))
     )
     missing_execution_input = (
-        metrics.get("request_mode") in {"ingest_first_pass", "ocr_rerun", "ocr_reparse", "llm_reparse"}
+        (metrics.get("request_mode") in {"ingest_first_pass", "ocr_rerun", "ocr_reparse", "llm_reparse"}
+         or metrics.get("ingest_ocr_mode") == "hakodate")
         and metrics.get("workflow_attempt_id") is None
         and not has_execution_input
     )

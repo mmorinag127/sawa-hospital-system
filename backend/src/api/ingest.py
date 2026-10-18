@@ -149,6 +149,15 @@ def _build_upload_existing_order_preview(
     return order_service.preview_existing_order_for_ingest(payload)
 
 
+def _intake_protocol(request: Request):
+    values = request.query_params.getlist("intake_protocol")
+    if not values:
+        return None
+    if values != ["native_ingest_v2"]:
+        raise HTTPException(status_code=422, detail="intake_protocol_invalid")
+    return values[0]
+
+
 def _handle_uploaded_pdf_bytes(
     *,
     file_bytes: bytes,
@@ -160,6 +169,7 @@ def _handle_uploaded_pdf_bytes(
     force_value: bool,
     skip_ocr_value: bool,
     facility_selection: dict,
+    intake_protocol: str | None = None,
 ) -> dict[str, Any]:
     from src.services.ingest_facility_selection_service import validate_selection
     try:
@@ -212,6 +222,7 @@ def _handle_uploaded_pdf_bytes(
                 force=force_value,
                 page_count=saved.total_pages or saved.page_number or 1,
                 facility_selection=facility_selection,
+                intake_protocol=intake_protocol,
             )
         except ValueError as exc:
             if str(exc).startswith(("ingest_facility_", "ingest_order_", "uploaded_pdf_original_",
@@ -263,6 +274,7 @@ async def _handle_uploaded_pdf(
     force_value: bool,
     skip_ocr_value: bool,
     facility_selection: dict,
+    intake_protocol: str | None = None,
 ) -> dict[str, Any]:
     raw_filename = str(pdf_file.filename or "").strip()
     if not raw_filename:
@@ -279,6 +291,7 @@ async def _handle_uploaded_pdf(
         force_value=force_value,
         skip_ocr_value=skip_ocr_value,
         facility_selection=facility_selection,
+        intake_protocol=intake_protocol,
     )
 
 
@@ -297,6 +310,7 @@ async def ingest_upload(
     expected_canonical_revision: str | None = Form(None),
     selected_version_id: str | None = Form(None),
 ):
+    intake_protocol = _intake_protocol(request)
     _enforce_upload_content_length(request)
     upload_files = _normalize_upload_files(pdf_file, pdf_files)
     facility_hint, week_hint = _normalize_required_upload_context(
@@ -327,6 +341,7 @@ async def ingest_upload(
                 force_value=force_value,
                 skip_ocr_value=skip_ocr_value,
                 facility_selection=facility_selection,
+                intake_protocol=intake_protocol,
             )
         )
     items: list[dict[str, Any]] = []
@@ -425,7 +440,8 @@ def get_uploaded_pdf_row(uploaded_pdf_id: str):
 
 
 @router.post("/uploads/{uploaded_pdf_id}/retry", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
-def retry_uploaded_pdf(uploaded_pdf_id: str):
+def retry_uploaded_pdf(uploaded_pdf_id: str, request: Request):
+    intake_protocol = _intake_protocol(request)
     row = get_uploaded_pdf(uploaded_pdf_id)
     if row is None:
         raise HTTPException(status_code=404, detail="uploaded_pdf_not_found")
@@ -433,7 +449,7 @@ def retry_uploaded_pdf(uploaded_pdf_id: str):
     if status_value == "completed" and is_uploaded_pdf_completion_ready(uploaded_pdf_id):
         raise HTTPException(status_code=409, detail="uploaded_pdf_already_completed")
     message_id = str(row.get("message_id") or "").strip()
-    updated = requeue_uploaded_pdf(uploaded_pdf_id)
+    updated = requeue_uploaded_pdf(uploaded_pdf_id, intake_protocol=intake_protocol) if intake_protocol is not None else requeue_uploaded_pdf(uploaded_pdf_id)
     enqueue_uploaded_pdf_async(uploaded_pdf_id)
     refreshed = get_uploaded_pdf(uploaded_pdf_id)
     return {"accepted": True, "item": refreshed or updated}

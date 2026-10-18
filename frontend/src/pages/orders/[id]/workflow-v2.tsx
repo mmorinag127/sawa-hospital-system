@@ -10,6 +10,7 @@ import { facilityReadSelection, facilityReadConfig } from "../../../services/ord
 import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
 import TopNav from "../../../components/TopNav";
 import OutputHistoryPanel from "../../../components/OutputHistoryPanel";
+import { nativeOcrOwner, type NativeOcrOwner } from "../../../features/orders/nativeOcrOwner";
 import {
   deriveWeekValueFromCalendarRange,
   formatWeekLabel,
@@ -63,6 +64,7 @@ type WorkflowV2 = {
     ocr_job_id?: string | null;
     order_id?: string | null;
     workflow_attempt_id?: string | null;
+    native_ingest?: { mode: string; intake_protocol: string; execution_id: string } | null;
     status?: string | null;
     created_at?: string | null;
     updated_at?: string | null;
@@ -1300,8 +1302,10 @@ export default function OrderWorkflowV2Page() {
   const activeOrderIdRef = useRef(orderId);
   activeOrderIdRef.current = orderId;
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
-  const workflowJobRef = useRef({orderId,jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state});
-  workflowJobRef.current={orderId,jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state};
+  const workflowJobRef = useRef<{orderId:string;workflowOrderId?:string;jobOrderId?:string|null;jobId:string|null;attemptId:string|null;state?:string;native_ingest?:unknown}>({orderId,jobId:null,attemptId:null});
+  workflowJobRef.current={orderId,workflowOrderId:workflow?.order_id,jobOrderId:workflow?.ocr_job?.order_id ?? null,
+    jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state,
+    ...(workflow?.ocr_job && "native_ingest" in workflow.ocr_job ? {native_ingest:workflow.ocr_job.native_ingest} : {})};
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
@@ -1634,7 +1638,9 @@ export default function OrderWorkflowV2Page() {
   const adoptReadWorkflow = (next: WorkflowV2 | null | undefined) => {
     if (!next) return;
     selectedOcrResultRef.current = next.selected_ocr_result_id;
-    workflowJobRef.current={orderId:next.order_id,jobId:next.ocr_job?.ocr_job_id ?? null,attemptId:next.ocr_job?.workflow_attempt_id ?? null,state:next.state};
+    workflowJobRef.current={orderId:next.order_id,workflowOrderId:next.order_id,jobOrderId:next.ocr_job?.order_id ?? null,
+      jobId:next.ocr_job?.ocr_job_id ?? null,attemptId:next.ocr_job?.workflow_attempt_id ?? null,state:next.state,
+      ...(next.ocr_job && "native_ingest" in next.ocr_job ? {native_ingest:next.ocr_job.native_ingest} : {})};
     setWorkflow(next);
     const token = workflowRevisionTokenFromRead(next);
     if (!sameRecordedValue(token,workflowRevisionRef.current)) {
@@ -1874,12 +1880,15 @@ export default function OrderWorkflowV2Page() {
   if (menuAmountUnresolved && !workflowBlockers.includes(menuAmountBlocker)) {
     workflowBlockers.push(menuAmountBlocker);
   }
+  const nativeStatusOwner = nativeOcrOwner(workflow?.ocr_job, orderId);
   const commonJobStatus = workflow?.order_id === orderId
     && workflow?.ocr_job?.order_id === orderId
     && Boolean(workflow?.ocr_job?.ocr_job_id)
     && workflow?.common_job_status?.domain === "hospital"
     && workflow.common_job_status.jobId === workflow.ocr_job.ocr_job_id
-    && workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null)
+    && ("native_ingest" in workflow.ocr_job
+      ? nativeStatusOwner !== null && workflow.common_job_status.attemptIdentity === nativeStatusOwner.executionId
+      : workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null))
     ? workflow.common_job_status : null;
   const ocrJobErrorMessage = String(
     workflow?.ocr_job?.error_user_message
@@ -2260,7 +2269,7 @@ export default function OrderWorkflowV2Page() {
 
   const refreshAll = async (
     callerCurrent: () => boolean = () => true,
-    expectedJob: {jobId:string;attemptId:string} | null = null,
+    expectedJob: {jobId:string;attemptId:string} | NativeOcrOwner | null = null,
     adopt: ActionAdoption = (publish) => publish(),
   ) => {
     if (!orderId) return;
@@ -2285,7 +2294,15 @@ export default function OrderWorkflowV2Page() {
       || requestedOrderId !== activeOrderIdRef.current
       || !ownsPageInput(own) || !callerCurrent()
     ) return;
-    if (expectedJob!==null && (workflowRes.data.ocr_job?.ocr_job_id!==expectedJob.jobId || workflowRes.data.ocr_job?.workflow_attempt_id!==expectedJob.attemptId)) return false;
+    if (expectedJob!==null) {
+      if ("executionKind" in expectedJob) {
+        const actual = nativeOcrOwner(workflowRes.data.ocr_job, requestedOrderId);
+        if (expectedJob.executionKind !== "native" || workflowRes.data.order_id !== requestedOrderId
+            || !actual || actual.jobId !== expectedJob.jobId || actual.executionId !== expectedJob.executionId) return false;
+      } else if (workflowRes.data.ocr_job && "native_ingest" in workflowRes.data.ocr_job
+          || workflowRes.data.ocr_job?.ocr_job_id!==expectedJob.jobId
+          || workflowRes.data.ocr_job?.workflow_attempt_id!==expectedJob.attemptId) return false;
+    }
     const {ocr_candidates: candidates, ...inspectionData} = inspectionRes.data;
     if (!candidates || candidates.order_id !== requestedOrderId
       || !Array.isArray(candidates.results)
@@ -2409,18 +2426,28 @@ export default function OrderWorkflowV2Page() {
     const own=capturePageOwner();
     const jobId=workflow.ocr_job?.ocr_job_id;
     const attemptId=workflow.ocr_job?.workflow_attempt_id;
-    if (typeof jobId!=="string" || !jobId || typeof attemptId!=="string" || !attemptId) {
+    const native = Boolean(workflow.ocr_job && "native_ingest" in workflow.ocr_job);
+    const nativeOwner = native ? nativeOcrOwner(workflow.ocr_job, orderId) : null;
+    if (typeof jobId!=="string" || !jobId || (native ? !nativeOwner || workflow.order_id!==orderId : typeof attemptId!=="string" || !attemptId)) {
       if (ownsPageContext(own)) setError("OCR進捗の実job IDまたはattempt IDが未記録です。進捗読取を停止しています。");
       return undefined;
     }
     let active=true;
-    const current=()=>active && ownsPageContext(own) && workflowJobRef.current.orderId===own.context.orderId
-      && workflowJobRef.current.jobId===jobId && workflowJobRef.current.attemptId===attemptId && workflowJobRef.current.state==="ocr_running";
+    const current=()=> {
+      const recorded = workflowJobRef.current;
+      if (!active || !ownsPageContext(own) || recorded.orderId!==own.context.orderId
+          || recorded.jobId!==jobId || recorded.state!=="ocr_running") return false;
+      if (!native) return !("native_ingest" in recorded) && recorded.attemptId===attemptId;
+      if (recorded.workflowOrderId!==orderId) return false;
+      const actual = nativeOcrOwner({ocr_job_id:recorded.jobId,order_id:recorded.jobOrderId,
+        workflow_attempt_id:recorded.attemptId,native_ingest:recorded.native_ingest},orderId);
+      return actual !== null && actual.executionId===nativeOwner?.executionId;
+    };
     const timer = window.setInterval(() => {
       if (!current()) return;
       const readOwn=capturePageOwner();
       const readCurrent=()=>current() && ownsPageInput(readOwn);
-      void refreshAll(readCurrent,{jobId,attemptId}).then(accepted=>{
+      void refreshAll(readCurrent,native ? nativeOwner! : {jobId,attemptId:attemptId as string}).then(accepted=>{
         if (accepted===false && readCurrent()) {
           setError("OCR進捗のjobが変更、またはattemptが変更されました。元のjobの進捗読取を停止しています。");
           active=false; window.clearInterval(timer);
@@ -2430,7 +2457,9 @@ export default function OrderWorkflowV2Page() {
       });
     }, 3000);
     return () => {active=false;window.clearInterval(timer);};
-  }, [orderId, workflow?.state,workflow?.ocr_job?.ocr_job_id,workflow?.ocr_job?.workflow_attempt_id,effectiveSelectedDocumentId,router.asPath]);
+  }, [orderId,workflow?.order_id,workflow?.state,workflow?.ocr_job?.order_id,workflow?.ocr_job?.ocr_job_id,workflow?.ocr_job?.workflow_attempt_id,
+    workflow?.ocr_job?.native_ingest?.mode,workflow?.ocr_job?.native_ingest?.intake_protocol,workflow?.ocr_job?.native_ingest?.execution_id,
+    Boolean(workflow?.ocr_job && "native_ingest" in workflow.ocr_job),effectiveSelectedDocumentId,router.asPath]);
 
   useEffect(() => {
     if (!router.isReady || !orderId || visibleStep !== 1.5) return;

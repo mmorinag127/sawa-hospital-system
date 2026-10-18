@@ -39,6 +39,103 @@ def current_ingest_lease():
     return deepcopy(_execution_lease.get())
 
 
+def ingest_terminal_receipt(session, job, captured):
+    """Select one recorded completion contract; never reinterpret old jobs."""
+    if job is None or not isinstance(captured, dict):
+        return None
+    metrics = job.metrics or {}
+    mode = captured.get("ingest_ocr_mode")
+    if mode not in (None, "registration_only", "hakodate"):
+        raise ValueError("ingest_ocr_mode_unknown")
+    protocol = (captured.get("ingest_lease") or {}).get("payload", {}).get("intake_protocol")
+    if ((mode is None and protocol is not None)
+            or (mode is not None and (protocol != "native_ingest_v2" or captured.get("intake_protocol") != protocol))):
+        raise ValueError("intake_protocol_mismatch")
+    if mode is None:
+        kinds = [key for key in ("first_pass_terminal_receipt", "non_ocr_terminal_receipt") if metrics.get(key) is not None]
+        if len(kinds) > 1:
+            raise ValueError("ingest_terminal_receipt_ambiguous")
+        return metrics.get(kinds[0]) if kinds else None
+    if mode == "registration_only":
+        if metrics.get("first_pass_terminal_receipt") is not None:
+            raise ValueError("ingest_registration_receipt_kind_invalid")
+        receipt = metrics.get("non_ocr_terminal_receipt")
+        source_failure = metrics.get("source_failure_receipt")
+        rerun = metrics.get("rerun_terminal_receipt")
+        if source_failure is not None or rerun is not None:
+            from src.services.workflow_attempt_guard_service import is_selected_pdf_failure
+            if (not isinstance(source_failure, dict) or receipt != source_failure or rerun != source_failure
+                    or not is_selected_pdf_failure(source_failure.get("error"))
+                    or source_failure.get("job_id") != job.id
+                    or source_failure.get("execution_id") != captured.get("execution_id")
+                    or source_failure.get("order_id") != captured.get("order_id")
+                    or source_failure.get("status") != "failed" or job.status != "failed"
+                    or job.error_message != source_failure.get("error")
+                    or source_failure.get("adopted") is not False or source_failure.get("evidence_run_id") is not None
+                    or source_failure.get("workflow_attempt_id") is not None
+                    or metrics.get("result_state") != "hard_failed"
+                    or metrics.get("processing_stage") != "source_verification_failed"):
+                raise ValueError("ingest_registration_source_failure_invalid")
+            return receipt
+        if receipt is None:
+            return None
+        document = captured.get("orders", {}).get(captured.get("order_id"), {}).get("document") or {}
+        if (not isinstance(receipt, dict) or receipt.get("job_id") != job.id
+                or receipt.get("execution_id") != captured.get("execution_id")
+                or receipt.get("document_id") != document.get("id")
+                or receipt.get("status") != job.status
+                or receipt.get("result_state") != metrics.get("result_state")
+                or not ((job.status == "done" and receipt.get("result_state") == "skipped" and job.error_message is None)
+                        or (job.status == "failed" and receipt.get("result_state") == "hard_failed" and job.error_message))):
+            raise ValueError("ingest_registration_terminal_invalid")
+        return receipt
+    receipt = metrics.get("rerun_terminal_receipt")
+    source_failure = metrics.get("source_failure_receipt")
+    for key in ("first_pass_terminal_receipt", "non_ocr_terminal_receipt"):
+        other = metrics.get(key)
+        if other is not None and not (key == "non_ocr_terminal_receipt" and source_failure is not None and other == source_failure == receipt):
+            raise ValueError("ingest_terminal_receipt_ambiguous")
+    if source_failure is not None:
+        from src.services.workflow_attempt_guard_service import is_selected_pdf_failure
+        if (source_failure != receipt or not is_selected_pdf_failure(source_failure.get("error"))
+                or source_failure.get("adopted") is not False or source_failure.get("evidence_run_id") is not None
+                or metrics.get("result_state") != "hard_failed" or job.error_message != source_failure.get("error")):
+            raise ValueError("ingest_native_source_failure_invalid")
+    if receipt is None:
+        return None
+    if (not isinstance(receipt, dict) or receipt.get("job_id") != job.id
+            or receipt.get("execution_id") != captured.get("execution_id")
+            or receipt.get("order_id") != captured.get("order_id")
+            or receipt.get("status") != job.status or job.status not in {"done", "failed"}
+            or receipt.get("error") != job.error_message
+            or receipt.get("workflow_attempt_id") is not None):
+        raise ValueError("ingest_native_terminal_owner_changed")
+    evidence_id = receipt.get("evidence_run_id")
+    if evidence_id is None:
+        if job.status != "failed" or not job.error_message:
+            raise ValueError("ingest_native_terminal_evidence_missing")
+        return receipt
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    evidence = session.get(OrderOcrEvidenceRun, evidence_id)
+    payload = evidence.payload_json if evidence is not None else None
+    lineage = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+    original = captured.get("orders", {}).get(captured.get("order_id"), {})
+    if (evidence is None or evidence.order_id != captured["order_id"]
+            or evidence.template_version_id != original.get("order", {}).get("template_version_id")
+            or evidence.producer_version != "hakodate_best_method_pipeline"
+            or not isinstance(lineage, dict) or lineage.get("job_id") != job.id
+            or lineage.get("nonworkflow_execution_id") != captured["execution_id"]
+            or lineage.get("evidence_run_id") != evidence.id
+            or lineage.get("selected_pdf_receipt") != captured.get("selected_pdf_receipt")):
+        raise ValueError("ingest_native_terminal_evidence_foreign")
+    if job.status == "done" and (receipt.get("error") is not None or job.error_message is not None
+            or metrics.get("result_state") != "evidence_ready" or metrics.get("processing_stage") != "evidence_ready"):
+        raise ValueError("ingest_native_terminal_state_invalid")
+    if job.status == "failed" and (evidence.status != "diagnostic_only" or not job.error_message):
+        raise ValueError("ingest_native_terminal_review_invalid")
+    return receipt
+
+
 def original_ingest_ocr_reference(lease):
     with session_scope() as session:
         if not lock_ingest_lease(session, lease):
@@ -57,6 +154,9 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
     with session_scope() as session:
         if not lock_ingest_lease(session, lease):
             raise ValueError("ingest_attempt_changed")
+        protocol = lease["payload"].get("intake_protocol")
+        if protocol not in (None, "native_ingest_v2") or payload.intake_protocol != protocol:
+            raise ValueError("intake_protocol_mismatch")
         session.execute(update(OcrJob).where(OcrJob.id == job_id).values(status=OcrJob.status))
         job = session.get(OcrJob, job_id, populate_existing=True, with_for_update=True)
         if job is not None and (job.metrics or {}).get("workflow_attempt_id") is not None:
@@ -75,6 +175,8 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
             job.metrics = {**job.metrics, "ingest_lease": deepcopy(lease), "nonworkflow_execution": recorded}
             session.flush()
             return _job_to_dict(job)
+        if job is not None and isinstance((job.metrics or {}).get("nonworkflow_execution"), dict):
+            raise ValueError("ingest_original_job_reuse_forbidden")
         if job is None:
             job = OcrJob(id=job_id, created_at=datetime.utcnow())
             session.add(job)
@@ -88,10 +190,12 @@ def prepare_ingest_ocr_job(lease, job_id, payload):
         job.updated_at = datetime.utcnow()
         retained = {key: value for key, value in (job.metrics or {}).items() if key not in {
             "nonworkflow_execution", "pipeline_delivery_receipt", "pending_receipt", "first_pass_terminal_receipt",
-            "non_ocr_terminal_receipt", "source_failure_receipt", "rerun_terminal_receipt", "evidence_run_id", "reparse_evidence_run_id",
+            "non_ocr_terminal_receipt", "source_failure_receipt", "rerun_terminal_receipt", "evidence_run_id", "reparse_evidence_run_id", "ingest_ocr_mode",
         }}
         job.metrics = {**retained, "ingest_lease": deepcopy(lease), "result_state": "processing",
-                       "processing_stage": "input_capture", "next_recovery_at": None}
+                       "processing_stage": "input_capture", "next_recovery_at": None,
+                       **({"ingest_ocr_mode": "registration_only" if payload.skip_ocr else "hakodate"}
+                          if lease["payload"].get("intake_protocol") == "native_ingest_v2" else {})}
         job.output_reference = None
         session.flush()
         return _job_to_dict(job)
@@ -154,6 +258,11 @@ def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     from src.services.ingest_policy import require_explicit_ingest_week
 
     normalized = dict(payload)
+    # The optional dataclass field is not a new key in the schema-1 protocol.
+    if normalized.get("intake_protocol") is None:
+        normalized.pop("intake_protocol", None)
+    if "intake_protocol" in normalized and normalized["intake_protocol"] != "native_ingest_v2":
+        raise ValueError("intake_protocol_invalid")
     normalized["week_hint"] = require_explicit_ingest_week(normalized.get("week_hint"))
     from src.services.ingest_facility_selection_service import validate_selection
     normalized["facility_selection"] = validate_selection(
@@ -499,7 +608,7 @@ def settle_ingest_ocr_terminal(execution):
         session.execute(update(OcrJob).where(OcrJob.id == execution["job_id"]).values(status=OcrJob.status))
         job = session.get(OcrJob, execution["job_id"], populate_existing=True, with_for_update=True)
         stored = (job.metrics or {}).get("nonworkflow_execution") if job is not None else None
-        receipt = ((job.metrics or {}).get("first_pass_terminal_receipt") or (job.metrics or {}).get("non_ocr_terminal_receipt")) if job is not None else None
+        receipt = ingest_terminal_receipt(session, job, stored)
         if (job is None or not isinstance(stored, dict) or stored.get("execution_id") != execution["execution_id"]
             or stored.get("ingest_lease") != lease or not isinstance(receipt, dict)
             or receipt.get("execution_id") != execution["execution_id"] or receipt.get("job_id") != job.id
@@ -560,7 +669,7 @@ def recover_completed_upload(uploaded, captured):
         ocr = session.get(OcrJob, ocr.id, populate_existing=True, with_for_update=True)
         if order is None or ocr.status != "done" or ocr.metrics.get("nonworkflow_execution") != boundary:
             return False
-        receipt = ocr.metrics.get("first_pass_terminal_receipt") or ocr.metrics.get("non_ocr_terminal_receipt")
+        receipt = ingest_terminal_receipt(session, ocr, boundary)
         document = boundary.get("orders", {}).get(boundary.get("order_id"), {}).get("document")
         if not isinstance(receipt, dict) or receipt.get("job_id") != ocr.id or receipt.get("execution_id") != boundary["execution_id"] or receipt.get("status") != "done" or not isinstance(document, dict) or document.get("storage_uri") != uploaded["storage_uri"] or document.get("source_email_id") != uploaded["message_id"]:
             return False

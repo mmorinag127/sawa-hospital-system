@@ -373,7 +373,7 @@ function PdfUploadScreen() {
     setUploadsError("");
     setUploadsNotice("");
     try {
-      await apiClient.post(`/ingest/uploads/${row.id}/retry`);
+      await apiClient.post(`/ingest/uploads/${row.id}/retry`, undefined, { params: { intake_protocol: "native_ingest_v2" } });
       setUploadsNotice(`「${row.original_filename || row.id}」を再処理に戻しました。`);
       await loadUploadedRows();
     } catch (err: any) {
@@ -431,6 +431,7 @@ function PdfUploadScreen() {
     let uploadedResults: UploadItemResult[] = [];
     try {
       const res = await apiClient.post("/ingest/upload", formData, {
+        params: { intake_protocol: "native_ingest_v2" },
         headers: { "Content-Type": "multipart/form-data" },
       });
       const payload: UploadResponse = res.data || {};

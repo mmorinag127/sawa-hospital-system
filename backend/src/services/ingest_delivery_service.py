@@ -227,7 +227,8 @@ def _receipt(session, row, job, *, validate_pipeline=True):
         raise ValueError("ingest_delivery_capture_owner_mismatch")
     if captured.get("job_id") != job.id or captured.get("input_reference") != job.input_reference:
         raise ValueError("ingest_delivery_capture_input_mismatch")
-    terminal = (job.metrics or {}).get("first_pass_terminal_receipt") or (job.metrics or {}).get("non_ocr_terminal_receipt")
+    from src.services.ingest_job_service import ingest_terminal_receipt
+    terminal = ingest_terminal_receipt(session, job, captured)
     if job.status in {"done", "failed"}:
         if terminal is None:
             return None, None
@@ -441,6 +442,11 @@ def persist_runner_receipt(lease, terminal):
             captured = (job.metrics or {}).get("nonworkflow_execution")
             if not isinstance(captured, dict) or not _same(captured.get("ingest_lease"), lease) or terminal.get("execution_id") != captured["execution_id"] or terminal.get("status") != job.status:
                 raise ValueError("ingest_delivery_terminal_original_mismatch")
+            from src.services.ingest_job_service import ingest_terminal_receipt
+            if captured.get("ingest_ocr_mode") in {"hakodate", "registration_only"}:
+                if ingest_terminal_receipt(session, job, captured) != terminal:
+                    raise ValueError("ingest_native_runner_receipt_changed")
+                return
             key = "first_pass_terminal_receipt" if "evidence_run_id" in terminal else "non_ocr_terminal_receipt"
             existing = (job.metrics or {}).get(key)
             if existing is not None and not _same(existing, terminal):
