@@ -15,7 +15,8 @@ const Navigation = createContext<{ allow: (url: string) => boolean; register: (g
 
 export function NavigationBoundary({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const ownerRouter = useRef(router).current;
+  const liveRouter = useRef(router);
+  liveRouter.current = router;
   const ownerToken = useRef<string | null>(null);
   const guard = useRef<Guard | null>(null);
   const blocked = useRef(false);
@@ -52,6 +53,7 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
     };
     let current: Position | null = position(history.state) ??
       (documentEntry?.token === token ? documentEntry : { token, index: 0 });
+    let capturedApproval: unknown = null;
     replace.call(history, { ...history.state, [key]: current }, "");
     history.pushState = function (state, unused, url) {
       // Unknown entries have no inferable distance to the prior owned segment.
@@ -61,14 +63,24 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
       current = next;
     };
     history.replaceState = function (state, unused, url) {
+      const entry = position(history.state);
+      if (!entry || entry.index !== current?.index) current = null;
       replace.call(this, current ? { ...state, [key]: current } : state, unused, url);
     };
-    ownerRouter.beforePopState(({ as }) => {
+    const unknown = () => {
+      current = null;
+      restoring.current = false;
+      capturedApproval = null;
+      blocked.current = true;
+      setError("履歴の位置を確認できません。編集内容を保持して移動を停止しました。");
+    };
+    const beforePop = ({ as }: { as: string }) => {
       const target = position(history.state);
       if (restoring.current && current && target?.index === current.index) {
         restoring.current = false;
         return false;
       }
+      if (restoring.current && guard.current?.active()) { unknown(); return false; }
       if (!guard.current?.active()) {
         blocked.current = false;
         restoring.current = false;
@@ -78,18 +90,14 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
       }
       if (!target || !current) {
         // There is no reliable delta outside the entries this boundary owns.
-        current = null;
-        blocked.current = true;
-        setError("履歴の位置を確認できません。編集内容を保持して移動を停止しました。");
+        unknown();
         return false;
       }
       if (blocked.current || restoring.current) return false;
       if (!guard.current.allow(as)) {
         const delta = current.index - target.index;
-        if (delta === 0) {
-          blocked.current = true;
-          setError("履歴の位置を確認できません。編集内容を保持して移動を停止しました。");
-        } else {
+        if (delta === 0) unknown();
+        else {
           restoring.current = true;
           history.go(delta);
         }
@@ -97,13 +105,47 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
       }
       current = target;
       return true;
+    };
+    // Next normalizes null/reloads __NA before beforePopState, and can skip it
+    // for same-URL SSR entries. Observe the original entry before those branches.
+    const capturePop = (event: PopStateEvent) => {
+      capturedApproval = null;
+      const state = event.state;
+      const target = state?.__N && !state.__NA ? position(state) : null;
+      if (!target) {
+        current = null;
+        restoring.current = false;
+        if (guard.current?.active()) {
+          event.stopImmediatePropagation();
+          unknown();
+        } else {
+          blocked.current = false;
+          setError("");
+        }
+        return;
+      }
+      if (restoring.current || (guard.current?.active() && state.as === liveRouter.current.asPath)) {
+        if (!beforePop(state)) event.stopImmediatePropagation();
+        else capturedApproval = state;
+      } else if (!guard.current?.active()) {
+        // Clean traversal must retain Next's events, scroll restoration and key updates.
+        current = target;
+        blocked.current = false;
+        setError("");
+      }
+    };
+    liveRouter.current.beforePopState(state => {
+      if (state === capturedApproval) { capturedApproval = null; return true; }
+      return beforePop(state);
     });
+    window.addEventListener("popstate", capturePop, true);
     return () => {
+      window.removeEventListener("popstate", capturePop, true);
       history.pushState = push;
       history.replaceState = replace;
-      ownerRouter.beforePopState(() => true);
+      liveRouter.current.beforePopState(() => true);
     };
-  }, [ownerRouter]);
+  }, [router.events]);
 
   return <Navigation.Provider value={api}>{error && <p role="alert">{error}</p>}{children}</Navigation.Provider>;
 }
