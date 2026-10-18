@@ -11,41 +11,58 @@ import { browserSessionKey, subscribeBrowserSession } from "../services/browserS
 
 const isoDate = (date: Date) => date.toISOString().slice(0, 10);
 
-const mondayForDate = (dateText: string) => {
-  const parsed = new Date(`${dateText}T00:00:00`);
-  if (Number.isNaN(parsed.getTime())) return "";
-  const day = parsed.getDay();
-  const monday = new Date(parsed);
-  monday.setDate(parsed.getDate() + (day === 0 ? -6 : 1 - day));
-  return isoDate(monday);
+const parseCivilDate = (text: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || text.startsWith("0000")) return null;
+  const date = new Date(`${text}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && isoDate(date) === text ? date : null;
 };
 
-const dateToWeekValue = (dateText: string) => {
-  const mondayText = mondayForDate(dateText);
-  if (!mondayText) return "";
-  const monday = new Date(`${mondayText}T00:00:00`);
+const isoWeekForMonday = (monday: Date) => {
   const thursday = new Date(monday);
-  thursday.setDate(monday.getDate() + 3);
-  const yearStart = new Date(thursday.getFullYear(), 0, 1);
-  const weekNumber = Math.ceil(((thursday.getTime() - yearStart.getTime()) / 86400000 + yearStart.getDay() + 1) / 7);
-  return `${thursday.getFullYear()}-W${String(weekNumber).padStart(2, "0")}`;
+  thursday.setUTCDate(monday.getUTCDate() + 3);
+  const year = thursday.getUTCFullYear();
+  if (year < 1 || year > 9999) return "";
+  const yearStart = parseCivilDate(`${String(year).padStart(4, "0")}-01-01`)!;
+  const week = Math.ceil(((thursday.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${String(year).padStart(4, "0")}-W${String(week).padStart(2, "0")}`;
 };
 
 const weekValueToMonday = (weekValue: string) => {
   const match = weekValue.match(/^(\d{4})-W(\d{2})$/);
   if (!match) return "";
-  const year = Number(match[1]);
   const week = Number(match[2]);
-  const janFourth = new Date(year, 0, 4);
-  const janFourthDay = janFourth.getDay() || 7;
-  const firstMonday = new Date(janFourth);
-  firstMonday.setDate(janFourth.getDate() - janFourthDay + 1);
-  const monday = new Date(firstMonday);
-  monday.setDate(firstMonday.getDate() + (week - 1) * 7);
-  return isoDate(monday);
+  const monday = parseCivilDate(`${match[1]}-01-04`);
+  if (!monday || week < 1 || week > 53) return "";
+  monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() || 7) + 1 + (week - 1) * 7);
+  return isoWeekForMonday(monday) === weekValue && parseCivilDate(isoDate(monday)) ? isoDate(monday) : "";
 };
 
-const todayWeek = () => dateToWeekValue(isoDate(new Date()));
+const weekDatesForValue = (value: string) => {
+  const monday = weekValueToMonday(value);
+  if (!monday) return [];
+  const date = parseCivilDate(monday)!;
+  date.setUTCDate(date.getUTCDate() - 1);
+  const dates = Array.from({ length: 7 }, () => {
+    const text = isoDate(date);
+    date.setUTCDate(date.getUTCDate() + 1);
+    return text;
+  });
+  return dates.every(text => parseCivilDate(text)) ? dates : [];
+};
+
+const dateToWeekValue = (dateText: string) => {
+  const monday = parseCivilDate(dateText);
+  if (!monday) return "";
+  // The ISO Monday identifies the business week beginning the preceding Sunday.
+  monday.setUTCDate(monday.getUTCDate() - monday.getUTCDay() + 1);
+  const value = isoWeekForMonday(monday);
+  return weekDatesForValue(value).length === 7 ? value : "";
+};
+
+const todayWeek = () => {
+  const now = new Date();
+  return dateToWeekValue(`${String(now.getFullYear()).padStart(4, "0")}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`);
+};
 
 const queryValue = (value: string | string[] | undefined) => {
   if (Array.isArray(value)) return value[0] || "";
@@ -115,16 +132,25 @@ const weekHistoryFromOrder = (order: OrderSummary) => {
   const weekValue = String(order.week_value || order.week || "").trim();
   const explicitRange = weekValue.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
   if (!explicitRange) return null;
+  const week = dateToWeekValue(explicitRange[2]);
+  const dates = weekDatesForValue(week);
+  if (!parseCivilDate(explicitRange[3]) || explicitRange[3] < explicitRange[2] || !dates.includes(explicitRange[3])) return null;
   return {
-    week: dateToWeekValue(explicitRange[2]),
-    label: order.week_label || `${explicitRange[2].slice(5).replace("-", "/")} - ${explicitRange[3].slice(5).replace("-", "/")}`,
+    week,
+    label: `${dates[0]} から ${dates[6]}`,
     receivedAt: order.received_at || "",
   };
 };
 
 function WeeklyWeightOutputScreen() {
   const router = useRouter();
-  const [week, setWeek] = useState(todayWeek());
+  const queryIdentity = (target = router) => JSON.stringify([target.asPath, target.query.week, target.query.date, target.query.status]);
+  const identity = queryIdentity();
+  const [resolvedQuery, setResolvedQuery] = useState<{ identity: string } | null>(null);
+  const periodReady = router.isReady && resolvedQuery?.identity === identity;
+  const liveRoute = useRef({ router, identity, periodReady });
+  liveRoute.current = { router, identity, periodReady };
+  const [week, setWeek] = useState("");
   const [status, setStatus] = useState("");
   const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: todayWeek(), status: "" } });
   const [message, setMessage] = useState("");
@@ -138,30 +164,31 @@ function WeeklyWeightOutputScreen() {
   const messageGeneration = useRef(0);
   const mounted = useRef(false);
 
+  const retireOperations = () => {
+    inputGeneration.current += 1;
+    loadGeneration.current += 1;
+    downloadGeneration.current += 1;
+    messageGeneration.current += 1;
+    setLoading(false);
+    setDownloading(false);
+    setMessage("");
+  };
+
   useEffect(() => {
     mounted.current = true;
     let observedConditions = { ...conditionForm.getValues() };
     let observedSession = browserSessionKey();
-    const retire = () => {
-      inputGeneration.current += 1;
-      loadGeneration.current += 1;
-      downloadGeneration.current += 1;
-      messageGeneration.current += 1;
-      setLoading(false);
-      setDownloading(false);
-      setMessage("");
-    };
     const subscription = conditionForm.watch(() => {
       const values = conditionForm.getValues();
       if (values.week === observedConditions.week && values.status === observedConditions.status) return;
       observedConditions = { ...values };
-      retire();
+      retireOperations();
     });
     const stopSession = subscribeBrowserSession(() => {
       const session = browserSessionKey();
       if (session === observedSession) return;
       observedSession = session;
-      retire();
+      retireOperations();
     });
     return () => {
       mounted.current = false;
@@ -175,17 +202,22 @@ function WeeklyWeightOutputScreen() {
   }, [conditionForm]);
 
   const beginOperation = (kind: "list" | "output", conditions: WeeklyWeightConditions) => {
+    const captured = { ...conditions };
+    const ownsInput = () => {
+      const live = liveRoute.current;
+      const values = conditionForm.getValues();
+      return mounted.current && live.periodReady && live.router.isReady
+        && identity === live.identity && live.identity === queryIdentity(live.router)
+        && captured.week === values.week && captured.status === values.status;
+    };
+    if (!ownsInput()) return { current: () => false, ownsMessage: () => false };
     const operations = kind === "list" ? loadGeneration : downloadGeneration;
     const operation = ++operations.current;
     const input = inputGeneration.current;
     const messageOwner = ++messageGeneration.current;
     const session = browserSessionKey();
-    const captured = { ...conditions };
-    const current = () => {
-      const values = conditionForm.getValues();
-      return mounted.current && input === inputGeneration.current && operation === operations.current
-        && session === browserSessionKey() && captured.week === values.week && captured.status === values.status;
-    };
+    const current = () => ownsInput() && input === inputGeneration.current && operation === operations.current
+      && session === browserSessionKey();
     if (current()) {
       setMessage("");
       if (kind === "list") setLoading(false);
@@ -195,27 +227,27 @@ function WeeklyWeightOutputScreen() {
   };
 
   useEffect(() => {
+    retireOperations();
     if (!router.isReady) return;
     const queryDate = queryValue(router.query.date);
     const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
-    const nextWeek = queryWeek || (queryDate ? dateToWeekValue(queryDate) : "") || week;
+    const hasWeek = router.query.week !== undefined;
+    const hasDate = router.query.date !== undefined;
+    const dateWeek = dateToWeekValue(queryDate);
+    const nextWeek = hasWeek ? queryWeek : hasDate ? dateWeek : todayWeek();
     const nextStatus = queryStatus || "";
     conditionForm.reset({ week: nextWeek, status: nextStatus });
-  }, [router.isReady, router.query.date, router.query.status, router.query.week]);
+    setResolvedQuery({ identity });
+    if (Array.isArray(router.query.week) || Array.isArray(router.query.date)
+      || !weekDatesForValue(nextWeek).length || (hasDate && (!dateWeek || dateWeek !== nextWeek))) {
+      conditionForm.setValue("week", "");
+      setMessage("有効な週・日付を指定してください。");
+      return;
+    }
+  }, [router.isReady, identity]);
 
-  const date = useMemo(() => weekValueToMonday(week), [week]);
-
-  const weekDates = useMemo(() => {
-    if (!date) return [];
-    const monday = new Date(`${date}T00:00:00`);
-    if (Number.isNaN(monday.getTime())) return [];
-    return Array.from({ length: 7 }, (_, index) => {
-      const item = new Date(monday);
-      item.setDate(monday.getDate() + index);
-      return isoDate(item);
-    });
-  }, [date]);
+  const weekDates = useMemo(() => weekDatesForValue(week), [week]);
 
   const weekLabel = useMemo(() => {
     if (weekDates.length === 0) return "";
@@ -257,13 +289,11 @@ function WeeklyWeightOutputScreen() {
   const loadWeeklyOrders = async (conditions: WeeklyWeightConditions) => {
     const owner = beginOperation("list", conditions);
     if (!owner.current()) return;
-    const targetDate = weekValueToMonday(conditions.week);
-    if (!targetDate) throw new Error("週を指定してください。");
-    const targetDates = Array.from({ length: 7 }, (_, index) => {
-      const item = new Date(`${targetDate}T00:00:00`);
-      item.setDate(item.getDate() + index);
-      return isoDate(item);
-    });
+    const targetDates = weekDatesForValue(conditions.week);
+    if (!targetDates.length) {
+      setMessage("有効な週を指定してください。");
+      return;
+    }
     setLoading(true);
     try {
       const responses = await Promise.all(
@@ -294,14 +324,17 @@ function WeeklyWeightOutputScreen() {
   };
 
   useEffect(() => {
-    void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
+    if (periodReady && weekDatesForValue(conditionForm.getValues().week).length) {
+      void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
+    }
+    // Only a newly resolved URL initiates an automatic list read, not manual edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [resolvedQuery]);
 
   const downloadWeeklyWeight = async (conditions: WeeklyWeightConditions) => {
     const owner = beginOperation("output", conditions);
     if (!owner.current()) return;
-    const targetDate = weekValueToMonday(conditions.week);
+    const targetDate = weekDatesForValue(conditions.week)[0];
     if (!targetDate) {
       setMessage("週を指定してください。");
       return;
@@ -355,12 +388,12 @@ function WeeklyWeightOutputScreen() {
         </header>
         <FormProvider {...conditionForm}>
           <Stack component="form" direction={{ xs: "column", sm: "row" }} spacing={2} onSubmit={conditionForm.handleSubmit((values) => void loadWeeklyOrders(values).catch(() => undefined))}>
-            <FormTextField<WeeklyWeightConditions> name="week" label="週" type="week" rules={{ required: "週を指定してください。" }} />
+            <FormTextField<WeeklyWeightConditions> name="week" label="週" type="week" rules={{ required: "週を指定してください。", validate: value => weekDatesForValue(value).length === 7 || "有効な週を指定してください。" }} />
             <FormTextField<WeeklyWeightConditions> name="status" label="ステータス" select>
               <MenuItem value="">全て</MenuItem><MenuItem value="未着">未着</MenuItem><MenuItem value="要確認">要確認</MenuItem><MenuItem value="確定">確定</MenuItem><MenuItem value="エラー">エラー</MenuItem>
             </FormTextField>
-            <Button type="submit" variant="contained" disabled={loading}>{loading ? "集計中..." : "表示・集計"}</Button>
-            <Button type="button" variant="outlined" disabled={downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
+            <Button type="submit" variant="contained" disabled={!periodReady || loading}>{loading ? "集計中..." : "表示・集計"}</Button>
+            <Button type="button" variant="outlined" disabled={!periodReady || downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
           </Stack>
         </FormProvider>
         <div className="filters">
