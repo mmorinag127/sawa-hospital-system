@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import uuid
 from pathlib import Path
 from typing import Type
@@ -90,11 +91,26 @@ def _has_canonical_system_check(connection: Connection, checks: list[dict]) -> b
             return len(actual) == len(expected) == 1 and actual[0].convalidated and actual[0].expression == expected[0].expression
         finally:
             connection.execute(sa.text(f'DROP TABLE "{reference}"'))
-    for check in checks:
-        if all(key in str(check.get("sqltext") or "") for key in SYSTEM_KEYS):
-            if connection.dialect.name == "sqlite" or str(check.get("name") or "") in {"", CANONICAL_CHECK_NAME}:
-                return True
-    if connection.dialect.name != "sqlite":
+    if connection.dialect.name != "sqlite" or not isinstance(checks, list) or len(checks) != 1:
         return False
-    ddl_text = str(connection.execute(sa.text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_system_access'")).scalar() or "")
-    return "CHECK" in ddl_text and all(key in ddl_text for key in SYSTEM_KEYS)
+    check = checks[0]
+    if not isinstance(check, dict) or check.get("name") != CANONICAL_CHECK_NAME or not isinstance(check.get("sqltext"), str):
+        return False
+    # Match only the migration's IN expression, never words elsewhere in DDL.
+    # SQL identifiers/keywords are case insensitive; string values are not.
+    column = r'(?i:system_key|"system_key"|`system_key`|\[system_key\])'
+    values = r"\s*,\s*".join(re.escape(f"'{key}'") for key in SYSTEM_KEYS)
+    if re.fullmatch(rf"\s*{column}\s+(?i:IN)\s*\(\s*{values}\s*\)\s*", check["sqltext"]) is None:
+        return False
+    try:
+        ddl = connection.execute(sa.text(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_system_access'"
+        )).scalar()
+        ignored = connection.exec_driver_sql("PRAGMA ignore_check_constraints").scalar()
+    except sa.exc.SQLAlchemyError:
+        return False
+    # Migration 0026 has no COLLATE declaration. Reflection omits column
+    # collation, so DDL is an additional veto, never a substitute for the CHECK.
+    return (isinstance(ddl, str) and bool(ddl.strip())
+            and re.search(r"\bCOLLATE\b", ddl, re.IGNORECASE) is None
+            and type(ignored) is int and ignored == 0)
