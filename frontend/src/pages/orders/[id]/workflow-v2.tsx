@@ -9,6 +9,7 @@ import { apiClient, hasActiveSessionAuthHeader } from "../../../services/apiClie
 import { facilityReadSelection, facilityReadConfig } from "../../../services/orderFacilityRead";
 import { browserSessionKey, subscribeBrowserSession } from "../../../services/browserSession";
 import TopNav from "../../../components/TopNav";
+import { useH1LeaveGuard } from "../../../hooks/useH1LeaveGuard";
 import OutputHistoryPanel from "../../../components/OutputHistoryPanel";
 import { nativeOcrOwner, type NativeOcrOwner } from "../../../features/orders/nativeOcrOwner";
 import {
@@ -1340,7 +1341,7 @@ export default function OrderWorkflowV2Page() {
   const [customWeekRangeEnd, setCustomWeekRangeEnd] = useState<string>("");
   const [sheetJson, setSheetJson] = useState(formatJson(defaultSheet));
   const [sheetJsonStale, setSheetJsonStale] = useState(false);
-  const [sheetPayload, setSheetPayload] = useState<SheetPayload | null>(null);
+  const [sheetPayload, setSheetPayloadState] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
   const [storedQuadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
   const [quadReviewLoading, setQuadReviewLoading] = useState(false);
@@ -1388,8 +1389,14 @@ export default function OrderWorkflowV2Page() {
   const [preSaveStatus, setPreSaveStatus] = useState<PreSaveStatus>({});
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const sheetPayloadRef = useRef<SheetPayload | null>(null);
+  const setSheetPayload = (value: SheetPayload | null | ((current: SheetPayload | null) => SheetPayload | null)) => {
+    const next = typeof value === "function" ? value(sheetPayloadRef.current) : value;
+    sheetPayloadRef.current = next;
+    setSheetPayloadState(next);
+  };
   const pendingSheetCellEditsRef = useRef<Map<string, { rowIndex: number; colIndex: number; value: string }>>(new Map());
   const sheetDirtyRef = useRef(false);
+  const unsavedSessionRef = useRef<string | null>(null);
   const sheetEditGenerationRef = useRef(0);
   const refreshGenerationRef = useRef(0);
   const workflowRevisionRef = useRef<WorkflowRevisionToken | null>(null);
@@ -1617,9 +1624,18 @@ export default function OrderWorkflowV2Page() {
     return workflowEditorVersionsRef.current[editor];
   };
   const hasDirtyWorkflowEditor = () => Object.values(workflowEditorVersionsRef.current).some((entry) => entry.dirty);
+  const hasUnsavedWorkflowInput = (preservedEditor?: string) => (
+    preservedEditor !== "sheet" && (sheetDirtyRef.current || pendingSheetCellEditsRef.current.size > 0)
+  ) || Object.entries(workflowEditorVersionsRef.current).some(([editor, entry]) => editor !== preservedEditor && entry.dirty);
+  const navigation = useH1LeaveGuard(() => unsavedSessionRef.current === quadAuth() && hasUnsavedWorkflowInput(), []);
+  const confirmWorkflowReplacement = (preservedEditor?: string) => !hasUnsavedWorkflowInput(preservedEditor)
+    || window.confirm("未保存の変更を破棄して処理を続けますか？");
   const beginWorkflowEditorEdit = (editor: string, command = false) => {
     retireOutput("download"); retireOutput("preview");
-    if (!command) ++workingInputGenerationRef.current;
+    if (!command) {
+      ++workingInputGenerationRef.current;
+      unsavedSessionRef.current = quadAuth();
+    }
     if (editor==="quad") { ++quadReadGenerationRef.current; setQuadReviewLoading(false); }
     const current = editorVersion(editor);
     if (!current.dirty) {
@@ -1767,6 +1783,9 @@ export default function OrderWorkflowV2Page() {
       if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
         throw new Error("workflow command の処理中に注文または入力が変更されました。再読込してから操作してください。");
       }
+      if (["ocrRun", "ocrSelection", "ocrDelete", "templateColumns"].includes(editor)) {
+        retireReplacedWorkflowInput(editor);
+      }
       if (preservedSheet) {
         const sheetEditor = editorVersion("sheet");
         const input = preservedSheet.input;
@@ -1814,11 +1833,29 @@ export default function OrderWorkflowV2Page() {
   const discardSheetDraft = () => {
     sheetEditGenerationRef.current += 1;
     pendingSheetCellEditsRef.current.clear();
-    sheetPayloadRef.current = null;
     markSheetClean();
     setSheetPayload(null);
     setSheetJson(formatJson(defaultSheet));
     setSheetJsonStale(false);
+  };
+  // Call only inside an owned successful source-command adoption, never at consent time.
+  const retireReplacedWorkflowInput = (preservedEditor: string) => {
+    discardSheetDraft();
+    for (const editor of Object.keys(workflowEditorVersionsRef.current)) {
+      if (editor !== preservedEditor) finishWorkflowEditorEdit(editor);
+    }
+    if (preservedEditor !== "recognition") { setRecognitionReview(null); setRecognitionValues({}); }
+    if (preservedEditor !== "quad") {
+      quadSourceRef.current = null; setQuadReview(null); setManualQuadPoints([]); setManualQuadMode(false);
+    }
+    for (const axis of ["header", "row"] as const) {
+      if (preservedEditor === axis) continue;
+      delete axisSourceRef.current[axis];
+      if (axis === "header") { setHeaderAxisReview(null); setHeaderAxisXs([]); }
+      else { setRowAxisReview(null); setRowAxisYs([]); }
+    }
+    setSheetAutoEditResult(null); setLocalAnomalyReview(null);
+    setSelectedAutoEditIndex(null); setSelectedAnomalyIndex(null);
   };
   const applyPreSaveState = (
     checks: PreSaveChecks | null | undefined,
@@ -2358,13 +2395,12 @@ export default function OrderWorkflowV2Page() {
       setOcrResults(candidates.results);
       setInspection(inspectionData);
       const savedSheet = inspectionRes.data.saved_sheet?.sheet;
-      const canReplaceSheet = !sheetDirtyRef.current && pendingSheetCellEditsRef.current.size === 0;
+      const canReplaceSheet = !sheetDirtyRef.current && pendingSheetCellEditsRef.current.size === 0 && canAdoptReadEditorInput("sheet");
       if (savedSheet && canReplaceSheet) {
         const normalizedSavedSheet = normalizeSheetPayload(savedSheet);
         if (!sameRecordedValue(sheetPayloadRef.current, normalizedSavedSheet)) {
           ++sheetEditGenerationRef.current;
         }
-        sheetPayloadRef.current = normalizedSavedSheet;
         setSheetPayload(normalizedSavedSheet);
         setSheetJsonStale(true);
       } else if (!savedSheet && canReplaceSheet) {
@@ -2399,7 +2435,6 @@ export default function OrderWorkflowV2Page() {
     workflowEditorVersionsRef.current = {};
     sheetAutoEditJobInputRef.current = null;
     pendingSheetCellEditsRef.current.clear();
-    sheetPayloadRef.current = null;
     setSheetDirty(false);
     setSheetPayload(null);
     setSheetJson(formatJson(defaultSheet));
@@ -2420,11 +2455,6 @@ export default function OrderWorkflowV2Page() {
     });
     return ()=>{active=false;};
   }, [orderId,effectiveSelectedDocumentId,router.asPath]);
-
-  useEffect(() => {
-    sheetPayloadRef.current = sheetPayload;
-    pendingSheetCellEditsRef.current.clear();
-  }, [sheetPayload]);
 
   useEffect(() => {
     if (!orderDetail || !currentDocumentId) return;
@@ -2773,8 +2803,9 @@ export default function OrderWorkflowV2Page() {
       adopt: ActionAdoption;
       captureContinuation: () => () => boolean;
     }) => Promise<void>,
-    options: { successMessage?: string; nextStep?: number; refreshAfter?: boolean } = {},
+    options: { successMessage?: string; nextStep?: number; refreshAfter?: boolean; replacesInput?: boolean; preservedEditor?: string } = {},
   ) => {
+    if (options.replacesInput && !confirmWorkflowReplacement(options.preservedEditor)) return;
     const own=capturePageOwner(), operation=++pageOperationGenerationRef.current;
     if (!ownsPageInput(own)) { setError("注文・PDF・認証を確認してから操作してください。"); return; }
     setBusy(label);
@@ -2823,7 +2854,7 @@ export default function OrderWorkflowV2Page() {
       throw new Error("注文・PDF・入力版が変わりました。再取得してください。");
     }
     adopt(() => {setRecognitionReview(review); setRecognitionValues({});});
-  }, {refreshAfter: false, successMessage: "確認対象のセル画像を取得しました"});
+  }, {refreshAfter: false, successMessage: "確認対象のセル画像を取得しました", replacesInput: editorVersion("recognition").dirty});
 
   const saveRecognitionReview = () => runAction("セル訂正保存", async ({assertCurrent, adopt}) => {
     if (!recognitionReview || recognitionReview.order_id !== orderId
@@ -2867,9 +2898,10 @@ export default function OrderWorkflowV2Page() {
         if (!adoptOwnWorkflowCommandResponse(response.data, contextInputVersion)) {
           throw new Error("Step1設定の保存中に注文または入力が変更されました。再読込してから操作してください。");
         }
+        retireReplacedWorkflowInput("context");
         finishWorkflowEditorEdit("context");
       });
-    });
+    }, { replacesInput: true, preservedEditor: "context" });
 
   const updateFacilityTemplateColumn = (
     rowIndex: number,
@@ -2932,6 +2964,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const saveFacilityTemplateColumns = async () => {
+    if (!confirmWorkflowReplacement("templateColumns")) return;
     const own=capturePageOwner(), operation=++facilitySaveGenerationRef.current;
     const pageOperation=++pageOperationGenerationRef.current;
     const busyOwner=busyGenerationRef.current;
@@ -2968,7 +3001,6 @@ export default function OrderWorkflowV2Page() {
         setFacilityResolvedConfig(resolved);
         setFacilityTemplateColumns(resolvedColumns);
         setFacilityTemplateColumnDraft(resolvedColumns);
-        discardSheetDraft();
         setVisibleStep(1);
       });
       const refreshed = await refreshAll(current, null, adopt);
@@ -3092,6 +3124,7 @@ export default function OrderWorkflowV2Page() {
     if (typeof receipt.geometry_source_digest!=="string" || !receipt.geometry_source_digest) {
       setQuadReviewMessage("4点のgeometry_source_digestが未記録です。補正保存・OCR再実行を停止しています。"); return;
     }
+    if (!confirmWorkflowReplacement("quad")) return;
     beginWorkflowEditorEdit("quad", true);
     const captured=captureWorkflowInputVersion("quad"), own=captureQuadOwner();
     const operation=++quadCommandGenerationRef.current;
@@ -3128,7 +3161,7 @@ export default function OrderWorkflowV2Page() {
         throw new Error("OCR再実行中に注文または入力が変更されました。");
       finishWorkflowEditorEdit("quad");
       quadSourceRef.current=null;
-      discardSheetDraft(); invalidateSheetPreSaveChecks();
+      retireReplacedWorkflowInput("quad"); invalidateSheetPreSaveChecks();
       setMessage("4点補正を保存し、OCRを再実行中です。完了後に正解OCRを選択してください。");
       setVisibleStep(2);
     } catch (err:any) {
@@ -3205,6 +3238,7 @@ export default function OrderWorkflowV2Page() {
       if (expectedCount>0 && points.length!==expectedCount && typeof window!=="undefined"
         && !window.confirm(`ヘッダー縦軸の本数がテンプレート期待値と一致しません。期待 ${expectedCount} 本 / 現在 ${points.length} 本です。このまま保存してOCRを再実行しますか？`)) return;
     }
+    if (!confirmWorkflowReplacement(axis)) return;
     beginWorkflowEditorEdit(axis,true);
     const operation=++pageOperationGenerationRef.current;
     ++axisReadGenerationRef.current[axis];
@@ -3231,6 +3265,7 @@ export default function OrderWorkflowV2Page() {
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(rerun.data,rerunInputVersion)) throw new Error("OCR再実行中に入力が変更されました。");
       finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis];
+      retireReplacedWorkflowInput(axis);
       setSheetAutoEditResult(null); setLocalAnomalyReview(null); setSelectedAnomalyIndex(null); setSelectedAutoEditIndex(null);
       setMessage(axis==="header"?"ヘッダー交点補正を保存し、OCRを再実行しました。":"行境界補正を保存し、OCRを再実行しました。"); setVisibleStep(2);
     } catch(err:any) { if (current()) setError(formatApiError(err,"交点補正の保存またはOCR再実行に失敗しました")); }
@@ -3442,6 +3477,7 @@ export default function OrderWorkflowV2Page() {
       {
         successMessage: ocrRunMode === "llm" ? "Step1 AI OCR run が開始しました" : "Step1 OCR run が開始しました",
         nextStep: 2,
+        replacesInput: true,
       },
     );
 
@@ -3454,13 +3490,14 @@ export default function OrderWorkflowV2Page() {
       {
         successMessage: "正解OCRを選択しました",
         nextStep: 3,
+        replacesInput: true,
       },
     );
 
   const deleteOcr = (ocrResultId: string) =>
     runAction("OCR result delete", async ({ adopt }) => {
       await executeWorkflowMutation("ocrDelete", (config) => apiClient.delete(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}`, config), adopt);
-    });
+    }, { replacesInput: true });
 
   const generateSheetFromSelectedOcr = () =>
     runAction("Step3 sheet source", async ({ adopt }) => {
@@ -3478,7 +3515,7 @@ export default function OrderWorkflowV2Page() {
         if (!normalized) {
           throw new Error("選択OCRからシートを生成できませんでした");
         }
-        sheetPayloadRef.current = normalized;
+        pendingSheetCellEditsRef.current.clear();
         setSheetPayload(normalized);
         markSheetJsonStale();
         setSheetAutoEditResult(null);
@@ -3490,31 +3527,36 @@ export default function OrderWorkflowV2Page() {
     }, {
       successMessage: "選択OCRからシートを生成しました",
       refreshAfter: false,
+      replacesInput: true,
     });
 
-  const getSheetPayloadForAction = () => flushPendingSheetCellEdits() || sheetPayload || normalizeSheetPayload(JSON.parse(sheetJson));
+  const getSheetPayloadForAction = () => flushPendingSheetCellEdits();
 
   const refreshSheetJsonForDetails = () => {
-    const latestSheet = flushPendingSheetCellEdits() || sheetPayloadRef.current || sheetPayload || defaultSheet;
+    const latestSheet = flushPendingSheetCellEdits();
+    if (!latestSheet) {
+      setError("現在のシート入力を確認できません。JSONは置き換えていません。");
+      return;
+    }
     setSheetJson(formatJson(latestSheet));
     setSheetJsonStale(false);
   };
 
   const flushPendingSheetCellEdits = () => {
     const edits = Array.from(pendingSheetCellEditsRef.current.values());
-    const baseSheet = sheetPayloadRef.current || sheetPayload;
+    const baseSheet = sheetPayloadRef.current;
     if (!edits.length) return baseSheet;
     if (!baseSheet) {
-      pendingSheetCellEditsRef.current.clear();
-      return null;
+      throw new Error("編集中のシートの正本を確認できません。入力を保持して処理を停止しました。");
     }
     const rows = baseSheet.rows.map((row) => [...row]);
     for (const edit of edits) {
-      if (!rows[edit.rowIndex] || edit.colIndex < 0 || edit.colIndex >= rows[edit.rowIndex].length) continue;
+      if (!rows[edit.rowIndex] || edit.colIndex < 0 || edit.colIndex >= rows[edit.rowIndex].length) {
+        throw new Error("編集中のセル位置を確認できません。入力を保持して処理を停止しました。");
+      }
       rows[edit.rowIndex][edit.colIndex] = edit.value;
     }
     const nextSheet = { ...baseSheet, rows };
-    sheetPayloadRef.current = nextSheet;
     pendingSheetCellEditsRef.current.clear();
     setSheetPayload(nextSheet);
     markSheetJsonStale();
@@ -3522,6 +3564,7 @@ export default function OrderWorkflowV2Page() {
   };
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
+    unsavedSessionRef.current = quadAuth();
     ++workingInputGenerationRef.current;
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
@@ -4059,6 +4102,7 @@ export default function OrderWorkflowV2Page() {
       {
         successMessage: "注文を確定しました",
         refreshAfter: false,
+        replacesInput: true,
       },
     );
 
@@ -4398,10 +4442,10 @@ export default function OrderWorkflowV2Page() {
           ) : null}
           {orderId ? (
             <>
-              <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`}>
+              <Link className="ghost-link" href={`/orders/${orderId}/inspection-v2`} onNavigate={event => { if (!navigation.allow(`/orders/${orderId}/inspection-v2`)) event.preventDefault(); }}>
                 確認専用ページ
               </Link>
-              <Link className="ghost-link" href="/orders">
+              <Link className="ghost-link" href="/orders" onNavigate={event => { if (!navigation.allow("/orders")) event.preventDefault(); }}>
                 注文一覧へ戻る
               </Link>
             </>
@@ -4475,6 +4519,7 @@ export default function OrderWorkflowV2Page() {
                   className="input workflow-ordinary-control"
                   value={effectiveSelectedDocumentId}
                   onChange={(event) => {
+                    if (!confirmWorkflowReplacement()) return;
                     setQuadReview(null);
                     setManualQuadPoints([]);
                     setSelectedDocumentId(event.target.value);
@@ -4766,7 +4811,7 @@ export default function OrderWorkflowV2Page() {
                 {facilityTemplateMissing ? (
                   <div className="facility-template-register">
                     <p className="workflow-warning">施設設定の JSON 正本に帳票テンプレートがありません。候補からの補完は行わず、設定を完了するまで OCR は実行できません。</p>
-                    <Link className="btn primary" href={`/facilities/${encodeURIComponent(contextForm.facility_id)}`}>
+                    <Link className="btn primary" href={`/facilities/${encodeURIComponent(contextForm.facility_id)}`} onNavigate={event => { if (!navigation.allow(`/facilities/${encodeURIComponent(contextForm.facility_id)}`)) event.preventDefault(); }}>
                       施設設定を開く
                     </Link>
                   </div>
@@ -5956,7 +6001,7 @@ export default function OrderWorkflowV2Page() {
                                     key={`${sheetPayload.row_ids?.[rowIdx] || rowIdx}:${field}:${colIdx}:${row[colIdx] || ""}`}
                                     data-sheet-row={rowIdx}
                                     data-sheet-col={colIdx}
-                                    defaultValue={row[colIdx] || ""}
+                                    defaultValue={pendingSheetCellEditsRef.current.get(`${rowIdx}:${colIdx}`)?.value ?? row[colIdx] ?? ""}
                                     readOnly={isLockedSheetField(field)}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
                                     onBlur={() => {
@@ -5995,8 +6040,10 @@ export default function OrderWorkflowV2Page() {
                 setSheetJson(nextJson);
                 markSheetDirty();
                 setSheetJsonStale(false);
+                pendingSheetCellEditsRef.current.clear();
                 try {
-                  setSheetPayload(normalizeSheetPayload(JSON.parse(nextJson)));
+                  const parsed = normalizeSheetPayload(JSON.parse(nextJson));
+                  setSheetPayload(parsed);
                 } catch {
                   setSheetPayload(null);
                 }
@@ -6240,7 +6287,7 @@ export default function OrderWorkflowV2Page() {
           </div>
         </div>
         {orderId ? (
-          <Link className="ghost-link lineage-link" href={`/orders/${orderId}/inspection-v2`}>
+          <Link className="ghost-link lineage-link" href={`/orders/${orderId}/inspection-v2`} onNavigate={event => { if (!navigation.allow(`/orders/${orderId}/inspection-v2`)) event.preventDefault(); }}>
             確認専用ページで見る
           </Link>
         ) : null}
