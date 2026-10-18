@@ -1,5 +1,4 @@
 import os
-import threading
 import time
 import json
 import urllib.error
@@ -8,16 +7,17 @@ import urllib.request
 from fastapi import Depends, HTTPException, status, Request
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
-from sqlalchemy import select, text
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.db import session_scope
-from src.models.user import User
 
 
 class UserContext:
-    def __init__(self, role: str, account: str | None = None):
+    def __init__(self, role: str, account: str | None = None, systems: tuple[str, ...] | None = None):
         self.role = role
         self.account = account
+        self.systems = systems
 
 
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
@@ -30,83 +30,8 @@ AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "local").strip().lower()
 PORTAL_AUTH_ME_URL = os.getenv("PORTAL_AUTH_ME_URL", "").strip()
 
 
-_USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS", "15")), 0.0)
-_USER_ROLE_CACHE_LOCK = threading.Lock()
-_USER_ROLE_CACHE_EXPIRES_AT = 0.0
-_USER_ROLE_CACHE: dict[str, str] = {}
-
-
-class UserRoleLookupError(RuntimeError):
-    pass
-
-
 def is_auth_disabled() -> bool:
     return os.getenv("AUTH_DISABLED", "false").lower() == "true"
-
-
-def invalidate_user_cache() -> None:
-    global _USER_ROLE_CACHE_EXPIRES_AT, _USER_ROLE_CACHE
-    with _USER_ROLE_CACHE_LOCK:
-        _USER_ROLE_CACHE_EXPIRES_AT = 0.0
-        _USER_ROLE_CACHE = {}
-
-
-def _load_active_user_roles() -> dict[str, str]:
-    global _USER_ROLE_CACHE_EXPIRES_AT, _USER_ROLE_CACHE
-
-    now = time.monotonic()
-    with _USER_ROLE_CACHE_LOCK:
-        if now < _USER_ROLE_CACHE_EXPIRES_AT:
-            return dict(_USER_ROLE_CACHE)
-
-    try:
-        roles: dict[str, str] = {}
-        with session_scope() as session:
-            users = session.execute(select(User)).scalars().all()
-            for user in users:
-                account = str(user.account or "").strip().lower()
-                role = str(user.role or "").strip().lower()
-                status_value = str(user.status or "active").strip().lower()
-                if not account or status_value != "active":
-                    continue
-                if role not in {"admin", "operator"}:
-                    continue
-                if roles.get(account) == "admin":
-                    continue
-                roles[account] = role
-    except Exception as exc:  # noqa: BLE001
-        raise UserRoleLookupError("Failed to load active user roles") from exc
-
-    with _USER_ROLE_CACHE_LOCK:
-        _USER_ROLE_CACHE = roles
-        _USER_ROLE_CACHE_EXPIRES_AT = now + _USER_ROLE_CACHE_TTL_SECONDS
-    return dict(roles)
-
-
-def _raise_role_lookup_unavailable():
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="User role lookup unavailable",
-    )
-
-
-def _has_system_access(account: str, system: str) -> bool:
-    try:
-        with session_scope() as session:
-            return bool(
-                session.execute(
-                    text(
-                        "SELECT 1 FROM users u "
-                        "JOIN user_system_access usa ON usa.user_id = u.id "
-                        "WHERE lower(u.account) = :account "
-                        "AND lower(u.status) = 'active' "
-                        "AND usa.system_key = :system AND usa.enabled = TRUE"
-                    ),
-                    {"account": account.strip().lower(), "system": system},
-                ).scalar()
-            )
-    except Exception as exc:  # noqa: BLE001
-        raise UserRoleLookupError("Failed to load system access") from exc
 
 
 def _automation_configs() -> list[tuple[str, str, str, str]]:
@@ -131,15 +56,11 @@ def automation_system(account: str) -> str | None:
     return matches[0] if matches else None
 
 
-def _require_system_access(account: str, system: str) -> None:
-    machine_system = automation_system(account)
+def _require_system_access(user: UserContext, system: str) -> None:
+    machine_system = automation_system(user.account or "")
     if machine_system is not None and system != machine_system:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System access denied")
-    try:
-        allowed = _has_system_access(account, system)
-    except UserRoleLookupError:
-        _raise_role_lookup_unavailable()
-    if not allowed:
+    if user.systems is None or system not in user.systems:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="System access denied")
 
 
@@ -188,7 +109,10 @@ def _portal_user(request: Request) -> UserContext | None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     if not account:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    return UserContext(role=role, account=account)
+    systems = payload.get("systems")
+    if systems is not None and (not isinstance(systems, list) or any(not isinstance(item, str) for item in systems)):
+        raise HTTPException(status_code=503, detail="Portal authentication unavailable")
+    return UserContext(role=role, account=account, systems=tuple(systems) if systems is not None else None)
 
 
 def _audience_candidates(request: Request) -> list[str]:
@@ -273,50 +197,55 @@ def _google_email_or_none(request: Request) -> str | None:
     return _verify_google_token(token, request)
 
 
-def _registered_role(account: str) -> str | None:
+def _local_current_user(account: str | None) -> UserContext:
+    identity = str(account or "").strip().lower()
+    if not identity:
+        raise HTTPException(status_code=403, detail="Active registered user required")
     try:
-        role = _load_active_user_roles().get(account.lower())
-    except UserRoleLookupError:
-        _raise_role_lookup_unavailable()
-    if automation_system(account) is not None and role != "operator":
+        with session_scope() as session:
+            rows = session.execute(text(
+                "SELECT u.id, u.account, u.role, u.status, a.system_key "
+                "FROM users u LEFT JOIN user_system_access a "
+                "ON a.user_id = u.id AND a.enabled = TRUE "
+                "WHERE lower(trim(u.account)) = :account ORDER BY u.id, a.system_key"
+            ), {"account": identity}).mappings().all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="User role lookup unavailable") from exc
+    if not rows:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if len({row["id"] for row in rows}) != 1:
+        raise HTTPException(status_code=403, detail="Unique active registered user required")
+    row = rows[0]
+    role = str(row["role"] or "").strip().lower()
+    if str(row["status"] or "").strip().lower() != "active" or role not in {"admin", "operator"}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    systems = tuple(row["system_key"] for row in rows if row["system_key"] is not None)
+    machine_system = automation_system(identity)
+    if machine_system is not None and role != "operator":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Automation operator required")
-    return role
+    if machine_system is not None and systems != (machine_system,):
+        raise HTTPException(status_code=403, detail="Automation single-system access required")
+    return UserContext(role, identity, systems)
 
 
 def get_current_admin(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="admin")
-    portal_user = _portal_user(request)
-    if portal_user:
-        if portal_user.role != "admin":
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        return portal_user
-    google_email = _google_email_or_none(request)
-    if google_email:
-        registered_role = _registered_role(google_email)
-        if registered_role == "admin":
-            _require_system_access(google_email, "hospital")
-            return UserContext(role="admin", account=google_email)
-        if registered_role in {"operator"}:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    user = get_current_user(request)
+    if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    _raise_unauthorized()
+    if AUTH_PROVIDER != "portal":
+        _require_system_access(user, "hospital")
+    return user
 
 
 def get_current_operator(request: Request) -> UserContext:
     if is_auth_disabled():
         return UserContext(role="operator")
-    portal_user = _portal_user(request)
-    if portal_user:
-        return UserContext(role="operator", account=portal_user.account)
-    google_email = _google_email_or_none(request)
-    if google_email:
-        registered_role = _registered_role(google_email)
-        if registered_role in {"admin", "operator"}:
-            _require_system_access(google_email, "hospital")
-            return UserContext(role="operator", account=google_email)
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    _raise_unauthorized()
+    user = get_current_user(request)
+    if AUTH_PROVIDER != "portal":
+        _require_system_access(user, "hospital")
+    return UserContext(role="operator", account=user.account, systems=user.systems)
 
 
 def get_current_user(request: Request) -> UserContext:
@@ -328,10 +257,7 @@ def get_current_user(request: Request) -> UserContext:
     google_email = _google_email_or_none(request)
     if not google_email:
         _raise_unauthorized()
-    registered_role = _registered_role(google_email)
-    if registered_role not in {"admin", "operator"}:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    return UserContext(role=registered_role, account=google_email)
+    return _local_current_user(google_email)
 
 
 def require_role(required: str):
@@ -346,6 +272,8 @@ def require_role(required: str):
 
 
 def require_portal_admin(user: UserContext = Depends(get_current_user)) -> UserContext:
+    if not is_auth_disabled() and AUTH_PROVIDER != "portal":
+        user = _local_current_user(user.account)
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return user
