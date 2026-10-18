@@ -2,8 +2,9 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
-from src.api.auth import UserContext, automation_system, get_current_user, require_portal_admin
+from src.api.auth import UserContext, automation_system, get_current_user, is_auth_disabled, require_portal_admin
 from src.db import session_scope
 from src.models.user import AuditLog
 
@@ -71,6 +72,46 @@ def list_users():
         rows = session.execute(text("SELECT id,account,role,status FROM users ORDER BY lower(account)")).mappings().all()
         return {"items": [{**dict(row), "systems": _systems(session, row["id"])} for row in rows]}
 
+
+def _require_current_write_actor(session, actor: UserContext, account: str, user_id: str | None):
+    if is_auth_disabled():
+        return
+    actor_account = str(actor.account or "").strip().lower()
+    if not actor_account:
+        raise HTTPException(status_code=403, detail="Active registered admin required")
+    try:
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            # Reserve the writer before reading authority; a retired actor cannot
+            # upgrade an earlier read snapshot into an authorized write.
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        elif dialect != "postgresql":
+            raise HTTPException(status_code=503, detail="Admin authority lookup unavailable")
+        statement = (
+            "SELECT id, account, role, status FROM users "
+            "WHERE lower(account) IN (:actor, :account) OR id = :target ORDER BY id"
+        )
+        if dialect == "postgresql":
+            # Both administrators editing each other take the same lock order.
+            # NOWAIT makes a competing retirement an explicit retryable conflict.
+            statement += " FOR UPDATE NOWAIT"
+        rows = session.execute(text(statement), {
+            "actor": actor_account, "account": account, "target": user_id,
+        }).mappings().all()
+    except SQLAlchemyError as exc:
+        original = getattr(exc, "orig", None)
+        code = getattr(original, "pgcode", None) or getattr(original, "sqlstate", None)
+        sqlite_code = getattr(original, "sqlite_errorcode", None)
+        if code in {"55P03", "40P01", "40001"} or (
+            sqlite_code is not None and sqlite_code & 255 in {5, 6}
+        ):
+            raise HTTPException(status_code=409, detail="Admin authority write conflict") from exc
+        raise HTTPException(status_code=503, detail="Admin authority lookup unavailable") from exc
+    actors = [row for row in rows if str(row["account"]).lower() == actor_account]
+    if len(actors) != 1 or str(actors[0]["status"]).strip().lower() != "active" or str(actors[0]["role"]).strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Active registered admin required")
+
+
 def _save(body: dict, actor: UserContext, user_id: str | None = None):
     account = str(body.get("account") or "").strip().lower()
     role = str(body.get("role") or "operator")
@@ -84,6 +125,7 @@ def _save(body: dict, actor: UserContext, user_id: str | None = None):
     ):
         raise HTTPException(status_code=400, detail="Invalid user")
     with session_scope() as session:
+        _require_current_write_actor(session, actor, account, user_id)
         existing = session.execute(text("SELECT id FROM users WHERE lower(account)=:account"), {"account": account}).scalar()
         target = user_id or existing or str(uuid.uuid4())
         if user_id and not session.execute(
