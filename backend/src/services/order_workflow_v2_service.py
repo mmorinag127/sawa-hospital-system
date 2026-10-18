@@ -1490,10 +1490,13 @@ def _require_workflow_revision(
     return None
 
 
-def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> str | None:
+def _finalize_workflow_mutation(
+    session: Any, workflow: OrderWorkflowState, *, unchanged: bool = False,
+    retired_bagging_proof: dict[str, Any] | None = None,
+) -> str | None:
     meta = _workflow_meta(workflow)
-    proof = meta.get("bagging_input_proof")
-    if isinstance(proof, dict) and proof.get("bagging_result_id") == meta.get("bagging_result_id"):
+    proof = retired_bagging_proof if retired_bagging_proof is not None else meta.get("bagging_input_proof")
+    if isinstance(proof, dict) and (retired_bagging_proof is not None or proof.get("bagging_result_id") == meta.get("bagging_result_id")):
         captured = _restore_bagging_write_input(proof, _workflow_revision(workflow))
         pending_values = {column.key: copy.deepcopy(getattr(workflow, column.key)) for column in workflow.__table__.columns}
         if captured is not None and (workflow.evidence_run_id != captured.get("evidence_run_id") or workflow.draft_id != captured.get("draft_id")):
@@ -1506,10 +1509,11 @@ def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> s
             return "bagging_input_conflict"
         for key, value in pending_values.items():
             setattr(workflow, key, value)
-        proof = copy.deepcopy(proof)
-        proof["owned_revision"] = _workflow_revision(workflow) + 1
-        meta["bagging_input_proof"] = proof
-        _write_workflow_meta(workflow, meta)
+        if not unchanged and retired_bagging_proof is None:
+            proof = copy.deepcopy(proof)
+            proof["owned_revision"] = _workflow_revision(workflow) + 1
+            meta["bagging_input_proof"] = proof
+            _write_workflow_meta(workflow, meta)
     configured = session.info.get("materialization_configured_input")
     if configured is not None:
         facility_id, captured = configured
@@ -1527,6 +1531,10 @@ def _finalize_workflow_mutation(session: Any, workflow: OrderWorkflowState) -> s
         if captured_defaults != menu_service.resolve_menu_defaults_in_session(session, names, facility_id)[0]:
             session.rollback()
             return "materialization_menu_defaults_changed"
+    if unchanged:
+        # Unchanged imported commands are verified at commit against their exact
+        # begin snapshot, then cleared by the existing transaction-end hook.
+        return None
     workflow.revision = _workflow_revision(workflow) + 1
     try:
         session.flush()
@@ -3093,33 +3101,39 @@ def set_expanded_cell_copy_mode(order_id: str, mode: str) -> tuple[dict[str, Any
         if template_error:
             return None, template_error
         previous_mode = _normalize_expanded_cell_copy_mode(meta.get("expanded_cell_copy_mode"))
+        if previous_mode == normalized_mode:
+            error = _finalize_workflow_mutation(session, workflow, unchanged=True)
+            return _serialize_workflow(workflow), error
+        prior_proof = meta.get("bagging_input_proof")
+        if not isinstance(prior_proof, dict) or prior_proof.get("bagging_result_id") != meta.get("bagging_result_id"):
+            prior_proof = None
         meta["expanded_cell_copy_mode"] = normalized_mode
-        meta["bagging_result_id"] = None
-        meta["bagging_result"] = None
-        meta["output_bundle_id"] = None
-        meta["output_bundle"] = None
-        if previous_mode != normalized_mode:
-            workflow.draft_id = None
-            workflow.confirmed_snapshot_id = None
-            session.flush()
-            _delete_downstream_after_sheet_change(session, order.id)
-            if workflow.evidence_run_id:
-                workflow.state = "ocr_selected"
-                workflow.headline = "拡大セル設定を変更しました。選択OCRからシートを再生成してください"
-                workflow.primary_action = "edit_sheet"
-            elif _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta):
-                workflow.state = "context_confirmed"
-                workflow.headline = "拡大セル設定を変更しました。OCRを実行してください"
-                workflow.primary_action = "run_ocr"
-            else:
-                workflow.state = "uploaded"
-                workflow.headline = "PDFと施設・週次を確認してください"
-                workflow.primary_action = "confirm_context"
-        workflow.blockers_json = []
-        workflow.warnings_json = []
+        # Retire current output acceptance, not the operator's canonical input or
+        # immutable output history. Readers require these exact current refs/proof.
+        _clear_step4_meta_references(meta)
+        meta.pop("bagging_input_proof", None)
+        workflow.confirmed_snapshot_id = None
+        if _normalize_id(order.status) == "確定":
+            order.status = "要確認"
+        if workflow.draft_id:
+            workflow.state = "sheet_saved"
+            workflow.headline = "拡大セル設定を変更しました。保存済みシートを保持しています。出力を再確認してください"
+            workflow.primary_action = "run_bagging"
+        elif workflow.evidence_run_id:
+            workflow.state = "ocr_selected"
+            workflow.headline = "拡大セル設定を変更しました。選択OCRからシートを作成できます"
+            workflow.primary_action = "edit_sheet"
+        elif _workflow_meta_has_confirmed_context(meta) and _workflow_meta_has_resolved_template(meta):
+            workflow.state = "context_confirmed"
+            workflow.headline = "拡大セル設定を変更しました。OCRを実行してください"
+            workflow.primary_action = "run_ocr"
+        else:
+            workflow.state = "uploaded"
+            workflow.headline = "PDFと施設・週次を確認してください"
+            workflow.primary_action = "confirm_context"
         workflow.last_transition_at = _now()
         _write_workflow_meta(workflow, meta)
-        revision_error = _finalize_workflow_mutation(session, workflow)
+        revision_error = _finalize_workflow_mutation(session, workflow, retired_bagging_proof=prior_proof)
         if revision_error:
             return _serialize_workflow(workflow), revision_error
         return _serialize_workflow(workflow), None

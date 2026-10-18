@@ -2981,13 +2981,12 @@ export default function OrderWorkflowV2Page() {
       const response = await executeWorkflowMutation("expandedCellCopy", (config) => apiClient.put(`/orders/${own.context.orderId}/workflow-v2/expanded-cell-copy-mode`, { mode: nextMode }, config), adopt);
       adopt(() => {
         setExpandedCellCopyMode(normalizeExpandedCellCopyMode(response.data?.expanded_cell_copy_mode));
-        discardSheetDraft();
       });
       await refreshAll(current, null, adopt);
       if (!current()) return;
       if (response.data?.selected_ocr_result_id) {
         setVisibleStep(3);
-        setMessage("拡大セルコピー設定を変更しました。選択OCRからシートを再生成してください。");
+        setMessage("拡大セルコピー設定を変更しました。保存済みシートと編集中の値は保持されます。出力を再確認してください。");
       } else {
         setVisibleStep(1);
         setMessage("拡大セルコピー設定を変更しました。OCR実行前に設定を確認できます。");
