@@ -1747,6 +1747,15 @@ export default function OrderWorkflowV2Page() {
     request: (config: ReturnType<typeof workflowMutationConfig>) => Promise<T>,
     adopt: ActionAdoption,
   ) => {
+    // Only this command preserves the saved source of an already dirty sheet.
+    const preservedSheet = editor === "expandedCellCopy" && sheetDirtyRef.current
+      && workflow?.saved_sheet_id && workflow.selected_ocr_result_id && workflow.template_version_id
+      && sheetPayloadRef.current?.base_evidence_run_id === workflow.selected_ocr_result_id
+      && sheetPayloadRef.current?.template_version_id === workflow.template_version_id
+      ? {input: captureWorkflowInputVersion("sheet"), source: {
+          saved_sheet_id: workflow.saved_sheet_id, selected_ocr_result_id: workflow.selected_ocr_result_id,
+          template_version_id: workflow.template_version_id,
+        }} : null;
     const captured = adopt(() => {
       beginWorkflowEditorEdit(editor, true);
       return captureWorkflowInputVersion(editor);
@@ -1754,8 +1763,29 @@ export default function OrderWorkflowV2Page() {
     if (!ownsPageInput(captured.owner)) throw new Error("注文・PDF・認証または入力が変更されました。");
     const response = await request(workflowMutationConfig(captured));
     adopt(() => {
+      const priorRevision = workflowRevisionRef.current?.revision;
       if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
         throw new Error("workflow command の処理中に注文または入力が変更されました。再読込してから操作してください。");
+      }
+      if (preservedSheet) {
+        const sheetEditor = editorVersion("sheet");
+        const input = preservedSheet.input;
+        const next = workflowFromMutationResponse(response.data)!;
+        if (priorRevision === captured.revision && input.revision === captured.revision
+          && sheetEditor.dirty && sheetDirtyRef.current && ownsPageInput(input.owner)
+          && input.orderId === captured.orderId && input.editGeneration === sheetEditGenerationRef.current
+          && input.editorGeneration === sheetEditor.generation && input.revision === sheetEditor.baseRevision
+          && input.bootstrap === sheetEditor.baseIsBootstrap
+          && input.operationGeneration === pageOperationGenerationRef.current
+          && input.busyGeneration === busyGenerationRef.current
+          && next.saved_sheet_id === preservedSheet.source.saved_sheet_id
+          && next.selected_ocr_result_id === preservedSheet.source.selected_ocr_result_id
+          && next.template_version_id === preservedSheet.source.template_version_id
+          && sheetPayloadRef.current?.base_evidence_run_id === preservedSheet.source.selected_ocr_result_id
+          && sheetPayloadRef.current?.template_version_id === preservedSheet.source.template_version_id) {
+          sheetEditor.baseRevision = next.revision!;
+          sheetEditor.baseIsBootstrap = false;
+        }
       }
       finishWorkflowEditorEdit(editor);
     });
@@ -2966,6 +2996,7 @@ export default function OrderWorkflowV2Page() {
 
   const updateExpandedCellCopyMode = async (nextMode: ExpandedCellCopyMode) => {
     if (nextMode === expandedCellCopyMode) return;
+    flushPendingSheetCellEdits();
     const own=capturePageOwner(), operation=++copySaveGenerationRef.current;
     const pageOperation=++pageOperationGenerationRef.current;
     const busyOwner=busyGenerationRef.current;

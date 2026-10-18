@@ -16,7 +16,7 @@ async function setup() {
     facility_id: 'own-facility', week_start: '2026-10-05', week_end: '2026-10-11',
     template_id: 'own-template', template_version_id: 'own-version',
     expanded_cell_copy_mode: 'auto', blockers: [], warnings: [],
-    menu_amount_resolution: {status: 'resolved', affected_lines: []} } };
+    menu_amount_resolution: {status: 'resolved', affected_lines: []} }, saved: clone(sheet), checks: {}, status: {} };
   const config = { source: 'canonical_json', order_id: ORDER, facility_id: 'own-facility',
     week_start: '2026-10-05', week_end: '2026-10-11', template_version_id: 'own-version',
     config: { fax_template_id: 'own-template', fax_template: { columns: [
@@ -31,8 +31,8 @@ async function setup() {
   t.on('get', BASE, () => ({data: clone(state.workflow)}));
   t.on('get', `${BASE}/facility-config`, () => ({data: clone(config)}));
   t.on('get', `${BASE}/inspection?include_ocr_results=true`, () => ({data: {
-    workflow: clone(state.workflow), pre_save_checks: {}, pre_save_status: {},
-    saved_sheet: {saved_sheet_id: 'own-saved', source_ocr_result_id: 'own-evidence', sheet: clone(sheet)},
+    workflow: clone(state.workflow), pre_save_checks: clone(state.checks), pre_save_status: clone(state.status),
+    saved_sheet: {saved_sheet_id: 'own-saved', source_ocr_result_id: 'own-evidence', sheet: clone(state.saved)},
     ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER,
       [{ocr_result_id: 'own-evidence', selected: true, status: 'completed'}], state.workflow),
   }}));
@@ -45,11 +45,41 @@ async function setup() {
   for (const suffix of ['', '?document_id=own-pdf', '?document_id=other-pdf'])
     t.on('get', `/orders/${ORDER}/document${suffix}`, () => ({data: new Blob(['authored transport'])}));
   t.on('put', `${BASE}/expanded-cell-copy-mode`, () => pending.promise);
+  const command = call => {
+    if (call.config?.headers?.['If-Match'] !== `"${state.workflow.revision}"`) {
+      throw Object.assign(new Error('authored CAS conflict'), {response: {status: 409, data: {detail: 'workflow_revision_conflict'}}});
+    }
+    state.workflow = {...state.workflow, revision: state.workflow.revision + 1};
+    return {data: {workflow: clone(state.workflow), pre_save_checks: clone(state.checks),
+      pre_save_status: clone(state.status), anomaly_review: {warnings: []}}};
+  };
+  t.on('post', `${BASE}/sheet/anomaly-review`, call => {
+    const response = command(call);
+    state.checks = {anomaly_review: {confirmed: true}};
+    state.status = {anomaly_review_confirmed: true};
+    response.data.pre_save_checks = clone(state.checks);
+    response.data.pre_save_status = clone(state.status);
+    return response;
+  });
+  t.on('post', `${BASE}/sheet/review-confirm`, call => {
+    const response = command(call);
+    state.checks.sheet_review = {confirmed: true};
+    state.status.sheet_review_confirmed = true;
+    response.data.pre_save_checks = clone(state.checks);
+    response.data.pre_save_status = clone(state.status);
+    return response;
+  });
+  t.on('put', `${BASE}/sheet`, call => {
+    const response = command(call);
+    state.saved = clone(call.body.sheet);
+    return response;
+  });
   const probe = { component: 'OrderWorkflowV2Page', bindings: [
     'workflow', 'sheetPayload', 'sheetDirty', 'sheetDirtyRef', 'pendingSheetCellEditsRef',
     'expandedCellCopyMode', 'expandedCellCopySaving', 'updateExpandedCellCopyMode',
     'updateSheetCell', 'flushPendingSheetCellEdits', 'refreshAll', 'error',
     'setSelectedDocumentId', 'workflowRevisionRef',
+    'editorVersion', 'runAnomalyReview', 'showSheetReview', 'saveSheet', 'beginWorkflowEditorEdit',
   ]};
   const h = await mount('src/pages/orders/[id]/workflow-v2.tsx',
     {api: t.api, probe, route: `/orders/${ORDER}/workflow-v2`, routerState: {query: {id: ORDER}}});
@@ -63,8 +93,8 @@ async function setup() {
         assert.ok(t.calls.some(call => call.method === 'put'));
         return {promise};
       },
-      async respond() {
-        state.workflow = {...state.workflow, revision: 8, expanded_cell_copy_mode: 'enabled'};
+      async respond(patch = {}) {
+        state.workflow = {...state.workflow, revision: 8, expanded_cell_copy_mode: 'enabled', ...patch};
         await h.settle(() => pending.resolve({data: clone(state.workflow)}));
       },
     };
@@ -118,6 +148,7 @@ test('input edit during setting command retires stale response and retains lates
     assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');
     assert.equal(f.probe.current.sheetDirty, true);
     assert.equal(f.probe.current.workflow.revision, 7);
+    assert.equal(f.probe.current.editorVersion('sheet').baseRevision, 7);
     await f.h.settle(() => f.probe.current.refreshAll());
     assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');
     assert.equal(f.probe.current.sheetDirtyRef.current, true);
@@ -133,6 +164,113 @@ test('document switch during setting command cannot adopt the old command respon
     await f.respond();
     await action.promise;
     assert.notEqual(f.probe.current.expandedCellCopyMode, 'enabled');
+    onlySettingWrite(f);
+  } finally { await f.h.close(); }
+});
+
+for (const value of ['31', '0', '']) {
+  test(`owned setting change permits actual confirmation and save of dirty ${JSON.stringify(value)}`, async () => {
+    const f = await setup();
+    try {
+      await f.h.settle(() => {
+        f.probe.current.updateSheetCell(0, 3, value);
+        f.probe.current.flushPendingSheetCellEdits();
+        f.probe.current.beginWorkflowEditorEdit('quad');
+      });
+      const before = {...f.probe.current.editorVersion('sheet')};
+      const action = await f.begin();
+      await f.respond();
+      await action.promise;
+      assert.equal(f.probe.current.editorVersion('sheet').baseRevision, 8);
+      assert.equal(f.probe.current.editorVersion('sheet').generation, before.generation);
+      assert.equal(f.probe.current.editorVersion('quad').baseRevision, 7);
+      assert.equal(f.probe.current.sheetDirty, true);
+      await f.h.settle(() => f.probe.current.runAnomalyReview());
+      await f.h.settle(() => f.probe.current.showSheetReview());
+      await f.h.settle(() => f.probe.current.saveSheet());
+      const writes = f.t.calls.filter(call => call.method !== 'get');
+      assert.deepEqual(writes.map(call => call.url), [`${BASE}/expanded-cell-copy-mode`,
+        `${BASE}/sheet/anomaly-review`, `${BASE}/sheet/review-confirm`, `${BASE}/sheet`]);
+      assert.deepEqual(writes.map(call => call.config.headers['If-Match']), ['"7"', '"8"', '"9"', '"10"']);
+      assert.equal(f.state.saved.rows[0][3], value);
+      assert.equal(typeof f.state.saved.rows[0][3], 'string');
+      assert.equal(f.probe.current.sheetPayload.rows[0][3], value);
+      assert.equal(f.probe.current.sheetDirty, false);
+      assert.equal(f.probe.current.workflow.revision, 11);
+      assert.equal(f.probe.current.error, '');
+    } finally { await f.h.close(); }
+  });
+}
+
+for (const [field, value] of [['saved_sheet_id', 'foreign-draft'],
+  ['selected_ocr_result_id', 'foreign-evidence'], ['template_version_id', 'foreign-template']]) {
+  test(`setting response with changed ${field} cannot rebase a preserved dirty sheet`, async () => {
+    const f = await setup();
+    try {
+      await f.h.settle(() => f.probe.current.updateSheetCell(0, 3, '31'));
+      const action = await f.begin();
+      await f.respond({[field]: value});
+      await action.promise;
+      assert.equal(f.probe.current.editorVersion('sheet').baseRevision, 7);
+      assert.equal(f.probe.current.sheetDirty, true);
+      await f.h.settle(() => f.probe.current.runAnomalyReview());
+      assert.equal(f.probe.current.error, '他の更新と競合しました。編集中の値は保持しています。最新状態を確認してから、もう一度保存してください。');
+      assert.equal(f.state.workflow.revision, 8);
+      assert.equal(f.state.saved.rows[0][3], '26');
+      assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');
+      assert.equal(f.t.calls.filter(call => call.url === `${BASE}/sheet`).length, 0);
+    } finally { await f.h.close(); }
+  });
+}
+
+test('external revision read before setting cannot rebase an older dirty editor', async () => {
+  const f = await setup();
+  try {
+    await f.h.settle(() => f.probe.current.updateSheetCell(0, 3, '31'));
+    await f.h.settle(() => f.probe.current.flushPendingSheetCellEdits());
+    f.state.workflow.revision = 8;
+    await f.h.settle(() => f.probe.current.refreshAll());
+    const action = await f.begin();
+    await f.respond({revision: 9});
+    await action.promise;
+    assert.equal(f.probe.current.editorVersion('sheet').baseRevision, 7);
+    await f.h.settle(() => f.probe.current.runAnomalyReview());
+    assert.equal(f.probe.current.error, '他の更新と競合しました。編集中の値は保持しています。最新状態を確認してから、もう一度保存してください。');
+    assert.equal(f.state.workflow.revision, 9);
+    assert.equal(f.state.saved.rows[0][3], '26');
+    assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');
+  } finally { await f.h.close(); }
+});
+
+test('rejected setting command never rebases the dirty sheet', async () => {
+  const f = await setup();
+  try {
+    await f.h.settle(() => f.probe.current.updateSheetCell(0, 3, '31'));
+    const action = await f.begin();
+    await f.h.settle(() => f.pending.reject(new Error('authored setting rejected')));
+    await action.promise;
+    assert.equal(f.probe.current.editorVersion('sheet').baseRevision, 7);
+    assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');
+    onlySettingWrite(f);
+  } finally { await f.h.close(); }
+});
+
+test('external revision read during setting cannot authorize dirty sheet revision adoption', async () => {
+  const f = await setup();
+  try {
+    await f.h.settle(() => {
+      f.probe.current.updateSheetCell(0, 3, '31');
+      f.probe.current.flushPendingSheetCellEdits();
+    });
+    const action = await f.begin();
+    f.state.workflow.revision = 8;
+    await f.h.settle(() => f.probe.current.refreshAll());
+    await f.respond({revision: 9});
+    await action.promise;
+    assert.equal(f.probe.current.editorVersion('sheet').baseRevision, 7);
+    assert.equal(f.probe.current.sheetDirty, true);
+    assert.equal(f.state.saved.rows[0][3], '26');
+    assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');
     onlySettingWrite(f);
   } finally { await f.h.close(); }
 });
