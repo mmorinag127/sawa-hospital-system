@@ -148,6 +148,7 @@ jobs:
             tests/unit/test_native_ingest_boundary.py \
             tests/unit/test_native_ingest_sql_component.py \
             tests/unit/test_native_document_source.py \
+            tests/unit/test_canonical_saved_projection_regression.py \
             tests/unit/test_native_recognition_recovery.py \
             tests/unit/test_native_quantity_projection_contract.py \
             tests/unit/test_recognition_review_result_ownership.py \
