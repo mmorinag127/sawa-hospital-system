@@ -1,13 +1,16 @@
 """Synthetic boundary tests only; no staging reads or product guard success injection."""
 from copy import deepcopy
+from contextlib import contextmanager
 from datetime import datetime
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import subprocess
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -139,7 +142,8 @@ def test_fixture_exact_uri_generation_path_size_and_hash(tmp_path):
         diag.fixture_bytes(tmp_path, assets, uri, {"verification": True})
 
 
-def test_capture_is_readonly_snapshot_one_parameterized_row(monkeypatch, tmp_path, capsys):
+@pytest.fixture
+def proxy_capture(monkeypatch, tmp_path):
     import psycopg2
     private_password = "SYNTHETIC-PRIVATE-PASSWORD"
     entries = [{"name": key, "value": value} for key, value in
@@ -160,24 +164,188 @@ def test_capture_is_readonly_snapshot_one_parameterized_row(monkeypatch, tmp_pat
     connection.cursor.return_value = cursor
     connect = Mock(return_value=connection)
     monkeypatch.setattr(psycopg2, "connect", connect)
-    process = Mock()
-    process.poll.return_value = None
-    popen = Mock(return_value=process)
+    state = SimpleNamespace(roots=[], modes=[], processes=[], listeners=[], reads=reads,
+        connect=connect, connection=connection, cursor=cursor, password=private_password)
+    real_temporary = diag.TemporaryDirectory
+    def temporary(*args, **kwargs):
+        context = real_temporary(*args, **kwargs)
+        state.roots.append(Path(context.name))
+        state.modes.append(Path(context.name).stat().st_mode & 0o777)
+        return context
+    monkeypatch.setattr(diag, "TemporaryDirectory", temporary)
+    def launch(args, **kwargs):
+        directory = Path(args[args.index("--unix-socket") + 1])
+        endpoint = directory / diag.INSTANCE / ".s.PGSQL.5432"
+        endpoint.parent.mkdir()
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(endpoint))
+        listener.listen(1)
+        state.listeners.append(listener)
+        process = Mock()
+        process.poll.return_value = None
+        def waited(*args, **kwargs):
+            assert directory.exists(), "proxy must finish before its owned directory is removed"
+            listener.close()
+            return 0
+        process.wait.side_effect = waited
+        state.processes.append(process)
+        return process
+    popen = Mock(side_effect=launch)
+    state.popen = popen
     monkeypatch.setattr(diag.subprocess, "Popen", popen)
-    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: MagicMock())
+    def forbidden(*args, **kwargs):
+        pytest.fail("readiness must not consume the only SQL connection slot")
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket.socket, "connect_ex", forbidden)
+    yield state
+    for listener in state.listeners:
+        listener.close()
+    assert all(not directory.exists() for directory in state.roots)
+
+
+def test_capture_is_readonly_snapshot_one_parameterized_row(proxy_capture, tmp_path, capsys):
+    state = proxy_capture
     assert diag.read_row(Path("synthetic-proxy"), tmp_path)["id"] == diag.EVIDENCE
-    connection.set_session.assert_called_once_with(isolation_level="REPEATABLE READ", readonly=True)
-    assert "default_transaction_read_only=on" in connect.call_args.kwargs["options"]
-    calls = cursor.execute.call_args_list
+    state.connect.assert_called_once()
+    state.connection.set_session.assert_called_once_with(isolation_level="REPEATABLE READ", readonly=True)
+    assert state.connect.call_args.kwargs["options"] == (
+        "-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=1000")
+    calls = state.cursor.execute.call_args_list
     assert [call.args[0].split()[0] for call in calls] == ["SHOW", "SHOW", "SELECT"]
     assert calls[-1].args[1] == (diag.ORDER, diag.EVIDENCE)
     assert "FOR UPDATE" not in calls[-1].args[0]
-    connection.rollback.assert_called_once()
-    connection.close.assert_called_once()
-    process.terminate.assert_called_once()
-    process.wait.assert_called_once()
-    assert all(args[1:4] in (["run", "services", "describe"], ["secrets", "versions", "access"]) for args in reads)
-    assert private_password not in capsys.readouterr().out
+    state.connection.rollback.assert_called_once()
+    state.connection.close.assert_called_once()
+    state.processes[0].terminate.assert_called_once()
+    state.processes[0].wait.assert_called_once_with(timeout=8)
+    assert all(args[1:4] in (["run", "services", "describe"], ["secrets", "versions", "access"]) for args in state.reads)
+    assert state.password not in capsys.readouterr().out
+
+
+def test_single_slot_capture_uses_unique_short_private_unix_paths(proxy_capture, tmp_path):
+    state = proxy_capture
+    for _ in range(2):
+        state.cursor.fetchone.side_effect = [{"transaction_read_only": "on"},
+            {"transaction_isolation": "repeatable read"}]
+        before = state.connect.call_count
+        assert diag.read_row(Path("synthetic-proxy"), tmp_path)["id"] == diag.EVIDENCE
+        assert state.connect.call_count == before + 1
+        directory = state.roots[-1]
+        assert directory.parent == Path("/tmp") and state.modes[-1] == 0o700
+        endpoint = directory / diag.INSTANCE / ".s.PGSQL.5432"
+        assert len(os.fsencode(endpoint)) < 104
+        assert state.connect.call_args.kwargs["host"] == str(endpoint.parent)
+        assert state.connect.call_args.kwargs["port"] == 5432
+        assert state.connect.call_args.kwargs["connect_timeout"] == 8
+        assert state.popen.call_args.args[0] == ["synthetic-proxy", "--gcloud-auth", "--unix-socket",
+            str(directory), "--max-connections", "1", diag.INSTANCE]
+        assert state.popen.call_args.kwargs == {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        assert not directory.exists()
+    assert state.roots[0] != state.roots[1]
+
+
+def test_readiness_waits_for_socket_without_a_connection_probe(proxy_capture, monkeypatch, tmp_path):
+    observed = []
+    real = Path.is_socket
+    def delayed(path):
+        observed.append(path)
+        return len(observed) > 1 and real(path)
+    monkeypatch.setattr(Path, "is_socket", delayed)
+    sleep = Mock()
+    monkeypatch.setattr(diag.time, "sleep", sleep)
+    diag.read_row(Path("synthetic-proxy"), tmp_path)
+    sleep.assert_called_once_with(0.1)
+    assert len(observed) == 2
+    proxy_capture.connect.assert_called_once()
+
+
+def test_overlong_socket_path_stops_before_proxy_or_database(proxy_capture, monkeypatch, tmp_path):
+    roots = []
+    @contextmanager
+    def overlong(**kwargs):
+        with TemporaryDirectory(prefix="x" * 100, dir=tmp_path) as directory:
+            roots.append(Path(directory))
+            yield directory
+    monkeypatch.setattr(diag, "TemporaryDirectory", overlong)
+    with pytest.raises(diag.Blocked, match="proxy_socket_path_invalid"):
+        diag.read_row(Path("synthetic-proxy"), tmp_path)
+    proxy_capture.popen.assert_not_called()
+    proxy_capture.connect.assert_not_called()
+    assert roots and all(not directory.exists() for directory in roots)
+
+
+@pytest.mark.parametrize("failure", ["db-connect", "query", "proxy-exit", "readiness-timeout", "spawn"])
+def test_proxy_and_owned_directory_cleanup_on_failure(proxy_capture, monkeypatch, tmp_path, failure):
+    import psycopg2
+    state = proxy_capture
+    sentinel = tmp_path / "not-owned-by-proxy"
+    sentinel.write_text("preserve")
+    if failure == "db-connect":
+        state.connect.side_effect = psycopg2.OperationalError("synthetic unavailable")
+    elif failure == "query":
+        state.cursor.fetchall.side_effect = psycopg2.OperationalError("synthetic query failure")
+    elif failure == "proxy-exit":
+        real_launch = state.popen.side_effect
+        def exited(*args, **kwargs):
+            process = real_launch(*args, **kwargs)
+            process.poll.return_value = 1
+            return process
+        state.popen.side_effect = exited
+    elif failure == "readiness-timeout":
+        monkeypatch.setattr(diag.time, "monotonic", Mock(side_effect=[0, 36]))
+    else:
+        state.popen.side_effect = OSError("synthetic spawn failure")
+    expected = diag.Blocked if failure in {"proxy-exit", "readiness-timeout"} else (
+        OSError if failure == "spawn" else psycopg2.OperationalError)
+    with pytest.raises(expected):
+        diag.read_row(Path("synthetic-proxy"), tmp_path)
+    assert state.connect.call_count == (1 if failure in {"db-connect", "query"} else 0)
+    assert state.connection.close.call_count == (1 if failure == "query" else 0)
+    for process in state.processes:
+        process.wait.assert_called_once_with(timeout=8)
+        assert process.terminate.call_count == (0 if failure == "proxy-exit" else 1)
+    assert sentinel.read_text() == "preserve"
+    assert all(not directory.exists() for directory in state.roots)
+
+
+def test_proxy_termination_timeout_kills_then_waits_before_cleanup(proxy_capture, tmp_path):
+    state = proxy_capture
+    launch = state.popen.side_effect
+    def slow(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        finish = process.wait.side_effect
+        def wait(*args, **kwargs):
+            if process.wait.call_count == 1:
+                raise subprocess.TimeoutExpired("synthetic-proxy", 8)
+            return finish(*args, **kwargs)
+        process.wait.side_effect = wait
+        return process
+    state.popen.side_effect = slow
+    diag.read_row(Path("synthetic-proxy"), tmp_path)
+    process = state.processes[0]
+    process.kill.assert_called_once()
+    assert [call.kwargs for call in process.wait.call_args_list] == [{"timeout": 8}, {"timeout": 5}]
+
+
+def test_sigterm_handler_unwinds_connection_proxy_and_directory(proxy_capture, monkeypatch, tmp_path):
+    state = proxy_capture
+    handlers = {}
+    monkeypatch.setattr(diag.signal, "signal", lambda number, handler: handlers.update({number: handler}))
+    monkeypatch.setattr(diag, "context", lambda *_: "a" * 40)
+    monkeypatch.setattr(diag, "run", lambda product, proxy, summary: diag.read_row(proxy, tmp_path))
+    def terminated():
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+    state.cursor.fetchall.side_effect = terminated
+    monkeypatch.setattr("sys.argv", ["diagnostic", "--product", str(tmp_path), "--proxy", "synthetic-proxy",
+        "--summary", str(tmp_path / "summary")])
+    with pytest.raises(SystemExit) as stopped:
+        diag.main()
+    assert stopped.value.code == 1
+    state.connection.close.assert_called_once()
+    state.processes[0].terminate.assert_called_once()
+    state.processes[0].wait.assert_called_once_with(timeout=8)
+    assert all(not directory.exists() for directory in state.roots)
 
 
 def test_capture_assets_validates_aliases_and_keeps_exact_uris(monkeypatch, tmp_path):
@@ -347,6 +515,16 @@ def test_real_guard_delegation_and_separate_offline_process_are_not_replaced():
     assert 'for build in ("headless", "gui")' in source
     assert 'sha(data) == entry["sha256"]' in source
     assert '"input_hashes": before' in source
+
+
+def test_diagnostic_is_selected_in_existing_saved_source_ci_command():
+    workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    selected = next(step for step in steps if step.get("name") == "Verify initial saved-source preservation")
+    assert selected["working-directory"] == "backend"
+    assert selected["run"].count("tests/unit/test_reviewed_ocr_diagnostic.py") == 1
+    assert "--confcutdir=tests/unit" in selected["run"]
+    assert "--junitxml=.logs/saved-source-junit.xml -q" in selected["run"]
 
 
 def staging_workflow():

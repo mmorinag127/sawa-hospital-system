@@ -129,6 +129,7 @@ jobs:
             tests/unit/test_stg_hakodate_verification.py \
             tests/integration/test_staging_db_target.py \
             tests/integration/test_verify_stg_output_source.py \
+            tests/unit/test_reviewed_ocr_diagnostic.py \
             --junitxml=.logs/saved-source-junit.xml -q
       - name: Verify OCR review-resolution root regression
         working-directory: backend
