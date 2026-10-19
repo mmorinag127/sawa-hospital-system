@@ -42,6 +42,11 @@ on:
         required: false
         type: string
         default: ""
+      verify_review_order_id:
+        description: "Existing artifact-bound order: inspect review dialog without submitting quantities or selecting OCR"
+        required: false
+        type: string
+        default: ""
       menu_verification_manifest:
         description: "Optional staging GCS manifest of verified production menu originals"
         required: false
@@ -245,6 +250,7 @@ jobs:
           OCR_MANIFEST: ${{ inputs.ocr_verification_manifest }}
           OCR_EXISTING_RUN: ${{ inputs.ocr_existing_artifact_run_id }}
           MENU_MANIFEST: ${{ inputs.menu_verification_manifest }}
+          REVIEW_ORDER: ${{ inputs.verify_review_order_id }}
           VERIFY_MENU: ${{ inputs.verify_menu_master_ui }}
           OUTPUT_ORDER: ${{ inputs.verify_output_source_order_id }}
           OUTPUT_DATE: ${{ inputs.verify_output_source_date }}
@@ -257,6 +263,10 @@ jobs:
             test -z "$OCR_MANIFEST"
             test "$GITHUB_EVENT_NAME" = workflow_dispatch
             test "${DEPLOY_MODE:-normal}" = normal
+          fi
+          if [ -n "${REVIEW_ORDER:-}" ]; then
+            [[ "$REVIEW_ORDER" =~ ^ORD[a-f0-9]{8}$ ]] || exit 1
+            test -n "$OCR_EXISTING_RUN"
           fi
           case "$GITHUB_EVENT_NAME:${DEPLOY_MODE:-normal}" in
             push:normal|workflow_dispatch:normal)
@@ -812,6 +822,12 @@ jobs:
         env:
           LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
         run: node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live
+      - name: Inspect reviewed OCR confirmation dialog without submitting
+        if: "!cancelled() && steps.ocr-ui-deps.outcome == 'success' && inputs.verify_review_order_id != ''"
+        env:
+          LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
+          REVIEW_ORDER_ID: ${{ inputs.verify_review_order_id }}
+        run: node frontend/scripts/verify-recognition-review-live.mjs tmp/ocr-verification tmp/ocr-live
       - uses: actions/upload-artifact@v4
         if: always() && github.event_name == 'workflow_dispatch' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')
         with:
