@@ -1,11 +1,14 @@
 const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
 const { webkit } = require('@playwright/test');
-const output = path.resolve('../tmp/browser');
+const output = path.resolve(process.env.OCR_COMPONENT_OUTPUT || '../tmp/browser');
+fs.mkdirSync(output,{recursive:true});
+const pages=process.argv.slice(2).length?process.argv.slice(2):['pdf-upload','ocr-queue','ocr-results'];
+assert.ok(pages.every(name=>['pdf-upload','ocr-queue','ocr-results'].includes(name)));
 // Synthetic, read-only component API/identity. No PDF/business job mutation.
 (async () => {
   const browser = await webkit.launch({ headless:true });
   try {
-    for (const width of [390,1440]) for (const name of ['pdf-upload','ocr-queue','ocr-results']) {
+    for (const width of [390,1440]) for (const name of pages) {
       const page = await browser.newPage({ viewport:{width,height:1000} });
       const requests=[], errors=[];
       page.on('pageerror',e=>errors.push(e.message));
@@ -16,7 +19,7 @@ const output = path.resolve('../tmp/browser');
       let release, produced;
       const held = new Promise(resolve=>{release=resolve;});
       const started = new Promise(resolve=>{produced=resolve;});
-      const heldPath = name==='pdf-upload'?'/api/facilities':name==='ocr-queue'?'/api/ocr/unclassified':'/api/orders';
+      const heldPath = name==='pdf-upload'?'/api/facilities':name==='ocr-queue'?'/api/ingest/jobs':'/api/orders';
       await page.route('**/api/**',async route=>{
         const request=route.request(),p=new URL(request.url()).pathname;
         requests.push({method:request.method(),path:p});
@@ -25,7 +28,7 @@ const output = path.resolve('../tmp/browser');
           '/api/auth/me':{role:'operator'},
           '/api/facilities':{facilities:[],revision:'component-r1',source:'canonical_json'},
           '/api/ingest/uploads':{items:[]},
-          '/api/ocr/unclassified':{items:[{id:'component-only-job',data:{status:'pending',input:{},artifacts:{},diagnostics:{}}}]},
+          '/api/ingest/jobs':{items:[{id:'component-only-job',status:'error',attempts:2,generation:'a'.repeat(32),generation_attempts:2,last_error:'synthetic ingest error',pdf_uri:'gs://fixture/input.pdf',message_id:'component-mail',failure_kind:'business',created_at:null,updated_at:null,started_at:null,finished_at:null,received_at:null}]},
           '/api/system/status':{ocr_pipeline:{status:'misconfigured',inflight:0,max_inflight:null}},
           '/api/orders':{orders:[]},
         };
@@ -33,7 +36,7 @@ const output = path.resolve('../tmp/browser');
         if(p===heldPath){produced();await held;}
         return route.fulfill({json:responses[p]});
       });
-      await page.goto('http://localhost:3221/hospital/'+name);
+      await page.goto((process.env.OCR_COMPONENT_ORIGIN || 'http://localhost:3221')+'/hospital/'+name);
       await started;
       if(name==='pdf-upload') {
         await page.waitForFunction(()=>document.querySelectorAll('[aria-disabled="true"],input:disabled').length>0);
@@ -54,11 +57,10 @@ const output = path.resolve('../tmp/browser');
         await page.getByRole('button',{name:'2件のPDFを登録',exact:true}).waitFor();
         // No facility/week selected, no submit, no claim these bytes are valid PDFs.
       } else if(name==='ocr-queue') {
-        const resolve=page.getByRole('button',{name:'解決',exact:true});
-        await page.waitForFunction(()=>document.querySelector('input[placeholder="テンプレートID"]')!==null);
-        await resolve.click();await page.getByText('テンプレートIDを入力してください。',{exact:true}).waitFor();
-        const input=page.getByPlaceholder('テンプレートID');await input.fill(' 000 raw ');assert.equal(await input.inputValue(),' 000 raw ');
-        const select=page.locator('select');await select.selectOption('resolved');assert.equal(await select.inputValue(),'resolved');
+        await page.getByText('component-only-job',{exact:true}).waitFor();
+        assert.equal(await page.getByPlaceholder('テンプレートID').count(),0);
+        await page.getByText('エラー: synthetic ingest error',{exact:true}).waitFor();
+        const select=page.locator('select');await select.selectOption('error');assert.equal(await select.inputValue(),'error');
       } else {
         await page.getByRole('button',{name:'更新',exact:true}).waitFor();
         const checkbox=page.locator('input[type="checkbox"]');await checkbox.check();assert.equal(await checkbox.isChecked(),true);await checkbox.uncheck();assert.equal(await checkbox.isChecked(),false);

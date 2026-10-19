@@ -65,8 +65,15 @@ def test_reads_client_environment_and_collection_are_byte_identical():
         assert assignment(after) == assignment(before)
 
 
-def test_api_entire_source_and_disabled_http_bodies_are_unchanged():
-    assert source(API) == original(API)
+def test_api_retired_reads_use_same_guard_and_training_contract_is_unchanged():
+    before, after = original(API), source(API)
+    old, new = functions(before), functions(after)
+    changed = {"list_unclassified", "get_unclassified"}
+    assert set(old) == set(new)
+    for name in set(old) - changed:
+        assert ast.get_source_segment(before, old[name]) == ast.get_source_segment(after, new[name])
+    for name in changed:
+        assert ast.get_source_segment(before, old[name].decorator_list[0]) == ast.get_source_segment(after, new[name].decorator_list[0])
     funcs = functions(source(API))
     disabled = [
         name for name, node in funcs.items()
@@ -76,7 +83,8 @@ def test_api_entire_source_and_disabled_http_bodies_are_unchanged():
         and isinstance(node.body[0].value.func, ast.Name)
         and node.body[0].value.func.id == "_legacy_ocr_registry_disabled"
     ]
-    assert len(disabled) == 13
+    assert len(disabled) == 15
+    assert changed <= set(disabled)
     helper = funcs["_legacy_ocr_registry_disabled"]
     assert isinstance(helper.body[0], ast.Raise)
     values = {arg.arg: ast.literal_eval(arg.value) for arg in helper.body[0].exc.keywords}
@@ -122,6 +130,35 @@ def test_tracked_python_import_alias_and_call_census():
                     and "ocr_registry_service" in child.value
                     for child in ast.walk(node)
                 ), (path, "dynamic registry import")
-    assert sorted(callers) == [
-        (API, "get_unclassified"), (API, "list_unclassified"),
-    ]
+    assert callers == []
+
+
+def test_retired_reader_http_auth_and_410_without_registry_access(monkeypatch):
+    import runpy
+    import sys
+    from types import ModuleType
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api import auth
+
+    class ForbiddenRegistry(ModuleType):
+        def __getattr__(self, name):
+            raise AssertionError(f"retired registry accessed: {name}")
+
+    monkeypatch.setitem(sys.modules, "src.services.ocr_registry_service", ForbiddenRegistry("registry"))
+    module = runpy.run_path(str(ROOT / API))
+    app = FastAPI()
+    app.include_router(module["router"])
+    monkeypatch.setenv("AUTH_DISABLED", "false")
+    monkeypatch.setattr(auth, "AUTH_PROVIDER", "local")
+    with TestClient(app) as client:
+        for path in ("/ocr/unclassified", "/ocr/unclassified/old-record"):
+            assert client.get(path).status_code == 401
+        app.dependency_overrides[auth.get_current_admin] = lambda: auth.UserContext("operator")
+        assert client.get("/ocr/unclassified").status_code == 403
+        app.dependency_overrides[auth.get_current_admin] = lambda: auth.UserContext("admin")
+        for path in ("/ocr/unclassified?status=pending&limit=100", "/ocr/unclassified/old-record"):
+            response = client.get(path)
+            assert response.status_code == 410
+            assert response.json() == {"detail": "legacy_ocr_registry_disabled"}
+        assert client.post("/ocr/unclassified/old-record/resolve", json={"template_id": "old"}).status_code == 410

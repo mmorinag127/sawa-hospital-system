@@ -30,31 +30,29 @@ async function exactTable(page, expect, values, empty, mark) {
 }
 export async function verifyOcrAdminReadonlyPages({ page, expect, check, receipt, navigate, mark, origin }) {
   await check('ocr-queue', async () => {
-    const [queue, system] = await readTogether(receipt, [{ path: '/api/ocr/unclassified', query: { status: 'pending' } },
+    const [queue, system] = await readTogether(receipt, [{ path: '/api/ingest/jobs', query: { status: 'pending' } },
       { path: '/api/system/status' }], () => navigate('/hospital/ocr-queue'));
     mark('ocr-queue-shape');
     const items = records(queue);
     await expect(page.getByRole('heading', { name: 'OCRキュー', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '取込ジョブ', exact: true })).toBeVisible();
     const cards = page.locator('.queue-card');
     await expect(cards).toHaveCount(items.length);
     if (!items.length) await expect(page.getByText('対象ジョブはありません。', { exact: true })).toBeVisible();
     for (let i = 0; i < items.length; i++) {
-      const { id, data } = items[i];
-      assert.ok(data && typeof data === 'object');
+      const entry = items[i];
       const card = cards.nth(i);
       mark('ocr-queue-job');
-      await expect(card.locator('.queue-title')).toHaveText(id);
-      await expect(card.locator('.queue-meta')).toHaveText(`${data.input?.bucket || '-'}/${data.input?.name || '-'}`);
-      await expect(card.locator('.badge')).toHaveText(String(data.status || 'pending'));
-      const artifacts = Object.entries(data.artifacts || {});
-      await expect(card.locator('.artifact')).toHaveCount(artifacts.length);
-      for (let j = 0; j < artifacts.length; j++) {
-        await expect(card.locator('.artifact-label').nth(j)).toHaveText(artifacts[j][0]);
-        await expect(card.locator('.artifact-uri').nth(j)).toHaveText(String(artifacts[j][1]));
-      }
-      await card.locator('summary').click();
-      await expect(card.locator('pre')).toHaveText(JSON.stringify(data.diagnostics ?? {}, null, 2));
-      await card.locator('summary').click();
+      await expect(card.locator('.queue-title')).toHaveText(entry.id);
+      await expect(card.locator('.badge')).toHaveText(entry.status);
+      await expect(card.locator('.queue-meta')).toHaveText([
+        entry.pdf_uri ?? '未取得', `メッセージID: ${entry.message_id ?? '未取得'}`,
+        `試行回数: ${entry.attempts} / 世代: ${entry.generation ?? '未取得'} / 世代内試行回数: ${entry.generation_attempts ?? '未取得'}`,
+        `受信: ${timestamp(entry.received_at, 'Asia/Tokyo')} / 作成: ${timestamp(entry.created_at, 'Asia/Tokyo')} / 更新: ${timestamp(entry.updated_at, 'Asia/Tokyo')}`,
+        `開始: ${timestamp(entry.started_at, 'Asia/Tokyo')} / 終了: ${timestamp(entry.finished_at, 'Asia/Tokyo')}`,
+        ...(entry.failure_kind ? [`失敗種別: ${entry.failure_kind}`] : []),
+      ]);
+      await expect(card.locator('.queue-status-error')).toHaveText(entry.last_error ? [`エラー: ${entry.last_error}`] : []);
     }
     mark('ocr-pipeline-shape');
     assert.ok(system.ocr_pipeline && system.uploaded_pdfs && system.ingest_jobs);
@@ -70,7 +68,7 @@ export async function verifyOcrAdminReadonlyPages({ page, expect, check, receipt
     }
     mark('ocr-pipeline-error');
     assert.ok(!pipeline.last_error);
-    await expect(page.locator('.queue-status-error')).toHaveCount(0);
+    await expect(page.locator('.queue-status-banner .queue-status-error')).toHaveCount(0);
   });
   await check('ocr-results', async () => {
     const candidates = new Map();

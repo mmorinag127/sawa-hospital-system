@@ -1,13 +1,40 @@
-import { Button, Input, NativeSelect } from "@mui/material";
+import { Button, NativeSelect } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import { sawaTheme } from "@sawa/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
 
 type QueueEntry = {
   id: string;
-  data: Record<string, any>;
+  status: string;
+  attempts: number;
+  generation_attempts: number | null;
+  generation: string | null;
+  message_id: string | null;
+  pdf_uri: string | null;
+  failure_kind: string | null;
+  last_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  received_at: string | null;
+};
+
+const isQueueEntries = (value: unknown): value is QueueEntry[] => {
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  return value.every((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.id !== "string" || !entry.id.trim() || ids.has(entry.id)
+      || !["pending", "processing", "done", "error"].includes(entry.status)
+      || !Number.isInteger(entry.attempts) || entry.attempts < 0
+      || (entry.generation_attempts !== null && (!Number.isInteger(entry.generation_attempts) || entry.generation_attempts < 0))) return false;
+    ids.add(entry.id);
+    return ["generation", "message_id", "pdf_uri", "failure_kind", "last_error", "created_at", "updated_at", "started_at", "finished_at", "received_at"]
+      .every((key) => entry[key] === null || typeof entry[key] === "string");
+  });
 };
 
 type SystemStatus = {
@@ -31,17 +58,6 @@ type SystemStatus = {
     stale_processing_count?: number;
     eligible_backlog_count?: number;
   };
-};
-
-const prettyJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
-
-const toHttpUrl = (uri: string) => {
-  if (uri.startsWith("gs://")) {
-    const [, rest] = uri.split("gs://");
-    const [bucket, ...parts] = rest.split("/");
-    return `https://storage.googleapis.com/${bucket}/${parts.join("/")}`;
-  }
-  return uri;
 };
 
 const formatDate = (value?: string | null) => {
@@ -68,18 +84,24 @@ export default function OcrQueuePage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [bulkRecoverPending, setBulkRecoverPending] = useState(false);
-  const [templateInputs, setTemplateInputs] = useState<Record<string, string>>({});
+  const [queueError, setQueueError] = useState(false);
+  const queueRead = useRef({ generation: 0, mounted: false });
 
   const loadQueue = async () => {
+    if (!queueRead.current.mounted) return null;
+    const generation = ++queueRead.current.generation;
+    const isCurrent = () => queueRead.current.mounted && queueRead.current.generation === generation;
     setLoading(true);
+    setQueueError(false);
     const nextMessages: string[] = [];
     try {
       const [queueResult, statusResult] = await Promise.allSettled([
-        apiClient.get("/ocr/unclassified", {
+        apiClient.get("/ingest/jobs", {
           params: statusFilter ? { status: statusFilter } : undefined,
         }),
         apiClient.get("/system/status"),
       ]);
+      if (!isCurrent()) return null;
 
       if (statusResult.status === "fulfilled") {
         setSystemStatus(statusResult.value.data || {});
@@ -89,73 +111,62 @@ export default function OcrQueuePage() {
       }
 
       if (queueResult.status === "fulfilled") {
-        const data = Array.isArray(queueResult.value.data.items) ? queueResult.value.data.items : [];
-        const normalized = data.map((entry: any) => ({
-          id: String(entry.id || ""),
-          data: entry.data || {},
-        }));
-        setItems(normalized);
-        setTemplateInputs((prev) => {
-          const next: Record<string, string> = {};
-          for (const item of normalized) {
-            next[item.id] = prev[item.id] || "";
-          }
-          return next;
-        });
+        if (!isQueueEntries(queueResult.value.data.items)) throw new Error("invalid_ingest_jobs_response");
+        setItems(queueResult.value.data.items);
       } else {
         setItems([]);
-        nextMessages.push("OCRキューの取得に失敗しました。");
+        setQueueError(true);
+        nextMessages.push("取込ジョブの取得に失敗しました。");
       }
     } catch (err) {
-      nextMessages.push("OCRキューの取得に失敗しました。");
+      if (!isCurrent()) return null;
+      setItems([]);
+      setQueueError(true);
+      nextMessages.push("取込ジョブの取得に失敗しました。");
     } finally {
-      setMessage(nextMessages.join(" "));
-      setLoading(false);
+      if (isCurrent()) {
+        setMessage(nextMessages.join(" "));
+        setLoading(false);
+      }
     }
+    return { generation, messages: nextMessages };
   };
 
   useEffect(() => {
+    queueRead.current.mounted = true;
     loadQueue();
+    return () => {
+      queueRead.current.mounted = false;
+      queueRead.current.generation++;
+    };
   }, [statusFilter]);
 
   const uploaded = systemStatus?.uploaded_pdfs;
   const ingest = systemStatus?.ingest_jobs;
   const pipeline = systemStatus?.ocr_pipeline;
 
-  const resolveJob = async (jobId: string, templateId: string) => {
-    if (!templateId) {
-      setMessage("テンプレートIDを入力してください。");
-      return;
-    }
-    setLoading(true);
-    try {
-      await apiClient.post(`/ocr/unclassified/${jobId}/resolve`, {
-        template_id: templateId,
-      });
-      await loadQueue();
-      setMessage(`${jobId} を解決しました。`);
-    } catch (err) {
-      setMessage("テンプレート解決に失敗しました。");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const recoverReadyQueue = async () => {
-    if (bulkRecoverPending) return;
+    if (bulkRecoverPending || !queueRead.current.mounted) return;
+    const generation = queueRead.current.generation;
     setBulkRecoverPending(true);
     setMessage("滞留しているOCRジョブをまとめて再試行しています。");
     try {
       const res = await apiClient.post("/ingest/recover-ready");
-      const body = res.data || {};
-      await loadQueue();
+      if (!queueRead.current.mounted || queueRead.current.generation !== generation) return;
+      const body = res.data;
+      if (body?.accepted !== true || !["ingest_enqueued", "uploaded_enqueued", "ocr_recovered"]
+        .every((key) => Number.isInteger(body[key]) && body[key] >= 0)) throw new Error("invalid_ingest_recovery_response");
+      const result = await loadQueue();
+      if (!result || !queueRead.current.mounted || queueRead.current.generation !== result.generation) return;
       setMessage(
-        `まとめて再試行を開始しました。ingest=${body.ingest_enqueued ?? 0}件 / uploaded=${body.uploaded_enqueued ?? 0}件 / ocr=${body.ocr_recovered ?? 0}件`
+        [`まとめて再試行を開始しました。ingest=${body.ingest_enqueued}件 / uploaded=${body.uploaded_enqueued}件 / ocr=${body.ocr_recovered}件`, ...result.messages].join(" ")
       );
     } catch (_err) {
-      setMessage("まとめて再試行に失敗しました。");
+      if (queueRead.current.mounted && queueRead.current.generation === generation) {
+        setMessage("まとめて再試行に失敗しました。");
+      }
     } finally {
-      setBulkRecoverPending(false);
+      if (queueRead.current.mounted) setBulkRecoverPending(false);
     }
   };
 
@@ -165,7 +176,6 @@ export default function OcrQueuePage() {
         <div>
           <p className="eyebrow">OCR Operations</p>
           <h1>OCRキュー</h1>
-          <p className="subtle">未分類ジョブと OCR パイプラインの滞留状況を同じ画面で確認します。</p>
         </div>
         <TopNav />
       </header>
@@ -203,6 +213,7 @@ export default function OcrQueuePage() {
           </div>
         </div>
         <header className="panel-header">
+          <h2>取込ジョブ</h2>
           <div className="filters">
             <label className="field">
               <span className="field-label">Status</span>
@@ -213,7 +224,9 @@ export default function OcrQueuePage() {
               >
                 <option value="">すべて</option>
                 <option value="pending">未処理</option>
-                <option value="resolved">解決済み</option>
+                <option value="processing">処理中</option>
+                <option value="done">完了</option>
+                <option value="error">エラー</option>
               </NativeSelect>
             </label>
           </div>
@@ -227,68 +240,28 @@ export default function OcrQueuePage() {
           </div>
         </header>
 
-        {items.length === 0 && <p className="subtle">対象ジョブはありません。</p>}
+        {!loading && !queueError && items.length === 0 && <p className="subtle">対象ジョブはありません。</p>}
 
         <div className="queue-grid">
-          {items.map((entry) => {
-            const artifacts = entry.data.artifacts || {};
-            const diagnostics = entry.data.diagnostics || {};
-            const input = entry.data.input || {};
-            return (
+          {items.map((entry) => (
               <article key={entry.id} className="queue-card">
                 <header className="queue-header">
                   <div>
                     <p className="queue-title">{entry.id}</p>
                     <p className="queue-meta">
-                      {String(input.bucket || "-")}/{String(input.name || "-")}
+                      {entry.pdf_uri ?? "未取得"}
                     </p>
                   </div>
-                  <span className="badge">{String(entry.data.status || "pending")}</span>
+                  <span className="badge">{entry.status}</span>
                 </header>
-                <div className="artifact-grid">
-                  {Object.keys(artifacts).length === 0 && (
-                    <p className="subtle">成果物はありません。</p>
-                  )}
-                  {Object.entries(artifacts).map(([key, uri]) => (
-                    <a
-                      key={key}
-                      className="artifact"
-                      href={toHttpUrl(String(uri))}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <span className="artifact-label">{key}</span>
-                      <span className="artifact-uri">{String(uri)}</span>
-                    </a>
-                  ))}
-                </div>
-                <details className="details">
-                  <summary>診断情報</summary>
-                  <pre className="code-block">{prettyJson(diagnostics)}</pre>
-                </details>
-                <div className="resolve">
-                  <Input disableUnderline
-                    className="input"
-                    placeholder="テンプレートID"
-                    value={templateInputs[entry.id] || ""}
-                    onChange={(e) =>
-                      setTemplateInputs((prev) => ({
-                        ...prev,
-                        [entry.id]: e.target.value,
-                      }))
-                    }
-                  />
-                  <Button type="submit"
-                    className="btn primary"
-                    onClick={() => resolveJob(entry.id, templateInputs[entry.id] || "")}
-                    disabled={loading}
-                  >
-                    解決
-                  </Button>
-                </div>
+                <p className="queue-meta">メッセージID: {entry.message_id ?? "未取得"}</p>
+                <p className="queue-meta">試行回数: {entry.attempts} / 世代: {entry.generation ?? "未取得"} / 世代内試行回数: {entry.generation_attempts ?? "未取得"}</p>
+                <p className="queue-meta">受信: {formatDate(entry.received_at)} / 作成: {formatDate(entry.created_at)} / 更新: {formatDate(entry.updated_at)}</p>
+                <p className="queue-meta">開始: {formatDate(entry.started_at)} / 終了: {formatDate(entry.finished_at)}</p>
+                {entry.failure_kind && <p className="queue-meta">失敗種別: {entry.failure_kind}</p>}
+                {entry.last_error && <p className="queue-status-error">エラー: {entry.last_error}</p>}
               </article>
-            );
-          })}
+          ))}
         </div>
       </section>
 
@@ -529,12 +502,14 @@ export default function OcrQueuePage() {
         .queue-title {
           margin: 0;
           font-weight: 700;
+          overflow-wrap: anywhere;
         }
 
         .queue-meta {
           margin: 4px 0 0;
           font-size: 12px;
           color: #6a7c76;
+          overflow-wrap: anywhere;
         }
 
         .badge {
