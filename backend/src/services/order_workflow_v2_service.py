@@ -30,6 +30,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import workflow_ocr_delivery_service
+from src.services.ocr_history_read import read_history
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
@@ -2938,12 +2939,7 @@ def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_r
             session, order=order, workflow=workflow, meta=workflow_meta,
         )
     if rows is None:
-        rows = (
-            session.query(OrderOcrEvidenceRun)
-            .filter(OrderOcrEvidenceRun.order_id == order.id)
-            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
-            .all()
-        )
+        rows = read_history(session, order.id)
     visible_rows = rows
     hidden_template_mismatch_result_count = 0
     if workflow is not None:
@@ -4827,12 +4823,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
             if template_error:
                 return None, template_error
         _inspection_next("history_query")
-        ocr_results = (
-            session.query(OrderOcrEvidenceRun)
-            .filter(OrderOcrEvidenceRun.order_id == order.id)
-            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
-            .all()
-        )
+        ocr_results = read_history(session, order.id)
         _inspection_next("saved_sheet", count=len(ocr_results))
         saved_sheet = None
         saved_sheet_hash = ""

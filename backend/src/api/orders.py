@@ -682,6 +682,7 @@ def list_orders(
     limit: int | None = Query(default=None, ge=1, le=1000),
     before_received_at: str | None = None,
     before_id: str | None = None,
+    response_view: Literal["ocr_monitor"] | None = None,
 ):
     include_archived_flag = True if include_archived is None else include_archived
     page = order_service.list_orders_page(
@@ -694,7 +695,7 @@ def list_orders(
     orders = page["orders"]
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
-        return page
+        return _order_list_response(page, response_view)
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
     lightweight_mode = include_ocr is False
     cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
@@ -762,7 +763,17 @@ def list_orders(
             )
             _attach_order_workflow_context(order, refresh=False)
     page["orders"] = orders
-    return page
+    return _order_list_response(page, response_view)
+
+
+def _order_list_response(page: dict, view: str | None) -> dict:
+    if view != "ocr_monitor":
+        return page
+    fields = ("id", "facility", "week", "status", "received_at", "ocr_status", "ocr_error")
+    return {**page, "orders": [
+        {field: order[field] for field in fields if field in order}
+        for order in page["orders"]
+    ]}
 
 
 @router.post("/cache-refresh", dependencies=[Depends(require_role("admin"))])

@@ -80,7 +80,7 @@ export async function verifyOcrAdminReadonlyPages({ page, expect, check, receipt
     };
     page.on('response', listener);
     try {
-      const [data, facilities] = await readTogether(receipt, [{ path: '/api/orders', query: { include_ocr: 'true' } },
+      const [data, facilities] = await readTogether(receipt, [{ path: '/api/orders', query: { include_ocr: 'true', response_view: 'ocr_monitor' } },
         { path: '/api/facilities' }], () => navigate('/hospital/ocr-results'));
       mark('ocr-results-shape');
       const orders = records(data, 'orders');
