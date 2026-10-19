@@ -7402,7 +7402,6 @@ def _build_non_condiment_amount_key(
 def _build_daily_bag_amount_stats(lines: list[dict[str, Any]]) -> dict[str, Any]:
     condiment_totals: dict[str, dict[str, float]] = {}
     non_condiment_stats: dict[str, dict[str, dict[str, float]]] = {}
-    menu_category_by_group: dict[str, str] = {}
     for line in lines:
         quantity_raw = (
             line.get("quantity_corrected")
@@ -7454,9 +7453,6 @@ def _build_daily_bag_amount_stats(lines: list[dict[str, Any]]) -> dict[str, Any]
             line.get("diet_type"),
             line.get("area_id"),
         )
-        menu_category = str(line.get("menu_category") or "").strip()
-        if menu_category and key not in menu_category_by_group:
-            menu_category_by_group[key] = menu_category
         unit_stats = non_condiment_stats.get(key, {})
         for unit, amount in amount_by_unit.items():
             current = unit_stats.get(unit, {"amount": 0.0, "quantity": 0.0})
@@ -7481,7 +7477,6 @@ def _build_daily_bag_amount_stats(lines: list[dict[str, Any]]) -> dict[str, Any]
     return {
         "condiment_totals": condiment_totals,
         "per_serving_by_group": per_serving_by_group,
-        "menu_category_by_group": menu_category_by_group,
     }
 
 
@@ -7536,19 +7531,11 @@ def _resolve_daily_bag_basis_label(bag: dict[str, Any], stats: dict[str, Any]) -
     return _format_basis_label(per_serving)
 
 
-def _resolve_daily_bag_menu_category(bag: dict[str, Any], stats: dict[str, Any]) -> str | None:
+def _resolve_daily_bag_menu_category(bag: dict[str, Any]) -> str | None:
     bag_type = _normalize_sheet_text(bag.get("bag_type")).lower()
     if bag_type == "condiment":
         return "付属品"
-    return stats.get("menu_category_by_group", {}).get(
-        _build_non_condiment_amount_key(
-            bag.get("date"),
-            bag.get("daypart"),
-            bag.get("menu_name"),
-            bag.get("diet_type"),
-            bag.get("area_id"),
-        )
-    )
+    return str(bag.get("menu_category") or "").strip() or None
 
 
 def _resolve_facility_label_for_code(facility_config: dict[str, Any]) -> str:
@@ -8200,7 +8187,7 @@ def get_daily_bag_summary(
             if _normalize_bag_summary_date(bag.get("date")) != target_date.isoformat():
                 continue
             group_daypart = str(bag.get("daypart") or _normalize_daypart_key(bag.get("daypart")) or "-").strip() or "-"
-            menu_category = str(_resolve_daily_bag_menu_category(bag, amount_stats) or "-").strip() or "-"
+            menu_category = str(_resolve_daily_bag_menu_category(bag) or "-").strip() or "-"
             menu_name = str(bag.get("menu_name") or "-").strip() or "-"
             menu_key = (group_daypart, menu_category, menu_name)
             menu_group = groups.get(menu_key)
