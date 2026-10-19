@@ -19,7 +19,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from test_portal_admin_write_authority import owned, owned_pg
-from test_ingest_delivery_contract import payload, successor_producer as incomplete_successor_producer
+from test_ingest_delivery_contract import payload
 from test_native_ingest_sql_component import native_sql as canonical_native_sql
 from src import db
 from src.api import worker
@@ -236,37 +236,59 @@ def store(database, monkeypatch):
 
 @pytest.fixture
 def successor_producer(store, payload, monkeypatch):
-    # Correct only this task's imported toy fixture, not its protected source.
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from src.services import order_service, ingest_delivery_successor_service as successor
+    monkeypatch.setenv('OCR_AUTO_LLM_REPARSE_ON_INGEST', '1')
+    monkeypatch.setenv('OCR_AUTO_LLM_REPARSE_PROVIDER', 'gemini')
     with store() as session:
+        template = session.execute(sa.select(Order).where(Order.message_id == 'sql-component-message')).scalar_one()
+        uri, projection = template.document_uri, template.template_version_id
         payload = dict(session.get(IngestJob, 'sql-component-message').payload,
             message_id=payload['message_id'], intake_protocol=None, uploaded_pdf_id=None)
-    actual_capture = guard._order_execution_input
-    source = incomplete_successor_producer.__wrapped__(store, payload, monkeypatch)
-    monkeypatch.setattr(guard, '_order_execution_input', actual_capture)
-    with delivery.claim_context(source['claim']), store.begin() as session:
-        template = session.execute(sa.select(Order).where(Order.message_id == 'sql-component-message')).scalar_one()
-        order = session.get(Order, 'producer-order')
-        order.facility_code, order.week_code = template.facility_code, template.week_code
-        order.template_version_id, order.current_document_id = template.template_version_id, 'producer-document'
-        order.document_uri = template.document_uri
-        document = session.get(OrderDocument, 'producer-document')
-        document.storage_uri = template.document_uri
-        job = session.get(OcrJob, source['capture']['job_id'])
-        job.input_reference = template.document_uri
-        job.metrics = {**job.metrics, 'ingest_lease':deepcopy(source['claim']['lease'])}
-        session.add(UploadedPdf(id='producer-upload', message_id=payload['message_id'],
-            storage_uri=template.document_uri, content_sha256=source['capture']['selected_pdf_receipt']['sha256'],
-            original_filename='authored.pdf', received_at=datetime.fromisoformat(payload['received_at'])))
-    # Capture uses the producer's immutable lease and the actual formal DB input.
-    lease = source['claim']['lease']
+    ingest.create_ingest_receipt(payload)
     with store() as session:
-        uri = session.get(Order, 'producer-order').document_uri
-    with delivery.claim_context(source['claim']), ingest.ingest_execution_context(lease):
-        boundary = guard.capture_nonworkflow_execution(source['capture']['job_id'], order_id='producer-order',
+        row = session.execute(sa.select(IngestDelivery).where(IngestDelivery.job_id == payload['message_id'])).scalar_one()
+        identity, generation = row.id, row.generation
+    claim = delivery.claim_delivery(identity, generation)
+    with delivery.claim_context(claim), store.begin() as session:
+        session.add(OrderDocument(id='producer-document', storage_uri=uri,
+            source_email_id=payload['message_id'], received_at=datetime.fromisoformat(payload['received_at']),
+            status='success'))
+        session.add(UploadedPdf(id='producer-upload', message_id=payload['message_id'],
+            storage_uri=uri, content_sha256=payload['content_sha256'],
+            original_filename='authored.pdf', received_at=datetime.fromisoformat(payload['received_at'])))
+        session.flush()
+        session.add(Order(id='producer-order', facility_code=payload['facility_hint'], week_code=payload['week_hint'],
+            template_version_id=projection, current_document_id='producer-document', document_uri=uri,
+            message_id=payload['message_id']))
+        # No ORM relationship orders these mappers; persist the FK parent first.
+        session.flush()
+        session.add(OcrJob(id='producer-parent-job', order_id='producer-order', status='running',
+            input_reference=uri, metrics={'ingest_lease':deepcopy(claim['lease'])}))
+    with delivery.claim_context(claim), ingest.ingest_execution_context(claim['lease']):
+        boundary = guard.capture_nonworkflow_execution('producer-parent-job', order_id='producer-order',
             input_reference=uri, expected_document_id='producer-document')
-    source['capture'].clear()
-    source['capture'].update(boundary)
-    return source
+    own_payload = {'table_raw':'authored metadata only', 'unknown':{'zero':0, 'null':None},
+        '_ocr_execution':{'job_id':boundary['job_id'], 'nonworkflow_execution_id':boundary['execution_id'],
+            'evidence_run_id':'producer-evidence', 'workflow_attempt_id':None, 'workflow_revision':None}}
+    with store.begin() as session:
+        session.add(OrderOcrEvidenceRun(id='producer-evidence', order_id='producer-order', schema_version='v1_legacy',
+            payload_json=own_payload, artifact_digest='recorded-authored-digest', status='ready'))
+    # Retain the original fixture's terminal-CAS isolation, not a new authority bypass.
+    monkeypatch.setattr(order_service, '_workflow_attempt_write_fence',
+        lambda session, job_id, order_id, **kwargs: delivery.fence_original_write(session, claim['lease']))
+
+    def produce(*, aborted=False):
+        with delivery.claim_context(claim), store.begin() as session:
+            receipt = order_service._complete_first_pass_job_in_session(session,
+                session.get(Order, 'producer-order'), session.get(OrderDocument, 'producer-document'), boundary,
+                {'id':'producer-evidence', 'selectable':True, 'payload_json':own_payload}, applied=True)
+            if aborted:
+                raise RuntimeError('authored_transaction_abort')
+            return receipt
+
+    return {'produce':produce, 'capture':boundary, 'claim':claim, 'payload':own_payload,
+        'service':successor, 'parent_id':identity, 'generation':generation}
 
 
 @pytest.mark.parametrize('change', ['accepted', 'not-ack', 'missing-handoff', 'refused', 'missing-successor',
