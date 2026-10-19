@@ -466,6 +466,67 @@ def is_job_stale(job: dict[str, Any] | None) -> bool:
     return stale_at <= datetime.utcnow()
 
 
+def has_recorded_execution_input(job: dict[str, Any]) -> bool:
+    """Check the saved execution contract without resolving or repairing input."""
+    from src.services.workflow_attempt_guard_service import (
+        nonworkflow_execution_context, processing_start_read_input,
+    )
+    metrics = job.get("metrics")
+    captured = metrics.get("nonworkflow_execution") if isinstance(metrics, dict) else None
+    if not isinstance(captured, dict):
+        return False
+    order_id = captured.get("order_id")
+    orders = captured.get("orders")
+    if (not isinstance(order_id, str) or not order_id
+        or not isinstance(orders, dict) or set(orders) != {order_id}
+        or not isinstance(orders[order_id], dict)
+        or captured.get("job_id") != job.get("id")
+        or not isinstance(captured.get("execution_id"), str) or not captured["execution_id"]
+        or captured.get("job_order_id") != job.get("order_id")
+        or captured.get("input_reference") != job.get("input_reference")):
+        return False
+    lease = captured.get("ingest_lease")
+    if lease is not None and (not isinstance(lease, dict)
+        or not all(isinstance(lease.get(key), str) and lease[key]
+                   for key in ("id", "generation", "claim_id", "input_digest"))
+        or type(lease.get("attempts")) is not int or lease["attempts"] < 1):
+        return False
+    if (metrics.get("ingest_ocr_mode") is not None
+        and captured.get("ingest_ocr_mode") != metrics["ingest_ocr_mode"]):
+        return False
+    try:
+        # This is the same hash/shape/selected-source check used by execution.
+        with nonworkflow_execution_context(captured):
+            processing_start_read_input()
+        if captured.get("ingest_ocr_mode") == "hakodate":
+            from src.workers.ingest_mail_adapter import parse_ingest_payload
+            from src.services.ingest_policy import require_explicit_ingest_week
+            from src.services.ingest_job_service import payload_digest
+            if not isinstance(lease, dict) or not isinstance(lease.get("payload"), dict):
+                return False
+            payload = parse_ingest_payload(lease["payload"])
+            recorded = orders[order_id]
+            order, document = recorded.get("order"), recorded.get("document")
+            selected = captured.get("selected_pdf_receipt")
+            if (payload.intake_protocol != "native_ingest_v2"
+                or captured.get("intake_protocol") != payload.intake_protocol or payload.skip_ocr
+                or payload_digest(lease["payload"]) != lease["input_digest"]
+                or not isinstance(order, dict) or order.get("id") != order_id
+                or order.get("week_code") != require_explicit_ingest_week(payload.week_hint)
+                or not isinstance(document, dict) or not document.get("id")
+                or order.get("current_document_id") != document["id"]
+                or document.get("storage_uri") != payload.pdf_uri
+                or document.get("source_email_id") != payload.message_id
+                or captured["input_reference"] != payload.pdf_uri
+                or not isinstance(selected, dict) or selected.get("document_id") != document["id"]
+                or selected.get("order_id") != order_id
+                or selected.get("sha256") != payload.content_sha256):
+                return False
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
 def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(job, dict):
         return {
@@ -477,23 +538,13 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         }
     normalized_status = str(job.get("status") or "").strip().lower() or "idle"
     effective_status = normalized_status
-    metrics = job.get("metrics") or {}
-    execution_input = metrics.get("nonworkflow_execution")
-    has_execution_input = (
-        isinstance(execution_input, dict)
-        and execution_input.get("job_id") == job.get("id")
-        and bool(execution_input.get("execution_id"))
-        and isinstance(execution_input.get("orders"), dict)
-        and isinstance(execution_input.get("start_orders"), dict)
-        and set(execution_input["orders"]) == {execution_input.get("order_id")}
-        and isinstance(execution_input["start_orders"].get(execution_input.get("order_id")), dict)
-        and bool(execution_input["start_orders"][execution_input.get("order_id")].get("input_sha256"))
-    )
+    metrics = job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
     missing_execution_input = (
         (metrics.get("request_mode") in {"ingest_first_pass", "ocr_rerun", "ocr_reparse", "llm_reparse"}
          or metrics.get("ingest_ocr_mode") == "hakodate")
         and metrics.get("workflow_attempt_id") is None
-        and not has_execution_input
+        and not has_recorded_execution_input(job)
     )
     if is_job_recoverable(job):
         effective_status = "recovering" if is_job_recovery_due(job) else "awaiting_output"

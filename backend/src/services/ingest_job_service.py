@@ -8,7 +8,8 @@ import os
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, update, func, desc, exists
+from sqlalchemy import and_, or_, select, update, func, desc, exists, tuple_, String
+from loguru import logger
 
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
@@ -16,6 +17,8 @@ from src.models.ocr_job import OcrJob
 from src.services.ocr_job_service import (
     get_job_stale_at,
     is_job_recoverable,
+    is_job_recovery_due,
+    has_recorded_execution_input,
     is_job_stale,
 )
 
@@ -624,21 +627,110 @@ def settle_ingest_ocr_terminal(execution):
         return {"status": job.status, "error": error, "lease": deepcopy(lease)}
 
 
+def _recorded_recovery_owner(job):
+    metrics = job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    pending = metrics.get("pending_receipt")
+    if metrics.get("workflow_attempt_id") is not None:
+        from src.services.order_service import is_own_pending_ocr_result, _pending_request_matches
+        from src.services.ocr_job_service import get_job_request_mode
+        return bool(isinstance(pending, dict)
+            and get_job_request_mode(job) in {"ocr_reparse", "llm_reparse"}
+            and is_own_pending_ocr_result(
+                {"outcome": "pending", "status": job["status"], "output_reference": job["output_reference"],
+                 "pending_receipt": pending}, order_id=job["order_id"], job_id=job["id"],
+                workflow_attempt_id=metrics["workflow_attempt_id"],
+                workflow_revision=metrics.get("workflow_completion_revision"))
+            and _pending_request_matches(metrics, pending))
+    captured = metrics.get("nonworkflow_execution")
+    if not isinstance(captured, dict):
+        logger.warning("OCR recovery stopped: processing-start input missing", job_id=job["id"])
+        return False
+    valid = has_recorded_execution_input(job)
+    if not valid:
+        logger.warning("OCR recovery stopped: recorded execution owner missing", job_id=job["id"])
+    return valid
+
+
 def list_ocr_recovery_candidates(limit):
     from src.services.ocr_job_service import _job_to_dict
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.ingest_delivery import IngestDelivery
+    from src.models.ingest_delivery_successor import IngestDeliverySuccessor
+    from src.services.ingest_delivery_service import _same
+    from src.services.ingest_delivery_successor_service import _recorded_identity
+    if type(limit) is not int or limit < 1:
+        raise ValueError("ocr_recovery_limit_required")
     original = OcrJob.metrics["nonworkflow_execution"]["ingest_lease"]
+    successor = OcrJob.metrics["nonworkflow_execution"]["ingest_successor_id"].as_string()
     owns_ingest = exists(select(IngestJob.id).where(
-        IngestJob.id == original["id"].as_string(), IngestJob.status == "processing",
+        IngestJob.id == original["id"].as_string(),
+        or_(and_(successor.is_(None), IngestJob.status == "processing"),
+            and_(successor.is_not(None), IngestJob.status == "done")),
         IngestJob.generation == original["generation"].as_string(),
         IngestJob.claim_id == original["claim_id"].as_string(),
         IngestJob.input_digest == original["input_digest"].as_string()))
+    workflow_attempt = OcrJob.metrics["workflow_attempt_id"].as_string()
+    owns_workflow = exists(select(OrderWorkflowState.order_id).where(
+        OrderWorkflowState.order_id == OcrJob.order_id,
+        OrderWorkflowState.revision.cast(String) == OcrJob.metrics["workflow_completion_revision"].as_string()))
     with session_scope() as session:
-        rows = session.execute(select(OcrJob).where(
+        query = select(OcrJob).where(
             or_(OcrJob.status.in_(["awaiting_output", "recovering", "running", "pending"]),
                 and_(OcrJob.status.in_(["failed", "error"]), OcrJob.error_message.ilike("%ocr pipeline output not found%"))),
-            or_(OcrJob.metrics["workflow_attempt_id"].as_string().is_not(None), original["id"].as_string().is_(None), owns_ingest),
-        ).order_by(OcrJob.updated_at.asc()).limit(limit)).scalars().all()
-        return [value for value in (_job_to_dict(row) for row in rows) if is_job_recoverable(value)]
+            or_(and_(workflow_attempt.is_not(None), owns_workflow),
+                and_(workflow_attempt.is_(None), or_(original["id"].as_string().is_(None), owns_ingest))),
+        )
+        # The formal schema requires updated_at. A timestamp/id key bounds this
+        # read while rejected rows consume scan pages, not the admission budget.
+        key = tuple_(OcrJob.updated_at, OcrJob.id)
+        ceiling = session.execute(query.with_only_columns(OcrJob.updated_at, OcrJob.id)
+            .order_by(OcrJob.updated_at.desc(), OcrJob.id.desc()).limit(1)).first()
+        if ceiling is None:
+            return []
+        query = query.where(key <= tuple(ceiling)).order_by(OcrJob.updated_at, OcrJob.id)
+        accepted, cursor = [], None
+        while len(accepted) < limit:
+            page = query if cursor is None else query.where(key > cursor)
+            rows = session.execute(page.limit(limit)).scalars().all()
+            if not rows:
+                break
+            for row in rows:
+                cursor = (row.updated_at, row.id)
+                value = _job_to_dict(row)
+                if is_job_recoverable(value) and _recorded_recovery_owner(value):
+                    captured = (value["metrics"] or {}).get("nonworkflow_execution")
+                    if isinstance(captured, dict):
+                        # The worker only polls legacy output before its retry is due.
+                        if (captured.get("ingest_ocr_mode") != "hakodate"
+                            and not str(value.get("output_reference") or "").strip()
+                            and not is_job_recovery_due(value)):
+                            continue
+                        lease = captured.get("ingest_lease")
+                        identity = captured.get("ingest_successor_id")
+                        if identity:
+                            owner = session.get(IngestDeliverySuccessor, identity)
+                            if (owner is None or owner.job_id != row.id or owner.state != "ACKNOWLEDGED"
+                                or owner.handoff_receipt is None
+                                or (owner.terminal_receipt or {}).get("kind") == "owned_refusal"
+                                or not _same(owner.owner_lease, lease)):
+                                continue
+                            try:
+                                _recorded_identity(session, owner)
+                            except ValueError:
+                                logger.warning("OCR recovery stopped: recorded successor owner changed", job_id=row.id)
+                                continue
+                        elif lease is not None:
+                            owner = session.execute(select(IngestDelivery).where(
+                                IngestDelivery.job_id == lease["id"],
+                                IngestDelivery.business_generation == lease["generation"])).scalar_one_or_none()
+                            if (owner is None or owner.state != "ACKNOWLEDGED" or owner.handoff_receipt is None
+                                or not _same(owner.owner_lease, lease)):
+                                continue
+                    accepted.append(value)
+                    if len(accepted) == limit:
+                        break
+        return accepted
 
 
 def recover_completed_upload(uploaded, captured):
