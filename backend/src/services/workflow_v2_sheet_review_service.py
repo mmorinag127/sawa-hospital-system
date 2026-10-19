@@ -320,6 +320,7 @@ def _ocr_items_from_hakodate_assignment(
     sheet: dict[str, Any],
     evidence_payload: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    from src.services.recognition_acceptance_service import accepted_values
     fields, _header, rows = _sheet_dimensions(sheet)
     targets = _hakodate_target_cells_from_payload(evidence_payload)
     records = _hakodate_evidence_records_from_payload(evidence_payload)
@@ -328,6 +329,7 @@ def _ocr_items_from_hakodate_assignment(
     assignment = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
         evidence_records=records,
         target_cells=targets,
+        accepted_values=accepted_values(evidence_payload or {}),
     )
     assignments = assignment.get("assignments") if isinstance(assignment, dict) else None
     if not isinstance(assignments, list):

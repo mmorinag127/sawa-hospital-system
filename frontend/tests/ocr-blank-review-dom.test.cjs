@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { mount, transport } = require('./helpers/modernization-react-dom.cjs');
 
-test('Step2 preserves raw prediction, shows review and disables unselectable evidence', async () => {
+test('Step2 preserves raw prediction and requires explicit approval after opening review', async () => {
   const t = transport(), order = 'blank-review', root = `/orders/${order}`;
   const workflow = {order_id: order, revision: 7, state: 'ocr_completed',
     selected_ocr_result_id: null, blockers: [], warnings: []};
@@ -27,7 +27,7 @@ test('Step2 preserves raw prediction, shows review and disables unselectable evi
     assert.equal(call.config.params.document_id, 'pdf');
     return {data: {order_id: order, source_receipt: {workflow_revision: 7,
       recognition_evidence_run_id: 'blocked-result', selected_pdf_receipt: {document_id: 'pdf'}},
-      cells: [{cell: 'F11', image_png_base64: ''}]}};
+      review_cells: cells, cells: [{cell: 'F11', image_png_base64: ''}]}};
   });
   const probe = {component: 'OrderWorkflowV2Page', bindings: ['ocrResults', 'setVisibleStep']};
   const h = await mount('src/pages/orders/[id]/workflow-v2.tsx', {
@@ -44,13 +44,30 @@ test('Step2 preserves raw prediction, shows review and disables unselectable evi
     assert.match(cards[0].textContent, /F11: 「1」/);
     assert.match(cards[0].textContent, /認識画像は白紙/);
     const select = card => [...card.querySelectorAll('button')].find(b => b.textContent === '正解にする');
-    assert.equal(select(cards[0]).disabled, true);
+    const review = [...cards[0].querySelectorAll('button')].find(b => b.textContent === '確認して正解にする');
+    assert.equal(review.disabled, false);
     assert.equal(select(cards[1]).disabled, false);
     assert.equal(select(cards[2]).disabled, true);
     assert.equal(cells[0].raw_text, '1');
+    const mutations = () => t.calls.filter(call => ['put', 'post', 'delete'].includes(call.method));
+    assert.equal(mutations().length, 0);
+    await h.click(review);
+    await h.waitFor(() => h.document.querySelector('[role="dialog"]'));
+    const dialog = h.document.querySelector('[role="dialog"]');
+    assert.match(dialog.textContent, /読み取り結果の確認・採用/);
+    assert.match(dialog.textContent, /読み取り原文: 「1」/);
+    assert.match(dialog.textContent, /認識画像は白紙/);
+    assert.ok(dialog.querySelector('img[alt="F11のFAX原画像"]'));
+    assert.ok(h.button('確認した値を採用して次へ'));
+    assert.equal(mutations().length, 0);
+    assert.equal(workflow.selected_ocr_result_id, null);
+    assert.equal(cells[0].raw_text, '1');
+    await h.click(h.button('閉じる'));
+    await h.waitFor(() => !h.document.querySelector('[role="dialog"]'));
     await h.click([...cards[0].querySelectorAll('button')].find(b => b.textContent === 'セル画像を確認・訂正'));
     await h.waitFor(() => h.document.querySelector('[role="dialog"]'));
     assert.match(h.document.querySelector('[role="dialog"]').textContent, /未確認 1 セル/);
+    assert.equal(mutations().length, 0);
   } finally {
     await h.close();
     if (originalShadowRoot) Object.defineProperty(global, 'ShadowRoot', originalShadowRoot);

@@ -9118,12 +9118,14 @@ def _validate_hakodate_recognition_review(payload, records, verified_inputs):
 
 
 def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review=False):
+    from src.services.recognition_acceptance_service import accepted_values
+    accepted = accepted_values(payload)
     source = payload.get("hakodate_repair_source_receipt") if isinstance(payload, dict) else None
     if not isinstance(source, dict) or not snapshots_equal(source, expected_source):
         raise ValueError("hakodate_artifact_source_mismatch")
     pipeline = payload.get("hakodate_canonical_pipeline") or {}
     review = payload.get("hakodate_recognition_review")
-    review_outcome = (allow_review and isinstance(review, dict)
+    review_outcome = ((allow_review or bool(accepted)) and isinstance(review, dict)
                      and type(review.get("count")) is int and review["count"] > 0
                      and isinstance(pipeline, dict) and pipeline.get("status") == "blocked")
     if not isinstance(pipeline, dict) or (pipeline.get("status") != "ready" and not review_outcome) or pipeline.get("version") != HAKODATE_CANONICAL_PIPELINE_VERSION:
@@ -9179,21 +9181,31 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
     from src.services import canonical_ocr_artifact_service
     verified_inputs = canonical_ocr_artifact_service.validate_payload(payload)
     _validate_hakodate_recognition_review(payload, records, verified_inputs)
-    if not allow_review and isinstance(review, dict) and review.get("count", 0) > 0:
+    if not allow_review and not accepted and isinstance(review, dict) and review.get("count", 0) > 0:
         raise ValueError("hakodate_ocr_quantity_unresolved")
 
 
-def _validate_selected_hakodate_artifacts(evidence, captured):
+def _validate_selected_hakodate_artifacts(evidence, captured, *, allow_review=False):
     """Validate an explicitly selected persisted result, not the new command's job."""
-    payload = evidence.get("payload_json") if isinstance(evidence, dict) else None
+    from src.services.recognition_acceptance_service import payload_for_evidence
+    payload = payload_for_evidence(evidence) if isinstance(evidence, dict) else None
     source = (payload or {}).get("hakodate_repair_source_receipt")
     execution = (payload or {}).get("_ocr_execution")
     if not isinstance(source, dict) or not isinstance(execution, dict) or execution.get("evidence_run_id") != evidence.get("id"):
         raise ValueError("hakodate_selected_evidence_lineage_missing")
-    original_source = (evidence.get("artifact_manifest_json") or {}).get("original_hakodate_source")
+    manifest = evidence.get("artifact_manifest_json") or {}
+    from src.services.recognition_acceptance_service import KEY
+    if allow_review or KEY in manifest:
+        original_source = _original_hakodate_execution_source(payload)
+        if KEY in manifest and manifest[KEY].get("original_hakodate_source") != original_source:
+            raise ValueError("recognition_acceptance_changed")
+        if "original_hakodate_source" in manifest and manifest["original_hakodate_source"] != original_source:
+            raise ValueError("hakodate_original_expectation_changed")
+    else:
+        original_source = manifest.get("original_hakodate_source")
     if not isinstance(original_source, dict):
         raise ValueError("hakodate_original_expectation_required")
-    _validate_hakodate_owned_artifacts(payload, original_source)
+    _validate_hakodate_owned_artifacts(payload, original_source, allow_review=allow_review)
     original = execution.get("processing_start_input")
     if not isinstance(original, dict) or not snapshots_equal(original.get("physical_menu_entries"), captured.get("physical_menu_entries")):
         raise ValueError("hakodate_original_expectation_required")
@@ -9206,16 +9218,21 @@ def _validate_selected_hakodate_artifacts(evidence, captured):
             raise ValueError("hakodate_selected_evidence_lineage_mismatch")
     if not source.get("job_id") or not (source.get("execution_id") or source.get("workflow_attempt_id")):
         raise ValueError("hakodate_selected_evidence_lineage_missing")
-    _validate_hakodate_owned_artifacts(payload, {**source, "physical_menu_digest": expected["physical_menu_digest"], "expected_sheet_cells": expected["expected_sheet_cells"]})
+    _validate_hakodate_owned_artifacts(payload, {**source, "physical_menu_digest": expected["physical_menu_digest"], "expected_sheet_cells": expected["expected_sheet_cells"]}, allow_review=allow_review)
 
 
-def _validate_hakodate_original_execution(payload):
+def _original_hakodate_execution_source(payload):
     execution = payload.get("_ocr_execution") if isinstance(payload, dict) else None
     start = execution.get("processing_start_input") if isinstance(execution, dict) else None
     if not isinstance(start, dict) or not isinstance(start.get("configured_input"), dict) or not execution.get("job_id"):
         raise ValueError("hakodate_original_expectation_required")
     expected = _hakodate_owned_source(start["configured_input"], execution.get("selected_pdf_receipt"), original_input=start)
     expected.update(job_id=execution["job_id"], execution_id=execution.get("nonworkflow_execution_id"), workflow_attempt_id=execution.get("workflow_attempt_id"), workflow_revision=execution.get("workflow_revision"), evidence_run_id=start.get("evidence_run_id"))
+    return expected
+
+
+def _validate_hakodate_original_execution(payload):
+    expected = _original_hakodate_execution_source(payload)
     _validate_hakodate_owned_artifacts(payload, expected)
 
 
@@ -10507,8 +10524,9 @@ def _resolve_active_ocr_evidence_run(order_id: str) -> Optional[dict]:
 
 
 def _load_active_ocr_payload(order_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    from src.services.recognition_acceptance_service import payload_for_evidence
     active_evidence = _resolve_active_ocr_evidence_run(order_id)
-    payload = active_evidence.get("payload_json") if isinstance(active_evidence, dict) else None
+    payload = payload_for_evidence(active_evidence) if isinstance(active_evidence, dict) else None
     if not isinstance(payload, dict):
         return None, active_evidence
     template = _resolve_order_fax_template(order_id)
@@ -11203,6 +11221,7 @@ def _load_latest_hakodate_overlay_source(
     order_id: str,
     *, captured_input: dict | None = None,
 ) -> tuple[dict[str, Any], str | None, bool]:
+    from src.services.recognition_acceptance_service import payload_for_evidence
     try:
         captured_input = captured_input if captured_input is not None else _capture_synchronous_cache_write_input(order_id)
     except ocr_evidence_service.SelectedEvidenceRejected:
@@ -11216,7 +11235,7 @@ def _load_latest_hakodate_overlay_source(
         _validate_selected_hakodate_artifacts(latest_evidence, captured_input)
     except ValueError as exc:
         raise ocr_evidence_service.SelectedEvidenceRejected(str(exc)) from exc
-    latest_payload = latest_evidence.get("payload_json") if isinstance(latest_evidence, dict) else None
+    latest_payload = payload_for_evidence(latest_evidence) if isinstance(latest_evidence, dict) else None
     if (
         isinstance(latest_payload, dict)
         and _payload_has_current_hakodate_canonical_pipeline(latest_payload)
@@ -24054,6 +24073,7 @@ def _build_hakodate_evidence_assignment_from_payload(
     payload: dict[str, Any] | None,
     facility_config: dict[str, Any],
 ) -> dict[str, Any]:
+    from src.services.recognition_acceptance_service import accepted_values
     target_cells = _extract_hakodate_target_cells_from_payload(payload)
     evidence_records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id)
     blockers: list[str] = []
@@ -24095,6 +24115,7 @@ def _build_hakodate_evidence_assignment_from_payload(
         hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
             evidence_records=evidence_records,
             target_cells=target_cells,
+            accepted_values=accepted_values(payload or {}),
         )
         if target_cells and evidence_records and not blockers
         else {
@@ -24533,11 +24554,16 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             cell_provenance_rows[row_index].append("")
         previous = rows[row_index][col_index]
         confidence = cell.get("assignment_confidence")
-        classification = _hakodate_ocr_classification_for_confidence(confidence)
-        confidence_tier = _hakodate_ocr_confidence_tier(confidence)
-        placement_basis = _hakodate_ocr_placement_basis_for_confidence(confidence)
+        operator_reviewed = bool(cell.get("operator_values"))
+        classification = "accepted" if operator_reviewed else _hakodate_ocr_classification_for_confidence(confidence)
+        confidence_tier = "operator" if operator_reviewed else _hakodate_ocr_confidence_tier(confidence)
+        placement_basis = "operator_review" if operator_reviewed else _hakodate_ocr_placement_basis_for_confidence(confidence)
         if value and role == "quantity":
-            ocr_numeric_cell_summary["raw_ocr_numeric_count"] += 1
+            if operator_reviewed:
+                ocr_numeric_cell_summary["operator_reviewed_numeric_count"] = ocr_numeric_cell_summary.get("operator_reviewed_numeric_count", 0) + 1
+            if not operator_reviewed or any(re.fullmatch(r"[0-9]+", hakodate_ocr_evidence_service.normalize_ocr_value(raw))
+                                           for raw in cell.get("raw_texts", [])):
+                ocr_numeric_cell_summary["raw_ocr_numeric_count"] += 1
             summary_key = (
                 "accepted_count"
                 if classification == "accepted"
@@ -24547,14 +24573,15 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
                 if classification == "weak_candidate"
                 else "unresolved_count"
             )
-            ocr_numeric_cell_summary[summary_key] += 1
+            if not operator_reviewed:
+                ocr_numeric_cell_summary[summary_key] += 1
             ocr_numeric_cell_items.append(
                 _build_ocr_numeric_cell_item(
                     classification=classification,
                     value=value,
                     confidence_tier=confidence_tier or "low",
                     placement_basis=placement_basis,
-                    read_basis="hakodate_cell_ocr_confidence_threshold",
+                    read_basis="operator_recognition_review" if operator_reviewed else "hakodate_cell_ocr_confidence_threshold",
                     source_row_index=row_index,
                     source_col_index=col_index,
                     target_row_index=row_index if classification != "unresolved" else None,
@@ -24569,8 +24596,8 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             rows[row_index][col_index] = value
             if col_index < len(cell_confidence_rows[row_index]):
                 cell_confidence_rows[row_index][col_index] = confidence_tier
-                cell_score_rows[row_index][col_index] = confidence
-                cell_provenance_rows[row_index][col_index] = "hakodate_ocr_strict_threshold"
+                cell_score_rows[row_index][col_index] = None if operator_reviewed else confidence
+                cell_provenance_rows[row_index][col_index] = "operator_recognition_review" if operator_reviewed else "hakodate_ocr_strict_threshold"
             applied.append(
                 {
                     "sheet_cell": sheet_cell,
@@ -24811,7 +24838,8 @@ def build_order_hakodate_assignment(
     if selected_evidence is not None:
         if selected_evidence.get("order_id") != order_id or not isinstance(selected_evidence.get("payload_json"), dict):
             return None, "evidence_lineage_missing"
-        payload = deepcopy(selected_evidence["payload_json"])
+        from src.services.recognition_acceptance_service import payload_for_evidence
+        payload = payload_for_evidence(selected_evidence)
     else:
         return None, "evidence_lineage_missing"
     facility_config, template, effective_template_id, template_error = _resolve_effective_sheet_template(

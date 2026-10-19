@@ -182,6 +182,9 @@ def get_review(order_id, *, document_id=None, ocr_result_id=None):
                 if job.metrics["rerun_terminal_receipt"].get("evidence_run_id") is not None:
                     receipt["recognition_evidence_run_id"] = job.metrics["rerun_terminal_receipt"]["evidence_run_id"]
             detail = (job.metrics or {}).get("error_detail") or job.error_message
+            evidence_id = receipt.get("recognition_evidence_run_id")
+            evidence = session.get(workflow.OrderOcrEvidenceRun, evidence_id) if evidence_id else None
+            review_cells = deepcopy((evidence.payload_json or {}).get("hakodate_recognition_review", {}).get("cells", [])) if evidence else []
         except ValueError as exc:
             return None, str(exc)
     try:
@@ -199,7 +202,8 @@ def get_review(order_id, *, document_id=None, ocr_result_id=None):
             if not ok:
                 raise ValueError("recognition_cell_image_invalid")
             cells.append({"cell": region["sheet_cell"], "image_png_base64": base64.b64encode(encoded).decode("ascii")})
-        return {"order_id": order_id, "source_receipt": receipt, "error_detail": detail, "cells": cells}, None
+        return {"order_id": order_id, "source_receipt": receipt, "error_detail": detail,
+                "cells": cells, "review_cells": review_cells}, None
     except ValueError as exc:
         return None, str(exc)
 
@@ -247,5 +251,65 @@ def save_review(order_id, *, source_receipt, values, edited_by):
         state.primary_action = "run_ocr"
         state.blockers_json = []
         state.last_transition_at = workflow._now()
+        error = workflow._finalize_workflow_mutation(session, state)
+        return workflow._serialize_workflow(state, ocr_job=job), error
+
+
+@workflow.workflow_command
+def accept_review(order_id, *, source_receipt, values, edited_by):
+    """Adopt explicit interpretations without rewriting or rerunning recognition."""
+    from src.services import recognition_acceptance_service as acceptance
+    if not isinstance(edited_by, str) or not edited_by.strip():
+        return None, "recognition_operator_identity_required"
+    with workflow.session_scope() as session:
+        order, error = workflow._get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        state = workflow._get_workflow(session, order_id)
+        if state is None:
+            return None, "workflow_not_initialized"
+        try:
+            error = workflow._validate_axis_receipt(session, order, state, source_receipt)
+            if error:
+                return None, error
+            identity = source_receipt.get("recognition_evidence_run_id")
+            if not identity:
+                raise ValueError("recognition_review_result_changed")
+            job, checkpoint = _failed_checkpoint(session, order, state, identity)
+            if (source_receipt.get("recognition_job_id") != job.id
+                    or source_receipt.get("recognition_checkpoint_digest") != workflow._stable_json_hash(checkpoint)):
+                raise ValueError("recognition_checkpoint_changed")
+            if (_is_native(job) and source_receipt.get("native_recognition_owner") != _native_owner(session, order, job)
+                    or not _is_native(job) and "native_recognition_owner" in source_receipt):
+                raise ValueError("recognition_native_owner_changed")
+            if state.draft_id and state.evidence_run_id != identity:
+                raise ValueError("recognition_acceptance_saved_draft_conflict")
+            row = session.get(workflow.OrderOcrEvidenceRun, identity)
+            if acceptance.KEY in (row.artifact_manifest_json or {}):
+                raise ValueError("recognition_acceptance_already_recorded")
+            service = workflow._get_order_service_module()
+            captured = workflow.capture_reparse_read_input(session, order)
+            captured["selected_pdf_receipt"] = source_receipt["selected_pdf_receipt"]
+            snapshot = {"id": row.id, "payload_json": row.payload_json,
+                        "artifact_manifest_json": row.artifact_manifest_json}
+            service._validate_selected_hakodate_artifacts(snapshot, captured, allow_review=True)
+            projected = acceptance.acknowledge(row.payload_json, values=values, edited_by=edited_by,
+                created_at=workflow._now().isoformat(), source_receipt=source_receipt)
+            audit = projected[acceptance.KEY]
+            audit["artifact_digest"] = row.artifact_digest
+            audit["original_hakodate_source"] = service._original_hakodate_execution_source(row.payload_json)
+            meta = workflow._workflow_meta(state)
+            history = meta.get("recognition_acceptances", [])
+            if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+                raise ValueError("recognition_acceptance_history_invalid")
+        except (ValueError, KeyError, TypeError) as exc:
+            return None, str(exc)
+        # Only metadata changes. Original OCR payload, digest, files and job stay exact.
+        row.artifact_manifest_json = {**(row.artifact_manifest_json or {}), acceptance.KEY: audit}
+        if not workflow.ocr_evidence_service.evidence_run_is_selectable(row):
+            session.rollback()
+            return None, "recognition_acceptance_other_blockers"
+        meta["recognition_acceptances"] = history + [deepcopy(audit)]
+        workflow._write_workflow_meta(state, meta)
         error = workflow._finalize_workflow_mutation(session, state)
         return workflow._serialize_workflow(state, ocr_job=job), error

@@ -157,6 +157,7 @@ jobs:
             tests/unit/test_recognition_review_result_ownership.py \
             tests/unit/test_recognition_checkpoint_geometry_invalidation.py \
             tests/unit/test_recognition_recovery_warning_lifecycle.py \
+            tests/unit/test_recognition_review_acceptance.py \
             tests/unit/test_recovery_invalidation_checkpoint_roundtrip.py \
             tests/unit/test_hakodate_ocr_checkpoint_service.py \
             tests/unit/test_hakodate_checkpoint_resume_runtime.py \
