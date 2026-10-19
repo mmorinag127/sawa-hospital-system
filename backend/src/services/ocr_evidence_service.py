@@ -756,7 +756,7 @@ class SelectedEvidenceRejected(ValueError):
 
 def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
     try:
-        payload = recognition_acceptance.payload_for_evidence(row)
+        payload = recognition_acceptance.payload_for_evidence(row, copy_payload=False)
         accepted = recognition_acceptance.accepted_values(payload)
     except (ValueError, KeyError, TypeError) as exc:
         return str(exc) or "evidence_unusable"

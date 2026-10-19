@@ -410,7 +410,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       diagnostics.begin('verify-review-controls');
       const card = page.locator('.ocr-card').filter({hasText: identity.evidenceId});
       await expect(card.getByRole('alert')).toContainText(`要確認: ${identity.review.count}セル`);
-      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();
+      await expect(card.getByRole('button', {name: '確認して正解にする', exact: true})).toBeEnabled();
       await expect(card.getByRole('button', {name: 'セル画像を確認・訂正', exact: true})).toBeVisible();
       result.review = {count: identity.review.count, selectionBlocked: true};
     }
