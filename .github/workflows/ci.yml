@@ -100,6 +100,7 @@ jobs:
             tests/contract/test_prod_portal_db_bootstrap_gate.py \
             tests/unit/test_portal_access_bootstrap_service.py \
             tests/integration/test_portal_admin_write_authority.py \
+            tests/integration/test_delivery_admission_hardening.py \
             tests/unit/test_portal_sqlite_constraint_contract.py \
             tests/unit/test_portal_prod_db_bootstrap_script.py \
             tests/unit/test_independent_ocr_ui_workflow.py \

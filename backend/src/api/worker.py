@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 import os
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
 from src.services import workflow_ocr_delivery_service as delivery
@@ -30,6 +29,8 @@ def drain_ingest_deliveries(limit: int, authorization: str | None = Header(defau
     from src.services.ingest_delivery_auth_service import require_identity
     from src.services.ingest_delivery_dispatch_service import drain
     require_identity(authorization, drain=True)
+    if limit <= 0:
+        raise HTTPException(status_code=422, detail="ingest_delivery_drain_limit_required")
     result = drain(limit)
     from src.services.ingest_delivery_successor_service import drain as drain_successors
     result["auto_llm"] = drain_successors(limit)
@@ -56,13 +57,8 @@ def _required_worker_identity(request, authorization, *, drain=False):
     config = {key: str(os.getenv(prefix + key) or "").strip() for key in ("EMAIL", "SUBJECT", "AUDIENCE")}
     if not all(config.values()) or not config["EMAIL"].endswith(".iam.gserviceaccount.com"):
         raise HTTPException(status_code=503, detail="workflow_ocr_delivery_auth_config_missing")
-    if not authorization or not authorization.startswith("Bearer ") or not authorization[7:].strip():
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        payload = id_token.verify_oauth2_token(
-            authorization[7:].strip(), google_requests.Request(), config["AUDIENCE"])
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="Unauthorized") from exc
+    from src.services.ingest_delivery_auth_service import verified_delivery_claims
+    payload = verified_delivery_claims(authorization, config["AUDIENCE"])
     if (payload.get("email") != config["EMAIL"] or payload.get("sub") != config["SUBJECT"]
             or payload.get("email_verified") is not True or payload.get("aud") != config["AUDIENCE"]):
         raise HTTPException(status_code=403, detail="Forbidden")

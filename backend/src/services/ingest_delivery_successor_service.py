@@ -249,10 +249,13 @@ def accept(session, job, execution_input, evidence, receipt, order):
         "request": request, "predecessor_receipt": deepcopy(receipt)}
     from src.services.order_service import _read_reparse_output_recovery_grace_seconds
     original["recovery_delay_seconds"] = _read_reparse_output_recovery_grace_seconds()
-    session.add(OcrJob(id=boundary["job_id"], order_id=boundary.get("job_order_id"), status="pending",
+    child = OcrJob(id=boundary["job_id"], order_id=boundary.get("job_order_id"), status="pending",
         input_reference=boundary["input_reference"], template_id=job.template_id,
         template_version_id=job.template_version_id, metrics={"nonworkflow_execution": boundary,
-            "ingest_successor_id": identity, "request_mode": "llm_reparse"}))
+            "ingest_successor_id": identity, "request_mode": "llm_reparse"})
+    session.add(child)
+    # These mappers have no ORM relationship to order their FK inserts.
+    session.flush([child])
     session.add(IngestDeliverySuccessor(id=identity, predecessor_job_id=job.id,
         parent_delivery_id=delivery.id, job_id=boundary["job_id"], original=original,
         generation=1, state="PENDING", task_contract=contract, visit_count=0, started=False))
