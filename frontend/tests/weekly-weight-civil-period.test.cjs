@@ -246,7 +246,8 @@ for (const nextQuery of [{ date: '2026-07-08' }, { date: '2026-02-30' }]) {
       if (nextQuery.date === '2026-07-08') {
         assert.deepEqual(calls(t).slice(prior).map(call => call.config.params.date), dates('2026-W28'));
         await h.click(h.button('Excel出力'));
-        assert.equal(t.calls.find(call => call.url === '/outputs/weekly-weight').config.params.date, '2026-07-05');
+        assert.equal(t.calls.find(call => call.url === '/outputs/weekly-weight').config.params.start, '2026-07-05');
+        assert.equal(t.calls.find(call => call.url === '/outputs/weekly-weight').config.params.end, '2026-07-11');
       } else {
         assert.equal(calls(t).length, prior);
         await h.click(h.button('Excel出力'));

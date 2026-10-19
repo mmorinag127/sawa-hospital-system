@@ -1,5 +1,5 @@
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { Button, MenuItem, Stack } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
@@ -110,11 +110,7 @@ function WeeklyWeightOutputScreen() {
   const messageGeneration = useRef(0);
   const mounted = useRef(false);
 
-  useEffect(() => {
-    mounted.current = true;
-    let observedConditions = { ...conditionForm.getValues() };
-    let observedSession = browserSessionKey();
-    const retire = () => {
+  const retireOperations = useCallback(() => {
       inputGeneration.current += 1;
       loadGeneration.current += 1;
       downloadGeneration.current += 1;
@@ -122,7 +118,13 @@ function WeeklyWeightOutputScreen() {
       setLoading(false);
       setDownloading(false);
       setMessage("");
-    };
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    let observedConditions = { ...conditionForm.getValues() };
+    let observedSession = browserSessionKey();
+    const retire = retireOperations;
     const subscription = conditionForm.watch(() => {
       const values = conditionForm.getValues();
       if (values.week !== observedConditions.week && values.savedWeek
@@ -152,7 +154,7 @@ function WeeklyWeightOutputScreen() {
       stopSession();
       router.events.off("routeChangeStart", retire);
     };
-  }, [conditionForm, router.events]);
+  }, [conditionForm, router.events, retireOperations]);
 
   const beginOperation = (kind: "list" | "output", conditions: WeeklyWeightConditions) => {
     const captured = { ...conditions };
@@ -181,6 +183,7 @@ function WeeklyWeightOutputScreen() {
   };
 
   useEffect(() => {
+    retireOperations();
     if (!router.isReady) return;
     const queryDate = queryValue(router.query.date);
     const queryWeek = queryValue(router.query.week);
@@ -201,7 +204,7 @@ function WeeklyWeightOutputScreen() {
     const selection = queryWeek || (queryDate ? "" : initialWeek);
     conditionForm.reset({ week: nextWeek, savedWeek: selection.includes("@") ? selection : "", status: nextStatus });
     setResolvedQuery(queryIdentity);
-  }, [router.isReady, queryIdentity]);
+  }, [router.isReady, queryIdentity, retireOperations]);
 
   const weekDates = useMemo(() => {
     const period = weeklyWeightPeriod(week);
