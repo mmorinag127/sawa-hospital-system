@@ -764,6 +764,7 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
         return "evidence_unusable"
     if isinstance(payload.get("hakodate_canonical_pipeline"), dict):
         from src.services import order_service
+        from src.services.workflow_attempt_guard_service import snapshots_equal
         source = payload.get("hakodate_repair_source_receipt")
         if not isinstance(source, dict):
             return "evidence_unusable"
@@ -776,7 +777,8 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
                     return "recognition_acceptance_changed"
             if not isinstance(original_source, dict):
                 return "evidence_unusable"
-            order_service._validate_hakodate_owned_artifacts(payload, original_source)
+            if not snapshots_equal(source, original_source):
+                raise ValueError("hakodate_artifact_source_mismatch")
             assignment = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
                 evidence_records=_extract_hakodate_evidence_records(payload),
                 target_cells=_extract_hakodate_target_cells(payload),
