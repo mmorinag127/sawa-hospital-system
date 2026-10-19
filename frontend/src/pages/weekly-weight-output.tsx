@@ -8,44 +8,9 @@ import { FormProvider, useForm } from "react-hook-form";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
-
-const isoDate = (date: Date) => date.toISOString().slice(0, 10);
-
-const mondayForDate = (dateText: string) => {
-  const parsed = new Date(`${dateText}T00:00:00`);
-  if (Number.isNaN(parsed.getTime())) return "";
-  const day = parsed.getDay();
-  const monday = new Date(parsed);
-  monday.setDate(parsed.getDate() + (day === 0 ? -6 : 1 - day));
-  return isoDate(monday);
-};
-
-const dateToWeekValue = (dateText: string) => {
-  const mondayText = mondayForDate(dateText);
-  if (!mondayText) return "";
-  const monday = new Date(`${mondayText}T00:00:00`);
-  const thursday = new Date(monday);
-  thursday.setDate(monday.getDate() + 3);
-  const yearStart = new Date(thursday.getFullYear(), 0, 1);
-  const weekNumber = Math.ceil(((thursday.getTime() - yearStart.getTime()) / 86400000 + yearStart.getDay() + 1) / 7);
-  return `${thursday.getFullYear()}-W${String(weekNumber).padStart(2, "0")}`;
-};
-
-const weekValueToMonday = (weekValue: string) => {
-  const match = weekValue.match(/^(\d{4})-W(\d{2})$/);
-  if (!match) return "";
-  const year = Number(match[1]);
-  const week = Number(match[2]);
-  const janFourth = new Date(year, 0, 4);
-  const janFourthDay = janFourth.getDay() || 7;
-  const firstMonday = new Date(janFourth);
-  firstMonday.setDate(janFourth.getDate() - janFourthDay + 1);
-  const monday = new Date(firstMonday);
-  monday.setDate(firstMonday.getDate() + (week - 1) * 7);
-  return isoDate(monday);
-};
-
-const todayWeek = () => dateToWeekValue(isoDate(new Date()));
+import { businessPeriodForDate, currentBusinessWeek, storedWeeklyWeightPeriod,
+  weekInputForPeriod, weeklyWeightConditionsPeriod, weeklyWeightDates,
+  weeklyWeightPeriod } from "../services/weeklyWeightPeriod";
 
 const queryValue = (value: string | string[] | undefined) => {
   if (Array.isArray(value)) return value[0] || "";
@@ -95,6 +60,7 @@ type WeekHistoryItem = {
 
 type WeeklyWeightConditions = {
   week: string;
+  savedWeek: string;
   status: string;
 };
 
@@ -113,20 +79,20 @@ const formatTimestamp = (value?: string | null) => {
 
 const weekHistoryFromOrder = (order: OrderSummary) => {
   const weekValue = String(order.week_value || order.week || "").trim();
-  const explicitRange = weekValue.match(/^(\d{4}-\d{2})@(\d{4}-\d{2}-\d{2})~(\d{4}-\d{2}-\d{2})$/);
-  if (!explicitRange) return null;
+  const period = storedWeeklyWeightPeriod(weekValue);
+  if (!period) return null;
   return {
-    week: dateToWeekValue(explicitRange[2]),
-    label: order.week_label || `${explicitRange[2].slice(5).replace("-", "/")} - ${explicitRange[3].slice(5).replace("-", "/")}`,
+    week: weekValue,
+    label: `${period.start} - ${period.end}`,
     receivedAt: order.received_at || "",
   };
 };
 
 function WeeklyWeightOutputScreen() {
   const router = useRouter();
-  const [week, setWeek] = useState(todayWeek());
+  const [week, setWeek] = useState(currentBusinessWeek());
   const [status, setStatus] = useState("");
-  const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: todayWeek(), status: "" } });
+  const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: currentBusinessWeek(), savedWeek: "", status: "" } });
   const [message, setMessage] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [orders, setOrders] = useState<OrderSummary[]>([]);
@@ -153,7 +119,13 @@ function WeeklyWeightOutputScreen() {
     };
     const subscription = conditionForm.watch(() => {
       const values = conditionForm.getValues();
-      if (values.week === observedConditions.week && values.status === observedConditions.status) return;
+      if (values.week !== observedConditions.week && values.savedWeek
+          && values.savedWeek === observedConditions.savedWeek) {
+        conditionForm.setValue("savedWeek", "");
+        return;
+      }
+      if (values.week === observedConditions.week && values.savedWeek === observedConditions.savedWeek
+          && values.status === observedConditions.status) return;
       observedConditions = { ...values };
       retire();
     });
@@ -184,7 +156,8 @@ function WeeklyWeightOutputScreen() {
     const current = () => {
       const values = conditionForm.getValues();
       return mounted.current && input === inputGeneration.current && operation === operations.current
-        && session === browserSessionKey() && captured.week === values.week && captured.status === values.status;
+        && session === browserSessionKey() && captured.week === values.week
+        && captured.savedWeek === values.savedWeek && captured.status === values.status;
     };
     if (current()) {
       setMessage("");
@@ -199,27 +172,26 @@ function WeeklyWeightOutputScreen() {
     const queryDate = queryValue(router.query.date);
     const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
-    const nextWeek = queryWeek || (queryDate ? dateToWeekValue(queryDate) : "") || week;
+    const period = queryWeek ? weeklyWeightPeriod(queryWeek) : queryDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(week);
+    if (!period || (queryDate && (!businessPeriodForDate(queryDate) || queryDate < period.start || queryDate > period.end))) {
+      conditionForm.reset({ week: "", savedWeek: "", status: queryStatus });
+      setMessage("対象期間を確認してください。");
+      return;
+    }
+    const nextWeek = weekInputForPeriod(period);
     const nextStatus = queryStatus || "";
-    conditionForm.reset({ week: nextWeek, status: nextStatus });
+    const selection = queryWeek || (queryDate ? "" : week);
+    conditionForm.reset({ week: nextWeek, savedWeek: selection.includes("@") ? selection : "", status: nextStatus });
   }, [router.isReady, router.query.date, router.query.status, router.query.week]);
 
-  const date = useMemo(() => weekValueToMonday(week), [week]);
-
   const weekDates = useMemo(() => {
-    if (!date) return [];
-    const monday = new Date(`${date}T00:00:00`);
-    if (Number.isNaN(monday.getTime())) return [];
-    return Array.from({ length: 7 }, (_, index) => {
-      const item = new Date(monday);
-      item.setDate(monday.getDate() + index);
-      return isoDate(item);
-    });
-  }, [date]);
+    const period = weeklyWeightPeriod(week);
+    return period ? weeklyWeightDates(period) : [];
+  }, [week]);
 
   const weekLabel = useMemo(() => {
     if (weekDates.length === 0) return "";
-    return `${weekDates[0]} から ${weekDates[6]}`;
+    return `${weekDates[0]} から ${weekDates.at(-1)}`;
   }, [weekDates]);
 
   const weekHistoryQuery = useQuery({
@@ -243,9 +215,7 @@ function WeeklyWeightOutputScreen() {
         });
       });
       return Array.from(grouped.values()).sort((left, right) => {
-          const leftMonday = weekValueToMonday(left.week);
-          const rightMonday = weekValueToMonday(right.week);
-          return rightMonday.localeCompare(leftMonday);
+          return right.week.localeCompare(left.week);
       });
     },
   });
@@ -257,13 +227,12 @@ function WeeklyWeightOutputScreen() {
   const loadWeeklyOrders = async (conditions: WeeklyWeightConditions) => {
     const owner = beginOperation("list", conditions);
     if (!owner.current()) return;
-    const targetDate = weekValueToMonday(conditions.week);
-    if (!targetDate) throw new Error("週を指定してください。");
-    const targetDates = Array.from({ length: 7 }, (_, index) => {
-      const item = new Date(`${targetDate}T00:00:00`);
-      item.setDate(item.getDate() + index);
-      return isoDate(item);
-    });
+    const period = weeklyWeightConditionsPeriod(conditions);
+    if (!period) {
+      if (owner.ownsMessage()) setMessage("対象期間を確認してください。");
+      return;
+    }
+    const targetDates = weeklyWeightDates(period);
     setLoading(true);
     try {
       const responses = await Promise.all(
@@ -280,7 +249,7 @@ function WeeklyWeightOutputScreen() {
         });
       });
       if (!owner.current()) return;
-      setWeek(conditions.week);
+      setWeek(conditions.savedWeek || conditions.week);
       setStatus(conditions.status);
       setOrders(Array.from(byId.values()));
     } catch (error) {
@@ -301,22 +270,22 @@ function WeeklyWeightOutputScreen() {
   const downloadWeeklyWeight = async (conditions: WeeklyWeightConditions) => {
     const owner = beginOperation("output", conditions);
     if (!owner.current()) return;
-    const targetDate = weekValueToMonday(conditions.week);
-    if (!targetDate) {
-      setMessage("週を指定してください。");
+    const period = weeklyWeightConditionsPeriod(conditions);
+    if (!period) {
+      setMessage("対象期間を確認してください。");
       return;
     }
     setDownloading(true);
     setMessage("週別重量表Excelを作成中です。");
     try {
       const res = await apiClient.get("/outputs/weekly-weight", {
-        params: { date: targetDate, status: conditions.status || undefined },
+        params: { start: period.start, end: period.end, status: conditions.status || undefined },
         responseType: "blob",
         timeout: 0,
       });
       if (!owner.current()) return;
       const contentDisposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
-      const filename = extractFilename(contentDisposition) || `weekly_weight_${targetDate}.xlsx`;
+      const filename = extractFilename(contentDisposition) || `weekly_weight_${period.start}_${period.end}.xlsx`;
       const blob = res.data instanceof Blob ? res.data : new Blob([res.data]);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -387,7 +356,10 @@ function WeeklyWeightOutputScreen() {
                 className={`week-chip${item.week === week ? " active" : ""} delivery-ordinary-control`}
                 key={item.week}
                 type="button"
-                onClick={() => conditionForm.setValue("week", item.week, { shouldDirty: true })}
+                onClick={() => {
+                  const period = storedWeeklyWeightPeriod(item.week);
+                  if (period) conditionForm.reset({ week: weekInputForPeriod(period), savedWeek: item.week, status: conditionForm.getValues("status") });
+                }}
               >
                 <span>{item.label}</span>
                 <small>{item.orderCount}件</small>

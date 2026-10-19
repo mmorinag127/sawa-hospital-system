@@ -19,6 +19,7 @@ from src.services.output_builder import (
     build_label_csv_for_order,
     build_label_workbook_for_order,
     build_weekly_weight_summary_workbook,
+    weekly_weight_period,
 )
 from src.services import order_form_service, order_service
 from src.api.auth import require_role
@@ -990,10 +991,25 @@ def download_daily_bundle(
 
 
 @router.get("/weekly-weight", dependencies=[Depends(require_role("operator"))])
-def download_weekly_weight(date: str, status: str | None = None):
-    target_date = _parse_iso_date(date)
+def download_weekly_weight(
+    date: str | None = None, status: str | None = None,
+    start: str | None = None, end: str | None = None,
+):
+    def date_only(value: str | None) -> dt_date | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise HTTPException(status_code=400, detail="weekly_weight_date_invalid")
+        return _parse_iso_date(value)
+
+    target_date, start_date, end_date = date_only(date), date_only(start), date_only(end)
     try:
-        weight_path = build_weekly_weight_summary_workbook(target_date, status=status)
+        weekly_weight_period(target_date, start=start_date, end=end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    try:
+        weight_path = (build_weekly_weight_summary_workbook(target_date, status=status, start=start_date, end=end_date)
+                       if start_date is not None else build_weekly_weight_summary_workbook(target_date, status=status))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"weekly weight build failed: {exc}") from exc
     return FileResponse(
