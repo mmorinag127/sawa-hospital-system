@@ -1,0 +1,78 @@
+name: Diagnose reviewed OCR (read-only, non-deploy)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose:
+    if: >-
+      github.repository == 'mmorinag127/sawa-hospital-system' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch'
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      DIAGNOSTIC_ENVIRONMENT: staging
+      PRODUCT_SHA: e5282354017b43d17f0d4dbd58e73972f37a716f
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: diagnostic
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: e5282354017b43d17f0d4dbd58e73972f37a716f
+          path: product
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Install unchanged product-locked runtime and isolated GUI comparison
+        run: |
+          set -euo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          uv sync --project product/backend --extra dev --frozen --python 3.11
+          uv pip install --python product/backend/.venv/bin/python --no-deps --index-url https://pypi.org/simple --target "$RUNNER_TEMP/reviewed-opencv-gui" opencv-python==5.0.0.93
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: sawahospitalsystem
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Download existing pinned Cloud SQL proxy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/reviewed-cloud-sql-proxy" 'https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.24.1/cloud-sql-proxy.linux.amd64'
+          printf '%s  %s\n' 'fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb' "$RUNNER_TEMP/reviewed-cloud-sql-proxy" | sha256sum -c -
+          chmod 700 "$RUNNER_TEMP/reviewed-cloud-sql-proxy"
+      - name: Capture one read-only snapshot and run disconnected profiles
+        run: |
+          set -euo pipefail
+          product/backend/.venv/bin/python -B diagnostic/scripts/diagnose_reviewed_ocr.py \
+            --product "$GITHUB_WORKSPACE/product" --proxy "$RUNNER_TEMP/reviewed-cloud-sql-proxy" \
+            --summary "$RUNNER_TEMP/reviewed-ocr-summary"
+      - name: Remove private inputs even after failure
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -x product/backend/.venv/bin/python ]; then
+            product/backend/.venv/bin/python -B diagnostic/scripts/diagnose_reviewed_ocr.py \
+              --product "$GITHUB_WORKSPACE/product" --cleanup --summary "$RUNNER_TEMP/reviewed-ocr-summary"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reviewed-ocr-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reviewed-ocr-summary/*.json
+          if-no-files-found: warn
+          retention-days: 7
