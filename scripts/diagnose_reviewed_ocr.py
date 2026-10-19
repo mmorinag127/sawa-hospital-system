@@ -1,6 +1,7 @@
 """One fixed staging evidence replay; read-only capture, then disconnected validation."""
 import argparse
 from collections import Counter
+from copy import deepcopy
 from contextlib import ExitStack
 from datetime import datetime
 from functools import wraps
@@ -82,6 +83,47 @@ def context(product):
     require(all(re.fullmatch(r"[1-9][0-9]*", env.get(key, "")) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
         "diagnostic_run_identity_invalid")
     return diagnostic_sha
+
+
+def candidate_context(product, candidate):
+    require(candidate is not None and candidate.resolve() != product.resolve(), "diagnostic_candidate_required")
+    require(command(["git", "-C", str(candidate), "rev-parse", "HEAD"]).decode().strip() == os.environ["GITHUB_SHA"],
+        "diagnostic_candidate_source_changed")
+    require(not command(["git", "-C", str(candidate), "status", "--porcelain", "--untracked-files=no"]),
+        "diagnostic_candidate_dirty")
+    for name in ("uv.lock", "pyproject.toml"):
+        require((product / "backend" / name).read_bytes() == (candidate / "backend" / name).read_bytes(),
+            "diagnostic_candidate_runtime_changed")
+
+
+def result_bytes(value):
+    # Typed encoding compares complete values privately, including every byte,
+    # without publishing raw evidence or conflating bytes with business strings.
+    def encode(item):
+        if isinstance(item, bytes):
+            return ["bytes", item.hex()]
+        if isinstance(item, dict):
+            require(all(isinstance(key, str) for key in item), "diagnostic_result_type_invalid")
+            return ["dict", [[key, encode(item[key])] for key in sorted(item)]]
+        if isinstance(item, list):
+            return ["list", [encode(entry) for entry in item]]
+        require(item is None or type(item) in (str, int, float, bool), "diagnostic_result_type_invalid")
+        return [type(item).__name__, item]
+    return json.dumps(encode(value), ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+
+
+def compare_results(private, summary):
+    comparisons = []
+    for build in ("headless", "gui"):
+        baseline = private / ("baseline-" + build + "-results.json")
+        candidate = private / ("candidate-" + build + "-results.json")
+        require(baseline.is_file() and candidate.is_file(), "diagnostic_comparison_missing")
+        left, right = baseline.read_bytes(), candidate.read_bytes()
+        comparisons.append({"build": build, "full_results_equal": left == right,
+            "baseline_sha256": sha(left), "candidate_sha256": sha(right)})
+    write_json(summary / "comparison.json", {"comparisons": comparisons,
+        "scope": "full phase values and exception identities on identical captured inputs; not HTTP latency"})
+    return all(item["full_results_equal"] for item in comparisons)
 
 
 def owned_path():
@@ -285,7 +327,7 @@ def fixture_bytes(private, assets, uri, options):
     return data
 
 
-def offline(product, private, output, build):
+def offline(product, private, output, build, *, variant="baseline", runtime=None):
     block_external()
     sys.path.insert(0, str(product / "backend"))
     from src.services import canonical_ocr_artifact_service as artifacts, storage_service as storage
@@ -301,10 +343,11 @@ def offline(product, private, output, build):
     require(versions == {"Pillow": "12.3.0", "numpy": "2.4.2"} and cv2.__version__ == "5.0.0"
         and importlib.metadata.version(distribution) == "5.0.0.93",
         "diagnostic_runtime_changed")
-    module_root = product / "backend/.venv" if build == "headless" else Path(os.environ["RUNNER_TEMP"]) / "reviewed-opencv-gui"
+    module_root = (runtime or product / "backend/.venv") if build == "headless" else Path(os.environ["RUNNER_TEMP"]) / "reviewed-opencv-gui"
     require(Path(cv2.__file__).resolve().is_relative_to(module_root.resolve()), "diagnostic_runtime_changed")
     require(json.loads((private / "owner.json").read_bytes()) == marker(), "diagnostic_owner_changed")
-    before = {path.name: sha(path.read_bytes()) for path in private.iterdir() if path.is_file()}
+    before = {path.name: sha(path.read_bytes()) for path in private.iterdir()
+        if path.is_file() and not path.name.endswith("-results.json")}
     bundle = json.loads((private / "bundle.json").read_bytes())
     require(sha((private / "payload.json").read_bytes()) == PAYLOAD_SHA
         and sha((private / "manifest.json").read_bytes()) == MANIFEST_SHA, "diagnostic_input_hash_changed")
@@ -313,11 +356,23 @@ def offline(product, private, output, build):
     row = SimpleNamespace(**row_data, payload_json=json.loads((private / "payload.json").read_bytes()),
         artifact_manifest_json=json.loads((private / "manifest.json").read_bytes()))
     assets = bundle["assets"]
+    original_row = deepcopy(row)
+    original_assets = deepcopy(assets)
+    changed_uri = None
+    changed_reads = 0
+    change_kind = None
     events, failures = [], []
 
     def load(uri, **kwargs):
+        nonlocal changed_reads
         wall, cpu = time.perf_counter(), time.process_time()
         data = fixture_bytes(private, assets, uri, kwargs)
+        if uri == changed_uri:
+            changed_reads += 1
+            if change_kind == "unavailable" or (change_kind == "in_flight_delete" and changed_reads > 1):
+                raise FileNotFoundError("synthetic deleted artifact")
+            if change_kind == "bytes_changed":
+                data += b"synthetic mutation"
         events.append({"name": "fixture_read", "bytes": len(data), "uri_hash": sha(uri.encode()),
             "wall": time.perf_counter() - wall, "cpu": time.process_time() - cpu})
         return data
@@ -338,7 +393,7 @@ def offline(product, private, output, build):
                 def reload(self, **kwargs):
                     require(kwargs == {"timeout": 30, "retry": None}, "diagnostic_metadata_options_changed")
                     load(uri, verification=True)
-                    require(entry.get("latest_generation") == entry["generation"], "diagnostic_generation_changed")
+                    require(entry.get("latest_generation") is not None, "diagnostic_unknown_uri")
                     self.generation = entry["latest_generation"]
             return Blob()
 
@@ -366,54 +421,95 @@ def offline(product, private, output, build):
         (observation, "validate_artifact"), (checkpoint, "load_recognizer_checkpoint"),
         (contact, "build_recognizer_contact_sheet"), (pixels, "contact_crop_evidence")]
     results = []
+    full_results = []
     with ExitStack() as stack:
         stack.enter_context(patch.object(storage, "load_bytes_from_uri", side_effect=load))
         stack.enter_context(patch.object(storage, "_get_thread_gcs_client", return_value=client))
         for module, name in watched:
             stack.enter_context(patch.object(module, name, spy(name, getattr(module, name))))
-        execution = row.payload_json["_ocr_execution"]
+        execution = original_row.payload_json["_ocr_execution"]
         captured = {**execution["processing_start_input"], "selected_pdf_receipt": execution["selected_pdf_receipt"]}
-        for phase, action in (
+        phases = (
             ("canonical_payload", lambda: artifacts.validate_payload(row.payload_json)),
             ("selection_blocker", lambda: workflow._evidence_selection_blocker(row)),
             ("selected_validation", lambda: orders._validate_selected_hakodate_artifacts(vars(row), captured)),
             ("serialize_evidence", lambda: evidence._serialize_evidence_run(row, include_payload=True)),
-        ):
-            events.clear()
-            failures.clear()
-            wall, cpu = time.perf_counter(), time.process_time()
-            try:
-                value = action()
-                outcome = value if isinstance(value, str) or value is None else type(value).__name__
-            except Exception as exc:
-                outcome = safe_error(exc)
-            counts = Counter(event["name"] for event in events)
-            loads = [event for event in events if event["name"] == "fixture_read"]
-            results.append({"phase": phase, "outcome": outcome, "wall": time.perf_counter() - wall,
-                "cpu": time.process_time() - cpu, "calls": dict(counts),
-                "bytes": sum(event["bytes"] for event in loads),
-                "unique_uris": len({event["uri_hash"] for event in loads}),
-                "errors_in_order": list(failures),
-                "returned_selectable": value.get("selectable") if outcome == "dict" and phase == "serialize_evidence" else None,
-                "inclusive_times": {name: {clock: sum(event[clock] for event in events if event["name"] == name)
-                    for clock in ("wall", "cpu")} for name in counts}})
-    require(before == {path.name: sha(path.read_bytes()) for path in private.iterdir() if path.is_file()},
+        )
+        cases = [("original", None, None), ("acceptance_changed", None, None),
+            ("source_changed", None, None), ("wrong_order", None, None), ("wrong_revision", None, None),
+            ("latest_pdf_generation", None, None), ("multiple_invalid", None, None)]
+        for index, uri in enumerate(original_assets):
+            cases.extend((kind + "_" + str(index), uri, kind)
+                for kind in ("unavailable", "bytes_changed", "in_flight_delete"))
+        for case, changed_uri, change_kind in cases:
+            row = deepcopy(original_row)
+            assets = deepcopy(original_assets)
+            if case in ("acceptance_changed", "multiple_invalid"):
+                row.artifact_manifest_json[KEY]["artifact_digest"] = "0" * 64
+            if case in ("source_changed", "multiple_invalid"):
+                row.payload_json["hakodate_repair_source_receipt"]["page"] = -1
+            if case == "wrong_order":
+                row.order_id = "synthetic-foreign-order"
+                row.payload_json["_ocr_execution"]["evidence_run_id"] = "synthetic-foreign-evidence"
+            if case == "wrong_revision":
+                row.payload_json["_ocr_execution"]["workflow_revision"] = -1
+            if case == "latest_pdf_generation":
+                for entry in assets.values():
+                    if "latest_generation" in entry:
+                        entry["latest_generation"] = str(int(entry["generation"]) + 1)
+            for phase, action in phases:
+                if changed_uri is not None and phase not in (
+                    ("selected_validation", "serialize_evidence") if change_kind == "in_flight_delete"
+                    else ("canonical_payload", "selected_validation")
+                ):
+                    continue
+                changed_reads = 0
+                events.clear()
+                failures.clear()
+                wall, cpu = time.perf_counter(), time.process_time()
+                phase_input = deepcopy(vars(row))
+                captured_input = deepcopy(captured)
+                try:
+                    value = action()
+                    outcome = value if isinstance(value, str) or value is None else type(value).__name__
+                    full_results.append({"case": case, "phase": phase, "value": json.loads(result_bytes(value))})
+                except Exception as exc:
+                    outcome = safe_error(exc)
+                    full_results.append({"case": case, "phase": phase,
+                        "exception": [type(exc).__module__, type(exc).__name__, str(exc)]})
+                require(vars(row) == phase_input and captured == captured_input, "diagnostic_input_mutated")
+                full_results[-1]["first_guard_error"] = failures[0] if failures else None
+                full_results[-1]["errors_in_order"] = list(failures)
+                counts = Counter(event["name"] for event in events)
+                loads = [event for event in events if event["name"] == "fixture_read"]
+                results.append({"case": case, "phase": phase, "outcome": outcome, "wall": time.perf_counter() - wall,
+                    "cpu": time.process_time() - cpu, "calls": dict(counts),
+                    "bytes": sum(event["bytes"] for event in loads),
+                    "unique_uris": len({event["uri_hash"] for event in loads}),
+                    "errors_in_order": list(failures),
+                    "returned_selectable": value.get("selectable") if outcome == "dict" and phase == "serialize_evidence" else None,
+                    "inclusive_times": {name: {clock: sum(event[clock] for event in events if event["name"] == name)
+                        for clock in ("wall", "cpu")} for name in counts}})
+    require(before == {path.name: sha(path.read_bytes()) for path in private.iterdir()
+        if path.is_file() and not path.name.endswith("-results.json")},
         "diagnostic_input_mutated")
-    require(row.payload_json == json.loads((private / "payload.json").read_bytes())
-        and row.artifact_manifest_json == json.loads((private / "manifest.json").read_bytes()), "diagnostic_input_mutated")
+    require(original_row.payload_json == json.loads((private / "payload.json").read_bytes())
+        and original_row.artifact_manifest_json == json.loads((private / "manifest.json").read_bytes()), "diagnostic_input_mutated")
     result = {"scope": "offline original execution input; not current DB capture or service latency", "build": build,
-        "product_sha": PRODUCT_SHA, "diagnostic_sha": os.environ["GITHUB_SHA"], "input_hashes": before,
+        "product_sha": PRODUCT_SHA if variant == "baseline" else os.environ["GITHUB_SHA"],
+        "variant": variant, "diagnostic_sha": os.environ["GITHUB_SHA"], "input_hashes": before,
         "script_sha256": sha(Path(__file__).read_bytes()), "lock_sha256": sha((product / "backend/uv.lock").read_bytes()),
         "versions": {**versions, "opencv": cv2.__version__, "python": sys.version.split()[0]},
         "opencv_gui": next((line.strip() for line in cv2.getBuildInformation().splitlines() if "GUI:" in line), "unknown"),
         "inputs_unchanged": True, "results": results}
     write_json(output, result)
+    write_json(private / (variant + "-" + build + "-results.json"), full_results)
     return (results[0]["outcome"] == "dict" and not results[0]["errors_in_order"]
         and results[1]["outcome"] is None and results[2]["outcome"] is None
         and results[3]["returned_selectable"] is True)
 
 
-def run(product, proxy, summary):
+def run(product, proxy, summary, candidate=None):
     private = owned_path()
     private.mkdir(mode=0o700)
     write_json(private / "owner.json", marker())
@@ -428,22 +524,27 @@ def run(product, proxy, summary):
         write_json(private / "header.json", header)
         write_json(private / "bundle.json", {"assets": capture_assets(payload, private)})
         statuses = []
-        for build in ("headless", "gui"):
+        for variant, source, build in (
+            (variant, source, build)
+            for variant, source in (("baseline", product), ("candidate", candidate)) if source is not None
+            for build in ("headless", "gui")
+        ):
             env = {key: os.environ[key] for key in ("PATH", "RUNNER_TEMP", "GITHUB_ACTIONS", "GITHUB_REPOSITORY",
                 "GITHUB_REPOSITORY_OWNER", "GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR", "GITHUB_EVENT_NAME", "GITHUB_REF",
                 "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "DIAGNOSTIC_ENVIRONMENT")}
             env.update(DATABASE_URL="sqlite:///:memory:", PYTHONDONTWRITEBYTECODE="1")
             if build == "gui":
                 env["PYTHONPATH"] = str(Path(os.environ["RUNNER_TEMP"]) / "reviewed-opencv-gui")
-            destination = summary / (build + ".json")
+            destination = summary / (variant + "-" + build + ".json")
+            candidate_args = ["--candidate", str(candidate)] if candidate is not None else []
             result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--product", str(product),
-                "--offline", "--build", build, "--summary", str(summary)], env=env,
+                "--offline", "--build", build, "--variant", variant, "--summary", str(summary), *candidate_args], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
             if result.returncode != 0:
-                require(destination.is_file() or (summary / (build + "-error.json")).is_file(),
+                require(destination.is_file() or (summary / (variant + "-" + build + "-error.json")).is_file(),
                     "diagnostic_offline_process_failed")
             statuses.append(result.returncode == 0)
-        return all(statuses)
+        return all(statuses) and (compare_results(private, summary) if candidate is not None else True)
     finally:
         cleanup(private)
 
@@ -451,6 +552,8 @@ def run(product, proxy, summary):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--product", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--variant", choices=("baseline", "candidate"), default="baseline")
     parser.add_argument("--proxy", type=Path)
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--offline", action="store_true")
@@ -461,19 +564,25 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     try:
         context(args.product)
+        if args.candidate is not None:
+            candidate_context(args.product, args.candidate)
         args.summary.mkdir(mode=0o700, parents=True, exist_ok=True)
         if args.cleanup:
             cleanup(owned_path())
         elif args.offline:
-            return 0 if offline(args.product, owned_path(), args.summary / (args.build + ".json"), args.build) else 1
+            require(args.variant == "baseline" or args.candidate is not None, "diagnostic_candidate_required")
+            source = args.product if args.variant == "baseline" else args.candidate
+            return 0 if offline(source, owned_path(), args.summary / (args.variant + "-" + args.build + ".json"),
+                args.build, variant=args.variant, runtime=args.product / "backend/.venv") else 1
         else:
             require(args.proxy is not None, "diagnostic_proxy_required")
-            return 0 if run(args.product, args.proxy, args.summary) else 1
+            require(args.candidate is not None, "diagnostic_candidate_required")
+            return 0 if run(args.product, args.proxy, args.summary, args.candidate) else 1
         return 0
     except Exception as exc:
         # Never publish exception text, raw DB rows, credentials or subprocess output.
         args.summary.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_json(args.summary / ((args.build if args.offline else "capture") + "-error.json"),
+        write_json(args.summary / ((args.variant + "-" + args.build if args.offline else "capture") + "-error.json"),
             {"status": "blocked", "error": safe_error(exc), "product_sha": PRODUCT_SHA})
         return 1
 

@@ -43,6 +43,20 @@ from src.services.menu_name_normalization import _MENU_TRANSLATION, _normalize_m
 from src.services.storage_service import load_bytes_from_uri
 
 
+def parse_menu_date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except Exception:
+        return None
+
+
 MEAL_SLOT_TERMS = {
     "朝",
     "昼",
@@ -790,17 +804,9 @@ def _apply_rule_payloads_to_items(items: list[dict], rules: list[dict]) -> list[
     return enriched
 
 
-def _monthly_item_patch_from_source(meta: dict, master: MenuMaster | None) -> dict:
-    patch = _extract_master_patch(meta, _MASTER_FIELDS)
-    if master is not None:
-        # Rule-generated suggestions are not changes supplied by the operator.
-        inherited_fields = set(meta.get("_inferred_master_fields", []))
-        for field in inherited_fields:
-            patch.pop(field, None)
-            value = getattr(master, field, None)
-            if not _is_blank_value(value):
-                patch[field] = value
-    return patch
+def _monthly_item_patch_from_source(meta: dict) -> dict:
+    inferred = set(meta.get("_inferred_master_fields", []))
+    return {field: value for field, value in _extract_master_patch(meta, _MASTER_FIELDS).items() if field not in inferred}
 
 
 def _parse_monthly_menu(
@@ -2626,7 +2632,7 @@ def create_menu(
             if plan is None:
                 raise ValueError(f"menu master resolution plan not found: {name}")
             master = _materialize_upload_menu_master_plan(session, name, plan)
-            item_patch = _monthly_item_patch_from_source(meta, master)
+            item_patch = _monthly_item_patch_from_source(meta)
             session.add(
                 MonthlyMenuItem(
                     id=item_id,

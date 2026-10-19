@@ -8,7 +8,8 @@ from src.api.auth import require_role, GOOGLE_OAUTH_CLIENT_IDS
 from src.services.ingest_job_service import summarize_ingest_jobs
 from src.services.intake_mode_service import get_intake_status
 from src.services.ocr_pipeline_state_store import load_pipeline_state
-from src.services.ocr_pipeline_service import get_pipeline_config, get_pipeline_runtime_status
+from src.services.ocr_pipeline_service import get_pipeline_config
+from src.services.ocr_operations_read_service import get_operations
 from src.services.ocr_quality_service import summarize_reparse_quality
 from src.services.uploaded_pdf_service import summarize_uploaded_pdfs
 from src.services.system_maintenance_service import (
@@ -39,12 +40,17 @@ def system_status():
             "last_error": str(exc),
             "last_error_at": datetime.now(tz=timezone.utc).isoformat(),
         }
-    pipeline_config = get_pipeline_config()
-    pipeline_runtime = get_pipeline_runtime_status()
+    operations = get_operations()
+    operations["external_history"] = {
+        "source": "legacy_external_pipeline", "current": False,
+        "recorded_at": pipeline_state.get("updated_at"),
+        "observation": pipeline_state, "configuration": get_pipeline_config(),
+    }
     intake = get_intake_status()
     oauth_config_ok = bool(GOOGLE_OAUTH_CLIENT_IDS)
     ingest_summary = summarize_ingest_jobs()
     uploaded_pdf_summary = summarize_uploaded_pdfs()
+    operations["intake"] = {"uploaded_pdfs": uploaded_pdf_summary, "ingest_jobs": ingest_summary}
     db_quota = get_db_quota_status()
     try:
         ocr_reparse_quality = summarize_reparse_quality()
@@ -59,33 +65,8 @@ def system_status():
             "configured": oauth_config_ok,
             "google_client_id_count": len(GOOGLE_OAUTH_CLIENT_IDS),
         },
-        "ocr_pipeline": {
-            "status": pipeline_state.get("status"),
-            "updated_at": pipeline_state.get("updated_at"),
-            "last_success_at": pipeline_state.get("last_success_at"),
-            "last_error_at": pipeline_state.get("last_error_at"),
-            "last_error": pipeline_state.get("last_error"),
-            "last_job_id": pipeline_state.get("last_job_id"),
-            "last_output_ref": pipeline_state.get("last_output_ref"),
-            "last_input_ref": pipeline_state.get("last_input_ref"),
-            "configured": pipeline_config.get("configured"),
-            "url_set": pipeline_config.get("url_set"),
-            "bucket_set": pipeline_config.get("bucket_set"),
-            "bucket": pipeline_config.get("bucket"),
-            "input_prefix": pipeline_config.get("input_prefix"),
-            "output_prefix": pipeline_config.get("output_prefix"),
-            "trigger_mode": pipeline_config.get("trigger_mode"),
-            "http_trigger_enabled": pipeline_config.get("http_trigger_enabled"),
-            "gcs_trigger_enabled": pipeline_config.get("gcs_trigger_enabled"),
-            "wait_strategy": pipeline_config.get("wait_strategy"),
-            "sync_wait_supported": pipeline_config.get("sync_wait_supported"),
-            "sync_wait_note": pipeline_config.get("sync_wait_note"),
-            "max_inflight": pipeline_runtime.get("max_inflight"),
-            "inflight": pipeline_runtime.get("inflight"),
-            "request_timeout_seconds": pipeline_runtime.get("request_timeout_seconds"),
-            "timeout_seconds": pipeline_runtime.get("timeout_seconds"),
-            "poll_interval_seconds": pipeline_runtime.get("poll_interval_seconds"),
-        },
+        "ocr_operations": operations,
+        "ocr_pipeline": {**operations["summary"], "source": operations["source"]},
         "ingest_jobs": ingest_summary,
         "uploaded_pdfs": uploaded_pdf_summary,
         "db_quota": db_quota,

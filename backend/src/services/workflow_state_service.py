@@ -546,21 +546,10 @@ def _current_sheet_clears_evidence_review(
         "quantity_review_required",
         "numeric_trust_low",
     }
-    stale_authoritative_sheet = apply_gate_service.authoritative_sheet_suppresses_stale_evidence_issues(
-        source=str(sheet_state.get("source") or "").strip() or None,
-        rows=rows,
-        has_semantic_fields=bool(sheet_state.get("has_semantic_fields")),
-        clean_saved_draft=bool(sheet_state.get("clean_saved_draft")),
-        authoritative_persisted_draft=bool(sheet_state.get("authoritative_persisted_draft")),
-        base_evidence_run_id=str(sheet_state.get("base_evidence_run_id") or "").strip() or None,
-        active_evidence_run_id=str((active_evidence_run or {}).get("id") or "").strip() or None,
-    )
     warnings = set(
         apply_gate_service.filter_stale_issue_tokens(
             [str(item or "").strip() for item in (sheet_state.get("warnings") or []) if str(item or "").strip()],
             source=str(sheet_state.get("source") or "").strip() or None,
-            clean_saved_draft=bool(sheet_state.get("clean_saved_draft")),
-            stale_authoritative_sheet=stale_authoritative_sheet,
         )
     )
     if warnings & review_warnings:

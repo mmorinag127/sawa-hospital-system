@@ -823,17 +823,7 @@ def build_facility_template_diagnostics(
 
 
 def _parse_menu_date(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return date.fromisoformat(text[:10])
-    except Exception:
-        return None
+    return menu_service.parse_menu_date(value)
 
 
 def _normalize_week_menu_entries(*, entries: Any, week_value: object) -> list[dict[str, Any]]:

@@ -1351,15 +1351,15 @@ function DailyDeliveryNotesScreen() {
               try { await loadOrders(values); } catch { /* The owned load sets the root error. */ }
             })}
           >
-            <FormTextField<DailyConditions> name="date" label="日付" type="date" rules={{ required: "日付を指定してください。" }} />
-            <FormTextField<DailyConditions> name="status" label="ステータス" select>
+            <FormTextField<DailyConditions> name="date" label="日付" type="date" rules={{ required: "日付を指定してください。" }} sx={{ flex: { sm: "1 1 0" }, minWidth: 0 }} />
+            <FormTextField<DailyConditions> name="status" label="ステータス" select sx={{ flex: { sm: "1 1 0" }, minWidth: 0 }}>
               <MenuItem value="">全て</MenuItem>
               <MenuItem value="未着">未着</MenuItem>
               <MenuItem value="要確認">要確認</MenuItem>
               <MenuItem value="確定">確定</MenuItem>
               <MenuItem value="エラー">エラー</MenuItem>
             </FormTextField>
-            <Button type="submit" variant="contained" disabled={loading}>
+            <Button type="submit" variant="contained" disabled={loading} sx={{ flexShrink: 0, whiteSpace: "nowrap" }}>
               {loading ? "集計中..." : "表示・集計"}
             </Button>
           </Stack>

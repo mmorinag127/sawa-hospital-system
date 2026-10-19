@@ -135,6 +135,11 @@ jobs:
           ref: e5282354017b43d17f0d4dbd58e73972f37a716f
           path: product
           persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
@@ -143,6 +148,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$GITHUB_SHA"
+          cmp product/backend/uv.lock candidate/backend/uv.lock
+          cmp product/backend/pyproject.toml candidate/backend/pyproject.toml
           uv sync --project product/backend --extra dev --frozen --python 3.11
           uv pip install --python product/backend/.venv/bin/python --no-deps --index-url https://pypi.org/simple --target "$RUNNER_TEMP/reviewed-opencv-gui" opencv-python==5.0.0.93
       - uses: google-github-actions/auth@v3
@@ -162,6 +170,7 @@ jobs:
           set -euo pipefail
           product/backend/.venv/bin/python -B diagnostic/scripts/diagnose_reviewed_ocr.py \
             --product "$GITHUB_WORKSPACE/product" --proxy "$RUNNER_TEMP/reviewed-cloud-sql-proxy" \
+            --candidate "$GITHUB_WORKSPACE/candidate" \
             --summary "$RUNNER_TEMP/reviewed-ocr-summary"
       - name: Remove private inputs even after failure
         if: always()

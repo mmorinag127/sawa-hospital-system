@@ -15,12 +15,28 @@ from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
-from src.services import order_workflow_v2_service
+from src.services import facility_template_version_service, order_workflow_v2_service
 from tests.contract.auth_support import registered_hospital_operator
 
 
 ERROR = "legacy_facility_template_column_override_disabled"
 ORDER_ID = "disabled-columns-component"
+
+
+def test_disabled_column_writer_does_not_access_session():
+    assert facility_template_version_service.save_columns_for_order(
+        object(), order=object(), columns=None,
+    ) == ({"error": ERROR}, ERROR)
+
+
+@pytest.mark.parametrize("facility_id,template_id", [
+    ("", "template"), ("FAC00001", " "), (" FAC00001 ", "template"),
+])
+def test_disabled_template_registry_never_accesses_session(facility_id, template_id):
+    error = "legacy_fax_template_registry_disabled"
+    assert facility_template_version_service.save_template_registration_for_facility(
+        object(), facility_id=facility_id, fax_template_id=template_id,
+    ) == ({"error": error}, error)
 
 
 def _snapshot(engine):

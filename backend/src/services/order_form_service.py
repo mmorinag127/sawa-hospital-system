@@ -513,17 +513,7 @@ def _infer_fax_template_id_from_facility(facility: dict) -> str | None:
 
 
 def _parse_menu_date(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return date.fromisoformat(text[:10])
-    except Exception:
-        return None
+    return menu_service.parse_menu_date(value)
 
 
 def _collect_menu_entries(month_id: str, facility_id: str) -> list[dict]:

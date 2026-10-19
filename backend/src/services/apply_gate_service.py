@@ -24,23 +24,6 @@ _RECOVERABLE_BLOCKING_WARNINGS = {
 }
 
 _LAYOUT_RESOLUTION_TYPES = {"template", "column_mapping", "quantity"}
-_POSITION_FALLBACK_LAYOUT_SUPPRESSED_ISSUES = {
-    "template_unresolved",
-    "template_resolution_blocked",
-    "sheet_quantity_column_unmapped",
-    "sheet_payload_mapping_blocked_unresolved_template",
-}
-_POSITION_FALLBACK_SAVED_SHEET_ONLY_SUPPRESSED_ISSUES = {
-    "ocr_evidence_recovery_required",
-}
-_STALE_AUTHORITATIVE_SHEET_SUPPRESSED_ISSUES = {
-    "sheet_ocr_review_required",
-    "sheet_payload_mapping_low_confidence",
-    "sheet_order_lines_unmapped_fallback_payload",
-    "column_mapping_review_required",
-    "quantity_review_required",
-    "numeric_trust_low",
-}
 _HUMAN_REVIEW_GATE_WARNINGS = {
     "column_mapping_review_required",
     "quantity_review_required",
@@ -113,13 +96,7 @@ def filter_stale_issue_tokens(
     position_fallback_semantics_ready: bool = False,
     stale_authoritative_sheet: bool = False,
 ) -> list[str]:
-    filtered: list[str] = []
-    for item in tokens or []:
-        token = str(item or "").strip()
-        if not token:
-            continue
-        filtered.append(token)
-    return _dedupe_tokens(filtered)
+    return _dedupe_tokens(tokens)
 
 
 def gate_requires_human_review(
@@ -374,34 +351,9 @@ def evaluate_sheet_gate(
     apply_blockers: list[str] = []
     confirm_blockers: list[str] = []
     confirm_warnings: list[str] = []
-    stale_authoritative_sheet = authoritative_sheet_suppresses_stale_evidence_issues(
-        source=source,
-        rows=rows,
-        has_semantic_fields=has_semantic_fields,
-        clean_saved_draft=clean_saved_draft,
-        authoritative_persisted_draft=authoritative_persisted_draft,
-        base_evidence_run_id=base_evidence_run_id,
-        active_evidence_run_id=active_evidence_run_id,
-    )
-    effective_position_fallback_semantics_ready = bool(
-        position_fallback_semantics_ready and not authoritative_persisted_draft
-    )
-
     normalized_source = str(source or "").strip()
-    normalized_blockers = filter_stale_issue_tokens(
-        blockers,
-        source=normalized_source,
-        clean_saved_draft=clean_saved_draft,
-        position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
-        stale_authoritative_sheet=stale_authoritative_sheet,
-    )
-    normalized_warnings = filter_stale_issue_tokens(
-        warnings,
-        source=normalized_source,
-        clean_saved_draft=clean_saved_draft,
-        position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
-        stale_authoritative_sheet=stale_authoritative_sheet,
-    )
+    normalized_blockers = _dedupe_tokens(blockers)
+    normalized_warnings = _dedupe_tokens(warnings)
     normalized_reparse_status = str(reparse_status or "").strip().lower()
     bypass_monthly_menu_object_block = _semantic_sheet_can_bypass_monthly_menu_object_block(
         rows=rows,
@@ -530,19 +482,8 @@ def evaluate_apply_gate(
     ]
     has_semantic_fields = bool(sheet_state.get("has_semantic_fields"))
     authoritative_persisted_draft = bool(sheet_state.get("authoritative_persisted_draft"))
-    base_evidence_run_id = str(sheet_state.get("base_evidence_run_id") or "").strip() or None
-    active_evidence_run_id = str((evidence_run or {}).get("id") or "").strip() or None
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
-    )
-    stale_authoritative_sheet = authoritative_sheet_suppresses_stale_evidence_issues(
-        source=source,
-        rows=rows,
-        has_semantic_fields=has_semantic_fields,
-        clean_saved_draft=clean_saved_draft,
-        authoritative_persisted_draft=authoritative_persisted_draft,
-        base_evidence_run_id=base_evidence_run_id,
-        active_evidence_run_id=active_evidence_run_id,
     )
     effective_position_fallback_semantics_ready = bool(
         position_fallback_semantics_ready
@@ -552,8 +493,6 @@ def evaluate_apply_gate(
         effective_position_fallback_semantics_ready
         and not ocr_evidence_service.payload_has_high_risk_numeric_issues(evidence_payload)
     )
-    if stale_authoritative_sheet:
-        position_fallback_clears_numeric_warning = True
 
     if not facility:
         apply_blockers.append("facility_missing")
@@ -663,33 +602,9 @@ def evaluate_apply_gate(
         confirm_warnings.append("ocr_table_fallback")
 
     if isinstance(sheet_gate, dict):
-        apply_blockers.extend(
-            filter_stale_issue_tokens(
-                sheet_gate.get("apply_blockers") or [],
-                source=source,
-                clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
-                stale_authoritative_sheet=stale_authoritative_sheet,
-            )
-        )
-        confirm_blockers.extend(
-            filter_stale_issue_tokens(
-                sheet_gate.get("confirm_blockers") or [],
-                source=source,
-                clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
-                stale_authoritative_sheet=stale_authoritative_sheet,
-            )
-        )
-        confirm_warnings.extend(
-            filter_stale_issue_tokens(
-                sheet_gate.get("confirm_warnings") or [],
-                source=source,
-                clean_saved_draft=clean_saved_draft,
-                position_fallback_semantics_ready=effective_position_fallback_semantics_ready,
-                stale_authoritative_sheet=stale_authoritative_sheet,
-            )
-        )
+        apply_blockers.extend(_dedupe_tokens(sheet_gate.get("apply_blockers")))
+        confirm_blockers.extend(_dedupe_tokens(sheet_gate.get("confirm_blockers")))
+        confirm_warnings.extend(_dedupe_tokens(sheet_gate.get("confirm_warnings")))
 
     deduped_apply_blockers = _dedupe_tokens(apply_blockers)
     deduped_confirm_blockers = _dedupe_tokens(confirm_blockers)

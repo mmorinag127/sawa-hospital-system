@@ -71,6 +71,17 @@ async function page({ system = "shift", role = "operator", systems = [system], a
   });
   return {
     calls, state,
+    cleanup,
+    async readFile(file) {
+      const fileInput = document.querySelector('input[type="file"]');
+      assert.ok(fileInput);
+      Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
+      await act(async () => fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
+      assert.equal(fileInput.value, "");
+      state[0] = input.value;
+      state[2] = document.querySelector("select").disabled;
+      state[3] = document.querySelector('[role="alert"]')?.textContent || "";
+    },
     async submit() {
       try {
         await act(async () => document.querySelector("form").dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
@@ -87,6 +98,33 @@ async function page({ system = "shift", role = "operator", systems = [system], a
     throw error;
   }
 }
+
+test("token file uses canonical authentication without a request during local read", async () => {
+  const scenario = await page({ system: "school-lunch" });
+  try {
+    await scenario.readFile({ size: 100, text: async () => " file-token \n" });
+    assert.equal(scenario.calls.length, 0);
+    assert.equal(scenario.state[0], "file-token");
+  } catch (error) { await scenario.cleanup(); throw error; }
+  await scenario.submit();
+  assert.equal(scenario.calls[1][1].headers.Authorization, "Bearer file-token");
+  assert.equal(scenario.calls[2][1].headers.Authorization, "Bearer file-token");
+  assert.deepEqual(scenario.calls[3], ["publish", "school-test-generation"]);
+  assert.equal(scenario.calls.at(-1)[1], "/school-lunch/implementation-price-tables");
+});
+
+test("unreadable or oversized token files clear stale credentials without requests", async () => {
+  for (const file of [{ size: 16385 }, { size: 1, text: async () => { throw new Error("unreadable"); } }]) {
+    const scenario = await page();
+    try {
+      await scenario.readFile(file);
+      assert.equal(scenario.state[0], "");
+      assert.equal(scenario.state[2], false);
+      assert.equal(scenario.calls.length, 0);
+      assert.equal(scenario.state[3], "認証ファイルを読み込めませんでした。");
+    } finally { await scenario.cleanup(); }
+  }
+});
 
 for (const system of ["shift", "school-lunch"]) {
   test(`${system} authenticates with explicit target and canonical navigation`, async () => {

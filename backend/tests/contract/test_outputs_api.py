@@ -2,6 +2,7 @@ import pathlib
 import sys
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -47,6 +48,26 @@ def test_delivery_html_render_sums_final_regular_column():
     )
 
     assert value == 3
+
+
+@pytest.mark.parametrize("areas", [("東棟", "西棟"), ("花", "月"), ("花", "2F"), ("1階", "1F")])
+def test_delivery_html_preserves_configured_areas_and_quantities(areas):
+    columns = outputs_api._build_delivery_render_columns([
+        {"name": "first", "source": "quantity", "diet_type": "regular", "area_id": areas[0]},
+        {"name": "second", "source": "quantity", "diet_type": "regular", "area_id": areas[1]},
+    ])
+    quantities = [column for column in columns if column["kind"] == "quantity"]
+    assert [column["header"] for column in quantities] == [f"常食\n{area}" for area in areas]
+    assert [outputs_api._delivery_render_cell_value({"first": 3, "second": 5}, column)
+            for column in quantities] == [3, 5]
+    html = outputs_api._render_editable_delivery_note_html(
+        "ORDTEST", "納品書", [], [], columns=[
+            {"name": "first", "source": "quantity", "diet_type": "regular", "area_id": areas[0]},
+            {"name": "second", "source": "quantity", "diet_type": "regular", "area_id": areas[1]},
+        ], raw_rows=[{"first": 3, "second": 5}],
+    )
+    for area in areas:
+        assert area in html
 
 
 def test_delivery_html_render_uses_display_menu_name_with_garnish():

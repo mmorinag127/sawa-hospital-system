@@ -9,6 +9,9 @@ from sqlalchemy.dialects import postgresql
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
+sys.path.append(str(ROOT / "tests/unit"))
+sys.path.append(str(ROOT / "tests/contract"))
+from totals_owned_fixture import totals_inputs
 
 from src.db import session_scope  # noqa: E402
 from src.main import app  # noqa: E402
@@ -35,8 +38,8 @@ def test_totals_dated_confirmed_order_query_uses_exists_not_distinct_for_postgre
     assert "DISTINCT" not in sql
 
 
-def test_totals_prefers_line_daypart_over_snapshot_daypart():
-    order_service.clear_all()
+def test_totals_prefers_line_daypart_over_snapshot_daypart(totals_inputs):
+    totals_inputs.clear_all()
     month_id = f"2026-03-totals-{uuid4().hex[:8]}"
     menu_csv = "menu\n豆腐の煮物\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
@@ -46,7 +49,7 @@ def test_totals_prefers_line_daypart_over_snapshot_daypart():
         menu_item["id"],
         {"qty_per_serving": 70, "unit_type": "g", "daypart": "朝食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = totals_inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-totals-daypart-001",
             pdf_uri="file://dummy-totals-daypart.pdf",
@@ -66,7 +69,7 @@ def test_totals_prefers_line_daypart_over_snapshot_daypart():
             }
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    totals_inputs.set_status(order["id"], "確定")
     with session_scope() as session:
         session.add(
             OrderMenuSnapshot(
@@ -150,7 +153,8 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master():
     assert row["menu_category"] == "副菜"
 
 
-def test_totals_merges_regular_equivalent_diets():
+def test_totals_merges_regular_equivalent_diets(totals_inputs):
+    order_service = totals_inputs
     order_service.clear_all()
     month_id = f"2026-03-totals-regular-bucket-{uuid4().hex[:8]}"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
@@ -229,7 +233,8 @@ def test_totals_merges_regular_equivalent_diets():
     assert not any(item.get("diet_type") in {"regular_bag", "daycare", "staff", "regular_1600kcal"} for item in rows)
 
 
-def test_totals_can_include_order_refs_for_debug():
+def test_totals_can_include_order_refs_for_debug(totals_inputs):
+    order_service = totals_inputs
     order_service.clear_all()
     month_id = f"2026-03-totals-order-refs-{uuid4().hex[:8]}"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
@@ -634,9 +639,9 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
     ]
 
 
-def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet():
+def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(totals_inputs):
+    order_service = totals_inputs
     order_service.clear_all()
-    _reset_facilities_from_master()
     month_id = f"2026-03-totals-confirm-materialization-{uuid4().hex[:8]}"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")

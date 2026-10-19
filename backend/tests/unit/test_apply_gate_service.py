@@ -5,6 +5,29 @@ import pytest
 from src.services import apply_gate_service
 
 
+@pytest.mark.parametrize("source", ["draft_sheet", "ocr_table", None])
+@pytest.mark.parametrize("ready", [False, True])
+def test_warning_normalization_preserves_review_and_blocking_tokens(source, ready):
+    warnings = ["", " numeric_trust_low ", "numeric_trust_low", "quantity_review_required"]
+    normalized = apply_gate_service.filter_stale_issue_tokens(
+        warnings, source=source, clean_saved_draft=ready,
+        position_fallback_semantics_ready=ready, stale_authoritative_sheet=ready,
+    )
+    assert normalized == ["numeric_trust_low", "quantity_review_required"]
+    assert apply_gate_service.gate_requires_human_review(apply_warnings=normalized)
+    assert not apply_gate_service.gate_can_apply(apply_blockers=[], apply_warnings=normalized)
+    assert not apply_gate_service.gate_can_confirm(confirm_blockers=[], confirm_warnings=normalized)
+    sheet_gate = apply_gate_service.evaluate_sheet_gate(
+        rows=[["10/01", "朝", "Fish", "2"]], source=source, has_semantic_fields=True,
+        blockers=["template_unresolved", " template_unresolved "],
+        warnings=["sheet_quantity_column_unmapped", "sheet_quantity_column_unmapped"],
+        clean_saved_draft=ready, position_fallback_semantics_ready=ready,
+        authoritative_persisted_draft=ready,
+    )
+    assert sheet_gate["apply_blockers"] == ["template_unresolved", "sheet_quantity_column_unmapped"]
+    assert sheet_gate["confirm_blockers"] == sheet_gate["apply_blockers"]
+
+
 def test_draft_newer_than_lines_allows_apply_but_blocks_confirm() -> None:
     sheet_gate = apply_gate_service.evaluate_sheet_gate(
         rows=[["04/26", "朝", "Menu A", "1"]],

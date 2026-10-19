@@ -90,9 +90,12 @@ const weekHistoryFromOrder = (order: OrderSummary) => {
 
 function WeeklyWeightOutputScreen() {
   const router = useRouter();
-  const queryIdentity = JSON.stringify([router.asPath, router.query.date, router.query.week, router.query.status]);
+  const routeIdentity = (target = router) => JSON.stringify([target.asPath, target.query.date, target.query.week, target.query.status]);
+  const queryIdentity = routeIdentity();
   const [resolvedQuery, setResolvedQuery] = useState<string | null>(null);
   const periodReady = router.isReady && resolvedQuery === queryIdentity;
+  const liveRoute = useRef({ router, queryIdentity, periodReady });
+  liveRoute.current = { router, queryIdentity, periodReady };
   const [week, setWeek] = useState(currentBusinessWeek());
   const [status, setStatus] = useState("");
   const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: currentBusinessWeek(), savedWeek: "", status: "" } });
@@ -152,18 +155,23 @@ function WeeklyWeightOutputScreen() {
   }, [conditionForm, router.events]);
 
   const beginOperation = (kind: "list" | "output", conditions: WeeklyWeightConditions) => {
+    const captured = { ...conditions };
+    const ownsInput = () => {
+      const live = liveRoute.current;
+      const values = conditionForm.getValues();
+      return mounted.current && live.periodReady && live.router.isReady
+        && queryIdentity === live.queryIdentity && live.queryIdentity === routeIdentity(live.router)
+        && captured.week === values.week && captured.savedWeek === values.savedWeek
+        && captured.status === values.status;
+    };
+    if (!ownsInput()) return { current: () => false, ownsMessage: () => false };
     const operations = kind === "list" ? loadGeneration : downloadGeneration;
     const operation = ++operations.current;
     const input = inputGeneration.current;
     const messageOwner = ++messageGeneration.current;
     const session = browserSessionKey();
-    const captured = { ...conditions };
-    const current = () => {
-      const values = conditionForm.getValues();
-      return periodReady && mounted.current && input === inputGeneration.current && operation === operations.current
-        && session === browserSessionKey() && captured.week === values.week
-        && captured.savedWeek === values.savedWeek && captured.status === values.status;
-    };
+    const current = () => ownsInput() && input === inputGeneration.current && operation === operations.current
+      && session === browserSessionKey();
     if (current()) {
       setMessage("");
       if (kind === "list") setLoading(false);
@@ -178,8 +186,11 @@ function WeeklyWeightOutputScreen() {
     const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
     const initialWeek = currentBusinessWeek();
-    const period = queryWeek ? weeklyWeightPeriod(queryWeek) : queryDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(initialWeek);
-    if (!period || (queryDate && (!businessPeriodForDate(queryDate) || queryDate < period.start || queryDate > period.end))) {
+    const hasWeek = router.query.week !== undefined;
+    const hasDate = router.query.date !== undefined;
+    const period = hasWeek ? weeklyWeightPeriod(queryWeek) : hasDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(initialWeek);
+    if (Array.isArray(router.query.week) || Array.isArray(router.query.date)
+      || !period || (hasDate && (!businessPeriodForDate(queryDate) || queryDate < period.start || queryDate > period.end))) {
       conditionForm.reset({ week: "", savedWeek: "", status: queryStatus });
       setMessage("対象期間を確認してください。");
       setResolvedQuery(queryIdentity);

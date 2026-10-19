@@ -5,9 +5,11 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
+import { OcrOperationsHistory, OcrOperationsPayload, OcrOperationsSummary } from "../components/OcrOperations";
 import { useCurrentUserRole } from "../hooks/useCurrentUserRole";
 
 type SystemStatus = {
+  ocr_operations?: OcrOperationsPayload;
   intake?: {
     mode?: string | null;
     manual_upload_enabled?: boolean;
@@ -338,14 +340,10 @@ export default function SystemStatusPage() {
           <p className="meta">Googleログインで利用します。</p>
         </article>
         <article className="card card-wide ocr-card">
-          <h2>OCR パイプライン</h2>
+          <h2>現行の注文OCR</h2>
           <div className="ocr-card-top">
             <div className="ocr-card-status">
-              <p className="value">
-                {status?.ocr_pipeline?.configured
-                  ? formatStatus(status?.ocr_pipeline?.status)
-                  : "未設定"}
-              </p>
+              <OcrOperationsSummary operations={status?.ocr_operations} />
               <p className={`ocr-backlog-badge ${ocrBacklogSeverity}`}>{ocrBacklogLabel}</p>
             </div>
             <div className="ocr-queue-summary" aria-label="OCR滞留サマリ">
@@ -367,27 +365,6 @@ export default function SystemStatusPage() {
               </div>
             </div>
           </div>
-          <p className="meta">最終成功: {formatDate(status?.ocr_pipeline?.last_success_at)}</p>
-          <p className="meta">最終失敗: {formatDate(status?.ocr_pipeline?.last_error_at)}</p>
-          {status?.ocr_pipeline?.last_error && (
-            <p className="meta warn">エラー: {status.ocr_pipeline.last_error}</p>
-          )}
-          <p className="meta">
-            設定: Bucket={status?.ocr_pipeline?.bucket_set ? "OK" : "NG"} / URL=
-            {status?.ocr_pipeline?.url_set ? "OK" : "未設定（バケット経由で動作）"}
-          </p>
-          <p className="meta">
-            trigger_mode={status?.ocr_pipeline?.trigger_mode || "未取得"} / wait=
-            {status?.ocr_pipeline?.wait_strategy || "未取得"}
-          </p>
-          <p className="meta">
-            sync_wait={status?.ocr_pipeline?.sync_wait_supported ? "OK" : "利用条件あり"} / http_trigger=
-            {status?.ocr_pipeline?.http_trigger_enabled ? "ON" : "OFF"}
-          </p>
-          <p className="meta">
-            inflight={status?.ocr_pipeline?.inflight ?? "未取得"} / max=
-            {status?.ocr_pipeline?.max_inflight ?? "未取得"}
-          </p>
           <p className="meta">
             uploaded backlog={uploadedPdfs?.eligible_backlog_count ?? "未取得"} / ingest backlog=
             {ingestJobs?.eligible_backlog_count ?? "未取得"}
@@ -396,14 +373,7 @@ export default function SystemStatusPage() {
             oldest backlog: {formatDate(uploadedPdfs?.oldest_ready_at)} / 経過=
             {formatDuration(uploadedPdfs?.oldest_ready_seconds)}
           </p>
-          {status?.ocr_pipeline?.sync_wait_note ? (
-            <p className="meta warn">{status.ocr_pipeline.sync_wait_note}</p>
-          ) : null}
-          <p className="meta">
-            Bucket: {status?.ocr_pipeline?.bucket || "未取得"} / input=
-            {status?.ocr_pipeline?.input_prefix || "-"} / output=
-            {status?.ocr_pipeline?.output_prefix || "-"}
-          </p>
+          <OcrOperationsHistory operations={status?.ocr_operations} />
         </article>
         <article className="card">
           <h2>DB Quota</h2>

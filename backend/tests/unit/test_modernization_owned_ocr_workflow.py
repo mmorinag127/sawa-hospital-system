@@ -95,7 +95,9 @@ class OwnedProducer:
             {"index": 2, "source_index": 2, "role": "aux", "name": "aux.weekday", "header": "曜日"},
             {"index": 3, "source_index": 3, "role": "menu_name", "header": "献立"},
             {"index": 4, "source_index": 4, "role": "quantity", "header": "常食",
-             "diet_type": "regular", "area_id": "X"},
+             "diet_type": "regular", "area_id": "X", "header_group": "常食"},
+            {"index": 5, "source_index": 5, "role": "aux", "name": "aux.notes",
+             "header": "備考", "header_group": "常食"},
         ]
         self.facility = {
             "facility_id": FACILITY, "facility_name": "Synthetic native unit facility",

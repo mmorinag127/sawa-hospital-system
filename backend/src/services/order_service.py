@@ -16059,28 +16059,6 @@ def _append_edited_ocr_revision(
         return None
 
 
-def _attach_edited_ocr_payload(parsed: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(parsed, dict):
-        return parsed
-    edited = parsed.get("_edited_ocr")
-    if not isinstance(edited, dict):
-        return parsed
-    if str(edited.get("schema_recanonicalization_blocked") or "").strip():
-        return parsed
-    latest = _select_edited_sheet_revision(parsed)
-    if not isinstance(latest, dict):
-        return parsed
-    enriched = dict(parsed)
-    enriched["ocr_source"] = "edited"
-    enriched["edited_table"] = {
-        "header": latest.get("header") if isinstance(latest.get("header"), list) else [],
-        "rows": latest.get("rows") if isinstance(latest.get("rows"), list) else [],
-        "row_ids": latest.get("row_ids") if isinstance(latest.get("row_ids"), list) else [],
-        "edited_at": latest.get("edited_at"),
-        "ui_mode": latest.get("ui_mode"),
-        "revision_id": latest.get("revision_id"),
-    }
-    return enriched
 
 
 def _sync_edited_ocr_latest_from_canonical_revision(
@@ -16173,133 +16151,6 @@ def _sync_edited_ocr_latest_from_canonical_revision(
     return next_payload, True
 
 
-def _recanonicalize_edited_ocr_payload_for_template(
-    payload: dict[str, Any] | None,
-    template: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, bool]:
-    if not isinstance(payload, dict) or not isinstance(template, dict):
-        return payload, False
-    edited = payload.get("_edited_ocr")
-    if not isinstance(edited, dict):
-        return payload, False
-    latest = edited.get("latest")
-    if not isinstance(latest, dict):
-        return payload, False
-    expected_fields = _get_row_fields(template)
-    if not expected_fields:
-        return payload, False
-    expected_header = _sheet_header_from_template(expected_fields, template)
-    latest_fields = [str(field).strip() for field in (latest.get("fields") or []) if str(field).strip()]
-    latest_header = [str(cell or "").strip() for cell in (latest.get("header") or [])]
-    latest_rows = latest.get("rows") if isinstance(latest.get("rows"), list) else []
-    latest_width_matches = all(isinstance(row, list) and len(row) >= len(expected_fields) for row in latest_rows)
-    if latest_fields == expected_fields and latest_header == expected_header and latest_width_matches:
-        return payload, False
-
-    raw_output = edited.get("raw_output")
-    if not isinstance(raw_output, dict):
-        next_payload = dict(payload)
-        next_edited = dict(edited)
-        next_edited["schema_recanonicalization_blocked"] = "edited_schema_contract_mismatch"
-        next_payload["_edited_ocr"] = next_edited
-        next_payload.pop("edited_table", None)
-        return next_payload, True
-    rebuilt_rows = _extract_sheet_rows_from_payload_uncanonicalized(raw_output, template)
-    if not rebuilt_rows:
-        next_payload = dict(payload)
-        next_edited = dict(edited)
-        next_edited["schema_recanonicalization_blocked"] = "edited_schema_contract_mismatch"
-        next_payload["_edited_ocr"] = next_edited
-        next_payload.pop("edited_table", None)
-        return next_payload, True
-    rebuilt_sheet = {
-        "fields": list(expected_fields),
-        "header": list(expected_header),
-        "rows": rebuilt_rows,
-        "row_ids": [f"ocr-row-{idx + 1}" for idx in range(len(rebuilt_rows))],
-        "warnings": [],
-    }
-    current_sheet = {
-        "fields": latest_fields,
-        "header": latest_header,
-        "rows": latest_rows,
-        "row_ids": latest.get("row_ids") if isinstance(latest.get("row_ids"), list) else [],
-        "warnings": [],
-    }
-    try:
-        merged_sheet = _merge_saved_draft_into_semantic_sheet(
-            current_sheet,
-            rebuilt_sheet,
-            append_unmatched_current_rows=False,
-            merge_current_warnings=False,
-        )
-    except ValueError as exc:
-        if not str(exc).startswith("saved_draft_row_identity_"):
-            raise
-        next_payload = deepcopy(payload)
-        next_payload["_edited_ocr"]["schema_recanonicalization_blocked"] = str(exc)
-        return next_payload, True
-    if not isinstance(merged_sheet, dict):
-        return payload, False
-    merged_rows = _sanitize_semantic_sheet_rows(
-        rows_payload=merged_sheet.get("rows"),
-        fields=expected_fields,
-    )
-    if not merged_rows:
-        return payload, False
-    merged_row_ids = [
-        str(item).strip()
-        for item in (merged_sheet.get("row_ids") or [])
-        if str(item).strip()
-    ]
-    if len(merged_row_ids) < len(merged_rows):
-        merged_row_ids.extend([f"ocr-row-{idx + 1}" for idx in range(len(merged_row_ids), len(merged_rows))])
-    revision_markdown = _build_markdown_table_string(expected_header, merged_rows)
-
-    next_payload = dict(payload)
-    next_edited = dict(edited)
-    next_edited.pop("schema_recanonicalization_blocked", None)
-    next_latest = dict(latest)
-    next_latest.update(
-        {
-            "fields": list(expected_fields),
-            "header": list(expected_header),
-            "rows": merged_rows,
-            "row_ids": merged_row_ids[: len(merged_rows)],
-            "row_count": len(merged_rows),
-            "markdown": revision_markdown,
-        }
-    )
-    revisions = next_edited.get("revisions")
-    if isinstance(revisions, list):
-        updated_revisions: list[dict[str, Any]] = []
-        latest_revision_id = str(next_latest.get("revision_id") or "").strip()
-        for item in revisions:
-            if not isinstance(item, dict):
-                continue
-            item_revision_id = str(item.get("revision_id") or "").strip()
-            if latest_revision_id and item_revision_id == latest_revision_id:
-                patched = dict(item)
-                patched.update(
-                    {
-                        "fields": list(expected_fields),
-                        "header": list(expected_header),
-                        "rows": merged_rows,
-                        "row_ids": merged_row_ids[: len(merged_rows)],
-                        "row_count": len(merged_rows),
-                        "markdown": revision_markdown,
-                    }
-                )
-                updated_revisions.append(patched)
-            else:
-                updated_revisions.append(item)
-        next_edited["revisions"] = updated_revisions
-    next_edited["latest"] = next_latest
-    next_payload["_edited_ocr"] = next_edited
-    next_payload.pop("edited_table", None)
-    if str(next_payload.get("ocr_source") or "").strip().lower() == "edited":
-        next_payload.pop("ocr_source", None)
-    return next_payload, True
 
 
 def _parse_revision_datetime(value: object) -> datetime | None:
@@ -19295,34 +19146,6 @@ def _signed_url_from_uri(uri: str | None) -> str | None:
         raise ValueError("storage_signed_url_failed") from exc
 
 
-def _load_job_output(
-    job: dict | None,
-    label: str,
-    *,
-    wait_for_recovery: bool = False,
-) -> Optional[dict]:
-    if not job:
-        return None
-    output_ref = job.get("output_reference")
-    if not output_ref:
-        return None
-    pending_job = _job_is_pending(job)
-    try:
-        payload = load_bytes_from_uri(output_ref)
-        parsed = json.loads(payload.decode("utf-8"))
-        validate_own_pipeline_result(parsed, output_ref)
-        return parsed
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "OCR output load failed",
-            job_id=job.get("id"),
-            output_reference=output_ref,
-            label=label,
-            error=str(exc),
-        )
-        if pending_job or not wait_for_recovery:
-            return None
-        return _load_pipeline_output_with_retry(output_ref)
 
 
 def _job_is_pending(job: dict | None) -> bool:
