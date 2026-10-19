@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -143,51 +144,55 @@ def read_row(proxy, private):
 
     require(value("DB_DRIVER").startswith("postgres"), "diagnostic_db_driver_invalid")
     credentials = {"dbname": value("DB_NAME"), "user": value("DB_USER"), "password": value("DB_PASSWORD")}
-    process = subprocess.Popen([str(proxy), "--gcloud-auth", "--address", "127.0.0.1", "--port", "15438",
-        "--max-connections", "1", INSTANCE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        started = time.monotonic()
-        while True:
-            require(process.poll() is None and time.monotonic() - started < 35, "diagnostic_proxy_start_failed")
-            try:
-                with socket.create_connection(("127.0.0.1", 15438), timeout=0.2):
-                    break
-            except OSError:
-                time.sleep(0.1)
-        connection = psycopg2.connect(**credentials, host="127.0.0.1", port=15438, connect_timeout=8,
-            options="-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=1000")
+    with TemporaryDirectory(prefix="ocr-sql-", dir="/tmp") as socket_directory:
+        socket_path = Path(socket_directory) / INSTANCE / ".s.PGSQL.5432"
+        require(len(os.fsencode(socket_path)) < 104, "diagnostic_proxy_socket_path_invalid")
+        process = None
         try:
-            connection.set_session(isolation_level="REPEATABLE READ", readonly=True)
-            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("SHOW transaction_read_only")
-                require(cursor.fetchone()["transaction_read_only"] == "on", "diagnostic_db_not_readonly")
-                cursor.execute("SHOW transaction_isolation")
-                require(cursor.fetchone()["transaction_isolation"] == "repeatable read", "diagnostic_db_isolation_changed")
-                cursor.execute("""SELECT e.id, e.order_id, e.status, e.template_version_id, e.producer_version,
-                    e.source, e.schema_version, e.artifact_digest, e.created_at,
-                    e.payload_json::text AS payload_raw, e.artifact_manifest_json::text AS manifest_raw,
-                    o.current_document_id, d.storage_uri, d.source_email_id,
-                    u.id AS uploaded_pdf_id, u.content_sha256, w.evidence_run_id AS selected_evidence,
-                    w.state AS workflow_state, w.draft_id, w.blockers_json AS workflow_blockers
-                    FROM order_ocr_evidence_runs e JOIN orders o ON o.id=e.order_id
-                    JOIN order_documents d ON d.id=o.current_document_id
-                    JOIN uploaded_pdfs u ON u.message_id=d.source_email_id AND u.storage_uri=d.storage_uri
-                    JOIN order_workflow_states w ON w.order_id=o.id WHERE e.order_id=%s AND e.id=%s""", (ORDER, EVIDENCE))
-                rows = cursor.fetchall()
-                require(len(rows) == 1, "diagnostic_row_count_changed")
-                row = dict(rows[0])
-            connection.rollback()
-            return row
-        finally:
-            connection.close()
-    finally:
-        if process.poll() is None:
-            process.terminate()
+            process = subprocess.Popen([str(proxy), "--gcloud-auth", "--unix-socket", socket_directory,
+                "--max-connections", "1", INSTANCE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            started = time.monotonic()
+            while True:
+                require(process.poll() is None and time.monotonic() - started < 35, "diagnostic_proxy_start_failed")
+                if socket_path.is_socket():
+                    break
+                time.sleep(0.1)
+            connection = psycopg2.connect(**credentials, host=str(socket_path.parent), port=5432, connect_timeout=8,
+                options="-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=1000")
             try:
-                process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+                connection.set_session(isolation_level="REPEATABLE READ", readonly=True)
+                with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("SHOW transaction_read_only")
+                    require(cursor.fetchone()["transaction_read_only"] == "on", "diagnostic_db_not_readonly")
+                    cursor.execute("SHOW transaction_isolation")
+                    require(cursor.fetchone()["transaction_isolation"] == "repeatable read", "diagnostic_db_isolation_changed")
+                    cursor.execute("""SELECT e.id, e.order_id, e.status, e.template_version_id, e.producer_version,
+                        e.source, e.schema_version, e.artifact_digest, e.created_at,
+                        e.payload_json::text AS payload_raw, e.artifact_manifest_json::text AS manifest_raw,
+                        o.current_document_id, d.storage_uri, d.source_email_id,
+                        u.id AS uploaded_pdf_id, u.content_sha256, w.evidence_run_id AS selected_evidence,
+                        w.state AS workflow_state, w.draft_id, w.blockers_json AS workflow_blockers
+                        FROM order_ocr_evidence_runs e JOIN orders o ON o.id=e.order_id
+                        JOIN order_documents d ON d.id=o.current_document_id
+                        JOIN uploaded_pdfs u ON u.message_id=d.source_email_id AND u.storage_uri=d.storage_uri
+                        JOIN order_workflow_states w ON w.order_id=o.id WHERE e.order_id=%s AND e.id=%s""", (ORDER, EVIDENCE))
+                    rows = cursor.fetchall()
+                    require(len(rows) == 1, "diagnostic_row_count_changed")
+                    row = dict(rows[0])
+                connection.rollback()
+                return row
+            finally:
+                connection.close()
+
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 def uri_parts(uri):
