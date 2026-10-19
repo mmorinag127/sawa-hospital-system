@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_role
-from src.services import ocr_registry_service, ocr_training_dataset_service
+from src.services import ocr_training_dataset_service
 
 
 router = APIRouter()
@@ -65,17 +65,12 @@ def delete_template(template_id: str):
 
 @router.get("/ocr/unclassified", dependencies=[Depends(require_role("admin"))])
 def list_unclassified(status: str | None = None, limit: int = 100):
-    return {
-        "items": ocr_registry_service.list_unclassified(status=status, limit=limit)
-    }
+    _legacy_ocr_registry_disabled()
 
 
 @router.get("/ocr/unclassified/{job_id}", dependencies=[Depends(require_role("admin"))])
 def get_unclassified(job_id: str):
-    entry = ocr_registry_service.get_unclassified(job_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"item": entry}
+    _legacy_ocr_registry_disabled()
 
 
 @router.post("/ocr/unclassified/{job_id}/resolve", dependencies=[Depends(require_role("admin"))])
