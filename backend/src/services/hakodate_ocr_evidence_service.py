@@ -213,7 +213,7 @@ def authored_cell_role(target: dict[str, Any]) -> str:
     return role
 
 
-def validate_ocr_source_for_role(record: dict[str, Any], role: str) -> str:
+def validate_ocr_source_for_role(record: dict[str, Any], role: str, *, accepted_value: str | None = None) -> str:
     sources = [record]
     metadata = record.get("engine_metadata")
     if isinstance(metadata, dict):
@@ -224,6 +224,10 @@ def validate_ocr_source_for_role(record: dict[str, Any], role: str) -> str:
         for key in ("field", "semantic_field"):
             if key in source and source[key] is not None:
                 authored_cell_role({"role": role, "field": source[key]})
+    if accepted_value is not None:
+        if role != "quantity" or re.fullmatch(r"[0-9]*", accepted_value) is None:
+            raise ValueError("recognition_acceptance_numeric_value_required")
+        return accepted_value
     if role == "quantity":
         return validate_ocr_quantity_source(record)
     if role != "note":
@@ -272,6 +276,15 @@ def validate_assigned_ocr_quantity(assignment: dict[str, Any]) -> str:
         return validate_ocr_quantity_source({"raw_text": "", "normalized_value": value})
     if state not in {"assigned", "blank_evidence"} or not raw_texts:
         raise ValueError("hakodate_ocr_quantity_unresolved")
+    operator_values = assignment.get("operator_values", {})
+    identities = assignment.get("evidence_ids")
+    if operator_values:
+        if (not isinstance(operator_values, dict) or not isinstance(identities, list)
+                or len(identities) != len(raw_texts) or not set(operator_values).issubset(identities)
+                or any(not isinstance(item, str) or re.fullmatch(r"[0-9]*", item) is None for item in operator_values.values())):
+            raise ValueError("recognition_acceptance_explicit_values_required")
+        raw_texts = [operator_values[identity] if identity in operator_values else raw
+                     for identity, raw in zip(identities, raw_texts)]
     values = [
         validate_ocr_quantity_source({"raw_text": raw, "normalized_value": value})
         for raw in raw_texts
@@ -468,6 +481,7 @@ def assign_evidence_to_target_cells(
     *,
     evidence_records: list[dict[str, Any]],
     target_cells: list[dict[str, Any]],
+    accepted_values: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     targets = target_cells_from_regions(target_cells)
     by_target: dict[str, list[dict[str, Any]]] = {str(target["target_cell_id"]): [] for target in targets}
@@ -509,7 +523,8 @@ def assign_evidence_to_target_cells(
         unresolved = False
         for record in records:
             try:
-                values.append(validate_ocr_source_for_role(record, role))
+                values.append(validate_ocr_source_for_role(record, role,
+                    accepted_value=(accepted_values or {}).get(record.get("evidence_id"))))
             except ValueError as exc:
                 blockers.append(f"{exc}: {record.get('evidence_id')}")
                 unresolved = True
@@ -544,6 +559,10 @@ def assign_evidence_to_target_cells(
                 )
             )
         )
+        reviewed = {record["evidence_id"]: accepted_values[record["evidence_id"]]
+                    for record in records if accepted_values and record.get("evidence_id") in accepted_values}
+        if reviewed:
+            assignments[-1]["operator_values"] = reviewed
         if unresolved and any((record.get("engine_metadata") or {}).get("recognizer_output", {}).get("resolution_state") == "review_required" for record in records):
             assignments[-1].update(assigned_value=None, resolution_state="review_required")
 
@@ -701,6 +720,7 @@ def sheet_output_from_assigned_results(
                 else None,
                 "evidence_ids": list(assignment.get("evidence_ids") or []),
                 "raw_texts": list(assignment.get("raw_texts") or []),
+                **({"operator_values": dict(assignment["operator_values"])} if assignment.get("operator_values") else {}),
             }
             if assignment.get("resolution_state") == "review_required":
                 cells[sheet_cell]["resolution_state"] = "review_required"

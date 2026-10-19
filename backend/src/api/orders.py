@@ -1528,6 +1528,17 @@ def save_order_recognition_review(order_id: str, body: WorkflowV2RecognitionRevi
     ))
 
 
+@router.put("/{order_id}/workflow-v2/recognition-review/accept")
+def accept_order_recognition_review(order_id: str, body: WorkflowV2RecognitionReviewBody,
+                                   expected_revision: int = Depends(_require_workflow_if_match),
+                                   user=Depends(require_role("operator"))):
+    from src.services import ocr_recognition_recovery_service
+    return _workflow_v2_or_404(ocr_recognition_recovery_service.accept_review(
+        order_id, source_receipt=body.source_receipt, values=body.values,
+        edited_by=user.account, expected_revision=expected_revision,
+    ))
+
+
 @router.put("/{order_id}/workflow-v2/header-axis-review", dependencies=[Depends(require_role("operator"))])
 def save_order_workflow_v2_header_axis_review(order_id: str, body: WorkflowV2HeaderAxisReviewBody, expected_revision: int = Depends(_require_workflow_if_match)):
     return _workflow_v2_or_404(

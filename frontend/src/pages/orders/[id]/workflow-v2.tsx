@@ -184,7 +184,16 @@ type RecognitionReviewPayload = {
   source_receipt: Record<string, any>;
   error_detail?: string;
   cells: Array<{cell: string; image_png_base64: string}>;
+  review_cells?: Array<{sheet_cell: string; raw_text: string; reason: string}>;
 };
+
+const recognitionReviewReason = (reason: string): string => ({
+  hakodate_blank_input_nonempty_prediction: "認識画像は白紙ですが、文字が読み取られています",
+  hakodate_ocr_quantity_non_numeric: "数量として解釈できない文字・記号です",
+  hakodate_preprocess_ink_loss: "画像の前処理で筆跡が失われた可能性があります",
+  hakodate_ocr_quantity_low_confidence: "認識スコアが確認基準を下回っています",
+  hakodate_ocr_quantity_candidate_conflict: "認識候補と読み取り結果が一致していません",
+} as Record<string, string>)[reason] ?? `不明な確認理由: ${reason}`;
 
 type RowAxisReviewPayload = {
   order_id: string;
@@ -246,6 +255,7 @@ type ContextSuggestion = {
 type OcrResult = {
   ocr_result_id: string;
   selectable?: boolean;
+  recognition_acceptance?: { edited_by: string; created_at: string; values: Record<string, string> } | null;
   recognition_review?: {
     count: number;
     cells: Array<{ sheet_cell: string; raw_text: string; reason: string }>;
@@ -543,6 +553,9 @@ const workflowRevisionTokenFromRead = (workflow: WorkflowV2): WorkflowRevisionTo
 };
 
 const formatApiError = (err: any, fallback: string) => {
+  const reviewError = err?.response?.data?.detail;
+  if (reviewError === "recognition_acceptance_saved_draft_conflict") return "別のOCR結果に紐づく保存済みシートがあります。編集内容を保持して採用を停止しました。使用するOCRと保存済みシートを確認してください。";
+  if (reviewError === "recognition_acceptance_explicit_values_required") return "要確認の全セルについて、空欄または数値を明示指定してください。文字・記号のままでは採用できません。";
   if (err?.response?.status === 428) {
     return "workflow revision を取得できません。再読込してから操作してください。";
   }
@@ -1364,6 +1377,7 @@ export default function OrderWorkflowV2Page() {
   const [rowDayBoundaries, setRowDayBoundaries] = useState<string[]>([]);
   const [recognitionReview, setRecognitionReview] = useState<RecognitionReviewPayload | null>(null);
   const [recognitionValues, setRecognitionValues] = useState<Record<string, string>>({});
+  const [recognitionReviewMode, setRecognitionReviewMode] = useState<"resume" | "adopt">("resume");
   const [draggingRowAxisIndex, setDraggingRowAxisIndex] = useState<number | null>(null);
   const [selectedRowAxisIndex, setSelectedRowAxisIndex] = useState<number | null>(null);
   const [rowAxisAddMode, setRowAxisAddMode] = useState(false);
@@ -1534,6 +1548,7 @@ export default function OrderWorkflowV2Page() {
     }
   });
   const pdfSourceOwnerRef = useRef<ReturnType<typeof capturePageOwner> | null>(null);
+  const recognitionReviewOwnerRef = useRef<ReturnType<typeof capturePageOwner> | null>(null);
   const pdfUrl = pdfSourceOwnerRef.current && ownsPageContext(pdfSourceOwnerRef.current) ? storedPdfUrl : "";
   const renderedInputGeneration=workingInputGenerationRef.current;
   const axisReadGenerationRef = useRef({header:0,row:0});
@@ -1928,6 +1943,10 @@ export default function OrderWorkflowV2Page() {
       || "",
   ).trim();
   const ocrJobRecoveryAction = String(workflow?.ocr_job?.recovery_action || "").trim();
+  const recognitionReviewPending = workflow?.state === "ocr_failed"
+    && workflow?.ocr_job?.result_state === "review_required"
+    && ocrJobRecoveryAction === "review_recognition_cells";
+  const currentStateLabel = recognitionReviewPending ? "Step2: 読み取り結果の確認待ち" : stateLabel(workflow?.state);
   const canReviewQuad = Boolean(orderId && workflowContextConfirmed && workflow?.template_version_id);
   const quadReviewRequired = ocrJobRecoveryAction === "review_or_edit_quad"
     || workflowBlockers.includes("quad_estimation_failed")
@@ -2839,6 +2858,80 @@ export default function OrderWorkflowV2Page() {
       finishWorkflowEditorEdit("recognition"); setRecognitionReview(null); setRecognitionValues({});
     });
   }, {successMessage: "手入力を保存しました。OCR再実行から保存したセル対応で処理を再開できます"});
+
+  const openRecognitionResume = (ocrResultId?: string) => {
+    setRecognitionReviewMode("resume");
+    recognitionReviewOwnerRef.current = capturePageOwner();
+    return loadRecognitionReview(ocrResultId);
+  };
+
+  const loadRecognitionAcceptance = (ocrResultId: string) => runAction("セル画像取得", async ({assertCurrent, adopt}) => {
+    if (editorVersion("sheet").dirty) throw new Error("未保存のシート編集があります。保存してから読み取り結果を確認してください。");
+    const response = await apiClient.get<RecognitionReviewPayload>(`/orders/${orderId}/workflow-v2/recognition-review`,
+      {params: {document_id: effectiveSelectedDocumentId, ocr_result_id: ocrResultId}});
+    assertCurrent();
+    const review = response.data;
+    if (review.order_id !== orderId || review.source_receipt?.selected_pdf_receipt?.document_id !== effectiveSelectedDocumentId
+        || (ocrResultId !== undefined && review.source_receipt.recognition_evidence_run_id !== ocrResultId)
+        || review.source_receipt.workflow_revision !== workflowRevisionRef.current?.revision || !Array.isArray(review.cells)) {
+      throw new Error("注文・PDF・入力版が変わりました。再取得してください。");
+    }
+    const reviewCells = review.review_cells;
+    if (!reviewCells?.length
+        || reviewCells.some(cell => !review.cells.some(image => image.cell === cell.sheet_cell))) {
+      throw new Error("確認対象とセル画像が一致しません。再取得してください。");
+    }
+    adopt(() => {
+      setRecognitionReviewMode("adopt");
+      recognitionReviewOwnerRef.current = capturePageOwner();
+      setRecognitionReview(review);
+      setRecognitionValues(Object.fromEntries(reviewCells
+        .filter(cell => /^[0-9]+$/.test(cell.raw_text)).map(cell => [cell.sheet_cell, cell.raw_text])));
+    });
+  }, {refreshAfter: false, successMessage: "確認対象のセル画像を取得しました"});
+
+  const acceptRecognitionReview = () => runAction("確認した値を採用", async ({assertCurrent, adopt}) => {
+    if (!recognitionReview || recognitionReview.order_id !== orderId
+        || !recognitionReviewOwnerRef.current || !ownsPageInput(recognitionReviewOwnerRef.current)
+        || recognitionReview.source_receipt.workflow_revision !== workflowRevisionRef.current?.revision) {
+      throw new Error("入力版が変わりました。セル画像を再取得してください。");
+    }
+    if (editorVersion("sheet").dirty) throw new Error("未保存のシート編集があります。先に保存してください。");
+    const captured = adopt(() => {beginWorkflowEditorEdit("recognition", true); return captureWorkflowInputVersion("recognition");});
+    const response = await apiClient.put(`/orders/${orderId}/workflow-v2/recognition-review/accept`,
+      {source_receipt: recognitionReview.source_receipt, values: recognitionValues}, workflowMutationConfig(captured));
+    assertCurrent();
+    adopt(() => {
+      if (!adoptOwnWorkflowCommandResponse(response.data, captured)) throw new Error("セル訂正中に入力が変更されました。");
+      finishWorkflowEditorEdit("recognition"); setRecognitionReview(null); setRecognitionValues({});
+    });
+    const identity = recognitionReview.source_receipt.recognition_evidence_run_id;
+    if (!identity) throw new Error("確認対象のOCR結果がありません。");
+    assertCurrent();
+    try {
+      await executeWorkflowMutation("ocrSelection", config => apiClient.post(
+        `/orders/${orderId}/workflow-v2/ocr-results/${identity}/select`, undefined, config), adopt);
+    } catch (error) {
+      assertCurrent();
+      await refreshAll(() => recognitionReviewOwnerRef.current !== null && ownsPageContext(recognitionReviewOwnerRef.current), null, adopt);
+      assertCurrent();
+      throw new Error(`確認した値は保存済みですが、正解OCRの選択は完了していません。${formatApiError(error, "選択を再確認してください")}`);
+    }
+  }, {successMessage: "確認した値を採用し、正解OCRを選択しました", nextStep: 3});
+
+  const recognitionDisplayCells = recognitionReviewMode === "adopt"
+    ? recognitionReview?.cells.filter(image => recognitionReview.review_cells?.some(cell => cell.sheet_cell === image.cell)) ?? []
+    : recognitionReview?.cells ?? [];
+
+  const canEditRecognitionReview = () => recognitionReview !== null && recognitionReviewOwnerRef.current !== null
+    && ownsPageInput(recognitionReviewOwnerRef.current)
+    && recognitionReview.source_receipt.workflow_revision === workflowRevisionRef.current?.revision;
+  const beginRecognitionEdit = () => {
+    if (!canEditRecognitionReview()) return false;
+    beginWorkflowEditorEdit("recognition");
+    recognitionReviewOwnerRef.current = capturePageOwner();
+    return true;
+  };
 
   const closeRecognitionReview = () => {
     if (busy) return;
@@ -4305,14 +4398,19 @@ export default function OrderWorkflowV2Page() {
       <section className="panel state-panel">
         <div className="state-panel-main">
           <p className="eyebrow">注文情報 / 現在状態</p>
-          <h2>{stateLabel(workflow?.state)}</h2>
-          <p className="subtle">{workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          <h2>{currentStateLabel}</h2>
+          <p className="subtle">{recognitionReviewPending ? "要確認セルの原画像と読み取り原文をStep2で確認し、空欄または数値を指定してください。" : workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
           {workflow?.recognition_override_invalidation ? <p role="status">
             {({quad: "4点", header_axis: "ヘッダー", row_axis: "行・日境界"} as Record<string, string>)[workflow.recognition_override_invalidation.geometry_kind] ?? "幾何"}補正が変更されたため、以前のセル手入力は履歴に保持し、新しいセルには適用しません。保存済みシートは保持しています。
           </p> : null}
           {workflow?.state === "ocr_failed" ? <div role="alert">
-            <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
-            {workflow.ocr_job?.recovery_action === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview()}>セル画像を確認・訂正</Button> : null}
+            {recognitionReviewPending ? <>
+              <Button disabled={Boolean(busy)} onClick={() => setVisibleStep(2)}>Step2で読み取り結果を確認</Button>
+              <details><summary>認識実行時の診断詳細</summary>
+                <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
+              </details>
+            </> : <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>}
+            {!recognitionReviewPending && ocrJobRecoveryAction === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={() => openRecognitionResume()}>セル画像を確認・訂正</Button> : null}
             {[
               {stage: "row_day_boundaries", action: "review_row_day_boundaries", step: 1.7, label: "行・日境界の画像を開いて訂正"},
               {stage: "header_boundaries", action: "review_header_boundaries", step: 1.6, label: "ヘッダー境界を訂正"},
@@ -4325,27 +4423,41 @@ export default function OrderWorkflowV2Page() {
             ))}
           </div> : null}
           <Dialog open={recognitionReview !== null} onClose={closeRecognitionReview} fullWidth maxWidth="md">
-            <DialogTitle>セル画像の確認・訂正</DialogTitle>
+            <DialogTitle>{recognitionReviewMode === "adopt" ? "読み取り結果の確認・採用" : "セル画像の確認・訂正"}</DialogTitle>
             <DialogContent>
               <p role="alert">{recognitionReview?.error_detail}</p>
-              <p>未確認 {recognitionReview?.cells.filter(cell => !(cell.cell in recognitionValues)).length ?? 0} セル</p>
+              <p>未確認 {recognitionDisplayCells.filter(cell => !(cell.cell in recognitionValues)).length} セル</p>
+              {recognitionReviewMode === "adopt" ? <Button disabled={Boolean(busy)} onClick={() => {
+                const owner = capturePageOwner(), dialogOwner = recognitionReviewOwnerRef.current;
+                if (!canEditRecognitionReview()) return;
+                if (!window.confirm(`要確認の${recognitionDisplayCells.length}セルをすべて空欄として採用しますか？読み取り原文は履歴に残ります。`)) return;
+                if (!ownsPageInput(owner) || recognitionReviewOwnerRef.current !== dialogOwner || !canEditRecognitionReview()) return;
+                if (!beginRecognitionEdit()) return;
+                setRecognitionValues(Object.fromEntries(recognitionDisplayCells.map(cell => [cell.cell, ""])));
+              }}>要確認の全セルを空欄に指定</Button> : null}
               <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12}}>
-                {recognitionReview?.cells.map(cell => <div key={cell.cell}>
+                {recognitionDisplayCells.map(cell => <div key={cell.cell}>
                   <img src={`data:image/png;base64,${cell.image_png_base64}`} alt={`${cell.cell}のFAX原画像`} style={{width: "100%", height: 72, objectFit: "contain"}} />
+                  {recognitionReview?.review_cells?.filter(item => item.sheet_cell === cell.cell).map(item =>
+                    <p key={item.sheet_cell}>読み取り原文: 「{item.raw_text}」<br />{recognitionReviewReason(item.reason)}</p>)}
                   <TextField label={cell.cell} size="small" value={recognitionValues[cell.cell] ?? ""} disabled={Boolean(busy)}
                     slotProps={{htmlInput: {inputMode: "numeric", pattern: "[0-9]*"}}}
-                    onChange={event => {const value=event.target.value; if (/^[0-9]*$/.test(value)) {beginWorkflowEditorEdit("recognition"); setRecognitionValues(current => ({...current, [cell.cell]: value}));}}} />
+                    onChange={event => {const value=event.target.value; if (/^[0-9]*$/.test(value) && beginRecognitionEdit()) {setRecognitionValues(current => ({...current, [cell.cell]: value}));}}} />
                   <label><Checkbox size="small" disabled={Boolean(busy)} checked={recognitionValues[cell.cell] === ""}
-                    onChange={event => {beginWorkflowEditorEdit("recognition"); const checked=event.target.checked; setRecognitionValues(current => {const next={...current}; if(checked) next[cell.cell]=""; else delete next[cell.cell]; return next;});}} />空欄</label>
+                    onChange={event => {if (!beginRecognitionEdit()) return; const checked=event.target.checked; setRecognitionValues(current => {const next={...current}; if(checked) next[cell.cell]=""; else delete next[cell.cell]; return next;});}} />空欄</label>
                 </div>)}
               </div>
             </DialogContent>
             <DialogActions>
               <Button disabled={Boolean(busy)} onClick={closeRecognitionReview}>閉じる</Button>
-              <Button disabled={Boolean(busy) || !recognitionReview?.cells.length || recognitionReview.cells.some(cell => !(cell.cell in recognitionValues))} onClick={saveRecognitionReview}>手入力を保存</Button>
+              <Button disabled={Boolean(busy) || !recognitionDisplayCells.length || recognitionDisplayCells.some(cell => !(cell.cell in recognitionValues))} onClick={() => {
+                if (!canEditRecognitionReview()) {setError("入力版が変わりました。セル画像を再取得してください。"); return;}
+                return recognitionReviewMode === "adopt" ? acceptRecognitionReview() : saveRecognitionReview();
+              }}>{recognitionReviewMode === "adopt" ? "確認した値を採用して次へ" : "手入力を保存"}</Button>
             </DialogActions>
           </Dialog>
-          {commonJobStatus ? <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
+          {selectedOcr?.selectable === true && selectedOcr.recognition_acceptance ? <p>読み取り結果は利用者確認済みです。以下は認識実行時のジョブ履歴です。</p> : null}
+          {commonJobStatus ? recognitionReviewPending ? <details><summary>認識ジョブの履歴</summary><JobStatus job={commonJobStatus} showDetails /></details> : <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
           ) : null}
@@ -4354,7 +4466,7 @@ export default function OrderWorkflowV2Page() {
           <div className="summary-primary-card">
             <span className="field-label">注文 / 状態</span>
             <p className="summary-value">{orderId || "-"}</p>
-            <p className="summary-subline">{stateLabel(workflow?.state)}</p>
+            <p className="summary-subline">{currentStateLabel}</p>
           </div>
           <div className="summary-primary-card">
             <span className="field-label">施設</span>
@@ -4369,7 +4481,7 @@ export default function OrderWorkflowV2Page() {
           </div>
           <div className="summary-primary-card">
             <span className="field-label">OCR</span>
-            <p className="summary-value">{ocrResults.length}件 / {formatOcrProgress(workflow)}</p>
+            <p className="summary-value">{ocrResults.length}件 / {recognitionReviewPending ? "読み取り結果の確認待ち" : formatOcrProgress(workflow)}</p>
             <p className="summary-subline">処理時間: {formatElapsedSeconds(workflow?.ocr_job?.elapsed_seconds)}</p>
           </div>
           <div className="summary-primary-card">
@@ -4412,8 +4524,8 @@ export default function OrderWorkflowV2Page() {
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
       {ocrJobErrorMessage && workflow?.ocr_job?.status === "failed" ? (
-        <div className="notice error">
-          <strong>OCR失敗:</strong> {ocrJobErrorMessage}
+        <div className={recognitionReviewPending ? "notice warning" : "notice error"}>
+          {recognitionReviewPending ? <><strong>読み取り結果の確認待ち</strong><details><summary>認識実行時のエラー詳細</summary>{ocrJobErrorMessage}</details></> : <><strong>OCR失敗:</strong> {ocrJobErrorMessage}</>}
           {ocrJobRecoveryAction === "review_or_edit_quad" ? (
             <span>
               {" "}Step1.5で推定4点を確認してください。
@@ -5358,9 +5470,10 @@ export default function OrderWorkflowV2Page() {
                       <p className="digest">{item.artifact_digest || ""}</p>
                       {item.recognition_review && item.recognition_review.count > 0 ? (
                         <div className="notice warning" role="alert">
-                          <strong>要確認: {item.recognition_review.count}セル</strong>
-                          <p>認識画像と読み取り結果が一致しないため、数量は未確定です。</p>
-                          <Button disabled={Boolean(busy)} onClick={() => loadRecognitionReview(item.ocr_result_id)}>
+                          <strong>{item.recognition_acceptance ? "確認済み" : "要確認"}: {item.recognition_review.count}セル</strong>
+                          <p>{item.recognition_acceptance ? "確認した値を採用済みです。読み取り原文と理由は履歴として保持しています。" : "以下の理由で数量の確認が必要です。原文を確認して空欄または数値を指定してください。"}</p>
+                          {!item.recognition_acceptance ? <Button disabled={Boolean(busy)} onClick={() => loadRecognitionAcceptance(item.ocr_result_id)}>読み取り結果を確認して採用</Button> : null}
+                          <Button disabled={Boolean(busy)} onClick={() => openRecognitionResume(item.ocr_result_id)}>
                             セル画像を確認・訂正
                           </Button>
                           <details>
@@ -5369,8 +5482,8 @@ export default function OrderWorkflowV2Page() {
                               {item.recognition_review.cells.map(cell => (
                                 <li key={cell.sheet_cell}>
                                   {cell.sheet_cell}: 「{cell.raw_text}」
-                                  {cell.reason === "hakodate_blank_input_nonempty_prediction"
-                                    ? "（認識画像は白紙）" : "（確認が必要です）"}
+                                  {`（${recognitionReviewReason(cell.reason)}）`}
+                                  {item.recognition_acceptance ? ` → 採用値: ${item.recognition_acceptance.values[cell.sheet_cell] === "" ? "空欄" : item.recognition_acceptance.values[cell.sheet_cell]}` : null}
                                 </li>
                               ))}
                             </ul>
@@ -5431,8 +5544,8 @@ export default function OrderWorkflowV2Page() {
                     </div>
                   </div>
                   <div className="row-actions">
-                    <Button className="btn workflow-ordinary-control" type="button" onClick={() => selectOcr(item.ocr_result_id)} disabled={Boolean(busy) || item.selectable !== true}>
-                      正解にする
+                    <Button className="btn workflow-ordinary-control" type="button" onClick={() => item.selectable === true ? selectOcr(item.ocr_result_id) : loadRecognitionAcceptance(item.ocr_result_id)} disabled={Boolean(busy) || (item.selectable !== true && !item.recognition_review?.count)}>
+                      {item.selectable === true ? "正解にする" : item.recognition_review?.count ? "確認して正解にする" : "正解にする"}
                     </Button>
                     <Button className="btn danger workflow-ordinary-control" type="button" onClick={() => deleteOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
                       完全削除
@@ -6216,7 +6329,7 @@ export default function OrderWorkflowV2Page() {
         <div className="summary-grid summary-grid--compact lineage-summary">
           <div className="summary-primary-card">
             <span>現在状態</span>
-            <p className="summary-value">{stateLabel(workflow?.state)}</p>
+            <p className="summary-value">{currentStateLabel}</p>
           </div>
           <div className="summary-primary-card">
             <span>正解OCR</span>

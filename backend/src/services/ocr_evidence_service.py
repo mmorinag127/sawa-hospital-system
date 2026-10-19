@@ -19,6 +19,7 @@ from src.services import (
     template_resolution_service,
 )
 from src.services.workflow_attempt_guard_service import lock_actual_write_ownership, current_nonworkflow_execution
+from src.services import recognition_acceptance_service as recognition_acceptance
 
 _EVIDENCE_META_KEYS = (
     "job_id",
@@ -141,6 +142,7 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
     if not isinstance(payload, dict):
         return None
     try:
+        accepted = recognition_acceptance.accepted_values(payload)
         target_cells = _extract_hakodate_target_cells(payload)
         evidence_records = _extract_hakodate_evidence_records(payload)
     except ValueError as exc:
@@ -189,6 +191,7 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
         assignment_result = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
             evidence_records=evidence_records,
             target_cells=target_cells,
+            accepted_values=accepted,
         )
         summary = assignment_result.get("summary") if isinstance(assignment_result, dict) else {}
         assigned_target_count = int((summary or {}).get("assigned_target_count") or 0)
@@ -202,7 +205,7 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
         if assigned_target_count <= 0 and not resolved_blank_targets:
             blockers.append("hakodate_assignment_missing")
 
-    if isinstance(canonical_pipeline, dict) and str(canonical_pipeline.get("status") or "").strip().lower() == "blocked":
+    if not accepted and isinstance(canonical_pipeline, dict) and str(canonical_pipeline.get("status") or "").strip().lower() == "blocked":
         blockers.extend(
             str(item).strip()
             for item in (canonical_pipeline.get("blockers") or [])
@@ -752,7 +755,11 @@ class SelectedEvidenceRejected(ValueError):
 
 
 def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
-    payload = row.payload_json or {}
+    try:
+        payload = recognition_acceptance.payload_for_evidence(row)
+        accepted = recognition_acceptance.accepted_values(payload)
+    except (ValueError, KeyError, TypeError) as exc:
+        return str(exc) or "evidence_unusable"
     if any(key in payload for key in ("hakodate_preprocessing", "hakodate_ocr_evidence", "hakodate_target_cell_map", "hakodate_ocr_evidence_records", "hakodate_overlay")) and not isinstance(payload.get("hakodate_canonical_pipeline"), dict):
         return "evidence_unusable"
     if isinstance(payload.get("hakodate_canonical_pipeline"), dict):
@@ -763,22 +770,27 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
         try:
             order_service._validate_hakodate_original_execution(payload)
             original_source = (row.artifact_manifest_json or {}).get("original_hakodate_source")
+            if accepted:
+                original_source = payload[recognition_acceptance.KEY].get("original_hakodate_source")
+                if original_source != order_service._original_hakodate_execution_source(payload):
+                    return "recognition_acceptance_changed"
             if not isinstance(original_source, dict):
                 return "evidence_unusable"
             order_service._validate_hakodate_owned_artifacts(payload, original_source)
             assignment = hakodate_ocr_evidence_service.assign_evidence_to_target_cells(
                 evidence_records=_extract_hakodate_evidence_records(payload),
                 target_cells=_extract_hakodate_target_cells(payload),
+                accepted_values=accepted,
             )
             if assignment.get("blockers"):
                 return "evidence_unusable"
         except (ValueError, KeyError, TypeError) as exc:
             return str(exc) if isinstance(exc, ValueError) and str(exc) else "evidence_unusable"
-    if _has_failed_evidence_status(row.status, payload.get("status"), payload.get("stage")):
+    if not accepted and _has_failed_evidence_status(row.status, payload.get("status"), payload.get("stage")):
         return "evidence_unusable"
     if (row.payload_json or {}).get("canonical_adoption_allowed") is False:
         return "evidence_unusable"
-    if row.status in {"diagnostic_only", "repair_blocked"} or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"}:
+    if (row.status == "diagnostic_only" and not accepted) or row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"}:
         return "evidence_unusable"
     if row.producer_version == "legacy-cache-mirror/v1":
         return "evidence_unusable"
@@ -788,7 +800,7 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun) -> str | None:
             return "evidence_unusable"
         if (execution.get("workflow_attempt_id") is None) != (execution.get("workflow_revision") is None):
             return "evidence_unusable"
-        if execution.get("disposition") not in ("pipeline_result", "accepted"):
+        if execution.get("disposition") not in ("pipeline_result", "accepted") and not (accepted and execution.get("disposition") == "rejected"):
             return "evidence_unusable"
     return None
 
@@ -817,10 +829,13 @@ def _serialize_evidence_run(
     include_payload: bool,
 ) -> dict[str, Any]:
     payload_json = _extract_evidence_payload(row.payload_json if isinstance(row.payload_json, dict) else {})
+    acceptance = (row.artifact_manifest_json or {}).get(recognition_acceptance.KEY)
+    if acceptance is not None:
+        payload_json = copy.deepcopy(row.payload_json)
     manifest = copy.deepcopy(row.artifact_manifest_json) if isinstance(row.artifact_manifest_json, dict) else None
-    capabilities = _build_capabilities(payload_json)
+    capabilities = _build_capabilities(recognition_acceptance.payload_for_evidence(row) if acceptance is not None else payload_json)
     capabilities["legacy_editable"] = bool(str(row.schema_version or "").startswith("v1_legacy"))
-    if row.status == "diagnostic_only":
+    if row.status == "diagnostic_only" and acceptance is None:
         capabilities = {key: False for key in capabilities}
     degraded_reasons = _build_degraded_reasons(payload_json, capabilities)
     serialized = {

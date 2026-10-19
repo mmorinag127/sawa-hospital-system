@@ -906,7 +906,8 @@ def _ensure_ocr_job_lineage(
 
 
 def _evidence_selection_blocker(row: OrderOcrEvidenceRun) -> str | None:
-    if row.status == "diagnostic_only":
+    from src.services.recognition_acceptance_service import KEY
+    if row.status == "diagnostic_only" and KEY not in (row.artifact_manifest_json or {}):
         return "ocr_diagnostic_result_not_selectable"
     if row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"} or row.producer_version == "legacy-cache-mirror/v1":
         return "legacy_ocr_evidence_not_selectable"
@@ -2798,6 +2799,7 @@ def mark_ocr_run_completed(
 
 
 def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[str, Any]:
+    from src.services.recognition_acceptance_service import KEY
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
     manifest = row.artifact_manifest_json if isinstance(row.artifact_manifest_json, dict) else {}
     hakodate_overlay = payload.get("hakodate_overlay") if isinstance(payload.get("hakodate_overlay"), dict) else {}
@@ -2812,6 +2814,7 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         signed_url = _inspection_call("sign_url", getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), sheet_review_base_uri)
         sheet_review_base_url = _normalize_id(signed_url)
     overlay_status = "ready" if overlay_url else "missing"
+    selectable = _inspection_call("selectability", ocr_evidence_service.evidence_run_is_selectable, row)
     return {
         "ocr_result_id": row.id,
         "order_id": row.order_id,
@@ -2823,8 +2826,9 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool) -> dict[s
         "selected": selected,
         "execution_lineage": copy.deepcopy(payload.get("_ocr_execution")),
         "result_disposition": payload["_ocr_execution"].get("disposition") if isinstance(payload.get("_ocr_execution"), dict) else None,
-        "selectable": _inspection_call("selectability", ocr_evidence_service.evidence_run_is_selectable, row),
+        "selectable": selectable,
         "recognition_review": copy.deepcopy(payload.get("hakodate_recognition_review")),
+        "recognition_acceptance": copy.deepcopy(manifest.get(KEY)) if selectable else None,
         "artifact_manifest": manifest,
         "artifact_digest": row.artifact_digest,
         "pipeline_version": payload.get("pipeline_version") or row.producer_version,
@@ -3180,6 +3184,55 @@ def select_ocr_result(
         )
         if template_error:
             return _serialize_workflow(workflow), template_error
+        from src.services.recognition_acceptance_service import KEY
+        if KEY in (ocr_result.artifact_manifest_json or {}):
+            if (meta.get("latest_ocr_result_id") != ocr_result.id
+                    or meta.get("ocr_job_id") != (ocr_result.payload_json or {}).get("_ocr_execution", {}).get("job_id")):
+                return None, "recognition_review_result_changed"
+            if workflow.draft_id and workflow.evidence_run_id != ocr_result.id:
+                return None, "recognition_acceptance_saved_draft_conflict"
+            try:
+                captured = capture_reparse_read_input(session, order)
+                captured["selected_pdf_receipt"] = capture_selected_pdf_receipt(session, order)
+                if not verify_selected_pdf_receipt(session, captured["selected_pdf_receipt"]):
+                    return None, "selected_pdf_input_mismatch"
+                _get_order_service_module()._validate_selected_hakodate_artifacts(
+                    ocr_evidence_service._serialize_evidence_run(ocr_result, include_payload=True), captured)
+            except ValueError as exc:
+                return None, str(exc)
+        if workflow.evidence_run_id == normalized_ocr_result_id and workflow.draft_id:
+            # Re-selecting reviewed evidence must not destroy an operator's draft.
+            draft = session.get(OrderSheetDraft, workflow.draft_id)
+            if draft is None or draft.order_id != order.id or draft.base_evidence_run_id != ocr_result.id:
+                return None, "saved_sheet_evidence_lineage_mismatch"
+            if workflow.state == "ocr_failed" and KEY in (ocr_result.artifact_manifest_json or {}):
+                # Reconcile only the reviewed OCR failure, using existing lineage
+                # and saved-sheet readiness. Unrelated blockers remain visible.
+                previous_state = workflow.state
+                workflow.state = "draft_ready"
+                next_state = _canonical_workflow_v2_state(workflow, meta)
+                workflow.state = previous_state
+                next_headline, next_action = _WORKFLOW_STATE_UI.get(next_state, (workflow.headline, workflow.primary_action))
+                review_blockers = {"evidence_unusable", "ocr_result_execution_lineage_mismatch", "hakodate_ocr_quantity_unresolved"}
+                remaining = [item for item in (workflow.blockers_json or []) if item not in review_blockers]
+                remaining.extend(item for item in (draft.blockers_json or []) if item not in remaining)
+                remaining.extend(item for item in (draft.draft_sheet_json or {}).get("blockers", []) if item not in remaining)
+                checked = _serialize_workflow_checked(session, order=order, workflow=workflow)
+                remaining.extend(item for item in checked.get("blockers", []) if item not in review_blockers and item not in remaining)
+                resolution = _workflow_menu_amount_resolution(session, order, workflow)
+                if resolution.get("status") == "unresolved" and resolution.get("blocker") not in remaining:
+                    remaining.append(resolution["blocker"])
+                # Source capture may refresh this identity-map row. Publish the
+                # transition only after all shared readiness reads have finished.
+                workflow.state = next_state
+                workflow.headline = next_headline
+                workflow.primary_action = next_action
+                workflow.blockers_json = remaining
+                if remaining:
+                    workflow.primary_action = "edit_sheet"
+            workflow.last_transition_at = _now()
+            revision_error = _finalize_workflow_mutation(session, workflow)
+            return _serialize_workflow(workflow), revision_error
         if workflow.evidence_run_id != normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
@@ -3799,11 +3852,13 @@ def _saved_sheet_with_target_cell_map(
         return serialized
     try:
         _get_order_service_module()._validate_selected_hakodate_artifacts(source_input["evidence"], source_input)
+        from src.services.recognition_acceptance_service import payload_for_evidence
+        reviewed_payload = payload_for_evidence(source_input["evidence"])
         assignment = _get_order_service_module()._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
             order_id=order.id,
             facility_id=facility_id,
             template_id=template_id or None,
-            payload=evidence_payload,
+            payload=reviewed_payload,
             facility_config=source_input["configured_input"]["facility"],
         )
     except (ValueError, KeyError, TypeError) as exc:
@@ -4214,7 +4269,8 @@ def _build_sheet_from_selected_ocr(
         if evidence_run_override is not None and not snapshots_equal(evidence_run_override, serialized):
             return None, "candidate_evidence_changed"
         evidence_snapshot = copy.deepcopy({column.key: getattr(evidence, column.key) for column in evidence.__table__.columns})
-        payload = copy.deepcopy(evidence.payload_json) if isinstance(evidence.payload_json, dict) else None
+        from src.services.recognition_acceptance_service import payload_for_evidence
+        payload = payload_for_evidence(evidence)
         meta = _workflow_meta(workflow)
         context_error = _workflow_v2_projection_context_error(meta)
         if context_error:
