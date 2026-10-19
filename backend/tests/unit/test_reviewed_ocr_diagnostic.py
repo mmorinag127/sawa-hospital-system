@@ -3,7 +3,9 @@ from copy import deepcopy
 from datetime import datetime
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 from types import SimpleNamespace
@@ -290,20 +292,28 @@ def test_both_offline_processes_run_with_no_credentials_and_private_cleanup(
 
 
 def test_workflow_run_blocks_have_bash_syntax():
-    workflow = yaml.load((ROOT / ".github/workflows/diagnose-reviewed-ocr.yml").read_text(), Loader=yaml.BaseLoader)
-    for step in workflow["jobs"]["diagnose"]["steps"]:
+    workflow = yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
+    for step in workflow["jobs"]["diagnose-reviewed-ocr"]["steps"]:
         if "run" in step:
             result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
             assert result.returncode == 0, step["name"]
 
 
 def test_dedicated_workflow_is_manual_owner_staging_nondeploy_and_summary_only():
-    text = (ROOT / ".github/workflows/diagnose-reviewed-ocr.yml").read_text()
-    workflow = yaml.load(text, Loader=yaml.BaseLoader)
-    assert set(workflow["on"]) == {"workflow_dispatch"}
-    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
-    assert set(workflow["jobs"]) == {"diagnose"}
-    job = workflow["jobs"]["diagnose"]
+    raw = (ROOT / ".github/workflows/deploy-stg.yml").read_text()
+    workflow = yaml.load(raw, Loader=yaml.BaseLoader)
+    text = raw.split("  diagnose-reviewed-ocr:\n", 1)[1].split("\n  diagnose-contact-replay:", 1)[0]
+    assert not (ROOT / ".github/workflows/diagnose-reviewed-ocr.yml").exists()
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["mode"]["options"] == ["normal", "recover-web-image"]
+    assert inputs["mode"]["description"] == "Normal deployment or explicitly approved web image recovery"
+    assert inputs["diagnose_reviewed_ocr"]["type"] == "boolean"
+    assert inputs["diagnose_reviewed_ocr"]["default"] == "false"
+    job = workflow["jobs"]["diagnose-reviewed-ocr"]
+    assert job["needs"] == "source-gate"
+    assert "needs.source-gate.result == 'success'" in job["if"]
+    assert "inputs.mode == 'normal'" in job["if"]
+    assert "inputs.diagnose_reviewed_ocr == true" in job["if"]
     for boundary in ("github.actor == github.repository_owner", "github.triggering_actor == github.repository_owner",
         "refs/heads/develop", "workflow_dispatch", diag.REPOSITORY):
         assert boundary in job["if"]
@@ -337,3 +347,172 @@ def test_real_guard_delegation_and_separate_offline_process_are_not_replaced():
     assert 'for build in ("headless", "gui")' in source
     assert 'sha(data) == entry["sha256"]' in source
     assert '"input_hashes": before' in source
+
+
+def staging_workflow():
+    return yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
+
+
+def dispatch_environment():
+    return {"PATH": os.defpath, "GITHUB_REPOSITORY": diag.REPOSITORY,
+        "GITHUB_REF": "refs/heads/develop", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "DEPLOY_MODE": "normal", "REPOSITORY_OWNER": "mmorinag127",
+        "REVIEWED_DIAGNOSTIC": "true", "REVIEWED_DIAGNOSTIC_JSON": "true",
+        "ACTOR": "mmorinag127", "TRIGGERING_ACTOR": "mmorinag127",
+        "RECOVERY_CONFIRMATION": "", "EXPECTED_REVISION": "", "EXPECTED_IMAGE": "",
+        "OCR_MANIFEST": "", "OCR_EXISTING_RUN": "", "MENU_MANIFEST": "", "REVIEW_ORDER": "",
+        "OUTPUT_ORDER": "", "OUTPUT_DATE": "", "VERIFY_MENU": "false", "CONTACT_REPLAY": "false"}
+
+
+def mode_validation(env):
+    step = staging_workflow()["jobs"]["source-gate"]["steps"][0]
+    return subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("GITHUB_REPOSITORY", "other/repo"), ("GITHUB_REF", "refs/heads/main"),
+    ("GITHUB_EVENT_NAME", "push"), ("GITHUB_EVENT_NAME", "repository_dispatch"),
+    ("REPOSITORY_OWNER", "other"), ("ACTOR", "other"), ("TRIGGERING_ACTOR", "other"),
+    ("RECOVERY_CONFIRMATION", "RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES"),
+    ("EXPECTED_REVISION", "web-stg-reviewed"), ("EXPECTED_IMAGE", "image"),
+    ("OCR_MANIFEST", "manifest"), ("OCR_EXISTING_RUN", "123"), ("MENU_MANIFEST", "manifest"),
+    ("REVIEW_ORDER", "ORD581f55d6"), ("OUTPUT_ORDER", "ORD581f55d6"), ("OUTPUT_DATE", "2026-10-19"),
+    ("VERIFY_MENU", "true"), ("CONTACT_REPLAY", "true"),
+    ("VERIFY_MENU", "unknown"), ("CONTACT_REPLAY", "unknown"),
+    ("DEPLOY_MODE", "recover-web-image"), ("DEPLOY_MODE", "diagnose-reviewed-ocr"),
+])
+def test_diagnostic_mode_rejects_foreign_context_and_every_conflicting_input(key, value, tmp_path):
+    env = dispatch_environment()
+    env[key] = value
+    assert mode_validation(env).returncode != 0
+    outcomes, outputs = dispatch_route(env, tmp_path)
+    assert outcomes["source-gate"] == "failure" and outputs == {}
+    assert all(result == "skipped" for name, result in outcomes.items() if name != "source-gate")
+
+
+def test_valid_diagnostic_disables_both_change_outputs(tmp_path):
+    env = dispatch_environment()
+    assert mode_validation(env).returncode == 0
+    env["GITHUB_OUTPUT"] = str(tmp_path / "outputs")
+    changes = next(s for s in staging_workflow()["jobs"]["source-gate"]["steps"] if s.get("id") == "changes")
+    subprocess.run(["bash", "-c", changes["run"]], env=env, check=True, capture_output=True)
+    assert (tmp_path / "outputs").read_text() == "backend_changed=false\nfrontend_changed=false\n"
+
+
+def job_allowed(expression, **overrides):
+    values = {"inputs.mode": "normal", "inputs.diagnose_reviewed_ocr": True, "github.repository": diag.REPOSITORY,
+        "github.actor": "mmorinag127", "github.triggering_actor": "mmorinag127",
+        "github.repository_owner": "mmorinag127", "github.ref": "refs/heads/develop",
+        "github.event_name": "workflow_dispatch", "inputs.diagnose_saved_contact_replay": False,
+        "needs.source-gate.result": "success", "needs.source-gate.outputs.backend_changed": "false",
+        "needs.source-gate.outputs.frontend_changed": "false", "needs.build-frontend.result": "skipped",
+        "needs.automation-bootstrap.result": "skipped", "needs.menu-master-migration.result": "skipped",
+        "needs.deploy-backend.result": "skipped", **overrides}
+    expression = expression.replace("always()", "True")
+    expression = re.sub(r"\b(?:needs|github|inputs)\.[\w.-]+", lambda m: repr(values[m[0]]), expression)
+    expression = re.sub(r"!(?!=)", "not ", expression)
+    expression = re.sub(r"\btrue\b", "True", expression)
+    return eval("(" + expression.replace("&&", " and ").replace("||", " or ") + ")",
+        {"__builtins__": {}}, {})
+
+
+def dispatch_route(env, tmp_path):
+    jobs = staging_workflow()["jobs"]
+    outcomes = {"source-gate": "success" if mode_validation(env).returncode == 0 else "failure"}
+    outputs = {}
+    if outcomes["source-gate"] == "success":
+        changes = next(s for s in jobs["source-gate"]["steps"] if s.get("id") == "changes")
+        output_file = tmp_path / "route-outputs"
+        subprocess.run(["bash", "-c", changes["run"]], env={**env, "GITHUB_OUTPUT": str(output_file)},
+            check=True, capture_output=True)
+        outputs = dict(line.split("=", 1) for line in output_file.read_text().splitlines())
+    pending = {name: job for name, job in jobs.items() if name != "source-gate"}
+    while pending:
+        ready = []
+        for name, job in pending.items():
+            dependencies = job.get("needs", [])
+            if isinstance(dependencies, str):
+                dependencies = [dependencies]
+            if any(dependency not in outcomes for dependency in dependencies):
+                continue
+            ready.append(name)
+            expression = job["if"]
+            implicit_success = all(outcomes[dependency] == "success" for dependency in dependencies)
+            values = {"inputs.mode": env["DEPLOY_MODE"],
+                "inputs.diagnose_reviewed_ocr": env.get("REVIEWED_DIAGNOSTIC_JSON") == "true",
+                "inputs.diagnose_saved_contact_replay": env.get("CONTACT_REPLAY") == "true",
+                "github.repository": env["GITHUB_REPOSITORY"], "github.ref": env["GITHUB_REF"],
+                "github.event_name": env["GITHUB_EVENT_NAME"], "github.actor": env["ACTOR"],
+                "github.triggering_actor": env["TRIGGERING_ACTOR"],
+                "github.repository_owner": env["REPOSITORY_OWNER"],
+                "needs.source-gate.outputs.backend_changed": outputs.get("backend_changed", ""),
+                "needs.source-gate.outputs.frontend_changed": outputs.get("frontend_changed", ""),
+                **{"needs." + dependency + ".result": outcome for dependency, outcome in outcomes.items()}}
+            allowed = (implicit_success or "always()" in expression) and job_allowed(expression, **values)
+            outcomes[name] = "success" if allowed else "skipped"
+        assert ready, "workflow dependency graph cannot progress"
+        for name in ready:
+            del pending[name]
+    return outcomes, outputs
+
+
+def test_diagnostic_source_gate_and_dependency_graph_disable_every_side_effect_job(tmp_path):
+    jobs = staging_workflow()["jobs"]
+    assert set(jobs) == {"source-gate", "diagnose-reviewed-ocr", "diagnose-contact-replay", "recover-web",
+        "automation-bootstrap", "menu-master-migration", "build-backend", "build-frontend",
+        "deploy-backend", "deploy-frontend"}
+    outcomes, outputs = dispatch_route(dispatch_environment(), tmp_path)
+    assert outputs == {"backend_changed": "false", "frontend_changed": "false"}
+    assert outcomes["source-gate"] == outcomes["diagnose-reviewed-ocr"] == "success"
+    assert all(result == "skipped" for name, result in outcomes.items()
+        if name not in {"source-gate", "diagnose-reviewed-ocr"})
+    expression = jobs["diagnose-reviewed-ocr"]["if"]
+    assert job_allowed(expression)
+    for key, value in [("inputs.diagnose_reviewed_ocr", False), ("inputs.mode", "recover-web-image"),
+        ("github.actor", "other"), ("github.triggering_actor", "other"),
+        ("github.ref", "refs/heads/main"), ("github.repository", "other/repo"),
+        ("github.event_name", "push"), ("needs.source-gate.result", "failure")]:
+        assert not job_allowed(expression, **{key: value})
+
+
+@pytest.mark.parametrize("event,mode", [("push", ""), ("workflow_dispatch", "normal"),
+    ("workflow_dispatch", "recover-web-image")])
+def test_existing_normal_and_recovery_input_guards_still_apply(event, mode):
+    env = dispatch_environment()
+    env.update(GITHUB_EVENT_NAME=event, DEPLOY_MODE=mode,
+        REVIEWED_DIAGNOSTIC="false", REVIEWED_DIAGNOSTIC_JSON="false")
+    if mode == "recover-web-image":
+        env.update(RECOVERY_CONFIRMATION="RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES",
+            EXPECTED_REVISION="web-stg-reviewed", EXPECTED_IMAGE=
+            "asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/frontend@sha256:" + "a" * 64)
+    assert mode_validation(env).returncode == 0
+    if mode == "recover-web-image":
+        env["RECOVERY_CONFIRMATION"] = ""
+    else:
+        env["EXPECTED_REVISION"] = "web-stg-reviewed"
+    assert mode_validation(env).returncode != 0
+
+
+@pytest.mark.parametrize("flag,encoded", [
+    ("true", '"true"'), ("false", '"false"'), ("1", "1"), ("0", "0"),
+    ("True", "true"), ("TRUE", "true"), ("true", "null"), ("true", ""),
+    ("", "true"), ("false", "true"), ("true", "false"), ("", "[]"), ("", "{}"),
+])
+def test_diagnostic_flag_rejects_strings_numbers_missing_or_inconsistent_types(flag, encoded, tmp_path):
+    env = dispatch_environment()
+    env.update(REVIEWED_DIAGNOSTIC=flag, REVIEWED_DIAGNOSTIC_JSON=encoded)
+    assert mode_validation(env).returncode != 0
+    outcomes, outputs = dispatch_route(env, tmp_path)
+    assert outcomes["source-gate"] == "failure" and outputs == {}
+    assert all(result == "skipped" for name, result in outcomes.items() if name != "source-gate")
+
+
+@pytest.mark.parametrize("flag,encoded", [("false", "false"), ("", "null"), ("", "")])
+def test_false_or_absent_diagnostic_keeps_normal_change_outputs(flag, encoded, tmp_path):
+    env = dispatch_environment()
+    env.update(REVIEWED_DIAGNOSTIC=flag, REVIEWED_DIAGNOSTIC_JSON=encoded,
+        GITHUB_OUTPUT=str(tmp_path / "outputs"))
+    assert mode_validation(env).returncode == 0
+    changes = next(s for s in staging_workflow()["jobs"]["source-gate"]["steps"] if s.get("id") == "changes")
+    subprocess.run(["bash", "-c", changes["run"]], env=env, check=True, capture_output=True)
+    assert (tmp_path / "outputs").read_text() == "backend_changed=true\nfrontend_changed=true\n"
