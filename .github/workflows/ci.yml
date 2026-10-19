@@ -136,6 +136,7 @@ jobs:
           set -euo pipefail
           mkdir -p .logs
           python -m pytest \
+            tests/unit/test_ocr_selectability_single_validation.py \
             tests/unit/test_hakodate_review_resolution_root.py \
             tests/unit/test_hakodate_blank_input_review.py \
             tests/unit/test_hakodate_blank_review_persistence.py \
