@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Checkbox, Input, NativeSelect } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import { sawaTheme } from "@sawa/ui";
@@ -6,7 +6,9 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 
 import TopNav from "../../components/TopNav";
-import { apiClient } from "../../services/apiClient";
+import { apiClient, hasActiveSessionAuthHeader } from "../../services/apiClient";
+import { browserSessionKey, subscribeBrowserSession } from "../../services/browserSession";
+import { BulkOcrCommandFailure, runBulkOcrOrder } from "../../services/bulkOcrCommand";
 import {
   fetchFacilityNameMap,
   fetchOrderFacilityCandidates,
@@ -262,6 +264,24 @@ export default function OrdersPage() {
   const [archiveBusyWeek, setArchiveBusyWeek] = useState<string>("");
   const [bulkOcrBusyWeek, setBulkOcrBusyWeek] = useState<string>("");
   const [bulkOcrProgress, setBulkOcrProgress] = useState<string>("");
+  const bulkOcrOperation = useRef<AbortController | null>(null);
+  const bulkOcrMounted = useRef(false);
+
+  useEffect(() => {
+    bulkOcrMounted.current = true;
+    const unsubscribe = subscribeBrowserSession(() => {
+      bulkOcrOperation.current?.abort();
+      bulkOcrOperation.current = null;
+      setBulkOcrBusyWeek("");
+      setBulkOcrProgress("");
+    });
+    return () => {
+      bulkOcrMounted.current = false;
+      unsubscribe();
+      bulkOcrOperation.current?.abort();
+      bulkOcrOperation.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -927,32 +947,11 @@ export default function OrdersPage() {
     );
   };
 
-  const workflowV2StillRunning = (payload: any) => {
-    const state = String(payload?.state || "").trim().toLowerCase();
-    const jobStatus = String(payload?.ocr_job?.status || "").trim().toLowerCase();
-    const jobStage = String(payload?.ocr_job?.processing_stage || "").trim().toLowerCase();
-    return (
-      state === "ocr_running"
-      || state === "rerun_in_progress"
-      || ["running", "pending", "queued", "awaiting_output", "recovering"].includes(jobStatus)
-      || ["queued", "ocr_slot_acquired", "ocr_pipeline", "hakodate_live_pipeline", "persist_evidence", "project_hakodate_sheet"].includes(jobStage)
-    );
-  };
-
-  const waitForWorkflowV2Ocr = async (orderId: string) => {
-    const startedAt = Date.now();
-    const timeoutMs = 20 * 60 * 1000;
-    while (Date.now() - startedAt < timeoutMs) {
-      const res = await apiClient.get(`/orders/${orderId}/workflow-v2`, { timeout: 60000 });
-      if (!workflowV2StillRunning(res.data)) return res.data;
-      await new Promise((resolve) => window.setTimeout(resolve, 5000));
-    }
-    throw new Error("OCR再実行の完了待ちがタイムアウトしました。");
-  };
-
   const rerunOcrWeekGroup = async (group: WeekGroup) => {
+    if (bulkOcrOperation.current || !bulkOcrMounted.current || !hasActiveSessionAuthHeader()) return;
     const orderIds = ocrRerunnableOrderIdsForWeekGroup(group);
     if (!orderIds.length) return;
+    const session = browserSessionKey();
     if (
       !window.confirm(
         `「${group.label}」の注文 ${orderIds.length} 件をOCR再実行します。1件ずつ完了待ちしてから次へ進みます。`,
@@ -960,6 +959,11 @@ export default function OrdersPage() {
     ) {
       return;
     }
+    if (!bulkOcrMounted.current || !hasActiveSessionAuthHeader() || browserSessionKey() !== session) return;
+    const operation = new AbortController();
+    bulkOcrOperation.current = operation;
+    const current = () => bulkOcrMounted.current && bulkOcrOperation.current === operation
+      && !operation.signal.aborted && hasActiveSessionAuthHeader() && browserSessionKey() === session;
     setBulkOcrBusyWeek(group.key);
     setBulkOcrProgress(`0 / ${orderIds.length}`);
     setArchiveNotice("");
@@ -968,19 +972,23 @@ export default function OrdersPage() {
     const failures: string[] = [];
     try {
       for (const [index, orderId] of orderIds.entries()) {
+        if (!current()) return;
         setBulkOcrProgress(`${index + 1} / ${orderIds.length}: ${orderId}`);
         try {
-          await apiClient.post(
-            `/orders/${orderId}/workflow-v2/ocr-runs`,
-            { mode: "hakodate", stale_action: "retry" },
-            { timeout: 60000 },
-          );
-          await waitForWorkflowV2Ocr(orderId);
+          await runBulkOcrOrder(orderId, current, operation.signal);
+          if (!current()) return;
           completed.push(orderId);
         } catch (err: any) {
+          if (!current()) return;
           failures.push(`${orderId}: ${apiErrorText(err, "OCR再実行に失敗しました。")}`);
+          if (!(err instanceof BulkOcrCommandFailure && err.terminal)) {
+            const remaining = orderIds.length - index - 1;
+            if (remaining > 0) failures.push(`終了を確認できないため、残り ${remaining} 件は開始していません。`);
+            break;
+          }
         }
       }
+      if (!current()) return;
       if (completed.length > 0) {
         setArchiveNotice(`「${group.label}」のOCR再実行が ${completed.length} 件完了しました。`);
         setReloadToken((value) => value + 1);
@@ -989,8 +997,11 @@ export default function OrdersPage() {
         setArchiveError(failures.join(" / "));
       }
     } finally {
-      setBulkOcrBusyWeek("");
-      setBulkOcrProgress("");
+      if (bulkOcrMounted.current && bulkOcrOperation.current === operation) {
+        bulkOcrOperation.current = null;
+        setBulkOcrBusyWeek("");
+        setBulkOcrProgress("");
+      }
     }
   };
 
