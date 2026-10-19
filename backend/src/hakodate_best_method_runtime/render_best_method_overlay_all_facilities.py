@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import math
 import sys
 import time
@@ -375,13 +376,17 @@ def _validate_operator_values(operator_values: dict[str, str] | None, expected_s
     return {cell: operator_values[cell] for cell in expected_sheet_cells}
 
 
-def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], truth: dict[str, dict[str, Any]], operator_values: dict[str, str]) -> tuple[list[dict[str, Any]], dict[str, Any], Image.Image]:
+def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], truth: dict[str, dict[str, Any]], operator_values: dict[str, str], recognized_records=None) -> tuple[list[dict[str, Any]], dict[str, Any], Image.Image]:
     contact_sheet, usable_regions, _polygons, skipped_regions = build_recognizer_contact_sheet(
         rectified_fax_bgr=raw_rectified_bgr, regions=regions, line_mask=None, mode="corner_cc",
     )
     records = []
+    originals = {row["sheet_cell"]: row for row in recognized_records} if recognized_records is not None else {}
     for region in sorted(usable_regions + skipped_regions, key=lambda value: int(value.get("ocr_contact_slot_index") or 0)):
         cell = str(region.get("sheet_cell") or region.get("region_id") or "")
+        if recognized_records is not None and cell not in operator_values:
+            records.append(deepcopy(originals[cell]))
+            continue
         value = operator_values[cell]
         records.append({
             **region, "truth": truth.get(cell) or {}, "expected_digits": str((truth.get(cell) or {}).get("expected_digits") or ""),
@@ -390,6 +395,7 @@ def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], 
             "raw_text": "", "pred_digits": value, "score": None, "ocr_candidate": False,
             "ocr_engine": "operator", "recognition_source": "operator", "operator_value": value,
             "supervised_label_source": "operator",
+            **({"original_recognizer_output": deepcopy(originals[cell])} if recognized_records is not None else {}),
         })
     return records, {
         "ocr_seconds": 0.0, "raw_prediction_count": 0, "digit_prediction_count": 0,
@@ -821,6 +827,7 @@ def build_best_method_for_manifest_item(
     checkpoint_callback: Any | None = None,
     recognition_checkpoint: dict[str, Any] | None = None,
     operator_values: dict[str, str] | None = None,
+    recognized_records: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], Image.Image]:
     item = _resolve_item_paths(item)
     facility_code = str(item.get("facility_code") or "")
@@ -879,11 +886,24 @@ def build_best_method_for_manifest_item(
             metadata={"axis_evidence": preprocess_axis_evidence, "rectified_quad_points": pre.get("rectified_quad_points"), "snap_debug": snap_debug},
         )
     try:
-        values = _validate_operator_values(operator_values, expected_sheet_cells)
+        if recognized_records is not None:
+            from src.services.hakodate_ocr_evidence_service import recognition_input_issue
+            if (recognition_checkpoint is None or not isinstance(recognized_records, list)
+                    or any(not isinstance(row, dict) for row in recognized_records)
+                    or [row.get("sheet_cell") for row in recognized_records] != expected_sheet_cells):
+                raise ValueError("recognition_diagnostic_cells_changed")
+            review_cells = [row["sheet_cell"] for row in recognized_records if recognition_input_issue(row)]
+            if not review_cells:
+                raise ValueError("recognition_diagnostic_review_required")
+            values = _validate_operator_values(operator_values, review_cells)
+            if values is None:
+                raise ValueError("recognition_diagnostic_values_required")
+        else:
+            values = _validate_operator_values(operator_values, expected_sheet_cells)
         if values is None:
             records, ocr_metrics, contact_sheet = _run_text_recognizer_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth)
         else:
-            records, ocr_metrics, contact_sheet = _operator_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth, operator_values=values)
+            records, ocr_metrics, contact_sheet = _operator_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth, operator_values=values, recognized_records=recognized_records)
     except Exception as exc:
         if checkpoint_callback is None and recognition_checkpoint is None:
             raise
@@ -1018,7 +1038,12 @@ def build_best_method_for_manifest_item(
     _write_pdf_from_pages([review_page], page_pdf)
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
+    original_by_cell = {row["sheet_cell"]: row for row in recognized_records} if recognized_records is not None else {}
     for original, serialized in zip(records, records_json):
+        if recognized_records is not None and original["sheet_cell"] not in values:
+            serialized.clear()
+            serialized.update(deepcopy(original_by_cell[original["sheet_cell"]]))
+            continue
         for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed", "recognizer_digit_score_threshold", "recognizer_preprocess_observation"):
             if key in original:
                 serialized[key] = original[key]
@@ -1026,6 +1051,8 @@ def build_best_method_for_manifest_item(
             serialized['polygon'] = original.get('polygon')
         if original.get("recognition_source") == "operator":
             serialized.update(operator_value=original["operator_value"], recognition_source="operator", ocr_engine="operator")
+            if "original_recognizer_output" in original:
+                serialized["original_recognizer_output"] = deepcopy(original["original_recognizer_output"])
     records_path.write_text(json.dumps(records_json, ensure_ascii=False, indent=2), encoding="utf-8")
     ocr_regions: list[dict[str, Any]] = []
     for original_record, record in zip(records, records_json):
@@ -1061,10 +1088,10 @@ def build_best_method_for_manifest_item(
         "facility_code": facility_code,
         "order_id": order_id,
         "method": "fax_line_snap_current_frame_noise_text_recognizer_topk",
-        "engine": "operator" if operator_values is not None else TEXT_RECOGNIZER_ENGINE,
+        "engine": "mixed" if recognized_records is not None else "operator" if operator_values is not None else TEXT_RECOGNIZER_ENGINE,
         "postprocess": "none",
         "recognition_checkpoint": checkpoint_reference,
-        "recognition_provenance": "operator" if operator_values is not None else "recognizer",
+        "recognition_provenance": "mixed" if recognized_records is not None else "operator" if operator_values is not None else "recognizer",
         "field_by_col": field_by_col,
         "metrics": metrics,
         "snap_debug": snap_debug,

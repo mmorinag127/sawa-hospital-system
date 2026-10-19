@@ -90,6 +90,9 @@ const weekHistoryFromOrder = (order: OrderSummary) => {
 
 function WeeklyWeightOutputScreen() {
   const router = useRouter();
+  const queryIdentity = JSON.stringify([router.asPath, router.query.date, router.query.week, router.query.status]);
+  const [resolvedQuery, setResolvedQuery] = useState<string | null>(null);
+  const periodReady = router.isReady && resolvedQuery === queryIdentity;
   const [week, setWeek] = useState(currentBusinessWeek());
   const [status, setStatus] = useState("");
   const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: currentBusinessWeek(), savedWeek: "", status: "" } });
@@ -135,6 +138,7 @@ function WeeklyWeightOutputScreen() {
       observedSession = session;
       retire();
     });
+    router.events.on("routeChangeStart", retire);
     return () => {
       mounted.current = false;
       inputGeneration.current += 1;
@@ -143,8 +147,9 @@ function WeeklyWeightOutputScreen() {
       messageGeneration.current += 1;
       subscription.unsubscribe();
       stopSession();
+      router.events.off("routeChangeStart", retire);
     };
-  }, [conditionForm]);
+  }, [conditionForm, router.events]);
 
   const beginOperation = (kind: "list" | "output", conditions: WeeklyWeightConditions) => {
     const operations = kind === "list" ? loadGeneration : downloadGeneration;
@@ -155,7 +160,7 @@ function WeeklyWeightOutputScreen() {
     const captured = { ...conditions };
     const current = () => {
       const values = conditionForm.getValues();
-      return mounted.current && input === inputGeneration.current && operation === operations.current
+      return periodReady && mounted.current && input === inputGeneration.current && operation === operations.current
         && session === browserSessionKey() && captured.week === values.week
         && captured.savedWeek === values.savedWeek && captured.status === values.status;
     };
@@ -172,17 +177,20 @@ function WeeklyWeightOutputScreen() {
     const queryDate = queryValue(router.query.date);
     const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
-    const period = queryWeek ? weeklyWeightPeriod(queryWeek) : queryDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(week);
+    const initialWeek = currentBusinessWeek();
+    const period = queryWeek ? weeklyWeightPeriod(queryWeek) : queryDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(initialWeek);
     if (!period || (queryDate && (!businessPeriodForDate(queryDate) || queryDate < period.start || queryDate > period.end))) {
       conditionForm.reset({ week: "", savedWeek: "", status: queryStatus });
       setMessage("対象期間を確認してください。");
+      setResolvedQuery(queryIdentity);
       return;
     }
     const nextWeek = weekInputForPeriod(period);
     const nextStatus = queryStatus || "";
-    const selection = queryWeek || (queryDate ? "" : week);
+    const selection = queryWeek || (queryDate ? "" : initialWeek);
     conditionForm.reset({ week: nextWeek, savedWeek: selection.includes("@") ? selection : "", status: nextStatus });
-  }, [router.isReady, router.query.date, router.query.status, router.query.week]);
+    setResolvedQuery(queryIdentity);
+  }, [router.isReady, queryIdentity]);
 
   const weekDates = useMemo(() => {
     const period = weeklyWeightPeriod(week);
@@ -263,9 +271,11 @@ function WeeklyWeightOutputScreen() {
   };
 
   useEffect(() => {
-    void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
+    if (periodReady && weeklyWeightConditionsPeriod(conditionForm.getValues())) {
+      void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [resolvedQuery, periodReady]);
 
   const downloadWeeklyWeight = async (conditions: WeeklyWeightConditions) => {
     const owner = beginOperation("output", conditions);
@@ -328,8 +338,8 @@ function WeeklyWeightOutputScreen() {
             <FormTextField<WeeklyWeightConditions> name="status" label="ステータス" select>
               <MenuItem value="">全て</MenuItem><MenuItem value="未着">未着</MenuItem><MenuItem value="要確認">要確認</MenuItem><MenuItem value="確定">確定</MenuItem><MenuItem value="エラー">エラー</MenuItem>
             </FormTextField>
-            <Button type="submit" variant="contained" disabled={loading}>{loading ? "集計中..." : "表示・集計"}</Button>
-            <Button type="button" variant="outlined" disabled={downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
+            <Button type="submit" variant="contained" disabled={!periodReady || loading}>{loading ? "集計中..." : "表示・集計"}</Button>
+            <Button type="button" variant="outlined" disabled={!periodReady || downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
           </Stack>
         </FormProvider>
         <div className="filters">

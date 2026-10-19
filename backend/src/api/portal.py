@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.api.auth import UserContext, automation_system, get_current_user, is_auth_disabled, require_portal_admin
+from src.api.auth import UserContext, automation_system, get_current_user, is_auth_disabled, require_portal_admin, _local_current_user
+from src.api import auth
 from src.db import session_scope
 from src.models.user import AuditLog
 
@@ -29,18 +30,11 @@ def portal_me(system: str | None = None, user: UserContext = Depends(get_current
         raise HTTPException(status_code=400, detail="Unknown system")
     if not user.account:
         raise HTTPException(status_code=403, detail="Registered account required")
-    with session_scope() as session:
-        row = (
-            session.execute(
-                text("SELECT id, account, status FROM users WHERE lower(account) = :account"),
-                {"account": (user.account or "").lower()},
-            ).mappings().first()
-            if user.account
-            else None
-        )
-        if not row or str(row["status"] or "").lower() != "active":
-            raise HTTPException(status_code=403, detail="Active registered user required")
-        systems = _systems(session, row["id"])
+    if auth.AUTH_PROVIDER != "portal":
+        user = _local_current_user(user.account)
+    if user.systems is None:
+        raise HTTPException(status_code=503, detail="Portal authentication unavailable")
+    systems = list(user.systems)
     machine_system = automation_system(user.account)
     if machine_system is not None and systems != [machine_system]:
         raise HTTPException(status_code=403, detail="Automation single-system access required")
@@ -89,7 +83,7 @@ def _require_current_write_actor(session, actor: UserContext, account: str, user
             raise HTTPException(status_code=503, detail="Admin authority lookup unavailable")
         statement = (
             "SELECT id, account, role, status FROM users "
-            "WHERE lower(account) IN (:actor, :account) OR id = :target ORDER BY id"
+            "WHERE lower(trim(account)) IN (:actor, :account) OR id = :target ORDER BY id"
         )
         if dialect == "postgresql":
             # Both administrators editing each other take the same lock order.
@@ -107,7 +101,7 @@ def _require_current_write_actor(session, actor: UserContext, account: str, user
         ):
             raise HTTPException(status_code=409, detail="Admin authority write conflict") from exc
         raise HTTPException(status_code=503, detail="Admin authority lookup unavailable") from exc
-    actors = [row for row in rows if str(row["account"]).lower() == actor_account]
+    actors = [row for row in rows if str(row["account"]).strip().lower() == actor_account]
     if len(actors) != 1 or str(actors[0]["status"]).strip().lower() != "active" or str(actors[0]["role"]).strip().lower() != "admin":
         raise HTTPException(status_code=403, detail="Active registered admin required")
 
@@ -126,7 +120,13 @@ def _save(body: dict, actor: UserContext, user_id: str | None = None):
         raise HTTPException(status_code=400, detail="Invalid user")
     with session_scope() as session:
         _require_current_write_actor(session, actor, account, user_id)
-        existing = session.execute(text("SELECT id FROM users WHERE lower(account)=:account"), {"account": account}).scalar()
+        matches = session.execute(
+            text("SELECT id FROM users WHERE lower(trim(account))=:account"),
+            {"account": account},
+        ).scalars().all()
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail="Account matches multiple users")
+        existing = matches[0] if matches else None
         target = user_id or existing or str(uuid.uuid4())
         if user_id and not session.execute(
             text("SELECT id FROM users WHERE id = :id"), {"id": user_id}
