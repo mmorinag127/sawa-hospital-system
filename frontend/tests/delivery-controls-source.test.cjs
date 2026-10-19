@@ -95,7 +95,7 @@ for (const [name, counts] of Object.entries(expected)) {
   const migration = '5634429';
   const current = execFileSync('git', ['show', migration + ':' + file], { cwd: root, encoding: 'utf8' });
   test(name + ' current approved input/output ownership and receipt functions remain exact', () => {
-    const approved = name === 'daily-delivery-notes' ? 'e206d34' : 'a2ce6ad';
+    const approved = name === 'daily-delivery-notes' ? 'e206d34' : '0796e1a';
     for (const [ancestor, descendant] of [[base, migration], [migration, approved], [approved, 'HEAD']])
       execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
     if (name === 'daily-delivery-notes') execFileSync('git', ['merge-base', '--is-ancestor', 'c5dd90a', approved], { cwd: root });

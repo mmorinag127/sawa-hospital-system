@@ -5411,8 +5411,27 @@ def _weekly_weight_start(target_date: dt_date) -> dt_date:
     return target_date - timedelta(days=(target_date.weekday() + 1) % 7)
 
 
-def _weekly_weight_sheet_title(week_start: dt_date) -> str:
-    week_end = week_start + timedelta(days=6)
+def weekly_weight_period(
+    target_date: dt_date | None = None, *, start: dt_date | None = None, end: dt_date | None = None,
+) -> tuple[dt_date, dt_date]:
+    if (start is None) != (end is None):
+        raise ValueError("weekly_weight_period_pair_required")
+    if start is not None:
+        if (type(start) is not dt_date or type(end) is not dt_date or end < start
+                or (end - start).days > 6 or _weekly_weight_start(start) != _weekly_weight_start(end)):
+            raise ValueError("weekly_weight_period_invalid")
+        if target_date is not None and (type(target_date) is not dt_date or not start <= target_date <= end):
+            raise ValueError("weekly_weight_date_period_mismatch")
+        return start, end
+    if type(target_date) is not dt_date:
+        raise ValueError("weekly_weight_date_required")
+    week_start = _weekly_weight_start(target_date)
+    return week_start, week_start + timedelta(days=6)
+
+
+def _weekly_weight_sheet_title(week_start: dt_date, week_end: dt_date | None = None) -> str:
+    if week_end is None:
+        week_end = week_start + timedelta(days=6)
     return f"{week_start.month}月{week_start.day}日～{week_end.month}月{week_end.day}日"
 
 
@@ -5746,10 +5765,13 @@ def _patch_weekly_weight_package(path: Path, *, sheet_title: str) -> None:
     temp_path.replace(path)
 
 
-def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = None) -> dict[tuple[dt_date, str, str], dict]:
-    week_start = _weekly_weight_start(target_date)
+def _weekly_weight_collect_rows(
+    target_date: dt_date | None, *, status: str | None = None,
+    start: dt_date | None = None, end: dt_date | None = None,
+) -> dict[tuple[dt_date, str, str], dict]:
+    week_start, week_end = weekly_weight_period(target_date, start=start, end=end)
     rows: dict[tuple[dt_date, str, str], dict] = {}
-    for offset in range(7):
+    for offset in range((week_end - week_start).days + 1):
         current_date = week_start + timedelta(days=offset)
         for order_summary in order_service.list_orders_by_line_date(current_date, status=status):
             order_id = str(order_summary.get("id") or "").strip()
@@ -5798,12 +5820,18 @@ def _weekly_weight_collect_rows(target_date: dt_date, *, status: str | None = No
     return rows
 
 
-def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | None = None) -> Path:
-    rows_by_key = _weekly_weight_collect_rows(target_date, status=status)
-    week_start = _weekly_weight_start(target_date)
+def build_weekly_weight_summary_workbook(
+    target_date: dt_date | None = None, *, status: str | None = None,
+    start: dt_date | None = None, end: dt_date | None = None,
+) -> Path:
+    week_start, week_end = weekly_weight_period(target_date, start=start, end=end)
+    explicit_period = start is not None
+    rows_by_key = (_weekly_weight_collect_rows(target_date, status=status, start=start, end=end)
+                   if explicit_period else _weekly_weight_collect_rows(target_date, status=status))
+    day_count = (week_end - week_start).days + 1
     render_keys = [
         (week_start + timedelta(days=offset), daypart, slot)
-        for offset in range(7)
+        for offset in range(day_count)
         for daypart, slots in _WEEKLY_WEIGHT_DAYPART_SLOTS
         for slot in slots
     ]
@@ -5812,10 +5840,18 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
     remaining_keys = set(rows_by_key)
     workbook = _build_weekly_weight_workbook_shell(week_start)
     ws = workbook.worksheets[0]
+    sheet_title = _weekly_weight_sheet_title(week_start, week_end)
+    ws.title = sheet_title
     uses_reference_layout = bool(getattr(workbook, "_weekly_weight_reference_layout", False))
+    if explicit_period:
+        from openpyxl.cell.cell import MergedCell
+        for row in ws.iter_rows(min_row=11, max_row=66, min_col=1, max_col=9):
+            for cell in row:
+                if not isinstance(cell, MergedCell):
+                    cell.value = None
     row_idx = 11
     weekdays = ["(月)", "(火)", "（水）", "(木)", "(金)", "(土)", "（日）"]
-    for offset in range(7):
+    for offset in range(day_count):
         current_date = week_start + timedelta(days=offset)
         day_start = row_idx
         for daypart, slots in _WEEKLY_WEIGHT_DAYPART_SLOTS:
@@ -5835,18 +5871,18 @@ def build_weekly_weight_summary_workbook(target_date: dt_date, *, status: str | 
                 regular_menu = payload.get("regular_menu") or ""
                 ws.cell(row=row_idx, column=9).value = soft_menu if soft_menu and soft_menu != regular_menu else None
                 row_idx += 1
-            if not uses_reference_layout:
+            if explicit_period or not uses_reference_layout:
                 ws.cell(row=part_start, column=2).value = daypart
-        if offset == 0 or not uses_reference_layout:
+        if explicit_period or offset == 0 or not uses_reference_layout:
             ws.cell(row=day_start, column=1).value = datetime(current_date.year, current_date.month, current_date.day)
-        if not uses_reference_layout:
+        if explicit_period or not uses_reference_layout:
             ws.cell(row=day_start + 5, column=1).value = weekdays[current_date.weekday()]
     if remaining_keys:
         raise ValueError("weekly_weight_rows_unconsumed")
-    output_path = OUTPUT_DIR / f"{_weekly_weight_sheet_title(week_start)} Weight.xlsx"
+    output_path = OUTPUT_DIR / f"{sheet_title} Weight.xlsx"
     workbook.save(output_path)
     try:
-        _patch_weekly_weight_package(output_path, sheet_title=_weekly_weight_sheet_title(week_start))
+        _patch_weekly_weight_package(output_path, sheet_title=sheet_title)
     except Exception:
         if rows_by_key:
             raise
