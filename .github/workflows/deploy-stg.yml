@@ -818,7 +818,7 @@ jobs:
           npx --no-install playwright install --with-deps webkit
       - name: Verify opted-in existing OCR workflow-v2 Step2 UI
         id: ocr-ui-verify
-        if: "!cancelled() && steps.ocr-ui-deps.outcome == 'success' && inputs.verify_review_order_id == ''"
+        if: "!cancelled() && steps.ocr-ui-deps.outcome == 'success'"
         env:
           LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
         run: node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live

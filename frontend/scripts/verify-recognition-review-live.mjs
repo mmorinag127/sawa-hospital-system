@@ -22,7 +22,7 @@ export function readonlyRequestAllowed(method, url, externalUrls) {
 
 export function expectedReviewReason(reason) {
   const descriptions = {
-    hakodate_blank_input_nonempty_prediction: '認識入力画像は白紙ですが、文字が読み取られています',
+    hakodate_blank_input_nonempty_prediction: '認識画像は白紙ですが、文字が読み取られています',
     hakodate_ocr_quantity_non_numeric: '数量として解釈できない文字・記号です',
     hakodate_preprocess_ink_loss: '画像の前処理で筆跡が失われた可能性があります',
     hakodate_ocr_quantity_low_confidence: '認識スコアが確認基準を下回っています',
@@ -122,9 +122,11 @@ export async function inspectReview({ identity, source, token, output }) {
     result.phase = 'inspect-flagged-images';
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
+    await page.screenshot({ path: resolve(output, 'review-dialog-top.png'), fullPage: true });
     for (const cell of identity.review.cells) {
       await expect(dialog.getByLabel(cell.sheet_cell, { exact: true })).toBeVisible();
       const image = dialog.getByRole('img', { name: `${cell.sheet_cell}のFAX原画像`, exact: true });
+      await image.scrollIntoViewIfNeeded();
       await expect(image).toBeVisible();
       await expect.poll(() => image.evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true);
       await expect(image.locator('..')).toContainText(`読み取り原文: 「${cell.raw_text}」`);

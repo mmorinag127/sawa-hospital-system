@@ -15,7 +15,7 @@ test('new opt-in keeps the original verifier and uses the same authenticated, pr
   const oldCheck = steps.find(step => step.id === 'ocr-ui-verify');
   const newCheck = steps.find(step => step.name === 'Inspect reviewed OCR confirmation dialog without submitting');
   assert.equal(oldCheck.run, 'node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live');
-  assert.ok(oldCheck.if.includes("inputs.verify_review_order_id == ''"));
+  assert.equal(oldCheck.if, "!cancelled() && steps.ocr-ui-deps.outcome == 'success'");
   assert.ok(newCheck.if.includes("steps.ocr-ui-deps.outcome == 'success'"));
   assert.ok(newCheck.if.includes("inputs.verify_review_order_id != ''"));
   assert.equal(newCheck.env.LIVE_ID_TOKEN, oldCheck.env.LIVE_ID_TOKEN);
