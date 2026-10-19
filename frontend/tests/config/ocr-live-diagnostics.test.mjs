@@ -50,7 +50,9 @@ test('original verification asserts, wait and readonly/external gates remain in 
   const original = execFileSync('git', ['show', `725fd66139927ad60c058145647b79c61d705b44:${file}`], {encoding:'utf8'});
   const current = readFileSync(new URL('../../scripts/verify-ocr-live.mjs', import.meta.url), 'utf8');
   for (const line of original.split('\n').filter(line => /assert\.|await expect\(|waitForLoadState\('networkidle'\)|allowedExternalUrls\.has|allowedMethods\.has|route\.abort|\.click\(\)/.test(line))) {
-    const expected = line.includes("item.pathname.endsWith('/ocr-results')")
+    const expected = line === "      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();"
+      ? "      await expect(card.getByRole('button', {name: '確認して正解にする', exact: true})).toBeEnabled();"
+      : line.includes("item.pathname.endsWith('/ocr-results')")
       ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/inspection')") : line;
     assert.ok(current.includes(expected), expected);
   }
