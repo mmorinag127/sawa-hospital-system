@@ -5,12 +5,17 @@ type Guard = { active: () => boolean; allow: (url: string) => boolean };
 type Position = { token: string; index: number };
 const key = "sawa_navigation";
 const readPosition = (state: unknown): Position | null => {
-  const value = (state as Record<string, Position> | null)?.[key];
-  return typeof value?.token === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value.token) &&
+  const entry = state as Record<string, unknown> | null;
+  const value = entry?.[key] as Position | undefined;
+  return Boolean(entry?.__N) && !entry?.__NA && typeof value?.token === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value.token) &&
     Number.isSafeInteger(value.index) && value.index >= 0 ? value : null;
 };
 // Capture before Next initializes the router and replaces its own history state.
 const documentEntry = typeof window === "undefined" ? null : readPosition(window.history.state);
+let documentInitialized = false;
+const documentOwners = new Set<string>();
+const retireDocumentEntry = () => { documentInitialized = true; };
+if (typeof window !== "undefined") window.addEventListener("popstate", retireDocumentEntry, { capture: true, once: true });
 const Navigation = createContext<{ allow: (url: string) => boolean; register: (guard: Guard) => () => void } | null>(null);
 
 export function NavigationBoundary({ children }: { children: ReactNode }) {
@@ -21,6 +26,7 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
   const guard = useRef<Guard | null>(null);
   const blocked = useRef(false);
   const restoring = useRef(false);
+  const ownsCurrent = useRef<() => boolean>(() => false);
   const [error, setError] = useState("");
   const api = useMemo(() => {
     const clearWhenUnprotected = () => {
@@ -29,6 +35,12 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
     return {
       allow: (url: string) => {
         clearWhenUnprotected();
+        if (guard.current?.active() && !ownsCurrent.current()) {
+          blocked.current = true;
+          restoring.current = false;
+          setError("履歴の位置を確認できません。編集内容を保持して移動を停止しました。");
+          return false;
+        }
         return !blocked.current && !restoring.current && (guard.current?.allow(url) ?? true);
       },
       register: (next: Guard) => {
@@ -45,19 +57,31 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
     const history = window.history;
     const push = history.pushState;
     const replace = history.replaceState;
-    // A reload keeps the document's existing owned history; effect replay keeps the ref.
-    let token = ownerToken.current ??= readPosition(history.state)?.token ?? documentEntry?.token ?? window.crypto.randomUUID();
+    window.removeEventListener("popstate", retireDocumentEntry, true);
+    const initialDocument = !documentInitialized;
+    documentInitialized = true;
+    const present = readPosition(history.state);
+    // Reload authority belongs to initial document setup, never a later remount.
+    let token = ownerToken.current ??= (present && (initialDocument || documentOwners.has(present.token)) ? present.token : null)
+      ?? (initialDocument ? documentEntry?.token : null) ?? window.crypto.randomUUID();
     const position = (state: unknown): Position | null => {
       const value = readPosition(state);
       return value?.token === token ? value : null;
     };
     let current: Position | null = position(history.state) ??
-      (documentEntry?.token === token ? documentEntry : { token, index: 0 });
+      (initialDocument ? (documentEntry?.token === token ? documentEntry : { token, index: 0 }) : null);
     let capturedApproval: unknown = null;
-    replace.call(history, { ...history.state, [key]: current }, "");
+    ownsCurrent.current = () => current !== null && position(history.state)?.index === current.index;
+    if (current) {
+      documentOwners.add(token);
+      replace.call(history, { ...history.state, [key]: current }, "");
+    }
     history.pushState = function (state, unused, url) {
       // Unknown entries have no inferable distance to the prior owned segment.
+      const entry = position(history.state);
+      if (!entry || entry.index !== current?.index) current = null;
       if (!current) token = ownerToken.current = window.crypto.randomUUID();
+      documentOwners.add(token);
       const next = { token, index: current ? current.index + 1 : 0 };
       push.call(this, { ...state, [key]: next }, unused, url);
       current = next;
@@ -124,7 +148,8 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
         }
         return;
       }
-      if (restoring.current || (guard.current?.active() && state.as === liveRouter.current.asPath)) {
+      // Cancel before Next updates its key/scroll bookkeeping for the rejected entry.
+      if (restoring.current || guard.current?.active()) {
         if (!beforePop(state)) event.stopImmediatePropagation();
         else capturedApproval = state;
       } else if (!guard.current?.active()) {
@@ -140,6 +165,7 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
     });
     window.addEventListener("popstate", capturePop, true);
     return () => {
+      ownsCurrent.current = () => false;
       window.removeEventListener("popstate", capturePop, true);
       history.pushState = push;
       history.replaceState = replace;
