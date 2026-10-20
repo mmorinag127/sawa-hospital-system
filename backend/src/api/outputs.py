@@ -6,7 +6,7 @@ from html import escape
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from loguru import logger
 from openpyxl import load_workbook
@@ -25,6 +25,15 @@ from src.services import order_form_service, order_service
 from src.api.auth import require_role
 
 router = APIRouter()
+
+
+@router.post("/validate-received", dependencies=[Depends(require_role("operator"))])
+def validate_received_output(order_id: str = Form(...), kind: str = Form(...), artifact_file: UploadFile = File(...)):
+    from src.services.output_file_validation_service import validate_received_output as validate
+    try:
+        return validate(order_id, kind, artifact_file.file.read())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 CSV_MEDIA_TYPE = "text/csv; charset=ms932"
 

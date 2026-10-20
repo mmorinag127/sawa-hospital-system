@@ -102,11 +102,17 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.equal(jobs["build-backend"].if, backendChanged);
   assert.deepEqual(jobs["deploy-backend"].needs, ["source-gate", "build-backend", "menu-master-migration"]);
   assert.equal(jobs["deploy-backend"].if, backendChanged);
-  assert.deepEqual(jobs["deploy-frontend"].needs, ["source-gate", "automation-bootstrap", "build-frontend", "deploy-backend", "menu-master-migration"]);
+  assert.deepEqual(jobs["deploy-frontend"].needs, ["source-gate", "automation-bootstrap", "build-frontend", "build-agent", "deploy-backend", "menu-master-migration"]);
   assert.equal(jobs["deploy-frontend"].if.replace(/\s+/g, " ").trim(),
     "always() && needs.source-gate.result == 'success' && needs.source-gate.outputs.frontend_changed == 'true' && " +
-    "needs.build-frontend.result == 'success' && (needs.source-gate.outputs.backend_changed == 'false' || " +
+    "needs.build-frontend.result == 'success' && needs.build-agent.result == 'success' && (needs.source-gate.outputs.backend_changed == 'false' || " +
     "(needs.automation-bootstrap.result == 'success' && needs.menu-master-migration.result == 'success' && needs.deploy-backend.result == 'success'))");
+  assert.deepEqual(jobs["build-agent"].needs, ["source-gate", "build-backend"]);
+  assert.deepEqual(jobs["build-agent"].permissions, {contents: "read", "id-token": "write"});
+  const agentAuth = jobs["build-agent"].steps.filter(step => step.uses === "google-github-actions/auth@v3");
+  assert.equal(agentAuth.length, 1);
+  assert.equal(agentAuth[0].with.workload_identity_provider, "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}");
+  assert.equal(agentAuth[0].with.service_account, "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}");
   assert.match(prodWorkflow, /python scripts\/portal_automation_db_bootstrap\.py/);
   for (const workflow of [stgWorkflow, prodWorkflow]) {
     assert.doesNotMatch(workflow, /register_automation_user\.py/);

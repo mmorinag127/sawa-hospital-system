@@ -388,7 +388,7 @@ def test_hakodate_assignment_blocks_target_fields_not_in_facility_template():
     assert "hakodate_target_field_unmapped" in assignment["blockers"]
 
 
-def test_hakodate_assignment_accepts_legacy_unknown_spacer_target_field():
+def test_hakodate_assignment_rejects_unresolved_legacy_spacer_target_field():
     _clear_facilities()
     facility_service.list_facilities()
     config_service.reload_configs()
@@ -425,15 +425,14 @@ def test_hakodate_assignment_accepts_legacy_unknown_spacer_target_field():
         ]},
     }
 
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
-        order_id="ORD-test-legacy-spacer",
-        facility_id="FAC00001",
-        template_id=config_service.get_facility_config("FAC00001")["fax_template_id"],
-        facility_config=config_service.get_facility_config("FAC00001"),
-        payload=payload,
-    )
-
-    assert assignment["blockers"] == ["hakodate_target_field_unmapped"]
+    with pytest.raises(ValueError, match="hakodate_target_role_unresolved"):
+        order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+            order_id="ORD-test-legacy-spacer",
+            facility_id="FAC00001",
+            template_id=config_service.get_facility_config("FAC00001")["fax_template_id"],
+            facility_config=config_service.get_facility_config("FAC00001"),
+            payload=payload,
+        )
 
 
 def test_explicit_quantity_diet_type_db_override_is_not_used_as_facility_template():

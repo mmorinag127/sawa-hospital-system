@@ -1,0 +1,256 @@
+"""Gemini Interactions bridge. Only the same bound local MCP tools can act."""
+import asyncio
+from decimal import Decimal, ROUND_CEILING
+import json
+import hashlib
+import os
+import re
+from urllib.parse import quote
+from uuid import uuid4
+
+import httpx
+
+from .managed import Managed, SYSTEM
+from .mcp_server import call_local
+from .store import Conflict
+from .tasks import TASKS
+
+QUIET = {'requires_action', 'completed', 'failed', 'cancelled', 'incomplete'}
+SETTINGS = ('GEMINI_AGENT_MODEL', 'GEMINI_AGENT_INPUT_USD_PER_MILLION', 'GEMINI_AGENT_OUTPUT_USD_PER_MILLION')
+
+
+class RequestRejected(Conflict):
+    """An explicit validation/auth rejection has no unknown running interaction."""
+
+
+def command_identity(interaction_id, call_id):
+    """Stable local receipt ID also satisfies native question-reference schemas."""
+    return 'gemini_' + hashlib.sha256(json.dumps([interaction_id,call_id],separators=(',',':')).encode()).hexdigest()
+
+
+def content(blocks):
+    result = []
+    for block in blocks:
+        if block['type'] == 'text': result.append({'type': 'text', 'text': block['text']})
+        elif block['type'] == 'image' and block['source']['type'] == 'base64':
+            result.append({'type': 'image', 'data': block['source']['data'], 'mime_type': block['source']['media_type']})
+        else: raise Conflict('Geminiへ渡せないツール結果です')
+    return result
+
+
+def function_result(blocks):
+    # A Content[] result is the multimodal protocol, even when all blocks are text.
+    # Gemini 2.5 accepts textual function results but rejects that protocol.
+    if all(block['type'] == 'text' for block in blocks):
+        return '\n'.join(block['text'] for block in blocks)
+    return content(blocks)
+
+
+class Gemini(Managed):
+    def missing(self):
+        missing = [key for key in SETTINGS if not os.environ.get(key)]
+        if not os.environ.get('GEMINI_API_KEY'): missing.insert(0, 'GEMINI_API_KEY')
+        return missing
+
+    def pin(self, ident):
+        previous = [e['payload'] for e in self.store.events(ident) if e['kind'] == 'gemini_binding']
+        if previous: return previous[-1]
+        if self.missing(): raise Conflict('Gemini接続設定が未完了です：' + ', '.join(self.missing()))
+        model = os.environ['GEMINI_AGENT_MODEL']
+        if not re.fullmatch(r'gemini-[a-zA-Z0-9._-]+', model): raise ValueError('Geminiモデル名が不正です')
+        rates = [Decimal(os.environ[key]) for key in SETTINGS[1:]]
+        if any(not r.is_finite() or r <= 0 for r in rates): raise ValueError('Geminiの入力・出力単価は正の数で設定してください')
+        maximum = int(os.environ.get('GEMINI_AGENT_MAX_OUTPUT_TOKENS', '4096'))
+        if not 1 <= maximum <= 65536: raise ValueError('Geminiの最大出力トークン数が不正です')
+        value = dict(model=model, input_rate=str(rates[0]), output_rate=str(rates[1]), max_output_tokens=maximum)
+        self.store.event(ident, 'gemini_binding', value)
+        return value
+
+    async def request(self, method, path='', body=None):
+        if self.client is None:
+            self.client = httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10), trust_env=False, follow_redirects=False)
+        response = await self.client.request(method, 'https://generativelanguage.googleapis.com/v1beta/interactions' + path,
+            headers={'x-goog-api-key': os.environ['GEMINI_API_KEY']}, json=body)
+        if not response.is_success:
+            error = RequestRejected if response.status_code in (400, 401, 403, 404, 422) else Conflict
+            raise error('Gemini APIが処理を拒否しました（HTTP ' + str(response.status_code) + '）。自動再送はしません。')
+        return response.json()
+
+    def checkpoint(self, ident, state):
+        self.store.event(ident, 'gemini_state', state)
+
+    def state(self, ident):
+        return next((e['payload'] for e in reversed(self.store.events(ident)) if e['kind'] == 'gemini_state'), None)
+
+    def current(self, ident, generation):
+        run = self.store.get(ident)
+        if run['generation'] != generation or run['status'] != 'running': raise Conflict('依頼は停止または変更されました')
+        return run
+
+    async def _start(self, run):
+        self.pin(run['id'])
+        await self.sandbox.start(run)
+        if self.store.get(run['id'])['generation'] != run['generation']: raise Conflict('依頼は停止されました')
+        self.store.update(run['id'], status='running')
+        text = TASKS[run['task_id']]['instruction'] if run.get('task_id') in TASKS else run['instruction']
+        text += '\n利用者の選択：' + json.dumps(run.get('task_inputs', {}), ensure_ascii=False)
+        text += '\n添付原本：' + json.dumps([e['payload'] for e in self.store.events(run['id']) if e['kind'] == 'source'], ensure_ascii=False)
+        await self.follow(run['id'], {'type': 'user.message', 'content': [{'type': 'text', 'text': text}]})
+
+    async def follow(self, ident, event):
+        old = self.tasks.get(ident)
+        if old and not old.done(): raise Conflict('既にイベントを処理中です')
+        run = self.store.get(ident)
+        self.current(ident, run['generation'])
+        state = self.state(ident)
+        if event['type'] == 'user.custom_tool_result':
+            if not state or state.get('pending') != event['custom_tool_use_id']: raise Conflict('回答するGeminiの質問が一致しません')
+            call = state['calls'][state['index']]
+            state['results'].append({'type': 'function_result', 'call_id': call['id'], 'name': call['name'], 'result': function_result(event['content'])})
+            state['index'] += 1; state['pending'] = None
+            self.checkpoint(ident, state)
+            inputs = None
+        else:
+            if state and state.get('pending'): raise Conflict('先に表示中の質問へ回答してください')
+            inputs = content(event['content'])
+            state = None
+        self.tasks[ident] = asyncio.create_task(self.consume_gemini(ident, run['generation'], state, inputs))
+
+    def record_usage(self, ident, interaction):
+        usage = interaction.get('usage')
+        keys = ('total_input_tokens', 'total_output_tokens', 'total_thought_tokens')
+        if not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in keys):
+            raise Conflict('Geminiのトークン利用量が未確定です。予約額を保持します')
+        self.store.event(ident, 'gemini_usage', {'id': interaction['id'], 'usage': usage})
+        by_id = {}
+        for event in self.store.events(ident):
+            if event['kind'] == 'gemini_usage':
+                value = event['payload']; old = by_id.get(value['id'], {})
+                by_id[value['id']] = {k: max(old.get(k, 0), value['usage'][k]) for k in keys}
+        pin = self.pin(ident)
+        totals = {k: sum(row[k] for row in by_id.values()) for k in keys}
+        amount = (Decimal(totals[keys[0]]) * Decimal(pin['input_rate']) +
+                  Decimal(totals[keys[1]] + totals[keys[2]]) * Decimal(pin['output_rate'])) / 10000
+        self.store.usage(ident, {**totals, 'provider': 'gemini', 'basis': 'configured_token_rates', 'estimated': True,
+            'model': pin['model'], 'rates': pin, 'list_cost': {'currency': 'USD', 'amount': str(int(amount.to_integral_value(rounding=ROUND_CEILING)))}})
+
+    def unsettled(self, ident):
+        dispatches, responses = set(), set()
+        for e in self.store.events(ident):
+            if e['kind'] == 'gemini_dispatch': dispatches.add(e['payload']['id'])
+            if e['kind'] == 'gemini_response': responses.add(e['payload']['dispatch'])
+            if e['kind'] == 'gemini_rejected': responses.add(e['payload']['dispatch'])
+        return dispatches - responses
+
+    async def refresh_usage(self, ident, release=False):
+        ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_response'))
+        if not ids: raise Conflict('Geminiの実行結果が未確定です。予約額を保持します')
+        for interaction_id in ids:
+            value = await self.request('GET', '/' + quote(interaction_id, safe=''))
+            if value.get('id') != interaction_id: raise Conflict('Gemini実行IDが一致しません')
+            if release and value.get('status') not in QUIET: raise Conflict('Geminiの停止確認待ちです')
+            self.record_usage(ident, value)
+        if release:
+            if self.unsettled(ident): raise Conflict('Geminiの送信結果が未確定です。再送せず予約額を保持します')
+            self.store.usage(ident, self.store.get(ident)['usage'], terminal=True)
+        return value
+
+    async def consume_gemini(self, ident, generation, state, inputs):
+        try:
+            while True:
+                run = self.current(ident, generation)
+                if state:
+                    while state['index'] < len(state['calls']):
+                        self.current(ident, generation)
+                        call = state['calls'][state['index']]
+                        command = command_identity(state['interaction'], call['id'])
+                        result = await call_local(self.mcp, self.tools, ident, generation, call['name'], call['arguments'], command)
+                        if result.get('waiting_input') or result.get('needs_operator_confirmation'):
+                            state['pending'] = command; self.checkpoint(ident, state)
+                            self.store.event(ident, 'operator_wait', {'command_id': command, 'result': result})
+                            return
+                        blocks = result.get('_content') or [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]
+                        state['results'].append({'type': 'function_result', 'call_id': call['id'], 'name': call['name'], 'result': function_result(blocks)})
+                        state['index'] += 1; self.checkpoint(ident, state)
+                        if self.store.get(ident)['status'] == 'completed':
+                            await self.sandbox.stop(ident)
+                            await self.refresh_usage(ident, release=True)
+                            return
+                    inputs = state['results']
+                run = self.current(ident, generation)
+                if run['spent'] >= run['cap']:
+                    self.store.update(ident, status='budget_reached'); await self.sandbox.stop(ident); return
+                pin = self.pin(ident)
+                body = {'model': pin['model'], 'input': inputs, 'system_instruction': SYSTEM,
+                    'store': True, 'background': False, 'generation_config': {'max_output_tokens': pin['max_output_tokens']},
+                    'tools': [{'type': 'function', 'name': d['name'], 'description': d['description'], 'parameters': d['input_schema']} for d in self.tools.definitions(run['domains'])]}
+                if run['session_id']: body['previous_interaction_id'] = run['session_id']
+                dispatch = uuid4().hex
+                self.store.event(ident, 'gemini_dispatch', {'id': dispatch})
+                try:
+                    value = await self.request('POST', body=body)
+                except RequestRejected:
+                    self.store.event(ident, 'gemini_rejected', {'dispatch': dispatch})
+                    raise
+                interaction_id = value.get('id')
+                if not isinstance(interaction_id, str) or not interaction_id: raise Conflict('Geminiの実行IDがありません')
+                self.store.event(ident, 'gemini_response', {'id': interaction_id, 'dispatch': dispatch})
+                self.store.update(ident, session_id=interaction_id)
+                self.current(ident, generation)
+                while value.get('status') in ('in_progress', 'queued'):
+                    await asyncio.sleep(.5)
+                    self.current(ident, generation)
+                    value = await self.request('GET', '/' + quote(interaction_id, safe=''))
+                    if value.get('id') != interaction_id: raise Conflict('Gemini実行IDが一致しません')
+                self.current(ident, generation)
+                self.record_usage(ident, value)
+                if value.get('status') not in ('requires_action', 'completed'): raise Conflict('Geminiの応答が完了しませんでした')
+                calls = []
+                for step in value.get('steps', []):
+                    if step['type'] == 'function_call': calls.append(step)
+                    elif step['type'] == 'model_output': self.store.event(ident, 'agent.message', {'content': step.get('content', [])})
+                if not calls:
+                    self.store.update(ident, status='waiting_input')
+                    self.store.event(ident, 'notice', {'message': '応答が終了しました。業務完了証跡がないため完了扱いにしていません。'})
+                    return
+                if len({c['id'] for c in calls}) != len(calls): raise Conflict('Geminiのツール呼出しIDが重複しています')
+                state = {'interaction': interaction_id, 'calls': calls, 'results': [], 'index': 0, 'pending': None}
+                self.checkpoint(ident, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.store.event(ident, 'error', {'message': '接続またはツール処理に失敗しました。再送せず結果照合が必要です。', 'class': type(exc).__name__})
+            await self.stop(ident)
+            if self.store.get(ident)['status'] == 'stopped': self.store.update(ident, status='reconciliation_required')
+
+    async def stop(self, ident):
+        previous = self.store.get(ident)
+        if previous['status'] in ('stopped', 'rolled_back'): return
+        restored = previous['status'] == 'rollback_stop_pending'
+        self.store.fence(ident)
+        for task in (self.starting.get(ident), self.tasks.get(ident)):
+            if task and not task.done() and task is not asyncio.current_task():
+                task.cancel(); await asyncio.gather(task, return_exceptions=True)
+        await self.sandbox.stop(ident)
+        ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_response'))
+        try:
+            for interaction_id in ids:
+                path = '/' + quote(interaction_id, safe='')
+                value = await self.request('GET', path)
+                if value.get('id') != interaction_id: raise Conflict('Gemini実行IDが一致しません')
+                if value.get('status') not in QUIET:
+                    await self.request('POST', path + '/cancel')
+                    for _ in range(20):
+                        value = await self.request('GET', path)
+                        if value.get('id') != interaction_id: raise Conflict('Gemini実行IDが一致しません')
+                        if value.get('status') in QUIET: break
+                        await asyncio.sleep(.25)
+                    else: raise Conflict('Geminiの停止確認待ちです')
+            if self.unsettled(ident): raise Conflict('Geminiの送信結果が未確定です')
+            if ids: await self.refresh_usage(ident, release=True)
+            else: self.store.update(ident, reserved=0)
+        except Exception:
+            self.store.update(ident, status='rollback_stop_pending' if restored else 'stop_pending')
+            self.store.event(ident, 'notice', {'message': '業務書込みは停止しました。Gemini側の停止・料金確認は未完了で、予約額を保持しています。'})
+            return
+        self.store.update(ident, status='rolled_back' if restored else 'stopped')

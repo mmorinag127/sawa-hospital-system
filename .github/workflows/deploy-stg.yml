@@ -6,6 +6,8 @@ on:
       - develop
     paths:
       - "backend/**"
+      - "agent_runtime/**"
+      - "experiments/agent_assistant/**"
       - "frontend/**"
       - "ocr_pipeline/**"
       - "scripts/**"
@@ -302,6 +304,7 @@ jobs:
             --build-arg SHIFT_WEB_PROXY_TARGET=https://shift-web-stg-avlnzjjrca-dt.a.run.app \
             --build-arg SCHOOL_LUNCH_WEB_PROXY_TARGET=https://price-web-stg-avlnzjjrca-dt.a.run.app \
             --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=$GOOGLE_OAUTH_CLIENT_ID" \
+            --build-arg NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=true \
             --build-arg "NEXT_PUBLIC_GIT_SHA=$GITHUB_SHA" \
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --label "sawa.git_sha=$GITHUB_SHA" --label sawa.release_branch=develop \
@@ -438,12 +441,12 @@ jobs:
           fi
           git cat-file -e "${before}^{commit}"
           git diff --name-only "$before" "$after" > /tmp/changed-files.txt
-          if grep -Eq '^(backend|ocr_pipeline)/|^scripts/|^Taskfile.yml$|^\.github/workflows/deploy-stg\.yml$' /tmp/changed-files.txt; then
+          if grep -Eq '^(backend|ocr_pipeline|agent_runtime|experiments/agent_assistant)/|^scripts/|^Taskfile.yml$|^\.github/workflows/deploy-stg\.yml$' /tmp/changed-files.txt; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -Eq '^frontend/|^scripts/|^Taskfile.yml$|^\.github/workflows/deploy-stg\.yml$' /tmp/changed-files.txt; then
+          if grep -Eq '^(frontend|agent_runtime|experiments/agent_assistant)/|^scripts/|^Taskfile.yml$|^\.github/workflows/deploy-stg\.yml$' /tmp/changed-files.txt; then
             echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
@@ -622,6 +625,7 @@ jobs:
             --build-arg "SHIFT_WEB_PROXY_TARGET=${SHIFT_WEB_URL}" \
             --build-arg "SCHOOL_LUNCH_WEB_PROXY_TARGET=${SCHOOL_LUNCH_WEB_URL}" \
             --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
+            --build-arg NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=true \
             --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
             --label "sawa.git_sha=${GITHUB_SHA}" \
@@ -744,13 +748,14 @@ jobs:
       - source-gate
       - automation-bootstrap
       - build-frontend
+      - build-agent
       - deploy-backend
       - menu-master-migration
     if: |
       always() &&
       needs.source-gate.result == 'success' &&
       needs.source-gate.outputs.frontend_changed == 'true' &&
-      needs.build-frontend.result == 'success' &&
+      needs.build-frontend.result == 'success' && needs.build-agent.result == 'success' &&
       (needs.source-gate.outputs.backend_changed == 'false' ||
        (needs.automation-bootstrap.result == 'success' &&
         needs.menu-master-migration.result == 'success' && needs.deploy-backend.result == 'success'))
@@ -776,6 +781,7 @@ jobs:
         id: deploy-web
         env:
           IMAGE: ${{ needs.build-frontend.outputs.image }}
+          SAWA_AGENT_RUNTIME_IMAGE: ${{ needs.build-agent.outputs.image }}
           GOOGLE_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
           DEPLOY_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
         run: |
@@ -947,3 +953,50 @@ jobs:
           path: tmp/ocr-live/
           retention-days: 7
           if-no-files-found: error
+
+  build-agent:
+    needs: [source-gate, build-backend]
+    if: >-
+      always() && needs.source-gate.result == 'success' &&
+      needs.source-gate.outputs.frontend_changed == 'true' &&
+      (needs.source-gate.outputs.backend_changed == 'false' || needs.build-backend.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build immutable agent runtime
+        id: image
+        env:
+          BUILT_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/develop
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          gcloud auth configure-docker asia-northeast2-docker.pkg.dev --quiet
+          image="asia-northeast2-docker.pkg.dev/$PROJECT_ID/backend/agent-runtime:stg-$GITHUB_SHA"
+          base_image="$BUILT_BACKEND_IMAGE"
+          if [ -z "$base_image" ]; then
+            base_image="$(gcloud run services describe worker-stg --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containers[0].image)')"
+          fi
+          [[ "$base_image" == asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend* ]]
+          base_digest="$(gcloud artifacts docker images describe "$base_image" --format='value(image_summary.digest)')"
+          [[ "$base_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          base_image="asia-northeast2-docker.pkg.dev/$PROJECT_ID/backend/backend@$base_digest"
+          docker buildx build --platform linux/amd64 --push --metadata-file /tmp/agent-build.json \
+            --label "sawa.git_sha=$GITHUB_SHA" --label sawa.component=agent-runtime \
+            --build-arg "BASE_IMAGE=$base_image" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --file agent_runtime/Dockerfile --tag "$image" .
+          digest="$(python3 -c 'import json; print(json.load(open("/tmp/agent-build.json"))["containerimage.digest"])')"
+          echo "image=${image%:*}@$digest" >> "$GITHUB_OUTPUT"

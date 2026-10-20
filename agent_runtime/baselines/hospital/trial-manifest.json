@@ -1,0 +1,21 @@
+{
+  "purpose": "sawa-agent-isolated-trial",
+  "data": "Clean formal fixture before pending FAX registration",
+  "facility_id": "FAC00001",
+  "week": "2026-01@2026-01-04~2026-01-10",
+  "pdf_sha256": "ece4e4a98a394402eea9f8b9396fcaaddfcae6b28d8e5f1a5c2a6075a3e1df0e",
+  "original_uri": "official-FAC00001-2026-01-04-10.pdf",
+  "staging_scope": "explicit synthetic data; isolated per request copies only",
+  "initialization": "register-declared-pending-faxes-v1",
+  "pending_sources": [
+    {
+      "path": "official-FAC00001-2026-01-04-10.pdf",
+      "sha256": "ece4e4a98a394402eea9f8b9396fcaaddfcae6b28d8e5f1a5c2a6075a3e1df0e",
+      "facility_id": "FAC00001",
+      "week": "2026-01@2026-01-04~2026-01-10",
+      "service_date": "2026-01-08",
+      "received_at": "2026-01-08T09:00:00",
+      "message_id": "stg-trial-fax-20260108"
+    }
+  ]
+}

@@ -116,6 +116,38 @@ def test_actual_shape_resolves_both_active_and_intended_without_new_env(cloud_ca
         assert 'private-password' not in repr(config)
 
 
+def test_staging_agent_sidecar_keeps_ingress_as_database_source(cloud_case):
+    documents, _, _, _ = cloud_case
+    for descriptor in (documents['services', 'web-stg']['spec']['template'],
+                       documents['revisions', 'web-stg-r1']):
+        front = descriptor['spec']['containers'][0]
+        front['ports'] = [{'containerPort': 8080}]
+        descriptor['spec']['containers'].append({'name': 'agent-runtime',
+            'image': gate.REGISTRY + '/sawahospitalsystem/backend/agent-runtime@sha256:' + 'b' * 64,
+            'env': [{'name': 'DB_HOST', 'value': 'must-not-be-used-as-ingress'}]})
+    assert load().db_name == 'orders'
+
+
+@pytest.mark.parametrize('case', ['worker', 'name', 'tag', 'ports', 'order', 'third'])
+def test_ambiguous_or_unknown_sidecar_stops_before_database(cloud_case, case):
+    documents, _, _, _ = cloud_case
+    service = 'worker-stg' if case == 'worker' else 'web-stg'
+    for descriptor in (documents['services', service]['spec']['template'],
+                       documents['revisions', service + '-r1']):
+        containers = descriptor['spec']['containers']
+        containers[0]['ports'] = [{'containerPort': 8080}]
+        agent = {'name': 'agent-runtime',
+            'image': gate.REGISTRY + '/sawahospitalsystem/backend/agent-runtime@sha256:' + 'b' * 64}
+        containers.append(agent)
+        if case == 'name': agent['name'] = 'unknown'
+        if case == 'tag': agent['image'] = agent['image'].split('@')[0] + ':latest'
+        if case == 'ports': agent['ports'] = [{'containerPort': 8128}]
+        if case == 'order': containers.reverse()
+        if case == 'third': containers.append(deepcopy(agent))
+    with pytest.raises(gate.StagingConfigBlocked, match='single-runtime-container-required'):
+        load(service)
+
+
 def mutate(case, documents, images):
     service = 'worker-stg' if case == 'worker-mismatch' else 'web-stg'
     template = documents['services',service]['spec']['template']

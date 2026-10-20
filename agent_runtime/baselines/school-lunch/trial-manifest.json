@@ -1,0 +1,5 @@
+{
+  "purpose": "sawa-agent-isolated-trial",
+  "data": "authored_school_fixture_only",
+  "staging_scope": "explicit synthetic data; isolated per request copies only"
+}

@@ -1,0 +1,9 @@
+{
+  "operator_account": "morinaga.masahiro@gmail.com",
+  "provider": "gemini",
+  "gemini_model": "gemini-3.8-flash",
+  "input_usd_per_million": "0.75",
+  "output_usd_per_million": "3.75",
+  "max_output_tokens": "8192",
+  "notice": "試用データのコピー内で実行します。共有業務データには反映しません。"
+}

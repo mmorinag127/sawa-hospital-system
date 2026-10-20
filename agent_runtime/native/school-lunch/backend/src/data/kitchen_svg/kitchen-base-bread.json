@@ -1,0 +1,6742 @@
+{
+  "schema_version": 1,
+  "supply_area_ids": ["inspection", "rice-store", "fridge-b2", "freezer-b1", "freezer-a", "fridge-c1", "fridge-c2", "fridge-d1", "fridge-d2", "ingredient-store"],
+  "template_id": "kitchen-bread",
+  "version": 8,
+  "view_box": [
+    0,
+    0,
+    1900,
+    1340
+  ],
+  "routing_bounds": [
+    304,
+    78,
+    1885,
+    1260
+  ],
+  "points": [
+    {
+      "id": "rice-cooker-west",
+      "name": "炊飯器・西接続",
+      "aliases": [
+        "炊飯器"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-rice-cooker-west",
+      "x": 375.0,
+      "y": 237.5,
+      "equipment_id": "rice-cooker",
+      "side": "西接続",
+      "label_anchor": "detail-rice-cooker-number"
+    },
+    {
+      "id": "rice-cooker-north",
+      "name": "炊飯器・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-rice-cooker-north",
+      "x": 420.0,
+      "y": 210.0,
+      "equipment_id": "rice-cooker",
+      "side": "北接続",
+      "label_anchor": "detail-rice-cooker-number"
+    },
+    {
+      "id": "rice-cooker-east",
+      "name": "炊飯器・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-rice-cooker-east",
+      "x": 465.0,
+      "y": 237.5,
+      "equipment_id": "rice-cooker",
+      "side": "東接続",
+      "label_anchor": "detail-rice-cooker-number"
+    },
+    {
+      "id": "rice-cooker-south",
+      "name": "炊飯器・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-rice-cooker-south",
+      "x": 420.0,
+      "y": 265.0,
+      "equipment_id": "rice-cooker",
+      "side": "南接続",
+      "label_anchor": "detail-rice-cooker-number"
+    },
+    {
+      "id": "lift-west",
+      "name": "エレベーター・西接続",
+      "aliases": [
+        "エレベーター"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-lift-west",
+      "x": 505.0,
+      "y": 347.5,
+      "equipment_id": "lift",
+      "side": "西接続"
+    },
+    {
+      "id": "lift-north",
+      "name": "エレベーター・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-lift-north",
+      "x": 531.0,
+      "y": 320.0,
+      "equipment_id": "lift",
+      "side": "北接続"
+    },
+    {
+      "id": "lift-east",
+      "name": "エレベーター・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-lift-east",
+      "x": 557.0,
+      "y": 347.5,
+      "equipment_id": "lift",
+      "side": "東接続"
+    },
+    {
+      "id": "lift-south",
+      "name": "エレベーター・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-lift-south",
+      "x": 531.0,
+      "y": 375.0,
+      "equipment_id": "lift",
+      "side": "南接続"
+    },
+    {
+      "id": "serving-table-north-west",
+      "name": "盛付作業台北・西接続",
+      "aliases": [
+        "盛付作業台北",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-north-west",
+      "x": 466.0,
+      "y": 464.0,
+      "equipment_id": "serving-table-north",
+      "side": "西接続"
+    },
+    {
+      "id": "serving-table-north-north",
+      "name": "盛付作業台北・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-north-north",
+      "x": 511.5,
+      "y": 426.0,
+      "equipment_id": "serving-table-north",
+      "side": "北接続"
+    },
+    {
+      "id": "serving-table-north-east",
+      "name": "盛付作業台北・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-north-east",
+      "x": 557.0,
+      "y": 464.0,
+      "equipment_id": "serving-table-north",
+      "side": "東接続"
+    },
+    {
+      "id": "serving-table-north-south",
+      "name": "盛付作業台北・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-north-south",
+      "x": 511.5,
+      "y": 502.0,
+      "equipment_id": "serving-table-north",
+      "side": "南接続"
+    },
+    {
+      "id": "serving-table-south-west",
+      "name": "盛付作業台南・西接続",
+      "aliases": [
+        "盛付作業台南",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-south-west",
+      "x": 462.0,
+      "y": 723.5,
+      "equipment_id": "serving-table-south",
+      "side": "西接続"
+    },
+    {
+      "id": "serving-table-south-north",
+      "name": "盛付作業台南・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-south-north",
+      "x": 507.5,
+      "y": 566.0,
+      "equipment_id": "serving-table-south",
+      "side": "北接続"
+    },
+    {
+      "id": "serving-table-south-east",
+      "name": "盛付作業台南・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-south-east",
+      "x": 553.0,
+      "y": 723.5,
+      "equipment_id": "serving-table-south",
+      "side": "東接続"
+    },
+    {
+      "id": "serving-table-south-south",
+      "name": "盛付作業台南・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-table-south-south",
+      "x": 507.5,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続"
+    },
+    {
+      "id": "steamer-side-unit-west",
+      "name": "スチコン横の無記名設備・西接続",
+      "aliases": [
+        "スチコン横の無記名設備"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-side-unit-west",
+      "x": 590.0,
+      "y": 467.0,
+      "equipment_id": "steamer-side-unit",
+      "side": "西接続"
+    },
+    {
+      "id": "steamer-side-unit-north",
+      "name": "スチコン横の無記名設備・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-side-unit-north",
+      "x": 611.5,
+      "y": 429.0,
+      "equipment_id": "steamer-side-unit",
+      "side": "北接続"
+    },
+    {
+      "id": "steamer-side-unit-east",
+      "name": "スチコン横の無記名設備・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-side-unit-east",
+      "x": 633.0,
+      "y": 467.0,
+      "equipment_id": "steamer-side-unit",
+      "side": "東接続"
+    },
+    {
+      "id": "steamer-side-unit-south",
+      "name": "スチコン横の無記名設備・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-side-unit-south",
+      "x": 611.5,
+      "y": 505.0,
+      "equipment_id": "steamer-side-unit",
+      "side": "南接続"
+    },
+    {
+      "id": "steamer-top-west",
+      "name": "上部小スチコン・西接続",
+      "aliases": [
+        "上部小スチコン",
+        "スチコン"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-top-west",
+      "x": 635.0,
+      "y": 465.5,
+      "equipment_id": "steamer-top",
+      "side": "西接続"
+    },
+    {
+      "id": "steamer-top-north",
+      "name": "上部小スチコン・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-top-north",
+      "x": 667.5,
+      "y": 453.0,
+      "equipment_id": "steamer-top",
+      "side": "北接続"
+    },
+    {
+      "id": "steamer-top-east",
+      "name": "上部小スチコン・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-top-east",
+      "x": 700.0,
+      "y": 465.5,
+      "equipment_id": "steamer-top",
+      "side": "東接続"
+    },
+    {
+      "id": "steamer-top-south",
+      "name": "上部小スチコン・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-top-south",
+      "x": 667.5,
+      "y": 478.0,
+      "equipment_id": "steamer-top",
+      "side": "南接続"
+    },
+    {
+      "id": "steamer-1-west",
+      "name": "スチコン1・西接続",
+      "aliases": [
+        "スチコン1",
+        "スチコン"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-1-west",
+      "x": 635.0,
+      "y": 522.0,
+      "equipment_id": "steamer-1",
+      "side": "西接続"
+    },
+    {
+      "id": "steamer-1-north",
+      "name": "スチコン1・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-1-north",
+      "x": 667.5,
+      "y": 478.0,
+      "equipment_id": "steamer-1",
+      "side": "北接続"
+    },
+    {
+      "id": "steamer-1-east",
+      "name": "スチコン1・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-1-east",
+      "x": 700.0,
+      "y": 522.0,
+      "equipment_id": "steamer-1",
+      "side": "東接続"
+    },
+    {
+      "id": "steamer-1-south",
+      "name": "スチコン1・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-1-south",
+      "x": 667.5,
+      "y": 566.0,
+      "equipment_id": "steamer-1",
+      "side": "南接続"
+    },
+    {
+      "id": "steamer-2-west",
+      "name": "スチコン2・西接続",
+      "aliases": [
+        "スチコン2",
+        "スチコン"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-2-west",
+      "x": 635.0,
+      "y": 615.0,
+      "equipment_id": "steamer-2",
+      "side": "西接続"
+    },
+    {
+      "id": "steamer-2-north",
+      "name": "スチコン2・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-2-north",
+      "x": 667.5,
+      "y": 566.0,
+      "equipment_id": "steamer-2",
+      "side": "北接続"
+    },
+    {
+      "id": "steamer-2-east",
+      "name": "スチコン2・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-2-east",
+      "x": 700.0,
+      "y": 615.0,
+      "equipment_id": "steamer-2",
+      "side": "東接続"
+    },
+    {
+      "id": "steamer-2-south",
+      "name": "スチコン2・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-steamer-2-south",
+      "x": 667.5,
+      "y": 664.0,
+      "equipment_id": "steamer-2",
+      "side": "南接続"
+    },
+    {
+      "id": "jet-oven-west",
+      "name": "ゼットオーブン・西接続",
+      "aliases": [
+        "ゼットオーブン"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-west",
+      "x": 843.0,
+      "y": 322.5,
+      "equipment_id": "jet-oven",
+      "side": "西接続"
+    },
+    {
+      "id": "jet-oven-north",
+      "name": "ゼットオーブン・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-north",
+      "x": 913.0,
+      "y": 294.0,
+      "equipment_id": "jet-oven",
+      "side": "北接続"
+    },
+    {
+      "id": "jet-oven-east",
+      "name": "ゼットオーブン・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-east",
+      "x": 983.0,
+      "y": 322.5,
+      "equipment_id": "jet-oven",
+      "side": "東接続"
+    },
+    {
+      "id": "jet-oven-south",
+      "name": "ゼットオーブン・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-south",
+      "x": 913.0,
+      "y": 351.0,
+      "equipment_id": "jet-oven",
+      "side": "南接続"
+    },
+    {
+      "id": "fryer-north-west",
+      "name": "フライヤー中央上・西接続",
+      "aliases": [
+        "フライヤー中央上",
+        "フライヤー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-north-west",
+      "x": 843.0,
+      "y": 428.5,
+      "equipment_id": "fryer-north",
+      "side": "西接続"
+    },
+    {
+      "id": "fryer-north-north",
+      "name": "フライヤー中央上・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-north-north",
+      "x": 913.0,
+      "y": 404.0,
+      "equipment_id": "fryer-north",
+      "side": "北接続"
+    },
+    {
+      "id": "fryer-north-east",
+      "name": "フライヤー中央上・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-north-east",
+      "x": 983.0,
+      "y": 428.5,
+      "equipment_id": "fryer-north",
+      "side": "東接続"
+    },
+    {
+      "id": "fryer-north-south",
+      "name": "フライヤー中央上・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-north-south",
+      "x": 913.0,
+      "y": 453.0,
+      "equipment_id": "fryer-north",
+      "side": "南接続"
+    },
+    {
+      "id": "jet-oven-side-box-west",
+      "name": "ゼットオーブン横の無記名枠・西接続",
+      "aliases": [
+        "ゼットオーブン横の無記名枠"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-side-box-west",
+      "x": 995.0,
+      "y": 322.5,
+      "equipment_id": "jet-oven-side-box",
+      "side": "西接続"
+    },
+    {
+      "id": "jet-oven-side-box-north",
+      "name": "ゼットオーブン横の無記名枠・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-side-box-north",
+      "x": 1015.0,
+      "y": 294.0,
+      "equipment_id": "jet-oven-side-box",
+      "side": "北接続"
+    },
+    {
+      "id": "jet-oven-side-box-east",
+      "name": "ゼットオーブン横の無記名枠・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-side-box-east",
+      "x": 1035.0,
+      "y": 322.5,
+      "equipment_id": "jet-oven-side-box",
+      "side": "東接続"
+    },
+    {
+      "id": "jet-oven-side-box-south",
+      "name": "ゼットオーブン横の無記名枠・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-jet-oven-side-box-south",
+      "x": 1015.0,
+      "y": 351.0,
+      "equipment_id": "jet-oven-side-box",
+      "side": "南接続"
+    },
+    {
+      "id": "fryer-south-west",
+      "name": "フライヤー中央下・西接続",
+      "aliases": [
+        "フライヤー中央下",
+        "フライヤー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-south-west",
+      "x": 843.0,
+      "y": 524.5,
+      "equipment_id": "fryer-south",
+      "side": "西接続"
+    },
+    {
+      "id": "fryer-south-north",
+      "name": "フライヤー中央下・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-south-north",
+      "x": 913.0,
+      "y": 503.0,
+      "equipment_id": "fryer-south",
+      "side": "北接続"
+    },
+    {
+      "id": "fryer-south-east",
+      "name": "フライヤー中央下・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-south-east",
+      "x": 983.0,
+      "y": 524.5,
+      "equipment_id": "fryer-south",
+      "side": "東接続"
+    },
+    {
+      "id": "fryer-south-south",
+      "name": "フライヤー中央下・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-south-south",
+      "x": 913.0,
+      "y": 546.0,
+      "equipment_id": "fryer-south",
+      "side": "南接続"
+    },
+    {
+      "id": "fryer-east-west",
+      "name": "フライヤー東側・西接続",
+      "aliases": [
+        "フライヤー東側",
+        "フライヤー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-east-west",
+      "x": 1085.0,
+      "y": 466.0,
+      "equipment_id": "fryer-east",
+      "side": "西接続"
+    },
+    {
+      "id": "fryer-east-north",
+      "name": "フライヤー東側・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-east-north",
+      "x": 1111.5,
+      "y": 404.0,
+      "equipment_id": "fryer-east",
+      "side": "北接続"
+    },
+    {
+      "id": "fryer-east-east",
+      "name": "フライヤー東側・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-east-east",
+      "x": 1138.0,
+      "y": 466.0,
+      "equipment_id": "fryer-east",
+      "side": "東接続"
+    },
+    {
+      "id": "fryer-east-south",
+      "name": "フライヤー東側・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fryer-east-south",
+      "x": 1111.5,
+      "y": 528.0,
+      "equipment_id": "fryer-east",
+      "side": "南接続"
+    },
+    {
+      "id": "hot-kitchen-table-west",
+      "name": "加熱室作業台・西接続",
+      "aliases": [
+        "加熱室作業台",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-hot-kitchen-table-west",
+      "x": 841.0,
+      "y": 641.5,
+      "equipment_id": "hot-kitchen-table",
+      "side": "西接続"
+    },
+    {
+      "id": "hot-kitchen-table-north",
+      "name": "加熱室作業台・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-hot-kitchen-table-north",
+      "x": 912.0,
+      "y": 592.0,
+      "equipment_id": "hot-kitchen-table",
+      "side": "北接続"
+    },
+    {
+      "id": "hot-kitchen-table-east",
+      "name": "加熱室作業台・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-hot-kitchen-table-east",
+      "x": 983.0,
+      "y": 641.5,
+      "equipment_id": "hot-kitchen-table",
+      "side": "東接続"
+    },
+    {
+      "id": "hot-kitchen-table-south",
+      "name": "加熱室作業台・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-hot-kitchen-table-south",
+      "x": 912.0,
+      "y": 691.0,
+      "equipment_id": "hot-kitchen-table",
+      "side": "南接続"
+    },
+    {
+      "id": "food-container-west",
+      "name": "食缶・西接続",
+      "aliases": [
+        "食缶"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-food-container-west",
+      "x": 735.0,
+      "y": 733.0,
+      "equipment_id": "food-container",
+      "side": "西接続"
+    },
+    {
+      "id": "food-container-north",
+      "name": "食缶・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-food-container-north",
+      "x": 774.0,
+      "y": 713.0,
+      "equipment_id": "food-container",
+      "side": "北接続"
+    },
+    {
+      "id": "food-container-east",
+      "name": "食缶・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-food-container-east",
+      "x": 813.0,
+      "y": 733.0,
+      "equipment_id": "food-container",
+      "side": "東接続"
+    },
+    {
+      "id": "food-container-south",
+      "name": "食缶・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-food-container-south",
+      "x": 774.0,
+      "y": 753.0,
+      "equipment_id": "food-container",
+      "side": "南接続"
+    },
+    {
+      "id": "cooling-bath-west",
+      "name": "冷却・西接続",
+      "aliases": [
+        "冷却"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-cooling-bath-west",
+      "x": 775.0,
+      "y": 798.0,
+      "equipment_id": "cooling-bath",
+      "side": "西接続"
+    },
+    {
+      "id": "cooling-bath-north",
+      "name": "冷却・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-cooling-bath-north",
+      "x": 813.0,
+      "y": 772.0,
+      "equipment_id": "cooling-bath",
+      "side": "北接続"
+    },
+    {
+      "id": "cooling-bath-east",
+      "name": "冷却・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-cooling-bath-east",
+      "x": 851.0,
+      "y": 798.0,
+      "equipment_id": "cooling-bath",
+      "side": "東接続"
+    },
+    {
+      "id": "cooling-bath-south",
+      "name": "冷却・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-cooling-bath-south",
+      "x": 813.0,
+      "y": 824.0,
+      "equipment_id": "cooling-bath",
+      "side": "南接続"
+    },
+    {
+      "id": "dewatering-machine-west",
+      "name": "脱水機・西接続",
+      "aliases": [
+        "脱水機"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dewatering-machine-west",
+      "x": 783.0,
+      "y": 902.0,
+      "equipment_id": "dewatering-machine",
+      "side": "西接続"
+    },
+    {
+      "id": "dewatering-machine-north",
+      "name": "脱水機・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dewatering-machine-north",
+      "x": 813.5,
+      "y": 878.0,
+      "equipment_id": "dewatering-machine",
+      "side": "北接続"
+    },
+    {
+      "id": "dewatering-machine-east",
+      "name": "脱水機・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dewatering-machine-east",
+      "x": 844.0,
+      "y": 902.0,
+      "equipment_id": "dewatering-machine",
+      "side": "東接続"
+    },
+    {
+      "id": "dewatering-machine-south",
+      "name": "脱水機・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dewatering-machine-south",
+      "x": 813.5,
+      "y": 926.0,
+      "equipment_id": "dewatering-machine",
+      "side": "南接続"
+    },
+    {
+      "id": "fish-prep-table-west",
+      "name": "魚肉前処理作業台・西接続",
+      "aliases": [
+        "魚肉前処理作業台",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fish-prep-table-west",
+      "x": 1588.0,
+      "y": 296.5,
+      "equipment_id": "fish-prep-table",
+      "side": "西接続"
+    },
+    {
+      "id": "fish-prep-table-north",
+      "name": "魚肉前処理作業台・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fish-prep-table-north",
+      "x": 1655.0,
+      "y": 267.0,
+      "equipment_id": "fish-prep-table",
+      "side": "北接続"
+    },
+    {
+      "id": "fish-prep-table-east",
+      "name": "魚肉前処理作業台・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fish-prep-table-east",
+      "x": 1722.0,
+      "y": 296.5,
+      "equipment_id": "fish-prep-table",
+      "side": "東接続"
+    },
+    {
+      "id": "fish-prep-table-south",
+      "name": "魚肉前処理作業台・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-fish-prep-table-south",
+      "x": 1655.0,
+      "y": 326.0,
+      "equipment_id": "fish-prep-table",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-mixer-north-west",
+      "name": "ミキサー北・西接続",
+      "aliases": [
+        "ミキサー北",
+        "ミキサー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-north-west",
+      "x": 1327.0,
+      "y": 404.5,
+      "equipment_id": "vegetable-mixer-north",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-mixer-north-north",
+      "name": "ミキサー北・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-north-north",
+      "x": 1386.5,
+      "y": 378.0,
+      "equipment_id": "vegetable-mixer-north",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-mixer-north-east",
+      "name": "ミキサー北・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-north-east",
+      "x": 1446.0,
+      "y": 404.5,
+      "equipment_id": "vegetable-mixer-north",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-mixer-north-south",
+      "name": "ミキサー北・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-north-south",
+      "x": 1386.5,
+      "y": 431.0,
+      "equipment_id": "vegetable-mixer-north",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-sink-west-west",
+      "name": "野菜加工シンク西・西接続",
+      "aliases": [
+        "野菜加工シンク西",
+        "シンク"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-west-west",
+      "x": 1162.0,
+      "y": 511.5,
+      "equipment_id": "vegetable-sink-west",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-sink-west-north",
+      "name": "野菜加工シンク西・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-west-north",
+      "x": 1192.0,
+      "y": 454.0,
+      "equipment_id": "vegetable-sink-west",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-sink-west-east",
+      "name": "野菜加工シンク西・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-west-east",
+      "x": 1222.0,
+      "y": 511.5,
+      "equipment_id": "vegetable-sink-west",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-sink-west-south",
+      "name": "野菜加工シンク西・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-west-south",
+      "x": 1192.0,
+      "y": 569.0,
+      "equipment_id": "vegetable-sink-west",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-worktable-north-west",
+      "name": "野菜加工作業台北・西接続",
+      "aliases": [
+        "野菜加工作業台北",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-north-west",
+      "x": 1386.0,
+      "y": 513.0,
+      "equipment_id": "vegetable-worktable-north",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-worktable-north-north",
+      "name": "野菜加工作業台北・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-north-north",
+      "x": 1447.5,
+      "y": 480.0,
+      "equipment_id": "vegetable-worktable-north",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-worktable-north-east",
+      "name": "野菜加工作業台北・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-north-east",
+      "x": 1509.0,
+      "y": 513.0,
+      "equipment_id": "vegetable-worktable-north",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-worktable-north-south",
+      "name": "野菜加工作業台北・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-north-south",
+      "x": 1447.5,
+      "y": 546.0,
+      "equipment_id": "vegetable-worktable-north",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-worktable-center-west",
+      "name": "野菜加工作業台中央・西接続",
+      "aliases": [
+        "野菜加工作業台中央",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-center-west",
+      "x": 1257.0,
+      "y": 674.5,
+      "equipment_id": "vegetable-worktable-center",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-worktable-center-north",
+      "name": "野菜加工作業台中央・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-center-north",
+      "x": 1290.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-worktable-center",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-worktable-center-east",
+      "name": "野菜加工作業台中央・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-center-east",
+      "x": 1323.0,
+      "y": 674.5,
+      "equipment_id": "vegetable-worktable-center",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-worktable-center-south",
+      "name": "野菜加工作業台中央・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-worktable-center-south",
+      "x": 1290.0,
+      "y": 755.0,
+      "equipment_id": "vegetable-worktable-center",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-sink-center-west",
+      "name": "野菜加工シンク中央・西接続",
+      "aliases": [
+        "野菜加工シンク中央",
+        "シンク"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-center-west",
+      "x": 1323.0,
+      "y": 674.5,
+      "equipment_id": "vegetable-sink-center",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-sink-center-north",
+      "name": "野菜加工シンク中央・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-center-north",
+      "x": 1416.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-sink-center-east",
+      "name": "野菜加工シンク中央・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-center-east",
+      "x": 1509.0,
+      "y": 674.5,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-sink-center-south",
+      "name": "野菜加工シンク中央・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-sink-center-south",
+      "x": 1416.0,
+      "y": 755.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-mixer-south-west",
+      "name": "ミキサー南・西接続",
+      "aliases": [
+        "ミキサー南",
+        "ミキサー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-south-west",
+      "x": 1219.0,
+      "y": 841.5,
+      "equipment_id": "vegetable-mixer-south",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-mixer-south-north",
+      "name": "ミキサー南・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-south-north",
+      "x": 1250.0,
+      "y": 801.0,
+      "equipment_id": "vegetable-mixer-south",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-mixer-south-east",
+      "name": "ミキサー南・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-south-east",
+      "x": 1281.0,
+      "y": 841.5,
+      "equipment_id": "vegetable-mixer-south",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-mixer-south-south",
+      "name": "ミキサー南・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-mixer-south-south",
+      "x": 1250.0,
+      "y": 882.0,
+      "equipment_id": "vegetable-mixer-south",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-slicer-west-west",
+      "name": "スライサー西・西接続",
+      "aliases": [
+        "スライサー西",
+        "スライサー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-west-west",
+      "x": 1321.0,
+      "y": 841.5,
+      "equipment_id": "vegetable-slicer-west",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-slicer-west-north",
+      "name": "スライサー西・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-west-north",
+      "x": 1353.5,
+      "y": 801.0,
+      "equipment_id": "vegetable-slicer-west",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-slicer-west-east",
+      "name": "スライサー西・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-west-east",
+      "x": 1386.0,
+      "y": 841.5,
+      "equipment_id": "vegetable-slicer-west",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-slicer-west-south",
+      "name": "スライサー西・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-west-south",
+      "x": 1353.5,
+      "y": 882.0,
+      "equipment_id": "vegetable-slicer-west",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-slicer-east-west",
+      "name": "スライサー東・西接続",
+      "aliases": [
+        "スライサー東",
+        "スライサー"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-east-west",
+      "x": 1443.0,
+      "y": 841.5,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-slicer-east-north",
+      "name": "スライサー東・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-east-north",
+      "x": 1475.5,
+      "y": 801.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-slicer-east-east",
+      "name": "スライサー東・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-east-east",
+      "x": 1508.0,
+      "y": 841.5,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-slicer-east-south",
+      "name": "スライサー東・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-slicer-east-south",
+      "x": 1475.5,
+      "y": 882.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "南接続"
+    },
+    {
+      "id": "insect-trap-west",
+      "name": "虫取りハッチ・西接続",
+      "aliases": [
+        "虫取りハッチ"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-insect-trap-west",
+      "x": 1610.0,
+      "y": 480.5,
+      "equipment_id": "insect-trap",
+      "side": "西接続"
+    },
+    {
+      "id": "insect-trap-north",
+      "name": "虫取りハッチ・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-insect-trap-north",
+      "x": 1642.0,
+      "y": 455.0,
+      "equipment_id": "insect-trap",
+      "side": "北接続"
+    },
+    {
+      "id": "insect-trap-east",
+      "name": "虫取りハッチ・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-insect-trap-east",
+      "x": 1674.0,
+      "y": 480.5,
+      "equipment_id": "insect-trap",
+      "side": "東接続"
+    },
+    {
+      "id": "insect-trap-south",
+      "name": "虫取りハッチ・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-insect-trap-south",
+      "x": 1642.0,
+      "y": 506.0,
+      "equipment_id": "insect-trap",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-prep-table-west",
+      "name": "野菜前処理作業台・西接続",
+      "aliases": [
+        "野菜前処理作業台",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-west",
+      "x": 1610.0,
+      "y": 653.5,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-prep-table-north",
+      "name": "野菜前処理作業台・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-north",
+      "x": 1665.0,
+      "y": 570.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-prep-table-east",
+      "name": "野菜前処理作業台・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-east",
+      "x": 1720.0,
+      "y": 653.5,
+      "equipment_id": "vegetable-prep-table",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-prep-table-south",
+      "name": "野菜前処理作業台・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-south",
+      "x": 1665.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続"
+    },
+    {
+      "id": "vegetable-prep-sink-west",
+      "name": "野菜前処理シンク・西接続",
+      "aliases": [
+        "野菜前処理シンク",
+        "シンク"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-west",
+      "x": 1610.0,
+      "y": 804.5,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "西接続"
+    },
+    {
+      "id": "vegetable-prep-sink-north",
+      "name": "野菜前処理シンク・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-north",
+      "x": 1686.5,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続"
+    },
+    {
+      "id": "vegetable-prep-sink-east",
+      "name": "野菜前処理シンク・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-east",
+      "x": 1763.0,
+      "y": 804.5,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "東接続"
+    },
+    {
+      "id": "vegetable-prep-sink-south",
+      "name": "野菜前処理シンク・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-south",
+      "x": 1686.5,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続"
+    },
+    {
+      "id": "chopper-west",
+      "name": "笹切り機・西接続",
+      "aliases": [
+        "笹切り機"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-chopper-west",
+      "x": 1763.0,
+      "y": 607.5,
+      "equipment_id": "chopper",
+      "side": "西接続"
+    },
+    {
+      "id": "chopper-north",
+      "name": "笹切り機・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-chopper-north",
+      "x": 1784.0,
+      "y": 570.0,
+      "equipment_id": "chopper",
+      "side": "北接続"
+    },
+    {
+      "id": "chopper-east",
+      "name": "笹切り機・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-chopper-east",
+      "x": 1805.0,
+      "y": 607.5,
+      "equipment_id": "chopper",
+      "side": "東接続"
+    },
+    {
+      "id": "chopper-south",
+      "name": "笹切り機・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-chopper-south",
+      "x": 1784.0,
+      "y": 645.0,
+      "equipment_id": "chopper",
+      "side": "南接続"
+    },
+    {
+      "id": "root-peeler-west",
+      "name": "球根皮剥機・西接続",
+      "aliases": [
+        "球根皮剥機"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-root-peeler-west",
+      "x": 1763.0,
+      "y": 702.5,
+      "equipment_id": "root-peeler",
+      "side": "西接続"
+    },
+    {
+      "id": "root-peeler-north",
+      "name": "球根皮剥機・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-root-peeler-north",
+      "x": 1784.0,
+      "y": 668.0,
+      "equipment_id": "root-peeler",
+      "side": "北接続"
+    },
+    {
+      "id": "root-peeler-east",
+      "name": "球根皮剥機・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-root-peeler-east",
+      "x": 1805.0,
+      "y": 702.5,
+      "equipment_id": "root-peeler",
+      "side": "東接続"
+    },
+    {
+      "id": "root-peeler-south",
+      "name": "球根皮剥機・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-root-peeler-south",
+      "x": 1784.0,
+      "y": 737.0,
+      "equipment_id": "root-peeler",
+      "side": "南接続"
+    },
+    {
+      "id": "salad-fridge-e-west",
+      "name": "冷蔵庫E・西接続",
+      "aliases": [
+        "冷蔵庫E"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-fridge-e-west",
+      "x": 843.0,
+      "y": 989.0,
+      "equipment_id": "salad-fridge-e",
+      "side": "西接続"
+    },
+    {
+      "id": "salad-fridge-e-north",
+      "name": "冷蔵庫E・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-fridge-e-north",
+      "x": 913.0,
+      "y": 975.0,
+      "equipment_id": "salad-fridge-e",
+      "side": "北接続"
+    },
+    {
+      "id": "salad-fridge-e-east",
+      "name": "冷蔵庫E・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-fridge-e-east",
+      "x": 983.0,
+      "y": 989.0,
+      "equipment_id": "salad-fridge-e",
+      "side": "東接続"
+    },
+    {
+      "id": "salad-fridge-e-south",
+      "name": "冷蔵庫E・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-fridge-e-south",
+      "x": 913.0,
+      "y": 1003.0,
+      "equipment_id": "salad-fridge-e",
+      "side": "南接続"
+    },
+    {
+      "id": "salad-table-west",
+      "name": "和え物作業台・西接続",
+      "aliases": [
+        "和え物作業台",
+        "作業台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-table-west",
+      "x": 840.0,
+      "y": 1067.5,
+      "equipment_id": "salad-table",
+      "side": "西接続"
+    },
+    {
+      "id": "salad-table-north",
+      "name": "和え物作業台・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-table-north",
+      "x": 910.0,
+      "y": 1046.0,
+      "equipment_id": "salad-table",
+      "side": "北接続"
+    },
+    {
+      "id": "salad-table-east",
+      "name": "和え物作業台・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-table-east",
+      "x": 980.0,
+      "y": 1067.5,
+      "equipment_id": "salad-table",
+      "side": "東接続"
+    },
+    {
+      "id": "salad-table-south",
+      "name": "和え物作業台・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-table-south",
+      "x": 910.0,
+      "y": 1089.0,
+      "equipment_id": "salad-table",
+      "side": "南接続"
+    },
+    {
+      "id": "salad-sink-west",
+      "name": "和え物シンク・西接続",
+      "aliases": [
+        "和え物シンク",
+        "シンク"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-sink-west",
+      "x": 1081.0,
+      "y": 1112.5,
+      "equipment_id": "salad-sink",
+      "side": "西接続"
+    },
+    {
+      "id": "salad-sink-north",
+      "name": "和え物シンク・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-sink-north",
+      "x": 1109.5,
+      "y": 1100.0,
+      "equipment_id": "salad-sink",
+      "side": "北接続"
+    },
+    {
+      "id": "salad-sink-east",
+      "name": "和え物シンク・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-sink-east",
+      "x": 1138.0,
+      "y": 1112.5,
+      "equipment_id": "salad-sink",
+      "side": "東接続"
+    },
+    {
+      "id": "salad-sink-south",
+      "name": "和え物シンク・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-salad-sink-south",
+      "x": 1109.5,
+      "y": 1125.0,
+      "equipment_id": "salad-sink",
+      "side": "南接続"
+    },
+    {
+      "id": "bread-transfer-table-west",
+      "name": "パン受渡し台・西接続",
+      "aliases": [
+        "パン受渡し台"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-bread-transfer-table-west",
+      "x": 516.0,
+      "y": 235.0,
+      "equipment_id": "bread-transfer-table",
+      "side": "西接続"
+    },
+    {
+      "id": "bread-transfer-table-north",
+      "name": "パン受渡し台・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-bread-transfer-table-north",
+      "x": 549.5,
+      "y": 213.0,
+      "equipment_id": "bread-transfer-table",
+      "side": "北接続"
+    },
+    {
+      "id": "bread-transfer-table-east",
+      "name": "パン受渡し台・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-bread-transfer-table-east",
+      "x": 583.0,
+      "y": 235.0,
+      "equipment_id": "bread-transfer-table",
+      "side": "東接続"
+    },
+    {
+      "id": "bread-transfer-table-south",
+      "name": "パン受渡し台・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-bread-transfer-table-south",
+      "x": 549.5,
+      "y": 257.0,
+      "equipment_id": "bread-transfer-table",
+      "side": "南接続"
+    },
+    {
+      "id": "kettle-e-west",
+      "name": "釜E・西接続",
+      "aliases": [
+        "釜E",
+        "釜"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-e-west",
+      "x": 876.0,
+      "y": 800.0,
+      "equipment_id": "kettle-e",
+      "side": "西接続"
+    },
+    {
+      "id": "kettle-e-north",
+      "name": "釜E・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-e-north",
+      "x": 905.0,
+      "y": 771.0,
+      "equipment_id": "kettle-e",
+      "side": "北接続"
+    },
+    {
+      "id": "kettle-e-east",
+      "name": "釜E・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-e-east",
+      "x": 934.0,
+      "y": 800.0,
+      "equipment_id": "kettle-e",
+      "side": "東接続"
+    },
+    {
+      "id": "kettle-e-south",
+      "name": "釜E・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-e-south",
+      "x": 905.0,
+      "y": 829.0,
+      "equipment_id": "kettle-e",
+      "side": "南接続"
+    },
+    {
+      "id": "kettle-c-west",
+      "name": "釜C・西接続",
+      "aliases": [
+        "釜C",
+        "釜"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-c-west",
+      "x": 961.0,
+      "y": 800.0,
+      "equipment_id": "kettle-c",
+      "side": "西接続"
+    },
+    {
+      "id": "kettle-c-north",
+      "name": "釜C・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-c-north",
+      "x": 990.0,
+      "y": 771.0,
+      "equipment_id": "kettle-c",
+      "side": "北接続"
+    },
+    {
+      "id": "kettle-c-east",
+      "name": "釜C・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-c-east",
+      "x": 1019.0,
+      "y": 800.0,
+      "equipment_id": "kettle-c",
+      "side": "東接続"
+    },
+    {
+      "id": "kettle-c-south",
+      "name": "釜C・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-c-south",
+      "x": 990.0,
+      "y": 829.0,
+      "equipment_id": "kettle-c",
+      "side": "南接続"
+    },
+    {
+      "id": "kettle-a-west",
+      "name": "釜A・西接続",
+      "aliases": [
+        "釜A",
+        "釜"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-a-west",
+      "x": 1041.0,
+      "y": 800.0,
+      "equipment_id": "kettle-a",
+      "side": "西接続"
+    },
+    {
+      "id": "kettle-a-north",
+      "name": "釜A・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-a-north",
+      "x": 1070.0,
+      "y": 771.0,
+      "equipment_id": "kettle-a",
+      "side": "北接続"
+    },
+    {
+      "id": "kettle-a-east",
+      "name": "釜A・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-a-east",
+      "x": 1099.0,
+      "y": 800.0,
+      "equipment_id": "kettle-a",
+      "side": "東接続"
+    },
+    {
+      "id": "kettle-a-south",
+      "name": "釜A・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-a-south",
+      "x": 1070.0,
+      "y": 829.0,
+      "equipment_id": "kettle-a",
+      "side": "南接続"
+    },
+    {
+      "id": "kettle-f-west",
+      "name": "釜F・西接続",
+      "aliases": [
+        "釜F",
+        "釜"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-f-west",
+      "x": 876.0,
+      "y": 905.0,
+      "equipment_id": "kettle-f",
+      "side": "西接続"
+    },
+    {
+      "id": "kettle-f-north",
+      "name": "釜F・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-f-north",
+      "x": 905.0,
+      "y": 876.0,
+      "equipment_id": "kettle-f",
+      "side": "北接続"
+    },
+    {
+      "id": "kettle-f-east",
+      "name": "釜F・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-f-east",
+      "x": 934.0,
+      "y": 905.0,
+      "equipment_id": "kettle-f",
+      "side": "東接続"
+    },
+    {
+      "id": "kettle-f-south",
+      "name": "釜F・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-f-south",
+      "x": 905.0,
+      "y": 934.0,
+      "equipment_id": "kettle-f",
+      "side": "南接続"
+    },
+    {
+      "id": "kettle-d-west",
+      "name": "釜D・西接続",
+      "aliases": [
+        "釜D",
+        "釜"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-d-west",
+      "x": 961.0,
+      "y": 905.0,
+      "equipment_id": "kettle-d",
+      "side": "西接続"
+    },
+    {
+      "id": "kettle-d-north",
+      "name": "釜D・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-d-north",
+      "x": 990.0,
+      "y": 876.0,
+      "equipment_id": "kettle-d",
+      "side": "北接続"
+    },
+    {
+      "id": "kettle-d-east",
+      "name": "釜D・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-d-east",
+      "x": 1019.0,
+      "y": 905.0,
+      "equipment_id": "kettle-d",
+      "side": "東接続"
+    },
+    {
+      "id": "kettle-d-south",
+      "name": "釜D・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-d-south",
+      "x": 990.0,
+      "y": 934.0,
+      "equipment_id": "kettle-d",
+      "side": "南接続"
+    },
+    {
+      "id": "kettle-b-west",
+      "name": "釜B・西接続",
+      "aliases": [
+        "釜B",
+        "釜"
+      ],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-b-west",
+      "x": 1041.0,
+      "y": 905.0,
+      "equipment_id": "kettle-b",
+      "side": "西接続"
+    },
+    {
+      "id": "kettle-b-north",
+      "name": "釜B・北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-b-north",
+      "x": 1070.0,
+      "y": 876.0,
+      "equipment_id": "kettle-b",
+      "side": "北接続"
+    },
+    {
+      "id": "kettle-b-east",
+      "name": "釜B・東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-b-east",
+      "x": 1099.0,
+      "y": 905.0,
+      "equipment_id": "kettle-b",
+      "side": "東接続"
+    },
+    {
+      "id": "kettle-b-south",
+      "name": "釜B・南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-b-south",
+      "x": 1070.0,
+      "y": 934.0,
+      "equipment_id": "kettle-b",
+      "side": "南接続"
+    },
+    {
+      "id": "rice-store",
+      "name": "米倉庫",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-rice-store",
+      "x": 365,
+      "y": 130,
+      "area_id": "rice-store",
+      "label_anchor": "detail-rice-store-number"
+    },
+    {
+      "id": "rice-space",
+      "name": "米飯スペース",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-rice-space",
+      "x": 475,
+      "y": 295,
+      "area_id": "rice-space"
+    },
+    {
+      "id": "bakery",
+      "name": "製パン室",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-bakery",
+      "x": 550,
+      "y": 285,
+      "area_id": "bakery"
+    },
+    {
+      "id": "north-cooling",
+      "name": "冷却スペース",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-north-cooling",
+      "x": 720,
+      "y": 145,
+      "area_id": "north-cooling"
+    },
+    {
+      "id": "boil-sterilization",
+      "name": "ボイル殺菌スペース",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-boil-sterilization",
+      "x": 1080,
+      "y": 145,
+      "area_id": "boil-sterilization"
+    },
+    {
+      "id": "bagging",
+      "name": "袋詰めスペース",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-bagging",
+      "x": 1300,
+      "y": 185,
+      "area_id": "bagging"
+    },
+    {
+      "id": "cold-meat-work",
+      "name": "魚肉冷凍加工作業場",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-meat-work",
+      "x": 1630,
+      "y": 180,
+      "area_id": "cold-meat-work"
+    },
+    {
+      "id": "high-pressure",
+      "name": "高圧処理",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-high-pressure",
+      "x": 1830,
+      "y": 150,
+      "area_id": "high-pressure"
+    },
+    {
+      "id": "back-door",
+      "name": "勝手口",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-back-door",
+      "x": 1830,
+      "y": 205,
+      "area_id": "back-door"
+    },
+    {
+      "id": "air-shower-west",
+      "name": "エアシャワー西",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-air-shower-west",
+      "x": 616,
+      "y": 185,
+      "area_id": "air-shower-west"
+    },
+    {
+      "id": "air-shower-east",
+      "name": "エアシャワー東",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-air-shower-east",
+      "x": 1010,
+      "y": 185,
+      "area_id": "air-shower-east"
+    },
+    {
+      "id": "corridor-two",
+      "name": "通路2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-corridor-two",
+      "x": 800,
+      "y": 185,
+      "area_id": "corridor-two"
+    },
+    {
+      "id": "corridor-one",
+      "name": "通路1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-corridor-one",
+      "x": 1100,
+      "y": 238,
+      "area_id": "corridor-one"
+    },
+    {
+      "id": "stairs",
+      "name": "階段",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-stairs",
+      "x": 793,
+      "y": 247,
+      "area_id": "stairs"
+    },
+    {
+      "id": "ante-room",
+      "name": "前室",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-ante-room",
+      "x": 685,
+      "y": 328,
+      "area_id": "ante-room"
+    },
+    {
+      "id": "annex",
+      "name": "附室",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-annex",
+      "x": 685,
+      "y": 365,
+      "area_id": "annex"
+    },
+    {
+      "id": "stove",
+      "name": "コンロ",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-stove",
+      "x": 685,
+      "y": 405,
+      "area_id": "stove"
+    },
+    {
+      "id": "dish-store",
+      "name": "保温食器・消毒保管室",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-dish-store",
+      "x": 360,
+      "y": 450,
+      "area_id": "dish-store"
+    },
+    {
+      "id": "wash-space",
+      "name": "洗浄スペース",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-wash-space",
+      "x": 360,
+      "y": 740,
+      "area_id": "wash-space"
+    },
+    {
+      "id": "dispatch-prep",
+      "name": "搬出準備室",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-dispatch-prep",
+      "x": 505,
+      "y": 1045,
+      "area_id": "dispatch-prep"
+    },
+    {
+      "id": "return",
+      "name": "返却口",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-return",
+      "x": 337,
+      "y": 1125,
+      "area_id": "return"
+    },
+    {
+      "id": "cooler-d",
+      "name": "冷却器",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cooler-d",
+      "x": 685,
+      "y": 850,
+      "area_id": "cooler-d"
+    },
+    {
+      "id": "fridge-d1",
+      "name": "冷蔵庫D-1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-fridge-d1",
+      "x": 685,
+      "y": 925,
+      "area_id": "fridge-d1"
+    },
+    {
+      "id": "fridge-d2",
+      "name": "冷蔵庫D-2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-fridge-d2",
+      "x": 685,
+      "y": 1045,
+      "area_id": "fridge-d2"
+    },
+    {
+      "id": "fridge-b2",
+      "name": "冷蔵庫B-2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-fridge-b2",
+      "x": 1160,
+      "y": 335,
+      "area_id": "fridge-b2"
+    },
+    {
+      "id": "freezer-b1",
+      "name": "冷凍庫B-1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-freezer-b1",
+      "x": 1425,
+      "y": 335,
+      "area_id": "freezer-b1"
+    },
+    {
+      "id": "freezer-a",
+      "name": "冷凍庫A",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-freezer-a",
+      "x": 1830,
+      "y": 345,
+      "area_id": "freezer-a"
+    },
+    {
+      "id": "fridge-c2",
+      "name": "冷蔵庫C-2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-fridge-c2",
+      "x": 1400,
+      "y": 1020,
+      "area_id": "fridge-c2"
+    },
+    {
+      "id": "fridge-c1",
+      "name": "冷蔵庫C-1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-fridge-c1",
+      "x": 1630,
+      "y": 1020,
+      "area_id": "fridge-c1"
+    },
+    {
+      "id": "ingredient-store",
+      "name": "食材倉庫",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-ingredient-store",
+      "x": 1830,
+      "y": 820,
+      "area_id": "ingredient-store"
+    },
+    {
+      "id": "inspection",
+      "name": "検品室",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection",
+      "x": 1830,
+      "y": 1040,
+      "area_id": "inspection"
+    },
+    {
+      "id": "office",
+      "name": "事務所",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-office",
+      "x": 880,
+      "y": 1145,
+      "area_id": "office"
+    },
+    {
+      "id": "entrance",
+      "name": "エントランス",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-entrance",
+      "x": 1050,
+      "y": 1145,
+      "area_id": "entrance"
+    },
+    {
+      "id": "entry",
+      "name": "玄関",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-entry",
+      "x": 1175,
+      "y": 1145,
+      "area_id": "entry"
+    },
+    {
+      "id": "dispatch-1",
+      "name": "搬出口1",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-1",
+      "x": 422.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-1"
+    },
+    {
+      "id": "dispatch-2",
+      "name": "搬出口2",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-2",
+      "x": 454.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-2"
+    },
+    {
+      "id": "dispatch-3",
+      "name": "搬出口3",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-3",
+      "x": 486.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-3"
+    },
+    {
+      "id": "dispatch-4",
+      "name": "搬出口4",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-4",
+      "x": 518.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-4"
+    },
+    {
+      "id": "dispatch-5",
+      "name": "搬出口5",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-5",
+      "x": 550.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-5"
+    },
+    {
+      "id": "dispatch-6",
+      "name": "搬出口6",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-6",
+      "x": 582.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-6"
+    },
+    {
+      "id": "dispatch-7",
+      "name": "搬出口7",
+      "aliases": [],
+      "kind": "dispatch",
+      "svg_element_id": "anchor-dispatch-7",
+      "x": 614.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-7"
+    },
+    {
+      "id": "hot-west-fryer",
+      "name": "フライヤー西側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-hot-west-fryer",
+      "x": 800,
+      "y": 524.5
+    },
+    {
+      "id": "hot-west-south",
+      "name": "加熱室西側通路南",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-hot-west-south",
+      "x": 800,
+      "y": 705
+    },
+    {
+      "id": "serving-south-east",
+      "name": "盛付南側通路東",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-serving-south-east",
+      "x": 580,
+      "y": 705
+    },
+    {
+      "id": "serving-west",
+      "name": "盛付台西側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-serving-west",
+      "x": 430,
+      "y": 720
+    },
+    {
+      "id": "serving-south",
+      "name": "盛付台南側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-serving-south",
+      "x": 507.5,
+      "y": 920
+    },
+    {
+      "id": "hot-east-north",
+      "name": "加熱室東側通路北",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-hot-east-north",
+      "x": 1050,
+      "y": 340
+    },
+    {
+      "id": "hot-east-south",
+      "name": "加熱室東側通路南",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-hot-east-south",
+      "x": 1105,
+      "y": 950
+    },
+    {
+      "id": "vegetable-west",
+      "name": "野菜加工西側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-vegetable-west",
+      "x": 1190,
+      "y": 730
+    },
+    {
+      "id": "vegetable-south",
+      "name": "野菜加工南側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-vegetable-south",
+      "x": 1430,
+      "y": 950
+    },
+    {
+      "id": "prep-opening",
+      "name": "野菜前処理との壁開口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-prep-opening",
+      "x": 1560,
+      "y": 930
+    },
+    {
+      "id": "prep-east",
+      "name": "野菜前処理東側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-prep-east",
+      "x": 1740,
+      "y": 860
+    },
+    {
+      "id": "rice-store-turn",
+      "name": "米倉庫から炊飯器への曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-rice-store-turn",
+      "x": 420,
+      "y": 130
+    },
+    {
+      "id": "rice-transfer-turn",
+      "name": "炊飯器から受渡し台への曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-rice-transfer-turn",
+      "x": 432,
+      "y": 265
+    },
+    {
+      "id": "rice-dispatch-turn",
+      "name": "米飯搬出前の曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-rice-dispatch-turn",
+      "x": 432,
+      "y": 1118
+    },
+    {
+      "id": "rice-dispatch-one",
+      "name": "搬出口1手前",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-rice-dispatch-one",
+      "x": 422,
+      "y": 1118
+    },
+    {
+      "id": "freezer-hot-turn",
+      "name": "冷凍庫B-1西側折返し",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-freezer-hot-turn",
+      "x": 1055,
+      "y": 335
+    },
+    {
+      "id": "fryer-in-east",
+      "name": "フライヤー中央下東側進入",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-fryer-in-east",
+      "x": 1055,
+      "y": 524.5
+    },
+    {
+      "id": "fryer-serving-turn",
+      "name": "フライヤーから盛付への南折返し",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-fryer-serving-turn",
+      "x": 800,
+      "y": 680
+    },
+    {
+      "id": "steamer-serving-turn",
+      "name": "スチコン南側から盛付への曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-steamer-serving-turn",
+      "x": 580,
+      "y": 680
+    },
+    {
+      "id": "serving-east-turn",
+      "name": "盛付作業台南東側の曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-serving-east-turn",
+      "x": 580,
+      "y": 723.5
+    },
+    {
+      "id": "serving-dispatch-three",
+      "name": "搬出口3への曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-serving-dispatch-three",
+      "x": 486,
+      "y": 920
+    },
+    {
+      "id": "dispatch-three-arrival",
+      "name": "搬出口3手前",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-dispatch-three-arrival",
+      "x": 486,
+      "y": 1118
+    },
+    {
+      "id": "detail-cabbage-receipt",
+      "name": "検品・入庫線 cabbage",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-cabbage-receipt",
+      "x": 1799,
+      "y": 1165,
+      "label_anchor": "detail-cabbage-receipt-number",
+      "area_id": "detail-cabbage-receipt"
+    },
+    {
+      "id": "detail-cabbage-receipt-number",
+      "name": "番号位置：検品・入庫線 cabbage",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-receipt-number",
+      "x": 1793,
+      "y": 1185
+    },
+    {
+      "id": "detail-meat-receipt",
+      "name": "検品・入庫線 meat",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-meat-receipt",
+      "x": 1809,
+      "y": 1165,
+      "label_anchor": "detail-meat-receipt-number",
+      "area_id": "detail-meat-receipt"
+    },
+    {
+      "id": "detail-meat-receipt-number",
+      "name": "番号位置：検品・入庫線 meat",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-meat-receipt-number",
+      "x": 1803,
+      "y": 1205
+    },
+    {
+      "id": "detail-fish-receipt",
+      "name": "検品・入庫線 fish",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-fish-receipt",
+      "x": 1819,
+      "y": 1165,
+      "label_anchor": "detail-fish-receipt-number",
+      "area_id": "detail-fish-receipt"
+    },
+    {
+      "id": "detail-fish-receipt-number",
+      "name": "番号位置：検品・入庫線 fish",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-fish-receipt-number",
+      "x": 1813,
+      "y": 1225
+    },
+    {
+      "id": "detail-ginger-receipt",
+      "name": "検品・入庫線 ginger",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-ginger-receipt",
+      "x": 1829,
+      "y": 1165,
+      "label_anchor": "detail-ginger-receipt-number",
+      "area_id": "detail-ginger-receipt"
+    },
+    {
+      "id": "detail-ginger-receipt-number",
+      "name": "番号位置：検品・入庫線 ginger",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger-receipt-number",
+      "x": 1823,
+      "y": 1185
+    },
+    {
+      "id": "detail-vegetables-receipt",
+      "name": "検品・入庫線 vegetables",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-vegetables-receipt",
+      "x": 1839,
+      "y": 1165,
+      "label_anchor": "detail-vegetables-receipt-number",
+      "area_id": "detail-vegetables-receipt"
+    },
+    {
+      "id": "detail-vegetables-receipt-number",
+      "name": "番号位置：検品・入庫線 vegetables",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables-receipt-number",
+      "x": 1833,
+      "y": 1205
+    },
+    {
+      "id": "detail-tofu-receipt",
+      "name": "検品・入庫線 tofu",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-tofu-receipt",
+      "x": 1849,
+      "y": 1165,
+      "label_anchor": "detail-tofu-receipt-number",
+      "area_id": "detail-tofu-receipt"
+    },
+    {
+      "id": "detail-tofu-receipt-number",
+      "name": "番号位置：検品・入庫線 tofu",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu-receipt-number",
+      "x": 1843,
+      "y": 1225
+    },
+    {
+      "id": "detail-peas-receipt",
+      "name": "検品・入庫線 peas",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-peas-receipt",
+      "x": 1859,
+      "y": 1165,
+      "label_anchor": "detail-peas-receipt-number",
+      "area_id": "detail-peas-receipt"
+    },
+    {
+      "id": "detail-peas-receipt-number",
+      "name": "番号位置：検品・入庫線 peas",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-peas-receipt-number",
+      "x": 1853,
+      "y": 1185
+    },
+    {
+      "id": "detail-cream-receipt",
+      "name": "検品・入庫線 cream",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-cream-receipt",
+      "x": 1869,
+      "y": 1165,
+      "label_anchor": "detail-cream-receipt-number",
+      "area_id": "detail-cream-receipt"
+    },
+    {
+      "id": "detail-cream-receipt-number",
+      "name": "番号位置：検品・入庫線 cream",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream-receipt-number",
+      "x": 1863,
+      "y": 1205
+    },
+    {
+      "id": "detail-muffin-receipt",
+      "name": "検品・入庫線 muffin",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-muffin-receipt",
+      "x": 1879,
+      "y": 1165,
+      "label_anchor": "detail-muffin-receipt-number",
+      "area_id": "detail-muffin-receipt"
+    },
+    {
+      "id": "detail-muffin-receipt-number",
+      "name": "番号位置：検品・入庫線 muffin",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin-receipt-number",
+      "x": 1873,
+      "y": 1225
+    },
+    {
+      "id": "detail-meat-store",
+      "name": "冷蔵庫B-2・肉用",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-meat-store",
+      "x": 1225,
+      "y": 333,
+      "label_anchor": "detail-meat-store-number",
+      "area_id": "detail-meat-store"
+    },
+    {
+      "id": "detail-meat-store-number",
+      "name": "番号位置：冷蔵庫B-2・肉用",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-meat-store-number",
+      "x": 1217,
+      "y": 354
+    },
+    {
+      "id": "detail-fish-store",
+      "name": "冷凍庫B-1・揚物用",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-fish-store",
+      "x": 1435,
+      "y": 321,
+      "label_anchor": "detail-fish-store-number",
+      "area_id": "detail-fish-store"
+    },
+    {
+      "id": "detail-fish-store-number",
+      "name": "番号位置：冷凍庫B-1・揚物用",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-fish-store-number",
+      "x": 1417,
+      "y": 342
+    },
+    {
+      "id": "detail-peas-store",
+      "name": "冷凍庫B-1・野菜用",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-peas-store",
+      "x": 1437,
+      "y": 385,
+      "label_anchor": "detail-peas-store-number",
+      "area_id": "detail-peas-store"
+    },
+    {
+      "id": "detail-peas-store-number",
+      "name": "番号位置：冷凍庫B-1・野菜用",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-peas-store-number",
+      "x": 1426,
+      "y": 382
+    },
+    {
+      "id": "detail-cream-store",
+      "name": "冷凍庫B-1・デザート1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-cream-store",
+      "x": 1292,
+      "y": 291,
+      "label_anchor": "detail-cream-store-number",
+      "area_id": "detail-cream-store"
+    },
+    {
+      "id": "detail-cream-store-number",
+      "name": "番号位置：冷凍庫B-1・デザート1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream-store-number",
+      "x": 1292,
+      "y": 315
+    },
+    {
+      "id": "detail-muffin-store",
+      "name": "冷凍庫B-1・デザート2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-muffin-store",
+      "x": 1306,
+      "y": 291,
+      "label_anchor": "detail-muffin-store-number",
+      "area_id": "detail-muffin-store"
+    },
+    {
+      "id": "detail-muffin-store-number",
+      "name": "番号位置：冷凍庫B-1・デザート2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin-store-number",
+      "x": 1307,
+      "y": 315
+    },
+    {
+      "id": "detail-cabbage-store",
+      "name": "冷蔵庫C-1・並走1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-cabbage-store",
+      "x": 1630,
+      "y": 1020,
+      "label_anchor": "detail-cabbage-store-number",
+      "area_id": "detail-cabbage-store"
+    },
+    {
+      "id": "detail-cabbage-store-number",
+      "name": "番号位置：冷蔵庫C-1・並走1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-store-number",
+      "x": 1624,
+      "y": 1040
+    },
+    {
+      "id": "detail-cabbage-sink-in",
+      "name": "野菜前処理シンク・南1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-sink-in",
+      "x": 1630.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.13071895424836602,
+      "label_anchor": "detail-cabbage-sink-in-number"
+    },
+    {
+      "id": "detail-cabbage-sink-in-number",
+      "name": "番号位置：野菜前処理シンク・南1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-sink-in-number",
+      "x": 1624,
+      "y": 822
+    },
+    {
+      "id": "detail-cabbage-sink-out",
+      "name": "野菜前処理シンク・北1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-sink-out",
+      "x": 1630.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.13071895424836602
+    },
+    {
+      "id": "detail-cabbage-table-in",
+      "name": "野菜前処理作業台・南1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-table-in",
+      "x": 1630.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.18181818181818182,
+      "label_anchor": "detail-cabbage-table-in-number"
+    },
+    {
+      "id": "detail-cabbage-table-in-number",
+      "name": "番号位置：野菜前処理作業台・南1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-table-in-number",
+      "x": 1624,
+      "y": 730
+    },
+    {
+      "id": "detail-cabbage-table-out",
+      "name": "野菜前処理作業台・西1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-table-out",
+      "x": 1610.0,
+      "y": 715.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.8682634730538922
+    },
+    {
+      "id": "detail-ginger-store",
+      "name": "冷蔵庫C-1・並走2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-ginger-store",
+      "x": 1647,
+      "y": 1020,
+      "label_anchor": "detail-ginger-store-number",
+      "area_id": "detail-ginger-store"
+    },
+    {
+      "id": "detail-ginger-store-number",
+      "name": "番号位置：冷蔵庫C-1・並走2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger-store-number",
+      "x": 1641,
+      "y": 1040
+    },
+    {
+      "id": "detail-ginger-sink-in",
+      "name": "野菜前処理シンク・南2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-sink-in",
+      "x": 1647.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.24183006535947713,
+      "label_anchor": "detail-ginger-sink-in-number"
+    },
+    {
+      "id": "detail-ginger-sink-in-number",
+      "name": "番号位置：野菜前処理シンク・南2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger-sink-in-number",
+      "x": 1641,
+      "y": 822
+    },
+    {
+      "id": "detail-ginger-sink-out",
+      "name": "野菜前処理シンク・北2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-sink-out",
+      "x": 1647.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.24183006535947713
+    },
+    {
+      "id": "detail-ginger-table-in",
+      "name": "野菜前処理作業台・南2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-table-in",
+      "x": 1647.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.33636363636363636,
+      "label_anchor": "detail-ginger-table-in-number"
+    },
+    {
+      "id": "detail-ginger-table-in-number",
+      "name": "番号位置：野菜前処理作業台・南2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger-table-in-number",
+      "x": 1641,
+      "y": 730
+    },
+    {
+      "id": "detail-ginger-table-out",
+      "name": "野菜前処理作業台・西2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-table-out",
+      "x": 1610.0,
+      "y": 700.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.7784431137724551
+    },
+    {
+      "id": "detail-vegetables-store",
+      "name": "冷蔵庫C-1・並走3",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-vegetables-store",
+      "x": 1664,
+      "y": 1020,
+      "label_anchor": "detail-vegetables-store-number",
+      "area_id": "detail-vegetables-store"
+    },
+    {
+      "id": "detail-vegetables-store-number",
+      "name": "番号位置：冷蔵庫C-1・並走3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables-store-number",
+      "x": 1658,
+      "y": 1040
+    },
+    {
+      "id": "detail-vegetables-sink-in",
+      "name": "野菜前処理シンク・南3",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-sink-in",
+      "x": 1664.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.35294117647058826,
+      "label_anchor": "detail-vegetables-sink-in-number"
+    },
+    {
+      "id": "detail-vegetables-sink-in-number",
+      "name": "番号位置：野菜前処理シンク・南3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables-sink-in-number",
+      "x": 1658,
+      "y": 822
+    },
+    {
+      "id": "detail-vegetables-sink-out",
+      "name": "野菜前処理シンク・北3",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-sink-out",
+      "x": 1664.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.35294117647058826
+    },
+    {
+      "id": "detail-vegetables-table-in",
+      "name": "野菜前処理作業台・南3",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-table-in",
+      "x": 1664.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.4909090909090909,
+      "label_anchor": "detail-vegetables-table-in-number"
+    },
+    {
+      "id": "detail-vegetables-table-in-number",
+      "name": "番号位置：野菜前処理作業台・南3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables-table-in-number",
+      "x": 1658,
+      "y": 730
+    },
+    {
+      "id": "detail-vegetables-table-out",
+      "name": "野菜前処理作業台・西3",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-table-out",
+      "x": 1610.0,
+      "y": 685.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.688622754491018
+    },
+    {
+      "id": "detail-tofu-store",
+      "name": "冷蔵庫C・境界左側の入庫位置",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-tofu-store",
+      "x": 1543,
+      "y": 1020,
+      "label_anchor": "cold-boundary-label",
+      "area_id": "detail-tofu-store"
+    },
+    {
+      "id": "detail-tofu-store-number",
+      "name": "番号位置：冷蔵庫C・境界左側の入庫位置",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu-store-number",
+      "x": 1530,
+      "y": 1034
+    },
+    {
+      "id": "detail-ginger-machine-in",
+      "name": "ミキサー南・材料2入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-machine-in",
+      "x": 1250.0,
+      "y": 801.0,
+      "equipment_id": "vegetable-mixer-south",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-ginger-machine-in-number"
+    },
+    {
+      "id": "detail-ginger-machine-in-number",
+      "name": "番号位置：ミキサー南・材料2入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger-machine-in-number",
+      "x": 1241,
+      "y": 856
+    },
+    {
+      "id": "detail-ginger-machine-out",
+      "name": "ミキサー南・材料2出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-machine-out",
+      "x": 1250.0,
+      "y": 882.0,
+      "equipment_id": "vegetable-mixer-south",
+      "side": "南接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-vegetables-machine-in",
+      "name": "スライサー東・材料3入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-machine-in",
+      "x": 1470.0,
+      "y": 801.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "北接続",
+      "port_fraction": 0.4153846153846154,
+      "label_anchor": "detail-vegetables-machine-in-number"
+    },
+    {
+      "id": "detail-vegetables-machine-in-number",
+      "name": "番号位置：スライサー東・材料3入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables-machine-in-number",
+      "x": 1463,
+      "y": 853
+    },
+    {
+      "id": "detail-vegetables-machine-out",
+      "name": "スライサー東・材料3出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-machine-out",
+      "x": 1470.0,
+      "y": 882.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "南接続",
+      "port_fraction": 0.4153846153846154
+    },
+    {
+      "id": "detail-cabbage-machine-in",
+      "name": "スライサー東・材料1入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-machine-in",
+      "x": 1491.0,
+      "y": 801.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "北接続",
+      "port_fraction": 0.7384615384615385,
+      "label_anchor": "detail-cabbage-machine-in-number"
+    },
+    {
+      "id": "detail-cabbage-machine-in-number",
+      "name": "番号位置：スライサー東・材料1入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-machine-in-number",
+      "x": 1484,
+      "y": 853
+    },
+    {
+      "id": "detail-cabbage-machine-out",
+      "name": "スライサー東・材料1出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-machine-out",
+      "x": 1491.0,
+      "y": 882.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "南接続",
+      "port_fraction": 0.7384615384615385
+    },
+    {
+      "id": "detail-tofu-table-in",
+      "name": "野菜加工作業台北・材料4入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-table-in",
+      "x": 1509.0,
+      "y": 536.0,
+      "equipment_id": "vegetable-worktable-north",
+      "side": "東接続",
+      "port_fraction": 0.8484848484848485,
+      "label_anchor": "detail-tofu-table-in-number"
+    },
+    {
+      "id": "detail-tofu-table-in-number",
+      "name": "番号位置：野菜加工作業台北・材料4入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu-table-in-number",
+      "x": 1485,
+      "y": 539
+    },
+    {
+      "id": "detail-tofu-table-out",
+      "name": "野菜加工作業台北・材料4出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-table-out",
+      "x": 1490.0,
+      "y": 546.0,
+      "equipment_id": "vegetable-worktable-north",
+      "side": "南接続",
+      "port_fraction": 0.8455284552845529
+    },
+    {
+      "id": "detail-tofu-sink-in",
+      "name": "野菜加工シンク中央・右槽4入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-sink-in",
+      "x": 1485.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.8709677419354839,
+      "label_anchor": "detail-tofu-sink-in-number"
+    },
+    {
+      "id": "detail-tofu-sink-in-number",
+      "name": "番号位置：野菜加工シンク中央・右槽4入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu-sink-in-number",
+      "x": 1478,
+      "y": 634
+    },
+    {
+      "id": "detail-tofu-sink-out",
+      "name": "野菜加工シンク中央・右槽4出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-sink-out",
+      "x": 1509.0,
+      "y": 648.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.33540372670807456
+    },
+    {
+      "id": "detail-peas-sink-in",
+      "name": "野菜加工シンク中央・左槽5入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-peas-sink-in",
+      "x": 1360.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.1989247311827957,
+      "label_anchor": "detail-peas-sink-in-number"
+    },
+    {
+      "id": "detail-peas-sink-in-number",
+      "name": "番号位置：野菜加工シンク中央・左槽5入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-peas-sink-in-number",
+      "x": 1353,
+      "y": 634
+    },
+    {
+      "id": "detail-peas-sink-out",
+      "name": "野菜加工シンク中央・左槽5出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-peas-sink-out",
+      "x": 1360.0,
+      "y": 755.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "南接続",
+      "port_fraction": 0.1989247311827957
+    },
+    {
+      "id": "detail-tofu-kettle-e-in",
+      "name": "釜E・材料4入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-kettle-e-in",
+      "x": 905.0,
+      "y": 771.0,
+      "equipment_id": "kettle-e",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-tofu-kettle-e-in-number"
+    },
+    {
+      "id": "detail-tofu-kettle-e-in-number",
+      "name": "番号位置：釜E・材料4入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu-kettle-e-in-number",
+      "x": 897,
+      "y": 810
+    },
+    {
+      "id": "detail-tofu-kettle-e-out",
+      "name": "釜E・材料4出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-kettle-e-out",
+      "x": 905.0,
+      "y": 829.0,
+      "equipment_id": "kettle-e",
+      "side": "南接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-meat-kettle-f",
+      "name": "釜F・meat到着",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-meat-kettle-f",
+      "x": 934.0,
+      "y": 905.0,
+      "equipment_id": "kettle-f",
+      "side": "東接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-meat-kettle-f-number"
+    },
+    {
+      "id": "detail-meat-kettle-f-number",
+      "name": "番号位置：釜F・meat到着",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-meat-kettle-f-number",
+      "x": 895,
+      "y": 895
+    },
+    {
+      "id": "detail-ginger-kettle-f",
+      "name": "釜F・ginger到着",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-ginger-kettle-f",
+      "x": 876.0,
+      "y": 905.0,
+      "equipment_id": "kettle-f",
+      "side": "西接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-ginger-kettle-f-number"
+    },
+    {
+      "id": "detail-ginger-kettle-f-number",
+      "name": "番号位置：釜F・ginger到着",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger-kettle-f-number",
+      "x": 880,
+      "y": 913
+    },
+    {
+      "id": "detail-vegetables-kettle-f",
+      "name": "釜F・vegetables到着",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-vegetables-kettle-f",
+      "x": 934.0,
+      "y": 905.0,
+      "equipment_id": "kettle-f",
+      "side": "東接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-vegetables-kettle-f-number"
+    },
+    {
+      "id": "detail-vegetables-kettle-f-number",
+      "name": "番号位置：釜F・vegetables到着",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables-kettle-f-number",
+      "x": 900,
+      "y": 913
+    },
+    {
+      "id": "detail-tofu-kettle-f",
+      "name": "釜F・tofu到着",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-tofu-kettle-f",
+      "x": 905.0,
+      "y": 876.0,
+      "equipment_id": "kettle-f",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-tofu-kettle-f-number"
+    },
+    {
+      "id": "detail-tofu-kettle-f-number",
+      "name": "番号位置：釜F・tofu到着",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu-kettle-f-number",
+      "x": 888,
+      "y": 928
+    },
+    {
+      "id": "detail-peas-kettle-f",
+      "name": "釜F・peas到着",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-peas-kettle-f",
+      "x": 905.0,
+      "y": 934.0,
+      "equipment_id": "kettle-f",
+      "side": "南接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-peas-kettle-f-number"
+    },
+    {
+      "id": "detail-peas-kettle-f-number",
+      "name": "番号位置：釜F・peas到着",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-peas-kettle-f-number",
+      "x": 909,
+      "y": 928
+    },
+    {
+      "id": "detail-stew-kettle-out",
+      "name": "釜F・調理後出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-stew-kettle-out",
+      "x": 876.0,
+      "y": 905.0,
+      "equipment_id": "kettle-f",
+      "side": "西接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-stew-serving-in",
+      "name": "盛付作業台南・そぼろ煮入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-stew-serving-in",
+      "x": 553.0,
+      "y": 715.0,
+      "equipment_id": "serving-table-south",
+      "side": "東接続",
+      "port_fraction": 0.473015873015873,
+      "label_anchor": "detail-stew-serving-in-number"
+    },
+    {
+      "id": "detail-stew-serving-in-number",
+      "name": "番号位置：盛付作業台南・そぼろ煮入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-stew-serving-in-number",
+      "x": 481,
+      "y": 717
+    },
+    {
+      "id": "detail-stew-serving-out",
+      "name": "盛付作業台南・そぼろ煮出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-stew-serving-out",
+      "x": 475.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.14285714285714285
+    },
+    {
+      "id": "detail-fish-fryer-in",
+      "name": "フライヤー中央下・揚物入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-fish-fryer-in",
+      "x": 983.0,
+      "y": 524.5,
+      "equipment_id": "fryer-south",
+      "side": "東接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-fish-fryer-in-number"
+    },
+    {
+      "id": "detail-fish-fryer-in-number",
+      "name": "番号位置：フライヤー中央下・揚物入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-fish-fryer-in-number",
+      "x": 887,
+      "y": 538
+    },
+    {
+      "id": "detail-fish-fryer-out",
+      "name": "フライヤー中央下・揚物出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-fish-fryer-out",
+      "x": 843.0,
+      "y": 524.5,
+      "equipment_id": "fryer-south",
+      "side": "西接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-fish-serving-in",
+      "name": "盛付作業台南・揚物入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-fish-serving-in",
+      "x": 553.0,
+      "y": 680.0,
+      "equipment_id": "serving-table-south",
+      "side": "東接続",
+      "port_fraction": 0.3619047619047619,
+      "label_anchor": "detail-fish-serving-in-number"
+    },
+    {
+      "id": "detail-fish-serving-in-number",
+      "name": "番号位置：盛付作業台南・揚物入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-fish-serving-in-number",
+      "x": 530,
+      "y": 687
+    },
+    {
+      "id": "detail-fish-serving-out",
+      "name": "盛付作業台南・揚物出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-fish-serving-out",
+      "x": 486.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.26373626373626374
+    },
+    {
+      "id": "detail-cabbage-kettle-in",
+      "name": "釜B・材料1入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-kettle-in",
+      "x": 1099.0,
+      "y": 905.0,
+      "equipment_id": "kettle-b",
+      "side": "東接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-cabbage-kettle-in-number"
+    },
+    {
+      "id": "detail-cabbage-kettle-in-number",
+      "name": "番号位置：釜B・材料1入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-kettle-in-number",
+      "x": 1056,
+      "y": 916
+    },
+    {
+      "id": "detail-cabbage-kettle-out",
+      "name": "釜B・材料1出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-kettle-out",
+      "x": 1070.0,
+      "y": 876.0,
+      "equipment_id": "kettle-b",
+      "side": "北接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-cabbage-cooling-in",
+      "name": "冷却・材料1入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-cooling-in",
+      "x": 813.0,
+      "y": 824.0,
+      "equipment_id": "cooling-bath",
+      "side": "南接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-cabbage-cooling-in-number"
+    },
+    {
+      "id": "detail-cabbage-cooling-in-number",
+      "name": "番号位置：冷却・材料1入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-cooling-in-number",
+      "x": 825,
+      "y": 810
+    },
+    {
+      "id": "detail-cabbage-cooling-out",
+      "name": "冷却・材料1出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-cooling-out",
+      "x": 775.0,
+      "y": 798.0,
+      "equipment_id": "cooling-bath",
+      "side": "西接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-cabbage-dewatering-in",
+      "name": "脱水機・材料1入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-dewatering-in",
+      "x": 813.5,
+      "y": 878.0,
+      "equipment_id": "dewatering-machine",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "label_anchor": "detail-cabbage-dewatering-in-number"
+    },
+    {
+      "id": "detail-cabbage-dewatering-in-number",
+      "name": "番号位置：脱水機・材料1入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-dewatering-in-number",
+      "x": 817,
+      "y": 913
+    },
+    {
+      "id": "detail-cabbage-dewatering-out",
+      "name": "脱水機・材料1出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-dewatering-out",
+      "x": 783.0,
+      "y": 902.0,
+      "equipment_id": "dewatering-machine",
+      "side": "西接続",
+      "port_fraction": 0.5
+    },
+    {
+      "id": "detail-cabbage-serving-north-in",
+      "name": "盛付作業台北・和え物入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-serving-north-in",
+      "x": 536.0,
+      "y": 502.0,
+      "equipment_id": "serving-table-north",
+      "side": "南接続",
+      "port_fraction": 0.7692307692307693,
+      "label_anchor": "detail-cabbage-serving-north-in-number"
+    },
+    {
+      "id": "detail-cabbage-serving-north-in-number",
+      "name": "番号位置：盛付作業台北・和え物入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-serving-north-in-number",
+      "x": 531,
+      "y": 488
+    },
+    {
+      "id": "detail-cabbage-serving-south-in",
+      "name": "盛付作業台南・和え物入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-serving-south-in",
+      "x": 536.0,
+      "y": 566.0,
+      "equipment_id": "serving-table-south",
+      "side": "北接続",
+      "port_fraction": 0.8131868131868132,
+      "label_anchor": "detail-cabbage-serving-south-in-number"
+    },
+    {
+      "id": "detail-cabbage-serving-south-in-number",
+      "name": "番号位置：盛付作業台南・和え物入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage-serving-south-in-number",
+      "x": 529,
+      "y": 598
+    },
+    {
+      "id": "detail-cabbage-serving-south-out",
+      "name": "盛付作業台南・和え物出口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cabbage-serving-south-out",
+      "x": 518.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.6153846153846154
+    },
+    {
+      "id": "detail-cream-serving-in",
+      "name": "盛付作業台北・デザート1入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-cream-serving-in",
+      "x": 557.0,
+      "y": 469.0,
+      "equipment_id": "serving-table-north",
+      "side": "東接続",
+      "port_fraction": 0.5657894736842105,
+      "label_anchor": "detail-cream-serving-in-number"
+    },
+    {
+      "id": "detail-cream-serving-in-number",
+      "name": "番号位置：盛付作業台北・デザート1入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream-serving-in-number",
+      "x": 510,
+      "y": 468
+    },
+    {
+      "id": "detail-cream-cold",
+      "name": "冷蔵庫D-2・デザート1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-cream-cold",
+      "x": 655,
+      "y": 1045,
+      "label_anchor": "detail-cream-cold-number",
+      "area_id": "detail-cream-cold"
+    },
+    {
+      "id": "detail-cream-cold-number",
+      "name": "番号位置：冷蔵庫D-2・デザート1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream-cold-number",
+      "x": 674,
+      "y": 1050
+    },
+    {
+      "id": "detail-cream-dispatch",
+      "name": "搬出口5・デザート1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-cream-dispatch",
+      "x": 545,
+      "y": 1130,
+      "label_anchor": "detail-cream-dispatch-number",
+      "area_id": "detail-cream-dispatch"
+    },
+    {
+      "id": "detail-cream-dispatch-number",
+      "name": "番号位置：搬出口5・デザート1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream-dispatch-number",
+      "x": 539,
+      "y": 1152
+    },
+    {
+      "id": "detail-muffin-serving-in",
+      "name": "盛付作業台北・デザート2入口",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-detail-muffin-serving-in",
+      "x": 557.0,
+      "y": 484.0,
+      "equipment_id": "serving-table-north",
+      "side": "東接続",
+      "port_fraction": 0.7631578947368421,
+      "label_anchor": "detail-muffin-serving-in-number"
+    },
+    {
+      "id": "detail-muffin-serving-in-number",
+      "name": "番号位置：盛付作業台北・デザート2入口",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin-serving-in-number",
+      "x": 528,
+      "y": 468
+    },
+    {
+      "id": "detail-muffin-cold",
+      "name": "冷蔵庫D-2・デザート2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-muffin-cold",
+      "x": 655,
+      "y": 1065,
+      "label_anchor": "detail-muffin-cold-number",
+      "area_id": "detail-muffin-cold"
+    },
+    {
+      "id": "detail-muffin-cold-number",
+      "name": "番号位置：冷蔵庫D-2・デザート2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin-cold-number",
+      "x": 674,
+      "y": 1070
+    },
+    {
+      "id": "detail-muffin-dispatch",
+      "name": "搬出口5・デザート2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-detail-muffin-dispatch",
+      "x": 555,
+      "y": 1130,
+      "label_anchor": "detail-muffin-dispatch-number",
+      "area_id": "detail-muffin-dispatch"
+    },
+    {
+      "id": "detail-muffin-dispatch-number",
+      "name": "番号位置：搬出口5・デザート2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin-dispatch-number",
+      "x": 554,
+      "y": 1152
+    },
+    {
+      "id": "detail-rice-store-number",
+      "name": "番号位置：米倉庫",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-rice-store-number",
+      "x": 355,
+      "y": 149
+    },
+    {
+      "id": "detail-rice-cooker-number",
+      "name": "番号位置：炊飯器",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-rice-cooker-number",
+      "x": 414,
+      "y": 258
+    },
+    {
+      "id": "detail-rice-transfer-number",
+      "name": "番号位置：米飯受渡し台",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-rice-transfer-number",
+      "x": 424,
+      "y": 460
+    },
+    {
+      "id": "detail-肉入庫1",
+      "name": "肉入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-肉入庫1",
+      "x": 1809,
+      "y": 267
+    },
+    {
+      "id": "detail-肉入庫2",
+      "name": "肉入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-肉入庫2",
+      "x": 1225,
+      "y": 267
+    },
+    {
+      "id": "detail-肉調理1",
+      "name": "肉調理・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-肉調理1",
+      "x": 1078,
+      "y": 333
+    },
+    {
+      "id": "detail-肉調理2",
+      "name": "肉調理・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-肉調理2",
+      "x": 1078,
+      "y": 705
+    },
+    {
+      "id": "detail-肉調理3",
+      "name": "肉調理・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-肉調理3",
+      "x": 950,
+      "y": 705
+    },
+    {
+      "id": "detail-肉調理4",
+      "name": "肉調理・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-肉調理4",
+      "x": 950,
+      "y": 905
+    },
+    {
+      "id": "detail-揚物入庫1",
+      "name": "揚物入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-揚物入庫1",
+      "x": 1819,
+      "y": 321
+    },
+    {
+      "id": "detail-揚物調理1",
+      "name": "揚物調理・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-揚物調理1",
+      "x": 1435,
+      "y": 278
+    },
+    {
+      "id": "detail-揚物調理2",
+      "name": "揚物調理・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-揚物調理2",
+      "x": 1061,
+      "y": 278
+    },
+    {
+      "id": "detail-揚物調理3",
+      "name": "揚物調理・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-揚物調理3",
+      "x": 1061,
+      "y": 524.5
+    },
+    {
+      "id": "detail-揚物調理4",
+      "name": "揚物調理・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-揚物調理4",
+      "x": 800,
+      "y": 524.5
+    },
+    {
+      "id": "detail-揚物調理5",
+      "name": "揚物調理・折点5",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-揚物調理5",
+      "x": 800,
+      "y": 680
+    },
+    {
+      "id": "detail-そぼろ盛付1",
+      "name": "そぼろ盛付・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-そぼろ盛付1",
+      "x": 861,
+      "y": 905
+    },
+    {
+      "id": "detail-そぼろ盛付2",
+      "name": "そぼろ盛付・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-そぼろ盛付2",
+      "x": 861,
+      "y": 715
+    },
+    {
+      "id": "detail-そぼろ搬出1",
+      "name": "そぼろ搬出・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-そぼろ搬出1",
+      "x": 475,
+      "y": 1000
+    },
+    {
+      "id": "detail-そぼろ搬出2",
+      "name": "そぼろ搬出・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-そぼろ搬出2",
+      "x": 454,
+      "y": 1000
+    },
+    {
+      "id": "detail-cabbage入庫1",
+      "name": "cabbage入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage入庫1",
+      "x": 1799,
+      "y": 1142
+    },
+    {
+      "id": "detail-cabbage入庫2",
+      "name": "cabbage入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cabbage入庫2",
+      "x": 1630,
+      "y": 1142
+    },
+    {
+      "id": "detail-ginger入庫1",
+      "name": "ginger入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger入庫1",
+      "x": 1829,
+      "y": 1150
+    },
+    {
+      "id": "detail-ginger入庫2",
+      "name": "ginger入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-ginger入庫2",
+      "x": 1647,
+      "y": 1150
+    },
+    {
+      "id": "detail-vegetables入庫1",
+      "name": "vegetables入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables入庫1",
+      "x": 1839,
+      "y": 1158
+    },
+    {
+      "id": "detail-vegetables入庫2",
+      "name": "vegetables入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-vegetables入庫2",
+      "x": 1664,
+      "y": 1158
+    },
+    {
+      "id": "detail-tofu入庫1",
+      "name": "tofu入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu入庫1",
+      "x": 1849,
+      "y": 1134
+    },
+    {
+      "id": "detail-tofu入庫2",
+      "name": "tofu入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-tofu入庫2",
+      "x": 1543,
+      "y": 1134
+    },
+    {
+      "id": "detail-生姜加工1",
+      "name": "生姜加工・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜加工1",
+      "x": 1270,
+      "y": 700
+    },
+    {
+      "id": "detail-生姜加工2",
+      "name": "生姜加工・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜加工2",
+      "x": 1270,
+      "y": 790
+    },
+    {
+      "id": "detail-生姜加工3",
+      "name": "生姜加工・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜加工3",
+      "x": 1250,
+      "y": 790
+    },
+    {
+      "id": "detail-生姜調理1",
+      "name": "生姜調理・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜調理1",
+      "x": 1250,
+      "y": 907
+    },
+    {
+      "id": "detail-生姜調理2",
+      "name": "生姜調理・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜調理2",
+      "x": 1150,
+      "y": 907
+    },
+    {
+      "id": "detail-生姜調理3",
+      "name": "生姜調理・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜調理3",
+      "x": 1150,
+      "y": 757
+    },
+    {
+      "id": "detail-生姜調理4",
+      "name": "生姜調理・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜調理4",
+      "x": 858,
+      "y": 757
+    },
+    {
+      "id": "detail-生姜調理5",
+      "name": "生姜調理・折点5",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-生姜調理5",
+      "x": 858,
+      "y": 905
+    },
+    {
+      "id": "detail-玉人加工1",
+      "name": "玉人加工・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-玉人加工1",
+      "x": 1470,
+      "y": 685
+    },
+    {
+      "id": "detail-玉人調理1",
+      "name": "玉人調理・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-玉人調理1",
+      "x": 1470,
+      "y": 896
+    },
+    {
+      "id": "detail-玉人調理2",
+      "name": "玉人調理・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-玉人調理2",
+      "x": 1142,
+      "y": 896
+    },
+    {
+      "id": "detail-玉人調理3",
+      "name": "玉人調理・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-玉人調理3",
+      "x": 1142,
+      "y": 765
+    },
+    {
+      "id": "detail-玉人調理4",
+      "name": "玉人調理・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-玉人調理4",
+      "x": 940,
+      "y": 765
+    },
+    {
+      "id": "detail-玉人調理5",
+      "name": "玉人調理・折点5",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-玉人調理5",
+      "x": 940,
+      "y": 905
+    },
+    {
+      "id": "detail-厚揚加工1",
+      "name": "厚揚加工・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-厚揚加工1",
+      "x": 1543,
+      "y": 536
+    },
+    {
+      "id": "detail-厚揚加工2",
+      "name": "厚揚加工・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-厚揚加工2",
+      "x": 1490,
+      "y": 574
+    },
+    {
+      "id": "detail-厚揚加工3",
+      "name": "厚揚加工・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-厚揚加工3",
+      "x": 1485,
+      "y": 574
+    },
+    {
+      "id": "detail-厚揚ボイル1",
+      "name": "厚揚ボイル・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-厚揚ボイル1",
+      "x": 1543,
+      "y": 648
+    },
+    {
+      "id": "detail-厚揚ボイル2",
+      "name": "厚揚ボイル・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-厚揚ボイル2",
+      "x": 1543,
+      "y": 770
+    },
+    {
+      "id": "detail-厚揚ボイル3",
+      "name": "厚揚ボイル・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-厚揚ボイル3",
+      "x": 905,
+      "y": 770
+    },
+    {
+      "id": "detail-豆入庫1",
+      "name": "豆入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-豆入庫1",
+      "x": 1859,
+      "y": 385
+    },
+    {
+      "id": "detail-豆洗浄1",
+      "name": "豆洗浄・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-豆洗浄1",
+      "x": 1458,
+      "y": 385
+    },
+    {
+      "id": "detail-豆洗浄2",
+      "name": "豆洗浄・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-豆洗浄2",
+      "x": 1458,
+      "y": 446
+    },
+    {
+      "id": "detail-豆洗浄3",
+      "name": "豆洗浄・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-豆洗浄3",
+      "x": 1360,
+      "y": 446
+    },
+    {
+      "id": "detail-豆調理1",
+      "name": "豆調理・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-豆調理1",
+      "x": 1360,
+      "y": 950
+    },
+    {
+      "id": "detail-豆調理2",
+      "name": "豆調理・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-豆調理2",
+      "x": 905,
+      "y": 950
+    },
+    {
+      "id": "detail-キャベツ加工1",
+      "name": "キャベツ加工・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ加工1",
+      "x": 1491,
+      "y": 715
+    },
+    {
+      "id": "detail-キャベツ調理1",
+      "name": "キャベツ調理・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ調理1",
+      "x": 1491,
+      "y": 910
+    },
+    {
+      "id": "detail-キャベツ調理2",
+      "name": "キャベツ調理・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ調理2",
+      "x": 1126,
+      "y": 910
+    },
+    {
+      "id": "detail-キャベツ調理3",
+      "name": "キャベツ調理・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ調理3",
+      "x": 1126,
+      "y": 905
+    },
+    {
+      "id": "detail-キャベツ冷却1",
+      "name": "キャベツ冷却・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ冷却1",
+      "x": 1070,
+      "y": 841
+    },
+    {
+      "id": "detail-キャベツ冷却2",
+      "name": "キャベツ冷却・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ冷却2",
+      "x": 813,
+      "y": 841
+    },
+    {
+      "id": "detail-キャベツ脱水1",
+      "name": "キャベツ脱水・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ脱水1",
+      "x": 775,
+      "y": 864
+    },
+    {
+      "id": "detail-キャベツ脱水2",
+      "name": "キャベツ脱水・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ脱水2",
+      "x": 813.5,
+      "y": 864
+    },
+    {
+      "id": "detail-キャベツ和え1",
+      "name": "キャベツ和え・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ和え1",
+      "x": 756,
+      "y": 902
+    },
+    {
+      "id": "detail-キャベツ和え2",
+      "name": "キャベツ和え・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ和え2",
+      "x": 756,
+      "y": 773
+    },
+    {
+      "id": "detail-キャベツ和え3",
+      "name": "キャベツ和え・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ和え3",
+      "x": 610,
+      "y": 773
+    },
+    {
+      "id": "detail-キャベツ和え4",
+      "name": "キャベツ和え・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ和え4",
+      "x": 610,
+      "y": 520
+    },
+    {
+      "id": "detail-キャベツ和え5",
+      "name": "キャベツ和え・折点5",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-キャベツ和え5",
+      "x": 536,
+      "y": 520
+    },
+    {
+      "id": "detail-cream入庫1",
+      "name": "cream入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream入庫1",
+      "x": 1869,
+      "y": 263
+    },
+    {
+      "id": "detail-cream入庫2",
+      "name": "cream入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream入庫2",
+      "x": 1292,
+      "y": 263
+    },
+    {
+      "id": "detail-cream盛付1",
+      "name": "cream盛付・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付1",
+      "x": 1292,
+      "y": 244
+    },
+    {
+      "id": "detail-cream盛付2",
+      "name": "cream盛付・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付2",
+      "x": 1050,
+      "y": 244
+    },
+    {
+      "id": "detail-cream盛付3",
+      "name": "cream盛付・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付3",
+      "x": 1050,
+      "y": 581
+    },
+    {
+      "id": "detail-cream盛付4",
+      "name": "cream盛付・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付4",
+      "x": 784,
+      "y": 581
+    },
+    {
+      "id": "detail-cream盛付5",
+      "name": "cream盛付・折点5",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付5",
+      "x": 784,
+      "y": 699
+    },
+    {
+      "id": "detail-cream盛付6",
+      "name": "cream盛付・折点6",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付6",
+      "x": 600,
+      "y": 699
+    },
+    {
+      "id": "detail-cream盛付7",
+      "name": "cream盛付・折点7",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream盛付7",
+      "x": 600,
+      "y": 469
+    },
+    {
+      "id": "detail-cream冷蔵1",
+      "name": "cream冷蔵・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream冷蔵1",
+      "x": 570,
+      "y": 469
+    },
+    {
+      "id": "detail-cream冷蔵2",
+      "name": "cream冷蔵・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream冷蔵2",
+      "x": 570,
+      "y": 1026
+    },
+    {
+      "id": "detail-cream冷蔵3",
+      "name": "cream冷蔵・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream冷蔵3",
+      "x": 630,
+      "y": 1026
+    },
+    {
+      "id": "detail-cream冷蔵4",
+      "name": "cream冷蔵・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream冷蔵4",
+      "x": 630,
+      "y": 1045
+    },
+    {
+      "id": "detail-cream搬出1",
+      "name": "cream搬出・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream搬出1",
+      "x": 655,
+      "y": 1045
+    },
+    {
+      "id": "detail-cream搬出2",
+      "name": "cream搬出・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream搬出2",
+      "x": 655,
+      "y": 1108
+    },
+    {
+      "id": "detail-cream搬出3",
+      "name": "cream搬出・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-cream搬出3",
+      "x": 545,
+      "y": 1108
+    },
+    {
+      "id": "detail-muffin入庫1",
+      "name": "muffin入庫・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin入庫1",
+      "x": 1879,
+      "y": 251
+    },
+    {
+      "id": "detail-muffin入庫2",
+      "name": "muffin入庫・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin入庫2",
+      "x": 1306,
+      "y": 251
+    },
+    {
+      "id": "detail-muffin盛付1",
+      "name": "muffin盛付・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付1",
+      "x": 1306,
+      "y": 232
+    },
+    {
+      "id": "detail-muffin盛付2",
+      "name": "muffin盛付・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付2",
+      "x": 1038,
+      "y": 232
+    },
+    {
+      "id": "detail-muffin盛付3",
+      "name": "muffin盛付・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付3",
+      "x": 1038,
+      "y": 569
+    },
+    {
+      "id": "detail-muffin盛付4",
+      "name": "muffin盛付・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付4",
+      "x": 772,
+      "y": 569
+    },
+    {
+      "id": "detail-muffin盛付5",
+      "name": "muffin盛付・折点5",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付5",
+      "x": 772,
+      "y": 687
+    },
+    {
+      "id": "detail-muffin盛付6",
+      "name": "muffin盛付・折点6",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付6",
+      "x": 588,
+      "y": 687
+    },
+    {
+      "id": "detail-muffin盛付7",
+      "name": "muffin盛付・折点7",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin盛付7",
+      "x": 588,
+      "y": 484
+    },
+    {
+      "id": "detail-muffin冷蔵1",
+      "name": "muffin冷蔵・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin冷蔵1",
+      "x": 582,
+      "y": 484
+    },
+    {
+      "id": "detail-muffin冷蔵2",
+      "name": "muffin冷蔵・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin冷蔵2",
+      "x": 582,
+      "y": 1038
+    },
+    {
+      "id": "detail-muffin冷蔵3",
+      "name": "muffin冷蔵・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin冷蔵3",
+      "x": 642,
+      "y": 1038
+    },
+    {
+      "id": "detail-muffin冷蔵4",
+      "name": "muffin冷蔵・折点4",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin冷蔵4",
+      "x": 642,
+      "y": 1065
+    },
+    {
+      "id": "detail-muffin搬出1",
+      "name": "muffin搬出・折点1",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin搬出1",
+      "x": 667,
+      "y": 1065
+    },
+    {
+      "id": "detail-muffin搬出2",
+      "name": "muffin搬出・折点2",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin搬出2",
+      "x": 667,
+      "y": 1120
+    },
+    {
+      "id": "detail-muffin搬出3",
+      "name": "muffin搬出・折点3",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-detail-muffin搬出3",
+      "x": 555,
+      "y": 1120
+    },
+    {
+      "id": "dispatch-one-axis",
+      "name": "搬出口1・米飯直線北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dispatch-one-axis",
+      "x": 430.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-1",
+      "side": "北接続",
+      "port_fraction": 0.7666666666666667,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-sink-lane1-北接続",
+      "name": "野菜前処理シンク・縦列1北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane1-北接続",
+      "x": 1670.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.39215686274509803,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-sink-lane1-南接続",
+      "name": "野菜前処理シンク・縦列1南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane1-南接続",
+      "x": 1670.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.39215686274509803,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-table-lane1-南接続",
+      "name": "野菜前処理作業台・縦列1南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-lane1-南接続",
+      "x": 1670.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.5454545454545454,
+      "allocation": "fixed"
+    },
+    {
+      "id": "prep-table-lane1-west",
+      "name": "野菜前処理作業台・下部列1西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-prep-table-lane1-west",
+      "x": 1610.0,
+      "y": 735.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.9880239520958084,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-prep1-east",
+      "name": "野菜加工シンク中央・前処理列1東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-prep1-east",
+      "x": 1509.0,
+      "y": 735.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.8757763975155279,
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-lane1",
+      "name": "冷蔵庫C-1・上辺列1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-lane1",
+      "x": 1670,
+      "y": 1005,
+      "side": "北接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-bottom1",
+      "name": "冷蔵庫C-1・下辺列1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-bottom1",
+      "x": 1670,
+      "y": 1115,
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number1"
+    },
+    {
+      "id": "cold-c1-arrival1",
+      "name": "冷蔵庫C-1・入庫列1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-arrival1",
+      "x": 1670,
+      "y": 1028,
+      "side": "南接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number1"
+    },
+    {
+      "id": "vegetable-prep-sink-lane2-北接続",
+      "name": "野菜前処理シンク・縦列2北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane2-北接続",
+      "x": 1680.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.45751633986928103,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-sink-lane2-南接続",
+      "name": "野菜前処理シンク・縦列2南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane2-南接続",
+      "x": 1680.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.45751633986928103,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-table-lane2-南接続",
+      "name": "野菜前処理作業台・縦列2南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-lane2-南接続",
+      "x": 1680.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.6363636363636364,
+      "allocation": "fixed"
+    },
+    {
+      "id": "prep-table-lane2-west",
+      "name": "野菜前処理作業台・下部列2西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-prep-table-lane2-west",
+      "x": 1610.0,
+      "y": 725.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.9281437125748503,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-prep2-east",
+      "name": "野菜加工シンク中央・前処理列2東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-prep2-east",
+      "x": 1509.0,
+      "y": 725.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.8136645962732919,
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-lane2",
+      "name": "冷蔵庫C-1・上辺列2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-lane2",
+      "x": 1680,
+      "y": 1005,
+      "side": "北接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-bottom2",
+      "name": "冷蔵庫C-1・下辺列2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-bottom2",
+      "x": 1680,
+      "y": 1115,
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number2"
+    },
+    {
+      "id": "cold-c1-arrival2",
+      "name": "冷蔵庫C-1・入庫列2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-arrival2",
+      "x": 1680,
+      "y": 1028,
+      "side": "南接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number2"
+    },
+    {
+      "id": "vegetable-prep-sink-lane3-北接続",
+      "name": "野菜前処理シンク・縦列3北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane3-北接続",
+      "x": 1690.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.5228758169934641,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-sink-lane3-南接続",
+      "name": "野菜前処理シンク・縦列3南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane3-南接続",
+      "x": 1690.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.5228758169934641,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-table-lane3-南接続",
+      "name": "野菜前処理作業台・縦列3南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-lane3-南接続",
+      "x": 1690.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.7272727272727273,
+      "allocation": "fixed"
+    },
+    {
+      "id": "prep-table-lane3-west",
+      "name": "野菜前処理作業台・下部列3西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-prep-table-lane3-west",
+      "x": 1610.0,
+      "y": 715.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.8682634730538922,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-prep3-east",
+      "name": "野菜加工シンク中央・前処理列3東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-prep3-east",
+      "x": 1509.0,
+      "y": 715.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.7515527950310559,
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-lane3",
+      "name": "冷蔵庫C-1・上辺列3",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-lane3",
+      "x": 1690,
+      "y": 1005,
+      "side": "北接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-bottom3",
+      "name": "冷蔵庫C-1・下辺列3",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-bottom3",
+      "x": 1690,
+      "y": 1115,
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number3"
+    },
+    {
+      "id": "cold-c1-arrival3",
+      "name": "冷蔵庫C-1・入庫列3",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-arrival3",
+      "x": 1690,
+      "y": 1028,
+      "side": "南接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number3"
+    },
+    {
+      "id": "vegetable-prep-sink-lane4-北接続",
+      "name": "野菜前処理シンク・縦列4北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane4-北接続",
+      "x": 1700.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.5882352941176471,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-sink-lane4-南接続",
+      "name": "野菜前処理シンク・縦列4南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane4-南接続",
+      "x": 1700.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.5882352941176471,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-table-lane4-南接続",
+      "name": "野菜前処理作業台・縦列4南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-lane4-南接続",
+      "x": 1700.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.8181818181818182,
+      "allocation": "fixed"
+    },
+    {
+      "id": "prep-table-lane4-west",
+      "name": "野菜前処理作業台・下部列4西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-prep-table-lane4-west",
+      "x": 1610.0,
+      "y": 705.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.8083832335329342,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-prep4-east",
+      "name": "野菜加工シンク中央・前処理列4東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-prep4-east",
+      "x": 1509.0,
+      "y": 705.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.6894409937888198,
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-lane4",
+      "name": "冷蔵庫C-1・上辺列4",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-lane4",
+      "x": 1700,
+      "y": 1005,
+      "side": "北接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-bottom4",
+      "name": "冷蔵庫C-1・下辺列4",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-bottom4",
+      "x": 1700,
+      "y": 1115,
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number4"
+    },
+    {
+      "id": "cold-c1-arrival4",
+      "name": "冷蔵庫C-1・入庫列4",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-arrival4",
+      "x": 1700,
+      "y": 1028,
+      "side": "南接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number4"
+    },
+    {
+      "id": "vegetable-prep-sink-lane5-北接続",
+      "name": "野菜前処理シンク・縦列5北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane5-北接続",
+      "x": 1710.0,
+      "y": 779.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "北接続",
+      "port_fraction": 0.6535947712418301,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-sink-lane5-南接続",
+      "name": "野菜前処理シンク・縦列5南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-sink-lane5-南接続",
+      "x": 1710.0,
+      "y": 830.0,
+      "equipment_id": "vegetable-prep-sink",
+      "side": "南接続",
+      "port_fraction": 0.6535947712418301,
+      "allocation": "fixed"
+    },
+    {
+      "id": "vegetable-prep-table-lane5-南接続",
+      "name": "野菜前処理作業台・縦列5南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-vegetable-prep-table-lane5-南接続",
+      "x": 1710.0,
+      "y": 737.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "南接続",
+      "port_fraction": 0.9090909090909091,
+      "allocation": "fixed"
+    },
+    {
+      "id": "prep-table-lane5-west",
+      "name": "野菜前処理作業台・下部列5西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-prep-table-lane5-west",
+      "x": 1610.0,
+      "y": 695.0,
+      "equipment_id": "vegetable-prep-table",
+      "side": "西接続",
+      "port_fraction": 0.7485029940119761,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-prep5-east",
+      "name": "野菜加工シンク中央・前処理列5東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-prep5-east",
+      "x": 1509.0,
+      "y": 695.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.6273291925465838,
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-lane5",
+      "name": "冷蔵庫C-1・上辺列5",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-lane5",
+      "x": 1710,
+      "y": 1005,
+      "side": "北接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c1-bottom5",
+      "name": "冷蔵庫C-1・下辺列5",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-bottom5",
+      "x": 1710,
+      "y": 1115,
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number5"
+    },
+    {
+      "id": "cold-c1-arrival5",
+      "name": "冷蔵庫C-1・入庫列5",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c1-arrival5",
+      "x": 1710,
+      "y": 1028,
+      "side": "南接続",
+      "area_id": "fridge-c1",
+      "allocation": "fixed",
+      "label_anchor": "cold-c1-number5"
+    },
+    {
+      "id": "central-sink-slicer1-south",
+      "name": "野菜加工シンク中央・スライサー列1南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-slicer1-south",
+      "x": 1462.0,
+      "y": 755.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "南接続",
+      "port_fraction": 0.7473118279569892,
+      "allocation": "fixed"
+    },
+    {
+      "id": "slicer-east-lane1-北接続",
+      "name": "スライサー東・縦列1北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-slicer-east-lane1-北接続",
+      "x": 1462.0,
+      "y": 801.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "北接続",
+      "port_fraction": 0.2923076923076923,
+      "allocation": "fixed"
+    },
+    {
+      "id": "slicer-east-lane1-南接続",
+      "name": "スライサー東・縦列1南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-slicer-east-lane1-南接続",
+      "x": 1462.0,
+      "y": 882.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "南接続",
+      "port_fraction": 0.2923076923076923,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-slicer2-south",
+      "name": "野菜加工シンク中央・スライサー列2南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-slicer2-south",
+      "x": 1480.0,
+      "y": 755.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "南接続",
+      "port_fraction": 0.8440860215053764,
+      "allocation": "fixed"
+    },
+    {
+      "id": "slicer-east-lane2-北接続",
+      "name": "スライサー東・縦列2北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-slicer-east-lane2-北接続",
+      "x": 1480.0,
+      "y": 801.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "北接続",
+      "port_fraction": 0.5692307692307692,
+      "allocation": "fixed"
+    },
+    {
+      "id": "slicer-east-lane2-南接続",
+      "name": "スライサー東・縦列2南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-slicer-east-lane2-南接続",
+      "x": 1480.0,
+      "y": 882.0,
+      "equipment_id": "vegetable-slicer-east",
+      "side": "南接続",
+      "port_fraction": 0.5692307692307692,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-upper1",
+      "name": "野菜加工シンク中央・上段区画1北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper1",
+      "x": 1376.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.2849462365591398,
+      "allocation": "fixed",
+      "compartment_bounds": [
+        1323,
+        594,
+        1387,
+        644
+      ],
+      "passage_depth": 36,
+      "label_anchor": "sink-compartment-number1"
+    },
+    {
+      "id": "central-sink-upper1-west",
+      "name": "野菜加工シンク中央・上段区画1西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper1-west",
+      "x": 1323.0,
+      "y": 620.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "西接続",
+      "port_fraction": 0.16149068322981366,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-upper1-return",
+      "name": "野菜加工シンク中央・上段区画1北戻り",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper1-return",
+      "x": 1332.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.04838709677419355,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-upper2",
+      "name": "野菜加工シンク中央・上段区画2北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper2",
+      "x": 1492.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.9086021505376344,
+      "allocation": "fixed",
+      "compartment_bounds": [
+        1443,
+        594,
+        1509,
+        644
+      ],
+      "passage_depth": 28,
+      "label_anchor": "sink-compartment-number2"
+    },
+    {
+      "id": "central-sink-upper2-west",
+      "name": "野菜加工シンク中央・上段区画2西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper2-west",
+      "x": 1323.0,
+      "y": 628.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "西接続",
+      "port_fraction": 0.2111801242236025,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-upper2-return",
+      "name": "野菜加工シンク中央・上段区画2北戻り",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper2-return",
+      "x": 1460.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.7365591397849462,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-upper3",
+      "name": "野菜加工シンク中央・上段区画3北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper3",
+      "x": 1502.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.9623655913978495,
+      "allocation": "fixed",
+      "compartment_bounds": [
+        1443,
+        594,
+        1509,
+        644
+      ],
+      "passage_depth": 38,
+      "label_anchor": "sink-compartment-number3"
+    },
+    {
+      "id": "central-sink-upper3-west",
+      "name": "野菜加工シンク中央・上段区画3西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper3-west",
+      "x": 1323.0,
+      "y": 636.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "西接続",
+      "port_fraction": 0.2608695652173913,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-upper3-return",
+      "name": "野菜加工シンク中央・上段区画3北戻り",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-upper3-return",
+      "x": 1450.0,
+      "y": 594.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "北接続",
+      "port_fraction": 0.6827956989247311,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-table-lower-東接続",
+      "name": "野菜加工作業台中央・下部東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-table-lower-東接続",
+      "x": 1323.0,
+      "y": 725.0,
+      "equipment_id": "vegetable-worktable-center",
+      "side": "東接続",
+      "port_fraction": 0.8136645962732919,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-lower-東接続",
+      "name": "野菜加工シンク中央・下段東接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-lower-東接続",
+      "x": 1509.0,
+      "y": 725.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "東接続",
+      "port_fraction": 0.8136645962732919,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-table-lower-西接続",
+      "name": "野菜加工作業台中央・下部西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-table-lower-西接続",
+      "x": 1257.0,
+      "y": 725.0,
+      "equipment_id": "vegetable-worktable-center",
+      "side": "西接続",
+      "port_fraction": 0.8136645962732919,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-lower-西接続",
+      "name": "野菜加工シンク中央・下段西接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-lower-西接続",
+      "x": 1323.0,
+      "y": 725.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "西接続",
+      "port_fraction": 0.8136645962732919,
+      "allocation": "fixed"
+    },
+    {
+      "id": "central-sink-lower-left-south",
+      "name": "野菜加工シンク中央・下段左区画南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-central-sink-lower-left-south",
+      "x": 1332.0,
+      "y": 755.0,
+      "equipment_id": "vegetable-sink-center",
+      "side": "南接続",
+      "port_fraction": 0.04838709677419355,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-dispatch-2",
+      "name": "盛付作業台南・搬出列2南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-dispatch-2",
+      "x": 464.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.02197802197802198,
+      "allocation": "fixed"
+    },
+    {
+      "id": "dispatch-aligned-2",
+      "name": "搬出口2・盛付直線北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dispatch-aligned-2",
+      "x": 464.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-2",
+      "side": "北接続",
+      "port_fraction": 0.8333333333333334,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-dispatch-3",
+      "name": "盛付作業台南・搬出列3南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-dispatch-3",
+      "x": 486.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.26373626373626374,
+      "allocation": "fixed"
+    },
+    {
+      "id": "dispatch-aligned-3",
+      "name": "搬出口3・盛付直線北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dispatch-aligned-3",
+      "x": 486.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-3",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-dispatch-4",
+      "name": "盛付作業台南・搬出列4南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-dispatch-4",
+      "x": 518.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.6153846153846154,
+      "allocation": "fixed"
+    },
+    {
+      "id": "dispatch-aligned-4",
+      "name": "搬出口4・盛付直線北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dispatch-aligned-4",
+      "x": 518.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-4",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-dispatch-5",
+      "name": "盛付作業台南・搬出列5南接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-dispatch-5",
+      "x": 550.0,
+      "y": 881.0,
+      "equipment_id": "serving-table-south",
+      "side": "南接続",
+      "port_fraction": 0.967032967032967,
+      "allocation": "fixed"
+    },
+    {
+      "id": "dispatch-aligned-5",
+      "name": "搬出口5・盛付直線北接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-dispatch-aligned-5",
+      "x": 550.0,
+      "y": 1130.0,
+      "equipment_id": "dispatch-slot-5",
+      "side": "北接続",
+      "port_fraction": 0.5,
+      "allocation": "fixed"
+    },
+    {
+      "id": "oven-box-north1",
+      "name": "ゼットオーブン横の無記名枠・上辺列1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-oven-box-north1",
+      "x": 1005.0,
+      "y": 294.0,
+      "equipment_id": "jet-oven-side-box",
+      "side": "北接続",
+      "port_fraction": 0.25,
+      "allocation": "fixed",
+      "label_anchor": "oven-box-number1"
+    },
+    {
+      "id": "oven-box-west1",
+      "name": "ゼットオーブン横の無記名枠・左辺列1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-oven-box-west1",
+      "x": 995.0,
+      "y": 322.5,
+      "equipment_id": "jet-oven-side-box",
+      "side": "西接続",
+      "port_fraction": 0.5,
+      "allocation": "fixed"
+    },
+    {
+      "id": "oven-east-lane1",
+      "name": "ゼットオーブン・右辺列1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-oven-east-lane1",
+      "x": 983.0,
+      "y": 322.5,
+      "equipment_id": "jet-oven",
+      "side": "東接続",
+      "port_fraction": 0.5,
+      "allocation": "fixed"
+    },
+    {
+      "id": "oven-box-north2",
+      "name": "ゼットオーブン横の無記名枠・上辺列2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-oven-box-north2",
+      "x": 1025.0,
+      "y": 294.0,
+      "equipment_id": "jet-oven-side-box",
+      "side": "北接続",
+      "port_fraction": 0.75,
+      "allocation": "fixed",
+      "label_anchor": "oven-box-number2"
+    },
+    {
+      "id": "oven-box-west2",
+      "name": "ゼットオーブン横の無記名枠・左辺列2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-oven-box-west2",
+      "x": 995.0,
+      "y": 342.5,
+      "equipment_id": "jet-oven-side-box",
+      "side": "西接続",
+      "port_fraction": 0.8508771929824561,
+      "allocation": "fixed"
+    },
+    {
+      "id": "oven-east-lane2",
+      "name": "ゼットオーブン・右辺列2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-oven-east-lane2",
+      "x": 983.0,
+      "y": 342.5,
+      "equipment_id": "jet-oven",
+      "side": "東接続",
+      "port_fraction": 0.8508771929824561,
+      "allocation": "fixed"
+    },
+    {
+      "id": "kettle-d-shared",
+      "name": "釜D・東共有接続",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-kettle-d-shared",
+      "x": 1019.0,
+      "y": 905.0,
+      "equipment_id": "kettle-d",
+      "side": "東接続",
+      "port_fraction": 0.5,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-east-upper1",
+      "name": "盛付作業台南・上部東列1",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-east-upper1",
+      "x": 553.0,
+      "y": 680.0,
+      "equipment_id": "serving-table-south",
+      "side": "東接続",
+      "port_fraction": 0.3619047619047619,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-east-upper2",
+      "name": "盛付作業台南・上部東列2",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-east-upper2",
+      "x": 553.0,
+      "y": 700.0,
+      "equipment_id": "serving-table-south",
+      "side": "東接続",
+      "port_fraction": 0.4253968253968254,
+      "allocation": "fixed"
+    },
+    {
+      "id": "serving-east-upper3",
+      "name": "盛付作業台南・上部東列3",
+      "aliases": [],
+      "kind": "equipment_port",
+      "svg_element_id": "anchor-serving-east-upper3",
+      "x": 553.0,
+      "y": 720.0,
+      "equipment_id": "serving-table-south",
+      "side": "東接続",
+      "port_fraction": 0.4888888888888889,
+      "allocation": "fixed"
+    },
+    {
+      "id": "inspection-bottom-1",
+      "name": "検品室・下辺列1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-1",
+      "x": 1804,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number1"
+    },
+    {
+      "id": "inspection-bottom-2",
+      "name": "検品室・下辺列2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-2",
+      "x": 1814,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number2"
+    },
+    {
+      "id": "inspection-bottom-3",
+      "name": "検品室・下辺列3",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-3",
+      "x": 1824,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number3"
+    },
+    {
+      "id": "inspection-bottom-4",
+      "name": "検品室・下辺列4",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-4",
+      "x": 1834,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number4"
+    },
+    {
+      "id": "inspection-bottom-5",
+      "name": "検品室・下辺列5",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-5",
+      "x": 1844,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number5"
+    },
+    {
+      "id": "inspection-bottom-6",
+      "name": "検品室・下辺列6",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-6",
+      "x": 1854,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number6"
+    },
+    {
+      "id": "inspection-bottom-7",
+      "name": "検品室・下辺列7",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-7",
+      "x": 1864,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number7"
+    },
+    {
+      "id": "inspection-bottom-8",
+      "name": "検品室・下辺列8",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-8",
+      "x": 1874,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number8"
+    },
+    {
+      "id": "inspection-bottom-9",
+      "name": "検品室・下辺列9",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-inspection-bottom-9",
+      "x": 1884,
+      "y": 1120,
+      "side": "北接続",
+      "allocation": "fixed",
+      "area_id": "inspection",
+      "label_anchor": "inspection-number9"
+    },
+    {
+      "id": "freezer-b1-lane1",
+      "name": "冷凍庫B-1・下部列1",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-freezer-b1-lane1",
+      "x": 1380,
+      "y": 365,
+      "area_id": "freezer-b1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "freezer-b1-lane2",
+      "name": "冷凍庫B-1・下部列2",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-freezer-b1-lane2",
+      "x": 1400,
+      "y": 365,
+      "area_id": "freezer-b1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "freezer-b1-lane3",
+      "name": "冷凍庫B-1・下部列3",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-freezer-b1-lane3",
+      "x": 1420,
+      "y": 365,
+      "area_id": "freezer-b1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "freezer-b1-lane4",
+      "name": "冷凍庫B-1・下部列4",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-freezer-b1-lane4",
+      "x": 1440,
+      "y": 365,
+      "area_id": "freezer-b1",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c2-bottom-right",
+      "name": "冷蔵庫C-2・下辺右寄り",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c2-bottom-right",
+      "x": 1540,
+      "y": 1115,
+      "area_id": "fridge-c2",
+      "allocation": "fixed",
+      "label_anchor": "cold-c2-number-right"
+    },
+    {
+      "id": "cold-c2-top-right",
+      "name": "冷蔵庫C-2・上辺右寄り",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c2-top-right",
+      "x": 1540,
+      "y": 1005,
+      "side": "北接続",
+      "area_id": "fridge-c2",
+      "allocation": "fixed"
+    },
+    {
+      "id": "cold-c2-arrival-right",
+      "name": "冷蔵庫C-2・入庫右寄り",
+      "aliases": [],
+      "kind": "area_anchor",
+      "svg_element_id": "anchor-cold-c2-arrival-right",
+      "x": 1540,
+      "y": 1055,
+      "side": "南接続",
+      "area_id": "fridge-c2",
+      "allocation": "fixed",
+      "label_anchor": "cold-c2-number-right"
+    },
+    {
+      "id": "cold-c2-number-right",
+      "name": "冷蔵庫C-2・右側番号欄",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-c2-number-right",
+      "x": 1524,
+      "y": 1042
+    },
+    {
+      "id": "cold-boundary-label",
+      "name": "冷蔵庫境界左側・番号欄",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-boundary-label",
+      "x": 1525,
+      "y": 1060
+    },
+    {
+      "id": "rice-axis-top",
+      "name": "米倉庫・炊飯直線の曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-rice-axis-top",
+      "x": 430,
+      "y": 130
+    },
+    {
+      "id": "oven-west-descent",
+      "name": "オーブン西側の縦通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-oven-west-descent",
+      "x": 830,
+      "y": 322.5
+    },
+    {
+      "id": "oven-serving-turn",
+      "name": "オーブンから盛付への曲がり",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-oven-serving-turn",
+      "x": 830,
+      "y": 680
+    },
+    {
+      "id": "kettle-d-west-descent",
+      "name": "釜D西側の縦通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-kettle-d-west-descent",
+      "x": 950,
+      "y": 905
+    },
+    {
+      "id": "hot-table-south-turn",
+      "name": "加熱室作業台南側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-hot-table-south-turn",
+      "x": 950,
+      "y": 710
+    },
+    {
+      "id": "kettle-e-serving-turn",
+      "name": "釜E北側の盛付折点",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-kettle-e-serving-turn",
+      "x": 905,
+      "y": 720
+    },
+    {
+      "id": "kettle-inter-row-east",
+      "name": "釜上下段間の通路東",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-kettle-inter-row-east",
+      "x": 1070,
+      "y": 850
+    },
+    {
+      "id": "cooling-south-passage",
+      "name": "冷却南側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-cooling-south-passage",
+      "x": 800,
+      "y": 850
+    },
+    {
+      "id": "vegetable-north-west",
+      "name": "野菜加工北側通路西",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-vegetable-north-west",
+      "x": 1240,
+      "y": 470
+    },
+    {
+      "id": "vegetable-north-east",
+      "name": "野菜加工北側通路東",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-vegetable-north-east",
+      "x": 1550,
+      "y": 470
+    },
+    {
+      "id": "prep-north-entry",
+      "name": "野菜前処理壁沿い北端",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-prep-north-entry",
+      "x": 1550,
+      "y": 250
+    },
+    {
+      "id": "freezer-b1-east",
+      "name": "冷凍庫B-1東側通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-freezer-b1-east",
+      "x": 1550,
+      "y": 335
+    },
+    {
+      "id": "prep-wall-lower",
+      "name": "野菜前処理壁沿い南端",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-prep-wall-lower",
+      "x": 1550,
+      "y": 980
+    },
+    {
+      "id": "cold-c1-number1",
+      "name": "冷蔵庫C-1・上部番号欄1",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-c1-number1",
+      "x": 1662,
+      "y": 1042
+    },
+    {
+      "id": "cold-c1-number2",
+      "name": "冷蔵庫C-1・上部番号欄2",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-c1-number2",
+      "x": 1672,
+      "y": 1067
+    },
+    {
+      "id": "cold-c1-number3",
+      "name": "冷蔵庫C-1・上部番号欄3",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-c1-number3",
+      "x": 1682,
+      "y": 1042
+    },
+    {
+      "id": "cold-c1-number4",
+      "name": "冷蔵庫C-1・上部番号欄4",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-c1-number4",
+      "x": 1692,
+      "y": 1067
+    },
+    {
+      "id": "cold-c1-number5",
+      "name": "冷蔵庫C-1・上部番号欄5",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-cold-c1-number5",
+      "x": 1702,
+      "y": 1042
+    },
+    {
+      "id": "inspection-number1",
+      "name": "検品室・下部番号欄1",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number1",
+      "x": 1805,
+      "y": 1240
+    },
+    {
+      "id": "inspection-number2",
+      "name": "検品室・下部番号欄2",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number2",
+      "x": 1830,
+      "y": 1240
+    },
+    {
+      "id": "inspection-number3",
+      "name": "検品室・下部番号欄3",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number3",
+      "x": 1855,
+      "y": 1240
+    },
+    {
+      "id": "inspection-number4",
+      "name": "検品室・下部番号欄4",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number4",
+      "x": 1805,
+      "y": 1262
+    },
+    {
+      "id": "inspection-number5",
+      "name": "検品室・下部番号欄5",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number5",
+      "x": 1830,
+      "y": 1262
+    },
+    {
+      "id": "inspection-number6",
+      "name": "検品室・下部番号欄6",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number6",
+      "x": 1855,
+      "y": 1262
+    },
+    {
+      "id": "inspection-number7",
+      "name": "検品室・下部番号欄7",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number7",
+      "x": 1805,
+      "y": 1284
+    },
+    {
+      "id": "inspection-number8",
+      "name": "検品室・下部番号欄8",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number8",
+      "x": 1830,
+      "y": 1284
+    },
+    {
+      "id": "inspection-number9",
+      "name": "検品室・下部番号欄9",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-inspection-number9",
+      "x": 1855,
+      "y": 1284
+    },
+    {
+      "id": "sink-compartment-number1",
+      "name": "野菜加工シンク中央・上段区画1番号欄",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-sink-compartment-number1",
+      "x": 1360,
+      "y": 636
+    },
+    {
+      "id": "sink-compartment-number2",
+      "name": "野菜加工シンク中央・上段区画2番号欄",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-sink-compartment-number2",
+      "x": 1468,
+      "y": 636
+    },
+    {
+      "id": "sink-compartment-number3",
+      "name": "野菜加工シンク中央・上段区画3番号欄",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-sink-compartment-number3",
+      "x": 1490,
+      "y": 636
+    },
+    {
+      "id": "oven-box-number1",
+      "name": "ゼットオーブン横の無記名枠・番号欄1",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-oven-box-number1",
+      "x": 1000,
+      "y": 320
+    },
+    {
+      "id": "oven-box-number2",
+      "name": "ゼットオーブン横の無記名枠・番号欄2",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-oven-box-number2",
+      "x": 1017,
+      "y": 344
+    },
+    {
+      "id": "green-join-upper",
+      "name": "野菜加工西側上段接続",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-green-join-upper",
+      "x": 1450,
+      "y": 574
+    },
+    {
+      "id": "green-join-middle",
+      "name": "野菜加工西側中段接続",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-green-join-middle",
+      "x": 1376,
+      "y": 574
+    },
+    {
+      "id": "central-sink-west-turn",
+      "name": "野菜加工シンク北西角通路",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-central-sink-west-turn",
+      "x": 1220,
+      "y": 574
+    },
+    {
+      "id": "green-join-lower",
+      "name": "野菜加工西側下段接続",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-green-join-lower",
+      "x": 1140,
+      "y": 755
+    },
+    {
+      "id": "green-pot-approach",
+      "name": "加熱室南釜東側共有進入",
+      "aliases": [],
+      "kind": "waypoint",
+      "svg_element_id": "anchor-green-pot-approach",
+      "x": 1030,
+      "y": 755
+    },
+    {
+      "id": "dispatch-caption-right",
+      "name": "搬出準備室見出し右寄せ",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-dispatch-caption-right",
+      "x": 560,
+      "y": 1080
+    },
+    {
+      "id": "slicer-east-caption-left",
+      "name": "スライサー東の名称・左脇",
+      "aliases": [],
+      "kind": "label_anchor",
+      "svg_element_id": "anchor-slicer-east-caption-left",
+      "x": 1387,
+      "y": 821
+    }
+  ],
+  "fields": [
+    {
+      "id": "school_name",
+      "name": "学校名",
+      "svg_element_id": "field-school_name",
+      "x": 165,
+      "y": 23,
+      "width": 145,
+      "height": 40,
+      "font_size": 16,
+      "max_lines": 2
+    },
+    {
+      "id": "month",
+      "name": "月",
+      "svg_element_id": "field-month",
+      "x": 465,
+      "y": 28,
+      "width": 45,
+      "height": 30,
+      "font_size": 22,
+      "max_lines": 1
+    },
+    {
+      "id": "day",
+      "name": "日",
+      "svg_element_id": "field-day",
+      "x": 553,
+      "y": 28,
+      "width": 45,
+      "height": 30,
+      "font_size": 22,
+      "max_lines": 1
+    },
+    {
+      "id": "weekday",
+      "name": "曜日",
+      "svg_element_id": "field-weekday",
+      "x": 695,
+      "y": 28,
+      "width": 45,
+      "height": 30,
+      "font_size": 24,
+      "max_lines": 1
+    },
+    {
+      "id": "menu_names",
+      "name": "献立名",
+      "svg_element_id": "field-menu_names",
+      "x": 45,
+      "y": 88,
+      "width": 245,
+      "height": 260,
+      "font_size": 18,
+      "max_lines": 12
+    },
+    {
+      "id": "food_names",
+      "name": "食品名",
+      "svg_element_id": "field-food_names",
+      "x": 38,
+      "y": 404,
+      "width": 252,
+      "height": 545,
+      "font_size": 17,
+      "max_lines": 26
+    },
+    {
+      "id": "delivery_chilled",
+      "name": "納品・冷蔵庫",
+      "svg_element_id": "field-delivery_chilled",
+      "x": 282,
+      "y": 1198,
+      "width": 305,
+      "height": 24,
+      "font_size": 14,
+      "max_lines": 1
+    },
+    {
+      "id": "delivery_frozen",
+      "name": "納品・冷凍庫",
+      "svg_element_id": "field-delivery_frozen",
+      "x": 282,
+      "y": 1224,
+      "width": 305,
+      "height": 24,
+      "font_size": 14,
+      "max_lines": 1
+    },
+    {
+      "id": "delivery_dry",
+      "name": "納品・食物倉庫",
+      "svg_element_id": "field-delivery_dry",
+      "x": 282,
+      "y": 1250,
+      "width": 210,
+      "height": 24,
+      "font_size": 14,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_1",
+      "name": "搬出口1記入欄",
+      "svg_element_id": "field-dispatch_label_1",
+      "x": 409,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_2",
+      "name": "搬出口2記入欄",
+      "svg_element_id": "field-dispatch_label_2",
+      "x": 441,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_3",
+      "name": "搬出口3記入欄",
+      "svg_element_id": "field-dispatch_label_3",
+      "x": 473,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_4",
+      "name": "搬出口4記入欄",
+      "svg_element_id": "field-dispatch_label_4",
+      "x": 505,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_5",
+      "name": "搬出口5記入欄",
+      "svg_element_id": "field-dispatch_label_5",
+      "x": 537,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_6",
+      "name": "搬出口6記入欄",
+      "svg_element_id": "field-dispatch_label_6",
+      "x": 569,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "dispatch_label_7",
+      "name": "搬出口7記入欄",
+      "svg_element_id": "field-dispatch_label_7",
+      "x": 601,
+      "y": 1131,
+      "width": 25,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "kettle_a_first",
+      "name": "釜A・1回目",
+      "svg_element_id": "field-kettle_a_first",
+      "x": 1585,
+      "y": 1200,
+      "width": 70,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "kettle_a_second",
+      "name": "釜A・2回目",
+      "svg_element_id": "field-kettle_a_second",
+      "x": 1670,
+      "y": 1200,
+      "width": 70,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "kettle_b_first",
+      "name": "釜B・1回目",
+      "svg_element_id": "field-kettle_b_first",
+      "x": 1585,
+      "y": 1228,
+      "width": 70,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    },
+    {
+      "id": "kettle_b_second",
+      "name": "釜B・2回目",
+      "svg_element_id": "field-kettle_b_second",
+      "x": 1670,
+      "y": 1228,
+      "width": 70,
+      "height": 25,
+      "font_size": 17,
+      "max_lines": 1
+    }
+  ],
+  "line_styles": {
+    "solid": {
+      "dasharray": []
+    },
+    "dashed": {
+      "dasharray": [
+        12,
+        4
+      ]
+    }
+  },
+  "route_regions": [
+    {
+      "id": "receiving-cold-interior",
+      "name": "検品室内から冷蔵庫へ（室外を通らない）",
+      "bounds": [
+        1500,
+        1000,
+        1885,
+        1125
+      ]
+    },
+    {
+      "id": "receiving-indoor",
+      "name": "検品室内から各保管庫へ（下辺室外を通らない）",
+      "bounds": [
+        304,
+        78,
+        1885,
+        1125
+      ]
+    }
+  ],
+  "optional_equipment": [
+    {
+      "id": "jet-oven-side-box",
+      "name": "ゼットオーブン横の無記名枠（原本で選択）"
+    }
+  ],
+  "movable_labels": [
+    {
+      "id": "equipment-label-rice-cooker",
+      "text": "炊飯器",
+      "name": "炊飯器"
+    },
+    {
+      "id": "equipment-label-lift",
+      "text": "エレベーター",
+      "name": "エレベーター"
+    },
+    {
+      "id": "equipment-label-serving-table-north",
+      "text": "作業台",
+      "name": "盛付作業台北"
+    },
+    {
+      "id": "equipment-label-serving-table-south",
+      "text": "作業台",
+      "name": "盛付作業台南"
+    },
+    {
+      "id": "equipment-label-steamer-top",
+      "text": "スチコン",
+      "name": "上部小スチコン"
+    },
+    {
+      "id": "equipment-label-jet-oven",
+      "text": "ゼットオーブン",
+      "name": "ゼットオーブン"
+    },
+    {
+      "id": "equipment-label-fryer-north",
+      "text": "フライヤー",
+      "name": "フライヤー中央上"
+    },
+    {
+      "id": "equipment-label-fryer-south",
+      "text": "フライヤー",
+      "name": "フライヤー中央下"
+    },
+    {
+      "id": "equipment-label-hot-kitchen-table",
+      "text": "作業台",
+      "name": "加熱室作業台"
+    },
+    {
+      "id": "equipment-label-food-container",
+      "text": "食缶",
+      "name": "食缶"
+    },
+    {
+      "id": "equipment-label-dewatering-machine",
+      "text": "脱水機",
+      "name": "脱水機"
+    },
+    {
+      "id": "equipment-label-fish-prep-table",
+      "text": "作業台",
+      "name": "魚肉前処理作業台"
+    },
+    {
+      "id": "equipment-label-vegetable-mixer-north",
+      "text": "ミキサー",
+      "name": "ミキサー北"
+    },
+    {
+      "id": "equipment-label-vegetable-sink-west",
+      "text": "シンク",
+      "name": "野菜加工シンク西"
+    },
+    {
+      "id": "equipment-label-vegetable-worktable-north",
+      "text": "作業台",
+      "name": "野菜加工作業台北"
+    },
+    {
+      "id": "equipment-label-vegetable-worktable-center",
+      "text": "作業台",
+      "name": "野菜加工作業台中央"
+    },
+    {
+      "id": "equipment-label-vegetable-mixer-south",
+      "text": "ミキサー",
+      "name": "ミキサー南"
+    },
+    {
+      "id": "equipment-label-vegetable-slicer-west",
+      "text": "スライサー",
+      "name": "スライサー西"
+    },
+    {
+      "id": "equipment-label-vegetable-slicer-east",
+      "text": "スライサー",
+      "name": "スライサー東"
+    },
+    {
+      "id": "equipment-label-insect-trap",
+      "text": "虫取りハッチ",
+      "name": "虫取りハッチ"
+    },
+    {
+      "id": "equipment-label-vegetable-prep-table",
+      "text": "作業台",
+      "name": "野菜前処理作業台"
+    },
+    {
+      "id": "equipment-label-vegetable-prep-sink",
+      "text": "シンク",
+      "name": "野菜前処理シンク"
+    },
+    {
+      "id": "equipment-label-salad-table",
+      "text": "作業台",
+      "name": "和え物作業台"
+    },
+    {
+      "id": "equipment-label-salad-sink",
+      "text": "シンク",
+      "name": "和え物シンク"
+    }
+  ],
+  "coordinate_units": "SVG user units",
+  "connection_policy": "Named drawing anchors; not physical entrance/exit claims. Unqualified equipment names explicitly alias west-edge ports. Use cardinal ports or named waypoints to choose another connection.",
+  "route_legend": {
+    "x": 38,
+    "y": 1010,
+    "width": 252,
+    "height": 130,
+    "font_size": 12,
+    "max_lines": 9
+  },
+  "svg_file": "kitchen-base-bread.svg",
+  "svg_sha256": "d9fbb94210478fcc0ef634a7a0ec09fc224979200f6c37a0c32f31e4a452c988"
+}

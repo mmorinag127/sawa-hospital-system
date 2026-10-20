@@ -37,6 +37,60 @@ from src.services import order_service, week_candidate_service
 
 router = APIRouter()
 
+
+@router.get("/pending-faxes", dependencies=[Depends(require_role("operator"))])
+def pending_faxes():
+    """Unfinished intake and OCR results awaiting workflow confirmation; no cutoff."""
+    from sqlalchemy import or_, select
+    from src.db import session_scope
+    from src.models.uploaded_pdf import UploadedPdf
+    from src.models.order_workflow_state import OrderWorkflowState
+    with session_scope() as session:
+        rows = session.execute(select(UploadedPdf).outerjoin(OrderWorkflowState,
+            OrderWorkflowState.order_id == UploadedPdf.current_order_id).where(or_(
+                UploadedPdf.status.in_(["pending", "processing"]),
+                (UploadedPdf.status == "completed") & or_(OrderWorkflowState.state != "confirmed", OrderWorkflowState.order_id.is_(None))
+            )).order_by(UploadedPdf.received_at, UploadedPdf.id)).scalars().all()
+        items = [{"id": row.id, "name": row.original_filename, "facility": row.facility_name,
+                  "facility_id": row.facility_hint, "week": row.week_hint, "status": row.status,
+                  "sha256": row.content_sha256, "order_id": row.current_order_id,
+                  "document_id": row.current_document_id, "skip_ocr": row.skip_ocr} for row in rows]
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/review-faxes", dependencies=[Depends(require_role("operator"))])
+def review_faxes():
+    from sqlalchemy import select
+    from src.db import session_scope
+    from src.models.uploaded_pdf import UploadedPdf
+    with session_scope() as session:
+        rows = session.execute(select(UploadedPdf).where(UploadedPdf.status.in_(["failed", "manual_review", "retry_wait"])).order_by(UploadedPdf.received_at, UploadedPdf.id)).scalars().all()
+        items = [{"id": row.id, "name": row.original_filename, "facility": row.facility_name,
+                  "facility_id": row.facility_hint, "week": row.week_hint, "status": row.status,
+                  "sha256": row.content_sha256, "order_id": row.current_order_id,
+                  "document_id": row.current_document_id, "skip_ocr": row.skip_ocr} for row in rows]
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/uploads/{uploaded_pdf_id}/start", status_code=202, dependencies=[Depends(require_role("operator"))])
+def start_pending_fax(uploaded_pdf_id: str, body: dict):
+    """Dispatch an existing pending intent; do not reset a lease or restart a job."""
+    row = get_uploaded_pdf(uploaded_pdf_id)
+    if row is None:
+        raise HTTPException(404, "uploaded_pdf_not_found")
+    if set(body) != {"sha256"} or body["sha256"] != row["content_sha256"] or row["skip_ocr"]:
+        raise HTTPException(409, "fax_original_changed_or_ocr_skipped")
+    if row["status"] == "processing":
+        return {"accepted": False, "already_processing": True}
+    if row["status"] != "pending":
+        raise HTTPException(409, "fax_is_not_pending")
+    try:
+        build_ingest_payload(row)  # Verify the captured original facility/week selection.
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    enqueue_uploaded_pdf_async(uploaded_pdf_id)
+    return {"accepted": True, "uploaded_pdf_id": uploaded_pdf_id}
+
 # Backward-compatible import alias for tests and internal helpers that still
 # patch or call the older single-save name.
 save_uploaded_pdf = save_uploaded_pdf_pages

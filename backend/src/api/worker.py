@@ -127,6 +127,11 @@ def _execute_claim(claim):
 def process_workflow_ocr_delivery(delivery_id: str, generation: int, request: Request,
                                  authorization: str | None = Header(default=None)):
     _required_worker_identity(request, authorization)
+    return execute_workflow_ocr_delivery(delivery_id, generation)
+
+
+def execute_workflow_ocr_delivery(delivery_id: str, generation: int):
+    """Shared business executor; public worker authentication stays at the route."""
     try:
         # Validate identity/generation before an active duplicate can receive ACK.
         observed = delivery.inspect_generation(delivery_id, generation)

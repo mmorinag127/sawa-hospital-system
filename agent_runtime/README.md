@@ -1,0 +1,11 @@
+# Isolated staging agent runtime
+
+The regular `develop` staging Actions build and deploy this private sidecar on `web-stg`. There is no local deploy command. The existing service identity, Cloud SQL attachment and authentication remain in place; no IAM grant is added. The frontend and sidecar are deployed together by immutable image digest.
+
+`release.json` fixes every synthetic baseline file. `manifests/shift.json` and `school-lunch.json` record the separate source revision, working-diff digest and complete packaged file hashes. Hospital source comes from the same release checkout's backend and OCR pipeline. Any missing/changed fixed source prevents startup. The image build starts all three native APIs and checks confinement/WAL/shutdown before it can be published.
+
+Hospital intake is initialized from the explicitly declared synthetic PDF, canonical facility JSON, formal database and original delivery workbook. Preparation calls the regular registration and receipt services inside each new request, before sealing its before-image. It never edits a saved delivery contract for a new path/token. Gemini then starts the pending intake through the normal API and performs OCR/review/outputs. The three 20-serving entries are synthetic test data, not a live hospital order.
+
+Business databases and files are request-local copies. The shared orders tables are never restored or modified by trial operations. Agent history and sealed files use a separate `sawa_agent_trial` PostgreSQL schema; the native public schema/catalog is unchanged. Replacement instances fence earlier instances and preserve costs/reservations while requiring explicit stop/rollback rather than replaying unknown operations.
+
+The service scales to zero when idle. After a restart, unfinished requests show that reconciliation is required; their before-image, sealed outputs and billing history remain available. No key is embedded in this package. Existing secret references are passed only to their intended runtime. The initial provider is Gemini; Claude remains unavailable until its existing required settings are supplied. The monthly agent ceiling starts at zero and is set in the authenticated management screen.
