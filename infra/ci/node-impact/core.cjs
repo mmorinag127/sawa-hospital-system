@@ -52,7 +52,8 @@ function unsafe(reason) {
 }
 
 function dependency(value) {
-  if (busy) return;
+  // An unsafe record always executes; hashing more inputs cannot make it reusable.
+  if (busy || globalUnsafe.size || storage.getStore()?.unsafe.size) return;
   busy = true;
   try {
     let file;
@@ -108,8 +109,12 @@ wrapMethod(require('node:net').Socket.prototype, 'connect', () => unsafe('networ
 syncBuiltinESMExports();
 const environment = process.env;
 process.env = new Proxy(environment, {
+  set(target, key, value) {
+    target[key] = value;
+    return true;
+  },
   get(target, key) {
-    if (!busy && typeof key === 'string' &&
+    if (!busy && !globalUnsafe.size && typeof key === 'string' &&
         (volatile.has(key) || /^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key))) {
       const caller = new Error().stack?.split('\n')[2] || '';
       if (!caller.includes('(node:') && !caller.includes('at node:')) {

@@ -70,6 +70,18 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         self.env["GITHUB_REF"] = "changed"
         self.assertIn("example.test.mjs::environment#0", self.run_tests(1)["selected"])
 
+    def test_environment_mutation_preserves_native_behavior(self):
+        with (self.root / "example.test.mjs").open("a") as stream:
+            stream.write("""
+test('environment write', () => {
+  process.env.IMPACT_EXAMPLE = 123;
+  assert.equal(process.env.IMPACT_EXAMPLE, '123');
+  delete process.env.IMPACT_EXAMPLE;
+  assert.equal(process.env.IMPACT_EXAMPLE, undefined);
+});
+""")
+        self.assertEqual(len(self.run_tests()["selected"]), 3)
+
     def test_subprocess_never_reused(self):
         with (self.root / "example.test.mjs").open("a") as stream:
             stream.write("""

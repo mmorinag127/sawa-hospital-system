@@ -150,7 +150,9 @@ def record_unsafe(reason):
 
 def audit(event, args):
     global BUSY
-    if BUSY or event not in {
+    # Once reuse is forbidden, further hashing cannot change the decision.
+    # Still record shared fixture inputs for their other consumers.
+    if BUSY or GLOBAL_UNSAFE or (UNSAFE and ACTIVE is not None and not FIXTURE_STACK) or event not in {
         "open", "os.listdir", "os.scandir", "subprocess.Popen",
         "os.system", "socket.connect", "socket.getaddrinfo",
     }:
@@ -217,7 +219,7 @@ def pytest_sessionstart(session):
         original = getattr(os, name)
 
         def observed_stat(*args, _original=original, **kwargs):
-            if not BUSY and not framework_read():
+            if not BUSY and not GLOBAL_UNSAFE and not framework_read():
                 value = args[0] if args else kwargs.get("path")
                 runtime = isinstance(value, (str, bytes, os.PathLike)) and any(
                     Path(os.path.abspath(os.fsdecode(value))).is_relative_to(prefix) for prefix in RUNTIME_PATHS
@@ -307,6 +309,8 @@ def pytest_sessionfinish(session, exitstatus):
     global BUSY
     BUSY = True
     STATE.mkdir(parents=True, exist_ok=True)
+    for entry in PREVIOUS.values():
+        entry["unsafe"] = sorted(set(entry["unsafe"]) | GLOBAL_UNSAFE)
     META.write_text(json.dumps({"context": CONTEXT, "tests": PREVIOUS}, sort_keys=True))
     REPORT.write_text(json.dumps({
         "selected": SELECTED, "reused": OMITTED, "reasons": REASONS,
@@ -328,7 +332,7 @@ _environment_getitem = os._Environ.__getitem__
 
 
 def observed_environment(self, key):
-    if (not BUSY and isinstance(key, str)
+    if (not BUSY and not GLOBAL_UNSAFE and isinstance(key, str)
             and (key in VOLATILE_ENV or key.startswith(("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_")))
             and not framework_read()):
         record_unsafe("volatile-environment")
