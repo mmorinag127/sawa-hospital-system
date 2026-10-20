@@ -701,6 +701,13 @@ def list_orders(
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
         return _order_list_response(page, response_view)
+    if response_view == "ocr_monitor" and include_ocr is not False:
+        jobs = get_ocr_jobs([order["ocr_job_id"] for order in orders if order.get("ocr_job_id")])
+        for order in orders:
+            job = jobs.get(order.get("ocr_job_id"))
+            _apply_job_status_to_order(order, job)
+            _apply_stale_ocr_status(order, job)
+        return _order_list_response(page, response_view)
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
     lightweight_mode = include_ocr is False
     cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
