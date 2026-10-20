@@ -8,6 +8,7 @@ import { NavigationBoundary } from "../components/NavigationBoundary";
 import { watchBrowserLogout } from "../services/browserSession";
 import { loginUrlFor } from "../services/loginDestination";
 import "../styles/sawa-template.css";
+import "../../public/assistant-workflow.css";
 
 const PUBLIC_ROUTES = new Set(["/login", "/logout", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
 const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");

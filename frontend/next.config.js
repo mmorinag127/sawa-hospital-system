@@ -60,7 +60,7 @@ const nextConfig = {
           destination: `${target}/:path*`,
         },
         {
-          source: "/api/:path*",
+          source: "/api/:path((?!assistant-trial(?:/|$)).*)",
           destination: `${target}/:path*`,
         },
       );

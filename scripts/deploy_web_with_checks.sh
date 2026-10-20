@@ -209,7 +209,14 @@ WEB_PUBLIC_ARGS=()
 if [[ "${ALLOW_UNAUTHENTICATED_WEB:-0}" == "1" ]]; then
   WEB_PUBLIC_ARGS+=(--allow-unauthenticated)
 fi
-gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" "${WEB_PUBLIC_ARGS[@]}" --quiet
+if [[ -n "${SAWA_AGENT_RUNTIME_IMAGE:-}" ]]; then
+  python3 "$SCRIPT_DIR/configure_agent_sidecar.py"
+else
+  WEB_CONTAINER_ARGS=()
+  WEB_CONTAINER_NAME="$(gcloud run services describe "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=json | python3 -c 'import json,sys; c=json.load(sys.stdin)["spec"]["template"]["spec"]["containers"]; print(c[0].get("name", "") if len(c)>1 else "")')"
+  if [[ -n "$WEB_CONTAINER_NAME" ]]; then WEB_CONTAINER_ARGS=(--container="$WEB_CONTAINER_NAME"); fi
+  gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" "${WEB_CONTAINER_ARGS[@]}" --image="$IMAGE" "${WEB_PUBLIC_ARGS[@]}" --quiet
+fi
 gcloud run services update-traffic "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --to-latest --quiet
 
 LATEST_READY_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)' || true)"

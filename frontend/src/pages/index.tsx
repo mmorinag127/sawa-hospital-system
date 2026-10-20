@@ -19,6 +19,7 @@ export default function SystemSelectorPage() {
     <main className="portal-page">
       <header><p className="eyebrow">統合管理ポータル</p><h1>システム選択</h1><p>利用するシステムを選択してください。</p></header>
       <section className="systems" aria-label="利用可能なシステム">
+        {process.env.NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED === "true" ? <Link href="/assistant"><strong>AIに依頼（試用）</strong><span>作業の依頼・確認・履歴・元に戻す</span></Link> : null}
         {systems.includes("hospital") ? <Link href="/hospital"><strong>病院注文</strong><span>注文・施設・帳票・発送を管理</span></Link> : null}
         {systems.includes("shift") ? <Link href="/shift"><strong>シフト管理</strong><span>人員・制約・シフト生成を管理</span></Link> : null}
         {systems.includes("school-lunch") ? <Link href="/school-lunch" onClick={enterSchoolLunch}><strong>学校給食</strong><span>献立・実施価格を管理</span></Link> : null}

@@ -1,0 +1,1170 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" viewBox="0 0 1900 1340" width="1900" height="1340" role="img" aria-labelledby="title description">
+  <title id="title">厨房基本図面 — パン用</title>
+  <desc id="description">提供PDFの基本図面を、傾きとスキャンノイズを除いてベクター化。設備配置と原表記を保持。寸法測量図ではありません。日別の材料動線は含みません。黒の標準経路は独立レイヤーです。</desc>
+  <metadata>{"source": "AI Utilization in School Lunch Documents.pdf", "page": 2, "sha256": "f433b90e1443f692372fe7dd539594a96712ea018e4baa93d453341cbf89a204", "coordinate_system": "deskewed illustration; not architectural dimensions"}</metadata>
+  <style>text {font-family:"Hiragino Kaku Gothic ProN","Yu Gothic","Noto Sans CJK JP",sans-serif;fill:#171717;font-size:17px} .wall {fill:none;stroke:#242424;stroke-width:2.5;stroke-linejoin:miter} .equipment {fill:white;stroke:#242424;stroke-width:2.5} .small {font-size:13px} .tiny {font-size:11px} .heading {font-weight:600} .zone {fill:none;stroke-width:4;stroke-linejoin:miter} .standard-route {fill:none;stroke:#303030;stroke-width:1.8;stroke-dasharray:12 4}</style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#303030" />
+    </marker>
+    <pattern id="stair-hatch" patternUnits="userSpaceOnUse" width="4" height="4">
+      <rect width="4" height="4" fill="#dadada" />
+      <path d="M0 0 L4 4" stroke="#9b9b9b" stroke-width=".6" />
+    </pattern>
+  </defs>
+  <rect width="1900" height="1340" fill="white" id="paper" />
+  <g id="sheet-labels" data-layer="sheet-labels" inkscape:groupmode="layer" inkscape:label="用紙見出し">
+    <text x="55" y="53" font-size="24" font-weight="600" style="font-size:24px">
+      <tspan x="55" dy="0">徳島県立</tspan>
+    </text>
+    <text x="316" y="53" font-size="24" font-weight="600" style="font-size:24px">
+      <tspan x="316" dy="0">学校</tspan>
+    </text>
+    <text x="515" y="53" font-size="24" font-weight="600" style="font-size:24px">
+      <tspan x="515" dy="0">月　　日　　（　　）</tspan>
+    </text>
+    <text x="1605" y="53" font-size="24" font-weight="600" style="font-size:24px">
+      <tspan x="1605" dy="0">株式会社「さわ」</tspan>
+    </text>
+    <text x="138" y="81" font-size="21" font-weight="600" style="font-size:21px">
+      <tspan x="138" dy="0">献立名</tspan>
+    </text>
+    <text x="130" y="393" font-size="21" font-weight="600" style="font-size:21px">
+      <tspan x="130" dy="0">食品名</tspan>
+    </text>
+  </g>
+  <g id="walls" data-layer="walls" inkscape:groupmode="layer" inkscape:label="壁・区画">
+    <path id="outer-envelope" d="M310 90 H1860 V1125 H1215 V1165 H300 V1125 H310 Z" class="wall" />
+    <path id="rice-and-bakery" d="M375 90 V160 H310 M505 90 V375 M595 90 V265 M375 375 H595 V265 H1140" class="wall" />
+    <path id="north-rooms" d="M595 160 H1035 V210 H1805 M845 90 V160 M1445 90 V210 M1805 90 V1125 M1805 165 H1860 M1805 210 H1860" class="wall" />
+    <path id="corridor-two-ends" d="M635 160 V210 M985 160 V210 M595 210 H1035 M740 210 V265 M845 210 V265 M985 210 V265" class="wall" />
+    <rect id="stair-unlabelled-hatch" x="845" y="210" width="140" height="55" class="wall" style="fill:url(#stair-hatch)" />
+    <path id="north-entry-rooms" d="M635 265 V425 H740 V265 M635 350 H740 M635 378 H740" class="wall" />
+    <path id="west-store-wash" d="M310 318 H375 V1125 M310 565 H375 M310 925 H375" class="wall" />
+    <path id="main-partitions" d="M635 425 V1165 M375 975 H1140 M635 825 H735 V1165 M635 880 H735 M1140 265 V1165" class="wall" />
+    <path id="cold-stores-b" d="M1140 265 H1445 V378 H1560 V210 M1288 265 V378 M1140 378 H1805" class="wall" />
+    <path id="east-prep-wall" d="M1560 378 V920 M1560 940 V1125 M1805 570 H1860 M1805 882 H1860" class="wall" />
+    <path id="cold-stores-c" d="M1140 995 H1805 M1560 995 V1125" class="wall" />
+    <path id="south-rooms" d="M300 1125 H1215 M980 1125 V1165 M1215 1125 V1165 M375 1125 V1165" class="wall" />
+  </g>
+  <g id="zone-boundaries" data-layer="zone-boundaries" inkscape:groupmode="layer" inkscape:label="汚染・非汚染区域">
+    <path id="zone-non-contaminated" d="M378 375 H596 V266 H1140 V1122 H370 V375 Z" class="zone" stroke="#39bed3" />
+    <path id="zone-contaminated" d="M1142 269 H1447 V374 H1564 V214 H1801 V1122 H1142 Z" class="zone" stroke="#ec4c9c" />
+  </g>
+  <g id="equipment" data-layer="equipment" inkscape:groupmode="layer" inkscape:label="設備">
+    <g id="rice-cooker" data-name="炊飯器">
+      <rect x="375" y="210" width="90" height="55" class="equipment" />
+      <text x="380" y="231" font-size="18" style="font-size:18px" id="equipment-label-rice-cooker">
+        <tspan x="380" dy="0">炊飯器</tspan>
+      </text>
+    </g>
+    <g id="lift" data-name="エレベーター">
+      <rect x="505" y="320" width="52" height="55" class="equipment" />
+      <text x="510" y="334" font-size="10.5" style="font-size:10.5px" id="equipment-label-lift">
+        <tspan x="510" dy="0">エレ</tspan>
+        <tspan x="510" dy="12.6">ベーター</tspan>
+      </text>
+    </g>
+    <g id="serving-table-north" data-name="作業台">
+      <rect x="466" y="426" width="91" height="76" class="equipment" />
+      <text x="471" y="447" font-size="18" style="font-size:18px" id="equipment-label-serving-table-north">
+        <tspan x="471" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="serving-table-south" data-name="作業台">
+      <rect x="462" y="566" width="91" height="315" class="equipment" />
+      <text x="467" y="587" font-size="18" style="font-size:18px" id="equipment-label-serving-table-south">
+        <tspan x="467" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <rect id="steamer-side-unit" x="590" y="429" width="43" height="76" class="equipment" />
+    <g id="steamer-top" data-name="スチコン">
+      <rect x="635" y="453" width="65" height="25" class="equipment" />
+      <text x="640" y="466" font-size="10" style="font-size:10px" id="equipment-label-steamer-top">
+        <tspan x="640" dy="0">スチコン</tspan>
+      </text>
+    </g>
+    <g id="steamer-1" data-name="">
+      <rect x="635" y="478" width="65" height="88" class="equipment" />
+    </g>
+    <g id="steamer-2" data-name="">
+      <rect x="635" y="566" width="65" height="98" class="equipment" />
+    </g>
+    <g id="jet-oven" data-name="ゼットオーブン">
+      <rect x="843" y="294" width="140" height="57" class="equipment" />
+      <text x="848" y="314" font-size="17" style="font-size:17px" id="equipment-label-jet-oven">
+        <tspan x="848" dy="0">ゼットオーブン</tspan>
+      </text>
+    </g>
+    <g id="jet-oven-side-box" data-name="" data-optional-equipment="true" style="display:none">
+      <rect x="995" y="294" width="40" height="57" class="equipment" />
+    </g>
+    <g id="fryer-north" data-name="フライヤー">
+      <rect x="843" y="404" width="140" height="49" class="equipment" />
+      <text x="848" y="424" font-size="17" style="font-size:17px" id="equipment-label-fryer-north">
+        <tspan x="848" dy="0">フライヤー</tspan>
+      </text>
+    </g>
+    <g id="fryer-south" data-name="フライヤー">
+      <rect x="843" y="503" width="140" height="43" class="equipment" />
+      <text x="848" y="523" font-size="17" style="font-size:17px" id="equipment-label-fryer-south">
+        <tspan x="848" dy="0">フライヤー</tspan>
+      </text>
+    </g>
+    <g id="fryer-east" data-name="">
+      <rect x="1085" y="404" width="53" height="124" class="equipment" />
+    </g>
+    <g id="hot-kitchen-table" data-name="作業台">
+      <rect x="841" y="592" width="142" height="99" class="equipment" />
+      <text x="846" y="613" font-size="18" style="font-size:18px" id="equipment-label-hot-kitchen-table">
+        <tspan x="846" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="food-container" data-name="食缶">
+      <rect x="735" y="713" width="78" height="40" class="equipment" />
+      <text x="740" y="727" font-size="11" style="font-size:11px" id="equipment-label-food-container">
+        <tspan x="740" dy="0">食缶</tspan>
+      </text>
+    </g>
+    <ellipse id="cooling-bath" cx="813" cy="798" rx="38" ry="26" class="equipment" data-name="冷却" />
+    <g id="dewatering-machine" data-name="脱水機">
+      <rect x="783" y="878" width="61" height="48" class="equipment" />
+      <text x="788" y="892" font-size="11" style="font-size:11px" id="equipment-label-dewatering-machine">
+        <tspan x="788" dy="0">脱水機</tspan>
+      </text>
+    </g>
+    <circle id="kettle-e" cx="905" cy="800" r="29" class="equipment" data-name="釜E" />
+    <circle id="kettle-c" cx="990" cy="800" r="29" class="equipment" data-name="釜C" />
+    <circle id="kettle-a" cx="1070" cy="800" r="29" class="equipment" data-name="釜A" />
+    <circle id="kettle-f" cx="905" cy="905" r="29" class="equipment" data-name="釜F" />
+    <circle id="kettle-d" cx="990" cy="905" r="29" class="equipment" data-name="釜D" />
+    <circle id="kettle-b" cx="1070" cy="905" r="29" class="equipment" data-name="釜B" />
+    <g id="fish-prep-table" data-name="作業台">
+      <rect x="1588" y="267" width="134" height="59" class="equipment" />
+      <text x="1593" y="288" font-size="18" style="font-size:18px" id="equipment-label-fish-prep-table">
+        <tspan x="1593" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="vegetable-mixer-north" data-name="ミキサー">
+      <rect x="1327" y="378" width="119" height="53" class="equipment" />
+      <text x="1332" y="398" font-size="17" style="font-size:17px" id="equipment-label-vegetable-mixer-north">
+        <tspan x="1332" dy="0">ミキサー</tspan>
+      </text>
+    </g>
+    <g id="vegetable-sink-west" data-name="シンク">
+      <rect x="1162" y="454" width="60" height="115" class="equipment" />
+      <text x="1167" y="474" font-size="16.666666666666668" style="font-size:16.666666666666668px" id="equipment-label-vegetable-sink-west">
+        <tspan x="1167" dy="0">シンク</tspan>
+      </text>
+    </g>
+    <path id="sink-west-divisions" d="M1162 504 H1222 M1162 525 H1222 M1162 547 H1222" class="wall" />
+    <g id="vegetable-worktable-north" data-name="作業台">
+      <rect x="1386" y="480" width="123" height="66" class="equipment" />
+      <text x="1391" y="501" font-size="18" style="font-size:18px" id="equipment-label-vegetable-worktable-north">
+        <tspan x="1391" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="vegetable-worktable-center" data-name="作業台">
+      <rect x="1257" y="594" width="66" height="161" class="equipment" />
+      <text x="1262" y="614" font-size="17" style="font-size:17px" id="equipment-label-vegetable-worktable-center">
+        <tspan x="1262" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="vegetable-sink-center" data-name="">
+      <rect x="1323" y="594" width="186" height="161" class="equipment" />
+    </g>
+    <path id="center-sink-divisions" d="M1323 644 H1509 M1387 594 V755 M1443 594 V755" class="wall" />
+    <g id="vegetable-mixer-south" data-name="ミキサー">
+      <rect x="1219" y="801" width="62" height="81" class="equipment" />
+      <text x="1224" y="821" font-size="13.0" style="font-size:13.0px" id="equipment-label-vegetable-mixer-south">
+        <tspan x="1224" dy="0">ミキサー</tspan>
+      </text>
+    </g>
+    <g id="vegetable-slicer-west" data-name="スライサー">
+      <rect x="1321" y="801" width="65" height="81" class="equipment" />
+      <text x="1326" y="819" font-size="11.0" style="font-size:11.0px" id="equipment-label-vegetable-slicer-west">
+        <tspan x="1326" dy="0">スライサー</tspan>
+      </text>
+    </g>
+    <g id="vegetable-slicer-east" data-name="スライサー">
+      <rect x="1443" y="801" width="65" height="81" class="equipment" />
+      <text x="1448" y="819" font-size="11.0" style="font-size:11.0px" id="equipment-label-vegetable-slicer-east">
+        <tspan x="1448" dy="0">スライサー</tspan>
+      </text>
+    </g>
+    <g id="insect-trap" data-name="虫取りハッチ">
+      <rect x="1610" y="455" width="64" height="51" class="equipment" />
+      <text x="1615" y="467" font-size="9" style="font-size:9px" id="equipment-label-insect-trap">
+        <tspan x="1615" dy="0">虫取りハッチ</tspan>
+      </text>
+    </g>
+    <g id="vegetable-prep-table" data-name="作業台">
+      <rect x="1610" y="570" width="110" height="167" class="equipment" />
+      <text x="1615" y="591" font-size="18" style="font-size:18px" id="equipment-label-vegetable-prep-table">
+        <tspan x="1615" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="vegetable-prep-sink" data-name="シンク">
+      <rect x="1610" y="779" width="153" height="51" class="equipment" />
+      <text x="1615" y="797" font-size="15" style="font-size:15px" id="equipment-label-vegetable-prep-sink">
+        <tspan x="1615" dy="0">シンク</tspan>
+      </text>
+    </g>
+    <path id="prep-sink-division" d="M1718 779 V830" class="wall" />
+    <g id="chopper" data-name="">
+      <rect x="1763" y="570" width="42" height="75" class="equipment" />
+    </g>
+    <g id="root-peeler" data-name="">
+      <rect x="1763" y="668" width="42" height="69" class="equipment" />
+    </g>
+    <g id="salad-fridge-e" data-name="">
+      <rect x="843" y="975" width="140" height="28" class="equipment" />
+    </g>
+    <g id="salad-table" data-name="作業台">
+      <rect x="840" y="1046" width="140" height="43" class="equipment" />
+      <text x="845" y="1066" font-size="17" style="font-size:17px" id="equipment-label-salad-table">
+        <tspan x="845" dy="0">作業台</tspan>
+      </text>
+    </g>
+    <g id="salad-sink" data-name="シンク">
+      <rect x="1081" y="1100" width="57" height="25" class="equipment" />
+      <text x="1086" y="1116" font-size="13" style="font-size:13px" id="equipment-label-salad-sink">
+        <tspan x="1086" dy="0">シンク</tspan>
+      </text>
+    </g>
+    <rect id="dispatch-slot-1" x="407" y="1130" width="30" height="28" class="equipment" />
+    <rect id="dispatch-slot-2" x="439" y="1130" width="30" height="28" class="equipment" />
+    <rect id="dispatch-slot-3" x="471" y="1130" width="30" height="28" class="equipment" />
+    <rect id="dispatch-slot-4" x="503" y="1130" width="30" height="28" class="equipment" />
+    <rect id="dispatch-slot-5" x="535" y="1130" width="30" height="28" class="equipment" />
+    <rect id="dispatch-slot-6" x="567" y="1130" width="30" height="28" class="equipment" />
+    <rect id="dispatch-slot-7" x="599" y="1130" width="30" height="28" class="equipment" />
+    <g id="bread-transfer-table" data-name="">
+      <rect x="516" y="213" width="67" height="44" class="equipment" />
+    </g>
+  </g>
+  <g id="equipment-labels" data-layer="equipment-labels" inkscape:groupmode="layer" inkscape:label="区画名・補助文字">
+    <text x="317" y="110" font-size="17" style="font-size:17px">
+      <tspan x="317" dy="0">米倉庫</tspan>
+    </text>
+    <text x="394" y="110" font-size="17" style="font-size:17px">
+      <tspan x="394" dy="0">米飯スペース</tspan>
+    </text>
+    <text x="518" y="110" font-size="17" style="font-size:17px">
+      <tspan x="518" dy="0">製パン室</tspan>
+    </text>
+    <text x="672" y="110" font-size="17" style="font-size:17px">
+      <tspan x="672" dy="0">冷却スペース</tspan>
+    </text>
+    <text x="850" y="110" font-size="17" style="font-size:17px">
+      <tspan x="850" dy="0">ボイル殺菌スペース</tspan>
+    </text>
+    <text x="1238" y="110" font-size="17" style="font-size:17px">
+      <tspan x="1238" dy="0">袋詰めスペース</tspan>
+      <tspan x="1238" dy="20.4">（真空パック）</tspan>
+    </text>
+    <text x="1630" y="110" font-size="17" style="font-size:17px">
+      <tspan x="1630" dy="0">魚肉冷凍加工作業場</tspan>
+      <tspan x="1630" dy="20.4">（低温加工作業場）</tspan>
+    </text>
+    <text x="794" y="180" font-size="17" style="font-size:17px">
+      <tspan x="794" dy="0">通路2</tspan>
+    </text>
+    <text x="790" y="233" font-size="18" style="font-size:18px">
+      <tspan x="790" dy="0">階段</tspan>
+    </text>
+    <text x="1140" y="234" font-size="18" style="font-size:18px">
+      <tspan x="1140" dy="0">通路 1</tspan>
+    </text>
+    <text x="640" y="288" font-size="18" style="font-size:18px">
+      <tspan x="640" dy="0">前室</tspan>
+    </text>
+    <text x="640" y="372" font-size="18" style="font-size:18px">
+      <tspan x="640" dy="0">附室</tspan>
+    </text>
+    <text x="640" y="420" font-size="17" style="font-size:17px">
+      <tspan x="640" dy="0">コンロ</tspan>
+    </text>
+    <text x="1145" y="289" font-size="17" style="font-size:17px">
+      <tspan x="1145" dy="0">冷蔵庫</tspan>
+    </text>
+    <text x="1145" y="317" font-size="17" style="font-size:17px">
+      <tspan x="1145" dy="0">B-2</tspan>
+    </text>
+    <text x="1390" y="289" font-size="17" style="font-size:17px">
+      <tspan x="1390" dy="0">冷凍庫</tspan>
+    </text>
+    <text x="1390" y="317" font-size="17" style="font-size:17px">
+      <tspan x="1390" dy="0">B-1</tspan>
+    </text>
+    <text x="1635" y="236" font-size="18" style="font-size:18px">
+      <tspan x="1635" dy="0">魚肉前処理作業場</tspan>
+    </text>
+    <text x="1145" y="399" font-size="18" style="font-size:18px">
+      <tspan x="1145" dy="0">野菜加工作業場</tspan>
+    </text>
+    <text x="1145" y="425" font-size="17" style="font-size:17px">
+      <tspan x="1145" dy="0">（低温加工作業場）</tspan>
+    </text>
+    <text x="1625" y="426" font-size="18" style="font-size:18px">
+      <tspan x="1625" dy="0">野菜前処理作業場</tspan>
+    </text>
+    <text x="1809" y="321" font-size="12" style="font-size:12px">
+      <tspan x="1809" dy="0">冷凍庫A</tspan>
+    </text>
+    <text x="1810" y="713" font-size="11" style="font-size:11px">
+      <tspan x="1810" dy="0">食材倉庫</tspan>
+    </text>
+    <text x="1810" y="977" font-size="13" style="font-size:13px">
+      <tspan x="1810" dy="0">検品室</tspan>
+    </text>
+    <text x="640" y="853" font-size="18" style="font-size:18px">
+      <tspan x="640" dy="0">冷却器</tspan>
+    </text>
+    <text x="640" y="902" font-size="17" style="font-size:17px">
+      <tspan x="640" dy="0">冷蔵庫D-1</tspan>
+    </text>
+    <text x="640" y="998" font-size="17" style="font-size:17px">
+      <tspan x="640" dy="0">冷蔵庫D-2</tspan>
+    </text>
+    <text x="1148" y="1015" font-size="18" style="font-size:18px">
+      <tspan x="1148" dy="0">冷蔵庫</tspan>
+    </text>
+    <text x="1148" y="1038" font-size="17" style="font-size:17px">
+      <tspan x="1148" dy="0">C-2</tspan>
+    </text>
+    <text x="1567" y="1015" font-size="18" style="font-size:18px">
+      <tspan x="1567" dy="0">冷蔵庫</tspan>
+    </text>
+    <text x="1567" y="1038" font-size="17" style="font-size:17px">
+      <tspan x="1567" dy="0">C-1</tspan>
+    </text>
+    <text x="375" y="998" font-size="18" style="font-size:18px">
+      <tspan x="375" dy="0">搬出準備室</tspan>
+    </text>
+    <text x="842" y="1018" font-size="13" style="font-size:13px">
+      <tspan x="842" dy="0">サラダ・和えもの加工作業場（低温加工作業場）</tspan>
+    </text>
+    <text x="888" y="1148" font-size="18" style="font-size:18px">
+      <tspan x="888" dy="0">事務所</tspan>
+    </text>
+    <text x="1016" y="1148" font-size="17" style="font-size:17px">
+      <tspan x="1016" dy="0">エントランス</tspan>
+    </text>
+    <text x="1160" y="1148" font-size="18" style="font-size:18px">
+      <tspan x="1160" dy="0">玄関</tspan>
+    </text>
+    <text x="307" y="1144" font-size="17" style="font-size:17px">
+      <tspan x="307" dy="0">返却口</tspan>
+    </text>
+    <text x="376" y="1144" font-size="12" style="font-size:12px">
+      <tspan x="376" dy="0">搬出口</tspan>
+    </text>
+    <text x="1831" y="108" style="font-size:12px">
+      <tspan x="1831" dy="0">高</tspan>
+      <tspan x="1831" dy="15">圧</tspan>
+      <tspan x="1831" dy="15">処</tspan>
+      <tspan x="1831" dy="15">理</tspan>
+    </text>
+    <text x="1814" y="191" font-size="12" style="font-size:12px">
+      <tspan x="1814" dy="0">勝手口</tspan>
+    </text>
+    <text x="625" y="177" style="font-size:10px">
+      <tspan x="625" dy="0">エ</tspan>
+      <tspan x="625" dy="12">ア</tspan>
+    </text>
+    <text x="613" y="177" style="font-size:10px">
+      <tspan x="613" dy="0">シ</tspan>
+      <tspan x="613" dy="12">ャ</tspan>
+    </text>
+    <text x="601" y="177" style="font-size:10px">
+      <tspan x="601" dy="0">ワ</tspan>
+      <tspan x="601" dy="12">ー</tspan>
+    </text>
+    <text x="1015" y="177" style="font-size:10px">
+      <tspan x="1015" dy="0">エ</tspan>
+      <tspan x="1015" dy="12">ア</tspan>
+    </text>
+    <text x="1003" y="177" style="font-size:10px">
+      <tspan x="1003" dy="0">シ</tspan>
+      <tspan x="1003" dy="12">ャ</tspan>
+    </text>
+    <text x="991" y="177" style="font-size:10px">
+      <tspan x="991" dy="0">ワ</tspan>
+      <tspan x="991" dy="12">ー</tspan>
+    </text>
+    <text x="337" y="354" style="font-size:18px">
+      <tspan x="337" dy="0">保</tspan>
+      <tspan x="337" dy="22">温</tspan>
+      <tspan x="337" dy="22">食</tspan>
+      <tspan x="337" dy="22">器</tspan>
+      <tspan x="337" dy="22">・</tspan>
+      <tspan x="337" dy="22">消</tspan>
+      <tspan x="337" dy="22">毒</tspan>
+      <tspan x="337" dy="22">保</tspan>
+      <tspan x="337" dy="22">管</tspan>
+      <tspan x="337" dy="22">室</tspan>
+    </text>
+    <text x="317" y="705" style="font-size:18px">
+      <tspan x="317" dy="0">洗</tspan>
+      <tspan x="317" dy="24">浄</tspan>
+      <tspan x="317" dy="24">ス</tspan>
+      <tspan x="317" dy="24">ペ</tspan>
+      <tspan x="317" dy="24">ー</tspan>
+      <tspan x="317" dy="24">ス</tspan>
+    </text>
+    <text x="381" y="500" style="font-size:15px">
+      <tspan x="381" dy="0">製</tspan>
+      <tspan x="381" dy="18">品</tspan>
+      <tspan x="381" dy="18">盛</tspan>
+      <tspan x="381" dy="18">り</tspan>
+      <tspan x="381" dy="18">付</tspan>
+      <tspan x="381" dy="18">け</tspan>
+      <tspan x="381" dy="18">作</tspan>
+      <tspan x="381" dy="18">業</tspan>
+      <tspan x="381" dy="18">場</tspan>
+      <tspan x="381" dy="18">（</tspan>
+      <tspan x="381" dy="18">低</tspan>
+      <tspan x="381" dy="18">温</tspan>
+      <tspan x="381" dy="18">盛</tspan>
+      <tspan x="381" dy="18">り</tspan>
+      <tspan x="381" dy="18">付</tspan>
+      <tspan x="381" dy="18">け</tspan>
+      <tspan x="381" dy="18">作</tspan>
+      <tspan x="381" dy="18">業</tspan>
+      <tspan x="381" dy="18">場</tspan>
+      <tspan x="381" dy="18">）</tspan>
+    </text>
+    <text x="642" y="492" style="font-size:15px">
+      <tspan x="642" dy="0">ス</tspan>
+      <tspan x="642" dy="16">チ</tspan>
+      <tspan x="642" dy="16">コ</tspan>
+      <tspan x="642" dy="16">ン</tspan>
+      <tspan x="642" dy="16">1</tspan>
+    </text>
+    <text x="642" y="583" style="font-size:15px">
+      <tspan x="642" dy="0">ス</tspan>
+      <tspan x="642" dy="16">チ</tspan>
+      <tspan x="642" dy="16">コ</tspan>
+      <tspan x="642" dy="16">ン</tspan>
+      <tspan x="642" dy="16">2</tspan>
+    </text>
+    <text x="1118" y="426" style="font-size:17px">
+      <tspan x="1118" dy="0">フ</tspan>
+      <tspan x="1118" dy="20">ラ</tspan>
+      <tspan x="1118" dy="20">イ</tspan>
+      <tspan x="1118" dy="20">ヤ</tspan>
+      <tspan x="1118" dy="20">ー</tspan>
+    </text>
+    <text x="788" y="791" font-size="11" style="font-size:11px">
+      <tspan x="788" dy="0">冷却</tspan>
+    </text>
+    <text x="1327" y="614" font-size="15" style="font-size:15px">
+      <tspan x="1327" dy="0">シンク</tspan>
+    </text>
+    <text x="1327" y="666" font-size="15" style="font-size:15px">
+      <tspan x="1327" dy="0">シンク</tspan>
+    </text>
+    <text x="1758" y="558" font-size="14" style="font-size:14px">
+      <tspan x="1758" dy="0">笹切り機</tspan>
+    </text>
+    <text x="1768" y="753" font-size="13" style="font-size:13px">
+      <tspan x="1768" dy="0">球根</tspan>
+      <tspan x="1768" dy="15.6">皮剥機</tspan>
+    </text>
+    <text x="920" y="997" font-size="17" style="font-size:17px">
+      <tspan x="920" dy="0">冷蔵庫E</tspan>
+    </text>
+    <text x="422" y="1151" font-size="17" text-anchor="middle" style="font-size:17px" data-field-id="dispatch_label_1">
+      <tspan x="422" dy="0">1</tspan>
+    </text>
+  </g>
+  <g id="standard-route" data-layer="standard-route" inkscape:groupmode="layer" inkscape:label="原本の標準経路">
+    <text x="568" y="250" font-size="19" text-anchor="middle" style="font-size:19px">
+      <tspan x="568" dy="0">①</tspan>
+    </text>
+    <path id="bread-to-dispatch" d="M568 257 V388 H427 V1118" class="standard-route" marker-end="url(#arrow)" />
+  </g>
+  <g id="legend" data-layer="legend" inkscape:groupmode="layer" inkscape:label="凡例">
+    <rect id="receipt-legend" x="32" y="1197" width="560" height="78" class="wall" />
+    <path id="receipt-legend-lines" d="M32 1223 H592 M32 1249 H592 M276 1197 V1275" class="wall" />
+    <text x="37" y="1218" font-size="17" style="font-size:17px">
+      <tspan x="37" dy="0">食材納品→検品室→冷蔵庫</tspan>
+    </text>
+    <text x="37" y="1244" font-size="17" style="font-size:17px">
+      <tspan x="37" dy="0">食材納品→検品室→冷凍庫</tspan>
+    </text>
+    <text x="37" y="1270" font-size="17" style="font-size:17px">
+      <tspan x="37" dy="0">食材納品→検品室→食物倉庫</tspan>
+    </text>
+    <text x="282" y="1270" font-size="16" style="font-size:16px" data-field-id="delivery_dry">
+      <tspan x="282" dy="0">①（パン倉庫）</tspan>
+    </text>
+    <text x="500" y="1270" font-size="15" style="font-size:15px">
+      <tspan x="500" dy="0">（食材倉庫）</tspan>
+    </text>
+    <rect id="heat-legend" x="630" y="1197" width="213" height="78" class="wall" />
+    <text x="637" y="1241" font-size="17" style="font-size:17px">
+      <tspan x="637" dy="0">加熱処理</tspan>
+    </text>
+    <text x="637" y="1268" font-size="17" style="font-size:17px">
+      <tspan x="637" dy="0">非加熱処理</tspan>
+    </text>
+    <path id="heated-sample" d="M740 1236 H833" class="standard-route" marker-end="url(#arrow)" />
+    <path id="unheated-sample" d="M740 1263 H833" class="" fill="none" stroke="#303030" stroke-width="1.8" marker-end="url(#arrow)" />
+    <rect id="contaminated-legend" x="955" y="1198" width="69" height="24" class="zone" stroke="#ec4c9c" />
+    <rect id="clean-legend" x="955" y="1240" width="69" height="24" class="zone" stroke="#39bed3" />
+    <text x="1040" y="1220" font-size="23" style="font-size:23px">
+      <tspan x="1040" dy="0">汚染区域</tspan>
+    </text>
+    <text x="1040" y="1263" font-size="23" style="font-size:23px">
+      <tspan x="1040" dy="0">非汚染区域</tspan>
+    </text>
+    <circle cx="1355" cy="1180" r="26" fill="none" stroke="#444" stroke-width="1.8" />
+    <text x="1355" y="1191" font-size="35" text-anchor="middle" style="font-size:35px">
+      <tspan x="1355" dy="0">E</tspan>
+    </text>
+    <circle cx="1433" cy="1180" r="26" fill="none" stroke="#444" stroke-width="1.8" />
+    <text x="1433" y="1191" font-size="35" text-anchor="middle" style="font-size:35px">
+      <tspan x="1433" dy="0">C</tspan>
+    </text>
+    <circle cx="1508" cy="1180" r="26" fill="none" stroke="#444" stroke-width="1.8" />
+    <text x="1508" y="1191" font-size="35" text-anchor="middle" style="font-size:35px">
+      <tspan x="1508" dy="0">A</tspan>
+    </text>
+    <circle cx="1355" cy="1242" r="26" fill="none" stroke="#444" stroke-width="1.8" />
+    <text x="1355" y="1253" font-size="35" text-anchor="middle" style="font-size:35px">
+      <tspan x="1355" dy="0">F</tspan>
+    </text>
+    <circle cx="1433" cy="1242" r="26" fill="none" stroke="#444" stroke-width="1.8" />
+    <text x="1433" y="1253" font-size="35" text-anchor="middle" style="font-size:35px">
+      <tspan x="1433" dy="0">D</tspan>
+    </text>
+    <circle cx="1508" cy="1242" r="26" fill="none" stroke="#444" stroke-width="1.8" />
+    <text x="1508" y="1253" font-size="35" text-anchor="middle" style="font-size:35px">
+      <tspan x="1508" dy="0">B</tspan>
+    </text>
+    <text x="1590" y="1184" font-size="17" style="font-size:17px">
+      <tspan x="1590" dy="0">1回目</tspan>
+    </text>
+    <text x="1674" y="1184" font-size="17" style="font-size:17px">
+      <tspan x="1674" dy="0">2回目</tspan>
+    </text>
+    <text x="1590" y="1220" font-size="17" style="font-size:17px" data-field-id="kettle_a_first">
+      <tspan x="1590" dy="0">A-1</tspan>
+    </text>
+    <text x="1674" y="1220" font-size="17" style="font-size:17px" data-field-id="kettle_a_second">
+      <tspan x="1674" dy="0">A-2</tspan>
+    </text>
+    <text x="1590" y="1248" font-size="17" style="font-size:17px" data-field-id="kettle_b_first">
+      <tspan x="1590" dy="0">B-1</tspan>
+    </text>
+  </g>
+  <g id="named-anchors" style="display:none" aria-hidden="true">
+    <circle id="anchor-rice-cooker-west" cx="375.0" cy="237.5" r="3" data-point-name="炊飯器・西接続" />
+    <circle id="anchor-rice-cooker-north" cx="420.0" cy="210.0" r="3" data-point-name="炊飯器・北接続" />
+    <circle id="anchor-rice-cooker-east" cx="465.0" cy="237.5" r="3" data-point-name="炊飯器・東接続" />
+    <circle id="anchor-rice-cooker-south" cx="420.0" cy="265.0" r="3" data-point-name="炊飯器・南接続" />
+    <circle id="anchor-lift-west" cx="505.0" cy="347.5" r="3" data-point-name="エレベーター・西接続" />
+    <circle id="anchor-lift-north" cx="531.0" cy="320.0" r="3" data-point-name="エレベーター・北接続" />
+    <circle id="anchor-lift-east" cx="557.0" cy="347.5" r="3" data-point-name="エレベーター・東接続" />
+    <circle id="anchor-lift-south" cx="531.0" cy="375.0" r="3" data-point-name="エレベーター・南接続" />
+    <circle id="anchor-serving-table-north-west" cx="466.0" cy="464.0" r="3" data-point-name="盛付作業台北・西接続" />
+    <circle id="anchor-serving-table-north-north" cx="511.5" cy="426.0" r="3" data-point-name="盛付作業台北・北接続" />
+    <circle id="anchor-serving-table-north-east" cx="557.0" cy="464.0" r="3" data-point-name="盛付作業台北・東接続" />
+    <circle id="anchor-serving-table-north-south" cx="511.5" cy="502.0" r="3" data-point-name="盛付作業台北・南接続" />
+    <circle id="anchor-serving-table-south-west" cx="462.0" cy="723.5" r="3" data-point-name="盛付作業台南・西接続" />
+    <circle id="anchor-serving-table-south-north" cx="507.5" cy="566.0" r="3" data-point-name="盛付作業台南・北接続" />
+    <circle id="anchor-serving-table-south-east" cx="553.0" cy="723.5" r="3" data-point-name="盛付作業台南・東接続" />
+    <circle id="anchor-serving-table-south-south" cx="507.5" cy="881.0" r="3" data-point-name="盛付作業台南・南接続" />
+    <circle id="anchor-steamer-side-unit-west" cx="590.0" cy="467.0" r="3" data-point-name="スチコン横の無記名設備・西接続" />
+    <circle id="anchor-steamer-side-unit-north" cx="611.5" cy="429.0" r="3" data-point-name="スチコン横の無記名設備・北接続" />
+    <circle id="anchor-steamer-side-unit-east" cx="633.0" cy="467.0" r="3" data-point-name="スチコン横の無記名設備・東接続" />
+    <circle id="anchor-steamer-side-unit-south" cx="611.5" cy="505.0" r="3" data-point-name="スチコン横の無記名設備・南接続" />
+    <circle id="anchor-steamer-top-west" cx="635.0" cy="465.5" r="3" data-point-name="上部小スチコン・西接続" />
+    <circle id="anchor-steamer-top-north" cx="667.5" cy="453.0" r="3" data-point-name="上部小スチコン・北接続" />
+    <circle id="anchor-steamer-top-east" cx="700.0" cy="465.5" r="3" data-point-name="上部小スチコン・東接続" />
+    <circle id="anchor-steamer-top-south" cx="667.5" cy="478.0" r="3" data-point-name="上部小スチコン・南接続" />
+    <circle id="anchor-steamer-1-west" cx="635.0" cy="522.0" r="3" data-point-name="スチコン1・西接続" />
+    <circle id="anchor-steamer-1-north" cx="667.5" cy="478.0" r="3" data-point-name="スチコン1・北接続" />
+    <circle id="anchor-steamer-1-east" cx="700.0" cy="522.0" r="3" data-point-name="スチコン1・東接続" />
+    <circle id="anchor-steamer-1-south" cx="667.5" cy="566.0" r="3" data-point-name="スチコン1・南接続" />
+    <circle id="anchor-steamer-2-west" cx="635.0" cy="615.0" r="3" data-point-name="スチコン2・西接続" />
+    <circle id="anchor-steamer-2-north" cx="667.5" cy="566.0" r="3" data-point-name="スチコン2・北接続" />
+    <circle id="anchor-steamer-2-east" cx="700.0" cy="615.0" r="3" data-point-name="スチコン2・東接続" />
+    <circle id="anchor-steamer-2-south" cx="667.5" cy="664.0" r="3" data-point-name="スチコン2・南接続" />
+    <circle id="anchor-jet-oven-west" cx="843.0" cy="322.5" r="3" data-point-name="ゼットオーブン・西接続" />
+    <circle id="anchor-jet-oven-north" cx="913.0" cy="294.0" r="3" data-point-name="ゼットオーブン・北接続" />
+    <circle id="anchor-jet-oven-east" cx="983.0" cy="322.5" r="3" data-point-name="ゼットオーブン・東接続" />
+    <circle id="anchor-jet-oven-south" cx="913.0" cy="351.0" r="3" data-point-name="ゼットオーブン・南接続" />
+    <circle id="anchor-fryer-north-west" cx="843.0" cy="428.5" r="3" data-point-name="フライヤー中央上・西接続" />
+    <circle id="anchor-fryer-north-north" cx="913.0" cy="404.0" r="3" data-point-name="フライヤー中央上・北接続" />
+    <circle id="anchor-fryer-north-east" cx="983.0" cy="428.5" r="3" data-point-name="フライヤー中央上・東接続" />
+    <circle id="anchor-fryer-north-south" cx="913.0" cy="453.0" r="3" data-point-name="フライヤー中央上・南接続" />
+    <circle id="anchor-jet-oven-side-box-west" cx="995.0" cy="322.5" r="3" data-point-name="ゼットオーブン横の無記名枠・西接続" />
+    <circle id="anchor-jet-oven-side-box-north" cx="1015.0" cy="294.0" r="3" data-point-name="ゼットオーブン横の無記名枠・北接続" />
+    <circle id="anchor-jet-oven-side-box-east" cx="1035.0" cy="322.5" r="3" data-point-name="ゼットオーブン横の無記名枠・東接続" />
+    <circle id="anchor-jet-oven-side-box-south" cx="1015.0" cy="351.0" r="3" data-point-name="ゼットオーブン横の無記名枠・南接続" />
+    <circle id="anchor-fryer-south-west" cx="843.0" cy="524.5" r="3" data-point-name="フライヤー中央下・西接続" />
+    <circle id="anchor-fryer-south-north" cx="913.0" cy="503.0" r="3" data-point-name="フライヤー中央下・北接続" />
+    <circle id="anchor-fryer-south-east" cx="983.0" cy="524.5" r="3" data-point-name="フライヤー中央下・東接続" />
+    <circle id="anchor-fryer-south-south" cx="913.0" cy="546.0" r="3" data-point-name="フライヤー中央下・南接続" />
+    <circle id="anchor-fryer-east-west" cx="1085.0" cy="466.0" r="3" data-point-name="フライヤー東側・西接続" />
+    <circle id="anchor-fryer-east-north" cx="1111.5" cy="404.0" r="3" data-point-name="フライヤー東側・北接続" />
+    <circle id="anchor-fryer-east-east" cx="1138.0" cy="466.0" r="3" data-point-name="フライヤー東側・東接続" />
+    <circle id="anchor-fryer-east-south" cx="1111.5" cy="528.0" r="3" data-point-name="フライヤー東側・南接続" />
+    <circle id="anchor-hot-kitchen-table-west" cx="841.0" cy="641.5" r="3" data-point-name="加熱室作業台・西接続" />
+    <circle id="anchor-hot-kitchen-table-north" cx="912.0" cy="592.0" r="3" data-point-name="加熱室作業台・北接続" />
+    <circle id="anchor-hot-kitchen-table-east" cx="983.0" cy="641.5" r="3" data-point-name="加熱室作業台・東接続" />
+    <circle id="anchor-hot-kitchen-table-south" cx="912.0" cy="691.0" r="3" data-point-name="加熱室作業台・南接続" />
+    <circle id="anchor-food-container-west" cx="735.0" cy="733.0" r="3" data-point-name="食缶・西接続" />
+    <circle id="anchor-food-container-north" cx="774.0" cy="713.0" r="3" data-point-name="食缶・北接続" />
+    <circle id="anchor-food-container-east" cx="813.0" cy="733.0" r="3" data-point-name="食缶・東接続" />
+    <circle id="anchor-food-container-south" cx="774.0" cy="753.0" r="3" data-point-name="食缶・南接続" />
+    <circle id="anchor-cooling-bath-west" cx="775.0" cy="798.0" r="3" data-point-name="冷却・西接続" />
+    <circle id="anchor-cooling-bath-north" cx="813.0" cy="772.0" r="3" data-point-name="冷却・北接続" />
+    <circle id="anchor-cooling-bath-east" cx="851.0" cy="798.0" r="3" data-point-name="冷却・東接続" />
+    <circle id="anchor-cooling-bath-south" cx="813.0" cy="824.0" r="3" data-point-name="冷却・南接続" />
+    <circle id="anchor-dewatering-machine-west" cx="783.0" cy="902.0" r="3" data-point-name="脱水機・西接続" />
+    <circle id="anchor-dewatering-machine-north" cx="813.5" cy="878.0" r="3" data-point-name="脱水機・北接続" />
+    <circle id="anchor-dewatering-machine-east" cx="844.0" cy="902.0" r="3" data-point-name="脱水機・東接続" />
+    <circle id="anchor-dewatering-machine-south" cx="813.5" cy="926.0" r="3" data-point-name="脱水機・南接続" />
+    <circle id="anchor-fish-prep-table-west" cx="1588.0" cy="296.5" r="3" data-point-name="魚肉前処理作業台・西接続" />
+    <circle id="anchor-fish-prep-table-north" cx="1655.0" cy="267.0" r="3" data-point-name="魚肉前処理作業台・北接続" />
+    <circle id="anchor-fish-prep-table-east" cx="1722.0" cy="296.5" r="3" data-point-name="魚肉前処理作業台・東接続" />
+    <circle id="anchor-fish-prep-table-south" cx="1655.0" cy="326.0" r="3" data-point-name="魚肉前処理作業台・南接続" />
+    <circle id="anchor-vegetable-mixer-north-west" cx="1327.0" cy="404.5" r="3" data-point-name="ミキサー北・西接続" />
+    <circle id="anchor-vegetable-mixer-north-north" cx="1386.5" cy="378.0" r="3" data-point-name="ミキサー北・北接続" />
+    <circle id="anchor-vegetable-mixer-north-east" cx="1446.0" cy="404.5" r="3" data-point-name="ミキサー北・東接続" />
+    <circle id="anchor-vegetable-mixer-north-south" cx="1386.5" cy="431.0" r="3" data-point-name="ミキサー北・南接続" />
+    <circle id="anchor-vegetable-sink-west-west" cx="1162.0" cy="511.5" r="3" data-point-name="野菜加工シンク西・西接続" />
+    <circle id="anchor-vegetable-sink-west-north" cx="1192.0" cy="454.0" r="3" data-point-name="野菜加工シンク西・北接続" />
+    <circle id="anchor-vegetable-sink-west-east" cx="1222.0" cy="511.5" r="3" data-point-name="野菜加工シンク西・東接続" />
+    <circle id="anchor-vegetable-sink-west-south" cx="1192.0" cy="569.0" r="3" data-point-name="野菜加工シンク西・南接続" />
+    <circle id="anchor-vegetable-worktable-north-west" cx="1386.0" cy="513.0" r="3" data-point-name="野菜加工作業台北・西接続" />
+    <circle id="anchor-vegetable-worktable-north-north" cx="1447.5" cy="480.0" r="3" data-point-name="野菜加工作業台北・北接続" />
+    <circle id="anchor-vegetable-worktable-north-east" cx="1509.0" cy="513.0" r="3" data-point-name="野菜加工作業台北・東接続" />
+    <circle id="anchor-vegetable-worktable-north-south" cx="1447.5" cy="546.0" r="3" data-point-name="野菜加工作業台北・南接続" />
+    <circle id="anchor-vegetable-worktable-center-west" cx="1257.0" cy="674.5" r="3" data-point-name="野菜加工作業台中央・西接続" />
+    <circle id="anchor-vegetable-worktable-center-north" cx="1290.0" cy="594.0" r="3" data-point-name="野菜加工作業台中央・北接続" />
+    <circle id="anchor-vegetable-worktable-center-east" cx="1323.0" cy="674.5" r="3" data-point-name="野菜加工作業台中央・東接続" />
+    <circle id="anchor-vegetable-worktable-center-south" cx="1290.0" cy="755.0" r="3" data-point-name="野菜加工作業台中央・南接続" />
+    <circle id="anchor-vegetable-sink-center-west" cx="1323.0" cy="674.5" r="3" data-point-name="野菜加工シンク中央・西接続" />
+    <circle id="anchor-vegetable-sink-center-north" cx="1416.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・北接続" />
+    <circle id="anchor-vegetable-sink-center-east" cx="1509.0" cy="674.5" r="3" data-point-name="野菜加工シンク中央・東接続" />
+    <circle id="anchor-vegetable-sink-center-south" cx="1416.0" cy="755.0" r="3" data-point-name="野菜加工シンク中央・南接続" />
+    <circle id="anchor-vegetable-mixer-south-west" cx="1219.0" cy="841.5" r="3" data-point-name="ミキサー南・西接続" />
+    <circle id="anchor-vegetable-mixer-south-north" cx="1250.0" cy="801.0" r="3" data-point-name="ミキサー南・北接続" />
+    <circle id="anchor-vegetable-mixer-south-east" cx="1281.0" cy="841.5" r="3" data-point-name="ミキサー南・東接続" />
+    <circle id="anchor-vegetable-mixer-south-south" cx="1250.0" cy="882.0" r="3" data-point-name="ミキサー南・南接続" />
+    <circle id="anchor-vegetable-slicer-west-west" cx="1321.0" cy="841.5" r="3" data-point-name="スライサー西・西接続" />
+    <circle id="anchor-vegetable-slicer-west-north" cx="1353.5" cy="801.0" r="3" data-point-name="スライサー西・北接続" />
+    <circle id="anchor-vegetable-slicer-west-east" cx="1386.0" cy="841.5" r="3" data-point-name="スライサー西・東接続" />
+    <circle id="anchor-vegetable-slicer-west-south" cx="1353.5" cy="882.0" r="3" data-point-name="スライサー西・南接続" />
+    <circle id="anchor-vegetable-slicer-east-west" cx="1443.0" cy="841.5" r="3" data-point-name="スライサー東・西接続" />
+    <circle id="anchor-vegetable-slicer-east-north" cx="1475.5" cy="801.0" r="3" data-point-name="スライサー東・北接続" />
+    <circle id="anchor-vegetable-slicer-east-east" cx="1508.0" cy="841.5" r="3" data-point-name="スライサー東・東接続" />
+    <circle id="anchor-vegetable-slicer-east-south" cx="1475.5" cy="882.0" r="3" data-point-name="スライサー東・南接続" />
+    <circle id="anchor-insect-trap-west" cx="1610.0" cy="480.5" r="3" data-point-name="虫取りハッチ・西接続" />
+    <circle id="anchor-insect-trap-north" cx="1642.0" cy="455.0" r="3" data-point-name="虫取りハッチ・北接続" />
+    <circle id="anchor-insect-trap-east" cx="1674.0" cy="480.5" r="3" data-point-name="虫取りハッチ・東接続" />
+    <circle id="anchor-insect-trap-south" cx="1642.0" cy="506.0" r="3" data-point-name="虫取りハッチ・南接続" />
+    <circle id="anchor-vegetable-prep-table-west" cx="1610.0" cy="653.5" r="3" data-point-name="野菜前処理作業台・西接続" />
+    <circle id="anchor-vegetable-prep-table-north" cx="1665.0" cy="570.0" r="3" data-point-name="野菜前処理作業台・北接続" />
+    <circle id="anchor-vegetable-prep-table-east" cx="1720.0" cy="653.5" r="3" data-point-name="野菜前処理作業台・東接続" />
+    <circle id="anchor-vegetable-prep-table-south" cx="1665.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・南接続" />
+    <circle id="anchor-vegetable-prep-sink-west" cx="1610.0" cy="804.5" r="3" data-point-name="野菜前処理シンク・西接続" />
+    <circle id="anchor-vegetable-prep-sink-north" cx="1686.5" cy="779.0" r="3" data-point-name="野菜前処理シンク・北接続" />
+    <circle id="anchor-vegetable-prep-sink-east" cx="1763.0" cy="804.5" r="3" data-point-name="野菜前処理シンク・東接続" />
+    <circle id="anchor-vegetable-prep-sink-south" cx="1686.5" cy="830.0" r="3" data-point-name="野菜前処理シンク・南接続" />
+    <circle id="anchor-chopper-west" cx="1763.0" cy="607.5" r="3" data-point-name="笹切り機・西接続" />
+    <circle id="anchor-chopper-north" cx="1784.0" cy="570.0" r="3" data-point-name="笹切り機・北接続" />
+    <circle id="anchor-chopper-east" cx="1805.0" cy="607.5" r="3" data-point-name="笹切り機・東接続" />
+    <circle id="anchor-chopper-south" cx="1784.0" cy="645.0" r="3" data-point-name="笹切り機・南接続" />
+    <circle id="anchor-root-peeler-west" cx="1763.0" cy="702.5" r="3" data-point-name="球根皮剥機・西接続" />
+    <circle id="anchor-root-peeler-north" cx="1784.0" cy="668.0" r="3" data-point-name="球根皮剥機・北接続" />
+    <circle id="anchor-root-peeler-east" cx="1805.0" cy="702.5" r="3" data-point-name="球根皮剥機・東接続" />
+    <circle id="anchor-root-peeler-south" cx="1784.0" cy="737.0" r="3" data-point-name="球根皮剥機・南接続" />
+    <circle id="anchor-salad-fridge-e-west" cx="843.0" cy="989.0" r="3" data-point-name="冷蔵庫E・西接続" />
+    <circle id="anchor-salad-fridge-e-north" cx="913.0" cy="975.0" r="3" data-point-name="冷蔵庫E・北接続" />
+    <circle id="anchor-salad-fridge-e-east" cx="983.0" cy="989.0" r="3" data-point-name="冷蔵庫E・東接続" />
+    <circle id="anchor-salad-fridge-e-south" cx="913.0" cy="1003.0" r="3" data-point-name="冷蔵庫E・南接続" />
+    <circle id="anchor-salad-table-west" cx="840.0" cy="1067.5" r="3" data-point-name="和え物作業台・西接続" />
+    <circle id="anchor-salad-table-north" cx="910.0" cy="1046.0" r="3" data-point-name="和え物作業台・北接続" />
+    <circle id="anchor-salad-table-east" cx="980.0" cy="1067.5" r="3" data-point-name="和え物作業台・東接続" />
+    <circle id="anchor-salad-table-south" cx="910.0" cy="1089.0" r="3" data-point-name="和え物作業台・南接続" />
+    <circle id="anchor-salad-sink-west" cx="1081.0" cy="1112.5" r="3" data-point-name="和え物シンク・西接続" />
+    <circle id="anchor-salad-sink-north" cx="1109.5" cy="1100.0" r="3" data-point-name="和え物シンク・北接続" />
+    <circle id="anchor-salad-sink-east" cx="1138.0" cy="1112.5" r="3" data-point-name="和え物シンク・東接続" />
+    <circle id="anchor-salad-sink-south" cx="1109.5" cy="1125.0" r="3" data-point-name="和え物シンク・南接続" />
+    <circle id="anchor-bread-transfer-table-west" cx="516.0" cy="235.0" r="3" data-point-name="パン受渡し台・西接続" />
+    <circle id="anchor-bread-transfer-table-north" cx="549.5" cy="213.0" r="3" data-point-name="パン受渡し台・北接続" />
+    <circle id="anchor-bread-transfer-table-east" cx="583.0" cy="235.0" r="3" data-point-name="パン受渡し台・東接続" />
+    <circle id="anchor-bread-transfer-table-south" cx="549.5" cy="257.0" r="3" data-point-name="パン受渡し台・南接続" />
+    <circle id="anchor-kettle-e-west" cx="876.0" cy="800.0" r="3" data-point-name="釜E・西接続" />
+    <circle id="anchor-kettle-e-north" cx="905.0" cy="771.0" r="3" data-point-name="釜E・北接続" />
+    <circle id="anchor-kettle-e-east" cx="934.0" cy="800.0" r="3" data-point-name="釜E・東接続" />
+    <circle id="anchor-kettle-e-south" cx="905.0" cy="829.0" r="3" data-point-name="釜E・南接続" />
+    <circle id="anchor-kettle-c-west" cx="961.0" cy="800.0" r="3" data-point-name="釜C・西接続" />
+    <circle id="anchor-kettle-c-north" cx="990.0" cy="771.0" r="3" data-point-name="釜C・北接続" />
+    <circle id="anchor-kettle-c-east" cx="1019.0" cy="800.0" r="3" data-point-name="釜C・東接続" />
+    <circle id="anchor-kettle-c-south" cx="990.0" cy="829.0" r="3" data-point-name="釜C・南接続" />
+    <circle id="anchor-kettle-a-west" cx="1041.0" cy="800.0" r="3" data-point-name="釜A・西接続" />
+    <circle id="anchor-kettle-a-north" cx="1070.0" cy="771.0" r="3" data-point-name="釜A・北接続" />
+    <circle id="anchor-kettle-a-east" cx="1099.0" cy="800.0" r="3" data-point-name="釜A・東接続" />
+    <circle id="anchor-kettle-a-south" cx="1070.0" cy="829.0" r="3" data-point-name="釜A・南接続" />
+    <circle id="anchor-kettle-f-west" cx="876.0" cy="905.0" r="3" data-point-name="釜F・西接続" />
+    <circle id="anchor-kettle-f-north" cx="905.0" cy="876.0" r="3" data-point-name="釜F・北接続" />
+    <circle id="anchor-kettle-f-east" cx="934.0" cy="905.0" r="3" data-point-name="釜F・東接続" />
+    <circle id="anchor-kettle-f-south" cx="905.0" cy="934.0" r="3" data-point-name="釜F・南接続" />
+    <circle id="anchor-kettle-d-west" cx="961.0" cy="905.0" r="3" data-point-name="釜D・西接続" />
+    <circle id="anchor-kettle-d-north" cx="990.0" cy="876.0" r="3" data-point-name="釜D・北接続" />
+    <circle id="anchor-kettle-d-east" cx="1019.0" cy="905.0" r="3" data-point-name="釜D・東接続" />
+    <circle id="anchor-kettle-d-south" cx="990.0" cy="934.0" r="3" data-point-name="釜D・南接続" />
+    <circle id="anchor-kettle-b-west" cx="1041.0" cy="905.0" r="3" data-point-name="釜B・西接続" />
+    <circle id="anchor-kettle-b-north" cx="1070.0" cy="876.0" r="3" data-point-name="釜B・北接続" />
+    <circle id="anchor-kettle-b-east" cx="1099.0" cy="905.0" r="3" data-point-name="釜B・東接続" />
+    <circle id="anchor-kettle-b-south" cx="1070.0" cy="934.0" r="3" data-point-name="釜B・南接続" />
+    <circle id="anchor-rice-store" cx="365" cy="130" r="3" data-point-name="米倉庫" />
+    <circle id="anchor-rice-space" cx="475" cy="295" r="3" data-point-name="米飯スペース" />
+    <circle id="anchor-bakery" cx="550" cy="285" r="3" data-point-name="製パン室" />
+    <circle id="anchor-north-cooling" cx="720" cy="145" r="3" data-point-name="冷却スペース" />
+    <circle id="anchor-boil-sterilization" cx="1080" cy="145" r="3" data-point-name="ボイル殺菌スペース" />
+    <circle id="anchor-bagging" cx="1300" cy="185" r="3" data-point-name="袋詰めスペース" />
+    <circle id="anchor-cold-meat-work" cx="1630" cy="180" r="3" data-point-name="魚肉冷凍加工作業場" />
+    <circle id="anchor-high-pressure" cx="1830" cy="150" r="3" data-point-name="高圧処理" />
+    <circle id="anchor-back-door" cx="1830" cy="205" r="3" data-point-name="勝手口" />
+    <circle id="anchor-air-shower-west" cx="616" cy="185" r="3" data-point-name="エアシャワー西" />
+    <circle id="anchor-air-shower-east" cx="1010" cy="185" r="3" data-point-name="エアシャワー東" />
+    <circle id="anchor-corridor-two" cx="800" cy="185" r="3" data-point-name="通路2" />
+    <circle id="anchor-corridor-one" cx="1100" cy="238" r="3" data-point-name="通路1" />
+    <circle id="anchor-stairs" cx="793" cy="247" r="3" data-point-name="階段" />
+    <circle id="anchor-ante-room" cx="685" cy="328" r="3" data-point-name="前室" />
+    <circle id="anchor-annex" cx="685" cy="365" r="3" data-point-name="附室" />
+    <circle id="anchor-stove" cx="685" cy="405" r="3" data-point-name="コンロ" />
+    <circle id="anchor-dish-store" cx="360" cy="450" r="3" data-point-name="保温食器・消毒保管室" />
+    <circle id="anchor-wash-space" cx="360" cy="740" r="3" data-point-name="洗浄スペース" />
+    <circle id="anchor-dispatch-prep" cx="505" cy="1045" r="3" data-point-name="搬出準備室" />
+    <circle id="anchor-return" cx="337" cy="1125" r="3" data-point-name="返却口" />
+    <circle id="anchor-cooler-d" cx="685" cy="850" r="3" data-point-name="冷却器" />
+    <circle id="anchor-fridge-d1" cx="685" cy="925" r="3" data-point-name="冷蔵庫D-1" />
+    <circle id="anchor-fridge-d2" cx="685" cy="1045" r="3" data-point-name="冷蔵庫D-2" />
+    <circle id="anchor-fridge-b2" cx="1160" cy="335" r="3" data-point-name="冷蔵庫B-2" />
+    <circle id="anchor-freezer-b1" cx="1425" cy="335" r="3" data-point-name="冷凍庫B-1" />
+    <circle id="anchor-freezer-a" cx="1830" cy="345" r="3" data-point-name="冷凍庫A" />
+    <circle id="anchor-fridge-c2" cx="1400" cy="1020" r="3" data-point-name="冷蔵庫C-2" />
+    <circle id="anchor-fridge-c1" cx="1630" cy="1020" r="3" data-point-name="冷蔵庫C-1" />
+    <circle id="anchor-ingredient-store" cx="1830" cy="820" r="3" data-point-name="食材倉庫" />
+    <circle id="anchor-inspection" cx="1830" cy="1040" r="3" data-point-name="検品室" />
+    <circle id="anchor-office" cx="880" cy="1145" r="3" data-point-name="事務所" />
+    <circle id="anchor-entrance" cx="1050" cy="1145" r="3" data-point-name="エントランス" />
+    <circle id="anchor-entry" cx="1175" cy="1145" r="3" data-point-name="玄関" />
+    <circle id="anchor-dispatch-1" cx="422.0" cy="1130.0" r="3" data-point-name="搬出口1" />
+    <circle id="anchor-dispatch-2" cx="454.0" cy="1130.0" r="3" data-point-name="搬出口2" />
+    <circle id="anchor-dispatch-3" cx="486.0" cy="1130.0" r="3" data-point-name="搬出口3" />
+    <circle id="anchor-dispatch-4" cx="518.0" cy="1130.0" r="3" data-point-name="搬出口4" />
+    <circle id="anchor-dispatch-5" cx="550.0" cy="1130.0" r="3" data-point-name="搬出口5" />
+    <circle id="anchor-dispatch-6" cx="582.0" cy="1130.0" r="3" data-point-name="搬出口6" />
+    <circle id="anchor-dispatch-7" cx="614.0" cy="1130.0" r="3" data-point-name="搬出口7" />
+    <circle id="anchor-hot-west-fryer" cx="800" cy="524.5" r="3" data-point-name="フライヤー西側通路" />
+    <circle id="anchor-hot-west-south" cx="800" cy="705" r="3" data-point-name="加熱室西側通路南" />
+    <circle id="anchor-serving-south-east" cx="580" cy="705" r="3" data-point-name="盛付南側通路東" />
+    <circle id="anchor-serving-west" cx="430" cy="720" r="3" data-point-name="盛付台西側通路" />
+    <circle id="anchor-serving-south" cx="507.5" cy="920" r="3" data-point-name="盛付台南側通路" />
+    <circle id="anchor-hot-east-north" cx="1050" cy="340" r="3" data-point-name="加熱室東側通路北" />
+    <circle id="anchor-hot-east-south" cx="1105" cy="950" r="3" data-point-name="加熱室東側通路南" />
+    <circle id="anchor-vegetable-west" cx="1190" cy="730" r="3" data-point-name="野菜加工西側通路" />
+    <circle id="anchor-vegetable-south" cx="1430" cy="950" r="3" data-point-name="野菜加工南側通路" />
+    <circle id="anchor-prep-opening" cx="1560" cy="930" r="3" data-point-name="野菜前処理との壁開口" />
+    <circle id="anchor-prep-east" cx="1740" cy="860" r="3" data-point-name="野菜前処理東側通路" />
+    <circle id="anchor-rice-store-turn" cx="420" cy="130" r="3" data-point-name="米倉庫から炊飯器への曲がり" />
+    <circle id="anchor-rice-transfer-turn" cx="432" cy="265" r="3" data-point-name="炊飯器から受渡し台への曲がり" />
+    <circle id="anchor-rice-dispatch-turn" cx="432" cy="1118" r="3" data-point-name="米飯搬出前の曲がり" />
+    <circle id="anchor-rice-dispatch-one" cx="422" cy="1118" r="3" data-point-name="搬出口1手前" />
+    <circle id="anchor-freezer-hot-turn" cx="1055" cy="335" r="3" data-point-name="冷凍庫B-1西側折返し" />
+    <circle id="anchor-fryer-in-east" cx="1055" cy="524.5" r="3" data-point-name="フライヤー中央下東側進入" />
+    <circle id="anchor-fryer-serving-turn" cx="800" cy="680" r="3" data-point-name="フライヤーから盛付への南折返し" />
+    <circle id="anchor-steamer-serving-turn" cx="580" cy="680" r="3" data-point-name="スチコン南側から盛付への曲がり" />
+    <circle id="anchor-serving-east-turn" cx="580" cy="723.5" r="3" data-point-name="盛付作業台南東側の曲がり" />
+    <circle id="anchor-serving-dispatch-three" cx="486" cy="920" r="3" data-point-name="搬出口3への曲がり" />
+    <circle id="anchor-dispatch-three-arrival" cx="486" cy="1118" r="3" data-point-name="搬出口3手前" />
+    <circle id="anchor-detail-cabbage-receipt" cx="1799" cy="1165" r="3" data-point-name="検品・入庫線 cabbage" />
+    <circle id="anchor-detail-cabbage-receipt-number" cx="1793" cy="1185" r="3" data-point-name="番号位置：検品・入庫線 cabbage" />
+    <circle id="anchor-detail-meat-receipt" cx="1809" cy="1165" r="3" data-point-name="検品・入庫線 meat" />
+    <circle id="anchor-detail-meat-receipt-number" cx="1803" cy="1205" r="3" data-point-name="番号位置：検品・入庫線 meat" />
+    <circle id="anchor-detail-fish-receipt" cx="1819" cy="1165" r="3" data-point-name="検品・入庫線 fish" />
+    <circle id="anchor-detail-fish-receipt-number" cx="1813" cy="1225" r="3" data-point-name="番号位置：検品・入庫線 fish" />
+    <circle id="anchor-detail-ginger-receipt" cx="1829" cy="1165" r="3" data-point-name="検品・入庫線 ginger" />
+    <circle id="anchor-detail-ginger-receipt-number" cx="1823" cy="1185" r="3" data-point-name="番号位置：検品・入庫線 ginger" />
+    <circle id="anchor-detail-vegetables-receipt" cx="1839" cy="1165" r="3" data-point-name="検品・入庫線 vegetables" />
+    <circle id="anchor-detail-vegetables-receipt-number" cx="1833" cy="1205" r="3" data-point-name="番号位置：検品・入庫線 vegetables" />
+    <circle id="anchor-detail-tofu-receipt" cx="1849" cy="1165" r="3" data-point-name="検品・入庫線 tofu" />
+    <circle id="anchor-detail-tofu-receipt-number" cx="1843" cy="1225" r="3" data-point-name="番号位置：検品・入庫線 tofu" />
+    <circle id="anchor-detail-peas-receipt" cx="1859" cy="1165" r="3" data-point-name="検品・入庫線 peas" />
+    <circle id="anchor-detail-peas-receipt-number" cx="1853" cy="1185" r="3" data-point-name="番号位置：検品・入庫線 peas" />
+    <circle id="anchor-detail-cream-receipt" cx="1869" cy="1165" r="3" data-point-name="検品・入庫線 cream" />
+    <circle id="anchor-detail-cream-receipt-number" cx="1863" cy="1205" r="3" data-point-name="番号位置：検品・入庫線 cream" />
+    <circle id="anchor-detail-muffin-receipt" cx="1879" cy="1165" r="3" data-point-name="検品・入庫線 muffin" />
+    <circle id="anchor-detail-muffin-receipt-number" cx="1873" cy="1225" r="3" data-point-name="番号位置：検品・入庫線 muffin" />
+    <circle id="anchor-detail-meat-store" cx="1225" cy="333" r="3" data-point-name="冷蔵庫B-2・肉用" />
+    <circle id="anchor-detail-meat-store-number" cx="1217" cy="354" r="3" data-point-name="番号位置：冷蔵庫B-2・肉用" />
+    <circle id="anchor-detail-fish-store" cx="1435" cy="321" r="3" data-point-name="冷凍庫B-1・揚物用" />
+    <circle id="anchor-detail-fish-store-number" cx="1417" cy="342" r="3" data-point-name="番号位置：冷凍庫B-1・揚物用" />
+    <circle id="anchor-detail-peas-store" cx="1437" cy="385" r="3" data-point-name="冷凍庫B-1・野菜用" />
+    <circle id="anchor-detail-peas-store-number" cx="1426" cy="382" r="3" data-point-name="番号位置：冷凍庫B-1・野菜用" />
+    <circle id="anchor-detail-cream-store" cx="1292" cy="291" r="3" data-point-name="冷凍庫B-1・デザート1" />
+    <circle id="anchor-detail-cream-store-number" cx="1292" cy="315" r="3" data-point-name="番号位置：冷凍庫B-1・デザート1" />
+    <circle id="anchor-detail-muffin-store" cx="1306" cy="291" r="3" data-point-name="冷凍庫B-1・デザート2" />
+    <circle id="anchor-detail-muffin-store-number" cx="1307" cy="315" r="3" data-point-name="番号位置：冷凍庫B-1・デザート2" />
+    <circle id="anchor-detail-cabbage-store" cx="1630" cy="1020" r="3" data-point-name="冷蔵庫C-1・並走1" />
+    <circle id="anchor-detail-cabbage-store-number" cx="1624" cy="1040" r="3" data-point-name="番号位置：冷蔵庫C-1・並走1" />
+    <circle id="anchor-detail-cabbage-sink-in" cx="1630.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・南1" />
+    <circle id="anchor-detail-cabbage-sink-in-number" cx="1624" cy="822" r="3" data-point-name="番号位置：野菜前処理シンク・南1" />
+    <circle id="anchor-detail-cabbage-sink-out" cx="1630.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・北1" />
+    <circle id="anchor-detail-cabbage-table-in" cx="1630.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・南1" />
+    <circle id="anchor-detail-cabbage-table-in-number" cx="1624" cy="730" r="3" data-point-name="番号位置：野菜前処理作業台・南1" />
+    <circle id="anchor-detail-cabbage-table-out" cx="1610.0" cy="715.0" r="3" data-point-name="野菜前処理作業台・西1" />
+    <circle id="anchor-detail-ginger-store" cx="1647" cy="1020" r="3" data-point-name="冷蔵庫C-1・並走2" />
+    <circle id="anchor-detail-ginger-store-number" cx="1641" cy="1040" r="3" data-point-name="番号位置：冷蔵庫C-1・並走2" />
+    <circle id="anchor-detail-ginger-sink-in" cx="1647.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・南2" />
+    <circle id="anchor-detail-ginger-sink-in-number" cx="1641" cy="822" r="3" data-point-name="番号位置：野菜前処理シンク・南2" />
+    <circle id="anchor-detail-ginger-sink-out" cx="1647.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・北2" />
+    <circle id="anchor-detail-ginger-table-in" cx="1647.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・南2" />
+    <circle id="anchor-detail-ginger-table-in-number" cx="1641" cy="730" r="3" data-point-name="番号位置：野菜前処理作業台・南2" />
+    <circle id="anchor-detail-ginger-table-out" cx="1610.0" cy="700.0" r="3" data-point-name="野菜前処理作業台・西2" />
+    <circle id="anchor-detail-vegetables-store" cx="1664" cy="1020" r="3" data-point-name="冷蔵庫C-1・並走3" />
+    <circle id="anchor-detail-vegetables-store-number" cx="1658" cy="1040" r="3" data-point-name="番号位置：冷蔵庫C-1・並走3" />
+    <circle id="anchor-detail-vegetables-sink-in" cx="1664.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・南3" />
+    <circle id="anchor-detail-vegetables-sink-in-number" cx="1658" cy="822" r="3" data-point-name="番号位置：野菜前処理シンク・南3" />
+    <circle id="anchor-detail-vegetables-sink-out" cx="1664.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・北3" />
+    <circle id="anchor-detail-vegetables-table-in" cx="1664.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・南3" />
+    <circle id="anchor-detail-vegetables-table-in-number" cx="1658" cy="730" r="3" data-point-name="番号位置：野菜前処理作業台・南3" />
+    <circle id="anchor-detail-vegetables-table-out" cx="1610.0" cy="685.0" r="3" data-point-name="野菜前処理作業台・西3" />
+    <circle id="anchor-detail-tofu-store" cx="1543" cy="1020" r="3" data-point-name="冷蔵庫C・境界左側の入庫位置" />
+    <circle id="anchor-detail-tofu-store-number" cx="1530" cy="1034" r="3" data-point-name="番号位置：冷蔵庫C・境界左側の入庫位置" />
+    <circle id="anchor-detail-ginger-machine-in" cx="1250.0" cy="801.0" r="3" data-point-name="ミキサー南・材料2入口" />
+    <circle id="anchor-detail-ginger-machine-in-number" cx="1241" cy="856" r="3" data-point-name="番号位置：ミキサー南・材料2入口" />
+    <circle id="anchor-detail-ginger-machine-out" cx="1250.0" cy="882.0" r="3" data-point-name="ミキサー南・材料2出口" />
+    <circle id="anchor-detail-vegetables-machine-in" cx="1470.0" cy="801.0" r="3" data-point-name="スライサー東・材料3入口" />
+    <circle id="anchor-detail-vegetables-machine-in-number" cx="1463" cy="853" r="3" data-point-name="番号位置：スライサー東・材料3入口" />
+    <circle id="anchor-detail-vegetables-machine-out" cx="1470.0" cy="882.0" r="3" data-point-name="スライサー東・材料3出口" />
+    <circle id="anchor-detail-cabbage-machine-in" cx="1491.0" cy="801.0" r="3" data-point-name="スライサー東・材料1入口" />
+    <circle id="anchor-detail-cabbage-machine-in-number" cx="1484" cy="853" r="3" data-point-name="番号位置：スライサー東・材料1入口" />
+    <circle id="anchor-detail-cabbage-machine-out" cx="1491.0" cy="882.0" r="3" data-point-name="スライサー東・材料1出口" />
+    <circle id="anchor-detail-tofu-table-in" cx="1509.0" cy="536.0" r="3" data-point-name="野菜加工作業台北・材料4入口" />
+    <circle id="anchor-detail-tofu-table-in-number" cx="1485" cy="539" r="3" data-point-name="番号位置：野菜加工作業台北・材料4入口" />
+    <circle id="anchor-detail-tofu-table-out" cx="1490.0" cy="546.0" r="3" data-point-name="野菜加工作業台北・材料4出口" />
+    <circle id="anchor-detail-tofu-sink-in" cx="1485.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・右槽4入口" />
+    <circle id="anchor-detail-tofu-sink-in-number" cx="1478" cy="634" r="3" data-point-name="番号位置：野菜加工シンク中央・右槽4入口" />
+    <circle id="anchor-detail-tofu-sink-out" cx="1509.0" cy="648.0" r="3" data-point-name="野菜加工シンク中央・右槽4出口" />
+    <circle id="anchor-detail-peas-sink-in" cx="1360.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・左槽5入口" />
+    <circle id="anchor-detail-peas-sink-in-number" cx="1353" cy="634" r="3" data-point-name="番号位置：野菜加工シンク中央・左槽5入口" />
+    <circle id="anchor-detail-peas-sink-out" cx="1360.0" cy="755.0" r="3" data-point-name="野菜加工シンク中央・左槽5出口" />
+    <circle id="anchor-detail-tofu-kettle-e-in" cx="905.0" cy="771.0" r="3" data-point-name="釜E・材料4入口" />
+    <circle id="anchor-detail-tofu-kettle-e-in-number" cx="897" cy="810" r="3" data-point-name="番号位置：釜E・材料4入口" />
+    <circle id="anchor-detail-tofu-kettle-e-out" cx="905.0" cy="829.0" r="3" data-point-name="釜E・材料4出口" />
+    <circle id="anchor-detail-meat-kettle-f" cx="934.0" cy="905.0" r="3" data-point-name="釜F・meat到着" />
+    <circle id="anchor-detail-meat-kettle-f-number" cx="895" cy="895" r="3" data-point-name="番号位置：釜F・meat到着" />
+    <circle id="anchor-detail-ginger-kettle-f" cx="876.0" cy="905.0" r="3" data-point-name="釜F・ginger到着" />
+    <circle id="anchor-detail-ginger-kettle-f-number" cx="880" cy="913" r="3" data-point-name="番号位置：釜F・ginger到着" />
+    <circle id="anchor-detail-vegetables-kettle-f" cx="934.0" cy="905.0" r="3" data-point-name="釜F・vegetables到着" />
+    <circle id="anchor-detail-vegetables-kettle-f-number" cx="900" cy="913" r="3" data-point-name="番号位置：釜F・vegetables到着" />
+    <circle id="anchor-detail-tofu-kettle-f" cx="905.0" cy="876.0" r="3" data-point-name="釜F・tofu到着" />
+    <circle id="anchor-detail-tofu-kettle-f-number" cx="888" cy="928" r="3" data-point-name="番号位置：釜F・tofu到着" />
+    <circle id="anchor-detail-peas-kettle-f" cx="905.0" cy="934.0" r="3" data-point-name="釜F・peas到着" />
+    <circle id="anchor-detail-peas-kettle-f-number" cx="909" cy="928" r="3" data-point-name="番号位置：釜F・peas到着" />
+    <circle id="anchor-detail-stew-kettle-out" cx="876.0" cy="905.0" r="3" data-point-name="釜F・調理後出口" />
+    <circle id="anchor-detail-stew-serving-in" cx="553.0" cy="715.0" r="3" data-point-name="盛付作業台南・そぼろ煮入口" />
+    <circle id="anchor-detail-stew-serving-in-number" cx="481" cy="717" r="3" data-point-name="番号位置：盛付作業台南・そぼろ煮入口" />
+    <circle id="anchor-detail-stew-serving-out" cx="475.0" cy="881.0" r="3" data-point-name="盛付作業台南・そぼろ煮出口" />
+    <circle id="anchor-detail-fish-fryer-in" cx="983.0" cy="524.5" r="3" data-point-name="フライヤー中央下・揚物入口" />
+    <circle id="anchor-detail-fish-fryer-in-number" cx="887" cy="538" r="3" data-point-name="番号位置：フライヤー中央下・揚物入口" />
+    <circle id="anchor-detail-fish-fryer-out" cx="843.0" cy="524.5" r="3" data-point-name="フライヤー中央下・揚物出口" />
+    <circle id="anchor-detail-fish-serving-in" cx="553.0" cy="680.0" r="3" data-point-name="盛付作業台南・揚物入口" />
+    <circle id="anchor-detail-fish-serving-in-number" cx="530" cy="687" r="3" data-point-name="番号位置：盛付作業台南・揚物入口" />
+    <circle id="anchor-detail-fish-serving-out" cx="486.0" cy="881.0" r="3" data-point-name="盛付作業台南・揚物出口" />
+    <circle id="anchor-detail-cabbage-kettle-in" cx="1099.0" cy="905.0" r="3" data-point-name="釜B・材料1入口" />
+    <circle id="anchor-detail-cabbage-kettle-in-number" cx="1056" cy="916" r="3" data-point-name="番号位置：釜B・材料1入口" />
+    <circle id="anchor-detail-cabbage-kettle-out" cx="1070.0" cy="876.0" r="3" data-point-name="釜B・材料1出口" />
+    <circle id="anchor-detail-cabbage-cooling-in" cx="813.0" cy="824.0" r="3" data-point-name="冷却・材料1入口" />
+    <circle id="anchor-detail-cabbage-cooling-in-number" cx="825" cy="810" r="3" data-point-name="番号位置：冷却・材料1入口" />
+    <circle id="anchor-detail-cabbage-cooling-out" cx="775.0" cy="798.0" r="3" data-point-name="冷却・材料1出口" />
+    <circle id="anchor-detail-cabbage-dewatering-in" cx="813.5" cy="878.0" r="3" data-point-name="脱水機・材料1入口" />
+    <circle id="anchor-detail-cabbage-dewatering-in-number" cx="817" cy="913" r="3" data-point-name="番号位置：脱水機・材料1入口" />
+    <circle id="anchor-detail-cabbage-dewatering-out" cx="783.0" cy="902.0" r="3" data-point-name="脱水機・材料1出口" />
+    <circle id="anchor-detail-cabbage-serving-north-in" cx="536.0" cy="502.0" r="3" data-point-name="盛付作業台北・和え物入口" />
+    <circle id="anchor-detail-cabbage-serving-north-in-number" cx="531" cy="488" r="3" data-point-name="番号位置：盛付作業台北・和え物入口" />
+    <circle id="anchor-detail-cabbage-serving-south-in" cx="536.0" cy="566.0" r="3" data-point-name="盛付作業台南・和え物入口" />
+    <circle id="anchor-detail-cabbage-serving-south-in-number" cx="529" cy="598" r="3" data-point-name="番号位置：盛付作業台南・和え物入口" />
+    <circle id="anchor-detail-cabbage-serving-south-out" cx="518.0" cy="881.0" r="3" data-point-name="盛付作業台南・和え物出口" />
+    <circle id="anchor-detail-cream-serving-in" cx="557.0" cy="469.0" r="3" data-point-name="盛付作業台北・デザート1入口" />
+    <circle id="anchor-detail-cream-serving-in-number" cx="510" cy="468" r="3" data-point-name="番号位置：盛付作業台北・デザート1入口" />
+    <circle id="anchor-detail-cream-cold" cx="655" cy="1045" r="3" data-point-name="冷蔵庫D-2・デザート1" />
+    <circle id="anchor-detail-cream-cold-number" cx="674" cy="1050" r="3" data-point-name="番号位置：冷蔵庫D-2・デザート1" />
+    <circle id="anchor-detail-cream-dispatch" cx="545" cy="1130" r="3" data-point-name="搬出口5・デザート1" />
+    <circle id="anchor-detail-cream-dispatch-number" cx="539" cy="1152" r="3" data-point-name="番号位置：搬出口5・デザート1" />
+    <circle id="anchor-detail-muffin-serving-in" cx="557.0" cy="484.0" r="3" data-point-name="盛付作業台北・デザート2入口" />
+    <circle id="anchor-detail-muffin-serving-in-number" cx="528" cy="468" r="3" data-point-name="番号位置：盛付作業台北・デザート2入口" />
+    <circle id="anchor-detail-muffin-cold" cx="655" cy="1065" r="3" data-point-name="冷蔵庫D-2・デザート2" />
+    <circle id="anchor-detail-muffin-cold-number" cx="674" cy="1070" r="3" data-point-name="番号位置：冷蔵庫D-2・デザート2" />
+    <circle id="anchor-detail-muffin-dispatch" cx="555" cy="1130" r="3" data-point-name="搬出口5・デザート2" />
+    <circle id="anchor-detail-muffin-dispatch-number" cx="554" cy="1152" r="3" data-point-name="番号位置：搬出口5・デザート2" />
+    <circle id="anchor-detail-rice-store-number" cx="355" cy="149" r="3" data-point-name="番号位置：米倉庫" />
+    <circle id="anchor-detail-rice-cooker-number" cx="414" cy="258" r="3" data-point-name="番号位置：炊飯器" />
+    <circle id="anchor-detail-rice-transfer-number" cx="424" cy="460" r="3" data-point-name="番号位置：米飯受渡し台" />
+    <circle id="anchor-detail-肉入庫1" cx="1809" cy="267" r="3" data-point-name="肉入庫・折点1" />
+    <circle id="anchor-detail-肉入庫2" cx="1225" cy="267" r="3" data-point-name="肉入庫・折点2" />
+    <circle id="anchor-detail-肉調理1" cx="1078" cy="333" r="3" data-point-name="肉調理・折点1" />
+    <circle id="anchor-detail-肉調理2" cx="1078" cy="705" r="3" data-point-name="肉調理・折点2" />
+    <circle id="anchor-detail-肉調理3" cx="950" cy="705" r="3" data-point-name="肉調理・折点3" />
+    <circle id="anchor-detail-肉調理4" cx="950" cy="905" r="3" data-point-name="肉調理・折点4" />
+    <circle id="anchor-detail-揚物入庫1" cx="1819" cy="321" r="3" data-point-name="揚物入庫・折点1" />
+    <circle id="anchor-detail-揚物調理1" cx="1435" cy="278" r="3" data-point-name="揚物調理・折点1" />
+    <circle id="anchor-detail-揚物調理2" cx="1061" cy="278" r="3" data-point-name="揚物調理・折点2" />
+    <circle id="anchor-detail-揚物調理3" cx="1061" cy="524.5" r="3" data-point-name="揚物調理・折点3" />
+    <circle id="anchor-detail-揚物調理4" cx="800" cy="524.5" r="3" data-point-name="揚物調理・折点4" />
+    <circle id="anchor-detail-揚物調理5" cx="800" cy="680" r="3" data-point-name="揚物調理・折点5" />
+    <circle id="anchor-detail-そぼろ盛付1" cx="861" cy="905" r="3" data-point-name="そぼろ盛付・折点1" />
+    <circle id="anchor-detail-そぼろ盛付2" cx="861" cy="715" r="3" data-point-name="そぼろ盛付・折点2" />
+    <circle id="anchor-detail-そぼろ搬出1" cx="475" cy="1000" r="3" data-point-name="そぼろ搬出・折点1" />
+    <circle id="anchor-detail-そぼろ搬出2" cx="454" cy="1000" r="3" data-point-name="そぼろ搬出・折点2" />
+    <circle id="anchor-detail-cabbage入庫1" cx="1799" cy="1142" r="3" data-point-name="cabbage入庫・折点1" />
+    <circle id="anchor-detail-cabbage入庫2" cx="1630" cy="1142" r="3" data-point-name="cabbage入庫・折点2" />
+    <circle id="anchor-detail-ginger入庫1" cx="1829" cy="1150" r="3" data-point-name="ginger入庫・折点1" />
+    <circle id="anchor-detail-ginger入庫2" cx="1647" cy="1150" r="3" data-point-name="ginger入庫・折点2" />
+    <circle id="anchor-detail-vegetables入庫1" cx="1839" cy="1158" r="3" data-point-name="vegetables入庫・折点1" />
+    <circle id="anchor-detail-vegetables入庫2" cx="1664" cy="1158" r="3" data-point-name="vegetables入庫・折点2" />
+    <circle id="anchor-detail-tofu入庫1" cx="1849" cy="1134" r="3" data-point-name="tofu入庫・折点1" />
+    <circle id="anchor-detail-tofu入庫2" cx="1543" cy="1134" r="3" data-point-name="tofu入庫・折点2" />
+    <circle id="anchor-detail-生姜加工1" cx="1270" cy="700" r="3" data-point-name="生姜加工・折点1" />
+    <circle id="anchor-detail-生姜加工2" cx="1270" cy="790" r="3" data-point-name="生姜加工・折点2" />
+    <circle id="anchor-detail-生姜加工3" cx="1250" cy="790" r="3" data-point-name="生姜加工・折点3" />
+    <circle id="anchor-detail-生姜調理1" cx="1250" cy="907" r="3" data-point-name="生姜調理・折点1" />
+    <circle id="anchor-detail-生姜調理2" cx="1150" cy="907" r="3" data-point-name="生姜調理・折点2" />
+    <circle id="anchor-detail-生姜調理3" cx="1150" cy="757" r="3" data-point-name="生姜調理・折点3" />
+    <circle id="anchor-detail-生姜調理4" cx="858" cy="757" r="3" data-point-name="生姜調理・折点4" />
+    <circle id="anchor-detail-生姜調理5" cx="858" cy="905" r="3" data-point-name="生姜調理・折点5" />
+    <circle id="anchor-detail-玉人加工1" cx="1470" cy="685" r="3" data-point-name="玉人加工・折点1" />
+    <circle id="anchor-detail-玉人調理1" cx="1470" cy="896" r="3" data-point-name="玉人調理・折点1" />
+    <circle id="anchor-detail-玉人調理2" cx="1142" cy="896" r="3" data-point-name="玉人調理・折点2" />
+    <circle id="anchor-detail-玉人調理3" cx="1142" cy="765" r="3" data-point-name="玉人調理・折点3" />
+    <circle id="anchor-detail-玉人調理4" cx="940" cy="765" r="3" data-point-name="玉人調理・折点4" />
+    <circle id="anchor-detail-玉人調理5" cx="940" cy="905" r="3" data-point-name="玉人調理・折点5" />
+    <circle id="anchor-detail-厚揚加工1" cx="1543" cy="536" r="3" data-point-name="厚揚加工・折点1" />
+    <circle id="anchor-detail-厚揚加工2" cx="1490" cy="574" r="3" data-point-name="厚揚加工・折点2" />
+    <circle id="anchor-detail-厚揚加工3" cx="1485" cy="574" r="3" data-point-name="厚揚加工・折点3" />
+    <circle id="anchor-detail-厚揚ボイル1" cx="1543" cy="648" r="3" data-point-name="厚揚ボイル・折点1" />
+    <circle id="anchor-detail-厚揚ボイル2" cx="1543" cy="770" r="3" data-point-name="厚揚ボイル・折点2" />
+    <circle id="anchor-detail-厚揚ボイル3" cx="905" cy="770" r="3" data-point-name="厚揚ボイル・折点3" />
+    <circle id="anchor-detail-豆入庫1" cx="1859" cy="385" r="3" data-point-name="豆入庫・折点1" />
+    <circle id="anchor-detail-豆洗浄1" cx="1458" cy="385" r="3" data-point-name="豆洗浄・折点1" />
+    <circle id="anchor-detail-豆洗浄2" cx="1458" cy="446" r="3" data-point-name="豆洗浄・折点2" />
+    <circle id="anchor-detail-豆洗浄3" cx="1360" cy="446" r="3" data-point-name="豆洗浄・折点3" />
+    <circle id="anchor-detail-豆調理1" cx="1360" cy="950" r="3" data-point-name="豆調理・折点1" />
+    <circle id="anchor-detail-豆調理2" cx="905" cy="950" r="3" data-point-name="豆調理・折点2" />
+    <circle id="anchor-detail-キャベツ加工1" cx="1491" cy="715" r="3" data-point-name="キャベツ加工・折点1" />
+    <circle id="anchor-detail-キャベツ調理1" cx="1491" cy="910" r="3" data-point-name="キャベツ調理・折点1" />
+    <circle id="anchor-detail-キャベツ調理2" cx="1126" cy="910" r="3" data-point-name="キャベツ調理・折点2" />
+    <circle id="anchor-detail-キャベツ調理3" cx="1126" cy="905" r="3" data-point-name="キャベツ調理・折点3" />
+    <circle id="anchor-detail-キャベツ冷却1" cx="1070" cy="841" r="3" data-point-name="キャベツ冷却・折点1" />
+    <circle id="anchor-detail-キャベツ冷却2" cx="813" cy="841" r="3" data-point-name="キャベツ冷却・折点2" />
+    <circle id="anchor-detail-キャベツ脱水1" cx="775" cy="864" r="3" data-point-name="キャベツ脱水・折点1" />
+    <circle id="anchor-detail-キャベツ脱水2" cx="813.5" cy="864" r="3" data-point-name="キャベツ脱水・折点2" />
+    <circle id="anchor-detail-キャベツ和え1" cx="756" cy="902" r="3" data-point-name="キャベツ和え・折点1" />
+    <circle id="anchor-detail-キャベツ和え2" cx="756" cy="773" r="3" data-point-name="キャベツ和え・折点2" />
+    <circle id="anchor-detail-キャベツ和え3" cx="610" cy="773" r="3" data-point-name="キャベツ和え・折点3" />
+    <circle id="anchor-detail-キャベツ和え4" cx="610" cy="520" r="3" data-point-name="キャベツ和え・折点4" />
+    <circle id="anchor-detail-キャベツ和え5" cx="536" cy="520" r="3" data-point-name="キャベツ和え・折点5" />
+    <circle id="anchor-detail-cream入庫1" cx="1869" cy="263" r="3" data-point-name="cream入庫・折点1" />
+    <circle id="anchor-detail-cream入庫2" cx="1292" cy="263" r="3" data-point-name="cream入庫・折点2" />
+    <circle id="anchor-detail-cream盛付1" cx="1292" cy="244" r="3" data-point-name="cream盛付・折点1" />
+    <circle id="anchor-detail-cream盛付2" cx="1050" cy="244" r="3" data-point-name="cream盛付・折点2" />
+    <circle id="anchor-detail-cream盛付3" cx="1050" cy="581" r="3" data-point-name="cream盛付・折点3" />
+    <circle id="anchor-detail-cream盛付4" cx="784" cy="581" r="3" data-point-name="cream盛付・折点4" />
+    <circle id="anchor-detail-cream盛付5" cx="784" cy="699" r="3" data-point-name="cream盛付・折点5" />
+    <circle id="anchor-detail-cream盛付6" cx="600" cy="699" r="3" data-point-name="cream盛付・折点6" />
+    <circle id="anchor-detail-cream盛付7" cx="600" cy="469" r="3" data-point-name="cream盛付・折点7" />
+    <circle id="anchor-detail-cream冷蔵1" cx="570" cy="469" r="3" data-point-name="cream冷蔵・折点1" />
+    <circle id="anchor-detail-cream冷蔵2" cx="570" cy="1026" r="3" data-point-name="cream冷蔵・折点2" />
+    <circle id="anchor-detail-cream冷蔵3" cx="630" cy="1026" r="3" data-point-name="cream冷蔵・折点3" />
+    <circle id="anchor-detail-cream冷蔵4" cx="630" cy="1045" r="3" data-point-name="cream冷蔵・折点4" />
+    <circle id="anchor-detail-cream搬出1" cx="655" cy="1045" r="3" data-point-name="cream搬出・折点1" />
+    <circle id="anchor-detail-cream搬出2" cx="655" cy="1108" r="3" data-point-name="cream搬出・折点2" />
+    <circle id="anchor-detail-cream搬出3" cx="545" cy="1108" r="3" data-point-name="cream搬出・折点3" />
+    <circle id="anchor-detail-muffin入庫1" cx="1879" cy="251" r="3" data-point-name="muffin入庫・折点1" />
+    <circle id="anchor-detail-muffin入庫2" cx="1306" cy="251" r="3" data-point-name="muffin入庫・折点2" />
+    <circle id="anchor-detail-muffin盛付1" cx="1306" cy="232" r="3" data-point-name="muffin盛付・折点1" />
+    <circle id="anchor-detail-muffin盛付2" cx="1038" cy="232" r="3" data-point-name="muffin盛付・折点2" />
+    <circle id="anchor-detail-muffin盛付3" cx="1038" cy="569" r="3" data-point-name="muffin盛付・折点3" />
+    <circle id="anchor-detail-muffin盛付4" cx="772" cy="569" r="3" data-point-name="muffin盛付・折点4" />
+    <circle id="anchor-detail-muffin盛付5" cx="772" cy="687" r="3" data-point-name="muffin盛付・折点5" />
+    <circle id="anchor-detail-muffin盛付6" cx="588" cy="687" r="3" data-point-name="muffin盛付・折点6" />
+    <circle id="anchor-detail-muffin盛付7" cx="588" cy="484" r="3" data-point-name="muffin盛付・折点7" />
+    <circle id="anchor-detail-muffin冷蔵1" cx="582" cy="484" r="3" data-point-name="muffin冷蔵・折点1" />
+    <circle id="anchor-detail-muffin冷蔵2" cx="582" cy="1038" r="3" data-point-name="muffin冷蔵・折点2" />
+    <circle id="anchor-detail-muffin冷蔵3" cx="642" cy="1038" r="3" data-point-name="muffin冷蔵・折点3" />
+    <circle id="anchor-detail-muffin冷蔵4" cx="642" cy="1065" r="3" data-point-name="muffin冷蔵・折点4" />
+    <circle id="anchor-detail-muffin搬出1" cx="667" cy="1065" r="3" data-point-name="muffin搬出・折点1" />
+    <circle id="anchor-detail-muffin搬出2" cx="667" cy="1120" r="3" data-point-name="muffin搬出・折点2" />
+    <circle id="anchor-detail-muffin搬出3" cx="555" cy="1120" r="3" data-point-name="muffin搬出・折点3" />
+    <circle id="anchor-dispatch-one-axis" cx="430.0" cy="1130.0" r="3" data-point-name="搬出口1・米飯直線北接続" />
+    <circle id="anchor-vegetable-prep-sink-lane1-北接続" cx="1670.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・縦列1北接続" />
+    <circle id="anchor-vegetable-prep-sink-lane1-南接続" cx="1670.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・縦列1南接続" />
+    <circle id="anchor-vegetable-prep-table-lane1-南接続" cx="1670.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・縦列1南接続" />
+    <circle id="anchor-prep-table-lane1-west" cx="1610.0" cy="735.0" r="3" data-point-name="野菜前処理作業台・下部列1西接続" />
+    <circle id="anchor-central-sink-prep1-east" cx="1509.0" cy="735.0" r="3" data-point-name="野菜加工シンク中央・前処理列1東接続" />
+    <circle id="anchor-cold-c1-lane1" cx="1670" cy="1005" r="3" data-point-name="冷蔵庫C-1・上辺列1" />
+    <circle id="anchor-cold-c1-bottom1" cx="1670" cy="1115" r="3" data-point-name="冷蔵庫C-1・下辺列1" />
+    <circle id="anchor-cold-c1-arrival1" cx="1670" cy="1028" r="3" data-point-name="冷蔵庫C-1・入庫列1" />
+    <circle id="anchor-vegetable-prep-sink-lane2-北接続" cx="1680.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・縦列2北接続" />
+    <circle id="anchor-vegetable-prep-sink-lane2-南接続" cx="1680.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・縦列2南接続" />
+    <circle id="anchor-vegetable-prep-table-lane2-南接続" cx="1680.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・縦列2南接続" />
+    <circle id="anchor-prep-table-lane2-west" cx="1610.0" cy="725.0" r="3" data-point-name="野菜前処理作業台・下部列2西接続" />
+    <circle id="anchor-central-sink-prep2-east" cx="1509.0" cy="725.0" r="3" data-point-name="野菜加工シンク中央・前処理列2東接続" />
+    <circle id="anchor-cold-c1-lane2" cx="1680" cy="1005" r="3" data-point-name="冷蔵庫C-1・上辺列2" />
+    <circle id="anchor-cold-c1-bottom2" cx="1680" cy="1115" r="3" data-point-name="冷蔵庫C-1・下辺列2" />
+    <circle id="anchor-cold-c1-arrival2" cx="1680" cy="1028" r="3" data-point-name="冷蔵庫C-1・入庫列2" />
+    <circle id="anchor-vegetable-prep-sink-lane3-北接続" cx="1690.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・縦列3北接続" />
+    <circle id="anchor-vegetable-prep-sink-lane3-南接続" cx="1690.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・縦列3南接続" />
+    <circle id="anchor-vegetable-prep-table-lane3-南接続" cx="1690.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・縦列3南接続" />
+    <circle id="anchor-prep-table-lane3-west" cx="1610.0" cy="715.0" r="3" data-point-name="野菜前処理作業台・下部列3西接続" />
+    <circle id="anchor-central-sink-prep3-east" cx="1509.0" cy="715.0" r="3" data-point-name="野菜加工シンク中央・前処理列3東接続" />
+    <circle id="anchor-cold-c1-lane3" cx="1690" cy="1005" r="3" data-point-name="冷蔵庫C-1・上辺列3" />
+    <circle id="anchor-cold-c1-bottom3" cx="1690" cy="1115" r="3" data-point-name="冷蔵庫C-1・下辺列3" />
+    <circle id="anchor-cold-c1-arrival3" cx="1690" cy="1028" r="3" data-point-name="冷蔵庫C-1・入庫列3" />
+    <circle id="anchor-vegetable-prep-sink-lane4-北接続" cx="1700.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・縦列4北接続" />
+    <circle id="anchor-vegetable-prep-sink-lane4-南接続" cx="1700.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・縦列4南接続" />
+    <circle id="anchor-vegetable-prep-table-lane4-南接続" cx="1700.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・縦列4南接続" />
+    <circle id="anchor-prep-table-lane4-west" cx="1610.0" cy="705.0" r="3" data-point-name="野菜前処理作業台・下部列4西接続" />
+    <circle id="anchor-central-sink-prep4-east" cx="1509.0" cy="705.0" r="3" data-point-name="野菜加工シンク中央・前処理列4東接続" />
+    <circle id="anchor-cold-c1-lane4" cx="1700" cy="1005" r="3" data-point-name="冷蔵庫C-1・上辺列4" />
+    <circle id="anchor-cold-c1-bottom4" cx="1700" cy="1115" r="3" data-point-name="冷蔵庫C-1・下辺列4" />
+    <circle id="anchor-cold-c1-arrival4" cx="1700" cy="1028" r="3" data-point-name="冷蔵庫C-1・入庫列4" />
+    <circle id="anchor-vegetable-prep-sink-lane5-北接続" cx="1710.0" cy="779.0" r="3" data-point-name="野菜前処理シンク・縦列5北接続" />
+    <circle id="anchor-vegetable-prep-sink-lane5-南接続" cx="1710.0" cy="830.0" r="3" data-point-name="野菜前処理シンク・縦列5南接続" />
+    <circle id="anchor-vegetable-prep-table-lane5-南接続" cx="1710.0" cy="737.0" r="3" data-point-name="野菜前処理作業台・縦列5南接続" />
+    <circle id="anchor-prep-table-lane5-west" cx="1610.0" cy="695.0" r="3" data-point-name="野菜前処理作業台・下部列5西接続" />
+    <circle id="anchor-central-sink-prep5-east" cx="1509.0" cy="695.0" r="3" data-point-name="野菜加工シンク中央・前処理列5東接続" />
+    <circle id="anchor-cold-c1-lane5" cx="1710" cy="1005" r="3" data-point-name="冷蔵庫C-1・上辺列5" />
+    <circle id="anchor-cold-c1-bottom5" cx="1710" cy="1115" r="3" data-point-name="冷蔵庫C-1・下辺列5" />
+    <circle id="anchor-cold-c1-arrival5" cx="1710" cy="1028" r="3" data-point-name="冷蔵庫C-1・入庫列5" />
+    <circle id="anchor-central-sink-slicer1-south" cx="1462.0" cy="755.0" r="3" data-point-name="野菜加工シンク中央・スライサー列1南接続" />
+    <circle id="anchor-slicer-east-lane1-北接続" cx="1462.0" cy="801.0" r="3" data-point-name="スライサー東・縦列1北接続" />
+    <circle id="anchor-slicer-east-lane1-南接続" cx="1462.0" cy="882.0" r="3" data-point-name="スライサー東・縦列1南接続" />
+    <circle id="anchor-central-sink-slicer2-south" cx="1480.0" cy="755.0" r="3" data-point-name="野菜加工シンク中央・スライサー列2南接続" />
+    <circle id="anchor-slicer-east-lane2-北接続" cx="1480.0" cy="801.0" r="3" data-point-name="スライサー東・縦列2北接続" />
+    <circle id="anchor-slicer-east-lane2-南接続" cx="1480.0" cy="882.0" r="3" data-point-name="スライサー東・縦列2南接続" />
+    <circle id="anchor-central-sink-upper1" cx="1376.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・上段区画1北接続" />
+    <circle id="anchor-central-sink-upper1-west" cx="1323.0" cy="620.0" r="3" data-point-name="野菜加工シンク中央・上段区画1西接続" />
+    <circle id="anchor-central-sink-upper1-return" cx="1332.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・上段区画1北戻り" />
+    <circle id="anchor-central-sink-upper2" cx="1492.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・上段区画2北接続" />
+    <circle id="anchor-central-sink-upper2-west" cx="1323.0" cy="628.0" r="3" data-point-name="野菜加工シンク中央・上段区画2西接続" />
+    <circle id="anchor-central-sink-upper2-return" cx="1460.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・上段区画2北戻り" />
+    <circle id="anchor-central-sink-upper3" cx="1502.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・上段区画3北接続" />
+    <circle id="anchor-central-sink-upper3-west" cx="1323.0" cy="636.0" r="3" data-point-name="野菜加工シンク中央・上段区画3西接続" />
+    <circle id="anchor-central-sink-upper3-return" cx="1450.0" cy="594.0" r="3" data-point-name="野菜加工シンク中央・上段区画3北戻り" />
+    <circle id="anchor-central-table-lower-東接続" cx="1323.0" cy="725.0" r="3" data-point-name="野菜加工作業台中央・下部東接続" />
+    <circle id="anchor-central-sink-lower-東接続" cx="1509.0" cy="725.0" r="3" data-point-name="野菜加工シンク中央・下段東接続" />
+    <circle id="anchor-central-table-lower-西接続" cx="1257.0" cy="725.0" r="3" data-point-name="野菜加工作業台中央・下部西接続" />
+    <circle id="anchor-central-sink-lower-西接続" cx="1323.0" cy="725.0" r="3" data-point-name="野菜加工シンク中央・下段西接続" />
+    <circle id="anchor-central-sink-lower-left-south" cx="1332.0" cy="755.0" r="3" data-point-name="野菜加工シンク中央・下段左区画南接続" />
+    <circle id="anchor-serving-dispatch-2" cx="464.0" cy="881.0" r="3" data-point-name="盛付作業台南・搬出列2南接続" />
+    <circle id="anchor-dispatch-aligned-2" cx="464.0" cy="1130.0" r="3" data-point-name="搬出口2・盛付直線北接続" />
+    <circle id="anchor-serving-dispatch-3" cx="486.0" cy="881.0" r="3" data-point-name="盛付作業台南・搬出列3南接続" />
+    <circle id="anchor-dispatch-aligned-3" cx="486.0" cy="1130.0" r="3" data-point-name="搬出口3・盛付直線北接続" />
+    <circle id="anchor-serving-dispatch-4" cx="518.0" cy="881.0" r="3" data-point-name="盛付作業台南・搬出列4南接続" />
+    <circle id="anchor-dispatch-aligned-4" cx="518.0" cy="1130.0" r="3" data-point-name="搬出口4・盛付直線北接続" />
+    <circle id="anchor-serving-dispatch-5" cx="550.0" cy="881.0" r="3" data-point-name="盛付作業台南・搬出列5南接続" />
+    <circle id="anchor-dispatch-aligned-5" cx="550.0" cy="1130.0" r="3" data-point-name="搬出口5・盛付直線北接続" />
+    <circle id="anchor-oven-box-north1" cx="1005.0" cy="294.0" r="3" data-point-name="ゼットオーブン横の無記名枠・上辺列1" />
+    <circle id="anchor-oven-box-west1" cx="995.0" cy="322.5" r="3" data-point-name="ゼットオーブン横の無記名枠・左辺列1" />
+    <circle id="anchor-oven-east-lane1" cx="983.0" cy="322.5" r="3" data-point-name="ゼットオーブン・右辺列1" />
+    <circle id="anchor-oven-box-north2" cx="1025.0" cy="294.0" r="3" data-point-name="ゼットオーブン横の無記名枠・上辺列2" />
+    <circle id="anchor-oven-box-west2" cx="995.0" cy="342.5" r="3" data-point-name="ゼットオーブン横の無記名枠・左辺列2" />
+    <circle id="anchor-oven-east-lane2" cx="983.0" cy="342.5" r="3" data-point-name="ゼットオーブン・右辺列2" />
+    <circle id="anchor-kettle-d-shared" cx="1019.0" cy="905.0" r="3" data-point-name="釜D・東共有接続" />
+    <circle id="anchor-serving-east-upper1" cx="553.0" cy="680.0" r="3" data-point-name="盛付作業台南・上部東列1" />
+    <circle id="anchor-serving-east-upper2" cx="553.0" cy="700.0" r="3" data-point-name="盛付作業台南・上部東列2" />
+    <circle id="anchor-serving-east-upper3" cx="553.0" cy="720.0" r="3" data-point-name="盛付作業台南・上部東列3" />
+    <circle id="anchor-inspection-bottom-1" cx="1804" cy="1120" r="3" data-point-name="検品室・下辺列1" />
+    <circle id="anchor-inspection-bottom-2" cx="1814" cy="1120" r="3" data-point-name="検品室・下辺列2" />
+    <circle id="anchor-inspection-bottom-3" cx="1824" cy="1120" r="3" data-point-name="検品室・下辺列3" />
+    <circle id="anchor-inspection-bottom-4" cx="1834" cy="1120" r="3" data-point-name="検品室・下辺列4" />
+    <circle id="anchor-inspection-bottom-5" cx="1844" cy="1120" r="3" data-point-name="検品室・下辺列5" />
+    <circle id="anchor-inspection-bottom-6" cx="1854" cy="1120" r="3" data-point-name="検品室・下辺列6" />
+    <circle id="anchor-inspection-bottom-7" cx="1864" cy="1120" r="3" data-point-name="検品室・下辺列7" />
+    <circle id="anchor-inspection-bottom-8" cx="1874" cy="1120" r="3" data-point-name="検品室・下辺列8" />
+    <circle id="anchor-inspection-bottom-9" cx="1884" cy="1120" r="3" data-point-name="検品室・下辺列9" />
+    <circle id="anchor-freezer-b1-lane1" cx="1380" cy="365" r="3" data-point-name="冷凍庫B-1・下部列1" />
+    <circle id="anchor-freezer-b1-lane2" cx="1400" cy="365" r="3" data-point-name="冷凍庫B-1・下部列2" />
+    <circle id="anchor-freezer-b1-lane3" cx="1420" cy="365" r="3" data-point-name="冷凍庫B-1・下部列3" />
+    <circle id="anchor-freezer-b1-lane4" cx="1440" cy="365" r="3" data-point-name="冷凍庫B-1・下部列4" />
+    <circle id="anchor-cold-c2-bottom-right" cx="1540" cy="1115" r="3" data-point-name="冷蔵庫C-2・下辺右寄り" />
+    <circle id="anchor-cold-c2-top-right" cx="1540" cy="1005" r="3" data-point-name="冷蔵庫C-2・上辺右寄り" />
+    <circle id="anchor-cold-c2-arrival-right" cx="1540" cy="1055" r="3" data-point-name="冷蔵庫C-2・入庫右寄り" />
+    <circle id="anchor-cold-c2-number-right" cx="1524" cy="1042" r="3" data-point-name="冷蔵庫C-2・右側番号欄" />
+    <circle id="anchor-cold-boundary-label" cx="1525" cy="1060" r="3" data-point-name="冷蔵庫境界左側・番号欄" />
+    <circle id="anchor-rice-axis-top" cx="430" cy="130" r="3" data-point-name="米倉庫・炊飯直線の曲がり" />
+    <circle id="anchor-oven-west-descent" cx="830" cy="322.5" r="3" data-point-name="オーブン西側の縦通路" />
+    <circle id="anchor-oven-serving-turn" cx="830" cy="680" r="3" data-point-name="オーブンから盛付への曲がり" />
+    <circle id="anchor-kettle-d-west-descent" cx="950" cy="905" r="3" data-point-name="釜D西側の縦通路" />
+    <circle id="anchor-hot-table-south-turn" cx="950" cy="710" r="3" data-point-name="加熱室作業台南側通路" />
+    <circle id="anchor-kettle-e-serving-turn" cx="905" cy="720" r="3" data-point-name="釜E北側の盛付折点" />
+    <circle id="anchor-kettle-inter-row-east" cx="1070" cy="850" r="3" data-point-name="釜上下段間の通路東" />
+    <circle id="anchor-cooling-south-passage" cx="800" cy="850" r="3" data-point-name="冷却南側通路" />
+    <circle id="anchor-vegetable-north-west" cx="1240" cy="470" r="3" data-point-name="野菜加工北側通路西" />
+    <circle id="anchor-vegetable-north-east" cx="1550" cy="470" r="3" data-point-name="野菜加工北側通路東" />
+    <circle id="anchor-prep-north-entry" cx="1550" cy="250" r="3" data-point-name="野菜前処理壁沿い北端" />
+    <circle id="anchor-freezer-b1-east" cx="1550" cy="335" r="3" data-point-name="冷凍庫B-1東側通路" />
+    <circle id="anchor-prep-wall-lower" cx="1550" cy="980" r="3" data-point-name="野菜前処理壁沿い南端" />
+    <circle id="anchor-cold-c1-number1" cx="1662" cy="1042" r="3" data-point-name="冷蔵庫C-1・上部番号欄1" />
+    <circle id="anchor-cold-c1-number2" cx="1672" cy="1067" r="3" data-point-name="冷蔵庫C-1・上部番号欄2" />
+    <circle id="anchor-cold-c1-number3" cx="1682" cy="1042" r="3" data-point-name="冷蔵庫C-1・上部番号欄3" />
+    <circle id="anchor-cold-c1-number4" cx="1692" cy="1067" r="3" data-point-name="冷蔵庫C-1・上部番号欄4" />
+    <circle id="anchor-cold-c1-number5" cx="1702" cy="1042" r="3" data-point-name="冷蔵庫C-1・上部番号欄5" />
+    <circle id="anchor-inspection-number1" cx="1805" cy="1240" r="3" data-point-name="検品室・下部番号欄1" />
+    <circle id="anchor-inspection-number2" cx="1830" cy="1240" r="3" data-point-name="検品室・下部番号欄2" />
+    <circle id="anchor-inspection-number3" cx="1855" cy="1240" r="3" data-point-name="検品室・下部番号欄3" />
+    <circle id="anchor-inspection-number4" cx="1805" cy="1262" r="3" data-point-name="検品室・下部番号欄4" />
+    <circle id="anchor-inspection-number5" cx="1830" cy="1262" r="3" data-point-name="検品室・下部番号欄5" />
+    <circle id="anchor-inspection-number6" cx="1855" cy="1262" r="3" data-point-name="検品室・下部番号欄6" />
+    <circle id="anchor-inspection-number7" cx="1805" cy="1284" r="3" data-point-name="検品室・下部番号欄7" />
+    <circle id="anchor-inspection-number8" cx="1830" cy="1284" r="3" data-point-name="検品室・下部番号欄8" />
+    <circle id="anchor-inspection-number9" cx="1855" cy="1284" r="3" data-point-name="検品室・下部番号欄9" />
+    <circle id="anchor-sink-compartment-number1" cx="1360" cy="636" r="3" data-point-name="野菜加工シンク中央・上段区画1番号欄" />
+    <circle id="anchor-sink-compartment-number2" cx="1468" cy="636" r="3" data-point-name="野菜加工シンク中央・上段区画2番号欄" />
+    <circle id="anchor-sink-compartment-number3" cx="1490" cy="636" r="3" data-point-name="野菜加工シンク中央・上段区画3番号欄" />
+    <circle id="anchor-oven-box-number1" cx="1000" cy="320" r="3" data-point-name="ゼットオーブン横の無記名枠・番号欄1" />
+    <circle id="anchor-oven-box-number2" cx="1017" cy="344" r="3" data-point-name="ゼットオーブン横の無記名枠・番号欄2" />
+    <circle id="anchor-green-join-upper" cx="1450" cy="574" r="3" data-point-name="野菜加工西側上段接続" />
+    <circle id="anchor-green-join-middle" cx="1376" cy="574" r="3" data-point-name="野菜加工西側中段接続" />
+    <circle id="anchor-central-sink-west-turn" cx="1220" cy="574" r="3" data-point-name="野菜加工シンク北西角通路" />
+    <circle id="anchor-green-join-lower" cx="1140" cy="755" r="3" data-point-name="野菜加工西側下段接続" />
+    <circle id="anchor-green-pot-approach" cx="1030" cy="755" r="3" data-point-name="加熱室南釜東側共有進入" />
+    <circle id="anchor-dispatch-caption-right" cx="560" cy="1080" r="3" data-point-name="搬出準備室見出し右寄せ" />
+    <circle id="anchor-slicer-east-caption-left" cx="1387" cy="821" r="3" data-point-name="スライサー東の名称・左脇" />
+  </g>
+  <g id="daily-field-boxes" style="display:none" aria-hidden="true">
+    <rect id="field-school_name" x="165" y="23" width="145" height="40" />
+    <rect id="field-month" x="465" y="28" width="45" height="30" />
+    <rect id="field-day" x="553" y="28" width="45" height="30" />
+    <rect id="field-weekday" x="695" y="28" width="45" height="30" />
+    <rect id="field-menu_names" x="45" y="88" width="245" height="260" />
+    <rect id="field-food_names" x="38" y="404" width="252" height="545" />
+    <rect id="field-delivery_chilled" x="282" y="1198" width="305" height="24" />
+    <rect id="field-delivery_frozen" x="282" y="1224" width="305" height="24" />
+    <rect id="field-delivery_dry" x="282" y="1250" width="210" height="24" />
+    <rect id="field-dispatch_label_1" x="409" y="1131" width="25" height="25" />
+    <rect id="field-dispatch_label_2" x="441" y="1131" width="25" height="25" />
+    <rect id="field-dispatch_label_3" x="473" y="1131" width="25" height="25" />
+    <rect id="field-dispatch_label_4" x="505" y="1131" width="25" height="25" />
+    <rect id="field-dispatch_label_5" x="537" y="1131" width="25" height="25" />
+    <rect id="field-dispatch_label_6" x="569" y="1131" width="25" height="25" />
+    <rect id="field-dispatch_label_7" x="601" y="1131" width="25" height="25" />
+    <rect id="field-kettle_a_first" x="1585" y="1200" width="70" height="25" />
+    <rect id="field-kettle_a_second" x="1670" y="1200" width="70" height="25" />
+    <rect id="field-kettle_b_first" x="1585" y="1228" width="70" height="25" />
+    <rect id="field-kettle_b_second" x="1670" y="1228" width="70" height="25" />
+  </g>
+</svg>

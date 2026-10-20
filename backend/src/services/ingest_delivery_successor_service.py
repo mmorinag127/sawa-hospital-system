@@ -53,6 +53,8 @@ def _recorded_identity(session, row):
         raise ValueError("auto_llm_recorded_predecessor_unproven")
     expected = transport.renew_contract(delivery.task_contract, row.id, row.generation)
     expected["http_request"]["url"] = expected["http_request"]["url"].rsplit("/", 1)[0] + "/auto-llm"
+    if expected.get("mode") == "request_local":
+        expected["kind"] = "auto-llm"
     capture = (job.metrics or {}).get("nonworkflow_execution")
     original = row.original["execution_input"]
     if (not parent._same(row.task_contract, expected) or not isinstance(capture, dict)
@@ -244,6 +246,8 @@ def accept(session, job, execution_input, evidence, receipt, order):
         raise ValueError("auto_llm_original_evidence_missing")
     contract = transport.renew_contract(delivery.task_contract, identity, 1)
     contract["http_request"]["url"] = contract["http_request"]["url"].rsplit("/", 1)[0] + "/auto-llm"
+    if contract.get("mode") == "request_local":
+        contract["kind"] = "auto-llm"
     original = {"execution_input": boundary, "evidence_id": evidence["id"],
         "evidence_digest": saved.artifact_digest, "payload": deepcopy(evidence["payload_json"]),
         "request": request, "predecessor_receipt": deepcopy(receipt)}
@@ -525,6 +529,20 @@ def dispatch(identity, generation):
     observed = inspect(identity, generation)
     if observed["duplicate"]:
         return {"action": "acknowledged"}
+    from src.services import agent_trial_transport as local
+    if local.enabled():
+        with parent.transaction() as session:
+            row = _locked(session, identity)
+            if row.generation != generation or row.state == "ACKNOWLEDGED":
+                return {"action": "noop"}
+            predecessor = _predecessor(session, row)
+            if predecessor.state != "ACKNOWLEDGED":
+                return {"action": "predecessor_pending"}
+            contract = deepcopy(row.task_contract)
+            local.validate(contract, identity, generation, "auto-llm")
+            if row.state == "PENDING":
+                row.state = "SENT"
+        return local.submit(contract, identity, generation, "auto-llm", lambda: process(identity, generation))
     with _exclusive(observed["mutex"]) as acquired:
         if not acquired:
             return {"action": "active_owner"}

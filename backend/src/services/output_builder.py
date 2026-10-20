@@ -2990,28 +2990,6 @@ def _apply_delivery_configured_headers(
         if not isinstance(cell, MergedCell):
             cell.value = header
     start_row = data_start_row or _delivery_start_row(ws, header_row)
-    intended_headers_by_col = {
-        int(col.get("column_index")): _normalize_cell_text(col.get("header") or col.get("name"))
-        for col in columns
-        if isinstance(col.get("column_index"), int) and int(col.get("column_index")) > 0
-    }
-    for merged in ws.merged_cells.ranges:
-        if merged.min_row >= header_row or merged.max_row >= start_row:
-            continue
-        covered = [
-            col_idx
-            for col_idx in configured_indexes
-            if merged.min_col <= col_idx <= merged.max_col
-        ]
-        if not covered:
-            continue
-        cell = ws.cell(row=merged.min_row, column=merged.min_col)
-        cell_text = _normalize_cell_text(cell.value)
-        if not cell_text:
-            continue
-        intended = {intended_headers_by_col.get(col_idx, "") for col_idx in covered}
-        if cell_text not in intended:
-            cell.value = ""
     for row_idx in range(header_row + 1, start_row):
         for col_idx in configured_indexes:
             cell = _resolve_merged_cell(ws, row_idx, col_idx)
@@ -3319,14 +3297,15 @@ def _build_ocr_menu_meta(order: dict, facility_config: dict | None = None, *, pa
 
 
 def _resolve_delivery_cell(row: dict, column: dict) -> Any:
-    source = column.get("source") or column.get("name")
-    value = None
-    if source == "quantity":
-        value = row.get(column.get("name", ""))
-    else:
-        value = row.get(source)
-        if value is None and column.get("name"):
-            value = row.get(column["name"])
+    source = column.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("delivery_column_source_required")
+    key = column.get("name") if source == "quantity" else source
+    if not isinstance(key, str) or not key or key not in row:
+        raise ValueError("delivery_column_source_unmapped:" + str(key))
+    value = row[key]
+    if source in {"date", "daypart", "menu_name", "menu_display", "menu_category"} and (value is None or not str(value).strip()):
+        raise ValueError("delivery_required_value_missing:" + source)
     if source == "daypart":
         return _normalize_delivery_daypart(value)
     return value
@@ -3601,6 +3580,10 @@ def _write_delivery_slot_row(
         if isinstance(cell, MergedCell):
             continue
         cell.value = "" if value is None else value
+        if source in {"menu_name", "menu_display"} and value:
+            alignment = copy(cell.alignment)
+            alignment.shrinkToFit = True
+            cell.alignment = alignment
 
 
 def _clear_delivery_slot_row(
@@ -3626,6 +3609,19 @@ def _clear_delivery_slot_row(
         if isinstance(cell, MergedCell):
             continue
         cell.value = ""
+
+
+def _clear_delivery_dynamic_rows(ws, slot_rows: list[int], menu_column: int) -> None:
+    """Only the body belongs to the current order; historical examples do not.
+
+    Clear unmapped quantity/note cells too. Date/daypart axes and all template
+    headings, merged geometry and styles remain owned by the original template.
+    """
+    for row_index in slot_rows:
+        for column_index in range(menu_column, ws.max_column + 1):
+            cell = ws.cell(row=row_index, column=column_index)
+            if not isinstance(cell, MergedCell):
+                cell.value = None
 
 
 def _assign_delivery_rows_to_slots(
@@ -3707,27 +3703,7 @@ def _write_delivery_note(
     facility_name: str | None = None,
 ) -> None:
     if not template_uri:
-        export_columns = [
-            (
-                str(col.get("name") or "").strip(),
-                str(col.get("header") or col.get("name") or "").strip(),
-            )
-            for col in columns
-            if isinstance(col, dict) and str(col.get("name") or "").strip()
-        ]
-        export_headers = [header or name for name, header in export_columns]
-        if not rows:
-            df = pd.DataFrame(columns=export_headers)
-        else:
-            df = pd.DataFrame(
-                [
-                    [row.get(name) for name, _header in export_columns]
-                    for row in rows
-                ],
-                columns=export_headers,
-            )
-        df.to_excel(path, index=False)
-        return
+        raise ValueError("delivery_template_uri_required")
 
     try:
         template_bytes = load_bytes_from_uri(template_uri)
@@ -3748,7 +3724,7 @@ def _write_delivery_note(
 
     header_row = _find_delivery_header_row(ws, columns)
     if not header_row:
-        header_row = 1
+        raise ValueError("delivery_header_row_unresolved")
     column_map = _build_delivery_column_map(ws, header_row, columns)
     menu_col_idx = _resolve_delivery_menu_column(columns, column_map)
     slot_rows = _find_delivery_slot_rows(ws, menu_col_idx) if menu_col_idx else []
@@ -3756,13 +3732,8 @@ def _write_delivery_note(
         # Slot templates keep the editable column labels immediately above the
         # first menu row; fixed title/company rows can otherwise win detection.
         header_row = max(1, min(slot_rows) - 1)
-    _apply_delivery_configured_headers(
-        ws,
-        header_row,
-        columns,
-        column_map,
-        data_start_row=min(slot_rows) if slot_rows else None,
-    )
+    if not slot_rows:
+        _apply_delivery_configured_headers(ws, header_row, columns, column_map)
     if slot_rows:
         original_sheet_count = len(workbook.worksheets)
         for name in list(workbook.sheetnames):
@@ -3830,6 +3801,7 @@ def _write_delivery_note(
                     weekday_cell = _resolve_merged_cell(target_ws, evening_row, date_col_idx)
                     if not isinstance(weekday_cell, MergedCell):
                         weekday_cell.value = _format_delivery_weekday(date_val)
+            _clear_delivery_dynamic_rows(target_ws, slot_rows, menu_col_idx)
             assignments = _assign_delivery_rows_to_slots(
                 rows_by_date.get(date_val, []),
                 slot_rows,
@@ -5944,6 +5916,8 @@ def _resolve_captured_invoice_template(facility_config: dict) -> dict:
 
     template = facility_config.get("invoice_template")
     if not isinstance(template, dict) or not isinstance(template.get("columns"), list) or not template["columns"]:
+        raise ValueError("accepted_invoice_template_required")
+    if not isinstance(template.get("template_uri"), str) or not template["template_uri"].strip():
         raise ValueError("accepted_invoice_template_required")
     errors = []
     _validate_invoice_columns(template["columns"], "invoice_template.columns", errors)

@@ -1,0 +1,21 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi==0.136.1
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+google-cloud-storage>=2.16.0
+google-cloud-tasks>=2.16.0
+google-auth>=2.0.0
+pypdfium2==5.5.0
+Pillow==12.1.1
+numpy==2.4.2
+opencv-python-headless>=4.9.0.80
+torch==2.6.0+cpu; platform_system == "Linux" and platform_machine == "x86_64"
+torch==2.6.0; platform_system != "Linux" or platform_machine != "x86_64"
+torchvision==0.21.0+cpu; platform_system == "Linux" and platform_machine == "x86_64"
+torchvision==0.21.0; platform_system != "Linux" or platform_machine != "x86_64"
+yomitoku==0.9.5
+pytest>=8.3.0
+httpx>=0.28.0

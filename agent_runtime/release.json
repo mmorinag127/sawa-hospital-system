@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "scope": "sawa-agent-isolated-staging-trial",
+  "domains": {
+    "hospital": {
+      "baseline_files": {
+        "database.sqlite3": "054edf04655f69e9e911c56da7282def21619cd8769bc5e21c7d0c0cb1404af6",
+        "facility-master.json": "d6412f6b895e5824114c6755f42d5e5b7a246a3539ffa84d9986f7ee4ca97d02",
+        "official-FAC00001-2026-01-04-10.pdf": "ece4e4a98a394402eea9f8b9396fcaaddfcae6b28d8e5f1a5c2a6075a3e1df0e",
+        "trial-manifest.json": "294e6c6ce80a9fdf26feb47f5d432b8faa11d29541de578977b3549e94300b73",
+        "納品書2025.2.8.xlsx": "e0edc3849dacfaabbeb81eb9329cea7baa4cd994c16ef69e187716981bb274ad"
+      }
+    },
+    "shift": {
+      "baseline_files": {
+        "database.sqlite3": "32b98558035f03b5d5b323c59b179fbe20a98bba13130875a1c93618df04ec1b",
+        "trial-manifest.json": "912ea07bf2ed8ec73704079e96d3f35b6d863a8f1bd5c239d2b64dd454f5e38e"
+      }
+    },
+    "school-lunch": {
+      "baseline_files": {
+        "database.sqlite3": "6604235465c6ffd0b914d5ff5300b95dbf2c680a916a369217a82650637c12e5",
+        "trial-manifest.json": "f8ead74d27c4348f20a87f400a92346ac606103313c31dd57aa748a41ac9179f"
+      }
+    }
+  }
+}

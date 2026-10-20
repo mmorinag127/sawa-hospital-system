@@ -20,6 +20,9 @@ class DeliveryConfigurationError(RuntimeError):
 
 
 def required_config():
+    from src.services import agent_trial_transport as local
+    if local.enabled():
+        return local.configuration()
     config = {key: str(os.getenv(PREFIX + key) or "").strip() for key in _CONFIG_KEYS}
     missing = [PREFIX + key for key, value in config.items() if not value]
     if missing:
@@ -39,6 +42,9 @@ def required_config():
 
 def task_contract(delivery_id, generation):
     config = required_config()
+    if config.get("mode") == "request_local":
+        from src.services import agent_trial_transport as local
+        return local.contract(delivery_id, generation, "workflow")
     parent = f'projects/{config["PROJECT_ID"]}/locations/{config["LOCATION"]}/queues/{config["QUEUE"]}'
     return {
         "name": parent + "/tasks/" + delivery_id + "-g" + str(generation),
@@ -53,6 +59,9 @@ def task_contract(delivery_id, generation):
 
 
 def next_task_contract(original, delivery_id, generation):
+    if original.get("mode") == "request_local":
+        from src.services import agent_trial_transport as local
+        return local.contract(delivery_id, generation, "workflow")
     contract = deepcopy(original)
     parent = original["name"].rsplit("/tasks/", 1)[0]
     contract["name"] = parent + "/tasks/" + delivery_id + "-g" + str(generation)
@@ -91,6 +100,16 @@ def dispatch(delivery_id, generation):
     if observed is None:
         return {"action": "noop"}
     contract = observed["task_contract"]
+    from src.services import agent_trial_transport as trial_transport
+    if trial_transport.enabled() and contract.get("mode") != "request_local":
+        raise ValueError("request_local_saved_contract_required")
+    if contract.get("mode") == "request_local":
+        from src.services import agent_trial_transport as local
+        from src.api.worker import execute_workflow_ocr_delivery
+        local.validate(contract, delivery_id, generation, "workflow")
+        if not delivery.mark_dispatched(delivery_id, generation, {"task_name": contract["name"], "executable_confirmed": True}):
+            raise ValueError("request_local_dispatch_fenced")
+        return local.submit(contract, delivery_id, generation, "workflow", lambda: execute_workflow_ocr_delivery(delivery_id, generation))
     try:
         client = tasks_v2.CloudTasksClient()
         state = inspect_task(client, contract)

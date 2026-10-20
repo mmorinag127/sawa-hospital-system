@@ -61,3 +61,6 @@ tmp/
 secrets/
 **/*.tsbuildinfo
 last_*.txt
+
+# Explicit synthetic staging baselines; runtime databases remain ignored.
+!agent_runtime/baselines/*/database.sqlite3

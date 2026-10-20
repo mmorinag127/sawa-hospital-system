@@ -1,0 +1,35 @@
+{
+  "template_ids": ["kitchen-rice", "kitchen-bread"],
+  "version": 1,
+  "source": {"file": "R8.7作業導線図.pdf", "sha256": "09249b6387cf336c59d621fb90b672b9fd7b35a766e36b05ee431d92f77e2ba3", "pages": [1, 3], "dates": ["2026-07-01", "2026-07-03"]},
+  "status": "reference_observation_not_user_confirmed",
+  "dispatch_representation": {
+    "source_pages": [1, 3, 4, 5, 6],
+    "arrow_clearance": 12,
+    "observed": "盛付から搬出準備室を経由し下辺の搬出口へ線が続く。箱内の番号は献立の表示であり、配送先や固定の献立別設備割当てとは断定しない。",
+    "drawing_lane_point_ids": ["dispatch-1", "dispatch-2", "dispatch-3", "dispatch-4", "dispatch-5", "dispatch-6", "dispatch-7"]
+  },
+  "receipt_representation": {
+    "rice-store": {
+      "mode": "legend_only",
+      "source_pages": [1, 4],
+      "reason": "学習用7/1・7/6では納品→検品→米倉庫は凡例で示し、図面内は米倉庫から開始。検品室から厨房を横断する米の線は描かれていない。"
+    }
+  },
+  "observations": [
+    {"id": "rice-stock", "page": 1, "material": "精白米・強化米", "observed": "米倉庫から炊飯器へ出庫。凡例に食材納品→検品室→食物倉庫（米倉庫）が記載。", "storage_point_id": "rice-store"},
+    {"id": "raw-meat-chilled", "page": 1, "material": "鶏ひき肉", "observed": "青①が冷蔵庫B-2から調理側へ。下部の冷蔵庫の納品凡例にも青①。下味を付ける肉の作業場所まで示す使用例ではない。", "storage_point_id": "fridge-b2"},
+    {"id": "fresh-vegetables-chilled", "page": 1, "material": "生姜・玉葱・にんじん・キャベツ", "observed": "冷蔵の納品凡例に各番号。冷蔵庫C-1付近から野菜前処理のシンク・台へ。", "storage_point_id": "fridge-c1"},
+    {"id": "frozen-prepared", "page": 1, "material": "きびなごフライ・いんげん", "observed": "冷凍の納品凡例に赤①・青⑤。B-1側にも対応する線と番号がある。見本の食品欄は『いんげん』、同日手配表は『グリンピース(冷凍)』で一致しないため、両者を同一材料とする学習はしない。", "storage_point_id": "freezer-b1"},
+    {"id": "frozen-edamame", "page": 3, "material": "枝豆", "observed": "緑②が冷凍の納品凡例にあり、B-1から加工側へ進む。7/1の使用例ではない。", "storage_point_id": "freezer-b1"},
+    {"id": "ambient-packaged", "page": 3, "material": "小魚アーモンド・焼き麩", "observed": "食物倉庫の納品凡例に紫①・青⑥。包装食品と乾物を生鮮野菜の冷蔵経路に入れない。", "storage_point_id": "ingredient-store"},
+    {"id": "processed-chilled", "page": 3, "material": "焼き豆腐・焼き竹輪", "observed": "冷蔵庫の納品凡例に番号。C-2側から加工台へ進む線。製品状態に応じた類推例であり全大豆製品への固定規則ではない。", "storage_point_id": "fridge-c2"}
+  ],
+  "inference_rules": [
+    "同じ材料でも生・冷凍・加工済み等の状態と用途を区別する。観察例は類推材料であり固定の正解ではない。",
+    "既存のユーザー指定を優先し、未設定項目だけを補う。材料名だけで温度や保存時間を断定しない。",
+    "水など厨房内供給の材料は搬入・冷蔵保管へ回さず、登録された供給設備を選ぶ。",
+    "調味料・乾物も材料IDを消さない。直接使用か保管後かを原文と例から推定する。",
+    "類推できる候補を一つ示し、根拠と未確定事項を併記する。配置範囲未登録を理由に意味の違う保管庫へ置換しない。"
+  ]
+}

@@ -9,6 +9,9 @@ PREFIX = "HOSPITAL_INGEST_DELIVERY_"
 
 
 def required_config():
+    from src.services import agent_trial_transport as local
+    if local.enabled():
+        return local.configuration()
     keys = ("PROJECT_ID", "LOCATION", "QUEUE", "TARGET_URL", "SERVICE_ACCOUNT_EMAIL", "AUDIENCE", "DISPATCH_DEADLINE_SECONDS")
     config = {key: os.getenv(PREFIX + key, "").strip() for key in keys}
     if not all(config.values()) or urlparse(config["TARGET_URL"]).scheme != "https":
@@ -28,6 +31,11 @@ def required_config():
 
 
 def task_contract(delivery_id, generation, config):
+    if config.get("mode") == "request_local":
+        from src.services import agent_trial_transport as local
+        if config != local.configuration():
+            raise ValueError("request_local_configuration_differs")
+        return local.contract(delivery_id, generation, "ingest")
     parent = f'projects/{config["PROJECT_ID"]}/locations/{config["LOCATION"]}/queues/{config["QUEUE"]}'
     body = json.dumps({"delivery_id": delivery_id, "generation": generation}, sort_keys=True, separators=(",", ":"))
     return {"name": f"{parent}/tasks/{delivery_id}-g{generation}",
@@ -38,6 +46,9 @@ def task_contract(delivery_id, generation, config):
 
 
 def renew_contract(original, delivery_id, generation):
+    if original.get("mode") == "request_local":
+        from src.services import agent_trial_transport as local
+        return local.contract(delivery_id, generation, original["kind"])
     contract = deepcopy(original)
     contract["name"] = original["name"].rsplit("/tasks/", 1)[0] + f"/tasks/{delivery_id}-g{generation}"
     contract["http_request"]["body"] = base64.b64encode(json.dumps(
@@ -100,6 +111,14 @@ def dispatch(delivery_id, generation):
     if observed is None:
         return {"action": "noop"}
     contract = observed["task_contract"]
+    from src.services import agent_trial_transport as trial_transport
+    if trial_transport.enabled() and contract.get("mode") != "request_local":
+        raise ValueError("request_local_saved_contract_required")
+    if contract.get("mode") == "request_local":
+        from src.services import agent_trial_transport as local
+        local.validate(contract, delivery_id, generation, "ingest")
+        delivery.mark_sent(delivery_id, generation)
+        return local.submit(contract, delivery_id, generation, "ingest", lambda: delivery.process(delivery_id, generation))
     try:
         client = tasks_v2.CloudTasksClient()
         state = inspect_task(client, contract)

@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "status": "reference_observation_not_user_confirmed",
+  "source": {
+    "file": "R8.7作業導線図.pdf",
+    "sha256": "09249b6387cf336c59d621fb90b672b9fd7b35a766e36b05ee431d92f77e2ba3",
+    "page": 1,
+    "date": "2026-07-01",
+    "additional_observed_pages": [3, 4, 5, 6],
+    "additional_observed_dates": ["2026-07-03", "2026-07-06", "2026-07-07", "2026-07-08"]
+  },
+  "rules": [
+    {
+      "id": "observed-oil-removal-at-central-preparation",
+      "source_pages": [1],
+      "operation_contains": ["油抜き"],
+      "equipment_type": "シンク",
+      "to_equipment_id": "vegetable-sink-center",
+      "observation": "7/1の加工大豆製品を含む線は中央作業台・シンクを経由して本調理の釜へ進む。工程側でシンク作業と判断された油抜きに限る候補。釜で茹でる指定は変更しない。"
+    },
+    {
+      "id": "central-preparation-cutting",
+      "source_pages": [1, 3],
+      "operation_contains": ["切断", "切る", "切り", "カット"],
+      "equipment_type": "作業台",
+      "from_equipment_id": "vegetable-sink-center",
+      "to_equipment_id": "vegetable-worktable-center",
+      "observation": "加工済食品の中央シンクと隣接作業台の前処理。前処理の次の切裁を距離だけで加熱室の作業台へ移さない。機械切裁や明示設備は変更しない。"
+    },
+    {
+      "id": "dewatered-salad-finishing-table",
+      "source_pages": [1, 6],
+      "operation_contains": ["和える", "混合", "混ぜ"],
+      "equipment_type": "作業台",
+      "from_any_equipment_ids": ["dewatering-machine"],
+      "to_equipment_id": "serving-table-north",
+      "observation": "7/1のキャベツのゆかりあえと7/8のナムルは脱水機から盛付側の北の作業台へ続く。手配表の冷却後に和える作業の候補。『和える』という語だけで下部の和え物室へ配置しない。"
+    },
+    {
+      "id": "chilled-preparation-washing",
+      "operation_contains": ["洗浄"],
+      "equipment_type": "シンク",
+      "direct_storage_id": "fridge-c1",
+      "to_equipment_id": "vegetable-prep-sink",
+      "observation": "7/1のC1から生姜・玉葱・にんじん・キャベツの線が野菜前処理シンクに入る。既存のfresh-vegetables-chilled観察にも記録。手配工程に洗浄がある場合の仮配置根拠。"
+    },
+    {
+      "id": "preparation-sink-to-cutting-table",
+      "operation_contains": ["切断", "切る", "切り", "皮むき"],
+      "equipment_type": "作業台",
+      "from_equipment_id": "vegetable-prep-sink",
+      "to_equipment_id": "vegetable-prep-table",
+      "observation": "7/1の前処理シンクから隣接する前処理作業台へ進む線。作業台での切断が工程にある場合に限定。ミキサー/スライサー指定を作業台へ変更しない。"
+    },
+    {
+      "id": "observed-vegetable-slicer",
+      "operation_contains": ["切断", "切る", "切り", "切裁"],
+      "equipment_type": "スライサー",
+      "to_equipment_id": "vegetable-slicer-east",
+      "observation": "7/1,7/3,7/6,7/7,7/8で野菜の線は加工室下側右のスライサーに入る。左側機へ距離だけで置く根拠はない。設備種類が既にスライサーである未設定工程だけの仮配置。"
+    },
+    {
+      "id": "observed-vegetable-mixer",
+      "operation_contains": ["おろ", "粉砕", "みじん", "加工"],
+      "equipment_type": "ミキサー",
+      "to_equipment_id": "vegetable-mixer-south",
+      "observation": "7/1の生姜、7/6のにんにく、7/8のにんにく・生姜は加工室下側ミキサーに入る。設備種類をミキサーとした未設定工程の仮配置であり、手切り作業をミキサーへ変更する指示ではない。"
+    }
+  ]
+}

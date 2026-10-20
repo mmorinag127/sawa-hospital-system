@@ -1,0 +1,17 @@
+{
+  "purpose": "sawa-agent-isolated-trial",
+  "data": "4人の試験データ・実ソルバー。8/6 試験職員Aの希望休。欠勤検証は8/4 試験職員B。",
+  "source": "/Users/mmorinag/Sawa/2025.12/worktrees/agent-assistant-trial-20261019/tmp/agent-assistant-trial/shift-e2e-20261020/completed-database.sqlite3",
+  "source_sha256": "50c4402b825a9bc6268deafa7356356b26136f171a679d46cb8935c6bcc5a5bf",
+  "registered_wish": {
+    "staff": "試験職員A",
+    "date": "2026-08-06",
+    "strength": "soft",
+    "weight": 1000
+  },
+  "absence_scenario": {
+    "staff": "試験職員B",
+    "date": "2026-08-04"
+  },
+  "staging_scope": "explicit synthetic data; isolated per request copies only"
+}
