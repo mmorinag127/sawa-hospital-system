@@ -715,7 +715,7 @@ def dispatch_route(env, tmp_path):
 def test_diagnostic_source_gate_and_dependency_graph_disable_every_side_effect_job(tmp_path):
     jobs = staging_workflow()["jobs"]
     assert set(jobs) == {"source-gate", "diagnose-reviewed-ocr", "diagnose-contact-replay", "recover-web",
-        "automation-bootstrap", "menu-master-migration", "build-backend", "build-frontend",
+        "automation-bootstrap", "menu-master-migration", "build-backend", "build-frontend", "build-agent",
         "deploy-backend", "deploy-frontend"}
     outcomes, outputs = dispatch_route(dispatch_environment(), tmp_path)
     assert outputs == {"backend_changed": "false", "frontend_changed": "false"}
