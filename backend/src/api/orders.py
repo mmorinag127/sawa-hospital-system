@@ -1790,8 +1790,26 @@ def confirm_order_workflow_v2(
 
 
 @router.get("/{order_id}/workflow-v2/inspection", dependencies=[Depends(require_role("operator"))])
-def get_order_workflow_v2_inspection(order_id: str, include_ocr_results: bool = Query(default=False)):
-    return _workflow_v2_or_404(order_workflow_v2_service.get_inspection(order_id, include_ocr_results=include_ocr_results))
+def get_order_workflow_v2_inspection(
+    order_id: str,
+    include_ocr_results: bool = Query(default=False),
+    history_details: bool = Query(default=True),
+):
+    if history_details:
+        return _workflow_v2_or_404(order_workflow_v2_service.get_inspection(
+            order_id, include_ocr_results=include_ocr_results,
+        ))
+    return _workflow_v2_or_404(order_workflow_v2_service.get_inspection(
+        order_id, include_ocr_results=include_ocr_results, history_details=False,
+    ))
+
+
+@router.get("/{order_id}/workflow-v2/inspection-detail/{evidence_id}", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_inspection_detail(order_id: str, evidence_id: str):
+    result = order_workflow_v2_service.get_inspection_detail(order_id, evidence_id)
+    if result[1] == "ocr_result_not_found":
+        raise HTTPException(status_code=404, detail=result[1])
+    return _workflow_v2_or_404(result)
 
 
 @router.get("/{order_id}/draft-sheet", dependencies=[Depends(require_role("operator"))])

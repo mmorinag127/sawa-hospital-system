@@ -93,8 +93,13 @@ def test_base_parity_counts_reads_and_no_mutation(packet_row, old_functions, mod
     new, new_trace = evaluate(row, analysis_enabled)
     assert new == old
     assert vars(row) == before
-    assert [x for x in new_trace if x != "accepted_values"] == [
-        x for x in old_trace if x != "accepted_values"]
+    expected_trace = [x for x in old_trace if x != "accepted_values"]
+    if mode == "accepted":
+        source_call = "_original_hakodate_execution_source"
+        assert old_trace.count(source_call) == 2
+        assert new_trace.count(source_call) == 1
+        assert expected_trace.pop() == source_call
+    assert [x for x in new_trace if x != "accepted_values"] == expected_trace
     assert new_trace.count("accepted_values") == 1
     assert old_trace.count("accepted_values") == (3 if mode == "accepted" else 2)
     assert new_trace.index("_original_hakodate_execution_source") < new_trace.index(
@@ -274,4 +279,4 @@ def test_handoff_and_real_source_callee_chain_are_read_only(packet_row, analysis
         assert evidence.evidence_run_selectability_error(
             row, _analysis=artifacts._EvidenceAnalysis() if analysis_enabled else None) is None
     unchanged(handoff["payload"])
-    assert boundaries == ["source", "owned", "source"]
+    assert boundaries == ["source", "owned"]

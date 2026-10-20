@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 
@@ -6,6 +6,7 @@ import { apiClient } from "../../../services/apiClient";
 
 type WorkflowV2 = {
   order_id: string;
+  revision: number;
   state: string;
   headline?: string | null;
   primary_action?: string | null;
@@ -34,6 +35,9 @@ type OcrResult = {
   overlay_status?: string | null;
   overlay_message?: string | null;
   created_at?: string | null;
+  detail_state?: "not_loaded";
+  selectable?: boolean;
+  workflow_revision?: number;
 };
 
 type SavedSheetPayload = {
@@ -124,10 +128,27 @@ const readSummary = (payload: Record<string, unknown> | null | undefined) => {
 export default function OrderInspectionV2Page() {
   const router = useRouter();
   const orderId = typeof router.query.id === "string" ? router.query.id : "";
+  return router.isReady && orderId ? <InspectionView key={orderId} orderId={orderId} /> : null;
+}
+
+function InspectionView({ orderId }: { orderId: string }) {
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [pdfError, setPdfError] = useState("");
+  const [reload, setReload] = useState(0);
+  const [detail, setDetail] = useState<OcrResult | null>(null);
+  const [detailId, setDetailId] = useState("");
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const detailRequest = useRef<AbortController | null>(null);
+  const rawRequest = useRef<AbortController | null>(null);
+  const [rawOpen, setRawOpen] = useState(false);
+  const [rawPayload, setRawPayload] = useState<InspectionPayload | null>(null);
+  const [rawError, setRawError] = useState("");
+  const [rawLoading, setRawLoading] = useState(false);
+  const requestGeneration = useRef(0);
 
   const selectedOcr = useMemo(
     () => (inspection?.ocr_results || []).find((item) => item.selected || item.ocr_result_id === inspection?.workflow?.selected_ocr_result_id) || null,
@@ -138,28 +159,95 @@ export default function OrderInspectionV2Page() {
   const outputEntries = useMemo(() => keyValueRows(inspection?.output_bundle || null), [inspection?.output_bundle]);
 
   useEffect(() => {
-    if (!router.isReady || !orderId) return;
+    const controller = new AbortController();
+    const generation = ++requestGeneration.current;
     let revokedUrl = "";
+    setInspection(null);
+    setPdfUrl("");
     setLoading(true);
     setError("");
-    Promise.all([
-      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`),
-      apiClient.get<Blob>(`/orders/${orderId}/document`, { responseType: "blob" }),
-    ])
-      .then(([inspectionRes, documentRes]) => {
-        setInspection(inspectionRes.data);
+    setPdfError("");
+    apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`, {
+      params: { history_details: false }, signal: controller.signal,
+    }).then((response) => {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setInspection(response.data);
+    }).catch((err) => {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setError(String(err?.response?.data?.detail || err?.message || "inspection の取得に失敗しました"));
+    }).finally(() => {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setLoading(false);
+    });
+    apiClient.get<Blob>(`/orders/${orderId}/document`, { responseType: "blob", signal: controller.signal })
+      .then((documentRes) => {
+        if (controller.signal.aborted) return;
         const nextUrl = URL.createObjectURL(documentRes.data);
         revokedUrl = nextUrl;
         setPdfUrl(nextUrl);
       })
       .catch((err) => {
-        setError(String(err?.response?.data?.detail || err?.message || "inspection の取得に失敗しました"));
-      })
-      .finally(() => setLoading(false));
+        if (!controller.signal.aborted) setPdfError(String(err?.response?.data?.detail || err?.message || "PDFの取得に失敗しました"));
+      });
     return () => {
+      controller.abort();
+      detailRequest.current?.abort();
+      rawRequest.current?.abort();
       if (revokedUrl) URL.revokeObjectURL(revokedUrl);
     };
-  }, [router.isReady, orderId]);
+  }, [orderId, reload]);
+
+  const loadDetail = async (id: string) => {
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
+    const generation = requestGeneration.current;
+    const revision = inspection?.workflow?.revision;
+    setDetailId(id);
+    setDetail(null);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      const response = await apiClient.get<OcrResult>(
+        `/orders/${orderId}/workflow-v2/inspection-detail/${encodeURIComponent(id)}`,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || generation !== requestGeneration.current) return;
+      if (response.data.workflow_revision !== revision) {
+        setError("注文の状態が更新されました。画面全体を再読み込みしてください。");
+        return;
+      }
+      setDetail(response.data);
+    } catch (err: any) {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setDetailError(String(err?.response?.data?.detail || err?.message || "詳細の取得に失敗しました"));
+    } finally {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setDetailLoading(false);
+    }
+  };
+
+  const loadRaw = async () => {
+    const revision = inspection?.workflow?.revision;
+    if (loading || typeof revision !== "number") return;
+    rawRequest.current?.abort();
+    const controller = new AbortController();
+    rawRequest.current = controller;
+    const generation = requestGeneration.current;
+    setRawPayload(null);
+    setRawError("");
+    setRawLoading(true);
+    try {
+      const response = await apiClient.get<InspectionPayload>(
+        `/orders/${orderId}/workflow-v2/inspection`, { signal: controller.signal },
+      );
+      if (controller.signal.aborted || generation !== requestGeneration.current) return;
+      if (response.data.workflow?.revision !== revision) {
+        setError("注文の状態が更新されました。画面全体を再読み込みしてください。");
+        return;
+      }
+      setRawPayload(response.data);
+    } catch (err: any) {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setRawError(String(err?.response?.data?.detail || err?.message || "JSONの取得に失敗しました"));
+    } finally {
+      if (!controller.signal.aborted && generation === requestGeneration.current) setRawLoading(false);
+    }
+  };
 
   return (
     <main className="page inspection-page">
@@ -181,7 +269,17 @@ export default function OrderInspectionV2Page() {
         </div>
       </header>
 
-      {error ? <div className="notice error">{error}</div> : null}
+      {error || pdfError ? <div className="notice error">
+        {error ? <p>{error}</p> : null}
+        {pdfError ? <p>{pdfError}</p> : null}
+        <button type="button" onClick={() => {
+        ++requestGeneration.current;
+        detailRequest.current?.abort();
+        rawRequest.current?.abort();
+        setDetail(null); setDetailId(""); setDetailLoading(false); setDetailError("");
+        setRawOpen(false); setRawPayload(null); setRawError(""); setRawLoading(false);
+        setReload((value) => value + 1);
+      }}>画面全体を再読み込み</button></div> : null}
 
       <section className="panel state-panel">
         <div>
@@ -221,7 +319,7 @@ export default function OrderInspectionV2Page() {
         <section className="panel pdf-panel">
           <p className="step-tag">Original PDF</p>
           <h2>原本PDF</h2>
-          {pdfUrl ? <iframe title="original pdf" src={pdfUrl} /> : <p className="subtle">PDFを読み込み中です。</p>}
+          {pdfUrl ? <iframe title="original pdf" src={pdfUrl} /> : <p className="subtle">{pdfError ? "PDFを取得できませんでした。" : "PDFを読み込み中です。"}</p>}
         </section>
 
         <section className="panel">
@@ -274,7 +372,25 @@ export default function OrderInspectionV2Page() {
                 </div>
                 <p className="candidate-id">{item.ocr_result_id}</p>
                 <p className="subtle">{item.status || "unknown"} / {item.source || "-"}</p>
-                {item.overlay_url ? (
+                {item.detail_state === "not_loaded" ? (
+                  <>
+                    <p className="subtle">{detailId === item.ocr_result_id && detail
+                      ? detail.selectable ? "検証済み・採用可能" : "採用不可"
+                      : "詳細未取得・採用可否未検証"}</p>
+                    <button type="button" onClick={() => loadDetail(item.ocr_result_id)} disabled={detailId === item.ocr_result_id && detailLoading}>詳細を確認</button>
+                    {detailId === item.ocr_result_id ? (
+                      <div>
+                        {detailLoading ? <p>読込中 <button type="button" onClick={() => {
+                          detailRequest.current?.abort(); setDetailLoading(false); setDetailId("");
+                        }}>キャンセル</button></p> : null}
+                        {detailError ? <p role="alert">{detailError}<button type="button" onClick={() => loadDetail(item.ocr_result_id)}>再試行</button></p> : null}
+                        {detail ? detail.overlay_url ? (
+                          <a className="ghost-link small-link" href={detail.overlay_url} target="_blank" rel="noreferrer">overlayを開く</a>
+                        ) : <p>{detail.overlay_message || "overlayなし"}</p> : null}
+                      </div>
+                    ) : null}
+                  </>
+                ) : item.overlay_url ? (
                   <a className="ghost-link small-link" href={item.overlay_url} target="_blank" rel="noreferrer">overlayを開く</a>
                 ) : (
                   <p className="subtle">{item.overlay_message || "overlayなし"}</p>
@@ -397,10 +513,25 @@ export default function OrderInspectionV2Page() {
             </div>
           ))}
         </div>
-        <details className="json-details">
+        {!loading && typeof inspection?.workflow?.revision === "number" ? <details className="json-details" open={rawOpen} onToggle={(event) => {
+          const open = event.currentTarget.open;
+          if (open === rawOpen) return;
+          setRawOpen(open);
+          if (open) void loadRaw();
+          else {
+            rawRequest.current?.abort();
+            setRawPayload(null);
+            setRawError("");
+            setRawLoading(false);
+          }
+        }}>
           <summary>デバッグ用 raw JSON を開く</summary>
-          <pre>{formatJson(inspection)}</pre>
-        </details>
+          {rawOpen ? <>
+            {rawLoading ? <p>読込中</p> : null}
+            {rawError ? <p role="alert">{rawError}<button type="button" onClick={loadRaw}>再試行</button></p> : null}
+            {rawPayload ? <pre>{formatJson(rawPayload)}</pre> : null}
+          </> : null}
+        </details> : null}
       </section>
 
       <style jsx>{`

@@ -147,6 +147,8 @@ jobs:
             tests/unit/test_ocr_read_projection_ownership.py \
             tests/unit/test_validation_readonly_borrow.py \
             tests/unit/test_acceptance_validation_dataflow.py \
+            tests/unit/test_original_source_dataflow.py \
+            tests/unit/test_inspection_demand_read.py \
             tests/unit/test_hakodate_review_resolution_root.py \
             tests/unit/test_hakodate_blank_input_review.py \
             tests/unit/test_hakodate_blank_review_persistence.py \
@@ -226,6 +228,7 @@ jobs:
           set -euo pipefail
           mkdir -p .logs
           npm run test:config 2>&1 | tee .logs/test-config.log
+          node --test tests/inspection-demand-read.test.mjs
       - name: Frontend typecheck
         working-directory: frontend
         run: |

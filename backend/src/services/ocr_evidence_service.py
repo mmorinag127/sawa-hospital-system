@@ -778,11 +778,11 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
         if not isinstance(source, dict):
             return "evidence_unusable"
         try:
-            order_service._validate_hakodate_original_execution(payload, _analysis=_analysis, _accepted_values=accepted)
+            validated_source = order_service._validate_hakodate_original_execution(payload, _analysis=_analysis, _accepted_values=accepted)
             original_source = (row.artifact_manifest_json or {}).get("original_hakodate_source")
             if accepted:
                 original_source = payload[recognition_acceptance.KEY].get("original_hakodate_source")
-                if original_source != order_service._original_hakodate_execution_source(payload):
+                if original_source != validated_source:
                     return "recognition_acceptance_changed"
             if not isinstance(original_source, dict):
                 return "evidence_unusable"
