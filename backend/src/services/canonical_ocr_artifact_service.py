@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import pickle
 from pathlib import Path
 import re
 from uuid import uuid4
@@ -78,37 +79,38 @@ def _json_bytes(value):
 
 
 def _analysis_input_bytes(value):
-    containers = {}
+    containers = set()
     active = set()
 
     def native(item):
         kind = type(item)
         if item is None or kind in (str, bool, int):
-            return [kind.__name__, item]
+            return
         if kind is float:
             if not math.isfinite(item):
                 raise ValueError("non_native_analysis_input")
-            return ["float", item]
+            return
         identity = id(item)
         if kind not in (dict, list) or identity in active:
             raise ValueError("non_native_analysis_input")
         if identity in containers:
-            return ["reference", containers[identity]]
-        index = len(containers)
-        containers[identity] = index
+            return
+        containers.add(identity)
         active.add(identity)
         if kind is dict:
             if any(type(key) is not str for key in item):
                 raise ValueError("non_native_analysis_input")
-            entries = [[key, native(entry)] for key, entry in item.items()]
+            for entry in item.values():
+                native(entry)
         else:
-            entries = [native(entry) for entry in item]
+            for entry in item:
+                native(entry)
         active.remove(identity)
-        return [kind.__name__, index, entries]
 
     try:
-        return json.dumps(native(value), ensure_ascii=False, allow_nan=False,
-                          separators=(",", ":")).encode("utf-8")
+        native(value)
+        # In-memory comparison bytes only; never persisted or unpickled.
+        return pickle.dumps(value, protocol=5)
     except (TypeError, ValueError, RecursionError):
         # Unrepresentable inputs still reach the original validator in its
         # original position; they never establish a reusable success.
