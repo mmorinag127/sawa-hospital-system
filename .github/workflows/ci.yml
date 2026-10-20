@@ -53,6 +53,12 @@ jobs:
       DB_URI: sqlite:///./test.db
       FACILITY_MASTER_PATH: src/data/facility_master.template.json
       INGEST_POLICY_PATH: src/data/ingest_policy.template.json
+      PYTHONPATH: ${{ github.workspace }}/infra/ci
+      PYTEST_ADDOPTS: -p pytest_impact --testmon
+      SAWA_IMPACT_ROOT: ${{ github.workspace }}
+      SAWA_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}
+      TESTMON_DATAFILE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}/testmon.sqlite
+      SAWA_IMPACT_FULL: ${{ github.event_name == 'push' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,6 +71,15 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: python -m pip install -e ".[dev]" --no-build-isolation
+      - name: Install per-test dependency tracker
+        run: python -m pip install "pytest-testmon==2.2.0"
+      - name: Restore trusted test dependencies
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-impact/${{ matrix.suite }}
+          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**', '.github/workflows/ci.yml') }}-
       - name: Install CPU torch for OCR contract tests
         working-directory: backend
         run: |
@@ -77,6 +92,10 @@ jobs:
         run: python -m ruff check --no-cache --select F821 src
       - name: Verify parallel CI coverage and required gate
         run: python infra/terraform/tests/test_ci_backend_parallel.py -v
+      - name: Verify per-test selection safety
+        run: |
+          python -m unittest discover -s infra/ci/tests -p test_pytest_impact.py -v
+          python -m unittest discover -s infra/ci/tests -p test_workflow_impact.py -v
       - name: Verify serving and frozen image dependency alignment
         run: python scripts/test_runtime_cv_dependency_alignment.py -v
       - name: Backend dependency audit
@@ -193,6 +212,19 @@ jobs:
             tests/unit/test_native_ingest_protocol.py \
             --junitxml=.logs/review-resolution-junit.xml \
             -q -rs 2>&1 | tee .logs/review-resolution.log
+      - name: Save trusted test dependencies
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-impact/${{ matrix.suite }}
+          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+      - name: Upload per-test selection report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-impact-${{ matrix.suite }}
+          include-hidden-files: true
+          path: .ci-impact/${{ matrix.suite }}/selection.json
       - name: Upload backend logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -226,6 +258,10 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    env:
+      SAWA_IMPACT_ROOT: ${{ github.workspace }}
+      SAWA_NODE_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/frontend
+      SAWA_IMPACT_FULL: ${{ github.event_name == 'push' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -238,6 +274,15 @@ jobs:
       - name: Install frontend deps
         working-directory: frontend
         run: npm ci
+      - name: Restore trusted frontend test dependencies
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-impact/frontend
+          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**', '.github/workflows/ci.yml') }}-
+      - name: Verify Node test selection safety
+        run: python3 -m unittest discover -s infra/ci/tests -p test_node_impact.py -v
       - name: Frontend dependency audit
         working-directory: frontend
         run: npm audit --omit=dev
@@ -252,11 +297,26 @@ jobs:
         run: npx --no-install playwright install --with-deps webkit
       - name: Frontend route contract tests
         working-directory: frontend
+        env:
+          NODE_OPTIONS: --import=${{ github.workspace }}/infra/ci/node-impact/register.mjs
         run: |
           set -euo pipefail
           mkdir -p .logs
           npm run test:config 2>&1 | tee .logs/test-config.log
           node --test tests/inspection-demand-read.test.mjs
+      - name: Save trusted frontend test dependencies
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-impact/frontend
+          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+      - name: Upload frontend test selection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-selection
+          include-hidden-files: true
+          path: .ci-impact/frontend/*.report.json
       - name: Frontend typecheck
         working-directory: frontend
         run: |

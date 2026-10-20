@@ -56,6 +56,7 @@ cloud-sql-proxy
 .codex/sessions/
 
 # Local caches
+.ci-impact/
 logs/
 tmp/
 secrets/

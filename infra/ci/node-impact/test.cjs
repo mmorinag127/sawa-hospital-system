@@ -1,0 +1,17 @@
+'use strict';
+const native = require('node:test');
+const { wrapTest, hook } = require('./core.cjs');
+const test = wrapTest(native.test);
+module.exports = test;
+module.exports.test = test;
+module.exports.it = test;
+module.exports.describe = hook(native.describe);
+module.exports.suite = module.exports.describe;
+module.exports.before = hook(native.before);
+module.exports.after = hook(native.after);
+module.exports.beforeEach = hook(native.beforeEach);
+module.exports.afterEach = hook(native.afterEach);
+module.exports.mock = native.mock;
+module.exports.snapshot = native.snapshot;
+module.exports.assert = native.assert;
+module.exports.run = native.run;
