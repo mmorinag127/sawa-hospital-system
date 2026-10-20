@@ -106,6 +106,24 @@ def test_env():
         self.env["GITHUB_REF"] = "changed"
         self.assertIn("test_example.py::test_env", self.run_tests(1)["selected"])
 
+    def test_unsafe_collection_runs_all_assertions_without_code_tracking(self):
+        self.env["GITHUB_REF"] = "main"
+        self.write("conftest.py", """import os
+import pytest
+VALUE = os.environ['GITHUB_REF']
+@pytest.fixture
+def setting():
+    return VALUE
+""")
+        self.write("test_example.py", "def test_setting(setting):\n    assert setting == 'main'\n")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        first = self.run_tests()
+        self.assertTrue(first["code_tracking_disabled"])
+        self.assertEqual(first["selected"], ["test_example.py::test_setting"])
+        self.assertEqual(self.run_tests()["reused"], [])
+        self.env["GITHUB_REF"] = "broken"
+        self.assertEqual(self.run_tests(1)["selected"], ["test_example.py::test_setting"])
+
     def test_test_change_new_test_and_failed_test_execute(self):
         self.run_tests()
         with (self.root / "test_example.py").open("a") as stream:

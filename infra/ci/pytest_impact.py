@@ -36,6 +36,7 @@ OMITTED = []
 REASONS = {}
 FIXTURES = {}
 FIXTURE_STACK = []
+DISABLED_COLLECTOR = None
 STDLIB = str(Path(os.__file__).resolve().parent) + os.sep
 RUNTIME_PATHS = tuple({Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
 
@@ -233,7 +234,7 @@ def pytest_sessionstart(session):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_collection_modifyitems(session, config, items):
-    global BUSY
+    global BUSY, DISABLED_COLLECTOR
     BUSY = True
     selector = config.pluginmanager.get_plugin("TestmonSelect")
     candidates = set(selector.deselected_tests)
@@ -259,6 +260,13 @@ def pytest_collection_modifyitems(session, config, items):
             stable.append(item.nodeid)
             OMITTED.append(item.nodeid)
     selector.deselected_tests = stable
+    if GLOBAL_UNSAFE:
+        # Every test must execute. Coverage cannot make this run reusable, so
+        # keep the tests and selector but do not instrument their execution.
+        collector = config.pluginmanager.get_plugin("TestmonCollect")
+        if collector is not None:
+            config.pluginmanager.unregister(collector)
+            DISABLED_COLLECTOR = collector
     BUSY = False
     yield
     SELECTED.extend(item.nodeid for item in items)
@@ -308,6 +316,8 @@ def pytest_runtest_setup(item):
 def pytest_sessionfinish(session, exitstatus):
     global BUSY
     BUSY = True
+    if DISABLED_COLLECTOR is not None:
+        DISABLED_COLLECTOR.pytest_sessionfinish(session)
     STATE.mkdir(parents=True, exist_ok=True)
     for entry in PREVIOUS.values():
         entry["unsafe"] = sorted(set(entry["unsafe"]) | GLOBAL_UNSAFE)
@@ -316,6 +326,7 @@ def pytest_sessionfinish(session, exitstatus):
         "selected": SELECTED, "reused": OMITTED, "reasons": REASONS,
         "untracked": {node: value["unsafe"] for node, value in PREVIOUS.items() if value.get("unsafe")},
         "full": FULL, "exitstatus": int(exitstatus),
+        "code_tracking_disabled": DISABLED_COLLECTOR is not None,
     }, indent=2))
     BUSY = False
 
