@@ -382,6 +382,33 @@ def test_parent_list_tuple_repro_delegates_actual_extractor_on_second_call(monke
     monkeypatch.setattr(orders, "_extract_hakodate_target_cells_from_payload", original)
 
 
+def test_payload_extractors_do_not_serialize_unrelated_archive(packet_row, monkeypatch):
+    from src.services import recognition_acceptance_service as acceptance, order_service as orders
+    payload = acceptance.payload_for_evidence(packet_row("accepted"))
+    expected = [acceptance.accepted_values(payload),
+                orders._extract_hakodate_target_cells_from_payload(payload),
+                orders._extract_hakodate_ocr_evidence_records_from_payload(payload, order_id="O")]
+    monkeypatch.setattr(artifacts, "_analysis_input_bytes",
+                        Mock(side_effect=AssertionError("whole-payload comparison is unnecessary")))
+    analysis = artifacts._EvidenceAnalysis()
+    for _ in range(2):
+        assert [analysis.accepted_values(payload), analysis.target_cells(payload),
+                analysis.evidence_records(payload, order_id="O")] == expected
+
+
+def test_review_binding_does_not_walk_the_whole_payload(packet_row, monkeypatch):
+    from src.services import order_service as orders
+    payload = packet_row("ready").payload_json
+    source = payload["hakodate_repair_source_receipt"]
+    binding = Mock(wraps=artifacts._analysis_input_bytes)
+    monkeypatch.setattr(artifacts, "_analysis_input_bytes", binding)
+    analysis = artifacts._EvidenceAnalysis()
+    orders._validate_hakodate_owned_artifacts(payload, source, _analysis=analysis)
+    assert analysis.recognition_review is not None
+    assert binding.call_args_list
+    assert all(call.args[0] is not payload for call in binding.call_args_list)
+
+
 @pytest.mark.parametrize("field", ["targets", "records", "review_cells"])
 def test_real_owned_packet_list_to_tuple_keeps_original_error(packet_row, field):
     from src.services import order_service as orders

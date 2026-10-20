@@ -9163,7 +9163,7 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
     from src.services import canonical_ocr_artifact_service
     verified_inputs = canonical_ocr_artifact_service.validate_payload(payload, _analysis=_analysis)
     review_inputs = None
-    if _analysis is not None and canonical_ocr_artifact_service._analysis_input_bytes(payload) is not None:
+    if _analysis is not None and type(payload) is dict:
         binding = canonical_ocr_artifact_service._analysis_input_bytes([
             {key: payload[key] for key in ("hakodate_recognition_review",) if key in payload}, records,
         ])
