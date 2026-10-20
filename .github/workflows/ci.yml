@@ -76,7 +76,7 @@ jobs:
         working-directory: backend
         run: python -m ruff check --no-cache --select F821 src
       - name: Verify parallel CI coverage and required gate
-        run: python scripts/test_ci_backend_parallel.py -v
+        run: python infra/terraform/tests/test_ci_backend_parallel.py -v
       - name: Verify serving and frozen image dependency alignment
         run: python scripts/test_runtime_cv_dependency_alignment.py -v
       - name: Backend dependency audit

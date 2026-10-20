@@ -1,12 +1,13 @@
 """Keep the parallel CI split equivalent to its reviewed serial predecessor."""
 import hashlib
+from fnmatch import fnmatch
 from pathlib import Path
 import subprocess
 import unittest
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 BASELINE = {
     "Run backend tests (US1-4)": ("us1-4", "d8c3f72cfe9f78d4f1478199c472fd67c0a72006c6cdd1b0bc93eaf41ee0d074"),
     "Verify initial saved-source preservation": ("saved-source", "58baf3221466a87d078c7f949f6c7460873d2318282f58fe904222b1799f77dd"),
@@ -62,6 +63,13 @@ class ParallelCI(unittest.TestCase):
         self.assertNotEqual(key("CI", 117, 1), key("CI", 116, 2))
         self.assertNotEqual(key("CI", None, 1), key("CI", None, 2))
         self.assertNotEqual(key("CI", 117, 1), key("Deploy Staging", 117, 1))
+
+    def test_ci_only_changes_do_not_trigger_staging_deploy(self):
+        deploy = yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
+        paths = deploy["on"]["push"]["paths"]
+        for changed in (".github/workflows/ci.yml", "infra/terraform/tests/test_ci_backend_parallel.py",
+                        "docs/ci-review-20261021.md"):
+            self.assertFalse(any(fnmatch(changed, pattern) for pattern in paths), changed)
 
 
 if __name__ == "__main__":
