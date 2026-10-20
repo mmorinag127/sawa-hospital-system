@@ -17,7 +17,7 @@ def payload_digest(payload):
 
 def review_values(payload, interpretations):
     from src.services.order_service import _extract_hakodate_ocr_evidence_records_from_payload
-    records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id="")
+    records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id="", copy_records=False)
     review = evidence.recognition_review(records)
     if not review["cells"] or payload.get("hakodate_recognition_review") != review:
         raise ValueError("recognition_acceptance_review_changed")
