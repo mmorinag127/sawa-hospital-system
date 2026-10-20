@@ -249,3 +249,58 @@ Earlier read-only run `39456171409` produced only
 `unexpected_TimeoutExpired`. The new original-only Actions result and
 same-input baseline/current comparison remain pending with the parent;
 overall parity/completion is explicitly NOT established.
+
+## PR119 job-error / current-blocker distinction
+
+- Base: `1947d86120c17443b97396722ec905a2d4e350ff`; branch:
+  `codex/hospital-live-lineage-diagnosis-20261021`.
+- Read-only diagnosis `39462308801`, downloaded to
+  `/private/tmp/sawa-pr119-reviewed-diagnostic`, completed all four original
+  phases for baseline `e5282354017b43d17f0d4dbd58e73972f37a716f` and
+  candidate `1947d86120c17443b97396722ec905a2d4e350ff`, headless and GUI.
+  All four input hash sets are equal and `inputs_unchanged=true`.
+  Both comparison entries report `full_results_equal=true`, with SHA256
+  `822fdf19f8e4132a2b0ce559cdb88ecca2d5a647d8a8372987065af294f14023`.
+  Canonical/selected validation stops at `hakodate_observation_contact_changed`;
+  selection blocker is `ocr_result_execution_lineage_mismatch`, and serialized
+  selectable is false. This is identical-input rejection parity, not successful
+  selection, service latency evidence, or permission to bypass validation.
+- PR119 live case 2 failed because the verifier incorrectly required the
+  historical job error `evidence_unusable` inside current workflow blockers.
+  Product UI lines 1987 and 4715 read the job's user/detail/message/error fields;
+  the selected-state red banner is `.notice.error` with `OCR失敗:`. Candidate
+  projection blockers are a copy of workflow blockers, not evidence rejection
+  reasons. Imported bindings can also short-circuit workflow lineage checks;
+  no claim is made here about this order's binding data.
+- The verifier now checks that actual red banner against the native immutable
+  terminal error already compared to the original artifact. Current selected
+  ID/state, nonselectability, public acceptance null, and full manifest
+  canonical receipt checks remain independent. It records current
+  `selectedInvalid.workflowBlockers` as code-only strings, rejecting values
+  containing digits or non-code characters before writing them to results.
+  Blockers/state must still match after reload.
+- Selected-invalid still ends `blocked` with
+  `selected_invalid_requires_original_diagnosis`, after image, reload and raw
+  observations. The separate diagnosis evidence above is for parent judgment;
+  the verifier does not turn this condition into passed.
+- `firstJsonRequest` retains its 30,000 ms body deadline. Full raw history may
+  exceed it; no timeout extension or successful-raw claim is made. The product
+  DOM class and label were checked against source and the PR119 failure image.
+
+Focused command (synthetic transport executing the full verifier):
+
+```sh
+cd /Users/mmorinag/Sawa/2025.12/worktrees/hospital-workflow-demand-read-20261020/frontend
+node --test --test-concurrency=1 \
+  tests/config/native-ingest-live.test.mjs \
+  tests/config/ocr-live-state.test.mjs \
+  tests/config/ocr-live-diagnostics.test.mjs \
+  tests/config/ocr-first-request.test.mjs
+```
+
+Result: **100 passed, 0 failed, 0 skipped**. Cases cover empty current blockers,
+independent nonempty blocker codes, immutable terminal and displayed-error
+mismatches, malformed/private-valued blockers, canonical receipt integrity,
+reload blocker/state changes, normal selected/unselected flows and existing
+request deadlines. No product/auth/DB/business-value changes, commit, push or
+deployment. Parent staging verification remains pending.

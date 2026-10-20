@@ -29,13 +29,12 @@ function fixture(selected, mutate = () => {}, failure = null,
     revision: 10, selected_ocr_result_id: selected ? identity.evidenceId : null,
     blockers: [], warnings: [], ocr_job: {order_id: identity.orderId, order_document_id: identity.documentId,
       status: 'failed', result_state: 'review_required'}};
-  if (selected && !selectable) workflow.blockers = ['evidence_unusable'];
   if (native) {
     identity.nativeIngest = {mode: 'hakodate', intake_protocol: 'native_ingest_v2', execution_id: 'native-execution',
       terminal_receipt: {execution_id: 'native-execution', job_id: 'native-job', order_id: identity.orderId,
-        status: 'failed', evidence_run_id: identity.evidenceId, error: 'review', workflow_attempt_id: null}};
+        status: 'failed', evidence_run_id: identity.evidenceId, error: 'evidence_unusable', workflow_attempt_id: null}};
     Object.assign(workflow.ocr_job, {native_ingest: structuredClone(identity.nativeIngest),
-      ocr_job_id: 'native-job', workflow_attempt_id: null, error_message: 'review'});
+      ocr_job_id: 'native-job', workflow_attempt_id: null, error_message: 'evidence_unusable'});
     Object.assign(evidence.execution_lineage, {job_id: 'native-job', nonworkflow_execution_id: 'native-execution',
       workflow_attempt_id: null});
     evidence.producer_version = 'hakodate_best_method_pipeline';
@@ -120,7 +119,18 @@ function fixture(selected, mutate = () => {}, failure = null,
   const context = {on: (...args) => events.on(...args), addInitScript: async () => {}, route: async () => {},
     newPage: async () => {events.emit('page', page); return page;}, close: async () => {}};
   const expect = loc => ({
-    toHaveText: async value => {assert.equal(loc.name, '.state-panel-main > p.subtle'); assert.match('synthetic loaded workflow', value);},
+    toHaveText: async value => {
+      if (loc.name === '.notice.error') {
+        const job = workflow.ocr_job;
+        assert.equal(job.status, 'failed');
+        assert.equal(workflow.state, 'ocr_selected');
+        const message = String(job.error_user_message || job.error_detail || job.error_message || job.error || '').trim();
+        assert.equal(`OCR失敗: ${message}`, value);
+      } else {
+        assert.equal(loc.name, '.state-panel-main > p.subtle');
+        assert.match('synthetic loaded workflow', value);
+      }
+    },
     not: {toHaveText: async value => {assert.equal(loc.name, '.state-panel-main > p.subtle'); assert.notEqual('synthetic loaded workflow', value);}},
     toContainText: async value => {
       const actual = loc.name === 'deploy version' ? 'c'.repeat(40) : loc.name === 'image-parent'
@@ -170,14 +180,15 @@ for (const selected of [false, true]) test(`native terminal failure and current 
   } finally {rmSync(output, {recursive: true, force: true});}
 });
 
-test('selected-invalid observes images reload and raw but remains blocked pending original diagnosis', async () => {
+for (const blockers of [[], ['ocr_result_execution_lineage_mismatch']]) test('selected-invalid observes job error independently of current blockers and remains blocked', async () => {
   const f = fixture(true, undefined, null, {selectable: false, native: true});
+  f.workflow.blockers = blockers;
   const output = mkdtempSync(join(tmpdir(), 'live-selected-invalid-'));
   try {
     const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
     assert.equal(result.status, 'blocked', JSON.stringify(result.failure));
     assert.equal(result.code, 'selected_invalid_requires_original_diagnosis');
-    assert.deepEqual(result.selectedInvalid, {blocker: 'evidence_unusable', manifestReceiptVerified: true});
+    assert.deepEqual(result.selectedInvalid, {workflowBlockers: blockers, manifestReceiptVerified: true});
     for (const check of ['verify-state-preserved', 'verify-raw-json'])
       assert.ok(result.timings.some(item => item.check === check), check);
     assert.equal(result.ui.imageVisible, true);
@@ -190,13 +201,13 @@ test('selected-invalid observes images reload and raw but remains blocked pendin
   } finally {rmSync(output, {recursive: true, force: true});}
 });
 
-for (const change of ['missing-blocker', 'other-blocker', 'missing-receipt', 'digest', 'payload-hash', 'pdf',
-  'revision', 'selected-id', 'public-acceptance', 'current-state', 'native-owner']) {
+for (const change of ['non-code-blocker', 'numeric-blocker', 'missing-receipt', 'digest', 'payload-hash', 'pdf',
+  'revision', 'selected-id', 'public-acceptance', 'current-state', 'native-owner', 'job-display', 'terminal-error']) {
   test(`selected-invalid rejects ${change} before diagnostic observation`, async () => {
     const f = fixture(true, undefined, null, {selectable: false, native: true});
     const receipt = f.evidence.artifact_manifest.operator_recognition_acceptance;
-    if (change === 'missing-blocker') f.workflow.blockers = [];
-    if (change === 'other-blocker') f.workflow.blockers = ['unrelated'];
+    if (change === 'non-code-blocker') f.workflow.blockers = ['PRIVATE token=value'];
+    if (change === 'numeric-blocker') f.workflow.blockers = ['quantity_123'];
     if (change === 'missing-receipt') delete f.evidence.artifact_manifest.operator_recognition_acceptance;
     if (change === 'digest') receipt.artifact_digest = 'foreign';
     if (change === 'payload-hash') receipt.payload_sha256 = 'foreign';
@@ -206,6 +217,8 @@ for (const change of ['missing-blocker', 'other-blocker', 'missing-receipt', 'di
     if (change === 'public-acceptance') f.evidence.recognition_acceptance = receipt;
     if (change === 'current-state') f.workflow.state = 'context_confirmed';
     if (change === 'native-owner') f.evidence.execution_lineage.job_id = 'foreign';
+    if (change === 'job-display') f.workflow.ocr_job.error_user_message = 'different display';
+    if (change === 'terminal-error') f.workflow.ocr_job.native_ingest.terminal_receipt.error = 'different';
     const output = mkdtempSync(join(tmpdir(), 'live-selected-invalid-reject-'));
     try {
       const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
@@ -213,9 +226,27 @@ for (const change of ['missing-blocker', 'other-blocker', 'missing-receipt', 'di
       assert.notEqual(result.code, 'selected_invalid_requires_original_diagnosis');
       assert.equal(f.clicks.includes('raw-summary'), false);
       assert.equal(result.unexpectedWriteCount, 0);
+      const saved = readFileSync(join(output, 'browser-result.json'), 'utf8');
+      assert.equal(saved.includes('PRIVATE'), false);
+      assert.equal(saved.includes('quantity_123'), false);
     } finally {rmSync(output, {recursive: true, force: true});}
   });
 }
+
+for (const change of ['blockers', 'state']) test(`selected-invalid rejects changed ${change} on reload`, async () => {
+  const f = fixture(true, data => {
+    if (change === 'blockers') data.workflow.blockers = ['ocr_result_execution_lineage_mismatch'];
+    else data.workflow.state = 'ocr_failed';
+  }, null, {selectable: false, native: true});
+  const output = mkdtempSync(join(tmpdir(), 'live-selected-invalid-reload-'));
+  try {
+    const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failure.check, 'verify-state-preserved');
+    assert.equal(f.clicks.includes('raw-summary'), false);
+    assert.equal(result.unexpectedWriteCount, 0);
+  } finally {rmSync(output, {recursive: true, force: true});}
+});
 
 for (const verifier of ['ocr','review']) for (const reload of [false,true]) for (const mode of ['detail','click']) {
   test(`${verifier} ${reload ? 'reload' : 'initial'} ${mode} rejection is handled and saves failed JSON`, async () => {
