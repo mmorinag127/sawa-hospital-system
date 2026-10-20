@@ -30,7 +30,10 @@ function writeCase(root, sourceOrder, suffix) {
   writeFileSync(join(folder, 'workflow.json'), JSON.stringify({ order_id: orderId, ocr_job: { order_id: orderId, order_document_id: documentId, status: 'done' } }));
   writeFileSync(join(folder, 'upload-state.json'), JSON.stringify({ current_order_id: orderId, current_document_id: documentId, content_sha256: sha }));
   writeFileSync(join(folder, 'evidence.json'), JSON.stringify({ id: evidenceId, payload_json: { _ocr_execution: { evidence_run_id: evidenceId, selected_pdf_receipt: { order_id: orderId, document_id: documentId, sha256: sha } } } }));
-  return { source_order_id: sourceOrder, sha256: sha, identity: { orderId, documentId, evidenceId, sourcePDFhash: sha } };
+  const hashes = {a: 'b333d612c0e5a11258353ba2b92a3c4d5d1556009c94af0e28f6938094bfdee5',
+    b: 'f8fae47714c45faf9204d75f6dedf4dff41d6ece7f95b77854d22b854c362668'};
+  return { source_order_id: sourceOrder, sha256: sha, identity: { orderId, documentId, evidenceId, sourcePDFhash: sha,
+    originalPayloadSha256: hashes[suffix], artifactDigest: undefined, selectedPdfReceipt: undefined } };
 }
 
 test('OCR verifier validates every manifest artifact case with matching order, document, evidence and source hash', () => {
@@ -44,4 +47,17 @@ test('OCR verifier validates every manifest artifact case with matching order, d
       current_document_id: first.identity.documentId, content_sha256: 'c'.repeat(64) }));
     assert.throws(() => verificationIdentities(root), /Expected values to be strictly equal/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('original payload digest preserves canonical Unicode, float and large integer bytes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ocr-live-digest-'));
+  try {
+    const {identity, ...source} = writeCase(root, 'source-order-a', 'a');
+    writeFileSync(join(root, 'manifest.json'), JSON.stringify({cases: [source]}));
+    writeFileSync(join(root, 'source-order-a', 'evidence.json'),
+      `{"id":"evidence-verified-a","payload_json":{"_ocr_execution":{"evidence_run_id":"evidence-verified-a","selected_pdf_receipt":{"order_id":"ORDverifieda","document_id":"doc-verified-a","sha256":"${'a'.repeat(64)}"}},"proof":{"number":1.0,"unicode":"\\u6f22\\u5b57","large":9007199254740993}}}`);
+    const [actual] = verificationIdentities(root);
+    assert.equal(actual.originalPayloadSha256, '20163d8408843a359e1a82e2a510e66c14020c5a41834797cfea06efd194c5a8');
+    assert.equal(actual.orderId, identity.orderId);
+  } finally {rmSync(root, {recursive: true, force: true});}
 });
