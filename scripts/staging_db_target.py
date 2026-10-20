@@ -89,15 +89,22 @@ def _access_token():
     return result.stdout.strip()
 
 
-def _container(descriptor):
+def _container(descriptor, service):
     containers = descriptor.get('spec', {}).get('containers', [])
-    require(len(containers) == 1, 'single-runtime-container-required')
+    if len(containers) != 1:
+        require(service == 'web-stg' and len(containers) == 2
+                and bool(containers[0].get('ports'))
+                and containers[1].get('name') == 'agent-runtime'
+                and not containers[1].get('ports')
+                and bool(re.fullmatch(re.escape(REGISTRY + '/sawahospitalsystem/backend/agent-runtime')
+                    + r'@sha256:[0-9a-f]{64}', containers[1].get('image', ''))),
+                'single-runtime-container-required')
     return containers[0]
 
 
-def _entries(descriptor):
+def _entries(descriptor, service):
     entries = {}
-    for entry in _container(descriptor).get('env', []):
+    for entry in _container(descriptor, service).get('env', []):
         name = entry.get('name')
         if name in KEYS:
             require(name not in entries, 'duplicate-runtime-env')
@@ -115,7 +122,7 @@ def resolve_runtime(descriptor, image, service):
         if name in KEYS:
             require(name not in values, 'duplicate-image-env')
             values[name] = value
-    for name, entry in _entries(descriptor).items():
+    for name, entry in _entries(descriptor, service).items():
         if 'value' in entry:
             require(set(entry) == {'name', 'value'} and isinstance(entry['value'], str), 'ambiguous-runtime-env-source')
             values[name] = entry['value']
@@ -165,7 +172,7 @@ def load_service_db_config(project, region, service, *, expected_revision=None):
         image = image_config(revision.get('status', {}).get('imageDigest', ''), 'frontend' if service == 'web-stg' else 'backend', access)
         configs[name] = resolve_runtime(revision, image, service)
         if name == intended:
-            require(_entries(template) == _entries(revision), 'intended-revision-env-mismatch')
+            require(_entries(template, service) == _entries(revision, service), 'intended-revision-env-mismatch')
             require(resolve_runtime(template, image, service) == configs[name], 'intended-runtime-mismatch')
     return configs[active]
 
