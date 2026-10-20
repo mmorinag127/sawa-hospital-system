@@ -78,7 +78,7 @@ def test_actual_detail_get_returns_persisted_failure_not_fake_running(monkeypatc
 def test_cache_status_is_diagnostic_not_terminal_substitution(monkeypatch):
     monkeypatch.setattr(orders.order_service, "get_cached_ocr_payload", lambda order_id: {"status": "success", "pages": [{}]})
     order = {"id": "order", "ocr_status": "running"}
-    assert orders._apply_cached_status_override(order, "order", None) is None
+    assert orders._apply_cached_status_override(order, "order", None, cached_payload={"status": "success", "pages": [{}]}) is None
     assert order["ocr_status"] == "running"
     assert order["ocr_cache_diagnostic"]["status"] == "success"
 
@@ -96,7 +96,7 @@ def test_stale_reparse_with_cached_evidence_keeps_job_tokens_cache_and_quantity(
     order = {"id": "order", "ocr_status": "running", "lines": [{"quantity": 0}]}
 
     assert orders._mark_stale_order_reparse_job(order, job) is job
-    assert orders._apply_cached_status_override(order, "order", job) is job
+    assert orders._apply_cached_status_override(order, "order", job, cached_payload=cached) is job
 
     assert order["ocr_stale_diagnostic"] == {
         "error": "reparse_stale_timeout>30m", "job_id": job["id"], "processing_stage": "waiting",

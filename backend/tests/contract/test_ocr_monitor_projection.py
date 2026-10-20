@@ -20,11 +20,12 @@ def test_monitor_keeps_visible_fields_pagination_and_full_runtime_path(monkeypat
     calls = []
     monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: deepcopy(original))
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
+    monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
     monkeypatch.setattr(api, 'get_ocr_jobs', lambda ids: {x: {'status': 'done'} for x in ids})
     def status(order, job):
         calls.append(('status', order['id']))
         order['ocr_status'] = order['status']
-    def cached(order, order_id, job):
+    def cached(order, order_id, job, **kw):
         calls.append(('cached', order_id))
         return job
     def stale(order, job):
@@ -38,7 +39,7 @@ def test_monitor_keeps_visible_fields_pagination_and_full_runtime_path(monkeypat
     monkeypatch.setattr(api, '_apply_stale_ocr_status', stale)
     monkeypatch.setattr(api, '_mark_stale_order_reparse_job', stale)
     monkeypatch.setattr(api, '_attach_order_review_summary', summary)
-    monkeypatch.setattr(api, '_attach_order_workflow_context', summary)
+    monkeypatch.setattr(api, '_apply_order_workflow_context', lambda order, workflow: summary(order))
     client = TestClient(app)
     params = {'include_ocr': 'true', 'include_runtime': str(runtime).lower(), 'limit': 5}
     full = client.get('/orders', params=params)

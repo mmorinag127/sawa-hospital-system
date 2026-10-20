@@ -14,6 +14,7 @@ from src.services import (
     workflow_state_service,
     uploaded_pdf_service,
     total_service,
+    evidence_manifest_service,
 )
 from src.services import order_workflow_v2_service
 from src.services import workflow_ocr_delivery_dispatch_service
@@ -250,8 +251,8 @@ def _should_prefer_cached_status(order_id: str, current_status: object, job: dic
     return False
 
 
-def _apply_cached_status_override(order: dict, order_id: str, job: dict | None) -> dict | None:
-    cached_payload = order_service.get_cached_ocr_payload(order_id)
+def _apply_cached_status_override(order: dict, order_id: str, job: dict | None, *, cached_payload: dict | None) -> dict | None:
+    cached_payload = evidence_manifest_service.ensure_evidence_manifest(cached_payload)
     cached_status = _derive_status_from_payload(cached_payload)
     current_status = order.get("ocr_status")
     if not cached_status or not _should_prefer_cached_status(order_id, current_status, job):
@@ -391,6 +392,10 @@ def _attach_order_workflow_context(
     if not order_id:
         return
     workflow = order_service.get_order_workflow_state(order_id, refresh=refresh)
+    _apply_order_workflow_context(order, workflow)
+
+
+def _apply_order_workflow_context(order: dict, workflow: dict | None) -> None:
     if not isinstance(workflow, dict):
         return
     order["workflow_state"] = workflow
@@ -699,8 +704,8 @@ def list_orders(
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
     lightweight_mode = include_ocr is False
     cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
+    workflow_map = workflow_state_service.list_workflow_states(order_ids)
     if lightweight_mode:
-        workflow_map = workflow_state_service.list_workflow_states(order_ids)
         reparse_jobs = get_ocr_jobs([f"OCR-{order_id}" for order_id in order_ids])
         for order in orders:
             order_id = str(order.get("id") or "").strip()
@@ -732,7 +737,10 @@ def list_orders(
             job = jobs.get(job_id) if job_id else None
             if job:
                 _apply_job_status_to_order(order, job)
-            job = _apply_cached_status_override(order, str(order.get("id") or ""), job)
+            job = _apply_cached_status_override(
+                order, str(order.get("id") or ""), job,
+                cached_payload=cache_map.get(str(order.get("id") or "")),
+            )
             job = _apply_stale_ocr_status(order, job)
     reparse_jobs = {} if lightweight_mode else get_ocr_jobs(
         list(
@@ -761,7 +769,7 @@ def list_orders(
                 cached_payload=cache_map.get(order_id),
                 ocr_job=review_job,
             )
-            _attach_order_workflow_context(order, refresh=False)
+            _apply_order_workflow_context(order, workflow_map.get(order_id))
     page["orders"] = orders
     return _order_list_response(page, response_view)
 
