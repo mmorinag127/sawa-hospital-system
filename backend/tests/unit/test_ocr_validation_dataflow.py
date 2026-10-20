@@ -339,6 +339,32 @@ def test_container_subclasses_cycles_and_alias_graphs_are_not_json_tree_proofs()
     assert aliased is not None and detached is not None and aliased != detached
 
 
+@pytest.mark.parametrize("left,right", [
+    (True, 1), (1, 1.0), (0.0, -0.0),
+    ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+    ([1, 2], [2, 1]), ("1", 1),
+])
+def test_binding_preserves_types_order_and_signed_zero(left, right):
+    assert artifacts._analysis_input_bytes(left) != artifacts._analysis_input_bytes(right)
+
+
+def test_binding_does_not_invoke_custom_serialization():
+    class Unexpected(dict):
+        def __reduce_ex__(self, protocol):
+            raise AssertionError("custom serialization must not execute")
+    assert artifacts._analysis_input_bytes({"nested": Unexpected(a=1)}) is None
+
+
+def test_binding_preserves_detached_copy_and_detects_nested_mutation():
+    shared = ["日本語", 1, 1.5, False, None]
+    value = {"left": shared, "right": shared}
+    original = artifacts._analysis_input_bytes(value)
+    copied = deepcopy(value)
+    assert artifacts._analysis_input_bytes(copied) == original
+    copied["left"][1] = 2
+    assert artifacts._analysis_input_bytes(copied) != original
+
+
 def test_parent_list_tuple_repro_delegates_actual_extractor_on_second_call(monkeypatch):
     from src.services import order_service as orders
     original = orders._extract_hakodate_target_cells_from_payload
