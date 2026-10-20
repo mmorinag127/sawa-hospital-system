@@ -3,9 +3,43 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const yaml = require("js-yaml");
+const os = require("node:os");
+const {spawnSync} = require("node:child_process");
 
 const repoRoot = path.resolve(__dirname, "../../..");
 const read = (relativePath) => fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
+
+test('agent base resolution uses registry bytes under existing deploy permissions', () => {
+  const job = yaml.load(read('.github/workflows/deploy-stg.yml')).jobs['build-agent'];
+  assert.ok(job.steps.some(step => step.uses === 'astral-sh/setup-uv@v8.1.0'));
+  const step = job.steps.find(step => step.id === 'image');
+  assert.equal(step.env.BACKEND_CHANGED, '${{ needs.source-gate.outputs.backend_changed }}');
+  const script = step.run.split('docker buildx build')[0] + '\nprintf "%s" "$base_image"\n';
+  const prefix = 'asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/';
+  const digest = prefix + 'backend@sha256:' + 'a'.repeat(64);
+  for (const [changed, built, expected, resolved, success] of [
+    ['true', prefix+'backend:new', prefix+'backend:new', digest, true],
+    ['false', '', prefix+'backend:existing', digest, true],
+    ['true', '', '', digest, false],
+    ['false', prefix+'backend:new', '', digest, false],
+    ['', '', '', digest, false],
+    ['true', prefix+'backend:new', prefix+'backend:new', prefix+'frontend@sha256:'+'a'.repeat(64), false],
+  ]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-registry-contract-'));
+    try {
+      fs.writeFileSync(path.join(directory, 'gcloud'), '#!/bin/bash\ncase "$*" in\n"auth configure-docker "*) exit 0;;\n"run services describe worker-stg "*) printf "%s\\n" "$TEST_EXISTING_IMAGE";;\n*) exit 91;;\nesac\n', {mode:0o700});
+      fs.writeFileSync(path.join(directory, 'uv'), '#!/bin/bash\ntest "$*" = "run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image $TEST_EXPECTED_IMAGE" || exit 92\nprintf "%s\\n" "$TEST_RESOLVED_IMAGE"\n', {mode:0o700});
+      const result = spawnSync('bash', ['-euc', script], {encoding:'utf8', env:{...process.env,
+        PATH:directory+path.delimiter+process.env.PATH, GITHUB_REF:'refs/heads/develop',
+        GITHUB_REPOSITORY:'mmorinag127/sawa-hospital-system', PROJECT_ID:'sawahospitalsystem',
+        REGION:'asia-northeast2', GITHUB_SHA:'b'.repeat(40), BACKEND_CHANGED:changed,
+        BUILT_BACKEND_IMAGE:built, TEST_EXPECTED_IMAGE:expected,
+        TEST_EXISTING_IMAGE:prefix+'backend:existing', TEST_RESOLVED_IMAGE:resolved}});
+      assert.equal(result.status === 0, success, JSON.stringify({changed,built,resolved,stderr:result.stderr}));
+      if (success) assert.equal(result.stdout, digest);
+    } finally {fs.rmSync(directory, {recursive:true, force:true});}
+  }
+});
 
 function oidcSteps(workflow) {
   return Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
