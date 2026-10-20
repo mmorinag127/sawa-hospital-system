@@ -12,6 +12,8 @@ from .sandbox import Sandbox
 
 
 async def check():
+    if any(not shutil.which(binary) for binary in ('soffice','pdftoppm')) or not list(Path('/usr/share/fonts').rglob('NotoSansCJK*.ttc')):
+        raise RuntimeError('Native workbook PDF conversion and Japanese fonts are required')
     config=configuration('/opt/sawa-agent')
     root=Path('/tmp/sawa-agent-image-smoke')
     try:

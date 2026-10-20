@@ -3,6 +3,8 @@ FROM ${BASE_IMAGE}
 USER root
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-calc fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/*
 # Separate environments preserve each native API's dependency contract.
 RUN python -m venv --system-site-packages /opt/agent/hospital \
  && python -m venv /opt/agent/gateway \
