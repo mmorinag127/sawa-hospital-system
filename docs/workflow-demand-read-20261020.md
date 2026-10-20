@@ -74,3 +74,61 @@
   changes; it is not part of this hospital deployment and remains untouched.
 - Historical sibling commits must not be treated as new fixes solely because
   their original SHAs differ from integrated/cherry-picked SHAs.
+
+## PR114 verifier resource-gate correction
+
+- Base: `580bb00680c14c19f66682cb1fb97838292e1828`; work branch:
+  `codex/hospital-live-resource-gate-20261020`.
+- Staging artifacts from Actions `39433164601` are under
+  `/private/tmp/sawa-pr114-live-ui`. OCR cases timed out in
+  `open-ocr-detail` after 30003/30005 ms; review timed out in `open-step2`.
+  No inspection-detail response was recorded.
+- Read-only local WebKit reproduction used the product's exact Google Fonts
+  CSS `@import` and `readLiveCandidate`. Holding that stylesheet produced a
+  1503 ms click timeout at `visible, enabled and stable`, with one matching
+  navigation element. Screenshot also timed out waiting for fonts.
+  Immediately aborting the unverified stylesheet completed the same helper
+  in 51 ms. A separate Blob PDF iframe reproduction completed clicks in
+  40-85 ms. PDF navigation blocking was not reproduced.
+- Both verifiers now execute the same resource gate: reject writes immediately;
+  continue same-origin GET/HEAD; abort external non-image resources immediately;
+  hold external images until receipt validation, then permit only exact
+  verified URLs. No external CSS/font allowlist, force click, or production
+  timeout change was introduced.
+- Timeout diagnostics retain only a recognized verifier filename and line,
+  never exception messages, values, full paths, or tokens. The unused review
+  predicate was removed; its method/origin/exact-URL tests execute the common
+  runtime gate instead.
+- The OCR live verifier also checks raw JSON: zero initial raw requests,
+  one request on opening, exact order/workflow revision/selection, displayed
+  JSON equal to the response, and no `pre` after closing. It submits no
+  quantities and does not adopt evidence.
+
+Reproduce the old CSS deadlock and verify the corrected gate with real WebKit
+(all responses are synthetic; no remote or business traffic):
+
+```sh
+cd /Users/mmorinag/Sawa/2025.12/worktrees/hospital-workflow-demand-read-20261020/frontend
+node --test --test-concurrency=1 tests/config/ocr-resource-gate.test.mjs
+```
+
+Related verification command:
+
+```sh
+node --test --test-concurrency=1 \
+  tests/config/ocr-resource-gate.test.mjs \
+  tests/config/ocr-live-state.test.mjs \
+  tests/config/ocr-live-diagnostics.test.mjs \
+  tests/config/ocr-live.test.mjs \
+  tests/config/ocr-review-live.test.mjs \
+  tests/config/ocr-first-request.test.mjs \
+  tests/config/ocr-live-endpoints.test.mjs \
+  tests/recognition-review-live-contract.test.cjs
+```
+
+Result: 93 passed, 0 failed, 0 skipped. Log:
+`/tmp/live-resource-gate-tests.log`. WebKit ran outside the local sandbox,
+as required by its macOS launch environment. These are local regression and
+fixture results, not a successful staging rerun. Product code, UI parameters,
+business values, authentication, DB, and Actions were not changed. No commit,
+push, or deployment was performed by this implementation task.
