@@ -9097,9 +9097,12 @@ def _validate_hakodate_recognition_review(payload, records, verified_inputs):
         raise ValueError("hakodate_recognition_review_invalid")
 
 
-def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review=False, _analysis=None):
+def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review=False, _analysis=None, _accepted_values=None):
     from src.services.recognition_acceptance_service import accepted_values
-    accepted = accepted_values(payload) if _analysis is None else _analysis.accepted_values(payload)
+    # Only the same read-only selectability call supplies a validated result.
+    accepted = _accepted_values
+    if accepted is None:
+        accepted = accepted_values(payload) if _analysis is None else _analysis.accepted_values(payload)
     source = payload.get("hakodate_repair_source_receipt") if isinstance(payload, dict) else None
     if not isinstance(source, dict) or not snapshots_equal(source, expected_source):
         raise ValueError("hakodate_artifact_source_mismatch")
@@ -9226,9 +9229,9 @@ def _original_hakodate_execution_source(payload):
     return expected
 
 
-def _validate_hakodate_original_execution(payload, *, allow_review=False, _analysis=None):
+def _validate_hakodate_original_execution(payload, *, allow_review=False, _analysis=None, _accepted_values=None):
     expected = _original_hakodate_execution_source(payload)
-    _validate_hakodate_owned_artifacts(payload, expected, allow_review=allow_review, _analysis=_analysis)
+    _validate_hakodate_owned_artifacts(payload, expected, allow_review=allow_review, _analysis=_analysis, _accepted_values=_accepted_values)
 
 
 def _classify_owned_evidence_payload(payload):

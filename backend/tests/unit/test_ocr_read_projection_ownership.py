@@ -1,6 +1,6 @@
 """Ownership parity using real local validators, not live latency acceptance."""
 import ast
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from hashlib import sha256
 import json
@@ -21,6 +21,18 @@ from test_h2_operator_repair_revision import _owned_artifact_fixture
 from test_modernization_canonical_ocr_artifacts import authored_outputs
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+@contextmanager
+def owned_acceptance_projection():
+    real = acceptance._payload_for_evidence_with_accepted_values
+
+    def owned(item, **_options):
+        return real(item, copy_payload=True)
+
+    with patch.object(acceptance, "_payload_for_evidence_with_accepted_values", side_effect=owned) as observed:
+        yield observed
+        assert observed.call_count > 0
 
 
 def evaluate(function, row, *, owned_projection=False):
@@ -48,15 +60,12 @@ def evaluate(function, row, *, owned_projection=False):
         if value is row.payload_json:
             full_copies.append(1)
         return real_copy(value)
-    real_projection = acceptance.payload_for_evidence
-    def owned(item, **_options):
-        return real_projection(item)
     with ExitStack() as stack:
         for module, name in watched:
             stack.enter_context(patch.object(module, name, side_effect=spy(name, getattr(module, name))))
         stack.enter_context(patch.object(acceptance, "deepcopy", side_effect=counted_copy))
         if owned_projection:
-            stack.enter_context(patch.object(acceptance, "payload_for_evidence", side_effect=owned))
+            stack.enter_context(owned_acceptance_projection())
         result = function(row)
     return result, trace, len(full_copies)
 
@@ -181,6 +190,7 @@ def test_dict_subclass_keeps_deepcopy():
 
 def test_only_selectability_borrows_and_other_seven_calls_are_unchanged():
     calls = []
+    helper_calls = []
     for path in (ROOT / "backend/src").rglob("*.py"):
         source = path.read_text()
         tree = ast.parse(source)
@@ -188,8 +198,28 @@ def test_only_selectability_borrows_and_other_seven_calls_are_unchanged():
             if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == "payload_for_evidence")
                     or (isinstance(node.func, ast.Attribute) and node.func.attr == "payload_for_evidence")):
                 calls.append((path, node))
-    assert len(calls) == 8
-    borrowers = [(path, node) for path, node in calls if node.keywords]
+            if isinstance(node, ast.Call) and (
+                    (isinstance(node.func, ast.Name) and node.func.id == "_payload_for_evidence_with_accepted_values")
+                    or (isinstance(node.func, ast.Attribute) and node.func.attr == "_payload_for_evidence_with_accepted_values")):
+                helper_calls.append((path, node))
+    assert len(calls) == 7
+    assert all(not node.keywords for _, node in calls)
+    assert len(helper_calls) == 2
+    wrapper_calls = [(path, node) for path, node in helper_calls
+                     if path.name == "recognition_acceptance_service.py"]
+    assert len(wrapper_calls) == 1
+    wrapper_path, wrapper_call = wrapper_calls[0]
+    wrapper_tree = ast.parse(wrapper_path.read_text())
+    wrapper = next(item for item in wrapper_tree.body if isinstance(item, ast.FunctionDef)
+                   and item.name == "payload_for_evidence")
+    assert wrapper.lineno <= wrapper_call.lineno <= wrapper.end_lineno
+    assert len(wrapper_call.args) == 1 and isinstance(wrapper_call.args[0], ast.Name)
+    assert wrapper_call.args[0].id == "row"
+    assert len(wrapper_call.keywords) == 1
+    forwarded = wrapper_call.keywords[0]
+    assert forwarded.arg == "copy_payload"
+    assert isinstance(forwarded.value, ast.Name) and forwarded.value.id == "copy_payload"
+    borrowers = [(path, node) for path, node in helper_calls if path != wrapper_path]
     assert len(borrowers) == 1
     path, node = borrowers[0]
     assert path.name == "ocr_evidence_service.py"
@@ -200,7 +230,7 @@ def test_only_selectability_borrows_and_other_seven_calls_are_unchanged():
     assert function.lineno <= node.lineno <= function.end_lineno
     assert {name: sum(path.name == name for path, _ in calls) for name in
             ("ocr_evidence_service.py", "order_service.py", "order_workflow_v2_service.py")} == {
-                "ocr_evidence_service.py": 2, "order_service.py": 4, "order_workflow_v2_service.py": 2}
+                "ocr_evidence_service.py": 1, "order_service.py": 4, "order_workflow_v2_service.py": 2}
     assert sum(not node.keywords for _, node in calls) == 7
 
 
@@ -227,11 +257,8 @@ def test_real_guards_decisions_order_and_immutability(packet_row, mode):
 def test_local_response_fields_and_selection_are_unchanged(packet_row, mode):
     row = packet_row(mode)
     before = deepcopy(vars(row))
-    real = acceptance.payload_for_evidence
-    def owned(item, **_options):
-        return real(item)
     for selected in (False, True):
-        with patch.object(acceptance, "payload_for_evidence", side_effect=owned):
+        with owned_acceptance_projection():
             expected = workflow._serialize_ocr_result(row, selected=selected)
         assert workflow._serialize_ocr_result(row, selected=selected) == expected
         assert expected["selected"] is selected

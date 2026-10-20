@@ -763,9 +763,10 @@ class SelectedEvidenceRejected(ValueError):
 
 def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None) -> str | None:
     try:
-        payload = recognition_acceptance.payload_for_evidence(row, copy_payload=False)
-        accepted = (recognition_acceptance.accepted_values(payload) if _analysis is None
-                    else _analysis.accepted_values(payload))
+        payload, accepted = recognition_acceptance._payload_for_evidence_with_accepted_values(row, copy_payload=False)
+        if accepted is None:
+            accepted = (recognition_acceptance.accepted_values(payload) if _analysis is None
+                        else _analysis.accepted_values(payload))
     except (ValueError, KeyError, TypeError) as exc:
         return str(exc) or "evidence_unusable"
     if any(key in payload for key in ("hakodate_preprocessing", "hakodate_ocr_evidence", "hakodate_target_cell_map", "hakodate_ocr_evidence_records", "hakodate_overlay")) and not isinstance(payload.get("hakodate_canonical_pipeline"), dict):
@@ -777,7 +778,7 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
         if not isinstance(source, dict):
             return "evidence_unusable"
         try:
-            order_service._validate_hakodate_original_execution(payload, _analysis=_analysis)
+            order_service._validate_hakodate_original_execution(payload, _analysis=_analysis, _accepted_values=accepted)
             original_source = (row.artifact_manifest_json or {}).get("original_hakodate_source")
             if accepted:
                 original_source = payload[recognition_acceptance.KEY].get("original_hakodate_source")
