@@ -536,10 +536,15 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
         if (liveEvidence.selected) {
           assert.equal(liveWorkflow.selected_ocr_result_id, identity.evidenceId);
           assert.equal(liveWorkflow.state, 'ocr_selected');
-          assert.ok(liveWorkflow.blockers.includes('evidence_unusable'));
+          assert.ok(Array.isArray(liveWorkflow.blockers));
+          assert.ok(liveWorkflow.blockers.every(code => typeof code === 'string'
+            && code.length <= 128 && /^[a-z]+(?:_[a-z]+)*$/.test(code)));
           assertRecognitionAcceptance({...liveEvidence,
             recognition_acceptance: liveEvidence.artifact_manifest.operator_recognition_acceptance}, liveWorkflow, identity);
-          result.selectedInvalid = {blocker: 'evidence_unusable', manifestReceiptVerified: true};
+          const terminalError = nonEmpty(identity.nativeIngest?.terminal_receipt?.error, 'native-terminal-error');
+          await expect(page.locator('.notice.error').filter({hasText: 'OCR失敗:'}))
+            .toHaveText(`OCR失敗: ${terminalError}`);
+          result.selectedInvalid = {workflowBlockers: [...liveWorkflow.blockers], manifestReceiptVerified: true};
         }
       }
       diagnostics.begin('open-step2');
