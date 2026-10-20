@@ -50,13 +50,22 @@ test('original verification asserts, wait and readonly/external gates remain in 
   const original = execFileSync('git', ['show', `725fd66139927ad60c058145647b79c61d705b44:${file}`], {encoding:'utf8'});
   const current = readFileSync(new URL('../../scripts/verify-ocr-live.mjs', import.meta.url), 'utf8');
   for (const line of original.split('\n').filter(line => /assert\.|await expect\(|waitForLoadState\('networkidle'\)|allowedExternalUrls\.has|allowedMethods\.has|route\.abort|\.click\(\)/.test(line))) {
-    const expected = line === "      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();"
+    const expected = line.includes('assert.equal(workflowReceipt.ok, true)') || line.includes('assert.equal(ocrResultsReceipt.ok, true)')
+      ? '    assert.equal(inspectionReceipt.ok, true);'
+      : line.includes("item.pathname.endsWith('/workflow-v2')")
+      ? line.replace("item.pathname.endsWith('/workflow-v2')", "item.pathname.endsWith('/inspection')")
+      : line.includes('assert.ok(liveEvidence)')
+      ? "    assert.equal(summaryEvidence?.detail_state, 'not_loaded');"
+      : line === "      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();"
       ? "      await expect(card.getByRole('button', {name: '確認して正解にする', exact: true})).toBeEnabled();"
       : line.includes("item.pathname.endsWith('/ocr-results')")
       ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/inspection')") : line;
     assert.ok(current.includes(expected), expected);
   }
-  assert.ok(current.includes("watchRead('ocr-candidates', '/workflow-v2/inspection?include_ocr_results=true')"));
+  assert.ok(current.includes("watchRead('inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false')"));
+  assert.ok(current.includes('assert.equal(detailReceipt.ok, true)'));
+  assert.ok(current.includes('assert.equal(liveEvidence.workflow_revision, liveWorkflow.revision)'));
+  assert.ok(current.includes("getByRole('button', {name: '詳細を表示', exact: true}).click()"));
   const firstRequest = readFileSync(new URL('../../scripts/ocr-first-request.mjs', import.meta.url), 'utf8');
   assert.ok(firstRequest.includes('url.search !== expected.search'));
   assert.ok(firstRequest.includes("request.method() !== 'GET'"));

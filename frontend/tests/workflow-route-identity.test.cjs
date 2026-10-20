@@ -5,8 +5,7 @@ const { mount, transport, deferred } = require('./helpers/modernization-react-do
 // Mounted production page; only router/session/HTTP are synthetic component inputs.
 const PAGE = 'src/pages/orders/[id]/workflow-v2.tsx';
 const ORDER = 'explicit-order', OTHER = 'second-explicit-order';
-const reads = id => [`/orders/${id}/workflow-v2`,
-  `/orders/${id}/workflow-v2/inspection?include_ocr_results=true`, `/orders/${id}`];
+const reads = id => [`/orders/${id}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, `/orders/${id}`];
 const orderCalls = t => t.calls.filter(call => /^\/(orders|outputs)(\/|\?)/.test(call.url));
 const value = (id, revision = 7) => ({ order_id: id, revision, state: 'ocr_failed',
   headline: `Owned ${id}`, blockers: [], warnings: [], selected_ocr_result_id: null,
@@ -17,9 +16,9 @@ async function setup(routerState, route = `/hospital/orders/${ORDER}/workflow-v2
   t.on('get', '/auth/me', () => ({ data: { role: 'operator' } }));
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic', facilities: [] } }));
   for (const id of [ORDER, OTHER]) {
-    const [workflow, inspection, order] = reads(id);
-    t.on('get', workflow, () => pending.get(id)?.promise || { data: value(id) });
-    t.on('get', inspection, () => ({ data: { saved_sheet: null, pre_save_checks: {},
+    const [inspection, order] = reads(id);
+    t.on('get', inspection, () => pending.get(id)?.promise || ({ data: { saved_sheet: null, pre_save_checks: {},
+      workflow: value(id),
       ocr_candidates: require('./helpers/ocr-candidates.cjs')(id, [], value(id)) } }));
     t.on('get', order, () => ({ data: { id, current_version: { document_id: `pdf-${id}` },
       versions: [{ document_id: `pdf-${id}`, is_current: true }] } }));
@@ -84,7 +83,7 @@ test('ready query identity wins over a different concrete prefixed pathname', as
   try {
     await f.h.waitFor(() => f.probe.current.workflow?.order_id === OTHER);
     assert.equal(f.probe.current.orderId, OTHER);
-    assert.ok(orderCalls(f.t).length >= 4);
+    assert.ok(orderCalls(f.t).length >= 3);
     assert.ok(orderCalls(f.t).every(call => call.url.startsWith(`/orders/${OTHER}`)));
   } finally { await f.h.close(); }
 });
@@ -108,7 +107,7 @@ test('readiness loss retires old reads and actions; a subsequent explicit order 
       await old.generateSheetFromSelectedOcr();
       await f.probe.current.generateSheetFromSelectedOcr();
       await f.probe.current.refreshAll();
-      waiting.resolve({ data: value(ORDER, 99) });
+      waiting.resolve({ data: {workflow: value(ORDER, 99)} });
       await refresh;
     });
     assert.equal(orderCalls(f.t).length, stoppedCount);

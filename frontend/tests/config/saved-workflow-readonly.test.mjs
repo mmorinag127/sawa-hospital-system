@@ -53,7 +53,7 @@ function listeners() {
 }
 function emitJSON(events, data, status = 200) {
   events.emit(response(`/api/orders/${id}/workflow-v2`, data.workflow, status));
-  events.emit(response(`/api/orders/${id}/workflow-v2/inspection?include_ocr_results=true`, data.inspection));
+  events.emit(response(`/api/orders/${id}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, data.inspection));
   events.emit(response(`/api/orders/${id}`, data.order));
 }
 test('all four waiters precede navigation and delayed PDF body prevents early success', async () => {

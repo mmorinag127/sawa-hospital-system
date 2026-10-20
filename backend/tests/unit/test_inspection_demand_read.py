@@ -11,28 +11,17 @@ from sqlalchemy import event
 
 from src.db import session_scope
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.models.ocr_job import OcrJob
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import order_workflow_v2_service as service
 from src.services.ocr_history_read import read_history, read_history_detail, read_history_summary
 from test_order_workflow_v2_service import (
     _create_order_with_evidence,
+    _stamp_evidence_with_workflow_template,
     _standard_active_template_for_workflow_tests,
     authored_april_context,
     test_inspection_is_read_only_projection_of_current_lineage as seed_saved_lineage,
 )
-
-
-@pytest.fixture(scope="module")
-def base_inspection():
-    source = subprocess.check_output(
-        ["git", "show", "6e2d0856088ffff99966c6d97e4a46037b4ac5ea:backend/src/services/order_workflow_v2_service.py"],
-        cwd=Path(__file__).resolve().parents[3], text=True,
-    )
-    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "get_inspection")
-    node.decorator_list = []
-    namespace = dict(vars(service))
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "base:get_inspection", "exec"), namespace)
-    return namespace["get_inspection"]
 
 
 @pytest.fixture(autouse=True)
@@ -45,8 +34,24 @@ def isolated(isolated_formal_schema, monkeypatch):
     return isolated_formal_schema
 
 
+@pytest.fixture(scope="module")
+def base_readers():
+    source = subprocess.check_output(
+        ["git", "show", "5e30eefee4f5daddc0f97b6c29cbd1ddc5172496:backend/src/services/order_workflow_v2_service.py"],
+        cwd=Path(__file__).resolve().parents[3], text=True,
+    )
+    wanted = {"get_inspection", "get_workflow_readonly"}
+    nodes = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    assert {node.name for node in nodes} == wanted
+    for node in nodes:
+        node.decorator_list = []
+    namespace = dict(vars(service))
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "base:workflow_reads", "exec"), namespace)
+    return namespace["get_inspection"], namespace["get_workflow_readonly"]
+
+
 @pytest.mark.parametrize("state", ["empty", "no_selected", "selected", "missing_selected", "saved"])
-def test_summary_full_and_detail_parity(state, authored_april_context, isolated, base_inspection):
+def test_summary_full_and_detail_parity(state, authored_april_context, isolated, base_readers):
     if state == "saved":
         seed_saved_lineage(authored_april_context)
         with session_scope() as session:
@@ -67,11 +72,19 @@ def test_summary_full_and_detail_parity(state, authored_april_context, isolated,
         if state == "empty":
             with session_scope() as session:
                 session.query(OrderOcrEvidenceRun).filter_by(order_id=order_id).delete()
+    base_inspection, base_workflow_readonly = base_readers
+    baseline, baseline_error = base_inspection(order_id)
+    assert baseline_error is None
     full, error = service.get_inspection(order_id)
     assert error is None
-    base_full, base_error = base_inspection(order_id)
-    assert base_error is None
-    assert json.dumps(full, ensure_ascii=True) == json.dumps(base_full, ensure_ascii=True)
+    workflow, workflow_error = service.get_workflow(order_id)
+    assert workflow_error is None
+    expected_workflow, expected_workflow_error = base_workflow_readonly(order_id)
+    assert expected_workflow_error is None
+    assert full["workflow"] == expected_workflow == workflow
+    assert {key: value for key, value in full.items() if key != "workflow"} == {
+        key: value for key, value in baseline.items() if key != "workflow"
+    }
     assert service.get_inspection(order_id, history_details=True) == (full, None)
     statements = []
     def track(conn, cursor, statement, parameters, context, executemany):
@@ -164,6 +177,7 @@ def test_api_auth_flags_and_detail_contract(monkeypatch):
     client = TestClient(app)
     url = f"/orders/{order}/workflow-v2/inspection"
     detail_url = f"/orders/{order}/workflow-v2/inspection-detail/{first}"
+    progress_url = f"/orders/{order}/workflow-v2/ocr-progress"
     with registered_hospital_operator(monkeypatch) as operator:
         full = client.get(url, headers=operator.headers)
         assert full.status_code == 200
@@ -177,16 +191,96 @@ def test_api_auth_flags_and_detail_contract(monkeypatch):
         assert value.pop("workflow_revision") == 0
         assert value == next(r for r in full.json()["ocr_results"] if r["ocr_result_id"] == first)
         assert client.get(detail_url.replace(first, foreign), headers=operator.headers).status_code == 404
+        assert client.get(progress_url, headers=operator.headers).status_code == 200
         assert client.get(url + "?history_details=invalid", headers=operator.headers).status_code == 422
         assert client.get(detail_url).status_code == 401
+        assert client.get(progress_url).status_code == 401
         assert client.get(url + "?history_details=false").status_code == 401
     with registered_hospital_operator(monkeypatch, systems=()) as denied:
         assert client.get(detail_url, headers=denied.headers).status_code == 403
+        assert client.get(progress_url, headers=denied.headers).status_code == 403
         assert client.get(url + "?history_details=false", headers=denied.headers).status_code == 403
 
 
-def test_candidate_sidecar_keeps_full_contract():
-    order, _, _ = _create_order_with_evidence()
-    assert service.get_inspection(order, include_ocr_results=True, history_details=False) == (
-        service.get_inspection(order, include_ocr_results=True)
+def test_candidate_sidecar_filters_current_template_without_loading_all_details(authored_april_context):
+    order, first, _ = _create_order_with_evidence()
+    context, error = service.confirm_context(
+        order_id=order, expected_revision=0, facility_id="FAC00001",
+        week_start="2026-04-26", week_end="2026-04-30", template_id="template-fac00001",
     )
+    assert error is None
+    with session_scope() as session:
+        session.get(OrderWorkflowState, order).evidence_run_id = first
+        session.get(OrderWorkflowState, order).state = "ocr_selected"
+    template_version_id = context["template_version_id"]
+    assert _stamp_evidence_with_workflow_template(order, first) == template_version_id
+    summary, error = service.get_inspection(order, include_ocr_results=True, history_details=False)
+    assert error is None
+    candidates = summary["ocr_candidates"]
+    full, error = service.get_inspection(order, include_ocr_results=True, history_details=True)
+    assert error is None
+    assert len(candidates["results"]) == 1
+    assert [item["ocr_result_id"] for item in candidates["results"]] == [first]
+    assert [item["ocr_result_id"] for item in full["ocr_candidates"]["results"]] == [first]
+    assert candidates["hidden_template_mismatch_result_count"] == 1
+    assert candidates["hidden_template_mismatch_result_count"] == full["ocr_candidates"]["hidden_template_mismatch_result_count"]
+    assert candidates["blockers"] == full["ocr_candidates"]["blockers"]
+    assert candidates["candidate_template_version_id"] == full["ocr_candidates"]["candidate_template_version_id"] == template_version_id
+    assert candidates["selected_ocr_result_id"] == first
+    assert candidates["selected_ocr_result_id"] == full["ocr_candidates"]["selected_ocr_result_id"]
+    assert candidates["workflow_state"] == summary["workflow"]["state"]
+    assert all(item["template_version_id"] == candidates["candidate_template_version_id"] for item in candidates["results"])
+    assert all(item.get("detail_state") != "not_loaded" for item in candidates["results"] if item["selected"])
+    assert all(item.get("detail_state") == "not_loaded" for item in candidates["results"] if not item["selected"])
+
+
+def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch):
+    order_id, _, _ = _create_order_with_evidence()
+    with session_scope() as session:
+        session.add(OrderWorkflowState(order_id=order_id, revision=1, state="ocr_running", primary_action="wait_ocr",
+            secondary_actions_json={service.WORKFLOW_V2_META_KEY: {"ocr_job_id": "progress-job", "ocr_job_attempt_id": "attempt-1"}}))
+        session.add(OcrJob(
+            id="progress-job", order_id=order_id, status="running", input_reference="gs://test/input.pdf",
+            metrics={"workflow_attempt_id": "attempt-1", "processing_stage": "hakodate_live_pipeline"},
+            created_at=datetime(2026, 4, 26, 12), updated_at=datetime(2026, 4, 26, 12),
+        ))
+    calls = []
+    original = service._recorded_workflow_job_status
+    def recorded(*args):
+        calls.append(args[0].order_id)
+        return original(*args)
+    monkeypatch.setattr(service, "_recorded_workflow_job_status", recorded)
+    progress, error = service.get_ocr_progress(order_id)
+    assert error is None
+    assert progress["order_id"] == order_id
+    assert progress["state"] == "ocr_running"
+    assert progress["ocr_job"]["ocr_job_id"] == "progress-job"
+    assert progress["ocr_job"]["workflow_attempt_id"] == "attempt-1"
+    assert calls == [order_id]
+    assert progress["common_job_status"]["jobId"] == "progress-job"
+    assert progress["common_job_status"]["attemptIdentity"] == "attempt-1"
+
+    with session_scope() as session:
+        session.get(OcrJob, "progress-job").metrics = {"workflow_attempt_id": "other"}
+    assert service.get_ocr_progress(order_id) == (None, "ocr_job_ownership_mismatch")
+
+
+def test_ocr_progress_preserves_native_owner_and_terminal_receipt():
+    order_id, _, _ = _create_order_with_evidence()
+    with session_scope() as session:
+        session.add(OrderWorkflowState(order_id=order_id, revision=1, state="ocr_running",
+            secondary_actions_json={service.WORKFLOW_V2_META_KEY: {"ocr_job_id": "native-progress-job"}}))
+        session.add(OcrJob(
+            id="native-progress-job", order_id=order_id, status="running", input_reference="gs://test/input.pdf",
+            metrics={
+                "workflow_attempt_id": None,
+                "nonworkflow_execution": {"ingest_ocr_mode": "hakodate", "execution_id": "native-1", "intake_protocol": "native_ingest_v2"},
+                "rerun_terminal_receipt": {"status": "running"},
+            },
+            created_at=datetime(2026, 4, 26, 12), updated_at=datetime(2026, 4, 26, 12),
+        ))
+    progress, error = service.get_ocr_progress(order_id)
+    assert error is None
+    assert progress["ocr_job"]["native_ingest"] == {
+        "mode": "hakodate", "execution_id": "native-1", "intake_protocol": "native_ingest_v2", "terminal_receipt": {"status": "running"},
+    }

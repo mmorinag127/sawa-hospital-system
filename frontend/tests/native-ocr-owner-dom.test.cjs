@@ -27,8 +27,13 @@ async function setup(initial = value()) {
     if (state.pending) { const pending = state.pending; state.pending = null; return pending.promise; }
     return { data: clone(state.value) };
   });
-  t.on('get', `${BASE}/inspection?include_ocr_results=true`, () => ({ data: { saved_sheet: null,
-    pre_save_checks: {}, ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER, [], state.value) } }));
+  t.on('get', `${BASE}/inspection?include_ocr_results=true&history_details=false`, () => ({ data: { saved_sheet: null,
+    workflow: clone(state.value), pre_save_checks: {}, ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER, [], state.value) } }));
+  t.on('get', `${BASE}/ocr-progress`, () => {
+    if (state.pending) { const pending = state.pending; state.pending = null; return pending.promise; }
+    return { data: { order_id: state.value.order_id, workflow_revision: state.value.revision,
+      state: state.value.state, ocr_job: clone(state.value.ocr_job), common_job_status: clone(state.value.common_job_status) } };
+  });
   t.on('get', `/orders/${ORDER}`, () => ({ data: { id: ORDER, current_version: { document_id: 'pdf-A' },
     versions: [{ document_id: 'pdf-A', is_current: true }, { document_id: 'pdf-B', is_current: false }] } }));
   t.on('get', `/orders/${ORDER}/week-options`, () => ({ data: { options: [] } }));
@@ -146,7 +151,11 @@ for (const retirement of ['route', 'document', 'order', 'execution', 'job', 'job
         if (retirement === 'workflowOrder') changed.order_id = 'other-order';
         if (retirement === 'mode') changed.ocr_job.native_ingest.mode = 'unknown';
         f.state.value = changed;
-        await f.h.settle(() => f.probe.current.refreshAll());
+        const before = f.probe.current.workflow;
+        if (retirement === 'workflowOrder') {
+          await f.h.settle(() => assert.rejects(f.probe.current.refreshAll(), /注文が一致/));
+          assert.equal(f.probe.current.workflow, before);
+        } else await f.h.settle(() => f.probe.current.refreshAll());
       }
       const current = f.probe.current.workflow, currentError = f.probe.current.error;
       const count = f.t.calls.length;
@@ -157,7 +166,12 @@ for (const retirement of ['route', 'document', 'order', 'execution', 'job', 'job
       assert.equal(f.probe.current.workflow, current);
       assert.equal(f.probe.current.error, currentError);
       await f.tick(oldTick);
-      assert.equal(f.t.calls.length, count);
+      if (retirement === 'workflowOrder') {
+        assert.equal(f.t.calls.length, count + 1);
+        assert.equal(f.probe.current.workflow, current);
+        assert.match(f.probe.current.error, /jobが変更/);
+        assert.equal(f.timers.size, 0);
+      } else assert.equal(f.t.calls.length, count);
       noWrites(f);
     } finally { await f.h.close(); }
   });

@@ -1605,6 +1605,11 @@ def list_order_workflow_v2_ocr_results(order_id: str):
     return _workflow_v2_or_404(order_workflow_v2_service.list_ocr_results(order_id))
 
 
+@router.get("/{order_id}/workflow-v2/ocr-progress", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_ocr_progress(order_id: str):
+    return _workflow_v2_or_404(order_workflow_v2_service.get_ocr_progress(order_id))
+
+
 @router.get("/{order_id}/workflow-v2/ocr-results/{ocr_result_id}", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_v2_ocr_result(order_id: str, ocr_result_id: str):
     payload, error = order_workflow_v2_service.get_ocr_result(order_id, ocr_result_id)

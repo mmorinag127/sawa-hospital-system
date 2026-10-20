@@ -27,7 +27,8 @@ async function setup() {
   t.on('get', `${ROOT}/facility-config`, () => ({ data: { source: 'canonical_json', order_id: ORDER,
     facility_id: 'facility-A', week_start: '2026-03-02', week_end: '2026-03-08', template_version_id: 'template-A',
     config: { fax_template_id: 'template-A', fax_template_ids: ['template-A'], facility_template_id: 'facility-template-A', fax_template: { columns } } } }));
-  t.on('get', `${ROOT}/inspection?include_ocr_results=true`, () => ({ data: {
+  t.on('get', `${ROOT}/inspection?include_ocr_results=true&history_details=false`, () => ({ data: {
+    workflow: clone(state.workflow),
     ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER, [{ ocr_result_id: state.workflow.selected_ocr_result_id || OCR, selected: true, status: 'completed' }], state.workflow),
     saved_sheet: state.saved ? { sheet: clone(state.saved) } : null, pre_save_status: status, pre_save_checks: checks,
     anomaly_review: { warnings: [{ row_index: 0, col_index: 4, suggested_value: '12', message: 'component suggestion' }] },
