@@ -28,11 +28,12 @@ function localDependencies(directory) {
 
 test('deps stage copies every declared committed local dependency before npm ci', () => {
   const docker = fs.readFileSync(path.join(frontend, 'Dockerfile'), 'utf8');
-  const deps = docker.split('FROM node:20-slim AS builder')[0];
+  const deps = docker.split('FROM node:24-slim AS builder')[0];
   assert.match(deps, /^COPY vendor \.\/vendor$/m);
   assert.ok(deps.indexOf('COPY vendor ./vendor') < deps.indexOf('RUN npm ci'));
   const old = execFileSync('git', ['show', '4a9beb430da25f878eb8a3bdd6e834298c803afe:frontend/Dockerfile'], { cwd: root, encoding: 'utf8' });
-  assert.equal(docker, old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor'));
+  assert.equal((old.match(/FROM node:20-slim/g) || []).length, 3);
+  assert.equal(docker, old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor').replaceAll('FROM node:20-slim', 'FROM node:24-slim'));
   for (const relative of localDependencies(frontend)) {
     const committed = execFileSync('git', ['show', `HEAD:frontend/${relative}`], { cwd: root });
     assert.deepEqual(fs.readFileSync(path.join(frontend, relative)), committed);

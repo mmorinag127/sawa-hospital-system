@@ -136,12 +136,10 @@ def client(store, monkeypatch):
             ), {"id": account, "system": "shift" if account == "shift" else "hospital",
                 "enabled": account != "disabled"})
         session.add(MenuMaster(id="existing", name="Existing", normalized_name="existing", qty_per_serving=1))
-    auth.invalidate_user_cache()
     app = FastAPI()
     app.include_router(menu_masters.router)
     with TestClient(app, headers={"Authorization": "Bearer operator"}) as api:
         yield api
-    auth.invalidate_user_cache()
 
 
 def invoke(client, method, path, headers=None):

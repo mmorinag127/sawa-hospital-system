@@ -21,7 +21,7 @@ function handler(context) {
   return sandbox.exports.fn;
 }
 function fixture() {
-  const calls = [], messages = [];
+  const calls = [], messages = [], retired = [];
   const receipt = {workflow_revision: 7, geometry_source_digest: 'source-bound'};
   const review = {source_receipt: receipt, coordinate_space: {mode: 'template_canvas', width: 100, height: 600},
     calendar_days: Array.from({length: 7}, (_, i) => ({date: `2026-10-${25 + i}`}))};
@@ -33,6 +33,8 @@ function fixture() {
     rowDayBoundaries: ['0', '8', '16', '24', '32', '40', '48', '56'],
     axisSourceRef: {current: {row: {review, own}}}, ownsPageContext: () => true,
     beginWorkflowEditorEdit: noop, pageOperationGenerationRef: {current: 0},
+    confirmWorkflowReplacement: () => true,
+    retireReplacedWorkflowInput: editor => retired.push(editor),
     axisReadGenerationRef: {current: {row: 0}}, setRowAxisLoading: noop, setBusy: noop,
     busyGenerationRef: {current: 0}, captureWorkflowInputVersion: () => ({revision: 7}),
     captureAxisOwner: () => own, ownsAxisInput: () => true, setError: value => messages.push(value),
@@ -46,9 +48,9 @@ function fixture() {
     setSelectedAutoEditIndex: noop, setMessage: noop, setVisibleStep: noop,
     formatApiError: error => error.message, quadAliveRef: {current: true},
   };
-  return {context, calls, messages};
+  return {context, calls, messages, retired};
 }
-test('row save sends explicit day labels and boundaries without changing points or discarding sheet', async () => {
+test('row save sends explicit day labels and boundaries and retires consented local input after rerun', async () => {
   const f = fixture();
   await handler(f.context)('row');
   assert.equal(f.calls.length, 2);
@@ -56,6 +58,15 @@ test('row save sends explicit day labels and boundaries without changing points 
   assert.equal(f.calls[0].body.day_labels[3], '2026-10-28');
   assert.deepEqual(Array.from(f.calls[0].body.corrected_ys), Array.from({length: 57}, (_, index) => index * 10));
   assert.equal(f.calls[1].body.document_id, 'original-pdf');
+  assert.deepEqual(f.retired, ['row']);
+});
+test('declined replacement preserves input and never saves or reruns', async () => {
+  const f = fixture();
+  f.context.confirmWorkflowReplacement = () => false;
+  await handler(f.context)('row');
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(f.retired, []);
+  assert.equal(f.context.rowAxisYs.length, 57);
 });
 test('missing day boundary keeps editor input and never sends save or rerun', async () => {
   const f = fixture();

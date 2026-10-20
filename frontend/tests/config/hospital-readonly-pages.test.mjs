@@ -75,7 +75,9 @@ test('disclosure and redirect corrections follow product contracts without suppr
   assert.ok(proxy.includes('NextResponse.redirect(url, 308)'));
   const dashboard = read('pages/hospital-dashboard.tsx');
   assert.ok(dashboard.includes('className="system-meta warn"'));
-  assert.ok(dashboard.includes('エラー: {systemStatus.ocr_pipeline.last_error}'));
+  assert.ok(dashboard.includes('<OcrOperationsSummary operations={systemStatus?.ocr_operations}'));
+  assert.ok(read('pages/system-status.tsx').includes('<OcrOperationsHistory operations={status?.ocr_operations}'));
+  assert.ok(!dashboard.includes('エラー: {systemStatus.ocr_pipeline.last_error}'));
   assert.ok(READONLY_MESSAGE_SURFACES.includes('.system-meta.warn'));
   assert.equal(readonlyPageStatus([{ status: 404 }], true), 'failed');
   assert.equal(businessPath('/hospital/facilities/FAC00015'), true);

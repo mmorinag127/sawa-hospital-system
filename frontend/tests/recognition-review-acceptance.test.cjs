@@ -22,7 +22,8 @@ async function setup({ normal = false, job = null, initialStep = 2 } = {}) {
   t.on('get', `/orders/${ORDER}/week-options`, () => ({data: {options: []}}));
   t.on('get', `/orders/${ORDER}/document`, () => ({data: new Blob(['synthetic component only'])}));
   const receipt = {workflow_revision: 7, recognition_evidence_run_id: 'ocr-A', selected_pdf_receipt: {document_id: 'pdf-A'}};
-  t.on('get', `${BASE}/recognition-review`, () => ({data: {order_id: ORDER, source_receipt: copy(receipt),
+  t.on('get', `${BASE}/recognition-review`, call => ({data: {order_id: ORDER, mode: call.config.params.mode, retained_cell_count: 11,
+    source_receipt: {...copy(receipt), recognition_mode: call.config.params.mode},
     review_cells: copy(flags), cells: [...cells, 'E11'].map(cell => ({cell, image_png_base64: ''}))}}));
   t.on('put', `${BASE}/recognition-review/accept`, call => {
     assert.equal(call.config.headers['If-Match'], '"7"');

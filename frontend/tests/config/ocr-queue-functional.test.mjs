@@ -14,6 +14,8 @@ test('actual queue uses native ingest rows and preserves recovery, refresh, erro
   const React=require('react'),{act}=React,mui=require('@mui/material'),styles=require('@mui/material/styles');
   const root=require('react-dom/client').createRoot(document.getElementById('root'));
   const ts=require('typescript'),calls=[];
+  const operationStatus=status=>({ocr_operations:{source:'recorded_sql_workflow/v1',observed_at:'2026-10-20',
+    summary:{status,total:0,counts:{}},items:[],history:[]}});
   const items=['pending','processing','done','error'].map((status,i)=>({id:`ingest-${i}`,status,attempts:i,generation:i?'a'.repeat(31)+i:null,generation_attempts:i?i:null,
     message_id:`mail-${i}`,pdf_uri:`gs://fixture/${i}.pdf`,last_error:i===0?'previous failure':i===3?'native failure':null,
     failure_kind:i===3?'business':null,created_at:'2026-10-19T00:00:00Z',updated_at:'2026-10-19T01:00:00Z',
@@ -27,7 +29,7 @@ test('actual queue uses native ingest rows and preserves recovery, refresh, erro
   const apiClient={get:async(path,options)=>{
     calls.push(['GET',path,options]);
     if(deferReads)return new Promise((resolve,reject)=>reads.push({path,options,resolve,reject}));
-    if(path==='/system/status') {if(statusFailure)throw new Error('HTTP 403');return {data:{ocr_pipeline:{status:'ok',inflight:1,max_inflight:2},uploaded_pdfs:{pending_count:3},ingest_jobs:{processing_count:1}}};}
+    if(path==='/system/status') {if(statusFailure)throw new Error('HTTP 403');return {data:{...operationStatus('idle'),uploaded_pdfs:{pending_count:3},ingest_jobs:{processing_count:1}}};}
     assert.equal(path,'/ingest/jobs');
     if(readFailure)throw new Error('HTTP 401');
     return {data:{items:malformed?malformedItems:options?.params?.status?items.filter(row=>row.status===options.params.status):items}};
@@ -42,6 +44,15 @@ test('actual queue uses native ingest rows and preserves recovery, refresh, erro
     if(name==='@mui/material/styles')return styles;
     if(name==='@sawa/ui')return {sawaTheme:styles.createTheme()};
     if(name==='../components/TopNav')return {default:()=>null};
+    if(name==='../components/OcrOperations') {
+      const actual={};
+      const moduleSource=readFileSync(new URL('../../src/components/OcrOperations.tsx',import.meta.url),'utf8');
+      const compiled=ts.transpileModule(moduleSource,{compilerOptions:{target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React,module:ts.ModuleKind.CommonJS}}).outputText;
+      vm.compileFunction(compiled,['exports','require','React'])(actual,name=>{
+        assert.equal(name,'next/link');return {default:({children,...props})=>React.createElement('a',props,children)};
+      },React);
+      return actual;
+    }
     if(name==='../services/apiClient')return {apiClient};
     throw new Error('Unexpected import '+name);
   },React);
@@ -112,7 +123,7 @@ test('actual queue uses native ingest rows and preserves recovery, refresh, erro
       const pair=reads.slice(start,start+2);assert.equal(pair.length,2);
       for(const read of pair) {
         if(fail)read.reject(new Error('older failed read'));
-        else read.resolve({data:read.path==='/ingest/jobs'?{items:items.filter(row=>row.status===status)}:{ocr_pipeline:{status}}});
+        else read.resolve({data:read.path==='/ingest/jobs'?{items:items.filter(row=>row.status===status)}:operationStatus(status==='error'?'failed':status==='done'?'review_required':status)});
       }
     });
     let older=reads.length;await choose('pending');let latest=reads.length;await choose('error');
@@ -121,16 +132,16 @@ test('actual queue uses native ingest rows and preserves recovery, refresh, erro
     assert.equal(button('再取得').disabled,true,'older finally must not clear current loading');
     await settle(latest,'error');
     assert.equal(document.querySelector('.queue-card .badge').textContent,'error');
-    assert.equal(document.querySelector('.queue-status-value').textContent,'エラー');
+    assert.equal(document.querySelector('[aria-label="現行SQL OCR状態"] strong').textContent,'失敗');
     older=reads.length;await choose('pending');latest=reads.length;await choose('done');
     await settle(latest,'done');await settle(older,'pending',true);
     assert.equal(document.querySelector('.queue-card .badge').textContent,'done');
-    assert.equal(document.querySelector('.queue-status-value').textContent,'done');
+    assert.equal(document.querySelector('[aria-label="現行SQL OCR状態"] strong').textContent,'認識結果の確認が必要');
     assert.equal(document.querySelector('.message'),null,'older failure must not overwrite current success');
     older=reads.length;await choose('pending');latest=reads.length;await choose('error');
     await settle(latest,'error');await settle(older,'pending');
     assert.equal(document.querySelector('.queue-card .badge').textContent,'error','reverse success must not replace current rows');
-    assert.equal(document.querySelector('.queue-status-value').textContent,'エラー');
+    assert.equal(document.querySelector('[aria-label="現行SQL OCR状態"] strong').textContent,'失敗');
     const detached=reads.length;await choose('pending');
     await act(async()=>root.unmount());unmounted=true;
     await settle(detached,'pending');assert.equal(lateUpdates,0,'unmounted reads must not publish');

@@ -68,16 +68,16 @@ async function queue(run, api) {
   }
 }
 
-test('actual queue requests only shared system status; no Firestore or retired template control', async () => {
+test('actual queue requests intake and shared system status; no Firestore or retired template control', async () => {
   const calls = [];
   await queue(async container => {
-    assert.deepEqual(calls, ['/system/status']);
+    assert.deepEqual(calls, ['/ingest/jobs', '/system/status']);
     assert.match(container.textContent, /認識結果の確認が必要/);
-    assert.match(container.textContent, /アップロード受付（未帰属を含む）/);
-    assert.match(container.textContent, /再試行対象: 3/);
+    assert.match(container.textContent, /取込ジョブ/);
+    assert.match(container.textContent, /backlog: 3/);
     assert.doesNotMatch(container.textContent, /テンプレートID|未分類ジョブ/);
     assert.ok(!container.querySelector('input'));
-  }, {get: async url => {calls.push(url);const data = payload();data.intake = {uploaded_pdfs: {eligible_backlog_count: 3}, ingest_jobs: {}};return {data: {ocr_operations: data}};}});
+  }, {get: async url => {calls.push(url);return {data: url === '/ingest/jobs' ? {items: []} : {ocr_operations: payload(), uploaded_pdfs: {eligible_backlog_count: 3}, ingest_jobs: {}}};}});
 });
 
 test('actual recover-ready remains explicit and zero acceptance is not recognition success', async () => {
@@ -86,9 +86,11 @@ test('actual recover-ready remains explicit and zero acceptance is not recogniti
     const button = [...container.querySelectorAll('button')].find(node => node.textContent === '滞留をまとめて再試行');
     await act(async () => {button.click();button.click();});
     assert.deepEqual(calls, ['/ingest/recover-ready']);
-    assert.match(container.textContent, /認識完了とは別/);
-    assert.match(container.textContent, /OCR=0/);
-  }, {get: async () => ({data: {ocr_operations: payload()}}), post: async url => {calls.push(url);return {data: {ingest_enqueued: 0, uploaded_enqueued: 0, ocr_recovered: 0}};}});
+    assert.match(container.textContent, /まとめて再試行を開始/);
+    assert.match(container.textContent, /認識結果の確認が必要/);
+    assert.doesNotMatch(container.textContent, /認識完了/);
+    assert.match(container.textContent, /ocr=0/);
+  }, {get: async url => ({data: url === '/ingest/jobs' ? {items: []} : {ocr_operations: payload()}}), post: async url => {calls.push(url);return {data: {accepted: true, ingest_enqueued: 0, uploaded_enqueued: 0, ocr_recovered: 0}};}});
 });
 
 test('queue request failure is visible, not an empty successful queue', async () => {
@@ -105,8 +107,8 @@ test('a failed status reload after accepted recovery cannot hide the read failur
     await act(async () => {button.click();});
     assert.match(container.textContent, /取得に失敗/);
     assert.doesNotMatch(container.textContent, /認識完了とは別|この状態の現在ジョブはありません/);
-  }, {get: async () => {if (++reads > 1) throw new Error('authored reload failure');return {data: {ocr_operations: payload()}};},
-    post: async () => ({data: {ocr_recovered: 0}})});
+  }, {get: async url => {if (url === '/ingest/jobs') return {data: {items: []}};if (++reads > 1) throw new Error('authored reload failure');return {data: {ocr_operations: payload()}};},
+    post: async () => ({data: {accepted: true, ingest_enqueued: 0, uploaded_enqueued: 0, ocr_recovered: 0}})});
 });
 
 test('all three source consumers render the identical current SQL component', () => {

@@ -21,7 +21,7 @@ def portal_client(monkeypatch):
         pytest.fail("Portal mode must not fall back to local token or role validation")
 
     monkeypatch.setattr(auth, "_google_email_or_none", forbidden_fallback)
-    monkeypatch.setattr(auth, "_load_active_user_roles", forbidden_fallback)
+    monkeypatch.setattr(auth, "_local_current_user", forbidden_fallback)
     app = FastAPI()
 
     @app.get("/user")

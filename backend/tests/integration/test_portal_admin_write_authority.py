@@ -64,16 +64,13 @@ def owned(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "session_scope", db.session_scope)
     monkeypatch.setattr(auth, "AUTH_PROVIDER", "google")
     monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setattr(auth, "_USER_ROLE_CACHE_TTL_SECONDS", 600)
     monkeypatch.setattr(auth, "_google_email_or_none", lambda request: ACTOR.account)
-    auth.invalidate_user_cache()
     app = FastAPI()
     app.include_router(portal.router)
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
             yield engine, client
     finally:
-        auth.invalidate_user_cache()
         engine.dispose()
         sa.event.remove(engine, "connect", foreign_keys)
 
@@ -413,9 +410,7 @@ def owned_pg(tmp_path, monkeypatch):
         monkeypatch.setattr(auth, "session_scope", db.session_scope)
         monkeypatch.setattr(auth, "AUTH_PROVIDER", "google")
         monkeypatch.setenv("AUTH_DISABLED", "false")
-        monkeypatch.setattr(auth, "_USER_ROLE_CACHE_TTL_SECONDS", 600)
         monkeypatch.setattr(auth, "_google_email_or_none", lambda request: ACTOR.account)
-        auth.invalidate_user_cache()
         app = FastAPI()
         app.include_router(portal.router)
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -428,7 +423,6 @@ def owned_pg(tmp_path, monkeypatch):
             pass  # The diagnostic was logged; preserve the original setup failure.
         raise
     finally:
-        auth.invalidate_user_cache()
         try:
             if engine is not None:
                 engine.dispose()

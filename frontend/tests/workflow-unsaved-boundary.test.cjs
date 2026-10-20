@@ -220,7 +220,7 @@ test('existing NavigationBoundary back/forward cancel restores exact owned histo
       nativeReplace.call(history, current, '', ROOT + '?view=3');
       await f.h.settle(() => assert.equal(f.pop({ as: ROOT + '?view=3' }), false));
       assert.deepEqual(snapshot(f), before);
-      history.pushState({}, '', ROOT + '?view=4');
+      history.pushState({ __N: true }, '', ROOT + '?view=4');
       const later = clone(history.state);
       nativeReplace.call(history, current, '', ROOT + '?view=3');
       // Move within the owned entries, accepting this transition first.

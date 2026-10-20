@@ -68,6 +68,7 @@ export default function OcrQueuePage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [bulkRecoverPending, setBulkRecoverPending] = useState(false);
+  const bulkRecoverInFlight = useRef(false);
   const [queueError, setQueueError] = useState(false);
   const queueRead = useRef({ generation: 0, mounted: false });
 
@@ -129,7 +130,8 @@ export default function OcrQueuePage() {
   const ingest = systemStatus?.ingest_jobs;
 
   const recoverReadyQueue = async () => {
-    if (bulkRecoverPending || !queueRead.current.mounted) return;
+    if (bulkRecoverInFlight.current || !queueRead.current.mounted) return;
+    bulkRecoverInFlight.current = true;
     const generation = queueRead.current.generation;
     setBulkRecoverPending(true);
     setMessage("滞留しているOCRジョブをまとめて再試行しています。");
@@ -149,6 +151,7 @@ export default function OcrQueuePage() {
         setMessage("まとめて再試行に失敗しました。");
       }
     } finally {
+      bulkRecoverInFlight.current = false;
       if (queueRead.current.mounted) setBulkRecoverPending(false);
     }
   };

@@ -20,10 +20,12 @@ function handler(name, context) {
 }
 function fixture() {
   const calls = [];
-  const review = {order_id: 'order', source_receipt: {workflow_revision: 7, selected_pdf_receipt: {document_id: 'pdf'}}, cells: [{cell: 'E11'}]};
+  const review = {order_id: 'order', mode: 'diagnostic_subset/v1', retained_cell_count: 1,
+    source_receipt: {workflow_revision: 7, recognition_mode: 'diagnostic_subset/v1', selected_pdf_receipt: {document_id: 'pdf'}}, cells: [{cell: 'E11'}]};
   const context = {
     orderId: 'order', effectiveSelectedDocumentId: 'pdf', workflowRevisionRef: {current: {revision: 7}},
     recognitionReview: review, recognitionValues: {E11: '9'},
+    editorVersion: () => ({dirty: false}),
     runAction: (_label, fn) => fn({assertCurrent() {}, adopt: fn => fn()}),
     apiClient: {get: async () => ({data: review}), put: async (url, body) => {calls.push({url, body}); return {data: {revision: 8}};}},
     setRecognitionReview: value => calls.push({review: value}), setRecognitionValues() {},
@@ -35,10 +37,10 @@ function fixture() {
 }
 test('recognition review compares numeric revision and selected PDF', async () => {
   const f = fixture();
-  await handler('loadRecognitionReview', f.context)();
+  await handler('loadRecognitionReview', f.context)('diagnostic_subset/v1');
   assert.equal(f.calls[0].review.order_id, 'order');
   f.context.effectiveSelectedDocumentId = 'changed';
-  await assert.rejects(handler('loadRecognitionReview', f.context)(), /PDF/);
+  await assert.rejects(handler('loadRecognitionReview', f.context)('diagnostic_subset/v1'), /PDF/);
 });
 test('recognition save retains authored value and refuses stale revision', async () => {
   const f = fixture();

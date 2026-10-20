@@ -126,7 +126,7 @@ test('case collision and symlink escape cannot choose an artifact owner', () => 
 });
 
 test('mixed legacy and case-1 labels keep distinct ordinal browser outputs and exact owner metadata', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'verified-browser-ordinal-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'verified-browser-ordinal-')));
   const artifact = join(root, 'artifact'); mkdirSync(artifact);
   const output = join(root, 'browser');
   const legacy = fixture();
