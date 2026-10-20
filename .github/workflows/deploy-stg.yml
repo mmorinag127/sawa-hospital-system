@@ -168,9 +168,10 @@ jobs:
       - name: Capture one read-only snapshot and run disconnected profiles
         run: |
           set -euo pipefail
+          # Original-input parity only; the script's default all-fault mode remains available.
           product/backend/.venv/bin/python -B diagnostic/scripts/diagnose_reviewed_ocr.py \
             --product "$GITHUB_WORKSPACE/product" --proxy "$RUNNER_TEMP/reviewed-cloud-sql-proxy" \
-            --candidate "$GITHUB_WORKSPACE/candidate" \
+            --candidate "$GITHUB_WORKSPACE/candidate" --original-only \
             --summary "$RUNNER_TEMP/reviewed-ocr-summary"
       - name: Remove private inputs even after failure
         if: always()

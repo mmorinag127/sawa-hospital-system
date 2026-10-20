@@ -65,3 +65,14 @@ test('native compatibility never supplies a missing workflow attempt to the old 
   delete source.expected_execution_mode;
   assert.throws(() => verificationOutcome(source, workflow, evidence));
 });
+
+for (const outcome of ['done', 'recognition_review_required']) {
+  test(`immutable ${outcome} owner remains valid after selection, historical outcome state is still checked`, () => {
+    const {source, workflow, evidence} = fixture(outcome);
+    workflow.state = 'ocr_selected';
+    assert.doesNotThrow(() => assertNativeIngestOwner(source, workflow, evidence));
+    assert.throws(() => verificationOutcome(source, workflow, evidence));
+    evidence.payload_json._ocr_execution.job_id = 'foreign';
+    assert.throws(() => assertNativeIngestOwner(source, workflow, evidence));
+  });
+}
