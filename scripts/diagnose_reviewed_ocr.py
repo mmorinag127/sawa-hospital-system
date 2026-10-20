@@ -327,7 +327,7 @@ def fixture_bytes(private, assets, uri, options):
     return data
 
 
-def offline(product, private, output, build, *, variant="baseline", runtime=None):
+def offline(product, private, output, build, *, variant="baseline", runtime=None, original_only=False):
     block_external()
     sys.path.insert(0, str(product / "backend"))
     from src.services import canonical_ocr_artifact_service as artifacts, storage_service as storage
@@ -441,6 +441,8 @@ def offline(product, private, output, build, *, variant="baseline", runtime=None
         for index, uri in enumerate(original_assets):
             cases.extend((kind + "_" + str(index), uri, kind)
                 for kind in ("unavailable", "bytes_changed", "in_flight_delete"))
+        if original_only:
+            cases = cases[:1]
         for case, changed_uri, change_kind in cases:
             row = deepcopy(original_row)
             assets = deepcopy(original_assets)
@@ -495,7 +497,11 @@ def offline(product, private, output, build, *, variant="baseline", runtime=None
         "diagnostic_input_mutated")
     require(original_row.payload_json == json.loads((private / "payload.json").read_bytes())
         and original_row.artifact_manifest_json == json.loads((private / "manifest.json").read_bytes()), "diagnostic_input_mutated")
+    original_valid = (results[0]["outcome"] == "dict" and not results[0]["errors_in_order"]
+        and results[1]["outcome"] is None and results[2]["outcome"] is None
+        and results[3]["returned_selectable"] is True)
     result = {"scope": "offline original execution input; not current DB capture or service latency", "build": build,
+        "mode": "original-only" if original_only else "all", "original_validation_passed": original_valid,
         "product_sha": PRODUCT_SHA if variant == "baseline" else os.environ["GITHUB_SHA"],
         "variant": variant, "diagnostic_sha": os.environ["GITHUB_SHA"], "input_hashes": before,
         "script_sha256": sha(Path(__file__).read_bytes()), "lock_sha256": sha((product / "backend/uv.lock").read_bytes()),
@@ -504,12 +510,11 @@ def offline(product, private, output, build, *, variant="baseline", runtime=None
         "inputs_unchanged": True, "results": results}
     write_json(output, result)
     write_json(private / (variant + "-" + build + "-results.json"), full_results)
-    return (results[0]["outcome"] == "dict" and not results[0]["errors_in_order"]
-        and results[1]["outcome"] is None and results[2]["outcome"] is None
-        and results[3]["returned_selectable"] is True)
+    # A completed comparison input is not a claim that the evidence is selectable.
+    return original_only or original_valid
 
 
-def run(product, proxy, summary, candidate=None):
+def run(product, proxy, summary, candidate=None, *, original_only=False):
     private = owned_path()
     private.mkdir(mode=0o700)
     write_json(private / "owner.json", marker())
@@ -537,14 +542,16 @@ def run(product, proxy, summary, candidate=None):
                 env["PYTHONPATH"] = str(Path(os.environ["RUNNER_TEMP"]) / "reviewed-opencv-gui")
             destination = summary / (variant + "-" + build + ".json")
             candidate_args = ["--candidate", str(candidate)] if candidate is not None else []
+            mode_args = ["--original-only"] if original_only else []
             result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--product", str(product),
-                "--offline", "--build", build, "--variant", variant, "--summary", str(summary), *candidate_args], env=env,
+                "--offline", "--build", build, "--variant", variant, "--summary", str(summary), *candidate_args, *mode_args], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
             if result.returncode != 0:
                 require(destination.is_file() or (summary / (variant + "-" + build + "-error.json")).is_file(),
                     "diagnostic_offline_process_failed")
             statuses.append(result.returncode == 0)
-        return all(statuses) and (compare_results(private, summary) if candidate is not None else True)
+        equal = compare_results(private, summary) if candidate is not None else True
+        return all(statuses) and equal
     finally:
         cleanup(private)
 
@@ -557,6 +564,8 @@ def main():
     parser.add_argument("--proxy", type=Path)
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--original-only", action="store_true",
+        help="Compare only the four original-input phases; default retains all fault cases.")
     parser.add_argument("--cleanup", action="store_true")
     parser.add_argument("--build", choices=("headless", "gui"), default="headless")
     args = parser.parse_args()
@@ -573,11 +582,13 @@ def main():
             require(args.variant == "baseline" or args.candidate is not None, "diagnostic_candidate_required")
             source = args.product if args.variant == "baseline" else args.candidate
             return 0 if offline(source, owned_path(), args.summary / (args.variant + "-" + args.build + ".json"),
-                args.build, variant=args.variant, runtime=args.product / "backend/.venv") else 1
+                args.build, variant=args.variant, runtime=args.product / "backend/.venv",
+                original_only=args.original_only) else 1
         else:
             require(args.proxy is not None, "diagnostic_proxy_required")
             require(args.candidate is not None, "diagnostic_candidate_required")
-            return 0 if run(args.product, args.proxy, args.summary, args.candidate) else 1
+            return 0 if run(args.product, args.proxy, args.summary, args.candidate,
+                original_only=args.original_only) else 1
         return 0
     except Exception as exc:
         # Never publish exception text, raw DB rows, credentials or subprocess output.

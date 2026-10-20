@@ -178,3 +178,74 @@ Result: 86 passed, 0 failed, 0 skipped. Log:
 jsdom warning about the JSX style attribute; no test failed. No business
 data, quantities, authentication, product code, or Actions were changed.
 No commit/push/deploy or staging rerun was performed for this correction.
+
+## PR116 terminal/current-state separation and original-only diagnosis
+
+- Base: `81b1aa2c2c357eddb1bd3710571da6f3250e6893`; branch:
+  `codex/hospital-live-current-state-20261021`.
+- Failure classes: immutable native job outcome was conflated with the later
+  operator workflow state; the original diagnostic results were only saved
+  after all fault cases, exceeding the existing offline child deadline.
+- `assertNativeIngestOwner` retains execution/job/evidence/order/PDF/hash,
+  attempt-null, producer, terminal status and error assertions. Historical
+  state remains checked in `verificationOutcome`; the live native check
+  separately checks the current selected/unselected state. Reload snapshots
+  now also preserve workflow state.
+- Selected-invalid observations require the explicit `evidence_unusable`
+  workflow blocker, selected evidence identity, `selectable=false`, public
+  acceptance `null`, and the existing full canonical receipt assertions
+  against the manifest receipt (including original payload hash, PDF,
+  digest, prior revision, cells and values). They may collect image/page
+  screenshots, reload and raw-open/close evidence, but finish with
+  `status=blocked`, `code=selected_invalid_requires_original_diagnosis`.
+  This generic public blocker is NOT treated as root-cause parity proof.
+  Invalid receipts or unrelated blockers still fail before observation.
+- `diagnose_reviewed_ocr.py --original-only` runs the four original-input
+  phases for both source revisions and both existing OpenCV profiles.
+  The explicit Actions diagnostic invocation uses this mode. The default
+  all-fault mode remains unchanged in case coverage. Child timeout remains
+  300 seconds; workflow timeout remains 15 minutes.
+- Original-only completion means diagnostic completion, not selectable
+  evidence: summaries explicitly record `mode` and
+  `original_validation_passed`. Full private values, exception identities
+  and error order are still compared before cleanup, including when both
+  versions reject the original input. A mismatch remains a failed run.
+- No product, business values, authentication, DB writes, dependencies,
+  commit, push or deployment changes. Existing untracked dependencies and
+  lock files were preserved.
+
+Focused verification:
+
+```sh
+cd /Users/mmorinag/Sawa/2025.12/worktrees/hospital-workflow-demand-read-20261020/backend
+env DB_URI=sqlite:///:memory: \
+  FACILITY_MASTER_PATH=/Users/mmorinag/Sawa/2025.12/worktrees/hospital-workflow-demand-read-20261020/backend/src/data/facility_master.test.json \
+  /Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main/backend/.venv/bin/python \
+  -m pytest tests/unit/test_reviewed_ocr_diagnostic.py -q
+
+cd ../frontend
+node --test --test-concurrency=1 \
+  tests/config/native-ingest-live.test.mjs \
+  tests/config/ocr-live-state.test.mjs \
+  tests/config/ocr-live.test.mjs \
+  tests/config/ocr-review-live.test.mjs \
+  tests/config/ocr-live-diagnostics.test.mjs \
+  tests/recognition-review-live-contract.test.cjs
+```
+
+Results: backend **120 passed**, frontend **101 passed**, no skipped tests.
+Backend Unix-socket fixtures required execution outside the local sandbox.
+An initial `DB_URI=:memory:` invocation failed configuration parsing; the
+explicit SQLite URI above was used without changing runtime code. The first
+sandboxed run had 111 passed/9 failed (8 socket permission failures and one
+SIGTERM fixture signature); that fixture was updated for the new keyword
+while retaining its cleanup assertions. Frontend initially had 99 passed/
+2 failed; the old source assertion mapping was updated and screenshot
+observation is checked via actual fixture screenshot calls, not a timing
+entry that was never recorded.
+
+These are focused local regressions, not a successful real-input diagnostic.
+Earlier read-only run `39456171409` produced only
+`unexpected_TimeoutExpired`. The new original-only Actions result and
+same-input baseline/current comparison remain pending with the parent;
+overall parity/completion is explicitly NOT established.
