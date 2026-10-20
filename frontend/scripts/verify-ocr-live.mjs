@@ -117,6 +117,7 @@ export function liveStateSnapshot(inspection, evidence) {
   // Signed URLs may renew on GET; persisted evidence, review and quantities must not change.
   const { overlay_url, sheet_review_base_url, workflow_revision, ...persistedEvidence } = evidence;
   return structuredClone({
+    state: inspection.workflow.state,
     revision: inspection.workflow.revision,
     selectedId: inspection.workflow.selected_ocr_result_id,
     blockers: inspection.workflow.blockers,
@@ -240,7 +241,6 @@ export function assertNativeIngestOwner(sourceCase, workflow, evidence) {
   assert.ok(terminal.workflow_attempt_id == null);
   assert.equal(evidence.producer_version, 'hakodate_best_method_pipeline');
   assert.equal(terminal.error, job.status === 'done' ? null : job.error_message);
-  assert.equal(workflow.state, job.status === 'done' ? 'ocr_completed' : 'ocr_failed');
 }
 
 export function verificationOutcome(sourceCase, workflow, evidence) {
@@ -261,6 +261,8 @@ export function verificationOutcome(sourceCase, workflow, evidence) {
   const execution = payload?._ocr_execution;
   if (nativeMode) {
     assertNativeIngestOwner(sourceCase, workflow, evidence);
+    // This is the captured execution outcome, not the later operator state.
+    assert.equal(workflow.state, job.status === 'done' ? 'ocr_completed' : 'ocr_failed');
   } else {
     assert.equal(nonEmpty(job?.ocr_job_id, 'job-id'), execution?.job_id);
     assert.equal(nonEmpty(job?.workflow_attempt_id, 'attempt-id'), execution?.workflow_attempt_id);
@@ -509,6 +511,8 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       assertNativeIngestOwner({ expected_execution_mode: 'native_ingest', sha256: identity.sourcePDFhash }, liveWorkflow,
         { id: liveEvidence.ocr_result_id, producer_version: liveEvidence.producer_version,
           payload_json: { _ocr_execution: liveEvidence.execution_lineage } });
+      assert.equal(liveWorkflow.state, liveEvidence.selected ? 'ocr_selected'
+        : liveWorkflow.ocr_job.status === 'done' ? 'ocr_completed' : 'ocr_failed');
     }
     const verifiedOverlayUrl = nonEmpty(liveEvidence.overlay_url, 'live-overlay-url');
     allowedExternalUrls.add(verifiedOverlayUrl);
@@ -526,7 +530,18 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
         assertRecognitionAcceptance(liveEvidence, liveWorkflow, identity);
         assert.equal(liveWorkflow.selected_ocr_result_id, identity.evidenceId);
         assert.equal(liveEvidence.selectable, true);
-      } else assert.equal(liveEvidence.selectable, false);
+      } else {
+        assert.equal(liveEvidence.selectable, false);
+        assert.equal(liveEvidence.recognition_acceptance, null);
+        if (liveEvidence.selected) {
+          assert.equal(liveWorkflow.selected_ocr_result_id, identity.evidenceId);
+          assert.equal(liveWorkflow.state, 'ocr_selected');
+          assert.ok(liveWorkflow.blockers.includes('evidence_unusable'));
+          assertRecognitionAcceptance({...liveEvidence,
+            recognition_acceptance: liveEvidence.artifact_manifest.operator_recognition_acceptance}, liveWorkflow, identity);
+          result.selectedInvalid = {blocker: 'evidence_unusable', manifestReceiptVerified: true};
+        }
+      }
       diagnostics.begin('open-step2');
       await page.locator('.step-nav button').filter({hasText: 'OCR選択'}).click();
       diagnostics.begin('verify-review-controls');
@@ -596,7 +611,9 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.equal(result.unexpectedWriteCount, 0);
     assert.equal(result.pageErrorCount, 0);
     result.finalPathname = new URL(page.url()).pathname;
-    result.status = 'passed';
+    // Complete read-only UI observations, but do not claim parity without the original diagnosis.
+    result.status = result.selectedInvalid ? 'blocked' : 'passed';
+    if (result.selectedInvalid) result.code = 'selected_invalid_requires_original_diagnosis';
     result.phase = 'finished';
   } catch (error) {
     diagnostics.fail(error);

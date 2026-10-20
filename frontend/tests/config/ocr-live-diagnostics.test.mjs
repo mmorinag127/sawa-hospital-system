@@ -57,7 +57,7 @@ test('original verification asserts, wait and readonly/external gates remain in 
       : line.includes('assert.ok(liveEvidence)')
       ? "  assert.equal(matches.length, 1);"
       : line.includes("assert.equal(liveEvidence.selectable, false)")
-      ? "      } else assert.equal(liveEvidence.selectable, false);"
+      ? "        assert.equal(liveEvidence.selectable, false);"
       : line.includes("toContainText(`要確認:")
       ? "      await expect(card.getByRole('alert')).toContainText(`${accepted ? '確認済み' : '要確認'}: ${identity.review.count}セル`);"
       : line === "      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();"

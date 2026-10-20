@@ -334,7 +334,10 @@ def test_sigterm_handler_unwinds_connection_proxy_and_directory(proxy_capture, m
     monkeypatch.setattr(diag.signal, "signal", lambda number, handler: handlers.update({number: handler}))
     monkeypatch.setattr(diag, "context", lambda *_: "a" * 40)
     monkeypatch.setattr(diag, "candidate_context", lambda *_: None)
-    monkeypatch.setattr(diag, "run", lambda product, proxy, summary, candidate: diag.read_row(proxy, tmp_path))
+    def run(product, proxy, summary, candidate, *, original_only):
+        assert original_only is False
+        return diag.read_row(proxy, tmp_path)
+    monkeypatch.setattr(diag, "run", run)
     def terminated():
         handlers[signal.SIGTERM](signal.SIGTERM, None)
     state.cursor.fetchall.side_effect = terminated
@@ -433,9 +436,31 @@ def test_safe_failure_has_no_raw_secret_or_exception_text(actions, monkeypatch, 
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("offline_mode", [False, True])
+@pytest.mark.parametrize("original_only", [False, True])
+def test_cli_propagates_explicit_original_mode_without_changing_default(
+        actions, monkeypatch, tmp_path, offline_mode, original_only):
+    monkeypatch.setattr(diag, "context", lambda *_: "a" * 40)
+    monkeypatch.setattr(diag, "candidate_context", lambda *_: None)
+    action = Mock(return_value=True)
+    monkeypatch.setattr(diag, "offline" if offline_mode else "run", action)
+    monkeypatch.setattr(diag.signal, "signal", lambda *args: None)
+    argv = ["diagnostic", "--product", str(tmp_path), "--candidate", str(tmp_path / "candidate"),
+        "--proxy", "proxy", "--summary", str(tmp_path / "summary")]
+    if offline_mode:
+        argv += ["--offline"]
+    if original_only:
+        argv += ["--original-only"]
+    monkeypatch.setattr("sys.argv", argv)
+    assert diag.main() == 0
+    action.assert_called_once()
+    assert action.call_args.kwargs["original_only"] == original_only
+
+
 @pytest.mark.parametrize("headless_status", [0, 1])
+@pytest.mark.parametrize("original_only", [False, True])
 def test_both_offline_processes_run_with_no_credentials_and_private_cleanup(
-        actions, synthetic_row, monkeypatch, tmp_path, headless_status):
+        actions, synthetic_row, monkeypatch, tmp_path, headless_status, original_only):
     synthetic_row.update(status="diagnostic_only", template_version_id="synthetic", producer_version="synthetic",
         source="synthetic", schema_version="synthetic", created_at=datetime(2026, 10, 19))
     monkeypatch.setattr(diag, "read_row", lambda *args: synthetic_row)
@@ -449,6 +474,8 @@ def test_both_offline_processes_run_with_no_credentials_and_private_cleanup(
         calls.append((args, kwargs))
         build = args[args.index("--build") + 1]
         assert "--offline" in args
+        assert ("--original-only" in args) == original_only
+        assert kwargs["timeout"] == 300
         assert "DB_PASSWORD" not in kwargs["env"]
         assert "GOOGLE_APPLICATION_CREDENTIALS" not in kwargs["env"]
         assert kwargs["env"]["DATABASE_URL"] == "sqlite:///:memory:"
@@ -459,12 +486,70 @@ def test_both_offline_processes_run_with_no_credentials_and_private_cleanup(
         diag.write_json(diag.owned_path() / (variant + "-" + build + "-results.json"), {"synthetic": True})
         return SimpleNamespace(returncode=headless_status if build == "headless" else 0)
     monkeypatch.setattr(diag.subprocess, "run", run)
-    assert diag.run(tmp_path, Path("proxy"), summary, tmp_path / "candidate") == (headless_status == 0)
+    assert diag.run(tmp_path, Path("proxy"), summary, tmp_path / "candidate",
+        original_only=original_only) == (headless_status == 0)
     assert len(calls) == 4
     assert not diag.owned_path().exists()
     assert set(path.name for path in summary.iterdir()) == {
         "baseline-headless.json", "baseline-gui.json", "candidate-headless.json", "candidate-gui.json",
-        *(["comparison.json"] if headless_status == 0 else [])}
+        "comparison.json"}
+
+
+@pytest.mark.parametrize("original_only", [False, True])
+def test_offline_original_mode_runs_four_real_guards_and_default_keeps_faults(
+        actions, monkeypatch, tmp_path, original_only):
+    # Synthetic invalid input exercises the real guards, never injects successful validation.
+    from src.services import (canonical_ocr_artifact_service, order_service, order_workflow_v2_service,
+        ocr_evidence_service, hakodate_preprocess_observation, hakodate_ocr_checkpoint_service,
+        hakodate_recognizer_contact_sheet, hakodate_recognizer_input_evidence)
+    import cv2
+    from sqlalchemy.engine import Engine
+    import psycopg2
+    targets = [(socket.socket, name) for name in ("connect", "connect_ex", "sendto", "sendmsg")
+        if hasattr(socket.socket, name)]
+    targets += [(socket, name) for name in ("create_connection", "getaddrinfo", "gethostbyname",
+        "gethostbyname_ex", "gethostbyaddr")]
+    targets += [(Engine, "connect"), (Engine, "raw_connection"), (psycopg2, "connect")]
+    for module, name in targets:
+        monkeypatch.setattr(module, name, getattr(module, name))
+    monkeypatch.setattr(diag.sys, "path", list(diag.sys.path))
+    monkeypatch.setattr(cv2, "__version__", "5.0.0")
+    monkeypatch.setattr(cv2, "__file__", str(ROOT / "backend/.venv/cv2/__init__.py"))
+    monkeypatch.setattr(diag.importlib.metadata, "version",
+        lambda name: {"Pillow": "12.3.0", "numpy": "2.4.2", "opencv-python-headless": "5.0.0.93"}[name])
+    private = tmp_path / "private"
+    private.mkdir()
+    payload = json.loads(row()["payload_raw"])
+    payload["_ocr_execution"]["processing_start_input"] = {}
+    manifest = json.loads(row()["manifest_raw"])
+    diag.write_json(private / "owner.json", diag.marker())
+    diag.write_json(private / "payload.json", payload)
+    diag.write_json(private / "manifest.json", manifest)
+    monkeypatch.setattr(diag, "PAYLOAD_SHA", diag.sha((private / "payload.json").read_bytes()))
+    monkeypatch.setattr(diag, "MANIFEST_SHA", diag.sha((private / "manifest.json").read_bytes()))
+    diag.write_json(private / "header.json", {"id": diag.EVIDENCE, "order_id": diag.ORDER,
+        "status": "diagnostic_only", "template_version_id": "synthetic", "producer_version": "synthetic",
+        "source": "synthetic", "schema_version": "synthetic", "artifact_digest": diag.ARTIFACT_SHA,
+        "created_at": "2026-10-19T00:00:00"})
+    diag.write_json(private / "bundle.json", {"assets": {diag.PDF_URI + "?generation=1":
+        {"generation": "1", "latest_generation": "1"}}})
+    output = tmp_path / "summary.json"
+    assert diag.offline(ROOT, private, output, "headless", original_only=original_only) == original_only
+    result = json.loads(output.read_bytes())
+    assert result["mode"] == ("original-only" if original_only else "all")
+    assert result["original_validation_passed"] is False
+    assert result["inputs_unchanged"] is True
+    assert len(result["results"]) == (4 if original_only else 34)
+    assert [(item["case"], item["phase"]) for item in result["results"][:4]] == [
+        ("original", phase) for phase in ("canonical_payload", "selection_blocker",
+            "selected_validation", "serialize_evidence")]
+    expected = {"original"} if original_only else {"original", "acceptance_changed", "source_changed",
+        "wrong_order", "wrong_revision", "latest_pdf_generation", "multiple_invalid",
+        "unavailable_0", "bytes_changed_0", "in_flight_delete_0"}
+    assert {item["case"] for item in result["results"]} == expected
+    full = json.loads((private / "baseline-headless-results.json").read_bytes())
+    assert len(full) == len(result["results"])
+    assert full[0]["exception"]
 
 
 def test_workflow_run_blocks_have_bash_syntax():
@@ -507,6 +592,9 @@ def test_dedicated_workflow_is_manual_owner_staging_nondeploy_and_summary_only()
     assert upload["with"]["retention-days"] == "7"
     cleanup = next(step for step in job["steps"] if "--cleanup" in step.get("run", ""))
     assert cleanup["if"] == "always()"
+    capture = next(step for step in job["steps"] if step.get("name") == "Capture one read-only snapshot and run disconnected profiles")
+    assert "--original-only" in capture["run"]
+    assert "--original-only" not in cleanup["run"]
     assert "uv sync --project product/backend --extra dev --frozen" in text
     assert "--target \"$RUNNER_TEMP/reviewed-opencv-gui\" opencv-python==5.0.0.93" in text
     for forbidden in ("run deploy", "add-iam", "prod-", "repository_dispatch", "<<", "continue-on-error"):

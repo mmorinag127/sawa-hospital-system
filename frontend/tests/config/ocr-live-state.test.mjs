@@ -9,7 +9,8 @@ import { inspectReview } from '../../scripts/verify-recognition-review-live.mjs'
 import { STG_OUTPUT_SOURCE_ORIGIN as origin } from '../../scripts/output-source-live-origin.mjs';
 
 // Synthetic browser transport executes the complete verifier, including its real response watchers.
-function fixture(selected, mutate = () => {}, failure = null) {
+function fixture(selected, mutate = () => {}, failure = null,
+  {selectable = selected, manifestAccepted = selected, publishedAccepted = selectable && manifestAccepted, native = false} = {}) {
   const review = {count: 1, cells: [{sheet_cell: 'F11', raw_text: '1', reason: 'hakodate_blank_input_nonempty_prediction'}]};
   const pdf = {order_id: 'ORD12345678', document_id: 'DOCtest', sha256: 'a'.repeat(64)};
   const identity = {orderId: pdf.order_id, documentId: pdf.document_id, sourcePDFhash: pdf.sha256,
@@ -19,21 +20,33 @@ function fixture(selected, mutate = () => {}, failure = null) {
     payload_sha256: identity.originalPayloadSha256, selected_pdf_receipt: pdf, workflow_revision: 9,
     source_receipt: {workflow_revision: 9, recognition_evidence_run_id: identity.evidenceId, selected_pdf_receipt: pdf},
     cells: review.cells, values: {F11: ''}, edited_by: 'synthetic-private', created_at: '2026-10-20'};
-  const evidence = {ocr_result_id: identity.evidenceId, order_id: identity.orderId, selected, selectable: selected,
-    recognition_review: review, recognition_acceptance: selected ? acceptance : null,
-    artifact_digest: 'digest', artifact_manifest: selected ? {operator_recognition_acceptance: acceptance} : {},
+  const evidence = {ocr_result_id: identity.evidenceId, order_id: identity.orderId, selected, selectable,
+    recognition_review: review, recognition_acceptance: publishedAccepted ? acceptance : null,
+    artifact_digest: 'digest', artifact_manifest: manifestAccepted ? {operator_recognition_acceptance: acceptance} : {},
     execution_lineage: {evidence_run_id: identity.evidenceId, selected_pdf_receipt: pdf},
     overlay_url: `${origin}/overlay`, overlay_uri: 'gs://synthetic/overlay'};
-  const workflow = {order_id: identity.orderId, revision: 10, selected_ocr_result_id: selected ? identity.evidenceId : null,
+  const workflow = {order_id: identity.orderId, state: selected ? 'ocr_selected' : 'ocr_failed',
+    revision: 10, selected_ocr_result_id: selected ? identity.evidenceId : null,
     blockers: [], warnings: [], ocr_job: {order_id: identity.orderId, order_document_id: identity.documentId,
       status: 'failed', result_state: 'review_required'}};
+  if (selected && !selectable) workflow.blockers = ['evidence_unusable'];
+  if (native) {
+    identity.nativeIngest = {mode: 'hakodate', intake_protocol: 'native_ingest_v2', execution_id: 'native-execution',
+      terminal_receipt: {execution_id: 'native-execution', job_id: 'native-job', order_id: identity.orderId,
+        status: 'failed', evidence_run_id: identity.evidenceId, error: 'review', workflow_attempt_id: null}};
+    Object.assign(workflow.ocr_job, {native_ingest: structuredClone(identity.nativeIngest),
+      ocr_job_id: 'native-job', workflow_attempt_id: null, error_message: 'review'});
+    Object.assign(evidence.execution_lineage, {job_id: 'native-job', nonworkflow_execution_id: 'native-execution',
+      workflow_attempt_id: null});
+    evidence.producer_version = 'hakodate_best_method_pipeline';
+  }
   const inspection = () => ({order_id: identity.orderId, workflow: structuredClone(workflow),
     saved_sheet: {sheet: {rows: [{quantity: 0}, {quantity: null}, {quantity: 12}]}},
     artifact_lineage: {selected_ocr_result_id: workflow.selected_ocr_result_id},
     ocr_candidates: {order_id: identity.orderId, selected_ocr_result_id: workflow.selected_ocr_result_id,
       results: [selected ? structuredClone(evidence) : {ocr_result_id: identity.evidenceId, selected: false, detail_state: 'not_loaded'}]}});
   const events = new EventEmitter(), page = new EventEmitter();
-  const clicks = [], requests = []; let reloaded = false, blank = false, connected = true, rawOpen = false;
+  const clicks = [], requests = [], screenshots = []; let reloaded = false, blank = false, connected = true, rawOpen = false;
   const base = `/api/orders/${identity.orderId}`;
   function respond(path, data, failed = false) {
     requests.push(path);
@@ -61,7 +74,7 @@ function fixture(selected, mutate = () => {}, failure = null) {
       innerText: async () => name === 'raw-pre' ? JSON.stringify(inspection()) : text(),
       getAttribute: async () => evidence.overlay_url,
       evaluate: async fn => fn({complete: true, naturalWidth: 100, naturalHeight: 80}),
-      screenshot: async () => {}, scrollIntoViewIfNeeded: async () => {},
+      screenshot: async options => {screenshots.push(options.path);}, scrollIntoViewIfNeeded: async () => {},
       async click() {
         clicks.push(name);
         if (name === 'raw-summary') {
@@ -75,7 +88,7 @@ function fixture(selected, mutate = () => {}, failure = null) {
             {...evidence, workflow_revision: workflow.revision}, failNow && failure.mode === 'detail');
           if (failNow) await new Promise(resolve => setTimeout(resolve, 20));
         } else if (name === '確認して正解にする') {
-          assert.equal(selected, false);
+          assert.equal(evidence.selectable, false);
           respond(base + `/workflow-v2/recognition-review?document_id=${identity.documentId}&ocr_result_id=${identity.evidenceId}`,
             {order_id: identity.orderId, source_receipt: {workflow_revision: workflow.revision,
               recognition_evidence_run_id: identity.evidenceId, selected_pdf_receipt: pdf}, review_cells: review.cells});
@@ -102,7 +115,7 @@ function fixture(selected, mutate = () => {}, failure = null) {
       reloaded = true; initial();
     },
     url: () => `${origin}/hospital/orders/${identity.orderId}/workflow-v2`,
-    waitForLoadState: async () => {}, screenshot: async () => {},
+    waitForLoadState: async () => {}, screenshot: async options => {screenshots.push(options.path);},
   });
   const context = {on: (...args) => events.on(...args), addInitScript: async () => {}, route: async () => {},
     newPage: async () => {events.emit('page', page); return page;}, close: async () => {}};
@@ -116,8 +129,8 @@ function fixture(selected, mutate = () => {}, failure = null) {
     },
     toBeEnabled: async () => {
       assert.ok(['正解にする', '確認して正解にする', '確認した値を採用して次へ'].includes(loc.name));
-      if (loc.name === '正解にする') assert.equal(selected, true);
-      if (loc.name === '確認して正解にする') assert.equal(selected, false);
+      if (loc.name === '正解にする') assert.equal(evidence.selectable, true);
+      if (loc.name === '確認して正解にする') assert.equal(evidence.selectable, false);
       if (loc.name === '確認した値を採用して次へ') assert.equal(blank, true);
     },
     toBeVisible: async () => {assert.ok(loc); if(loc.name === 'raw-pre') assert.equal(rawOpen, true);},
@@ -128,7 +141,7 @@ function fixture(selected, mutate = () => {}, failure = null) {
   expect.poll = fn => ({toBe: async value => assert.equal(await fn(), value)});
   const playwright = {expect, webkit: {launch: async () => ({newContext: async () => context,
     close: async () => {connected = false;}, isConnected: () => connected})}};
-  return {identity, workflow, evidence, playwright, clicks, requests};
+  return {identity, workflow, evidence, playwright, clicks, requests, screenshots};
 }
 
 for (const selected of [false, true]) test(`full OCR verifier executes ${selected ? 'selected approved display' : 'unselected detail'} without mutation`, async () => {
@@ -146,6 +159,63 @@ for (const selected of [false, true]) test(`full OCR verifier executes ${selecte
     assert.equal(f.clicks.filter(x => x === 'raw-summary').length, 2);
   } finally {rmSync(output, {recursive: true, force: true});}
 });
+
+for (const selected of [false, true]) test(`native terminal failure and current selected=${selected} are independent`, async () => {
+  const f = fixture(selected, undefined, null, {native: true}), output = mkdtempSync(join(tmpdir(), 'live-native-'));
+  try {
+    const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
+    assert.equal(result.status, 'passed', JSON.stringify(result.failure));
+    assert.equal(f.workflow.ocr_job.status, 'failed');
+    assert.equal(f.workflow.state, selected ? 'ocr_selected' : 'ocr_failed');
+  } finally {rmSync(output, {recursive: true, force: true});}
+});
+
+test('selected-invalid observes images reload and raw but remains blocked pending original diagnosis', async () => {
+  const f = fixture(true, undefined, null, {selectable: false, native: true});
+  const output = mkdtempSync(join(tmpdir(), 'live-selected-invalid-'));
+  try {
+    const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
+    assert.equal(result.status, 'blocked', JSON.stringify(result.failure));
+    assert.equal(result.code, 'selected_invalid_requires_original_diagnosis');
+    assert.deepEqual(result.selectedInvalid, {blocker: 'evidence_unusable', manifestReceiptVerified: true});
+    for (const check of ['verify-state-preserved', 'verify-raw-json'])
+      assert.ok(result.timings.some(item => item.check === check), check);
+    assert.equal(result.ui.imageVisible, true);
+    assert.ok(f.screenshots.includes(join(output, 'visible-ocr-image.png')));
+    assert.ok(f.screenshots.includes(join(output, 'workflow-v2-step2.png')));
+    assert.equal(f.clicks.filter(item => item === 'raw-summary').length, 2);
+    assert.equal(f.clicks.includes('確認して正解にする'), false);
+    assert.equal(result.unexpectedWriteCount, 0);
+    assert.equal(JSON.parse(readFileSync(join(output, 'browser-result.json'))).status, 'blocked');
+  } finally {rmSync(output, {recursive: true, force: true});}
+});
+
+for (const change of ['missing-blocker', 'other-blocker', 'missing-receipt', 'digest', 'payload-hash', 'pdf',
+  'revision', 'selected-id', 'public-acceptance', 'current-state', 'native-owner']) {
+  test(`selected-invalid rejects ${change} before diagnostic observation`, async () => {
+    const f = fixture(true, undefined, null, {selectable: false, native: true});
+    const receipt = f.evidence.artifact_manifest.operator_recognition_acceptance;
+    if (change === 'missing-blocker') f.workflow.blockers = [];
+    if (change === 'other-blocker') f.workflow.blockers = ['unrelated'];
+    if (change === 'missing-receipt') delete f.evidence.artifact_manifest.operator_recognition_acceptance;
+    if (change === 'digest') receipt.artifact_digest = 'foreign';
+    if (change === 'payload-hash') receipt.payload_sha256 = 'foreign';
+    if (change === 'pdf') receipt.selected_pdf_receipt = {...receipt.selected_pdf_receipt, document_id: 'foreign'};
+    if (change === 'revision') receipt.workflow_revision = f.workflow.revision;
+    if (change === 'selected-id') f.workflow.selected_ocr_result_id = 'foreign';
+    if (change === 'public-acceptance') f.evidence.recognition_acceptance = receipt;
+    if (change === 'current-state') f.workflow.state = 'context_confirmed';
+    if (change === 'native-owner') f.evidence.execution_lineage.job_id = 'foreign';
+    const output = mkdtempSync(join(tmpdir(), 'live-selected-invalid-reject-'));
+    try {
+      const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
+      assert.equal(result.status, 'failed');
+      assert.notEqual(result.code, 'selected_invalid_requires_original_diagnosis');
+      assert.equal(f.clicks.includes('raw-summary'), false);
+      assert.equal(result.unexpectedWriteCount, 0);
+    } finally {rmSync(output, {recursive: true, force: true});}
+  });
+}
 
 for (const verifier of ['ocr','review']) for (const reload of [false,true]) for (const mode of ['detail','click']) {
   test(`${verifier} ${reload ? 'reload' : 'initial'} ${mode} rejection is handled and saves failed JSON`, async () => {
