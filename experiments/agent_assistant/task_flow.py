@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 from datetime import date
 import json
+import shutil
 from uuid import uuid4
 
 from .catalog import OPERATIONS, build_path, public_intake_data
@@ -110,7 +111,7 @@ class TaskFlow:
             if not isinstance(inputs.get('absence_date'),str): raise ValueError('欠勤日を選択してください')
             absent = date.fromisoformat(inputs['absence_date'])
 
-        run = dict(id=uuid4().hex, domains=[spec['domain']])
+        run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup')
         self.tools.authorizations[run['id']] = authorization
         try:
             self.tools.sandbox.prepare(run)
@@ -170,6 +171,9 @@ class TaskFlow:
             return {'selection_id':ident, **payload}
         finally:
             await self.tools.sandbox.stop(run['id'])
+            directory = self.tools.sandbox.path(run['id'])
+            if directory.exists():
+                shutil.rmtree(directory)
             self.tools.authorizations.pop(run['id'],None)
 
     def selection(self, task_id, owner, selection_id, keys, layout_id=None):

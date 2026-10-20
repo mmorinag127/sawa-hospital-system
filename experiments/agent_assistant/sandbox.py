@@ -97,7 +97,7 @@ class Sandbox:
             copy_tree(directory / "data", directory / "registered-before")
             os.replace(before, directory / "baseline-before-registration")
             os.replace(directory / "registered-before", before)
-        if self.durable_store is not None:
+        if self.durable_store is not None and run.get('purpose') != 'target_lookup':
             self.durable_store.persist_files(run["id"])
 
     def environment(self, run, domain, cfg, data, worktree, token, *, include_models=True):
@@ -169,7 +169,8 @@ class Sandbox:
             elif not (worktree / ".git").is_file():
                 raise Conflict("業務APIには専用Git worktreeを指定してください")
             token = self.tokens.setdefault(key, secrets.token_urlsafe(32))
-            env = self.environment(run, domain, cfg, data, worktree, token)
+            env = self.environment(run, domain, cfg, data, worktree, token,
+                                   include_models=run.get('purpose') != 'target_lookup')
             if domain == "school-lunch":
                 worker_key = (run["id"], "school-lunch-worker")
                 if worker_key not in self.children or self.children[worker_key].returncode is not None:
@@ -269,6 +270,12 @@ class Sandbox:
             self.tokens.pop(key, None)
             self.logs.pop(key).close()
             (self.path(run_id) / f"{key[1]}.process.json").unlink(missing_ok=True)
+        # These are rebuildable execution caches, never rollback or output data.
+        # Stop all native writers before reclaiming Cloud Run's memory-backed disk.
+        for domain in self.configs:
+            cache = self.path(run_id) / 'data' / domain / 'home' / 'model-cache'
+            if cache.exists():
+                shutil.rmtree(cache)
 
     async def restore(self, run):
         await self.stop(run["id"])
