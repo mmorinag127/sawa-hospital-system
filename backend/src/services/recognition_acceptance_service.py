@@ -90,6 +90,12 @@ def acknowledge(payload, *, values, edited_by, created_at, source_receipt):
 
 def payload_for_evidence(row, *, copy_payload=True):
     """Project acceptance; borrowed nested payloads are for read-only validation."""
+    payload, _ = _payload_for_evidence_with_accepted_values(row, copy_payload=copy_payload)
+    return payload
+
+
+def _payload_for_evidence_with_accepted_values(row, *, copy_payload=True):
+    """Return the projected payload and its acceptance result, if validated here."""
     snapshot = row if isinstance(row, dict) else {
         "payload_json": row.payload_json, "artifact_manifest_json": row.artifact_manifest_json,
         "artifact_digest": row.artifact_digest, "id": row.id}
@@ -98,10 +104,11 @@ def payload_for_evidence(row, *, copy_payload=True):
     if KEY in payload:
         raise ValueError("recognition_acceptance_invalid_storage")
     acceptance = (snapshot.get("artifact_manifest_json") or {}).get(KEY)
+    accepted = None
     if acceptance is not None:
         if (not isinstance(acceptance, dict) or acceptance.get("artifact_digest") != snapshot.get("artifact_digest")
                 or acceptance.get("evidence_run_id") != snapshot.get("id")):
             raise ValueError("recognition_acceptance_changed")
         payload[KEY] = deepcopy(acceptance)
-        accepted_values(payload)
-    return payload
+        accepted = accepted_values(payload)
+    return payload, accepted
