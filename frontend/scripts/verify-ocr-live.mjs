@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { isAllowedOutputSourceOrigin, STG_OUTPUT_SOURCE_ORIGIN } from './output-source-live-origin.mjs';
 import { firstJsonRequest } from './ocr-first-request.mjs';
 
@@ -10,7 +11,7 @@ const phases = new Set([
   'validate-artifact', 'launch-browser', 'configure-private-context', 'open-workflow',
   'verify-deploy-version', 'await-workflow-reads', 'verify-live-identity',
   'verify-visible-ocr-image', 'capture-visible-ocr-image', 'capture-workflow-page',
-  'validate-readonly', 'finished',
+  'validate-readonly', 'finished', 'open-ocr-detail', 'verify-state-preserved',
   'await-network-idle', 'verify-review-state', 'open-step2', 'verify-review-controls', 'verify-evidence-text',
 ]);
 
@@ -36,8 +37,89 @@ export function diagnosticTimeline(result, now = () => Date.now()) {
       result.failure = { check: phases.has(result.phase) ? result.phase : 'unknown-phase',
         type: error?.name === 'TimeoutError' ? 'TimeoutError'
           : error?.name === 'AssertionError' ? 'AssertionError' : 'other' };
+      result.failure.assertion = safeAssertionName(error);
     },
   };
+}
+
+export function safeAssertionName(error) {
+  const location = /(?:\/|\\)(verify-(?:ocr|recognition-review)-live\.mjs):(\d+):\d+/.exec(error?.stack || '');
+  return error?.name === 'AssertionError' && location ? `${location[1]}:L${location[2]}` : null;
+}
+
+export async function readLiveCandidate({ inspection, workflow, identity, page, readDetail, requireUnselected = false }) {
+  assert.equal(inspection.order_id, identity.orderId);
+  assert.equal(inspection.workflow.order_id, identity.orderId);
+  assert.equal(inspection.workflow.revision, workflow.revision);
+  assert.ok(Number.isInteger(workflow.revision));
+  assert.equal(inspection.ocr_candidates.order_id, identity.orderId);
+  assert.equal(inspection.ocr_candidates.selected_ocr_result_id, workflow.selected_ocr_result_id);
+  const matches = inspection.ocr_candidates.results.filter(item => item.ocr_result_id === identity.evidenceId);
+  assert.equal(matches.length, 1);
+  const candidate = matches[0];
+  const selected = workflow.selected_ocr_result_id === identity.evidenceId;
+  assert.equal(candidate.selected, selected);
+  if (requireUnselected) assert.equal(workflow.selected_ocr_result_id, null);
+  await page.locator('.step-nav button').filter({ hasText: 'OCR選択' }).click();
+  const card = page.locator('.ocr-card').filter({ hasText: identity.evidenceId });
+  let evidence;
+  if (selected) {
+    assert.notEqual(candidate.detail_state, 'not_loaded');
+    assert.ok(candidate.execution_lineage);
+    assert.equal(await card.getByRole('button', { name: '詳細を表示', exact: true }).count(), 0);
+    evidence = candidate;
+  } else {
+    assert.equal(candidate.detail_state, 'not_loaded');
+    const pending = readDetail();
+    await card.getByRole('button', { name: '詳細を表示', exact: true }).click();
+    evidence = await pending;
+    assert.equal(evidence.workflow_revision, workflow.revision);
+    assert.equal(evidence.selected, false);
+  }
+  assert.equal(evidence.order_id, identity.orderId);
+  assert.equal(evidence.ocr_result_id, identity.evidenceId);
+  assert.ok(typeof identity.artifactDigest === 'string' && identity.artifactDigest.length > 0);
+  assert.equal(evidence.artifact_digest, identity.artifactDigest);
+  return evidence;
+}
+
+export function liveStateSnapshot(inspection, evidence) {
+  // Signed URLs may renew on GET; persisted evidence, review and quantities must not change.
+  const { overlay_url, sheet_review_base_url, workflow_revision, ...persistedEvidence } = evidence;
+  return structuredClone({
+    revision: inspection.workflow.revision,
+    selectedId: inspection.workflow.selected_ocr_result_id,
+    blockers: inspection.workflow.blockers,
+    warnings: inspection.workflow.warnings,
+    savedSheet: inspection.saved_sheet?.sheet ?? null,
+    lineage: inspection.artifact_lineage,
+    evidence: persistedEvidence,
+  });
+}
+
+export function assertRecognitionAcceptance(evidence, workflow, identity) {
+  const receipt = evidence.recognition_acceptance;
+  assert.equal(receipt.version, 1);
+  assert.equal(receipt.evidence_run_id, identity.evidenceId);
+  assert.equal(receipt.artifact_digest, identity.artifactDigest);
+  assert.ok(typeof identity.artifactDigest === 'string' && identity.artifactDigest.length > 0);
+  assert.equal(evidence.artifact_digest, identity.artifactDigest);
+  assert.match(identity.originalPayloadSha256, /^[a-f0-9]{64}$/);
+  assert.equal(receipt.payload_sha256, identity.originalPayloadSha256);
+  assert.deepEqual(receipt.selected_pdf_receipt, identity.selectedPdfReceipt);
+  assert.equal(receipt.selected_pdf_receipt.order_id, identity.orderId);
+  assert.equal(receipt.selected_pdf_receipt.document_id, identity.documentId);
+  assert.equal(receipt.selected_pdf_receipt.sha256, identity.sourcePDFhash);
+  assert.ok(Number.isInteger(receipt.workflow_revision) && receipt.workflow_revision < workflow.revision);
+  assert.equal(receipt.source_receipt.workflow_revision, receipt.workflow_revision);
+  assert.equal(receipt.source_receipt.recognition_evidence_run_id, identity.evidenceId);
+  assert.deepEqual(receipt.source_receipt.selected_pdf_receipt, receipt.selected_pdf_receipt);
+  assert.deepEqual(receipt.cells, identity.review.cells);
+  assert.deepEqual(Object.keys(receipt.values).sort(), identity.review.cells.map(cell => cell.sheet_cell).sort());
+  for (const value of Object.values(receipt.values)) assert.match(value, /^[0-9]*$/);
+  assert.ok(typeof receipt.edited_by === 'string' && receipt.edited_by.trim().length > 0);
+  assert.ok(typeof receipt.created_at === 'string' && receipt.created_at.length > 0);
+  assert.deepEqual(evidence.artifact_manifest.operator_recognition_acceptance, receipt);
 }
 
 export async function captureFailureScreen(page, origin, orderId, output) {
@@ -193,6 +275,12 @@ function verificationIdentityForCase(folder, sourceCase) {
   const order = readJson(resolve(caseFolder, 'order.json'));
   const workflow = readJson(resolve(caseFolder, 'workflow.json'));
   const evidence = readJson(resolve(caseFolder, 'evidence.json'));
+  // Use the same Python JSON number/Unicode serialization as payload_digest, not JS rounding.
+  const originalPayloadSha256 = execFileSync('python3', ['-c',
+    'import sys,json,hashlib; p=json.load(sys.stdin)["payload_json"]; p={k:v for k,v in p.items() if k!="operator_recognition_acceptance"}; print(hashlib.sha256(json.dumps(p,sort_keys=True,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()).hexdigest())'],
+  { input: readFileSync(resolve(caseFolder, 'evidence.json')), encoding: 'utf8' }).trim();
+  const originalIdentity = { originalPayloadSha256, artifactDigest: evidence.artifact_digest,
+    selectedPdfReceipt: evidence.payload_json?.hakodate_repair_source_receipt?.selected_pdf_receipt };
   const uploadState = readJson(resolve(caseFolder, 'upload-state.json'));
   const execution = evidence.payload_json?._ocr_execution;
   const selectedPdf = execution?.selected_pdf_receipt;
@@ -254,11 +342,13 @@ function verificationIdentityForCase(folder, sourceCase) {
     assert.ok(Array.isArray(review?.cells) && review.cells.length > 0);
     assert.equal(review.count, review.cells.length);
     return { orderId, documentId, evidenceId, sourcePDFhash, expectedOutcome, review,
+      ...originalIdentity,
       ...policyIdentity,
       ...(Object.hasOwn(sourceCase, 'case_id') ? { caseId: sourceCase.case_id } : {}) };
   }
   assert.equal(workflow.ocr_job?.status, 'done');
   return { orderId, documentId, evidenceId, sourcePDFhash,
+    ...originalIdentity,
     ...policyIdentity,
     ...(Object.hasOwn(sourceCase, 'case_id') ? { caseId: sourceCase.case_id } : {}) };
 }
@@ -286,7 +376,7 @@ export function expectedWorkflowRead(pathname, orderId) {
     || pathname === `/api/orders/${orderId}`;
 }
 
-export async function verifyOcrBrowser({ origin, token, identity, source, output }) {
+export async function verifyOcrBrowser({ origin, token, identity, source, output, playwright }) {
   const result = {
     status: 'failed', scope: 'GET-only workflow-v2 Step2 OCR evidence; service-principal auth, not human login',
     phase: 'validate-artifact', sourceSHA: source, orderId: identity.orderId, documentId: identity.documentId,
@@ -309,7 +399,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.match(source, /^[0-9a-f]{40}$/);
     nonEmpty(token, 'live-id-token');
     result.phase = 'launch-browser';
-    const { expect, webkit } = await import('@playwright/test');
+    const { expect, webkit } = playwright || await import('@playwright/test');
     browser = await webkit.launch({ headless: true });
     result.phase = 'configure-private-context';
     context = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
@@ -377,18 +467,14 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.equal(liveWorkflow.ocr_job?.order_document_id, identity.documentId);
     assert.equal(liveOrder.id, identity.orderId);
     assert.equal(liveOrder.current_version?.document_id, identity.documentId);
-    const summaryEvidence = (liveOcrResults.results || []).find(item => item?.ocr_result_id === identity.evidenceId);
-    assert.equal(summaryEvidence?.detail_state, 'not_loaded');
     diagnostics.begin('open-ocr-detail');
-    await page.locator('.step-nav button').filter({hasText: 'OCR選択'}).click();
-    const card = page.locator('.ocr-card').filter({hasText: identity.evidenceId});
-    const detailRead = watchRead('ocr-detail', `/workflow-v2/inspection-detail/${identity.evidenceId}`);
-    await card.getByRole('button', {name: '詳細を表示', exact: true}).click();
-    const detailReceipt = await detailRead;
-    assert.equal(detailReceipt.ok, true);
-    const liveEvidence = await detailReceipt.response.json();
-    assert.equal(liveEvidence.order_id, identity.orderId);
-    assert.equal(liveEvidence.workflow_revision, liveWorkflow.revision);
+    const liveEvidence = await readLiveCandidate({inspection: liveInspection, workflow: liveWorkflow, identity, page,
+      readDetail: async () => {
+        const detailReceipt = await watchRead('ocr-detail', `/workflow-v2/inspection-detail/${identity.evidenceId}`);
+        assert.equal(detailReceipt.ok, true);
+        return detailReceipt.response.json();
+      }});
+    const initialState = liveStateSnapshot(liveInspection, liveEvidence);
     diagnostics.end();
     assert.equal(liveEvidence.order_id, identity.orderId);
     assert.equal(liveEvidence.execution_lineage?.evidence_run_id, identity.evidenceId);
@@ -410,16 +496,21 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       diagnostics.begin('verify-review-state');
       assert.equal(liveWorkflow.ocr_job?.status, 'failed');
       assert.equal(liveWorkflow.ocr_job?.result_state, 'review_required');
-      assert.equal(liveEvidence.selectable, false);
       assert.deepEqual(liveEvidence.recognition_review, identity.review);
+      const accepted = liveEvidence.recognition_acceptance;
+      if (accepted) {
+        assertRecognitionAcceptance(liveEvidence, liveWorkflow, identity);
+        assert.equal(liveWorkflow.selected_ocr_result_id, identity.evidenceId);
+        assert.equal(liveEvidence.selectable, true);
+      } else assert.equal(liveEvidence.selectable, false);
       diagnostics.begin('open-step2');
       await page.locator('.step-nav button').filter({hasText: 'OCR選択'}).click();
       diagnostics.begin('verify-review-controls');
       const card = page.locator('.ocr-card').filter({hasText: identity.evidenceId});
-      await expect(card.getByRole('alert')).toContainText(`要確認: ${identity.review.count}セル`);
-      await expect(card.getByRole('button', {name: '確認して正解にする', exact: true})).toBeEnabled();
+      await expect(card.getByRole('alert')).toContainText(`${accepted ? '確認済み' : '要確認'}: ${identity.review.count}セル`);
+      await expect(card.getByRole('button', {name: accepted ? '正解にする' : '確認して正解にする', exact: true})).toBeEnabled();
       await expect(card.getByRole('button', {name: 'セル画像を確認・訂正', exact: true})).toBeVisible();
-      result.review = {count: identity.review.count, selectionBlocked: true};
+      result.review = {count: identity.review.count, selectionBlocked: !accepted};
     }
     diagnostics.begin('verify-evidence-text');
     const identityText = await page.locator('main').innerText();
@@ -437,6 +528,21 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     await image.screenshot({ path: resolve(output, 'visible-ocr-image.png') });
     result.phase = 'capture-workflow-page';
     await page.screenshot({ path: resolve(output, 'workflow-v2-step2.png'), fullPage: true });
+    diagnostics.begin('verify-state-preserved');
+    const finalRead = watchRead('final-inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const finalReceipt = await finalRead;
+    assert.equal(finalReceipt.ok, true);
+    const finalInspection = await finalReceipt.response.json();
+    assert.equal(finalInspection.workflow.revision, liveWorkflow.revision);
+    const finalEvidence = await readLiveCandidate({inspection: finalInspection, workflow: liveWorkflow, identity, page,
+      readDetail: async () => {
+        const receipt = await watchRead('final-detail', `/workflow-v2/inspection-detail/${identity.evidenceId}`);
+        assert.equal(receipt.ok, true);
+        return receipt.response.json();
+      }});
+    assert.deepEqual(liveStateSnapshot(finalInspection, finalEvidence), initialState);
+    diagnostics.end();
     result.phase = 'validate-readonly';
     assert.equal(result.unexpectedWriteCount, 0);
     assert.equal(result.pageErrorCount, 0);

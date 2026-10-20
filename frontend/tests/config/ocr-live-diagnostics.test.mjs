@@ -18,7 +18,7 @@ test('all six checks retain start/end and duration, with bounded fixed failure c
       assert.ok(item.elapsedMs > 0);
       assert.notEqual(sanitizedFailureCode(item.check), 'browser-readonly-check-failed-at-unknown-phase');
     }
-    assert.deepEqual(result.failure, {check: 'verify-evidence-text', type: name === 'secret-token' ? 'other' : name});
+    assert.deepEqual(result.failure, {check: 'verify-evidence-text', type: name === 'secret-token' ? 'other' : name, assertion: null});
     assert.doesNotMatch(JSON.stringify(result), /credential|response body|secret-token/);
     assert.throws(() => timeline.begin('raw-secret'));
   }
@@ -55,17 +55,21 @@ test('original verification asserts, wait and readonly/external gates remain in 
       : line.includes("item.pathname.endsWith('/workflow-v2')")
       ? line.replace("item.pathname.endsWith('/workflow-v2')", "item.pathname.endsWith('/inspection')")
       : line.includes('assert.ok(liveEvidence)')
-      ? "    assert.equal(summaryEvidence?.detail_state, 'not_loaded');"
+      ? "  assert.equal(matches.length, 1);"
+      : line.includes("assert.equal(liveEvidence.selectable, false)")
+      ? "      } else assert.equal(liveEvidence.selectable, false);"
+      : line.includes("toContainText(`要確認:")
+      ? "      await expect(card.getByRole('alert')).toContainText(`${accepted ? '確認済み' : '要確認'}: ${identity.review.count}セル`);"
       : line === "      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();"
-      ? "      await expect(card.getByRole('button', {name: '確認して正解にする', exact: true})).toBeEnabled();"
+      ? "      await expect(card.getByRole('button', {name: accepted ? '正解にする' : '確認して正解にする', exact: true})).toBeEnabled();"
       : line.includes("item.pathname.endsWith('/ocr-results')")
       ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/inspection')") : line;
-    assert.ok(current.includes(expected), expected);
+    assert.ok(current.includes(expected.trim()), expected);
   }
   assert.ok(current.includes("watchRead('inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false')"));
   assert.ok(current.includes('assert.equal(detailReceipt.ok, true)'));
-  assert.ok(current.includes('assert.equal(liveEvidence.workflow_revision, liveWorkflow.revision)'));
-  assert.ok(current.includes("getByRole('button', {name: '詳細を表示', exact: true}).click()"));
+  assert.ok(current.includes('assert.equal(evidence.workflow_revision, workflow.revision)'));
+  assert.ok(current.includes("getByRole('button', { name: '詳細を表示', exact: true }).click()"));
   const firstRequest = readFileSync(new URL('../../scripts/ocr-first-request.mjs', import.meta.url), 'utf8');
   assert.ok(firstRequest.includes('url.search !== expected.search'));
   assert.ok(firstRequest.includes("request.method() !== 'GET'"));

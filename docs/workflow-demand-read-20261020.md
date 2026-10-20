@@ -28,7 +28,30 @@
   (`/tmp/demand-final-owner.log`). TypeScript check passed.
 - Parent rerun of demand-read and native-owner component tests: 61 passed,
   zero failures/skips. The monitor approved the code review only.
-- No commit, merge, or staging deployment has occurred for this branch yet.
+- PR113 merged into develop at `4c0bc6dbcefa3c587ec8e03de345dec3d3857ee4`.
+- Formal PR CI `39421362085` passed backend, frontend and infrastructure.
+  Backend completed in 25m24s; frontend in 4m35s.
+- Post-merge parent component checks: 68 passed, zero failures/skips.
+- Staging Actions `39424788076` ran in normal mode with existing,
+  provenance-verified OCR artifact run `39109725288` and review order
+  `ORD581f55d6`. This is GET-only UI verification, not OCR reprocessing.
+- Automatic push run `39424702757` was cancelled before deployment to avoid
+  duplicate deployment. It is not counted as successful verification.
+- Post-merge parent backend checks: 11 passed.
+- Deployment succeeded, but the overall run failed the optional browser checks.
+  Web is `web-stg-00426-ck9`, 100% traffic, image
+  `sha256:1eece76bbae9cc3c6ab8c235781408dfcfc0498384166ec6e6d0f1b34c678419`.
+  Worker is `worker-stg-00867-29r`, 100% traffic, image
+  `sha256:b78b5eab6e944b9c6beb2b45e9d127d0f33ca55ccfce1668ea474d5ddd56abe8`.
+- Browser artifacts: `/private/tmp/sawa-pr113-live-ui`.
+  Target inspection body completion minus request start was 9.017 seconds.
+  This is one sample, not full-page acceptance or a controlled speed ratio.
+- The verifier incorrectly required every target to be an unloaded detail.
+  Read-only staging SQL confirmed target `ORD581f55d6` is revision 56 with
+  selected evidence `OEV9fef6b9e2672`; the older artifact had revision 53.
+  Sibling `ORDc69f352e` is revision 10 with no selected evidence.
+  The verifier also omitted `open-ocr-detail` from its diagnostic phase list.
+  Correction is in progress; operator state will not be reset for a test.
 
 ## Live verification constraint
 

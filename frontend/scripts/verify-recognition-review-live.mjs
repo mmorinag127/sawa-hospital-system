@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { verificationIdentities, assertNativeIngestOwner, captureFailureScreen } from './verify-ocr-live.mjs';
+import { verificationIdentities, assertNativeIngestOwner, captureFailureScreen, readLiveCandidate, liveStateSnapshot, safeAssertionName } from './verify-ocr-live.mjs';
 import { firstJsonRequest } from './ocr-first-request.mjs';
 import { STG_OUTPUT_SOURCE_ORIGIN as origin } from './output-source-live-origin.mjs';
 
@@ -32,7 +32,7 @@ export function expectedReviewReason(reason) {
   return descriptions[reason];
 }
 
-export async function inspectReview({ identity, source, token, output }) {
+export async function inspectReview({ identity, source, token, output, playwright }) {
   const result = { status: 'failed', sourceSHA: source, orderId: identity.orderId,
     evidenceId: identity.evidenceId, documentId: identity.documentId, sourcePDFhash: identity.sourcePDFhash,
     scope: 'staging service-principal UI test; no human login, OCR selection or quantity submission',
@@ -43,7 +43,7 @@ export async function inspectReview({ identity, source, token, output }) {
   try {
     assert.match(source, /^[a-f0-9]{40}$/);
     assert.ok(typeof token === 'string' && token.length > 0);
-    const { webkit, expect } = await import('@playwright/test');
+    const { webkit, expect } = playwright || await import('@playwright/test');
     browser = await webkit.launch({ headless: true });
     context = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
     await context.addInitScript(({ token, origin }) => {
@@ -86,16 +86,16 @@ export async function inspectReview({ identity, source, token, output }) {
     assert.equal(order.current_version?.document_id, identity.documentId);
     assert.equal(workflow.order_id, identity.orderId);
     assert.equal(inspection.ocr_candidates?.order_id, identity.orderId);
-    const summaryEvidence = inspection.ocr_candidates.results.find(item => item.ocr_result_id === identity.evidenceId);
-    assert.equal(summaryEvidence?.detail_state, 'not_loaded');
     result.phase = 'open-step2';
-    await page.locator('.step-nav button').filter({ hasText: 'OCR選択' }).click();
+    const evidence = await readLiveCandidate({inspection, workflow, identity, page, requireUnselected: true,
+      readDetail: async () => {
+        const detailResponse = await watch(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`);
+        assert.ok(detailResponse.response);
+        assert.equal(detailResponse.response.status(), 200);
+        return detailResponse.response.json();
+      }});
+    const initialState = liveStateSnapshot(inspection, evidence);
     const card = page.locator('.ocr-card').filter({ hasText: identity.evidenceId });
-    const detailRead = watch(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`);
-    await card.getByRole('button', { name: '詳細を表示', exact: true }).click();
-    const detailResponse = await detailRead;
-    assert.ok(detailResponse.response);
-    const evidence = await detailResponse.response.json();
     assert.equal(evidence.order_id, identity.orderId);
     assert.equal(evidence.workflow_revision, workflow.revision);
     assert.equal(evidence?.order_id, identity.orderId);
@@ -150,6 +150,23 @@ export async function inspectReview({ identity, source, token, output }) {
     for (const cell of identity.review.cells) await expect(dialog.getByLabel(cell.sheet_cell, { exact: true })).toHaveValue('');
     await expect(dialog.getByRole('button', { name: '確認した値を採用して次へ', exact: true })).toBeEnabled();
     await page.screenshot({ path: resolve(output, 'review-dialog-local-choice-not-submitted.png'), fullPage: true });
+    result.phase = 'verify-state-preserved';
+    const finalRead = watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
+    page.once('dialog', dialog => dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss());
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const finalResponse = await finalRead;
+    assert.ok(finalResponse.response);
+    assert.equal(finalResponse.response.status(), 200);
+    const finalInspection = await finalResponse.response.json();
+    assert.equal(finalInspection.workflow.revision, workflow.revision);
+    const finalEvidence = await readLiveCandidate({inspection: finalInspection, workflow, identity, page, requireUnselected: true,
+      readDetail: async () => {
+        const receipt = await watch(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`);
+        assert.ok(receipt.response);
+        assert.equal(receipt.response.status(), 200);
+        return receipt.response.json();
+      }});
+    assert.deepEqual(liveStateSnapshot(finalInspection, finalEvidence), initialState);
     assert.equal(result.unexpectedWrites, 0);
     assert.equal(result.pageErrors, 0);
     result.review = identity.review;
@@ -158,6 +175,7 @@ export async function inspectReview({ identity, source, token, output }) {
     result.phase = 'finished-without-submission';
   } catch (error) {
     result.failureType = error?.name === 'AssertionError' ? 'AssertionError' : error?.name === 'TimeoutError' ? 'TimeoutError' : 'other';
+    result.failureAssertion = safeAssertionName(error);
     result.failureScreenshotSaved = await captureFailureScreen(page, origin, identity.orderId, output);
   } finally {
     reads.forEach(item => item.cancel());
