@@ -1112,7 +1112,6 @@ def test_refresh_workflow_state_suppresses_stale_draft_layout_blockers_when_posi
         ],
     )
     assert saved is not None
-    monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
     monkeypatch.setattr(
         workflow_state_service,
         "_build_menu_context_from_current_sheet_context",
@@ -1207,7 +1206,6 @@ def test_refresh_workflow_state_keeps_active_evidence_layout_blockers_for_author
         ],
     )
     assert saved is not None
-    monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
     monkeypatch.setattr(
         workflow_state_service,
         "_build_menu_context_from_current_sheet_context",

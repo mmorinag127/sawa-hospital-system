@@ -25,7 +25,8 @@ test('Step2 preserves raw prediction and requires explicit approval after openin
   t.on('get', `${root}/workflow-v2/recognition-review`, call => {
     assert.equal(call.config.params.ocr_result_id, 'blocked-result');
     assert.equal(call.config.params.document_id, 'pdf');
-    return {data: {order_id: order, source_receipt: {workflow_revision: 7,
+    return {data: {order_id: order, mode: call.config.params.mode, retained_cell_count: 1, source_receipt: {workflow_revision: 7,
+      recognition_mode: call.config.params.mode,
       recognition_evidence_run_id: 'blocked-result', selected_pdf_receipt: {document_id: 'pdf'}},
       review_cells: cells, cells: [{cell: 'F11', image_png_base64: ''}]}};
   });

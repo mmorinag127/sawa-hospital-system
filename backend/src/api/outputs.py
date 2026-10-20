@@ -201,20 +201,6 @@ def _normalize_delivery_diet_for_display(value: object) -> str:
     return lowered or text
 
 
-def _normalize_delivery_area_for_display(value: object) -> str:
-    text = str(value or "").strip()
-    if not text or text.upper() == "X":
-        return ""
-    text = text.replace("階", "F").replace("ｆ", "F").replace("Ｆ", "F")
-    if not re.search(r"\dF|月|花", text, re.IGNORECASE):
-        return ""
-    if "花" in text:
-        return "2F"
-    if "月" in text:
-        return "3F"
-    return text.upper()
-
-
 def _delivery_final_header_base(column: dict) -> str:
     diet = _normalize_delivery_diet_for_display(column.get("diet_type"))
     if diet in _FINAL_DIET_LABELS:
@@ -240,7 +226,9 @@ def _build_delivery_render_columns(columns: list | None) -> list[dict]:
         diet = _normalize_delivery_diet_for_display(column.get("diet_type") or column.get("name"))
         if diet in {"change_1", "change_2", "change1", "change2", "変更1", "変更2", "変更１", "変更２"}:
             diet = "regular"
-        area = _normalize_delivery_area_for_display(column.get("area_id") or column.get("name"))
+        area = str(column.get("area_id") or "").strip()
+        if area.upper() == "X":
+            area = ""
         base = _delivery_final_header_base(column)
         key = (diet or base, area)
         group = quantity_groups.setdefault(

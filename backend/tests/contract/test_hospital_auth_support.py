@@ -60,7 +60,6 @@ def test_protected_routes_check_real_registered_role_and_hospital_grant(monkeypa
                     text("UPDATE user_system_access SET enabled = FALSE WHERE user_id = :id"),
                     {"id": operator.user_id},
                 )
-        auth_module.invalidate_user_cache()
         response = TestClient(app).request(method, path, headers=operator.headers, **kwargs)
         assert response.status_code == 403
         assert response.json()["detail"] == (
@@ -98,7 +97,7 @@ def test_hospital_admin_fixture_uses_registered_admin_role_and_enabled_grant(hos
     assert hospital_admin.verifier.called
 
 
-def test_helper_clears_cache_restores_patches_and_preserves_other_users(monkeypatch):
+def test_helper_restores_patches_and_preserves_other_users_without_cached_authority(monkeypatch):
     original_env = {key: os.environ.get(key) for key in ("AUTH_DISABLED", "AUTH_PROVIDER")}
     original_provider = auth_module.AUTH_PROVIDER
     original_audiences = auth_module.GOOGLE_OAUTH_CLIENT_IDS
@@ -108,13 +107,14 @@ def test_helper_clears_cache_restores_patches_and_preserves_other_users(monkeypa
         with registered_hospital_operator(monkeypatch) as operator:
             response = TestClient(app).get("/health/backlog", headers=operator.headers)
             assert response.status_code == 200
-            assert auth_module._USER_ROLE_CACHE[operator.account] == "operator"
+            assert auth_module._local_current_user(operator.account).role == "operator"
         assert {key: os.environ.get(key) for key in original_env} == original_env
         assert auth_module.AUTH_PROVIDER == original_provider
         assert auth_module.GOOGLE_OAUTH_CLIENT_IDS is original_audiences
         assert auth_module.id_token.verify_oauth2_token is original_verifier
-        assert auth_module._USER_ROLE_CACHE == {}
-        assert auth_module._USER_ROLE_CACHE_EXPIRES_AT == 0.0
+        with pytest.raises(auth_module.HTTPException) as removed:
+            auth_module._local_current_user(operator.account)
+        assert removed.value.status_code == 403
         with session_scope() as session:
             assert session.get(User, operator.user_id) is None
             assert session.get(User, other_id) is not None

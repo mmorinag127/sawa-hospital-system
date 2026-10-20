@@ -1073,16 +1073,7 @@ def _captured_monthly_categories(menu_entries: list[dict]) -> dict:
 
 
 def _normalize_output_daypart(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if text.startswith("朝"):
-        return "朝"
-    if text.startswith("昼"):
-        return "昼"
-    if text.startswith("夕"):
-        return "夕"
-    return text
+    return daily_output_override_service.normalize_override_daypart(value)
 
 
 def _menu_entry_category_label(entry: dict) -> str:
@@ -3398,8 +3389,6 @@ def _is_blank_cell_value(value: Any) -> bool:
 
 def _format_reference_quantity_value(value: Any, original_value: Any) -> Any:
     if _is_blank_cell_value(value):
-        if original_value == 0:
-            return 0
         return value
     if not isinstance(value, (int, float)):
         return value
@@ -4797,7 +4786,7 @@ def _drop_calc_chain(parts: dict[str, bytes]) -> None:
 
 
 def _is_delivery_static_artifact_value(value: Any) -> bool:
-    if value in {"v", "V", 0, "0"}:
+    if value in {"v", "V", 0, "0", "./"}:
         return True
     return False
 
@@ -5006,7 +4995,7 @@ def _write_reference_daily_delivery_sheet(
                 continue
             original_value = display_ws.cell(row=row_idx, column=col_idx).value if display_ws is not None else None
             if not row_payload:
-                cell.value = 0 if original_value == 0 else None
+                cell.value = None
                 continue
             value = row_payload.get(name) if source == "quantity" else row_payload.get("note")
             if source == "quantity":

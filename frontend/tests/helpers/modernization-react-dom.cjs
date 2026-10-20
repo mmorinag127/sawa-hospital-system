@@ -28,6 +28,7 @@ async function mount(file, { api, props = {}, probe, route, routerState, compone
   const requirePackage = createRequire(path.join(frontend, 'package.json'));
   const { JSDOM } = requirePackage('jsdom');
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: `http://localhost${route || '/'}`, pretendToBeVisual: true });
+  dom.window.history.replaceState({ __N: true, as: route || '/', url: route || '/' }, '');
   const descriptors = new Map(), timers = new Set(), intervals = new Set(), popups = [];
   const downloads = [], blobs = [], revoked = [];
   function assign(object, key, value) {

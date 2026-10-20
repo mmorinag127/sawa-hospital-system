@@ -64,16 +64,13 @@ def owned(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "session_scope", db.session_scope)
     monkeypatch.setattr(auth, "AUTH_PROVIDER", "google")
     monkeypatch.setenv("AUTH_DISABLED", "false")
-    monkeypatch.setattr(auth, "_USER_ROLE_CACHE_TTL_SECONDS", 600)
     monkeypatch.setattr(auth, "_google_email_or_none", lambda request: ACTOR.account)
-    auth.invalidate_user_cache()
     app = FastAPI()
     app.include_router(portal.router)
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
             yield engine, client
     finally:
-        auth.invalidate_user_cache()
         engine.dispose()
         sa.event.remove(engine, "connect", foreign_keys)
 
@@ -86,14 +83,21 @@ def submit(client, operation, body=None):
     return client.put("/portal/users/target", json=body)
 
 
+def capture_admin(client):
+    actor = auth._local_current_user(ACTOR.account)
+    assert actor.role == "admin"
+    client.app.dependency_overrides[portal.get_current_user] = lambda: actor
+    return actor
+
+
 @pytest.mark.parametrize("operation", ["create", "update"])
 @pytest.mark.parametrize("retirement", ["role='operator'", "status='inactive'"])
 def test_cached_admin_cannot_write_after_committed_retirement(owned, operation, retirement):
     engine, client = owned
-    assert auth._registered_role(ACTOR.account) == "admin"
+    actor = capture_admin(client)
     with engine.begin() as connection:
         connection.exec_driver_sql(f"UPDATE users SET {retirement} WHERE id='admin'")
-    assert auth._registered_role(ACTOR.account) == "admin"
+    assert actor.role == "admin"
     before = snapshot(engine)
     response = submit(client, operation)
     assert response.status_code == 403, response.text
@@ -135,7 +139,7 @@ def test_actor_must_be_unique_and_present(owned, kind, operation):
 @pytest.mark.parametrize("operation", ["create", "update"])
 def test_authority_read_failure_is_503_and_no_writes(owned, operation):
     engine, client = owned
-    assert auth._registered_role(ACTOR.account) == "admin"
+    capture_admin(client)
     before = snapshot(engine)
 
     def fail(connection, cursor, statement, parameters, context, executemany):
@@ -152,7 +156,7 @@ def test_authority_read_failure_is_503_and_no_writes(owned, operation):
 
 def test_self_demotion_succeeds_then_same_cached_context_is_denied(owned):
     engine, client = owned
-    assert auth._registered_role(ACTOR.account) == "admin"
+    capture_admin(client)
     response = client.put("/portal/users/admin", json=dict(BODY, account=ACTOR.account))
     assert response.status_code == 200
     before = snapshot(engine)
@@ -164,7 +168,7 @@ def test_self_demotion_succeeds_then_same_cached_context_is_denied(owned):
 @pytest.mark.parametrize("retirement", ["role='operator'", "status='inactive'"])
 def test_same_cached_context_cannot_bypass_shared_save(owned, operation, retirement):
     engine, _client = owned
-    assert auth._registered_role(ACTOR.account) == ACTOR.role
+    assert auth._local_current_user(ACTOR.account).role == ACTOR.role
     with engine.begin() as connection:
         connection.exec_driver_sql(f"UPDATE users SET {retirement} WHERE id='admin'")
     before = snapshot(engine)
@@ -184,7 +188,7 @@ def test_explicit_disabled_auth_keeps_existing_behavior(owned, monkeypatch):
 @pytest.mark.parametrize("operation", ["create", "update"])
 def test_real_concurrent_retirement_commits_before_actor_write(owned, operation):
     engine, client = owned
-    assert auth._registered_role(ACTOR.account) == "admin"
+    capture_admin(client)
     attempting = threading.Event()
 
     def capture(connection, cursor, statement, parameters, context, executemany):
@@ -239,7 +243,7 @@ def test_busy_reservation_stops_409_without_writes(owned, monkeypatch):
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     sa.event.listen(contender, "connect", foreign_keys)
     monkeypatch.setattr(db, "SessionLocal", sessionmaker(bind=contender, autoflush=False))
-    assert auth._registered_role(ACTOR.account) == "admin"
+    capture_admin(client)
     before = snapshot(engine)
     try:
         with engine.connect() as owner:
@@ -413,9 +417,7 @@ def owned_pg(tmp_path, monkeypatch):
         monkeypatch.setattr(auth, "session_scope", db.session_scope)
         monkeypatch.setattr(auth, "AUTH_PROVIDER", "google")
         monkeypatch.setenv("AUTH_DISABLED", "false")
-        monkeypatch.setattr(auth, "_USER_ROLE_CACHE_TTL_SECONDS", 600)
         monkeypatch.setattr(auth, "_google_email_or_none", lambda request: ACTOR.account)
-        auth.invalidate_user_cache()
         app = FastAPI()
         app.include_router(portal.router)
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -428,7 +430,6 @@ def owned_pg(tmp_path, monkeypatch):
             pass  # The diagnostic was logged; preserve the original setup failure.
         raise
     finally:
-        auth.invalidate_user_cache()
         try:
             if engine is not None:
                 engine.dispose()
@@ -457,10 +458,10 @@ def owned_pg(tmp_path, monkeypatch):
 @pytest.mark.parametrize("retirement", ["role='operator'", "status='inactive'"])
 def test_pg_cached_admin_after_independent_committed_retirement(owned_pg, operation, retirement):
     engine, client = owned_pg
-    assert auth._registered_role(ACTOR.account) == "admin"
+    actor = capture_admin(client)
     with engine.begin() as connection:
         connection.exec_driver_sql(f"UPDATE users SET {retirement} WHERE id='admin'")
-    assert auth._registered_role(ACTOR.account) == "admin"
+    assert actor.role == "admin"
     before = snapshot(engine)
     assert submit(client, operation).status_code == 403
     assert snapshot(engine) == before
@@ -482,7 +483,7 @@ def test_pg_current_admin_response_access_and_audit(owned_pg, operation):
 @pytest.mark.parametrize("operation", ["create", "update"])
 def test_pg_retirement_row_lock_nowait_then_same_cached_actor_denied(owned_pg, operation):
     engine, client = owned_pg
-    assert auth._registered_role(ACTOR.account) == "admin"
+    capture_admin(client)
     before = snapshot(engine)
     attempting = threading.Event()
 

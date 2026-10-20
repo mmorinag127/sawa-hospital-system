@@ -48,14 +48,30 @@ from src.services.hakodate_step_review_pipeline_service import (  # noqa: E402
     _write_pdf_from_pages,
 )
 from src.services.yomitoku_text_recognizer_topk import YomitokuTextRecognizerTopKWrapper  # noqa: E402
+from src.services.hakodate_recognizer_contact_sheet import (
+    _remove_table_lines,
+    _remove_noise_components,
+    _foreground_centered,
+    _preprocess_crop_for_recognizer,
+    _preprocess_dynamic_crop_for_recognizer,
+)
 from src.services.recognizer_diagnostics import diagnosed  # noqa: E402
+
+
+from src.hakodate_best_method_runtime.text_recognizer_common import (
+    FULLWIDTH_DIGIT_TRANS,
+    _clean_text_for_number,
+    summarize_regions,
+    _candidate_summary,
+    build_unaccepted_topk_review,
+    load_baseline_counts,
+)
 
 
 DEFAULT_BASE = WORKSPACE / "tmp" / "outer_quad_eval_correct_20260426"
 DEFAULT_MANIFEST = DEFAULT_BASE / "step123_no_code_change_20260427" / "manifest.json"
 DEFAULT_BASELINE_SUMMARY = DEFAULT_BASE / "hakodate_cell_ocr_batch_20260428_current" / "cell_ocr_summary.json"
 DEFAULT_OUTPUT_DIR = DEFAULT_BASE / "hakodate_text_recognizer_trial_20260428"
-FULLWIDTH_DIGIT_TRANS = str.maketrans("０１２３４５６７８９", "0123456789")
 TRIAL_ENGINE = "yomitoku_text_recognizer_direct"
 RECOGNIZER_MODES = ("raw", "clean", "dynamic")
 
@@ -65,107 +81,6 @@ def _load_text_recognizer(device: str):
     from yomitoku import TextRecognizer  # noqa: PLC0415
 
     return TextRecognizer(device=device, visualize=False)
-
-
-def _clean_text_for_number(value: object) -> str:
-    text = str(value or "").strip().translate(FULLWIDTH_DIGIT_TRANS)
-    text = text.replace("O", "0").replace("o", "0").replace("I", "1").replace("l", "1").replace("|", "1")
-    return re.sub(r"[^0-9]", "", text)
-
-
-def _remove_table_lines(gray: np.ndarray, line_mask: np.ndarray) -> np.ndarray:
-    if line_mask.size == 0:
-        return gray
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    line_mask = cv2.dilate(line_mask, kernel, iterations=1)
-    cleaned = gray.copy()
-    cleaned[line_mask > 0] = 255
-    return cleaned
-
-
-def _remove_noise_components(binary: np.ndarray) -> np.ndarray:
-    ink = 255 - binary
-    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, connectivity=8)
-    kept = np.zeros_like(ink)
-    height, width = ink.shape[:2]
-    for label in range(1, num_labels):
-        x, y, w, h, area = stats[label]
-        if area < 5:
-            continue
-        if w > width * 0.62 and h <= max(3, height * 0.12):
-            continue
-        if h > height * 0.72 and w <= max(3, width * 0.10):
-            continue
-        kept[labels == label] = 255
-    return 255 - kept
-
-
-def _foreground_centered(binary: np.ndarray, *, out_width: int, out_height: int) -> tuple[Image.Image, dict[str, Any]]:
-    ink = 255 - binary
-    points = cv2.findNonZero(ink)
-    canvas = np.full((out_height, out_width), 255, dtype=np.uint8)
-    if points is None:
-        return Image.fromarray(canvas).convert("RGB"), {"ink_area": 0, "bbox": None, "bbox_width": 0, "bbox_height": 0}
-    x, y, w, h = cv2.boundingRect(points)
-    crop = binary[y : y + h, x : x + w]
-    stats = {
-        "ink_area": int(np.count_nonzero(ink)),
-        "bbox": [int(x), int(y), int(w), int(h)],
-        "bbox_width": int(w),
-        "bbox_height": int(h),
-    }
-    if crop.size == 0:
-        return Image.fromarray(canvas).convert("RGB"), stats
-    max_w = max(1, min(out_width, out_width - 18 if out_width > 18 else out_width))
-    max_h = max(1, min(out_height, out_height - 18 if out_height > 18 else out_height))
-    fit_scale = min(max_w / max(1, crop.shape[1]), max_h / max(1, crop.shape[0]))
-    # Very wide line/noise components must still fit in the contact-sheet slot.
-    scale = fit_scale if fit_scale < 0.2 else max(0.2, min(fit_scale, 5.5))
-    resized_width = max(1, min(max_w, int(round(crop.shape[1] * scale))))
-    resized_height = max(1, min(max_h, int(round(crop.shape[0] * scale))))
-    resized = cv2.resize(
-        crop,
-        (resized_width, resized_height),
-        interpolation=cv2.INTER_CUBIC,
-    )
-    px = (out_width - resized.shape[1]) // 2
-    py = (out_height - resized.shape[0]) // 2
-    canvas[py : py + resized.shape[0], px : px + resized.shape[1]] = resized
-    return Image.fromarray(canvas).convert("RGB"), stats
-
-
-def _preprocess_crop_for_recognizer(
-    crop_bgr: np.ndarray,
-    *,
-    line_mask: np.ndarray | None,
-    slot_width: int,
-    slot_height: int,
-    mode: str,
-) -> tuple[Image.Image, dict[str, Any]]:
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr.copy()
-    if mode == "clean" and line_mask is not None:
-        gray = _remove_table_lines(gray, line_mask)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    gray = cv2.equalizeHist(gray)
-    _threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if mode == "clean":
-        binary = _remove_noise_components(binary)
-    return _foreground_centered(binary, out_width=slot_width - 10, out_height=slot_height - 10)
-
-
-def _preprocess_dynamic_crop_for_recognizer(
-    crop_bgr: np.ndarray,
-    *,
-    cell_box: list[float],
-    crop_box: tuple[int, int, int, int],
-    slot_width: int,
-    slot_height: int,
-) -> tuple[Image.Image, dict[str, Any]]:
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if crop_bgr.ndim == 3 else crop_bgr.copy()
-    frame_removed = _erase_known_cell_frame(gray, cell_box=cell_box, crop_box=crop_box)
-    cleaned = _remove_small_noise_only(frame_removed)
-    _threshold, binary = cv2.threshold(cleaned, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return _foreground_centered(binary, out_width=slot_width - 10, out_height=slot_height - 10)
 
 
 def build_recognizer_contact_sheet(
@@ -366,112 +281,6 @@ def run_text_recognizer_direct(
     }
 
 
-def summarize_regions(regions: list[dict[str, Any]]) -> dict[str, Any]:
-    accepted = [r for r in regions if str(r.get("ocr_normalized") or "").strip()]
-    raw_digit = [r for r in regions if _clean_text_for_number(r.get("recognizer_raw_text"))]
-    raw_nonempty = [r for r in regions if str(r.get("recognizer_raw_text") or "").strip()]
-    candidates = [r for r in regions if r.get("recognizer_candidate")]
-    skipped = [r for r in regions if r.get("recognizer_skipped")]
-    false_like = [
-        {
-            "region_id": r.get("region_id"),
-            "raw": r.get("recognizer_raw_text"),
-            "digits": _clean_text_for_number(r.get("recognizer_raw_text")),
-            "score": round(float(r.get("recognizer_score") or 0.0), 4),
-            "candidates": [
-                {
-                    "text": candidate.get("text"),
-                    "score": round(float(candidate.get("score") or 0.0), 4),
-                    "digits": _clean_text_for_number(candidate.get("text")),
-                }
-                for candidate in list(r.get("recognizer_candidates") or [])[:5]
-            ],
-        }
-        for r in raw_digit[:25]
-    ]
-    return {
-        "region_count": len(regions),
-        "candidate_count": len(candidates),
-        "skipped_count": len(skipped),
-        "raw_nonempty_count": len(raw_nonempty),
-        "raw_digit_count": len(raw_digit),
-        "accepted_digit_count": len(accepted),
-        "examples": false_like,
-    }
-
-
-def _candidate_summary(candidate: dict[str, Any]) -> str:
-    text = str(candidate.get("text") or "")
-    score = float(candidate.get("score") or 0.0)
-    digits = _clean_text_for_number(text)
-    suffix = f" -> {digits}" if digits and digits != text else ""
-    return f"{text or '<blank>'} ({score:.3f}){suffix}"
-
-
-def build_unaccepted_topk_review(
-    *,
-    contact_sheet: Image.Image,
-    regions: list[dict[str, Any]],
-    max_items: int = 36,
-) -> Image.Image:
-    review_targets = [
-        region
-        for region in regions
-        if region.get("recognizer_candidate")
-        and not str(region.get("ocr_normalized") or "").strip()
-        and (
-            str(region.get("recognizer_raw_text") or "").strip()
-            or any(str(candidate.get("text") or "").strip() for candidate in region.get("recognizer_candidates") or [])
-        )
-    ]
-    review_targets.sort(
-        key=lambda region: (
-            not any(_clean_text_for_number(candidate.get("text")) for candidate in region.get("recognizer_candidates") or []),
-            int(region.get("ocr_contact_slot_index") or 0),
-        )
-    )
-    review_targets = review_targets[:max_items]
-    row_h = 124
-    crop_w = 220
-    canvas_w = 1500
-    title_h = 52
-    canvas_h = max(title_h + row_h, title_h + row_h * len(review_targets))
-    canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
-    draw = ImageDraw.Draw(canvas)
-    font = _load_overlay_font(20)
-    small = _load_overlay_font(16)
-    _draw_text_safe(
-        draw,
-        (18, 14),
-        f"accepted なしセルの top-k 候補 ({len(review_targets)} shown)",
-        fill=(0, 0, 0, 255),
-        font=font,
-    )
-    for idx, region in enumerate(review_targets):
-        y = title_h + idx * row_h
-        slot = region.get("ocr_contact_crop_box") or region.get("ocr_contact_slot")
-        if isinstance(slot, list) and len(slot) == 4:
-            x0, y0, x1, y1 = [int(round(float(value))) for value in slot]
-            crop = contact_sheet.crop((x0, y0, x1, y1)).convert("RGB")
-            crop.thumbnail((crop_w - 22, row_h - 18), Image.Resampling.LANCZOS)
-            canvas.paste(crop, (14, y + (row_h - crop.height) // 2))
-            draw.rectangle((12, y + 8, crop_w - 4, y + row_h - 8), outline=(210, 210, 210), width=1)
-        raw_text = str(region.get("recognizer_raw_text") or "")
-        raw_score = float(region.get("recognizer_score") or 0.0)
-        candidates = list(region.get("recognizer_candidates") or [])[:5]
-        topk = " / ".join(_candidate_summary(candidate) for candidate in candidates)
-        line1 = (
-            f"{region.get('region_id')} slot={region.get('ocr_contact_slot_index')} "
-            f"raw={raw_text or '<blank>'} ({raw_score:.3f})"
-        )
-        line2 = f"top-k: {topk or '<none>'}"
-        _draw_text_safe(draw, (crop_w + 18, y + 18), line1, fill=(0, 0, 0, 255), font=font)
-        _draw_text_safe(draw, (crop_w + 18, y + 52), line2, fill=(170, 0, 0, 255), font=small)
-    if not review_targets:
-        _draw_text_safe(draw, (18, 76), "対象なし", fill=(0, 0, 0, 255), font=font)
-    return canvas
-
-
 def build_page_result(
     *,
     item: dict[str, Any],
@@ -583,22 +392,6 @@ def build_page_result(
         "variants": variants,
         "review_page": str(review_page_path),
     }, page_canvas
-
-
-def load_baseline_counts(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return {
-        "engine": data.get("ocr_engine"),
-        "count": data.get("count"),
-        "total_physical_region_count": data.get("total_physical_region_count"),
-        "total_logical_assignment_count": data.get("total_logical_assignment_count"),
-        "total_recognized_region_count": data.get("total_recognized_region_count"),
-        "total_recognized_assignment_count": data.get("total_recognized_assignment_count"),
-        "total_elapsed_seconds": data.get("total_elapsed_seconds"),
-        "summary_path": str(path),
-    }
 
 
 def write_contact_sheet_preview(results: list[dict[str, Any]], output_dir: Path) -> str:

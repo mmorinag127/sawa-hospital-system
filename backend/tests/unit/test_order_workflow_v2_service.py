@@ -42,6 +42,20 @@ def _id(prefix: str) -> str:
     return f"{prefix}{uuid4().hex[:12]}"
 
 
+@pytest.mark.parametrize("action", [
+    order_workflow_v2_service.confirm_bagging,
+    order_workflow_v2_service.prepare_output_review,
+])
+def test_output_review_entrypoints_keep_missing_source_blockers(action):
+    assert action(_id("MISSING"), expected_revision=0) == (None, "order_not_found")
+    order_id, _, _ = _create_order_with_evidence()
+    assert action(order_id, expected_revision=_current_workflow_revision(order_id)) == (
+        None, "bagging_result_required",
+    )
+    with session_scope() as session:
+        assert session.query(OrderOutputBundle).filter_by(order_id=order_id).count() == 0
+
+
 def _create_order_with_evidence() -> tuple[str, str, str]:
     order_id = _id("ORDv2")
     evidence_id_1 = _id("OEV")

@@ -1037,6 +1037,7 @@ def build_hakodate_best_method_for_manifest_item(
     checkpoint_callback: Any | None = None,
     recognition_checkpoint: dict[str, Any] | None = None,
     operator_values: dict[str, str] | None = None,
+    recognized_records: list[dict[str, Any]] | None = None,
 ) -> tuple[HakodateCellOcrCaseResult, Image.Image]:
     """Production-compatible entry point for the accepted Hakodate cell OCR pipeline.
 
@@ -1065,6 +1066,8 @@ def build_hakodate_best_method_for_manifest_item(
         runtime_args["recognition_checkpoint"] = recognition_checkpoint
     if operator_values is not None:
         runtime_args["operator_values"] = operator_values
+    if recognized_records is not None:
+        runtime_args["recognized_records"] = recognized_records
     summary, review_page = build_best_method_for_manifest_item(**runtime_args)
     outputs = {
         key: str(value)

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { apiClient } from "../services/apiClient";
 import { classifyDashboardMenuRead, type MenuInfo } from "../services/dashboardMenuInfo";
 import TopNav from "../components/TopNav";
+import { OcrOperationsPayload, OcrOperationsSummary } from "../components/OcrOperations";
 import {
   fetchFacilityNameMap,
   fetchOrderFacilityCandidates,
@@ -34,6 +35,7 @@ type Order = {
 };
 
 type SystemStatus = {
+  ocr_operations?: OcrOperationsPayload;
   intake?: {
     mode?: string | null;
     manual_upload_enabled?: boolean;
@@ -532,27 +534,8 @@ export default function HomePage() {
               </p>
             </div>
             <div className="system-card">
-              <p className="system-label">OCRパイプライン</p>
-              <p className="system-value">
-                {systemStatus?.ocr_pipeline?.configured
-                  ? formatSystemStatus(systemStatus?.ocr_pipeline?.status)
-                  : "未設定"}
-              </p>
-              <p className="system-meta">
-                最終成功: {formatDate(systemStatus?.ocr_pipeline?.last_success_at)}
-              </p>
-              <p className="system-meta">
-                稼働中:{" "}
-                {systemStatus?.ocr_pipeline?.inflight != null &&
-                systemStatus?.ocr_pipeline?.max_inflight != null
-                  ? `${systemStatus.ocr_pipeline.inflight}/${systemStatus.ocr_pipeline.max_inflight}`
-                  : "未取得"}
-              </p>
-              {systemStatus?.ocr_pipeline?.last_error && (
-                <p className="system-meta warn">
-                  エラー: {systemStatus.ocr_pipeline.last_error}
-                </p>
-              )}
+              <p className="system-label">現行の注文OCR</p>
+              <OcrOperationsSummary operations={systemStatus?.ocr_operations} />
             </div>
           </div>
         </article>

@@ -262,7 +262,6 @@ def test_google_admin_requires_active_registered_admin_role(monkeypatch):
     importlib.reload(auth_module)
     importlib.reload(auth_config_module)
     monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
-    monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
 
     client = TestClient(app)
     res = client.get("/auth/me", headers=_bearer_header())
@@ -276,7 +275,6 @@ def test_google_operator_requires_active_registered_role(monkeypatch):
     importlib.reload(auth_module)
     importlib.reload(auth_config_module)
     monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
-    monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
 
     client = TestClient(app)
     res = client.get("/orders", headers=_bearer_header())
@@ -290,7 +288,6 @@ def test_legacy_email_allowlists_do_not_bypass_common_user_database(monkeypatch)
     importlib.reload(auth_module)
     importlib.reload(auth_config_module)
     monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "user@example.com")
-    monkeypatch.setattr(auth_module, "_load_active_user_roles", lambda: {})
 
     client = TestClient(app)
     admin_res = client.get("/auth/me", headers=_bearer_header())
@@ -308,9 +305,9 @@ def test_google_role_lookup_failure_blocks_admin_and_operator(monkeypatch):
     monkeypatch.setattr(auth_module, "_verify_google_token", lambda _token, _request: "admin@example.com")
 
     def raise_lookup_failure():
-        raise auth_module.UserRoleLookupError("db unavailable")
+        raise auth_module.SQLAlchemyError("db unavailable")
 
-    monkeypatch.setattr(auth_module, "_load_active_user_roles", raise_lookup_failure)
+    monkeypatch.setattr(auth_module, "session_scope", raise_lookup_failure)
 
     client = TestClient(app)
     admin_res = client.get("/auth/me", headers=_bearer_header())

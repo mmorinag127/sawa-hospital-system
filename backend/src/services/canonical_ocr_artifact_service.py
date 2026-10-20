@@ -3,6 +3,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import math
 import mimetypes
 from pathlib import Path
 import re
@@ -18,8 +19,105 @@ REQUIRED_OUTPUTS = (
 CONTRACT = "hakodate_best_method_outputs/v1"
 
 
+class _EvidenceAnalysis:
+    """Successful pure work owned by one evidence operation, never a read cache."""
+
+    def __init__(self):
+        self.recognition_review = None
+        self.acceptance = None
+        self.targets = None
+        self.records = None
+        self.assignment = None
+
+    def accepted_values(self, payload):
+        from src.services.recognition_acceptance_service import accepted_values
+        binding = _analysis_input_bytes(payload)
+        if binding is not None and self.acceptance is not None and self.acceptance[0] == binding:
+            return deepcopy(self.acceptance[1])
+        accepted = accepted_values(payload)
+        self.acceptance = (binding, deepcopy(accepted)) if binding is not None else None
+        return accepted
+
+    def target_cells(self, payload):
+        from src.services.order_service import _extract_hakodate_target_cells_from_payload
+        binding = _analysis_input_bytes(payload)
+        if binding is not None and self.targets is not None and self.targets[0] == binding:
+            return deepcopy(self.targets[1])
+        targets = _extract_hakodate_target_cells_from_payload(payload)
+        self.targets = (binding, deepcopy(targets)) if binding is not None else None
+        return targets
+
+    def evidence_records(self, payload, *, order_id):
+        from src.services.order_service import _extract_hakodate_ocr_evidence_records_from_payload
+        binding = _analysis_input_bytes([payload, order_id])
+        if binding is not None and self.records is not None and self.records[0] == binding:
+            return deepcopy(self.records[1])
+        records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id)
+        self.records = (binding, deepcopy(records)) if binding is not None else None
+        return records
+
+    def assign(self, *, evidence_records, target_cells, accepted_values):
+        from src.services.hakodate_ocr_evidence_service import assign_evidence_to_target_cells
+        binding = _analysis_input_bytes([evidence_records, target_cells, accepted_values])
+        if binding is not None and self.assignment is not None and self.assignment[0] == binding:
+            return deepcopy(self.assignment[1])
+        assigned = assign_evidence_to_target_cells(evidence_records=evidence_records,
+            target_cells=target_cells, accepted_values=accepted_values)
+        self.assignment = (binding, deepcopy(assigned)) if binding is not None else None
+        return assigned
+
+    def validate_observation(self, inputs, records, source):
+        from src.services.hakodate_preprocess_observation import validate_artifact
+        # Keep the live checkpoint boundary and its original exception wrapper.
+        validate_artifact(inputs['preprocess_observation'], records,
+                          inputs['contact_sheet'], source)
+
+
 def _json_bytes(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _analysis_input_bytes(value):
+    containers = {}
+    active = set()
+
+    def native(item):
+        kind = type(item)
+        if item is None or kind in (str, bool, int):
+            return [kind.__name__, item]
+        if kind is float:
+            if not math.isfinite(item):
+                raise ValueError("non_native_analysis_input")
+            return ["float", item]
+        identity = id(item)
+        if kind not in (dict, list) or identity in active:
+            raise ValueError("non_native_analysis_input")
+        if identity in containers:
+            return ["reference", containers[identity]]
+        index = len(containers)
+        containers[identity] = index
+        active.add(identity)
+        if kind is dict:
+            if any(type(key) is not str for key in item):
+                raise ValueError("non_native_analysis_input")
+            entries = [[key, native(entry)] for key, entry in item.items()]
+        else:
+            entries = [native(entry) for entry in item]
+        active.remove(identity)
+        return [kind.__name__, index, entries]
+
+    try:
+        return json.dumps(native(value), ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        # Unrepresentable inputs still reach the original validator in its
+        # original position; they never establish a reusable success.
+        return None
+
+
+def _verified_input_types(inputs):
+    return type(inputs) is dict and all(type(key) is str and type(data) is bytes
+                                       for key, data in inputs.items())
 
 
 def _receipt(uri, data, content_type):
@@ -42,7 +140,7 @@ def _verify(receipt):
     return data
 
 
-def validate_payload(payload):
+def validate_payload(payload, *, _analysis=None):
     pipeline = payload.get("hakodate_canonical_pipeline")
     if not isinstance(pipeline, dict):
         raise ValueError("canonical_artifact_packet_required")
@@ -55,6 +153,7 @@ def validate_payload(payload):
         pipeline.get("artifact_packet"), source_receipt=source,
         outputs=pipeline.get("outputs"), expected_sheet_cells=pipeline.get("expected_sheet_cells"),
         producer_version=pipeline.get("version"), order_id=order_id,
+        _analysis=_analysis,
     )
     outputs = pipeline["outputs"]
     overlay = payload.get("hakodate_overlay")
@@ -107,7 +206,8 @@ def persist_outputs(*, order_id, outputs, source_receipt, expected_sheet_cells, 
     return packet
 
 
-def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, producer_version, order_id):
+def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, producer_version, order_id,
+                    _analysis=None):
     if not isinstance(packet, dict) or packet.get("contract") != CONTRACT:
         raise ValueError("canonical_artifact_packet_required")
     if (packet.get("source_receipt") != source_receipt or not source_receipt
@@ -144,7 +244,10 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
     if has_observation != ('preprocess_observation' in verified_inputs):
         raise ValueError('hakodate_observation_artifact_required')
     if has_observation:
-        from src.services.hakodate_preprocess_observation import validate_artifact
-        validate_artifact(verified_inputs['preprocess_observation'],original_records,
-            verified_inputs['contact_sheet'],source_receipt)
+        if _analysis is None:
+            from src.services.hakodate_preprocess_observation import validate_artifact
+            validate_artifact(verified_inputs['preprocess_observation'],original_records,
+                verified_inputs['contact_sheet'],source_receipt)
+        else:
+            _analysis.validate_observation(verified_inputs, original_records, source_receipt)
     return verified_inputs

@@ -42,7 +42,7 @@ export default function OcrResultsPage() {
     setLoading(true);
     setMessage("");
     try {
-      const res = await apiClient.get("/orders", { params: { include_ocr: true } });
+      const res = await apiClient.get("/orders", { params: { include_ocr: true, response_view: "ocr_monitor" } });
       setOrders(res.data?.orders || []);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;

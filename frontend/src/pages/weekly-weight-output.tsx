@@ -1,5 +1,5 @@
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { Button, MenuItem, Stack } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
@@ -90,6 +90,12 @@ const weekHistoryFromOrder = (order: OrderSummary) => {
 
 function WeeklyWeightOutputScreen() {
   const router = useRouter();
+  const routeIdentity = (target = router) => JSON.stringify([target.asPath, target.query.date, target.query.week, target.query.status]);
+  const queryIdentity = routeIdentity();
+  const [resolvedQuery, setResolvedQuery] = useState<string | null>(null);
+  const periodReady = router.isReady && resolvedQuery === queryIdentity;
+  const liveRoute = useRef({ router, queryIdentity, periodReady });
+  liveRoute.current = { router, queryIdentity, periodReady };
   const [week, setWeek] = useState(currentBusinessWeek());
   const [status, setStatus] = useState("");
   const conditionForm = useForm<WeeklyWeightConditions>({ defaultValues: { week: currentBusinessWeek(), savedWeek: "", status: "" } });
@@ -104,11 +110,7 @@ function WeeklyWeightOutputScreen() {
   const messageGeneration = useRef(0);
   const mounted = useRef(false);
 
-  useEffect(() => {
-    mounted.current = true;
-    let observedConditions = { ...conditionForm.getValues() };
-    let observedSession = browserSessionKey();
-    const retire = () => {
+  const retireOperations = useCallback(() => {
       inputGeneration.current += 1;
       loadGeneration.current += 1;
       downloadGeneration.current += 1;
@@ -116,7 +118,13 @@ function WeeklyWeightOutputScreen() {
       setLoading(false);
       setDownloading(false);
       setMessage("");
-    };
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    let observedConditions = { ...conditionForm.getValues() };
+    let observedSession = browserSessionKey();
+    const retire = retireOperations;
     const subscription = conditionForm.watch(() => {
       const values = conditionForm.getValues();
       if (values.week !== observedConditions.week && values.savedWeek
@@ -135,6 +143,7 @@ function WeeklyWeightOutputScreen() {
       observedSession = session;
       retire();
     });
+    router.events.on("routeChangeStart", retire);
     return () => {
       mounted.current = false;
       inputGeneration.current += 1;
@@ -143,22 +152,28 @@ function WeeklyWeightOutputScreen() {
       messageGeneration.current += 1;
       subscription.unsubscribe();
       stopSession();
+      router.events.off("routeChangeStart", retire);
     };
-  }, [conditionForm]);
+  }, [conditionForm, router.events, retireOperations]);
 
   const beginOperation = (kind: "list" | "output", conditions: WeeklyWeightConditions) => {
+    const captured = { ...conditions };
+    const ownsInput = () => {
+      const live = liveRoute.current;
+      const values = conditionForm.getValues();
+      return mounted.current && live.periodReady && live.router.isReady
+        && queryIdentity === live.queryIdentity && live.queryIdentity === routeIdentity(live.router)
+        && captured.week === values.week && captured.savedWeek === values.savedWeek
+        && captured.status === values.status;
+    };
+    if (!ownsInput()) return { current: () => false, ownsMessage: () => false };
     const operations = kind === "list" ? loadGeneration : downloadGeneration;
     const operation = ++operations.current;
     const input = inputGeneration.current;
     const messageOwner = ++messageGeneration.current;
     const session = browserSessionKey();
-    const captured = { ...conditions };
-    const current = () => {
-      const values = conditionForm.getValues();
-      return mounted.current && input === inputGeneration.current && operation === operations.current
-        && session === browserSessionKey() && captured.week === values.week
-        && captured.savedWeek === values.savedWeek && captured.status === values.status;
-    };
+    const current = () => ownsInput() && input === inputGeneration.current && operation === operations.current
+      && session === browserSessionKey();
     if (current()) {
       setMessage("");
       if (kind === "list") setLoading(false);
@@ -168,21 +183,28 @@ function WeeklyWeightOutputScreen() {
   };
 
   useEffect(() => {
+    retireOperations();
     if (!router.isReady) return;
     const queryDate = queryValue(router.query.date);
     const queryWeek = queryValue(router.query.week);
     const queryStatus = queryValue(router.query.status);
-    const period = queryWeek ? weeklyWeightPeriod(queryWeek) : queryDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(week);
-    if (!period || (queryDate && (!businessPeriodForDate(queryDate) || queryDate < period.start || queryDate > period.end))) {
+    const initialWeek = currentBusinessWeek();
+    const hasWeek = router.query.week !== undefined;
+    const hasDate = router.query.date !== undefined;
+    const period = hasWeek ? weeklyWeightPeriod(queryWeek) : hasDate ? businessPeriodForDate(queryDate) : weeklyWeightPeriod(initialWeek);
+    if (Array.isArray(router.query.week) || Array.isArray(router.query.date)
+      || !period || (hasDate && (!businessPeriodForDate(queryDate) || queryDate < period.start || queryDate > period.end))) {
       conditionForm.reset({ week: "", savedWeek: "", status: queryStatus });
       setMessage("対象期間を確認してください。");
+      setResolvedQuery(queryIdentity);
       return;
     }
     const nextWeek = weekInputForPeriod(period);
     const nextStatus = queryStatus || "";
-    const selection = queryWeek || (queryDate ? "" : week);
+    const selection = queryWeek || (queryDate ? "" : initialWeek);
     conditionForm.reset({ week: nextWeek, savedWeek: selection.includes("@") ? selection : "", status: nextStatus });
-  }, [router.isReady, router.query.date, router.query.status, router.query.week]);
+    setResolvedQuery(queryIdentity);
+  }, [router.isReady, queryIdentity, retireOperations]);
 
   const weekDates = useMemo(() => {
     const period = weeklyWeightPeriod(week);
@@ -263,9 +285,11 @@ function WeeklyWeightOutputScreen() {
   };
 
   useEffect(() => {
-    void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
+    if (periodReady && weeklyWeightConditionsPeriod(conditionForm.getValues())) {
+      void loadWeeklyOrders(conditionForm.getValues()).catch(() => undefined);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [resolvedQuery, periodReady]);
 
   const downloadWeeklyWeight = async (conditions: WeeklyWeightConditions) => {
     const owner = beginOperation("output", conditions);
@@ -328,8 +352,8 @@ function WeeklyWeightOutputScreen() {
             <FormTextField<WeeklyWeightConditions> name="status" label="ステータス" select>
               <MenuItem value="">全て</MenuItem><MenuItem value="未着">未着</MenuItem><MenuItem value="要確認">要確認</MenuItem><MenuItem value="確定">確定</MenuItem><MenuItem value="エラー">エラー</MenuItem>
             </FormTextField>
-            <Button type="submit" variant="contained" disabled={loading}>{loading ? "集計中..." : "表示・集計"}</Button>
-            <Button type="button" variant="outlined" disabled={downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
+            <Button type="submit" variant="contained" disabled={!periodReady || loading}>{loading ? "集計中..." : "表示・集計"}</Button>
+            <Button type="button" variant="outlined" disabled={!periodReady || downloading} onClick={() => void conditionForm.handleSubmit(downloadWeeklyWeight)()}>{downloading ? "出力中..." : "Excel出力"}</Button>
           </Stack>
         </FormProvider>
         <div className="filters">

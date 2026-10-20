@@ -37,7 +37,6 @@ def _seed_user(account: str, *, role: str = "operator", status: str = "active", 
                 text("INSERT INTO user_system_access(user_id, system_key, enabled) VALUES(:id, :system, TRUE)"),
                 {"id": user_id, "system": system},
             )
-    auth_module.invalidate_user_cache()
     return user_id
 
 
@@ -45,7 +44,6 @@ def _cleanup(user_id: str) -> None:
     with db.engine.begin() as connection:
         connection.execute(text("DELETE FROM user_system_access WHERE user_id=:id"), {"id": user_id})
         connection.execute(text("DELETE FROM users WHERE id=:id"), {"id": user_id})
-    auth_module.invalidate_user_cache()
 
 
 def _google(monkeypatch, account: str) -> dict[str, str]:

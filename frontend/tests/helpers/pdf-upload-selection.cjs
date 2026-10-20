@@ -33,15 +33,26 @@ async function mount(api) {
     esModuleInterop: true,
   } }).outputText;
   const module = { exports: {} };
+  const router = { asPath: '/pdf-upload', events: { on() {}, off() {} } };
   let sharedUi, sharedForm, sharedMaterial;
   function load(name) {
+    if (name === 'next/router') return { useRouter: () => router };
     if (name === '@sawa/ui') return sharedUi;
     if (name === 'react-hook-form') return sharedForm;
     if (name === '@mui/material') return sharedMaterial;
     if (name === 'next/link') return { __esModule: true, default: ({ children, ...props }) => React.createElement('a', props, children) };
     if (name === '../components/TopNav') return { __esModule: true, default: () => null };
-    if (name === '../services/apiClient') return { apiClient: api };
+    if (name === '../services/apiClient') return { apiClient: api, hasActiveSessionAuthHeader: () => true };
     if (name === '../services/browserSession') return { browserSessionKey: () => 'owned-component', subscribeBrowserSession: () => () => {} };
+    if (name === '../hooks/useMenuInputOwner') {
+      const hookFile = path.resolve(__dirname, '../../src/hooks/useMenuInputOwner.ts');
+      const hook = { exports: {} };
+      const output = ts.transpileModule(fs.readFileSync(hookFile, 'utf8'), { compilerOptions: {
+        target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS,
+      } }).outputText;
+      vm.compileFunction(output, ['require', 'module', 'exports'], { filename: hookFile })(load, hook, hook.exports);
+      return hook.exports;
+    }
     return require(name);
   }
   try {

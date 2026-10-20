@@ -1016,16 +1016,6 @@ def test_get_ocr_output_falls_back_to_message_job_first_pass_payload_when_repars
         ],
     }
 
-    def _fake_load_job_output(job, label):
-        if not isinstance(job, dict):
-            return None
-        if job.get("id") == f"OCR-{order['id']}":
-            return {"status": "failed", "error": "lines_empty"}
-        if job.get("id") == f"OCR-{order['message_id']}":
-            return dict(first_pass_payload)
-        return None
-
-    monkeypatch.setattr(order_service, "_load_job_output", _fake_load_job_output)
 
     output, error = order_service.get_ocr_output(order["id"])
 
@@ -1180,16 +1170,6 @@ def test_get_ocr_pages_falls_back_to_message_job_pages_when_reparse_job_has_no_p
         ],
     }
 
-    def _fake_load_job_output(job, label):
-        if not isinstance(job, dict):
-            return None
-        if job.get("id") == f"OCR-{order['id']}":
-            return {"status": "success", "table_raw": "|日付|区分|メニュー|常食2F|"}
-        if job.get("id") == f"OCR-{order['message_id']}":
-            return dict(first_pass_payload)
-        return None
-
-    monkeypatch.setattr(order_service, "_load_job_output", _fake_load_job_output)
 
     pages, error = order_service.get_ocr_pages(order["id"])
 

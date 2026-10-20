@@ -3,6 +3,7 @@ import { ThemeProvider } from "@mui/material/styles";
 import { sawaTheme } from "@sawa/ui";
 import { useEffect, useRef, useState } from "react";
 import TopNav from "../components/TopNav";
+import { OcrOperationsHistory, OcrOperationsPayload, OcrOperationsSummary, OcrOperationsTable } from "../components/OcrOperations";
 import { apiClient } from "../services/apiClient";
 
 type QueueEntry = {
@@ -38,14 +39,7 @@ const isQueueEntries = (value: unknown): value is QueueEntry[] => {
 };
 
 type SystemStatus = {
-  ocr_pipeline?: {
-    status?: string | null;
-    last_success_at?: string | null;
-    last_error_at?: string | null;
-    last_error?: string | null;
-    inflight?: number | null;
-    max_inflight?: number | null;
-  };
+  ocr_operations?: OcrOperationsPayload;
   uploaded_pdfs?: {
     pending_count?: number;
     processing_count?: number;
@@ -67,16 +61,6 @@ const formatDate = (value?: string | null) => {
   return date.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 };
 
-const formatStatus = (value?: string | null) => {
-  const raw = (value || "").toLowerCase();
-  if (!raw) return "未取得";
-  if (raw === "ok") return "OK";
-  if (raw === "error") return "エラー";
-  if (raw === "running") return "実行中";
-  if (raw === "misconfigured") return "未設定";
-  return value || "未取得";
-};
-
 export default function OcrQueuePage() {
   const [items, setItems] = useState<QueueEntry[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -84,6 +68,7 @@ export default function OcrQueuePage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [bulkRecoverPending, setBulkRecoverPending] = useState(false);
+  const bulkRecoverInFlight = useRef(false);
   const [queueError, setQueueError] = useState(false);
   const queueRead = useRef({ generation: 0, mounted: false });
 
@@ -143,10 +128,10 @@ export default function OcrQueuePage() {
 
   const uploaded = systemStatus?.uploaded_pdfs;
   const ingest = systemStatus?.ingest_jobs;
-  const pipeline = systemStatus?.ocr_pipeline;
 
   const recoverReadyQueue = async () => {
-    if (bulkRecoverPending || !queueRead.current.mounted) return;
+    if (bulkRecoverInFlight.current || !queueRead.current.mounted) return;
+    bulkRecoverInFlight.current = true;
     const generation = queueRead.current.generation;
     setBulkRecoverPending(true);
     setMessage("滞留しているOCRジョブをまとめて再試行しています。");
@@ -166,6 +151,7 @@ export default function OcrQueuePage() {
         setMessage("まとめて再試行に失敗しました。");
       }
     } finally {
+      bulkRecoverInFlight.current = false;
       if (queueRead.current.mounted) setBulkRecoverPending(false);
     }
   };
@@ -183,15 +169,8 @@ export default function OcrQueuePage() {
       <section className="panel">
         <div className="queue-status-banner">
           <div className="queue-status-main">
-            <p className="queue-status-label">OCR パイプライン</p>
-            <p className="queue-status-value">{formatStatus(pipeline?.status)}</p>
-            <p className="queue-status-meta">
-              最終成功: {formatDate(pipeline?.last_success_at)} / 最終失敗: {formatDate(pipeline?.last_error_at)}
-            </p>
-            <p className="queue-status-meta">
-              稼働中: {pipeline?.inflight ?? "未取得"} / {pipeline?.max_inflight ?? "未取得"}
-            </p>
-            {pipeline?.last_error ? <p className="queue-status-error">エラー: {pipeline.last_error}</p> : null}
+            <p className="queue-status-label">現行の注文OCR</p>
+            <OcrOperationsSummary operations={systemStatus?.ocr_operations} />
           </div>
           <div className="queue-status-counts" aria-label="OCRキュー件数">
             <div className="queue-status-count-card">
@@ -212,6 +191,8 @@ export default function OcrQueuePage() {
             </div>
           </div>
         </div>
+        {systemStatus?.ocr_operations && <OcrOperationsTable items={systemStatus.ocr_operations.items} />}
+        <OcrOperationsHistory operations={systemStatus?.ocr_operations} />
         <header className="panel-header">
           <h2>取込ジョブ</h2>
           <div className="filters">

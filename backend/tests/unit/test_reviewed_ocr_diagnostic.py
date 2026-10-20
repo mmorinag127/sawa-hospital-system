@@ -333,11 +333,13 @@ def test_sigterm_handler_unwinds_connection_proxy_and_directory(proxy_capture, m
     handlers = {}
     monkeypatch.setattr(diag.signal, "signal", lambda number, handler: handlers.update({number: handler}))
     monkeypatch.setattr(diag, "context", lambda *_: "a" * 40)
-    monkeypatch.setattr(diag, "run", lambda product, proxy, summary: diag.read_row(proxy, tmp_path))
+    monkeypatch.setattr(diag, "candidate_context", lambda *_: None)
+    monkeypatch.setattr(diag, "run", lambda product, proxy, summary, candidate: diag.read_row(proxy, tmp_path))
     def terminated():
         handlers[signal.SIGTERM](signal.SIGTERM, None)
     state.cursor.fetchall.side_effect = terminated
     monkeypatch.setattr("sys.argv", ["diagnostic", "--product", str(tmp_path), "--proxy", "synthetic-proxy",
+        "--candidate", str(tmp_path / "candidate"),
         "--summary", str(tmp_path / "summary")])
     with pytest.raises(SystemExit) as stopped:
         diag.main()
@@ -419,8 +421,10 @@ def test_private_cleanup_is_owned_and_finally_even_on_capture_failure(actions, m
 
 def test_safe_failure_has_no_raw_secret_or_exception_text(actions, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(diag, "context", lambda *_: "a" * 40)
+    monkeypatch.setattr(diag, "candidate_context", lambda *_: None)
     monkeypatch.setattr(diag, "run", Mock(side_effect=RuntimeError("PRIVATE-DATA")))
     monkeypatch.setattr("sys.argv", ["diagnostic", "--product", str(tmp_path), "--proxy", "proxy",
+        "--candidate", str(tmp_path / "candidate"),
         "--summary", str(tmp_path / "summary")])
     assert diag.main() == 1
     raw = (tmp_path / "summary/capture-error.json").read_text()
@@ -450,13 +454,17 @@ def test_both_offline_processes_run_with_no_credentials_and_private_cleanup(
         assert kwargs["env"]["DATABASE_URL"] == "sqlite:///:memory:"
         assert kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
         assert ("PYTHONPATH" in kwargs["env"]) == (build == "gui")
-        diag.write_json(summary / (build + ".json"), {"synthetic": True})
+        variant = args[args.index("--variant") + 1]
+        diag.write_json(summary / (variant + "-" + build + ".json"), {"synthetic": True})
+        diag.write_json(diag.owned_path() / (variant + "-" + build + "-results.json"), {"synthetic": True})
         return SimpleNamespace(returncode=headless_status if build == "headless" else 0)
     monkeypatch.setattr(diag.subprocess, "run", run)
-    assert diag.run(tmp_path, Path("proxy"), summary) == (headless_status == 0)
-    assert len(calls) == 2
+    assert diag.run(tmp_path, Path("proxy"), summary, tmp_path / "candidate") == (headless_status == 0)
+    assert len(calls) == 4
     assert not diag.owned_path().exists()
-    assert set(path.name for path in summary.iterdir()) == {"headless.json", "gui.json"}
+    assert set(path.name for path in summary.iterdir()) == {
+        "baseline-headless.json", "baseline-gui.json", "candidate-headless.json", "candidate-gui.json",
+        *(["comparison.json"] if headless_status == 0 else [])}
 
 
 def test_workflow_run_blocks_have_bash_syntax():
@@ -489,7 +497,8 @@ def test_dedicated_workflow_is_manual_owner_staging_nondeploy_and_summary_only()
     assert job["permissions"] == {"contents": "read", "actions": "read", "id-token": "write"}
     checkouts = [step["with"] for step in job["steps"] if step.get("uses") == "actions/checkout@v6"]
     assert checkouts == [{"path": "diagnostic", "persist-credentials": "false"},
-        {"ref": diag.PRODUCT_SHA, "path": "product", "persist-credentials": "false"}]
+        {"ref": diag.PRODUCT_SHA, "path": "product", "persist-credentials": "false"},
+        {"ref": "${{ github.sha }}", "path": "candidate", "persist-credentials": "false"}]
     auth = next(step for step in job["steps"] if step.get("uses") == "google-github-actions/auth@v3")
     assert auth["with"]["service_account"] == "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}"
     upload = job["steps"][-1]
@@ -525,6 +534,75 @@ def test_diagnostic_is_selected_in_existing_saved_source_ci_command():
     assert selected["run"].count("tests/unit/test_reviewed_ocr_diagnostic.py") == 1
     assert "--confcutdir=tests/unit" in selected["run"]
     assert "--junitxml=.logs/saved-source-junit.xml -q" in selected["run"]
+
+
+@pytest.mark.parametrize("value", [None, [], {}, {"records": [1, True, "1"], "contact": b"\x00\xff"}])
+def test_complete_comparison_keeps_types_and_every_byte(value):
+    encoded = diag.result_bytes(value)
+    assert encoded == diag.result_bytes(deepcopy(value))
+    assert diag.result_bytes(1) != diag.result_bytes(True) != diag.result_bytes("1")
+    assert diag.result_bytes(b"x") != diag.result_bytes("x")
+    assert diag.result_bytes(b"x") != diag.result_bytes(b"y")
+
+
+@pytest.mark.parametrize("difference", [None, "quantity", "payload", "bytes", "error", "error_order"])
+def test_before_after_comparison_checks_full_private_results_not_boolean(tmp_path, difference):
+    private, summary = tmp_path / "private", tmp_path / "summary"
+    private.mkdir()
+    summary.mkdir()
+    original = {"selectable": True, "quantity": 7, "payload": ["raw", ""], "bytes": b"original",
+        "errors": ["first_guard", "second_guard"]}
+    changed = deepcopy(original)
+    if difference == "quantity": changed["quantity"] = 8
+    elif difference == "payload": changed["payload"][1] = "1"
+    elif difference == "bytes": changed["bytes"] = b"changed"
+    elif difference == "error": changed["errors"][0] = "other_guard"
+    elif difference == "error_order": changed["errors"].reverse()
+    for build in ("headless", "gui"):
+        diag.write_private(private / ("baseline-" + build + "-results.json"), diag.result_bytes(original))
+        diag.write_private(private / ("candidate-" + build + "-results.json"), diag.result_bytes(changed))
+    assert diag.compare_results(private, summary) is (difference is None)
+    raw = (summary / "comparison.json").read_text()
+    assert "original" not in raw and "quantity" not in raw and "first_guard" not in raw
+
+
+@pytest.mark.parametrize("difference", ["sha", "dirty", "lock", "project", "missing"])
+def test_candidate_source_and_identical_runtime_are_mandatory(actions, tmp_path, monkeypatch, difference):
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    for root in (baseline, candidate):
+        (root / "backend").mkdir(parents=True)
+        (root / "backend/uv.lock").write_bytes(b"same lock")
+        (root / "backend/pyproject.toml").write_bytes(b"same project")
+    if difference in ("lock", "project"):
+        name = "uv.lock" if difference == "lock" else "pyproject.toml"
+        (candidate / "backend" / name).write_bytes(b"changed")
+    monkeypatch.setattr(diag, "command", Mock(side_effect=[
+        b"different" if difference == "sha" else actions["GITHUB_SHA"].encode(),
+        b"M product" if difference == "dirty" else b""]))
+    with pytest.raises(diag.Blocked):
+        diag.candidate_context(baseline, None if difference == "missing" else candidate)
+
+
+@pytest.mark.parametrize("errors", [
+    ["first", "different_later", "wrapper", "wrapper"],
+    ["first", "later", "wrapper"],
+    ["first", "wrapper", "later", "wrapper"],
+])
+def test_same_value_first_error_and_exception_cannot_hide_later_error_or_wrapper_loss(tmp_path, errors):
+    private, summary = tmp_path / "private", tmp_path / "summary"
+    private.mkdir()
+    summary.mkdir()
+    original = {"value": {"selectable": False}, "exception": ["builtins", "ValueError", "first"],
+        "first_guard_error": "first", "errors_in_order": ["first", "later", "wrapper", "wrapper"]}
+    changed = deepcopy(original)
+    changed["errors_in_order"] = errors
+    for build in ("headless", "gui"):
+        diag.write_json(private / ("baseline-" + build + "-results.json"), original)
+        diag.write_json(private / ("candidate-" + build + "-results.json"), changed)
+    assert diag.compare_results(private, summary) is False
+    assert all(not item["full_results_equal"] for item in json.loads((summary / "comparison.json").read_text())["comparisons"])
+    source = (ROOT / "scripts/diagnose_reviewed_ocr.py").read_text()
+    assert 'full_results[-1]["errors_in_order"] = list(failures)' in source
 
 
 def staging_workflow():

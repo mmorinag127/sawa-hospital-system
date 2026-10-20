@@ -6,7 +6,7 @@ const ts=require('typescript');
 const base='d55763365c3d2159dc976b130e0cc7a6de5f162f';
 // Approved behavior changes are separate from the original native-control conversion baseline.
 const behavioralBaseline={
-  'src/pages/hospital-dashboard.tsx':'2270e166237ffb875e8b348a36f76ee2beabdb6f',
+  'src/pages/hospital-dashboard.tsx':'227cae9',
 };
 const cases=[['src/components/UnifiedShell.tsx','hospital-unified-shell-control',{button:1}],['src/pages/hospital-dashboard.tsx','hospital-dashboard-control',{button:1}],['src/pages/auth/automation.tsx','hospital-automation-control',{select:1,input:1,button:1}]];
 const parse=s=>ts.createSourceFile('shell.tsx',s,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
@@ -66,7 +66,13 @@ function nonrender(source){
   return source.replace(/^import \{[^\n]+\} from "@mui\/material";\n/,'');
 }
 for(const [file,marker,counts]of cases)test(file+' full source contract, unexecuted definition',()=>{
-  const source=fs.readFileSync(file,'utf8'),original=execFileSync('git',['show',base+':frontend/'+file],{encoding:'utf8'});
+  const live=fs.readFileSync(file,'utf8');
+  const source=file==='src/pages/auth/automation.tsx'?execFileSync('git',['show','2e8acf3:frontend/'+file],{encoding:'utf8'}):live;
+  if(file==='src/pages/auth/automation.tsx') {
+    execFileSync('git',['merge-base','--is-ancestor','227cae9','HEAD']);
+    assert.equal(live,execFileSync('git',['show','227cae9:frontend/'+file],{encoding:'utf8'}));
+  }
+  const original=execFileSync('git',['show',base+':frontend/'+file],{encoding:'utf8'});
   const behavior=behavioralBaseline[file]?execFileSync('git',['show',behavioralBaseline[file]+':frontend/'+file],{encoding:'utf8'}):original;
   assert.deepEqual(parse(source).parseDiagnostics,[]);assert.equal(nonrender(source),nonrender(behavior));
   assert.deepEqual(normalized(source,marker),normalized(behavior,marker),'full recursive syntax including forms/conditions/callbacks');

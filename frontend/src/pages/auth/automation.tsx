@@ -1,5 +1,5 @@
 import { Button, Input, NativeSelect } from "@mui/material";
-import { useState, type FormEvent } from "react";
+import { useState, type ChangeEvent, type FormEvent } from "react";
 import { clearAuth, setBearerToken } from "../../services/apiClient";
 import { publishSchoolLunchSessionGeneration } from "../../services/browserSession";
 
@@ -8,6 +8,24 @@ export default function AutomationLoginPage() {
   const [system, setSystem] = useState("shift");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const readTokenFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.target;
+    const file = input.files?.[0];
+    if (!file || busy) return;
+    setBusy(true);
+    setToken("");
+    setError("");
+    try {
+      if (file.size > 16384) throw new Error("Token file too large");
+      setToken((await file.text()).trim());
+    } catch {
+      setError("認証ファイルを読み込めませんでした。");
+    } finally {
+      input.value = "";
+      setBusy(false);
+    }
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -65,6 +83,11 @@ export default function AutomationLoginPage() {
           <span>認証トークン</span>
           <Input disableUnderline className="hospital-automation-control" type="password" inputProps={{ autoComplete: "off" }} value={token}
             onChange={(event) => setToken(event.target.value)} disabled={busy} required />
+        </label>
+        <label className="field">
+          <span>認証トークンファイル</span>
+          <Input disableUnderline className="hospital-automation-control" type="file"
+            inputProps={{ accept: ".txt,text/plain" }} onChange={readTokenFile} disabled={busy} />
         </label>
         <Button className="btn primary hospital-automation-control" type="submit" disabled={busy || !token.trim()}>
           {busy ? "認証中" : "ログイン"}

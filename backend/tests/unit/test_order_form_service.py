@@ -28,7 +28,42 @@ def _build_source_workbook(path: pathlib.Path, sheet_name: str) -> None:
     worksheet["G3"] = "締切日1月1日まで"
     worksheet["A4"] = ""
     worksheet["D7"] = "献立"
+    worksheet["E7"] = "常食"
+    worksheet["F7"] = "肉禁"
     workbook.save(path)
+
+
+def _authored_columns(quantities):
+    return {"fax_template": {"columns": [
+        {"role": "date", "source_index": 0},
+        {"role": "daypart", "source_index": 1},
+        {"role": "category", "source_index": 2},
+        {"role": "menu", "source_index": 3},
+        *[{"role": "quantity", "source_index": index - 1, "name": f"qty.{diet}_x",
+           "diet_type": diet, "header": header} for index, diet, header in quantities],
+    ]}}
+
+
+def _bind_monthly_export(monkeypatch, facility_id, month, source, quantities):
+    from copy import deepcopy
+    facility = deepcopy(order_form_service.config_service.get_facility_config(facility_id))
+    facility.update(_authored_columns(quantities))
+    facility["order_form_month_sources"] = {month: str(source)}
+    snapshot = SimpleNamespace(master={}, revision="test-revision", source="unit-fixture")
+    monkeypatch.setattr(order_form_service.canonical_facility_store, "read_snapshot", lambda: snapshot)
+    monkeypatch.setattr(order_form_service, "_resolve_monthly_facility", lambda _snapshot, _id, _month: deepcopy(facility))
+    return facility
+
+
+_PACKAGED_QUANTITIES = {
+    "fax_layout_regular_forbidden_v1": [(5, "regular", "常食"), (7, "no_meat", "肉禁"), (8, "no_fish", "魚禁"), (9, "change_1", "変更①"), (10, "change_2", "変更②")],
+    "fax_layout_floor_2f3f_v1": [(5, "regular_hana", "花"), (6, "regular_tsuki", "月"), (7, "soft_hana", "花"), (8, "soft_tsuki", "月"), (9, "mixer_hana", "花"), (10, "mixer_tsuki", "月"), (11, "no_fish", "魚禁(常食)")],
+    "fax_layout_regular_soft_mixer_forbidden_v1": [(5, "regular", "常食"), (6, "packaged", "常食"), (7, "soft", "軟菜"), (8, "mixer", "ミキサー"), (9, "no_meat", "肉禁"), (10, "no_fish", "魚禁")],
+    "fax_layout_regular_staff_daycare_v1": [(5, "regular", "常食"), (6, "staff", "職員"), (7, "no_meat", "肉禁"), (8, "no_fish", "魚禁"), (9, "no_sesame", "ゴマ禁アレルギー"), (10, "change_1", "変更①")],
+    "fax_layout_regular_diabetes_v1": [(5, "regular", "常食"), (6, "diabetes", "糖尿"), (7, "no_meat", "肉禁"), (8, "no_fish", "魚禁"), (9, "change_1", "変更①"), (10, "change_2", "変更②")],
+    "fax_layout_regular_staff_daycare_other_forbidden_v1": [(5, "regular", "常食"), (6, "staff", "職員"), (7, "daycare", "通所"), (8, "no_meat", "肉禁"), (9, "no_fish", "魚禁"), (10, "other", "その他"), (11, "change_1", "変更①"), (12, "change_2", "変更②")],
+    "fax_layout_soft_packaging_forbidden_v1": [(5, "soft", "軟菜"), (6, "packaged", "袋分け"), (7, "no_meat", "肉禁"), (8, "no_fish", "魚禁"), (9, "change_1", "変更①"), (10, "change_2", "変更②")],
+}
 
 
 class _FakeSessionScope:
@@ -163,12 +198,16 @@ def test_build_order_form_excel_creates_weekly_sheets_and_metadata(tmp_path, mon
                 {"menu_date": "2026-03-01", "daypart": "朝", "category": "副①", "name": "A"},
                 {"menu_date": "2026-03-01", "daypart": "昼", "category": "主", "name": "B"},
                 {"menu_date": "2026-03-08", "daypart": "朝", "category": "副①", "name": "C"},
+                {"menu_date": "2026-03-15", "daypart": "朝", "category": "副①", "name": "C2"},
+                {"menu_date": "2026-03-22", "daypart": "朝", "category": "副①", "name": "C3"},
                 {"menu_date": "2026-03-29", "daypart": "夕", "category": "主", "name": "D"},
                 {"menu_date": "2026-03-31", "daypart": "朝", "category": "副①", "name": "E"},
             ]
         },
     )
 
+    _bind_monthly_export(monkeypatch, "FACTEST01", "2026-03", tmp_path / source_name,
+                         [(5, "regular", "常食"), (6, "no_meat", "肉禁")])
     output = order_form_service.build_order_form_excel(facility_id="FACTEST01", month_id="2026-03")
 
     workbook = load_workbook(output)
@@ -195,67 +234,69 @@ def test_build_order_form_excel_creates_weekly_sheets_and_metadata(tmp_path, mon
     assert last_sheet["A12"].value.date() == datetime(2026, 3, 31).date()
     assert rows["month_id"] == "2026-03"
     assert rows["sheet_count"] == 5
-    assert rows["entry_count"] == 5
+    assert rows["entry_count"] == 7
     assert rows["week_1_sheet_name"] == "3月1日～3月7日"
     assert workbook["設定"].sheet_state == "hidden"
 
 
-def test_build_saved_sheet_order_form_excel_writes_saved_quantities_to_week_form(tmp_path, monkeypatch):
-    source_name = "saved-source.xlsx"
-    week_sheet = "3月1日～3月7日"
-    _build_source_workbook(tmp_path / source_name, week_sheet)
-    source_workbook = load_workbook(tmp_path / source_name)
-    source_ws = source_workbook[week_sheet]
-    source_ws["E7"] = "常食"
-    source_ws["F7"] = "肉禁"
-    source_workbook.save(tmp_path / source_name)
+def _saved_form_input(monkeypatch, tmp_path, *, start="2026-03-01", end="2026-03-07",
+                      source_month="2026-03", source_week="3月1日～3月7日"):
+    from copy import deepcopy
+    from datetime import date
 
-    order = SimpleNamespace(
-        id="ORD-SAVED-SHEET-001",
-        facility_code="FACTEST01",
-        week_code="2026-03@2026-03-01~2026-03-07",
-        received_at=datetime(2026, 3, 1, 9, 0, 0),
-    )
-    monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", tmp_path)
-    monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(order_form_service, "session_scope", lambda: _FakeSessionScope(order))
-    monkeypatch.setitem(
-        order_form_service._FAX_FAMILY_SOURCE_MAP,
-        "fax_layout_regular_forbidden_v1",
-        {
-            "source_workbook": source_name,
-            "family_label": "共通・禁食2種",
-        },
-    )
-    monkeypatch.setattr(
-        order_form_service.config_service,
-        "get_facility_config",
-        lambda facility_id: {
-            "facility_id": facility_id,
-            "facility_name": "保存済み施設",
+    source = tmp_path / "saved-source.xlsx"
+    _build_source_workbook(source, source_week)
+    workbook = load_workbook(source)
+    workbook[source_week]["E7"] = "常食"
+    workbook[source_week]["F7"] = "肉禁"
+    workbook.save(source)
+    workbook.close()
+    template = {"columns": [
+        {"role": "date", "source_index": 0},
+        {"role": "daypart", "source_index": 1},
+        {"role": "category", "source_index": 2},
+        {"role": "menu", "source_index": 3},
+        {"role": "quantity", "source_index": 4, "name": "qty.regular_x",
+         "diet_type": "regular", "header": "常食"},
+        {"role": "quantity", "source_index": 5, "name": "qty.no_meat_x",
+         "diet_type": "no_meat", "header": "肉禁"},
+    ]}
+    captured = {
+        "order_id": "ORD-SAVED-SHEET-001", "facility_id": "FACTEST01",
+        "received_at": datetime.fromisoformat(start), "fax_version": {},
+        "draft_id": "ODR-DRAFT-001", "month_id": start[:7],
+        "week_code": f"{start[:7]}@{start}~{end}",
+        "week_start": date.fromisoformat(start), "week_end": date.fromisoformat(end),
+        "facility": {
+            "facility_id": "FACTEST01", "facility_name": "保存済み施設",
             "fax_template_id": "fax_layout_regular_forbidden_v1",
-            "order_form_source_workbook": source_name,
+            "fax_template": template,
+            "order_form_month_sources": {source_month: str(source)},
         },
-    )
-    monkeypatch.setattr(
-        order_form_service.draft_sheet_service,
-        "get_latest_sheet_draft",
-        lambda order_id: {
-            "id": "ODR-DRAFT-001",
-            "draft_sheet_json": {
-                "fields": ["date", "daypart", "category", "menu_name", "qty.regular_x", "qty.no_meat_x"],
-                "rows": [
-                    ["3/1", "朝", "主", "テスト献立A", "12", "3"],
-                    ["3/1", "昼", "副", "テスト献立B", "4", ""],
-                ],
-            },
+        "draft_payload": {
+            "fields": ["date_mmdd", "daypart", "category", "menu", "qty.regular_x", "qty.no_meat_x"],
+            "rows": [[start, "朝", "主", "テスト献立A", "12", "3"],
+                     [start, "昼", "副", "テスト献立B", "4", ""]],
         },
-    )
+    }
+    calls = []
+    def capture(_session, order_id):
+        assert order_id == captured["order_id"]
+        calls.append(order_id)
+        return deepcopy(captured)
+    monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(order_form_service, "session_scope", lambda: _FakeSessionScope(None))
+    # These workbook-unit tests begin at the immutable captured-input boundary.
+    monkeypatch.setattr(order_form_service, "_capture_saved_sheet_order_form_input", capture)
+    return captured, source, calls
 
-    output = order_form_service.build_saved_sheet_order_form_excel(order_id=order.id)
 
+def test_build_saved_sheet_order_form_excel_writes_saved_quantities_to_week_form(tmp_path, monkeypatch):
+    captured, source, calls = _saved_form_input(monkeypatch, tmp_path)
+    original = source.read_bytes()
+    output = order_form_service.build_saved_sheet_order_form_excel(order_id=captured["order_id"])
     workbook = load_workbook(output)
-    worksheet = workbook[week_sheet]
+    worksheet = workbook["3月1日～3月7日"]
     metadata = _metadata_rows(workbook)
     assert worksheet["A4"].value == "保存済み施設"
     assert worksheet["A11"].value.date() == datetime(2026, 3, 1).date()
@@ -267,140 +308,52 @@ def test_build_saved_sheet_order_form_excel_writes_saved_quantities_to_week_form
     assert worksheet["B12"].value == "昼"
     assert worksheet["D12"].value == "テスト献立B"
     assert worksheet["E12"].value == 4
+    assert worksheet["F12"].value is None
     assert str(worksheet["B1"].value).startswith("FAX読取シートExcel作成: ")
     assert metadata["mode"] == "saved_sheet"
-    assert metadata["order_id"] == order.id
+    assert metadata["order_id"] == captured["order_id"]
     assert metadata["saved_sheet_draft_id"] == "ODR-DRAFT-001"
+    assert calls == [captured["order_id"], captured["order_id"]]
+    assert source.read_bytes() == original
+    workbook.close()
 
 
-def test_build_saved_sheet_order_form_excel_clones_template_when_week_sheet_missing(tmp_path, monkeypatch):
-    source_name = "saved-source.xlsx"
-    source_week_sheet = "3月1日～3月7日"
-    target_week_sheet = "3月8日～3月14日"
-    _build_source_workbook(tmp_path / source_name, source_week_sheet)
-    source_workbook = load_workbook(tmp_path / source_name)
-    source_ws = source_workbook[source_week_sheet]
-    source_ws["E7"] = "常食"
-    source_ws["F7"] = "肉禁"
-    source_workbook.save(tmp_path / source_name)
-
-    order = SimpleNamespace(
-        id="ORD-SAVED-SHEET-MISSING-WEEK",
-        facility_code="FACTEST02",
-        week_code="2026-03@2026-03-08~2026-03-14",
-        received_at=datetime(2026, 3, 8, 9, 0, 0),
+@pytest.mark.parametrize("start,end,source_month,source_week,message", [
+    ("2026-03-08", "2026-03-14", "2026-03", "3月1日～3月7日",
+     "saved sheet week not found in configured workbook"),
+    ("2026-05-10", "2026-05-16", "2026-04", "4月26日～4月30日",
+     "saved sheet source workbook not configured"),
+])
+def test_saved_form_rejects_missing_week_or_month_without_substituting_source(
+    tmp_path, monkeypatch, start, end, source_month, source_week, message,
+):
+    captured, source, calls = _saved_form_input(
+        monkeypatch, tmp_path, start=start, end=end,
+        source_month=source_month, source_week=source_week,
     )
-    monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", tmp_path)
-    monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(order_form_service, "session_scope", lambda: _FakeSessionScope(order))
-    monkeypatch.setitem(
-        order_form_service._FAX_FAMILY_SOURCE_MAP,
-        "fax_layout_regular_forbidden_v1",
-        {
-            "month_sources": {"2026-03": source_name},
-            "source_workbook": "",
-            "family_label": "共通・禁食2種",
-        },
-    )
-    monkeypatch.setattr(
-        order_form_service.config_service,
-        "get_facility_config",
-        lambda facility_id: {
-            "facility_id": facility_id,
-            "facility_name": "週欠損施設",
-            "fax_template_id": "fax_layout_regular_forbidden_v1",
-        },
-    )
-    monkeypatch.setattr(
-        order_form_service.draft_sheet_service,
-        "get_latest_sheet_draft",
-        lambda order_id: {
-            "id": "ODR-DRAFT-MISSING-WEEK",
-            "draft_sheet_json": {
-                "fields": ["date", "daypart", "category", "menu_name", "qty.regular_x", "qty.no_meat_x"],
-                "rows": [["3/8", "朝", "主", "欠損週献立", "8", "2"]],
-            },
-        },
-    )
-
-    output = order_form_service.build_saved_sheet_order_form_excel(order_id=order.id)
-
-    workbook = load_workbook(output)
-    worksheet = workbook[target_week_sheet]
-    metadata = _metadata_rows(workbook)
-    assert workbook.sheetnames == [target_week_sheet, "設定"]
-    assert worksheet["A4"].value == "週欠損施設"
-    assert worksheet["A11"].value.date() == datetime(2026, 3, 8).date()
-    assert worksheet["D11"].value == "欠損週献立"
-    assert worksheet["E11"].value == 8
-    assert worksheet["F11"].value == 2
-    assert metadata["source_workbook"] == source_name
-    assert metadata["week_sheet_name"] == target_week_sheet
+    original = source.read_bytes()
+    with pytest.raises(ValueError, match=message):
+        order_form_service.build_saved_sheet_order_form_excel(order_id=captured["order_id"])
+    assert calls == [captured["order_id"]]
+    assert list(tmp_path.iterdir()) == [source]
+    assert source.read_bytes() == original
 
 
-def test_build_saved_sheet_order_form_excel_uses_latest_family_source_when_month_missing(tmp_path, monkeypatch):
-    source_name = "saved-source-2604.xlsx"
-    source_week_sheet = "4月26日～4月30日"
-    target_week_sheet = "5月10日～5月16日"
-    _build_source_workbook(tmp_path / source_name, source_week_sheet)
-    source_workbook = load_workbook(tmp_path / source_name)
-    source_ws = source_workbook[source_week_sheet]
-    source_ws["E7"] = "常食"
-    source_ws["F7"] = "肉禁"
-    source_workbook.save(tmp_path / source_name)
-
-    order = SimpleNamespace(
-        id="ORD-SAVED-SHEET-MISSING-MONTH",
-        facility_code="FACTEST03",
-        week_code="2026-05@2026-05-10~2026-05-16",
-        received_at=datetime(2026, 5, 10, 9, 0, 0),
-    )
-    monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", tmp_path)
-    monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(order_form_service, "session_scope", lambda: _FakeSessionScope(order))
-    monkeypatch.setitem(
-        order_form_service._FAX_FAMILY_SOURCE_MAP,
-        "fax_layout_regular_forbidden_v1",
-        {
-            "month_sources": {"2026-04": source_name},
-            "source_workbook": "",
-            "family_label": "共通・禁食2種",
-        },
-    )
-    monkeypatch.setattr(
-        order_form_service.config_service,
-        "get_facility_config",
-        lambda facility_id: {
-            "facility_id": facility_id,
-            "facility_name": "月欠損施設",
-            "fax_template_id": "fax_layout_regular_forbidden_v1",
-        },
-    )
-    monkeypatch.setattr(
-        order_form_service.draft_sheet_service,
-        "get_latest_sheet_draft",
-        lambda order_id: {
-            "id": "ODR-DRAFT-MISSING-MONTH",
-            "draft_sheet_json": {
-                "fields": ["date", "daypart", "category", "menu_name", "qty.regular_x", "qty.no_meat_x"],
-                "rows": [["5/10", "朝", "主", "5月欠損献立", "9", "1"]],
-            },
-        },
-    )
-
-    output = order_form_service.build_saved_sheet_order_form_excel(order_id=order.id)
-
-    workbook = load_workbook(output)
-    worksheet = workbook[target_week_sheet]
-    metadata = _metadata_rows(workbook)
-    assert workbook.sheetnames == [target_week_sheet, "設定"]
-    assert worksheet["A4"].value == "月欠損施設"
-    assert _cell_date(worksheet["A11"].value) == datetime(2026, 5, 10).date()
-    assert worksheet["D11"].value == "5月欠損献立"
-    assert worksheet["E11"].value == 9
-    assert worksheet["F11"].value == 1
-    assert metadata["source_workbook"] == source_name
-    assert metadata["week_sheet_name"] == target_week_sheet
+def test_saved_form_rejects_changed_captured_input_before_publishing(tmp_path, monkeypatch):
+    from copy import deepcopy
+    captured, source, _calls = _saved_form_input(monkeypatch, tmp_path)
+    reads = []
+    def capture(_session, _order_id):
+        result = deepcopy(captured)
+        if reads:
+            result["draft_payload"]["rows"][0][4] = "99"
+        reads.append(result)
+        return result
+    monkeypatch.setattr(order_form_service, "_capture_saved_sheet_order_form_input", capture)
+    with pytest.raises(ValueError, match="saved sheet output input changed"):
+        order_form_service.build_saved_sheet_order_form_excel(order_id=captured["order_id"])
+    assert len(reads) == 2
+    assert list(tmp_path.iterdir()) == [source]
 
 
 def test_write_saved_sheet_rows_maps_workflow_v2_fields_by_header_role() -> None:
@@ -420,15 +373,20 @@ def test_write_saved_sheet_rows_maps_workflow_v2_fields_by_header_role() -> None
     worksheet["K9"] = "その他"
     worksheet["L7"] = "変更①"
     worksheet["M7"] = "備考欄"
+    facility = _authored_columns([(5, "total", "合計"), (6, "regular", "常食"), (7, "daycare", "通所"), (8, "staff", "職員"),
+        (9, "no_meat", "肉禁"), (10, "no_fish", "魚禁"), (11, "no_fried", "その他"), (12, "change_1", "変更①")])
+    facility["fax_template"]["columns"].extend([
+        {"role": "note", "source_index": 12},
+    ])
 
     written = order_form_service._write_saved_sheet_rows_to_order_form(
         worksheet,
         fields=[
             "date_mmdd",
             "daypart",
-            "aux.col_2",
+            "category",
             "menu",
-            "aux.col_4",
+            "qty.total_x",
             "qty.regular_x",
             "qty.daycare_x",
             "qty.staff_x",
@@ -440,9 +398,11 @@ def test_write_saved_sheet_rows_maps_workflow_v2_fields_by_header_role() -> None
         ],
         header=["日付", "区分", "副区分", "メニュー", "合計"],
         rows=[
-            ["05/10", "昼", "主", "豚肉と白菜のすき煮", "65", "60", "2", "1", "3", "4", "5", "6", "備考"],
+            ["05/10", "昼", "主", "豚肉と白菜のすき煮", 65, "60", "2", "1", "3", "4", "5", "6", "備考"],
         ],
         received_at=datetime(2026, 5, 10, 9, 0, 0),
+        template=facility["fax_template"], facility_config=facility,
+        week_code="2026-05@2026-05-10~2026-05-16",
     )
 
     assert written == 1
@@ -460,7 +420,7 @@ def test_write_saved_sheet_rows_maps_workflow_v2_fields_by_header_role() -> None
     assert worksheet["L11"].value == 6
 
 
-def test_write_saved_sheet_rows_skips_unknown_quantity_without_shifting_columns() -> None:
+def test_write_saved_sheet_rows_rejects_unknown_quantity_without_shifting_columns() -> None:
     workbook = Workbook()
     worksheet = workbook.active
     worksheet["A7"] = "日　付"
@@ -472,7 +432,19 @@ def test_write_saved_sheet_rows_skips_unknown_quantity_without_shifting_columns(
     worksheet["H9"] = "魚禁"
     worksheet["I7"] = "変更①"
     worksheet["J7"] = "変更②"
-
+    facility = _authored_columns([(5, "regular", "常食"), (7, "no_meat", "肉禁"),
+        (8, "no_fish", "魚禁"), (9, "change_1", "変更①"), (10, "change_2", "変更②")])
+    facility["fax_template"]["columns"].append({"role": "note", "source_index": 10})
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.unknown_x",
+              "qty.no_meat_x", "qty.no_fish_x", "qty.change_1_x", "qty.change_2_x", "remarks"]
+    rows = [["05/10", "昼", "豚肉と白菜のすき煮", "32", "", "1", "2", "3", "4", ""]]
+    with pytest.raises(ValueError, match="saved sheet canonical field unmapped"):
+        order_form_service._write_saved_sheet_rows_to_order_form(
+            worksheet, fields=fields, rows=rows, received_at=datetime(2026, 5, 10),
+            template=facility["fax_template"], facility_config=facility,
+            week_code="2026-05@2026-05-10~2026-05-16",
+        )
+    assert worksheet["E11"].value is None
     written = order_form_service._write_saved_sheet_rows_to_order_form(
         worksheet,
         fields=[
@@ -480,7 +452,6 @@ def test_write_saved_sheet_rows_skips_unknown_quantity_without_shifting_columns(
             "daypart",
             "menu",
             "qty.regular_x",
-            "qty.unknown_x",
             "qty.no_meat_x",
             "qty.no_fish_x",
             "qty.change_1_x",
@@ -489,9 +460,11 @@ def test_write_saved_sheet_rows_skips_unknown_quantity_without_shifting_columns(
         ],
         header=["日付", "区分", "メニュー", "常食", "不明"],
         rows=[
-            ["05/10", "昼", "豚肉と白菜のすき煮", "32", "", "1", "2", "3", "4", ""],
+            ["05/10", "昼", "豚肉と白菜のすき煮", "32", "1", "2", "3", "4", ""],
         ],
         received_at=datetime(2026, 5, 10, 9, 0, 0),
+        template=facility["fax_template"], facility_config=facility,
+        week_code="2026-05@2026-05-10~2026-05-16",
     )
 
     assert written == 1
@@ -635,7 +608,7 @@ def test_write_week_entries_restores_weekday_to_template_weekday_block() -> None
     order_form_service._clear_week_sheet_body(worksheet)
     order_form_service._write_week_entries(
         worksheet,
-        [
+        [{**entry, "_source_index": index} for index, entry in enumerate([
             {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "朝", "category": "副①", "name": "A"},
             {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "朝", "category": "副②", "name": "B"},
             {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "昼", "category": "主", "name": "C"},
@@ -644,14 +617,16 @@ def test_write_week_entries_restores_weekday_to_template_weekday_block() -> None
             {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "夕", "category": "主", "name": "F"},
             {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "夕", "category": "副①", "name": "G"},
             {"_menu_date_obj": datetime(2026, 4, 26).date(), "daypart": "夕", "category": "副②", "name": "H"},
-        ],
+        ])],
+        facility_config=_authored_columns(_PACKAGED_QUANTITIES["fax_layout_regular_forbidden_v1"]),
     )
 
     assert _cell_date(worksheet["A11"].value) == datetime(2026, 4, 26).date()
-    assert worksheet["A16"].value == "（日）"
+    assert "A11:A17" in {str(region) for region in worksheet.merged_cells.ranges}
+    assert worksheet["A18"].value == "日"
 
 
-def test_write_week_entries_keeps_overflow_metadata_instead_of_hard_failing() -> None:
+def test_write_week_entries_expands_for_all_63_rows_without_overflow() -> None:
     source_path = order_form_service._resolve_source_workbook_path("共通　2604.xlsx")
     workbook = load_workbook(source_path)
     worksheet = workbook["4月26日～4月30日"]
@@ -674,19 +649,17 @@ def test_write_week_entries_keeps_overflow_metadata_instead_of_hard_failing() ->
         )
 
     order_form_service._clear_week_sheet_body(worksheet)
-    result = order_form_service._write_week_entries(worksheet, entries)
+    result = order_form_service._write_week_entries(worksheet,
+        [{**entry, "_source_index": index} for index, entry in enumerate(entries)],
+        facility_config=_authored_columns(_PACKAGED_QUANTITIES["fax_layout_regular_forbidden_v1"]))
 
     assert result.source_rows == 63
-    assert int(result) == 56
-    assert result.overflow_rows == 7
-    assert result.overflow_entries[0] == {
-        "date": "2026-07-05",
-        "daypart": "昼",
-        "category": "副③",
-        "name": "昼D0",
-    }
-    assert worksheet["D66"].value == "夕C6"
-    assert worksheet["D67"].value is None
+    assert int(result) == 63
+    assert result.overflow_rows == 0
+    assert result.overflow_entries == []
+    assert [worksheet.cell(11 + index, 4).value for index in range(63)] == [entry["name"] for entry in entries]
+    assert worksheet["D73"].value == "夕C6"
+    assert worksheet["D74"].value is None
 
 
 def test_clear_week_sheet_body_uses_header_detected_quantity_columns_for_sibling_template() -> None:
@@ -732,11 +705,15 @@ def test_build_order_form_excel_supports_six_week_months(tmp_path, monkeypatch):
         lambda month_id, facility_id: {
             "entries": [
                 {"menu_date": "2026-05-01", "daypart": "朝", "category": "副①", "name": "A"},
+                *[{"menu_date": f"2026-05-{day:02}", "daypart": "朝", "category": "副①", "name": f"週{day}"}
+                  for day in (3, 10, 17, 24)],
                 {"menu_date": "2026-05-31", "daypart": "夕", "category": "主", "name": "B"},
             ]
         },
     )
 
+    _bind_monthly_export(monkeypatch, "FAC6WEEK", "2026-05", tmp_path / source_name,
+                         [(5, "regular", "常食"), (6, "no_meat", "肉禁")])
     output = order_form_service.build_order_form_excel(facility_id="FAC6WEEK", month_id="2026-05")
 
     workbook = load_workbook(output)
@@ -763,7 +740,7 @@ def test_build_order_form_excel_supports_six_week_months(tmp_path, monkeypatch):
         ("fax_layout_soft_packaging_forbidden_v1", "池袋確認"),
     ],
 )
-def test_build_order_form_excel_supports_all_fax_families(tmp_path, monkeypatch, fax_template_id, facility_name):
+def test_build_order_form_excel_validates_all_packaged_family_sheets(tmp_path, monkeypatch, fax_template_id, facility_name):
     monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
         order_form_service.config_service,
@@ -781,11 +758,25 @@ def test_build_order_form_excel_supports_all_fax_families(tmp_path, monkeypatch,
             "entries": [
                 {"menu_date": "2026-03-01", "daypart": "朝", "category": "副①", "name": "A"},
                 {"menu_date": "2026-03-02", "daypart": "昼", "category": "主", "name": "B"},
+                *[{"menu_date": f"2026-03-{day:02}", "daypart": "朝", "category": "副①", "name": f"週{day}"}
+                  for day in (8, 15, 22)],
                 {"menu_date": "2026-03-29", "daypart": "夕", "category": "副②", "name": "C"},
             ]
         },
     )
 
+    source = order_form_service._FAX_FAMILY_SOURCE_MAP[fax_template_id]["month_sources"]["2026-03"]
+    source_path = order_form_service._resolve_source_workbook_path(source)
+    original = source_path.read_bytes()
+    _bind_monthly_export(monkeypatch, "FACTESTALL", "2026-03", source, _PACKAGED_QUANTITIES[fax_template_id])
+    if fax_template_id == "fax_layout_regular_soft_mixer_forbidden_v1":
+        # Actual asset changes soft/mixer from G/H to I/J after week 1.
+        # One authored layout cannot silently remap those later worksheets.
+        with pytest.raises(ValueError, match="source workbook quantity header mismatch:qty.soft_x"):
+            order_form_service.build_order_form_excel(facility_id="FACTESTALL", month_id="2026-03")
+        assert list(tmp_path.iterdir()) == []
+        assert source_path.read_bytes() == original
+        return
     output = order_form_service.build_order_form_excel(facility_id="FACTESTALL", month_id="2026-03")
     workbook = load_workbook(output)
 
@@ -798,6 +789,7 @@ def test_build_order_form_excel_supports_all_fax_families(tmp_path, monkeypatch,
     ]
     assert workbook[workbook.sheetnames[0]]["A4"].value == facility_name
     assert str(workbook[workbook.sheetnames[0]]["B1"].value).startswith("発注書作成: ")
+    assert source_path.read_bytes() == original
 
 
 def test_infer_fax_template_id_from_facility_requires_explicit_template_id() -> None:
@@ -838,7 +830,7 @@ def test_infer_fax_template_id_from_facility_requires_explicit_template_id() -> 
     )
 
 
-def test_build_order_form_excel_uses_inferred_template_id_in_output_name(tmp_path, monkeypatch):
+def test_build_order_form_excel_rejects_inferred_template_id(tmp_path, monkeypatch):
     source_name = "source.xlsx"
     _build_source_workbook(tmp_path / source_name, order_form_service._DEFAULT_WEEK_SHEET)
 
@@ -877,9 +869,11 @@ def test_build_order_form_excel_uses_inferred_template_id_in_output_name(tmp_pat
         },
     )
 
-    output = order_form_service.build_order_form_excel(facility_id="FACINF01", month_id="2026-03")
-
-    assert "fax_layout_floor_2f3f_v1" in output.name
+    _bind_monthly_export(monkeypatch, "FACINF01", "2026-03", tmp_path / source_name,
+                         [(5, "regular", "常食"), (6, "no_meat", "肉禁")])
+    with pytest.raises(ValueError, match="facility fax_template_id not found"):
+        order_form_service.build_order_form_excel(facility_id="FACINF01", month_id="2026-03")
+    assert list(tmp_path.iterdir()) == [tmp_path / source_name]
 
 
 def test_packaged_order_form_sources_exist_for_manifest() -> None:
@@ -909,11 +903,15 @@ def test_build_order_form_excel_uses_month_specific_packaged_source_workbook(tmp
         lambda month_id, facility_id: {
             "entries": [
                 {"menu_date": "2026-04-01", "daypart": "朝", "category": "副①", "name": "A"},
+                *[{"menu_date": f"2026-04-{day:02}", "daypart": "朝", "category": "副①", "name": f"週{day}"}
+                  for day in (5, 12, 19)],
                 {"menu_date": "2026-04-26", "daypart": "昼", "category": "主", "name": "B"},
             ]
         },
     )
 
+    _bind_monthly_export(monkeypatch, "FACAPR01", "2026-04", "共通　2604.xlsx",
+                         _PACKAGED_QUANTITIES["fax_layout_regular_forbidden_v1"])
     output = order_form_service.build_order_form_excel(facility_id="FACAPR01", month_id="2026-04")
 
     workbook = load_workbook(output)
@@ -1033,8 +1031,9 @@ def test_build_order_form_excel_blocks_when_month_specific_source_missing(tmp_pa
         },
     )
 
+    _bind_monthly_export(monkeypatch, "FACMISS01", "2026-03", "source.xlsx", [(5, "regular", "常食")])
     with pytest.raises(
         ValueError,
-        match="source workbook not configured for fax_template_id=fax_layout_missing_month_v1 month_id=2026-05",
+        match="saved sheet source workbook not configured",
     ):
         order_form_service.build_order_form_excel(facility_id="FACMISS01", month_id="2026-05")

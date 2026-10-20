@@ -93,7 +93,6 @@ def test_registered_operator_download_preserves_owned_receipts_without_sql_write
     candidate_before = deepcopy(candidate)
     with registered_hospital_operator(monkeypatch) as operator:
         assert os.environ["AUTH_DISABLED"] == "false"
-        auth.invalidate_user_cache()
         path, params = request_target(fixture, candidate, case)
         with readonly_request(fixture):
             response = client.get(path, params=params, headers=operator.headers)
@@ -143,7 +142,6 @@ def test_download_requires_real_registered_active_hospital_grant(
             with fixture.session_scope() as session:
                 session.execute(text("UPDATE user_system_access SET enabled=FALSE WHERE user_id=:id"),
                                 {"id": operator.user_id})
-        auth.invalidate_user_cache()
         before = preservation(fixture)
         files = {path: path.read_bytes() for path in fixture.output.rglob("*") if path.is_file()}
         path, params = request_target(fixture, candidate, case)

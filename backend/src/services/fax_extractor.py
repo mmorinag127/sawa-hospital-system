@@ -64,17 +64,6 @@ def _flag_enabled(value: object) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
-def _crop_to_bbox(image, bbox: list[float]):
-    width, height = image.size
-    x0 = int(max(bbox[0] * width, 0))
-    y0 = int(max(bbox[1] * height, 0))
-    x1 = int(min(bbox[2] * width, width))
-    y1 = int(min(bbox[3] * height, height))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return image.crop((x0, y0, x1, y1))
-
-
 def _extract_tesseract_tokens(image) -> list[dict]:
     _ = image
     raise RuntimeError("tesseract_ocr_removed")

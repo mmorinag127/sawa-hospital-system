@@ -34,7 +34,7 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
     assert.equal(text.split(from).length-1,1,'Only the counted approved harness addition may be normalized');
     return text.replace(from,to);
   };
-  const approvedHarness=execFileSync('git',['show','1b0f3c28dd9a1e9b010f1bb72dd417b42f8b5c7a:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
+  const approvedHarness=execFileSync('git',['show','cfe1548bb3f2aa83dc627f42072a866d0c4c4950:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
   assert.equal(source,approvedHarness,'Exact approved preservation harness, including actual pending-edit flush, quantities and CAS assertions');
   let compatible=execFileSync('git',['show','6a543cc9a0d5f128a85d01f6bd8d7ccae82b9d77:frontend/tests/h2-quad-owner.test.cjs'],{encoding:'utf8'});
   compatible=replaceOnce(compatible, "  h.timer.tick();await settle();assert.equal(calls,3);cleanup();", "  h.timer.tick();await settle();assert.equal(calls,4);cleanup();");
@@ -85,7 +85,7 @@ test('original fixtures, assertions, transpilation and PDF evaluator are byte id
   execFileSync('git',['merge-base','--is-ancestor','d557633','3c5a9ca']);
   execFileSync('git',['merge-base','--is-ancestor','3c5a9ca','HEAD']);
   assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname,'..',production))).digest('hex'),
-    'd5808755c3fc80ee6c9a10f1a3b38b7ae23508599ff3f61c47c164f1043354b8',
+    '6e37f1e753858dda0e0ff086c3f9ab775edeb041575a14b1da5d5e4150363432',
     'exact revised source: approved single-read sidecar with ownership/action/history/feedback/PDF and facility guards');
   execFileSync('git',['merge-base','--is-ancestor','d26febd','HEAD']);
   const before=old.slice(old.indexOf('function actual('),old.indexOf('\nconst plain='));

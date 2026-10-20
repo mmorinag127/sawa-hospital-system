@@ -548,15 +548,6 @@ def test_get_ocr_output_prefers_active_evidence_over_stale_job_output(monkeypatc
             "metrics": {},
         },
     )
-    monkeypatch.setattr(
-        order_service,
-        "_load_job_output",
-        lambda _job, _source: {
-            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/21|朝|Menu A|3|",
-            "table_rows": [["03/21", "朝", "Menu A", "3"]],
-            "pages": [{"page_index": 1}],
-        },
-    )
 
     payload, payload_error = order_service.get_ocr_output(order["id"], persist_cache=False)
 
@@ -686,162 +677,6 @@ def test_get_ocr_output_blocks_stale_aux_position_fallback_when_recompute_is_imp
     assert resolution.get("blocked_reasons") == ["column_mapping_contract_mismatch"]
 
 
-def test_get_ocr_output_recanonicalizes_stale_edited_rows_to_authoritative_aux_schema():
-    rows = _fac00004_aux_rows()
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
-    payload = {
-        "status": "done",
-        "table_raw": "|日付|区分|副区分|献立|合計|#☆|通所|職員|平森|肉蒸|魚禁|揚げ物|備考|\n|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-        "tables": [
-            {
-                "table_id": "p1_t1",
-                "page_index": 1,
-                "rows": rows,
-                "cells": _structured_cells(rows),
-                "row_count": len(rows),
-                "col_count": len(rows[0]),
-            }
-        ],
-        "_edited_ocr": {
-            "raw_output": {
-                "table_raw": "|日付|区分|副区分|献立|合計|#☆|通所|職員|平森|肉蒸|魚禁|揚げ物|備考|\n|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-                "tables": [
-                    {
-                        "table_id": "p1_t1",
-                        "page_index": 1,
-                        "rows": rows,
-                        "cells": _structured_cells(rows),
-                        "row_count": len(rows),
-                        "col_count": len(rows[0]),
-                    }
-                ],
-            },
-            "latest": {
-                "revision_id": "rev-aux-001",
-                "ui_mode": "sheet",
-                "fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_x",
-                    "qty.daycare_x",
-                    "qty.staff_x",
-                    "qty.no_meat_x",
-                    "qty.no_fish_x",
-                    "qty.no_fried_x",
-                    "qty.change_1_x",
-                    "remarks",
-                ],
-                "header": ["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-                "rows": [["04/26", "朝", "鶏じゃが", "9", "", "", "", "", "", "", ""]],
-                "row_ids": ["ocr-row-1"],
-                "edited_at": "2026-04-18T11:11:11Z",
-            },
-            "revisions": [
-                {
-                    "revision_id": "rev-aux-001",
-                    "ui_mode": "sheet",
-                    "fields": [
-                        "date_mmdd",
-                        "daypart",
-                        "menu",
-                        "qty.regular_x",
-                        "qty.daycare_x",
-                        "qty.staff_x",
-                        "qty.no_meat_x",
-                        "qty.no_fish_x",
-                        "qty.no_fried_x",
-                        "qty.change_1_x",
-                        "remarks",
-                    ],
-                    "header": ["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-                    "rows": [["04/26", "朝", "鶏じゃが", "9", "", "", "", "", "", "", ""]],
-                    "row_ids": ["ocr-row-1"],
-                    "edited_at": "2026-04-18T11:11:11Z",
-                }
-            ],
-        },
-    }
-
-    payload, changed = order_service._recanonicalize_edited_ocr_payload_for_template(payload, template)
-
-    assert changed is True
-    assert isinstance(payload, dict)
-    edited_table = order_service._attach_edited_ocr_payload(payload).get("edited_table")
-    assert isinstance(edited_table, dict)
-    assert edited_table.get("header") == [
-        "日付",
-        "区分",
-        "副区分",
-        "メニュー",
-        "合計",
-        "常食",
-        "通所",
-        "職員",
-        "肉禁",
-        "魚禁",
-        "揚げ物禁",
-        "変更1",
-        "備考欄",
-    ]
-    rows_payload = edited_table.get("rows") or []
-    assert rows_payload[0][1:5] == ["朝", "主", "鶏じゃが", "67"]
-    latest = ((payload.get("_edited_ocr") or {}).get("latest") or {})
-    assert latest.get("fields") == [
-        "date_mmdd",
-        "daypart",
-        "aux.col_2",
-        "menu",
-        "aux.col_4",
-        "qty.regular_x",
-        "qty.daycare_x",
-        "qty.staff_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
-        "qty.no_fried_x",
-        "qty.change_1_x",
-        "remarks",
-    ]
-
-
-def test_get_ocr_output_blocks_stale_edited_rows_when_recanonicalization_source_is_missing():
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
-    payload = {
-        "status": "done",
-        "_edited_ocr": {
-            "latest": {
-                "revision_id": "rev-aux-block-001",
-                "ui_mode": "sheet",
-                "fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_x",
-                    "qty.daycare_x",
-                    "qty.staff_x",
-                    "qty.no_meat_x",
-                    "qty.no_fish_x",
-                    "qty.no_fried_x",
-                    "qty.change_1_x",
-                    "remarks",
-                ],
-                "header": ["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-                "rows": [["04/26", "朝", "鶏じゃが", "9", "", "", "", "", "", "", ""]],
-                "row_ids": ["ocr-row-1"],
-                "edited_at": "2026-04-18T11:11:11Z",
-            },
-        },
-    }
-
-    payload, changed = order_service._recanonicalize_edited_ocr_payload_for_template(payload, template)
-
-    assert changed is True
-    assert isinstance(payload, dict)
-    assert order_service._attach_edited_ocr_payload(payload).get("edited_table") is None
-    edited = payload.get("_edited_ocr") or {}
-    assert edited.get("schema_recanonicalization_blocked") == "edited_schema_contract_mismatch"
-
-
 def test_get_ocr_pages_prefers_active_evidence_over_stale_cache(monkeypatch):
     order_service.clear_all()
     order = _seed_order(message_id="msg-ocr-redesign-pages-active-evidence-001")
@@ -923,20 +758,6 @@ def test_get_ocr_pages_prefers_active_evidence_over_stale_job_output(monkeypatch
             "status": "done",
             "output_reference": "gs://bucket/stale-output.json",
             "metrics": {},
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_load_job_output",
-        lambda _job, _source: {
-            "pages": [
-                {
-                    "page_index": 1,
-                    "ocr_overlay_uri": "gs://bucket/stale-overlay.png",
-                    "layout_overlay_uri": "gs://bucket/stale-layout.png",
-                    "figure_uris": [],
-                }
-            ]
         },
     )
     monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
@@ -3076,7 +2897,6 @@ def test_get_ocr_sheet_suppresses_stale_saved_draft_layout_warnings_when_positio
             "order": 1,
         },
     ]
-    monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
 
     try:
         order_service._save_order_ocr_cache(

@@ -64,7 +64,7 @@ test('empty result monitor is compared with actual empty orders and canonical fa
   await verifyOcrAdminReadonlyPages({ page, expect, origin: 'https://fixture.invalid',
     check: async (name, action) => { if (name === 'ocr-results') await action(); },
     receipt: async (path, action, query) => { paths.push(path); await action();
-      if (path === '/api/orders') { assert.deepEqual(query, { include_ocr: 'true' }); return { orders: [] }; }
+      if (path === '/api/orders') { assert.deepEqual(query, { include_ocr: 'true', response_view: 'ocr_monitor' }); return { orders: [] }; }
       return { source: 'canonical_json', revision: 'r1', facilities: [] }; },
     navigate: async path => { assert.equal(paths.length, 2); assert.equal(path, '/hospital/ocr-results'); }, mark() {} });
 }));

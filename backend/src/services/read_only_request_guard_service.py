@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 
 
 CANONICAL_TABLES = {
+    "monthly_menus",
+    "monthly_menu_items",
+    "monthly_menu_entries",
     "facility_template_versions",
     "orders",
     "ocr_jobs",

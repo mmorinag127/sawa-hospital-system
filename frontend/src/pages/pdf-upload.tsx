@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { useRouter } from "next/router";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import TopNav from "../components/TopNav";
 import type { ChangeEvent } from "react";
@@ -7,6 +8,7 @@ import { FormTextField, SawaProvider } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
 import { apiClient } from "../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
+import { useMenuInputOwner } from "../hooks/useMenuInputOwner";
 
 type UploadResponse = {
   accepted?: boolean;
@@ -125,6 +127,8 @@ type WeekOption = {
 };
 
 type FacilitySelectionPreview = {
+  route: string;
+  session: string;
   facilityId: string;
   effectiveDate: string;
   weekHint: string;
@@ -231,34 +235,49 @@ const uploadedPdfCanRetry = (row: UploadedPdfRow) => {
 };
 
 function PdfUploadScreen() {
+  const router = useRouter();
+  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
+  const owner = useMenuInputOwner(router.asPath);
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
-  const [facilityHint, setFacilityHint] = useState("");
-  const [weekHint, setWeekHint] = useState("");
-  const [facilityName, setFacilityName] = useState("");
   const [targetMonth, setTargetMonth] = useState(currentMonthId());
   const [facilityOptions, setFacilityOptions] = useState<FacilityOption[]>([]);
   const [facilityOptionsLoading, setFacilityOptionsLoading] = useState(false);
   const [facilityOptionsError, setFacilityOptionsError] = useState("");
   const [weekOptions, setWeekOptions] = useState<WeekOption[]>(() => buildCalendarWeekOptions(currentMonthId()));
-  const [receivedAt, setReceivedAt] = useState("");
-  const [force, setForce] = useState(false);
-  const [skipOcr, setSkipOcr] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [results, setResults] = useState<UploadItemResult[]>([]);
   const [uploadedRows, setUploadedRows] = useState<UploadedPdfRow[]>([]);
   const [uploadedStatusFilter, setUploadedStatusFilter] = useState("");
+  const currentUploadedStatusFilter = useRef(uploadedStatusFilter);
+  currentUploadedStatusFilter.current = uploadedStatusFilter;
   const [uploadsLoading, setUploadsLoading] = useState(false);
   const [uploadsError, setUploadsError] = useState("");
   const [uploadsNotice, setUploadsNotice] = useState("");
   const [retryBusyId, setRetryBusyId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const fileSelection = useRef(0);
+  type RequestLane = "facilities" | "uploads" | "retry" | "upload";
+  const requests = useRef<Partial<Record<RequestLane, ReturnType<typeof owner.capture>>>>({});
+  const uploadsRequested = useRef(false);
+  const beginRequest = (lane: RequestLane, bindInput = false) => {
+    const current = owner.capture(lane, bindInput);
+    requests.current[lane] = current;
+    return current;
+  };
+  const finishRequest = (lane: RequestLane, current: ReturnType<typeof owner.capture>) => {
+    if (requests.current[lane] !== current) return false;
+    delete requests.current[lane];
+    return true;
+  };
+  useEffect(() => () => { requests.current = {}; }, []);
   const uploadForm = useForm<UploadConditions>({
     defaultValues: { facility_hint: "", effective_date: "", week_hint: "", facility_name: "", received_at: "", force: false, skip_ocr: false },
   });
   const selectedFacilityId = uploadForm.watch("facility_hint");
   const effectiveDate = uploadForm.watch("effective_date");
   const selectedWeekHint = uploadForm.watch("week_hint");
+  const facilityName = uploadForm.watch("facility_name");
   const selectedWeek = weekOptions.find((option) => option.week_id === selectedWeekHint);
   const periodStart = selectedWeek?.date_from;
   const periodEnd = selectedWeek?.date_to;
@@ -267,10 +286,29 @@ function PdfUploadScreen() {
   const [selectionError, setSelectionError] = useState("");
   const selectionCurrent = selectionPreview?.facilityId === selectedFacilityId
     && selectionPreview?.effectiveDate === effectiveDate
-    && selectionPreview?.weekHint === selectedWeekHint;
+    && selectionPreview?.weekHint === selectedWeekHint
+    && selectionPreview?.route === router.asPath && selectionPreview?.session === sessionKey;
+
+  useEffect(() => {
+    const subscription = uploadForm.watch((_values, { name }) => {
+      owner.changed();
+      if (name === "facility_hint" || name === "effective_date" || name === "week_hint") {
+        setSelectionPreview(null);
+        setSelectionConfirmed(false);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [uploadForm.watch]);
+
+  useEffect(() => {
+    const retire = () => owner.changed();
+    router.events.on("routeChangeStart", retire);
+    return () => router.events.off("routeChangeStart", retire);
+  }, [router.events]);
 
   useEffect(() => {
     let active = true;
+    const current = owner.capture("preview", false);
     setSelectionPreview(null);
     setSelectionConfirmed(false);
     setSelectionError("");
@@ -282,7 +320,7 @@ function PdfUploadScreen() {
       void apiClient.get(`/facilities/${encodeURIComponent(selectedFacilityId)}/resolved`, {
         params: { effective_date: effectiveDate },
       }).then(({ data }) => {
-        if (!active) return;
+        if (!active || !current()) return;
         if (data?.source !== "canonical_json" || data?.facility_id !== selectedFacilityId
             || data?.effective_date !== effectiveDate
             || typeof data?.revision !== "string" || !data.revision
@@ -290,22 +328,24 @@ function PdfUploadScreen() {
           setSelectionError("正本施設版を確認できません。");
           return;
         }
-        setSelectionPreview({ facilityId: selectedFacilityId, effectiveDate,
+        setSelectionPreview({ route: router.asPath, session: sessionKey, facilityId: selectedFacilityId, effectiveDate,
           weekHint: selectedWeekHint, revision: data.revision, versionId: data.version.version_id });
       }).catch(() => {
-        if (active) setSelectionError("適用日の正本施設版を解決できません。");
+        if (active && current()) setSelectionError("適用日の正本施設版を解決できません。");
       });
     }
     return () => { active = false; };
-  }, [selectedFacilityId, effectiveDate, selectedWeekHint, periodStart, periodEnd]);
+  }, [selectedFacilityId, effectiveDate, selectedWeekHint, periodStart, periodEnd, router.asPath, sessionKey]);
 
-  const selectedFacility = facilityOptions.find((option) => option.id === uploadForm.watch("facility_hint"));
+  const selectedFacility = facilityOptions.find((option) => option.id === selectedFacilityId);
 
   const loadFacilityOptions = async () => {
+    const current = beginRequest("facilities");
     setFacilityOptionsLoading(true);
     setFacilityOptionsError("");
     try {
       const res = await apiClient.get("/facilities");
+      if (!current()) return;
       const facilities = Array.isArray(res.data?.facilities) ? res.data.facilities : [];
       setFacilityOptions(
         facilities
@@ -316,6 +356,7 @@ function PdfUploadScreen() {
           .filter((item: FacilityOption) => item.id)
       );
     } catch (err: any) {
+      if (!current()) return;
       const detail =
         err?.response?.data?.detail ||
         err?.response?.data?.message ||
@@ -323,18 +364,24 @@ function PdfUploadScreen() {
         "施設一覧の取得に失敗しました。";
       setFacilityOptionsError(String(detail));
     } finally {
-      setFacilityOptionsLoading(false);
+      if (finishRequest("facilities", current)) setFacilityOptionsLoading(false);
     }
   };
 
   const loadUploadedRows = async () => {
+    uploadsRequested.current = true;
+    const filter = currentUploadedStatusFilter.current;
+    const current = beginRequest("uploads");
+    const ownsQuery = () => current() && filter === currentUploadedStatusFilter.current;
     setUploadsLoading(true);
     setUploadsError("");
     try {
-      const params = uploadedStatusFilter ? { status: uploadedStatusFilter, limit: 50 } : { limit: 50 };
+      const params = filter ? { status: filter, limit: 50 } : { limit: 50 };
       const res = await apiClient.get("/ingest/uploads", { params });
+      if (!ownsQuery()) return;
       setUploadedRows(Array.isArray(res.data?.items) ? res.data.items : []);
     } catch (err: any) {
+      if (!ownsQuery()) return;
       const detail =
         err?.response?.data?.detail ||
         err?.response?.data?.message ||
@@ -342,13 +389,28 @@ function PdfUploadScreen() {
         "取込済みPDF一覧の取得に失敗しました。";
       setUploadsError(String(detail));
     } finally {
-      setUploadsLoading(false);
+      if (finishRequest("uploads", current) && filter === currentUploadedStatusFilter.current) setUploadsLoading(false);
     }
   };
 
   useEffect(() => {
+    // Retire busy ownership separately from result adoption, then read the new boundary.
+    requests.current = {};
+    setLoading(false);
+    setRetryBusyId("");
+    setUploadsLoading(false);
+    setUploadsError("");
+    setUploadsNotice("");
+    setUploadedRows([]);
+    setFacilityOptions([]);
+    setResults([]);
+    setMessage("");
     void loadFacilityOptions();
-  }, []);
+  }, [router.asPath, sessionKey]);
+
+  useEffect(() => {
+    if (uploadsRequested.current) void loadUploadedRows();
+  }, [router.asPath, sessionKey, uploadedStatusFilter]);
 
   useEffect(() => {
     setWeekOptions(buildCalendarWeekOptions(targetMonth));
@@ -356,27 +418,32 @@ function PdfUploadScreen() {
 
   useEffect(() => {
     if (facilityName || !selectedFacility?.name) return;
-    setFacilityName(selectedFacility.name);
+    uploadForm.setValue("facility_name", selectedFacility.name);
   }, [facilityName, selectedFacility]);
 
   useEffect(() => {
-    if (!weekHint) return;
-    if (!weekOptions.some((option) => option.week_id === weekHint)) {
-      setWeekHint("");
+    if (!selectedWeekHint) return;
+    if (!weekOptions.some((option) => option.week_id === selectedWeekHint)) {
+      uploadForm.setValue("week_hint", "");
     }
-  }, [weekHint, weekOptions]);
+  }, [selectedWeekHint, weekOptions]);
 
   const retryUploadedPdf = async (row: UploadedPdfRow) => {
     if (!uploadedPdfCanRetry(row)) return;
     if (!window.confirm(`「${row.original_filename || row.id}」を再処理に戻します。`)) return;
+    if (requests.current.retry?.active()) return;
+    const current = beginRequest("retry");
+    if (!current()) return;
     setRetryBusyId(row.id);
     setUploadsError("");
     setUploadsNotice("");
     try {
       await apiClient.post(`/ingest/uploads/${row.id}/retry`, undefined, { params: { intake_protocol: "native_ingest_v2" } });
+      if (!current()) return;
       setUploadsNotice(`「${row.original_filename || row.id}」を再処理に戻しました。`);
       await loadUploadedRows();
     } catch (err: any) {
+      if (!current()) return;
       const detail =
         err?.response?.data?.detail ||
         err?.response?.data?.message ||
@@ -384,12 +451,16 @@ function PdfUploadScreen() {
         "再処理の投入に失敗しました。";
       setUploadsError(String(detail));
     } finally {
-      setRetryBusyId("");
+      if (finishRequest("retry", current)) setRetryBusyId("");
     }
   };
 
   const submit = async (conditions: UploadConditions) => {
-    if (pdfFiles.length === 0) {
+    if (requests.current.upload?.active()) return;
+    if (JSON.stringify(conditions) !== JSON.stringify(uploadForm.getValues())) return;
+    const submittedFiles = [...pdfFiles];
+    const submittedSelection = fileSelection.current;
+    if (submittedFiles.length === 0) {
       setMessage("PDFを1件以上選択してください。");
       return;
     }
@@ -401,87 +472,100 @@ function PdfUploadScreen() {
       setMessage("対象週を選択してください。");
       return;
     }
-    if (!selectionConfirmed || !selectionPreview
+    if (!selectionConfirmed || !selectionCurrent || !selectionPreview
         || selectionPreview.facilityId !== conditions.facility_hint
         || selectionPreview.effectiveDate !== conditions.effective_date
         || selectionPreview.weekHint !== conditions.week_hint) {
       setMessage("適用日と正本施設版を確認してください。");
       return;
     }
+    const current = beginRequest("upload", true);
+    if (!current()) return;
     setLoading(true);
-    setMessage(pdfFiles.length === 1 ? "アップロードしています..." : `${pdfFiles.length}件のPDFをまとめて登録しています...`);
+    setMessage(submittedFiles.length === 1 ? "アップロードしています..." : `${submittedFiles.length}件のPDFをまとめて登録しています...`);
     setResults([]);
-    const formData = new FormData();
-    if (pdfFiles.length === 1) {
-      formData.append("pdf_file", pdfFiles[0]);
-    } else {
-      for (const pdfFile of pdfFiles) {
-        formData.append("pdf_files", pdfFile);
+    try {
+      let uploadedResults: UploadItemResult[] = [];
+      try {
+        const formData = new FormData();
+        if (submittedFiles.length === 1) {
+          formData.append("pdf_file", submittedFiles[0]);
+        } else {
+          for (const pdfFile of submittedFiles) {
+            formData.append("pdf_files", pdfFile);
+          }
+        }
+        formData.append("facility_hint", conditions.facility_hint.trim());
+        formData.append("effective_date", selectionPreview.effectiveDate);
+        formData.append("expected_canonical_revision", selectionPreview.revision);
+        formData.append("selected_version_id", selectionPreview.versionId);
+        formData.append("week_hint", conditions.week_hint.trim());
+        if (conditions.facility_name.trim()) formData.append("facility_name", conditions.facility_name.trim());
+        if (conditions.received_at.trim()) formData.append("received_at", new Date(conditions.received_at).toISOString());
+        if (conditions.force) formData.append("force", "true");
+        if (conditions.skip_ocr) formData.append("skip_ocr", "true");
+        const res = await apiClient.post("/ingest/upload", formData, {
+          params: { intake_protocol: "native_ingest_v2" },
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        if (!current()) return;
+        const payload: UploadResponse = res.data || {};
+        const payloadItems = Array.isArray(payload.items) && payload.items.length > 0 ? payload.items : [payload];
+        uploadedResults = payloadItems.map((item, index) => ({
+          file_name: item.filename || submittedFiles[index]?.name || submittedFiles[0]?.name || `PDF ${index + 1}`,
+          ...item,
+        }));
+        setResults(uploadedResults);
+      } catch (err: any) {
+        if (!current()) return;
+        const detail = err?.response?.data?.detail;
+        uploadedResults = submittedFiles.map((file) => ({
+          file_name: file.name,
+          error: detail ? `アップロードに失敗しました: ${detail}` : "アップロードに失敗しました。",
+        }));
+        setResults(uploadedResults);
+      }
+      const acceptedCount = uploadedResults.filter((item) => !item.error).length;
+      const errorCount = uploadedResults.filter((item) => item.error).length;
+      const duplicateCount = uploadedResults.filter((item) => item.duplicate_blocked).length;
+      const directOrderCount = uploadedResults.filter((item) => item.order_id || item.existing_order_id).length;
+      if (submittedFiles.length === 1) {
+        const payload = uploadedResults[0];
+        const orderHint = payload?.order_id || payload?.existing_order_id;
+        setMessage(
+          payload?.error
+            ? payload.error
+            : payload?.existing_order_preview
+            ? "同じ施設・同じ週の既存注文に取り込みます。対象注文と差し替え内容を確認してください。"
+            : payload?.duplicate_blocked
+            ? "同じPDFは既に取り込まれています。該当注文を開いて確認してください。"
+            : orderHint
+            ? "取り込みが受け付けられました。対象の注文をすぐ確認できます。"
+            : "受付しました。注文一覧に反映されるまで少し待ってください。"
+        );
+      } else {
+        setMessage(
+          `完了: ${acceptedCount}件受付、${duplicateCount}件重複、${errorCount}件失敗。` +
+            (directOrderCount > 0 ? " 各PDFはそれぞれ別の注文/取込として扱われます。" : "")
+        );
+      }
+      void loadUploadedRows();
+      if (submittedSelection === fileSelection.current) {
+        fileSelection.current += 1;
+        setPdfFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    } finally {
+      if (finishRequest("upload", current)) {
+        setLoading(false);
       }
     }
-    formData.append("facility_hint", conditions.facility_hint.trim());
-    formData.append("effective_date", selectionPreview.effectiveDate);
-    formData.append("expected_canonical_revision", selectionPreview.revision);
-    formData.append("selected_version_id", selectionPreview.versionId);
-    formData.append("week_hint", conditions.week_hint.trim());
-    if (conditions.facility_name.trim()) formData.append("facility_name", conditions.facility_name.trim());
-    if (conditions.received_at.trim()) formData.append("received_at", new Date(conditions.received_at).toISOString());
-    if (conditions.force) formData.append("force", "true");
-    if (conditions.skip_ocr) formData.append("skip_ocr", "true");
-    let uploadedResults: UploadItemResult[] = [];
-    try {
-      const res = await apiClient.post("/ingest/upload", formData, {
-        params: { intake_protocol: "native_ingest_v2" },
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      const payload: UploadResponse = res.data || {};
-      const payloadItems = Array.isArray(payload.items) && payload.items.length > 0 ? payload.items : [payload];
-      uploadedResults = payloadItems.map((item, index) => ({
-        file_name: item.filename || pdfFiles[index]?.name || pdfFiles[0]?.name || `PDF ${index + 1}`,
-        ...item,
-      }));
-      setResults(uploadedResults);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      uploadedResults = pdfFiles.map((file) => ({
-        file_name: file.name,
-        error: detail ? `アップロードに失敗しました: ${detail}` : "アップロードに失敗しました。",
-      }));
-      setResults(uploadedResults);
-    }
-    const acceptedCount = uploadedResults.filter((item) => !item.error).length;
-    const errorCount = uploadedResults.filter((item) => item.error).length;
-    const duplicateCount = uploadedResults.filter((item) => item.duplicate_blocked).length;
-    const directOrderCount = uploadedResults.filter((item) => item.order_id || item.existing_order_id).length;
-    if (pdfFiles.length === 1) {
-      const payload = uploadedResults[0];
-      const orderHint = payload?.order_id || payload?.existing_order_id;
-      setMessage(
-        payload?.error
-          ? payload.error
-          : payload?.existing_order_preview
-          ? "同じ施設・同じ週の既存注文に取り込みます。対象注文と差し替え内容を確認してください。"
-          : payload?.duplicate_blocked
-          ? "同じPDFは既に取り込まれています。該当注文を開いて確認してください。"
-          : orderHint
-          ? "取り込みが受け付けられました。対象の注文をすぐ確認できます。"
-          : "受付しました。注文一覧に反映されるまで少し待ってください。"
-      );
-    } else {
-      setMessage(
-        `完了: ${acceptedCount}件受付、${duplicateCount}件重複、${errorCount}件失敗。` +
-          (directOrderCount > 0 ? " 各PDFはそれぞれ別の注文/取込として扱われます。" : "")
-      );
-    }
-    setLoading(false);
-    void loadUploadedRows();
-    setPdfFiles([]);
-    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const primaryResult = results.length === 1 ? results[0] : null;
 
   return (
+    <SawaProvider sessionKey={`hospital-pdf-upload:${sessionKey}`}>
     <main className="page">
       <header className="hero">
         <div>
@@ -566,15 +650,18 @@ function PdfUploadScreen() {
               inputRef={fileInputRef}
               className="input"
               type="file"
-              onChange={(e: ChangeEvent<HTMLInputElement>) => setPdfFiles(Array.from(e.target.files || []))}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                fileSelection.current += 1;
+                setPdfFiles(Array.from(e.target.files || []));
+              }}
             />
           </label>
         </div>
 
         <div className="context-banner">
           <strong>アップロード前提</strong>
-          <span>施設: {selectedFacility?.name || facilityHint || "未選択"}</span>
-          <span>対象週: {selectedWeek?.label || weekHint || "未選択"}</span>
+          <span>施設: {selectedFacility?.name || selectedFacilityId || "未選択"}</span>
+          <span>対象週: {selectedWeek?.label || selectedWeekHint || "未選択"}</span>
           <span>PDF: {pdfFiles.length ? `${pdfFiles.length}件` : "未選択"}</span>
         </div>
 
@@ -590,7 +677,7 @@ function PdfUploadScreen() {
                 <Input disableUnderline
                   className="input"
                   value={facilityName}
-                  onChange={(e) => setFacilityName(e.target.value)}
+                  onChange={(e) => uploadForm.setValue("facility_name", e.target.value, { shouldDirty: true })}
                   placeholder="例: 大和なでしこ"
                 />
               </label>
@@ -600,15 +687,15 @@ function PdfUploadScreen() {
                 <Input disableUnderline
                   className="input"
                   type="datetime-local"
-                  value={receivedAt}
-                  onChange={(e) => setReceivedAt(e.target.value)}
+                  value={uploadForm.watch("received_at")}
+                  onChange={(e) => uploadForm.setValue("received_at", e.target.value, { shouldDirty: true })}
                 />
               </label>
             </div>
 
             <div className="checks">
               <label>
-                <Checkbox checked={force} onChange={(e) => setForce(e.target.checked)} />{" "}
+                <Checkbox checked={uploadForm.watch("force")} onChange={(e) => uploadForm.setValue("force", e.target.checked, { shouldDirty: true })} />{" "}
                 同じPDFでも再登録する
               </label>
             </div>
@@ -623,7 +710,7 @@ function PdfUploadScreen() {
             </p>
             <div className="checks">
               <label>
-                <Checkbox checked={skipOcr} onChange={(e) => setSkipOcr(e.target.checked)} />{" "}
+                <Checkbox checked={uploadForm.watch("skip_ocr")} onChange={(e) => uploadForm.setValue("skip_ocr", e.target.checked, { shouldDirty: true })} />{" "}
                 OCRをあとで実行する
               </label>
             </div>
@@ -812,7 +899,10 @@ function PdfUploadScreen() {
               <NativeSelect
                 className="input"
                 value={uploadedStatusFilter}
-                onChange={(e) => setUploadedStatusFilter(e.target.value)}
+                onChange={(e) => {
+                  currentUploadedStatusFilter.current = e.target.value;
+                  setUploadedStatusFilter(e.target.value);
+                }}
               >
                 <option value="">すべて</option>
                 <option value="pending">未処理</option>
@@ -1275,10 +1365,10 @@ function PdfUploadScreen() {
         }
       `}</style>
     </main>
+    </SawaProvider>
   );
 }
 
 export default function PdfUploadPage() {
-  const sessionKey = useSyncExternalStore(subscribeBrowserSession, browserSessionKey, () => "server");
-  return <SawaProvider sessionKey={`hospital-pdf-upload:${sessionKey}`}><PdfUploadScreen /></SawaProvider>;
+  return <PdfUploadScreen />;
 }

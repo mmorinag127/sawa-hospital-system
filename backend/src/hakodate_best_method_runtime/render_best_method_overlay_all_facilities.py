@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import math
 import sys
 import time
@@ -207,13 +208,6 @@ def _snap_regions_x_to_fax_lines_all_targets(
     return snap_regions_x_to_local_fax_rulings(rectified, regions)
 
 
-def _apply_soft_pair_when_present(
-    records: list[dict[str, Any]],
-    field_by_col: dict[int, str],
-) -> list[dict[str, Any]]:
-    if "soft" in field_by_col.get(7, "") and "soft" in field_by_col.get(8, ""):
-        return cmp._apply_soft_pair_spillover_postprocess(records)
-    return records
 
 
 def _restore_display_bboxes(
@@ -375,13 +369,17 @@ def _validate_operator_values(operator_values: dict[str, str] | None, expected_s
     return {cell: operator_values[cell] for cell in expected_sheet_cells}
 
 
-def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], truth: dict[str, dict[str, Any]], operator_values: dict[str, str]) -> tuple[list[dict[str, Any]], dict[str, Any], Image.Image]:
+def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], truth: dict[str, dict[str, Any]], operator_values: dict[str, str], recognized_records=None) -> tuple[list[dict[str, Any]], dict[str, Any], Image.Image]:
     contact_sheet, usable_regions, _polygons, skipped_regions = build_recognizer_contact_sheet(
         rectified_fax_bgr=raw_rectified_bgr, regions=regions, line_mask=None, mode="corner_cc",
     )
     records = []
+    originals = {row["sheet_cell"]: row for row in recognized_records} if recognized_records is not None else {}
     for region in sorted(usable_regions + skipped_regions, key=lambda value: int(value.get("ocr_contact_slot_index") or 0)):
         cell = str(region.get("sheet_cell") or region.get("region_id") or "")
+        if recognized_records is not None and cell not in operator_values:
+            records.append(deepcopy(originals[cell]))
+            continue
         value = operator_values[cell]
         records.append({
             **region, "truth": truth.get(cell) or {}, "expected_digits": str((truth.get(cell) or {}).get("expected_digits") or ""),
@@ -390,6 +388,7 @@ def _operator_records(*, raw_rectified_bgr: Any, regions: list[dict[str, Any]], 
             "raw_text": "", "pred_digits": value, "score": None, "ocr_candidate": False,
             "ocr_engine": "operator", "recognition_source": "operator", "operator_value": value,
             "supervised_label_source": "operator",
+            **({"original_recognizer_output": deepcopy(originals[cell])} if recognized_records is not None else {}),
         })
     return records, {
         "ocr_seconds": 0.0, "raw_prediction_count": 0, "digit_prediction_count": 0,
@@ -577,238 +576,10 @@ def _accepted_header_intersection_points(axis_evidence: dict[str, Any] | None) -
     return accepted
 
 
-def _extract_vertical_line_peaks_for_target_frame(
-    rectified: np.ndarray,
-    regions: list[dict[str, Any]],
-) -> list[tuple[int, float]]:
-    if not regions:
-        return []
-    gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY) if rectified.ndim == 3 else rectified.copy()
-    height, width = gray.shape[:2]
-    min_x = int(min(float(region["bbox"][0]) for region in regions))
-    max_x = int(max(float(region["bbox"][2]) for region in regions))
-    min_y = int(min(float(region["bbox"][1]) for region in regions))
-    max_y = int(max(float(region["bbox"][3]) for region in regions))
-
-    # Target boxes may already be shifted when the template axis is wrong.
-    # Search a wider table band, then let span evidence and profile matching
-    # decide which lines are real boundaries.
-    x0 = max(0, min_x - max(160, int(width * 0.22)))
-    x1 = min(width, max_x + max(80, int(width * 0.08)))
-    y0 = max(0, min_y - 80)
-    y1 = min(height, max_y + 80)
-    roi = gray[y0:y1, x0:x1]
-    if roi.size == 0:
-        return []
-
-    _threshold, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel_h = max(35, int((y1 - y0) * 0.035))
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_h))
-    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
-    projection = vertical.sum(axis=0).astype(np.float32) / 255.0
-    if projection.size == 0:
-        return []
-    smooth = cv2.GaussianBlur(projection.reshape(1, -1), (1, 9), 0).ravel()
-    threshold = max(float(np.percentile(smooth, 82)), float(smooth.max()) * 0.16, 6.0)
-    candidates = np.where(smooth >= threshold)[0]
-    if candidates.size == 0:
-        return []
-
-    peaks: list[tuple[int, float]] = []
-    start = int(candidates[0])
-    prev = int(candidates[0])
-    for value in candidates[1:]:
-        value = int(value)
-        if value > prev + 2:
-            segment = smooth[start : prev + 1]
-            local = int(np.argmax(segment)) + start
-            peaks.append((int(x0 + local), float(smooth[local])))
-            start = value
-        prev = value
-    segment = smooth[start : prev + 1]
-    local = int(np.argmax(segment)) + start
-    peaks.append((int(x0 + local), float(smooth[local])))
-    return peaks
 
 
-def _vertical_peak_span_evidence(
-    rectified: np.ndarray,
-    regions: list[dict[str, Any]],
-    peaks: list[tuple[int, float]],
-) -> list[dict[str, Any]]:
-    if not peaks or not regions:
-        return []
-    gray = cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY) if rectified.ndim == 3 else rectified.copy()
-    y0 = max(0, int(min(float(region["bbox"][1]) for region in regions)) - 40)
-    y1 = min(gray.shape[0], int(max(float(region["bbox"][3]) for region in regions)) + 40)
-    roi = gray[y0:y1, :]
-    if roi.size == 0:
-        return []
-    _threshold, binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 45))
-    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
-    vertical = cv2.dilate(vertical, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 5)), iterations=1)
-    height = max(1, y1 - y0)
-    enriched: list[dict[str, Any]] = []
-    for peak_x, score in peaks:
-        x0 = max(0, int(peak_x) - 2)
-        x1 = min(vertical.shape[1], int(peak_x) + 3)
-        strip = vertical[:, x0:x1]
-        if strip.size == 0:
-            row_hits = np.zeros((height,), dtype=bool)
-        else:
-            row_hits = (strip.sum(axis=1) / 255.0) >= 1.0
-        coverage_ratio = float(row_hits.sum()) / float(height)
-        bands = np.array_split(row_hits, 14)
-        band_hits = [bool(band.size and band.any()) for band in bands]
-        hit_band_ratio = float(sum(1 for hit in band_hits if hit)) / float(len(band_hits))
-        body_bands = band_hits[2:]
-        body_band_ratio = float(sum(1 for hit in body_bands if hit)) / float(max(1, len(body_bands)))
-        top_band_hit = any(band_hits[:2])
-        bottom_band_hit = any(band_hits[-2:])
-        full_height_valid = bool(hit_band_ratio >= 0.72 and top_band_hit and bottom_band_hit)
-        body_height_valid = bool(body_band_ratio >= 0.84 and bottom_band_hit)
-        enriched.append(
-            {
-                "x": int(peak_x),
-                "score": float(score),
-                "coverage_ratio": round(coverage_ratio, 4),
-                "hit_band_ratio": round(hit_band_ratio, 4),
-                "body_band_ratio": round(body_band_ratio, 4),
-                "top_band_hit": top_band_hit,
-                "bottom_band_hit": bottom_band_hit,
-                "full_height_valid": full_height_valid,
-                "body_height_valid": body_height_valid,
-                "valid": bool(full_height_valid or body_height_valid),
-            }
-        )
-    return enriched
 
 
-def _snap_boundaries_by_template_profile(
-    original_boundaries: list[int],
-    peaks: list[dict[str, Any]],
-) -> tuple[list[int], list[dict[str, Any]], dict[str, Any]]:
-    if len(original_boundaries) < 2:
-        return original_boundaries, [], {"used": False, "reason": "insufficient_boundaries"}
-    valid_peaks = [peak for peak in peaks if peak.get("valid")]
-    states: list[list[dict[str, Any]]] = []
-    for index, boundary in enumerate(original_boundaries):
-        left_gap = (
-            original_boundaries[index] - original_boundaries[index - 1]
-            if index > 0
-            else original_boundaries[1] - original_boundaries[0]
-        )
-        right_gap = (
-            original_boundaries[index + 1] - original_boundaries[index]
-            if index < len(original_boundaries) - 1
-            else original_boundaries[-1] - original_boundaries[-2]
-        )
-        neighbor_gap = max(1, min(int(left_gap), int(right_gap)))
-        tolerance = max(85, min(170, int(neighbor_gap * 0.85)))
-        boundary_states: dict[int, dict[str, Any]] = {
-            int(boundary): {
-                "x": int(boundary),
-                "score": 0.0,
-                "source": "template",
-                "local_cost": 6.0,
-                "candidate_count": 0,
-            }
-        }
-        candidate_count = 0
-        for peak in valid_peaks:
-            peak_x = int(peak["x"])
-            delta = abs(peak_x - int(boundary))
-            if index == 0 and peak_x < int(boundary) - 25:
-                continue
-            if delta > tolerance:
-                continue
-            candidate_count += 1
-            score_bonus = min(float(peak.get("score") or 0.0) / 260.0, 1.0) * 0.25
-            span_penalty = 0.0 if peak.get("full_height_valid") else 1.2
-            local_cost = (delta / max(1.0, float(tolerance))) * 5.0 + span_penalty - score_bonus
-            existing = boundary_states.get(peak_x)
-            if existing is None or local_cost < float(existing["local_cost"]):
-                boundary_states[peak_x] = {
-                    "x": peak_x,
-                    "score": float(peak.get("score") or 0.0),
-                    "source": "fax",
-                    "local_cost": float(local_cost),
-                    "candidate_count": candidate_count,
-                    "coverage_ratio": peak.get("coverage_ratio"),
-                    "hit_band_ratio": peak.get("hit_band_ratio"),
-                    "body_band_ratio": peak.get("body_band_ratio"),
-                    "full_height_valid": peak.get("full_height_valid"),
-                    "body_height_valid": peak.get("body_height_valid"),
-                }
-        for state in boundary_states.values():
-            state["candidate_count"] = candidate_count
-        states.append(sorted(boundary_states.values(), key=lambda item: (float(item["local_cost"]), int(item["x"]))))
-
-    dp: list[dict[int, tuple[float, int | None]]] = []
-    prev: list[dict[int, int | None]] = []
-    for index, boundary_states in enumerate(states):
-        dp_row: dict[int, tuple[float, int | None]] = {}
-        prev_row: dict[int, int | None] = {}
-        for state in boundary_states:
-            x = int(state["x"])
-            local_cost = float(state["local_cost"])
-            if index == 0:
-                dp_row[x] = (local_cost, None)
-                prev_row[x] = None
-                continue
-            template_gap = max(1.0, float(original_boundaries[index] - original_boundaries[index - 1]))
-            best_cost = float("inf")
-            best_prev: int | None = None
-            for prev_x, (prev_cost, _prev_prev) in dp[index - 1].items():
-                gap = float(x - prev_x)
-                if gap <= 0:
-                    continue
-                gap_ratio = gap / template_gap
-                if gap < max(28.0, template_gap * 0.45) or gap_ratio > 1.80:
-                    transition_cost = 80.0
-                else:
-                    transition_cost = abs(gap_ratio - 1.0) * 5.0
-                total = float(prev_cost) + local_cost + transition_cost
-                if total < best_cost:
-                    best_cost = total
-                    best_prev = prev_x
-            if best_prev is not None:
-                dp_row[x] = (best_cost, best_prev)
-                prev_row[x] = best_prev
-        if not dp_row:
-            return original_boundaries, [], {"used": False, "reason": "no_monotonic_profile_match"}
-        dp.append(dp_row)
-        prev.append(prev_row)
-
-    last_x = min(dp[-1].items(), key=lambda item: item[1][0])[0]
-    snapped = [last_x]
-    for index in range(len(states) - 1, 0, -1):
-        previous_x = prev[index].get(snapped[-1])
-        if previous_x is None:
-            return original_boundaries, [], {"used": False, "reason": "profile_backtrack_failed"}
-        snapped.append(previous_x)
-    snapped.reverse()
-    state_by_index_x = [{int(state["x"]): state for state in state_list} for state_list in states]
-    assignments: list[dict[str, Any]] = []
-    for index, (template_x, snapped_x) in enumerate(zip(original_boundaries, snapped)):
-        state = state_by_index_x[index][int(snapped_x)]
-        assignments.append(
-            {
-                "template_x": int(template_x),
-                "snapped_x": int(snapped_x),
-                "delta": int(snapped_x - template_x),
-                "score": round(float(state.get("score") or 0.0), 2),
-                "source": state.get("source"),
-                "candidate_count": int(state.get("candidate_count") or 0),
-                "coverage_ratio": state.get("coverage_ratio"),
-                "hit_band_ratio": state.get("hit_band_ratio"),
-                "body_band_ratio": state.get("body_band_ratio"),
-                "full_height_valid": state.get("full_height_valid"),
-                "body_height_valid": state.get("body_height_valid"),
-            }
-        )
-    return [int(value) for value in snapped], assignments, {"used": True, "valid_peak_count": len(valid_peaks)}
 
 
 def build_best_method_for_manifest_item(
@@ -821,6 +592,7 @@ def build_best_method_for_manifest_item(
     checkpoint_callback: Any | None = None,
     recognition_checkpoint: dict[str, Any] | None = None,
     operator_values: dict[str, str] | None = None,
+    recognized_records: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], Image.Image]:
     item = _resolve_item_paths(item)
     facility_code = str(item.get("facility_code") or "")
@@ -879,11 +651,24 @@ def build_best_method_for_manifest_item(
             metadata={"axis_evidence": preprocess_axis_evidence, "rectified_quad_points": pre.get("rectified_quad_points"), "snap_debug": snap_debug},
         )
     try:
-        values = _validate_operator_values(operator_values, expected_sheet_cells)
+        if recognized_records is not None:
+            from src.services.hakodate_ocr_evidence_service import recognition_input_issue
+            if (recognition_checkpoint is None or not isinstance(recognized_records, list)
+                    or any(not isinstance(row, dict) for row in recognized_records)
+                    or [row.get("sheet_cell") for row in recognized_records] != expected_sheet_cells):
+                raise ValueError("recognition_diagnostic_cells_changed")
+            review_cells = [row["sheet_cell"] for row in recognized_records if recognition_input_issue(row)]
+            if not review_cells:
+                raise ValueError("recognition_diagnostic_review_required")
+            values = _validate_operator_values(operator_values, review_cells)
+            if values is None:
+                raise ValueError("recognition_diagnostic_values_required")
+        else:
+            values = _validate_operator_values(operator_values, expected_sheet_cells)
         if values is None:
             records, ocr_metrics, contact_sheet = _run_text_recognizer_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth)
         else:
-            records, ocr_metrics, contact_sheet = _operator_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth, operator_values=values)
+            records, ocr_metrics, contact_sheet = _operator_records(raw_rectified_bgr=pre["raw_rectified"], regions=snapped_regions, truth=truth, operator_values=values, recognized_records=recognized_records)
     except Exception as exc:
         if checkpoint_callback is None and recognition_checkpoint is None:
             raise
@@ -1018,7 +803,12 @@ def build_best_method_for_manifest_item(
     _write_pdf_from_pages([review_page], page_pdf)
     contact_sheet.save(contact_sheet_path)
     records_json = [cmp._strip_record_for_json(record) for record in records]
+    original_by_cell = {row["sheet_cell"]: row for row in recognized_records} if recognized_records is not None else {}
     for original, serialized in zip(records, records_json):
+        if recognized_records is not None and original["sheet_cell"] not in values:
+            serialized.clear()
+            serialized.update(deepcopy(original_by_cell[original["sheet_cell"]]))
+            continue
         for key in ("recognizer_input_evidence", "quantity_source_issue", "resolution_state", "resolved_value", "recognizer_preprocess_ink_removed", "recognizer_digit_score_threshold", "recognizer_preprocess_observation"):
             if key in original:
                 serialized[key] = original[key]
@@ -1026,6 +816,8 @@ def build_best_method_for_manifest_item(
             serialized['polygon'] = original.get('polygon')
         if original.get("recognition_source") == "operator":
             serialized.update(operator_value=original["operator_value"], recognition_source="operator", ocr_engine="operator")
+            if "original_recognizer_output" in original:
+                serialized["original_recognizer_output"] = deepcopy(original["original_recognizer_output"])
     records_path.write_text(json.dumps(records_json, ensure_ascii=False, indent=2), encoding="utf-8")
     ocr_regions: list[dict[str, Any]] = []
     for original_record, record in zip(records, records_json):
@@ -1061,10 +853,10 @@ def build_best_method_for_manifest_item(
         "facility_code": facility_code,
         "order_id": order_id,
         "method": "fax_line_snap_current_frame_noise_text_recognizer_topk",
-        "engine": "operator" if operator_values is not None else TEXT_RECOGNIZER_ENGINE,
+        "engine": "mixed" if recognized_records is not None else "operator" if operator_values is not None else TEXT_RECOGNIZER_ENGINE,
         "postprocess": "none",
         "recognition_checkpoint": checkpoint_reference,
-        "recognition_provenance": "operator" if operator_values is not None else "recognizer",
+        "recognition_provenance": "mixed" if recognized_records is not None else "operator" if operator_values is not None else "recognizer",
         "field_by_col": field_by_col,
         "metrics": metrics,
         "snap_debug": snap_debug,

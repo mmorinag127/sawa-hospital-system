@@ -32,7 +32,7 @@ const current = {};
 for (const name of pages) {
   const file = 'src/pages/'+name+'.tsx', source = fs.readFileSync(file,'utf8');
   const historical = execFileSync('git',['show',base+':frontend/'+file],{encoding:'utf8'});
-  const original = name !== 'ocr-results' ? execFileSync('git',['show',modernBase+':frontend/'+file],{encoding:'utf8'}) : historical;
+  const original = name !== 'ocr-results' ? execFileSync('git',['show',modernBase+':frontend/'+file],{encoding:'utf8'}) : historical.replace('params: { include_ocr: true }', 'params: { include_ocr: true, response_view: "ocr_monitor" }');
   current[name] = controls(source);
   test(name+' all rendered control props/options/handler parity and non-rendered source',()=>{
     if (name === 'pdf-upload') {

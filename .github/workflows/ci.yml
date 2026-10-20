@@ -101,6 +101,7 @@ jobs:
             tests/unit/test_portal_access_bootstrap_service.py \
             tests/integration/test_portal_admin_write_authority.py \
             tests/integration/test_delivery_admission_hardening.py \
+            tests/integration/test_current_actor_authority.py \
             tests/unit/test_portal_sqlite_constraint_contract.py \
             tests/unit/test_portal_prod_db_bootstrap_script.py \
             tests/unit/test_independent_ocr_ui_workflow.py \
@@ -130,6 +131,9 @@ jobs:
             tests/integration/test_staging_db_target.py \
             tests/integration/test_verify_stg_output_source.py \
             tests/unit/test_reviewed_ocr_diagnostic.py \
+            tests/unit/test_daily_bag_canonical_category.py \
+            tests/unit/test_weekly_weight_period.py \
+            tests/unit/test_order_list_response_ownership.py \
             tests/unit/test_ocr_registry_retirement.py \
             --junitxml=.logs/saved-source-junit.xml -q
       - name: Verify OCR review-resolution root regression
@@ -139,6 +143,7 @@ jobs:
           mkdir -p .logs
           python -m pytest \
             tests/unit/test_ocr_selectability_single_validation.py \
+            tests/unit/test_ocr_validation_dataflow.py \
             tests/unit/test_ocr_read_projection_ownership.py \
             tests/unit/test_hakodate_review_resolution_root.py \
             tests/unit/test_hakodate_blank_input_review.py \
@@ -155,6 +160,7 @@ jobs:
             tests/unit/test_native_ingest_boundary.py \
             tests/unit/test_native_ingest_sql_component.py \
             tests/unit/test_native_document_source.py \
+            tests/unit/test_canonical_saved_projection_regression.py \
             tests/unit/test_saved_sheet_setting_invalidation.py \
             tests/unit/test_native_recognition_recovery.py \
             tests/unit/test_native_quantity_projection_contract.py \
@@ -194,7 +200,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend deps

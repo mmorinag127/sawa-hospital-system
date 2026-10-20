@@ -56,9 +56,7 @@ def automation(monkeypatch):
 
     verifier = Mock(side_effect=verify)
     monkeypatch.setattr(auth_module.id_token, "verify_oauth2_token", verifier)
-    auth_module.invalidate_user_cache()
     yield claims, verifier
-    auth_module.invalidate_user_cache()
 
 
 @pytest.fixture
@@ -88,7 +86,6 @@ def seed_user():
                     {"id": user_id, "system": system, "enabled": enabled},
                 )
         users.append((user_id, account))
-        auth_module.invalidate_user_cache()
         return user_id
 
     yield seed
@@ -97,7 +94,6 @@ def seed_user():
             connection.execute(AuditLog.__table__.delete().where(AuditLog.actor == account))
             connection.execute(text("DELETE FROM user_system_access WHERE user_id=:id"), {"id": user_id})
             connection.execute(text("DELETE FROM users WHERE id=:id"), {"id": user_id})
-    auth_module.invalidate_user_cache()
 
 
 def _audit_ids():
