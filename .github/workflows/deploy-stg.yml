@@ -969,6 +969,7 @@ jobs:
       image: ${{ steps.image.outputs.image }}
     steps:
       - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
       - uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.PROJECT_ID }}
@@ -980,6 +981,7 @@ jobs:
         id: image
         env:
           BUILT_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
+          BACKEND_CHANGED: ${{ needs.source-gate.outputs.backend_changed }}
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/develop
@@ -987,13 +989,18 @@ jobs:
           gcloud auth configure-docker asia-northeast2-docker.pkg.dev --quiet
           image="asia-northeast2-docker.pkg.dev/$PROJECT_ID/backend/agent-runtime:stg-$GITHUB_SHA"
           base_image="$BUILT_BACKEND_IMAGE"
-          if [ -z "$base_image" ]; then
-            base_image="$(gcloud run services describe worker-stg --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containers[0].image)')"
-          fi
-          [[ "$base_image" == asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend* ]]
-          base_digest="$(gcloud artifacts docker images describe "$base_image" --format='value(image_summary.digest)')"
-          [[ "$base_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          base_image="asia-northeast2-docker.pkg.dev/$PROJECT_ID/backend/backend@$base_digest"
+          case "$BACKEND_CHANGED" in
+            true) test -n "$base_image" ;;
+            false)
+              test -z "$base_image"
+              base_image="$(gcloud run services describe worker-stg --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containers[0].image)')"
+              ;;
+            *) echo "agent_backend_source_unresolved" >&2; exit 1 ;;
+          esac
+          base_image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$base_image")"
+          [[ "$base_image" == asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend@sha256:* ]] || {
+            echo "agent_backend_image_required" >&2; exit 1;
+          }
           docker buildx build --platform linux/amd64 --push --metadata-file /tmp/agent-build.json \
             --label "sawa.git_sha=$GITHUB_SHA" --label sawa.component=agent-runtime \
             --build-arg "BASE_IMAGE=$base_image" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
