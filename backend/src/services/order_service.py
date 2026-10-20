@@ -9130,7 +9130,7 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
     evidence_container = payload.get("hakodate_ocr_evidence") or {}
     if not isinstance(evidence_container, dict):
         raise ValueError("hakodate_own_artifact_invalid")
-    raw_records = _first_hakodate_payload_list(payload, [("hakodate_ocr_evidence", "records"), ("hakodate_ocr_evidence_records",)])
+    raw_records = _first_hakodate_payload_list(payload, [("hakodate_ocr_evidence", "records"), ("hakodate_ocr_evidence_records",)], copy_records=False)
     record_evidence_ids = [record.get("evidence_id") for record in raw_records]
     if any(not isinstance(identity, str) or not identity for identity in record_evidence_ids) or len(set(record_evidence_ids)) != len(record_evidence_ids):
         raise ValueError("hakodate_own_record_identity_missing")
@@ -23835,7 +23835,7 @@ def _hakodate_skeleton_rows_from_baseline(baseline: dict[str, Any] | None) -> li
     return skeleton
 
 
-def _first_hakodate_payload_list(payload: dict[str, Any], paths: list[tuple[str, ...]]) -> list[dict[str, Any]]:
+def _first_hakodate_payload_list(payload: dict[str, Any], paths: list[tuple[str, ...]], *, copy_records: bool = True) -> list[dict[str, Any]]:
     if not any(path[0] in payload for path in paths):
         return []
     canonical = None
@@ -23856,7 +23856,7 @@ def _first_hakodate_payload_list(payload: dict[str, Any], paths: list[tuple[str,
             canonical = current
         elif not snapshots_equal(current, canonical):
             raise ValueError("hakodate_own_artifact_representations_conflict")
-    return deepcopy(canonical)
+    return deepcopy(canonical) if copy_records else canonical
 
 
 def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -23887,6 +23887,7 @@ def _extract_hakodate_ocr_evidence_records_from_payload(
     payload: dict[str, Any] | None,
     *,
     order_id: str,
+    copy_records: bool = True,
 ) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -23896,6 +23897,7 @@ def _extract_hakodate_ocr_evidence_records_from_payload(
             ("hakodate_ocr_evidence", "records"),
             ("hakodate_ocr_evidence_records",),
         ],
+        copy_records=copy_records,
     )
     if not raw_records:
         return []
