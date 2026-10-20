@@ -1,4 +1,5 @@
 import hashlib
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -11,6 +12,31 @@ from experiments.agent_assistant.store import Conflict
 ROOT=Path(__file__).resolve().parents[3]
 spec=importlib.util.spec_from_file_location('sidecar',ROOT/'scripts/configure_agent_sidecar.py')
 sidecar=importlib.util.module_from_spec(spec);spec.loader.exec_module(sidecar)
+
+
+def test_native_absolute_output_defaults_are_confined_per_request(tmp_path):
+    from experiments.agent_assistant.tests.test_trial import prepared
+    _, sandbox, _, run = prepared(tmp_path)
+    data = sandbox.path(run['id']) / 'data' / 'hospital'
+    (data / 'facility-master.json').write_text('{}')
+    cfg = {'facility_master_file': 'facility-master.json'}
+    env = sandbox.environment(run, 'hospital', cfg, data, ROOT, 'synthetic-token')
+    # Discover settings from the actual native services so a newly added global
+    # output default cannot silently escape the request's storage configuration.
+    settings = set()
+    for source in (ROOT / 'backend/src/services').glob('*.py'):
+        for node in ast.walk(ast.parse(source.read_text())):
+            if (isinstance(node, ast.Call) and len(node.args) >= 2
+                    and ast.unparse(node.func) in {'os.getenv', 'os.environ.get'}
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                    and node.args[1].value.startswith('/tmp/')):
+                settings.add(node.args[0].value)
+    assert settings
+    for setting in settings:
+        assert Path(env[setting]).is_relative_to(data), setting
+    assert len({env[key] for key in settings}) == len(settings)
 
 
 def test_pinned_source_rejects_modified_or_added_code(tmp_path):

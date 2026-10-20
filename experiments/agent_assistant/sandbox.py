@@ -130,6 +130,18 @@ class Sandbox:
                     "UPLOAD_DIR": str(data / "uploads"),
                     "ENABLE_DEV_SEED": "false", "AUTO_CREATE_SCHEMA": "false"})
         if domain == "hospital":
+            # Native output services have separate storage settings. Bind every
+            # one before import; their global /tmp defaults are outside this run.
+            for setting, folder in {
+                "ORDER_FORM_OUTPUT_DIR": "order-forms",
+                "FAX_ORDER_FORM_OUTPUT_DIR": "fax-order-forms",
+                "FAX_SOURCE_TEMPLATE_MATERIALIZED_DIR": "source-workbooks",
+                "SYSTEM_EXPORT_DIR": "system-exports",
+                "SHIPPING_OUTPUT_DIR": "shipping-outputs",
+                "SHIPPING_EXPORT_DIR": "shipping-exports",
+                "OCR_TRAINING_EXPORT_DIR": "ocr-training-exports",
+            }.items():
+                env[setting] = str(data / "outputs" / folder)
             if not cfg.get("facility_master_file"):
                 raise Conflict("病院注文の試用用正本JSONの指定が必要です")
             master = (data / cfg["facility_master_file"]).resolve()
