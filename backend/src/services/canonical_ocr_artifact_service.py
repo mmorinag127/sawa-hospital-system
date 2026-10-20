@@ -25,37 +25,19 @@ class _EvidenceAnalysis:
 
     def __init__(self):
         self.recognition_review = None
-        self.acceptance = None
-        self.targets = None
-        self.records = None
         self.assignment = None
 
     def accepted_values(self, payload):
         from src.services.recognition_acceptance_service import accepted_values
-        binding = _analysis_input_bytes(payload)
-        if binding is not None and self.acceptance is not None and self.acceptance[0] == binding:
-            return deepcopy(self.acceptance[1])
-        accepted = accepted_values(payload)
-        self.acceptance = (binding, deepcopy(accepted)) if binding is not None else None
-        return accepted
+        return accepted_values(payload)
 
     def target_cells(self, payload):
         from src.services.order_service import _extract_hakodate_target_cells_from_payload
-        binding = _analysis_input_bytes(payload)
-        if binding is not None and self.targets is not None and self.targets[0] == binding:
-            return deepcopy(self.targets[1])
-        targets = _extract_hakodate_target_cells_from_payload(payload)
-        self.targets = (binding, deepcopy(targets)) if binding is not None else None
-        return targets
+        return _extract_hakodate_target_cells_from_payload(payload)
 
     def evidence_records(self, payload, *, order_id):
         from src.services.order_service import _extract_hakodate_ocr_evidence_records_from_payload
-        binding = _analysis_input_bytes([payload, order_id])
-        if binding is not None and self.records is not None and self.records[0] == binding:
-            return deepcopy(self.records[1])
-        records = _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id)
-        self.records = (binding, deepcopy(records)) if binding is not None else None
-        return records
+        return _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id)
 
     def assign(self, *, evidence_records, target_cells, accepted_values):
         from src.services.hakodate_ocr_evidence_service import assign_evidence_to_target_cells
