@@ -15,6 +15,10 @@ on:
       - "docs/**"
       - "**/*.md"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   infra:
     runs-on: ubuntu-latest
@@ -28,6 +32,10 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [us1-4, saved-source, review-resolution]
     services:
       postgres:
         image: postgres:16
@@ -67,6 +75,8 @@ jobs:
       - name: Check backend undefined names
         working-directory: backend
         run: python -m ruff check --no-cache --select F821 src
+      - name: Verify parallel CI coverage and required gate
+        run: python infra/terraform/tests/test_ci_backend_parallel.py -v
       - name: Verify serving and frozen image dependency alignment
         run: python scripts/test_runtime_cv_dependency_alignment.py -v
       - name: Backend dependency audit
@@ -77,6 +87,7 @@ jobs:
           python -m pip install pip-audit
           python -m pip_audit --local --skip-editable
       - name: Run backend tests (US1-4)
+        if: matrix.suite == 'us1-4'
         working-directory: backend
         run: |
           set -euo pipefail
@@ -109,8 +120,11 @@ jobs:
             --junitxml=.logs/pytest-junit.xml \
             -vv 2>&1 | tee .logs/pytest.log
       - name: Verify initial saved-source preservation
+        if: matrix.suite == 'saved-source'
         working-directory: backend
         run: |
+          set -euo pipefail
+          mkdir -p .logs
           python -m pytest --confcutdir=tests/unit \
             tests/unit/test_menu_normalization_import.py \
             tests/unit/test_monthly_menu_read_batch.py \
@@ -137,6 +151,7 @@ jobs:
             tests/unit/test_ocr_registry_retirement.py \
             --junitxml=.logs/saved-source-junit.xml -q
       - name: Verify OCR review-resolution root regression
+        if: matrix.suite == 'review-resolution'
         working-directory: backend
         run: |
           set -euo pipefail
@@ -182,7 +197,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-test-logs
+          name: backend-test-logs-${{ matrix.suite }}
           include-hidden-files: true
           path: backend/.logs
       - name: Backend log summary
@@ -192,9 +207,22 @@ jobs:
           {
             echo "## Backend pytest log (tail)";
             echo '```';
-            tail -n 200 .logs/pytest.log || echo "no pytest log";
+            for log in .logs/*.log; do
+              [ -f "$log" ] && tail -n 200 "$log";
+            done
             echo '```';
           } >> "$GITHUB_STEP_SUMMARY"
+
+  backend-required:
+    name: backend
+    if: always()
+    needs: [backend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all backend suites to pass
+        env:
+          RESULT: ${{ needs.backend.result }}
+        run: test "$RESULT" = success
 
   frontend:
     runs-on: ubuntu-latest
