@@ -3956,6 +3956,7 @@ def _build_delivery_rows(
         row = rows.setdefault(
             key,
             {
+                **{column["name"]: None for column in quantity_columns},
                 "date": line_date,
                 "daypart": daypart_key,
                 "menu_name": menu_name,
@@ -3964,6 +3965,7 @@ def _build_delivery_rows(
                 "menu_display": "",
                 "_order_index": order_index,
                 "_delivery_condiments": [],
+                "note": "",
             },
         )
         if delivery_menu_display_name and not row.get("_delivery_menu_display_name"):
@@ -4025,6 +4027,7 @@ def _build_delivery_rows(
             row = rows.setdefault(
                 key,
                 {
+                    **{column["name"]: None for column in quantity_columns},
                     "date": entry_date,
                     "daypart": daypart_key,
                     "menu_name": menu_name,
@@ -4033,6 +4036,7 @@ def _build_delivery_rows(
                     "menu_display": "",
                     "_order_index": entry.get("index"),
                     "_delivery_condiments": [],
+                    "note": "",
                 },
             )
             if delivery_menu_display_name and not row.get("_delivery_menu_display_name"):

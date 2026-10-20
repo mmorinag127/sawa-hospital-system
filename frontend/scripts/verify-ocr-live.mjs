@@ -61,6 +61,19 @@ export async function gateReadonlyResource(route, {origin, allowedExternalUrls, 
   return route.abort('blockedbyclient');
 }
 
+export async function waitForWorkflowReadiness({page, expect, inspection, order, identity, revision}) {
+  assert.equal(order.id, identity.orderId);
+  assert.equal(order.current_version?.document_id, identity.documentId);
+  assert.equal(inspection.order_id, identity.orderId);
+  assert.equal(inspection.workflow.order_id, identity.orderId);
+  assert.ok(Number.isInteger(revision));
+  assert.equal(inspection.workflow.revision, revision);
+  const headline = page.locator('.state-panel-main > p.subtle');
+  await expect(headline).toBeVisible();
+  await expect(headline).toHaveText(/\S/);
+  await expect(headline).not.toHaveText('workflow-v2 を読み込み中です。');
+}
+
 export async function readLiveCandidate({ inspection, workflow, identity, page, readDetail, requireUnselected = false }) {
   assert.equal(inspection.order_id, identity.orderId);
   assert.equal(inspection.workflow.order_id, identity.orderId);
@@ -84,9 +97,12 @@ export async function readLiveCandidate({ inspection, workflow, identity, page, 
     evidence = candidate;
   } else {
     assert.equal(candidate.detail_state, 'not_loaded');
-    const pending = readDetail();
+    // Attach rejection handling before click can wait or fail; rethrow when consumed.
+    const pending = readDetail().then(data => ({ok: true, data}), error => ({ok: false, error}));
     await card.getByRole('button', { name: '詳細を表示', exact: true }).click();
-    evidence = await pending;
+    const receipt = await pending;
+    if (!receipt.ok) throw receipt.error;
+    evidence = receipt.data;
     assert.equal(evidence.workflow_revision, workflow.revision);
     assert.equal(evidence.selected, false);
   }
@@ -461,6 +477,8 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       inspectionReceipt.response.json(), orderReceipt.response.json(),
     ]);
     const liveWorkflow = liveInspection.workflow;
+    await waitForWorkflowReadiness({page, expect, inspection: liveInspection, order: liveOrder, identity,
+      revision: liveWorkflow.revision});
     const liveOcrResults = liveInspection.ocr_candidates;
     assert.equal(liveOcrResults?.order_id, identity.orderId);
     assert.ok(Array.isArray(liveOcrResults?.results));
@@ -536,11 +554,16 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     await page.screenshot({ path: resolve(output, 'workflow-v2-step2.png'), fullPage: true });
     diagnostics.begin('verify-state-preserved');
     const finalRead = watchRead('final-inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
+    const finalOrderRead = watchRead('final-order', '');
     await page.reload({ waitUntil: 'domcontentloaded' });
-    const finalReceipt = await finalRead;
+    const [finalReceipt, finalOrderReceipt] = await Promise.all([finalRead, finalOrderRead]);
     assert.equal(finalReceipt.ok, true);
+    assert.equal(finalOrderReceipt.ok, true);
     const finalInspection = await finalReceipt.response.json();
+    const finalOrder = await finalOrderReceipt.response.json();
     assert.equal(finalInspection.workflow.revision, liveWorkflow.revision);
+    await waitForWorkflowReadiness({page, expect, inspection: finalInspection, order: finalOrder, identity,
+      revision: liveWorkflow.revision});
     const finalEvidence = await readLiveCandidate({inspection: finalInspection, workflow: liveWorkflow, identity, page,
       readDetail: async () => {
         const receipt = await watchRead('final-detail', `/workflow-v2/inspection-detail/${identity.evidenceId}`);

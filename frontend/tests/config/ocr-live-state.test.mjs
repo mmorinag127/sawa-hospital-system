@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyOcrBrowser, assertRecognitionAcceptance } from '../../scripts/verify-ocr-live.mjs';
@@ -9,7 +9,7 @@ import { inspectReview } from '../../scripts/verify-recognition-review-live.mjs'
 import { STG_OUTPUT_SOURCE_ORIGIN as origin } from '../../scripts/output-source-live-origin.mjs';
 
 // Synthetic browser transport executes the complete verifier, including its real response watchers.
-function fixture(selected, mutate = () => {}) {
+function fixture(selected, mutate = () => {}, failure = null) {
   const review = {count: 1, cells: [{sheet_cell: 'F11', raw_text: '1', reason: 'hakodate_blank_input_nonempty_prediction'}]};
   const pdf = {order_id: 'ORD12345678', document_id: 'DOCtest', sha256: 'a'.repeat(64)};
   const identity = {orderId: pdf.order_id, documentId: pdf.document_id, sourcePDFhash: pdf.sha256,
@@ -35,12 +35,14 @@ function fixture(selected, mutate = () => {}) {
   const events = new EventEmitter(), page = new EventEmitter();
   const clicks = [], requests = []; let reloaded = false, blank = false, connected = true, rawOpen = false;
   const base = `/api/orders/${identity.orderId}`;
-  function respond(path, data) {
+  function respond(path, data, failed = false) {
     requests.push(path);
     const request = {url: () => origin + path, method: () => 'GET'};
     const response = {url: request.url, request: () => request, status: () => 200,
       finished: async () => null, json: async () => structuredClone(data)};
-    page.emit('request', request); page.emit('response', response); events.emit('response', response);
+    page.emit('request', request);
+    if (failed) {page.emit('requestfailed', request); return;}
+    page.emit('response', response); events.emit('response', response);
     page.emit('requestfinished', request);
   }
   function initial() {
@@ -67,7 +69,11 @@ function fixture(selected, mutate = () => {}) {
           if (rawOpen) respond(base + '/workflow-v2/inspection?history_details=true', inspection());
         } else if (name === '詳細を表示') {
           assert.equal(selected, false);
-          respond(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`, {...evidence, workflow_revision: workflow.revision});
+          const failNow = failure && failure.reload === reloaded;
+          if (failNow && failure.mode === 'click') throw Error('synthetic click failure');
+          respond(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`,
+            {...evidence, workflow_revision: workflow.revision}, failNow && failure.mode === 'detail');
+          if (failNow) await new Promise(resolve => setTimeout(resolve, 20));
         } else if (name === '確認して正解にする') {
           assert.equal(selected, false);
           respond(base + `/workflow-v2/recognition-review?document_id=${identity.documentId}&ocr_result_id=${identity.evidenceId}`,
@@ -101,6 +107,8 @@ function fixture(selected, mutate = () => {}) {
   const context = {on: (...args) => events.on(...args), addInitScript: async () => {}, route: async () => {},
     newPage: async () => {events.emit('page', page); return page;}, close: async () => {}};
   const expect = loc => ({
+    toHaveText: async value => {assert.equal(loc.name, '.state-panel-main > p.subtle'); assert.match('synthetic loaded workflow', value);},
+    not: {toHaveText: async value => {assert.equal(loc.name, '.state-panel-main > p.subtle'); assert.notEqual('synthetic loaded workflow', value);}},
     toContainText: async value => {
       const actual = loc.name === 'deploy version' ? 'c'.repeat(40) : loc.name === 'image-parent'
         ? '読み取り原文: 「1」 認識画像は白紙ですが、文字が読み取られています' : text();
@@ -138,6 +146,26 @@ for (const selected of [false, true]) test(`full OCR verifier executes ${selecte
     assert.equal(f.clicks.filter(x => x === 'raw-summary').length, 2);
   } finally {rmSync(output, {recursive: true, force: true});}
 });
+
+for (const verifier of ['ocr','review']) for (const reload of [false,true]) for (const mode of ['detail','click']) {
+  test(`${verifier} ${reload ? 'reload' : 'initial'} ${mode} rejection is handled and saves failed JSON`, async () => {
+    const f = fixture(false, () => {}, {reload, mode}), output = mkdtempSync(join(tmpdir(), 'live-reject-'));
+    const unhandled = [];
+    const onUnhandled = error => unhandled.push(error);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = verifier === 'ocr' ? verifyOcrBrowser : inspectReview;
+      const result = await run({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
+      await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(result.status, 'failed');
+      assert.deepEqual(unhandled, []);
+      const saved = JSON.parse(readFileSync(join(output, verifier === 'ocr' ? 'browser-result.json' : 'review-ui-result.json')));
+      assert.equal(saved.status, 'failed');
+      assert.equal(saved.ownedBrowserStopped, true);
+      assert.equal(verifier === 'ocr' ? saved.unexpectedWriteCount : saved.unexpectedWrites, 0);
+    } finally {process.off('unhandledRejection', onUnhandled); rmSync(output, {recursive: true, force: true});}
+  });
+}
 
 test('full sibling review dialog verifies raw cells and local blank choice without submitting', async () => {
   const f = fixture(false), output = mkdtempSync(join(tmpdir(), 'live-review-'));

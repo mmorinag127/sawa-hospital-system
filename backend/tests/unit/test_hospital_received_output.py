@@ -154,3 +154,19 @@ def test_delivery_output_rejects_unmapped_authored_quantity_source():
         _resolve_delivery_cell({'常食':20},{'source':'quantity','name':'別の数量'})
     assert _resolve_delivery_cell({'常食':0},{'source':'quantity','name':'常食'})==0
     assert _resolve_delivery_cell({'常食':None},{'source':'quantity','name':'常食'}) is None
+
+
+@pytest.mark.parametrize('zero_as_empty',[True,False])
+def test_delivery_rows_explicitly_materialize_declared_blank_columns(zero_as_empty):
+    from src.services.output_builder import _build_delivery_rows,_resolve_delivery_cell
+    columns=[{'source':'quantity','name':'常食','diet_type':'regular','area_id':'X'},
+             {'source':'quantity','name':'小口','diet_type':'small','area_id':'X'}]
+    order={'facility':'synthetic','lines':[{'date':'2026-01-08','daypart':'昼','menu_name':'合成献立',
+            'quantity_original':5,'diet_type':'regular','area_id':'X'}]}
+    result=_build_delivery_rows(order,{'columns':columns},{'zero_as_empty':zero_as_empty},allow_ocr_menu_meta=False)
+    assert len(result)==1
+    assert result[0]['常食']==5
+    assert '小口' in result[0] and result[0]['小口'] is None
+    assert _resolve_delivery_cell(result[0],columns[1]) is None
+    with pytest.raises(ValueError,match='delivery_column_source_unmapped'):
+        _resolve_delivery_cell(result[0],{'source':'quantity','name':'未定義'})
