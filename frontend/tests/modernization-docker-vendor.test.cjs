@@ -33,7 +33,11 @@ test('deps stage copies every declared committed local dependency before npm ci'
   assert.ok(deps.indexOf('COPY vendor ./vendor') < deps.indexOf('RUN npm ci'));
   const old = execFileSync('git', ['show', '4a9beb430da25f878eb8a3bdd6e834298c803afe:frontend/Dockerfile'], { cwd: root, encoding: 'utf8' });
   assert.equal((old.match(/FROM node:20-slim/g) || []).length, 3);
-  assert.equal(docker, old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor').replaceAll('FROM node:20-slim', 'FROM node:24-slim'));
+  const expected = old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor')
+    .replaceAll('FROM node:20-slim', 'FROM node:24-slim')
+    .replace('ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\n', 'ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\nARG NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=false\n')
+    .replace('ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\n', 'ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\nENV NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=${NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED}\n');
+  assert.equal(docker, expected);
   for (const relative of localDependencies(frontend)) {
     const committed = execFileSync('git', ['show', `HEAD:frontend/${relative}`], { cwd: root });
     assert.deepEqual(fs.readFileSync(path.join(frontend, relative)), committed);
