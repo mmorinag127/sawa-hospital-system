@@ -26,7 +26,8 @@ const volatile = new Set(['HOME', 'PWD', 'OLDPWD', 'PATH', 'TMP', 'TEMP', 'TMPDI
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !volatile.has(key) && !/^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key)).sort());
 const configs = Object.fromEntries([...tracked].sort().filter((name) =>
-  /\.(json|toml|ini|cfg|ya?ml|lock)$/.test(name) || name.startsWith('infra/ci/'))
+  /\.(toml|ini|cfg|ya?ml|lock)$/.test(name) ||
+  /(^|\/)(package(-lock)?|tsconfig[^/]*)\.json$/.test(name) || name.startsWith('infra/ci/'))
   .map((name) => [name, fileHash(path.join(root, name))]));
 const context = hash(JSON.stringify({ version: 1, node: process.version, platform: process.platform,
   tracked: [...tracked].sort(), configs, env }));
@@ -105,6 +106,19 @@ for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execF
 }
 wrapMethod(require('node:net').Socket.prototype, 'connect', () => unsafe('network'));
 syncBuiltinESMExports();
+const environment = process.env;
+process.env = new Proxy(environment, {
+  get(target, key) {
+    if (!busy && typeof key === 'string' &&
+        (volatile.has(key) || /^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key))) {
+      const caller = new Error().stack?.split('\n')[2] || '';
+      if (!caller.includes('(node:') && !caller.includes('at node:')) {
+        unsafe('volatile-environment');
+      }
+    }
+    return Reflect.get(target, key);
+  },
+});
 
 function valid(record) {
   return record && record.passed === true && Array.isArray(record.unsafe) && !record.unsafe.length &&

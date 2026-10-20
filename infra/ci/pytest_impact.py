@@ -37,6 +37,7 @@ REASONS = {}
 FIXTURES = {}
 FIXTURE_STACK = []
 STDLIB = str(Path(os.__file__).resolve().parent) + os.sep
+RUNTIME_PATHS = tuple({Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
 
 
 def digest(path):
@@ -168,6 +169,8 @@ def audit(event, args):
         path = Path(os.fsdecode(args[0])).resolve()
         if path.is_relative_to(STATE):
             return
+        if any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
+            return  # Installed versions are in the context, including in-repo venvs.
         if event != "open":
             # Directory membership may include untracked or externally generated inputs.
             if path.is_relative_to(ROOT) and path.name not in {"__pycache__", ".pytest_cache"}:
@@ -194,7 +197,7 @@ def audit(event, args):
                     fixture["inputs"][name] = value
             elif "__pycache__" not in path.parts and ".pytest_cache" not in path.parts:
                 record_unsafe("untracked-file-input")
-        elif not any(path.is_relative_to(Path(p).resolve()) for p in (sys.prefix, sys.base_prefix)):
+        else:
             if str(path) not in {"/dev/null", "/dev/urandom"}:
                 record_unsafe("external-file-input")
     finally:
@@ -215,7 +218,12 @@ def pytest_sessionstart(session):
 
         def observed_stat(*args, _original=original, **kwargs):
             if not BUSY and not framework_read():
-                record_unsafe("file-metadata")
+                value = args[0] if args else kwargs.get("path")
+                runtime = isinstance(value, (str, bytes, os.PathLike)) and any(
+                    Path(os.path.abspath(os.fsdecode(value))).is_relative_to(prefix) for prefix in RUNTIME_PATHS
+                )
+                if not runtime:
+                    record_unsafe("file-metadata")
             return _original(*args, **kwargs)
 
         setattr(os, name, observed_stat)
@@ -316,3 +324,15 @@ def pytest_terminal_summary(terminalreporter):
 
 # Observe conftest/module import inputs too, before sessionstart and collection.
 sys.addaudithook(audit)
+_environment_getitem = os._Environ.__getitem__
+
+
+def observed_environment(self, key):
+    if (not BUSY and isinstance(key, str)
+            and (key in VOLATILE_ENV or key.startswith(("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_")))
+            and not framework_read()):
+        record_unsafe("volatile-environment")
+    return _environment_getitem(self, key)
+
+
+os._Environ.__getitem__ = observed_environment

@@ -96,6 +96,16 @@ def test_metadata():
         self.run_tests()
         self.assertIn("test_example.py::test_metadata", self.run_tests()["selected"])
 
+    def test_ci_environment_dependency_never_reused(self):
+        self.env["GITHUB_REF"] = "main"
+        self.write("test_example.py", """import os
+def test_env():
+    assert os.environ['GITHUB_REF'] == 'main'
+""")
+        self.run_tests()
+        self.env["GITHUB_REF"] = "changed"
+        self.assertIn("test_example.py::test_env", self.run_tests(1)["selected"])
+
     def test_test_change_new_test_and_failed_test_execute(self):
         self.run_tests()
         with (self.root / "test_example.py").open("a") as stream:

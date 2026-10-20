@@ -62,6 +62,14 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
             file.unlink()
         self.assertEqual(len(self.run_tests()["selected"]), 2)
 
+    def test_ci_environment_dependency_never_reused(self):
+        self.env["GITHUB_REF"] = "main"
+        with (self.root / "example.test.mjs").open("a") as stream:
+            stream.write("\ntest('environment', () => assert.equal(process.env.GITHUB_REF, 'main'));\n")
+        self.run_tests()
+        self.env["GITHUB_REF"] = "changed"
+        self.assertIn("example.test.mjs::environment#0", self.run_tests(1)["selected"])
+
     def test_subprocess_never_reused(self):
         with (self.root / "example.test.mjs").open("a") as stream:
             stream.write("""
