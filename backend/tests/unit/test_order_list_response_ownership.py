@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from src.api import orders as orders_api
+from src.api.auth import UserContext, get_current_operator
 from src.main import app
 from src.services import order_service
 
@@ -125,6 +126,8 @@ def test_explicit_refresh_propagates_failure_without_replacing_cache(cache_world
 
 @pytest.fixture
 def mounted_cache(cache_world, monkeypatch):
+    monkeypatch.setitem(app.dependency_overrides, get_current_operator,
+                        lambda: UserContext("operator", "owned-list@example.invalid", ("hospital",)))
     monkeypatch.setattr(orders_api, "get_ocr_jobs", lambda ids: {})
     monkeypatch.setattr(order_service, "_load_order_ocr_cache_map", lambda ids: {})
     monkeypatch.setattr(order_service, "get_cached_ocr_payload", lambda order_id: None)
