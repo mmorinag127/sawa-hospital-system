@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { verificationIdentities, assertNativeIngestOwner, captureFailureScreen, readLiveCandidate, liveStateSnapshot, safeAssertionName } from './verify-ocr-live.mjs';
+import { verificationIdentities, assertNativeIngestOwner, captureFailureScreen, readLiveCandidate, liveStateSnapshot, safeAssertionName, gateReadonlyResource } from './verify-ocr-live.mjs';
 import { firstJsonRequest } from './ocr-first-request.mjs';
 import { STG_OUTPUT_SOURCE_ORIGIN as origin } from './output-source-live-origin.mjs';
 
@@ -13,11 +13,6 @@ export function requestedIdentity(identities, orderId) {
   assert.equal(matches[0].expectedOutcome, 'recognition_review_required');
   assert.ok(matches[0].review?.count > 0);
   return matches[0];
-}
-
-export function readonlyRequestAllowed(method, url, externalUrls) {
-  return ['GET', 'HEAD'].includes(method) &&
-    (new URL(url).origin === origin || externalUrls.has(url));
 }
 
 export function expectedReviewReason(reason) {
@@ -59,13 +54,9 @@ export async function inspectReview({ identity, source, token, output, playwrigh
       if (new URL(response.url()).origin === origin) result.http.push({
         pathname: new URL(response.url()).pathname, method: response.request().method(), status: response.status() });
     });
-    await context.route('**/*', async route => {
-      const request = route.request();
-      if (!['GET', 'HEAD'].includes(request.method())) result.unexpectedWrites++;
-      if (new URL(request.url()).origin !== origin) await externalGate;
-      return readonlyRequestAllowed(request.method(), request.url(), externalUrls)
-        ? route.continue() : route.abort('blockedbyclient');
-    });
+    await context.route('**/*', route => gateReadonlyResource(route, {
+      origin, allowedExternalUrls: externalUrls, externalGate, onWrite: () => result.unexpectedWrites++,
+    }));
     page = await context.newPage();
     const watch = path => {
       const item = firstJsonRequest(page, origin + path, {});

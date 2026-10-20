@@ -63,24 +63,32 @@ test('review verifier selects only the unique explicitly requested artifact iden
   }
 });
 
+async function permitted(method, url, allowedExternalUrls) {
+  const {gateReadonlyResource} = await import('../scripts/verify-ocr-live.mjs');
+  let result, writes = 0;
+  await gateReadonlyResource({request: () => ({method: () => method, url: () => url, resourceType: () => 'image'}),
+    continue: () => {result = true;}, abort: () => {result = false;}},
+  {origin, allowedExternalUrls, externalGate: Promise.resolve(), onWrite: () => writes++});
+  assert.equal(writes, ['GET', 'HEAD'].includes(method) ? 0 : 1);
+  return result;
+}
+
 for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT']) {
   test(`review verifier blocks ${method}, including explicitly whitelisted asset URLs`, async () => {
-    const { readonlyRequestAllowed } = await verifier;
     const asset = 'https://storage.googleapis.com/owned-stg-artifact.png?signature=synthetic';
-    assert.equal(readonlyRequestAllowed(method, origin + '/api/orders', new Set()), false);
-    assert.equal(readonlyRequestAllowed(method, asset, new Set([asset])), false);
+    assert.equal(await permitted(method, origin + '/api/orders', new Set()), false);
+    assert.equal(await permitted(method, asset, new Set([asset])), false);
   });
 }
 
 for (const method of ['GET', 'HEAD']) {
   test(`review verifier allows ${method} only for exact first-party origin or verified exact asset URL`, async () => {
-    const { readonlyRequestAllowed } = await verifier;
     const asset = 'https://storage.googleapis.com/owned-stg-artifact.png?signature=synthetic';
-    assert.equal(readonlyRequestAllowed(method, origin + '/api/orders', new Set()), true);
-    assert.equal(readonlyRequestAllowed(method, asset, new Set([asset])), true);
+    assert.equal(await permitted(method, origin + '/api/orders', new Set()), true);
+    assert.equal(await permitted(method, asset, new Set([asset])), true);
     for (const url of [origin + '.invalid/api/orders', 'https://web-prod-avlnzjjrca-dt.a.run.app/api/orders',
       asset + '&other=1', 'https://unrelated.invalid/']) {
-      assert.equal(readonlyRequestAllowed(method, url, new Set([asset])), false);
+      assert.equal(await permitted(method, url, new Set([asset])), false);
     }
   });
 }
