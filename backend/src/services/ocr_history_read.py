@@ -14,9 +14,36 @@ def history_statement(order_id: str):
     ).execution_options(yield_per=4)
 
 
+def read_history_summary(session, order_id: str) -> list[SimpleNamespace]:
+    table = OrderOcrEvidenceRun.__table__
+    columns = (
+        "id", "order_id", "template_version_id", "schema_version",
+        "producer_version", "source", "status", "artifact_digest", "created_at",
+    )
+    statement = select(*(table.c[name] for name in columns)).where(
+        table.c.order_id == order_id,
+    ).order_by(table.c.created_at.desc(), table.c.id.desc())
+    result = session.execute(statement)
+    try:
+        return [SimpleNamespace(**dict(row)) for row in result.mappings()]
+    finally:
+        result.close()
+
+
+def read_history_detail(session, order_id: str, evidence_id: str) -> SimpleNamespace | None:
+    rows = _read_rows(
+        session, history_statement(order_id).where(OrderOcrEvidenceRun.__table__.c.id == evidence_id),
+    )
+    return rows[0] if rows else None
+
+
 def read_history(session, order_id: str) -> list[SimpleNamespace]:
+    return _read_rows(session, history_statement(order_id))
+
+
+def _read_rows(session, statement) -> list[SimpleNamespace]:
     rows = []
-    result = session.execute(history_statement(order_id))
+    result = session.execute(statement)
     try:
         for source in result.mappings():
             values = dict(source)

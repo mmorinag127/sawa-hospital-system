@@ -9232,6 +9232,7 @@ def _original_hakodate_execution_source(payload):
 def _validate_hakodate_original_execution(payload, *, allow_review=False, _analysis=None, _accepted_values=None):
     expected = _original_hakodate_execution_source(payload)
     _validate_hakodate_owned_artifacts(payload, expected, allow_review=allow_review, _analysis=_analysis, _accepted_values=_accepted_values)
+    return expected
 
 
 def _classify_owned_evidence_payload(payload):

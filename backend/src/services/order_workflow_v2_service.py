@@ -30,7 +30,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import workflow_ocr_delivery_service
-from src.services.ocr_history_read import read_history
+from src.services.ocr_history_read import read_history, read_history_detail, read_history_summary
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
@@ -4808,7 +4808,7 @@ def final_confirm(
 
 
 @_measure_inspection
-def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple[dict[str, Any] | None, str | None]:
+def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_details: bool = True) -> tuple[dict[str, Any] | None, str | None]:
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     analysis = _EvidenceAnalysis()
     with session_scope() as session, session.no_autoflush:
@@ -4823,7 +4823,16 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
             if template_error:
                 return None, template_error
         _inspection_next("history_query")
-        ocr_results = read_history(session, order.id)
+        # Candidate projection requires the existing full representation.
+        history_details = history_details or include_ocr_results
+        ocr_results = read_history(session, order.id) if history_details else read_history_summary(session, order.id)
+        if not history_details and workflow is not None and workflow.evidence_run_id:
+            for index, row in enumerate(ocr_results):
+                if row.id == workflow.evidence_run_id:
+                    detail = read_history_detail(session, order.id, row.id)
+                    if detail is None:
+                        return None, "ocr_result_not_found"
+                    ocr_results[index] = detail
         _inspection_next("saved_sheet", count=len(ocr_results))
         saved_sheet = None
         saved_sheet_hash = ""
@@ -4870,6 +4879,20 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
                     "ocr_row_serialize", _serialize_ocr_result, row, selected=row.id == (workflow.evidence_run_id if workflow is not None else None),
                     _analysis=analysis if workflow is not None and row.id == workflow.evidence_run_id else _EvidenceAnalysis(),
                 )
+                if history_details or (workflow is not None and row.id == workflow.evidence_run_id)
+                else {
+                    "ocr_result_id": row.id,
+                    "order_id": row.order_id,
+                    "template_version_id": row.template_version_id,
+                    "schema_version": row.schema_version,
+                    "producer_version": row.producer_version,
+                    "source": row.source,
+                    "status": row.status,
+                    "selected": False,
+                    "artifact_digest": row.artifact_digest,
+                    "created_at": _serialize_datetime(row.created_at),
+                    "detail_state": "not_loaded",
+                }
                 for row in ocr_results
             ],
             "saved_sheet": saved_sheet,
@@ -4908,4 +4931,24 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False) -> tuple
                 return None, error
             result["ocr_candidates"] = candidates
         _inspection_next("session_exit")
+        return result, None
+
+
+def get_inspection_detail(order_id: str, evidence_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    with session_scope() as session, session.no_autoflush:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_workflow_readonly(session, order.id)
+        if workflow is not None:
+            template_error = _selected_workflow_template_error(session, order, workflow)
+            if template_error:
+                return None, template_error
+        row = read_history_detail(session, order.id, evidence_id)
+        if row is None:
+            return None, "ocr_result_not_found"
+        result = _serialize_ocr_result(
+            row, selected=workflow is not None and row.id == workflow.evidence_run_id,
+        )
+        result["workflow_revision"] = _workflow_revision(workflow) if workflow is not None else 0
         return result, None
