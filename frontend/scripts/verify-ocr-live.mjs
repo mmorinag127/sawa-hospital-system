@@ -282,8 +282,7 @@ export function verificationIdentities(folder) {
 }
 
 export function expectedWorkflowRead(pathname, orderId) {
-  return pathname === `/api/orders/${orderId}/workflow-v2`
-    || pathname === `/api/orders/${orderId}/workflow-v2/inspection`
+  return pathname === `/api/orders/${orderId}/workflow-v2/inspection`
     || pathname === `/api/orders/${orderId}`;
 }
 
@@ -351,8 +350,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       readWatchers.push(watcher);
       return settleResponse(watcher.promise);
     };
-    const workflowRead = watchRead('workflow', '/workflow-v2');
-    const ocrResultsRead = watchRead('ocr-candidates', '/workflow-v2/inspection?include_ocr_results=true');
+    const inspectionRead = watchRead('inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
     const orderRead = watchRead('order', '');
     result.phase = 'open-workflow';
     const workflowResponse = await page.goto(`${origin}/hospital/orders/${encodeURIComponent(identity.orderId)}/workflow-v2`, { waitUntil: 'domcontentloaded' });
@@ -360,19 +358,17 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     result.phase = 'verify-deploy-version';
     await expect(page.getByRole('contentinfo', { name: 'deploy version' })).toContainText(source.slice(0, 12));
     result.phase = 'await-workflow-reads';
-    const [workflowReceipt, ocrResultsReceipt, orderReceipt] = await Promise.all([workflowRead, ocrResultsRead, orderRead]);
-    assert.equal(workflowReceipt.ok, true);
-    assert.equal(ocrResultsReceipt.ok, true);
+    const [inspectionReceipt, orderReceipt] = await Promise.all([inspectionRead, orderRead]);
+    assert.equal(inspectionReceipt.ok, true);
     assert.equal(orderReceipt.ok, true);
-    const [liveWorkflowResponse, liveOcrResultsResponse, liveOrderResponse] = [workflowReceipt.response, ocrResultsReceipt.response, orderReceipt.response];
-    const [liveWorkflow, liveInspection, liveOrder] = await Promise.all([
-      liveWorkflowResponse.json(), liveOcrResultsResponse.json(), liveOrderResponse.json(),
+    const [liveInspection, liveOrder] = await Promise.all([
+      inspectionReceipt.response.json(), orderReceipt.response.json(),
     ]);
+    const liveWorkflow = liveInspection.workflow;
     const liveOcrResults = liveInspection.ocr_candidates;
     assert.equal(liveOcrResults?.order_id, identity.orderId);
     assert.ok(Array.isArray(liveOcrResults?.results));
     const expectedReads = result.http.filter(item => expectedWorkflowRead(item.pathname, identity.orderId));
-    assert.ok(expectedReads.some(item => item.pathname.endsWith('/workflow-v2') && item.status === 200));
     assert.ok(expectedReads.some(item => item.pathname.endsWith('/inspection') && item.status === 200));
     assert.ok(expectedReads.some(item => item.pathname === `/api/orders/${identity.orderId}` && item.status === 200));
     diagnostics.begin('verify-live-identity');
@@ -381,8 +377,19 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     assert.equal(liveWorkflow.ocr_job?.order_document_id, identity.documentId);
     assert.equal(liveOrder.id, identity.orderId);
     assert.equal(liveOrder.current_version?.document_id, identity.documentId);
-    const liveEvidence = (liveOcrResults.results || []).find(item => item?.ocr_result_id === identity.evidenceId);
-    assert.ok(liveEvidence);
+    const summaryEvidence = (liveOcrResults.results || []).find(item => item?.ocr_result_id === identity.evidenceId);
+    assert.equal(summaryEvidence?.detail_state, 'not_loaded');
+    diagnostics.begin('open-ocr-detail');
+    await page.locator('.step-nav button').filter({hasText: 'OCR選択'}).click();
+    const card = page.locator('.ocr-card').filter({hasText: identity.evidenceId});
+    const detailRead = watchRead('ocr-detail', `/workflow-v2/inspection-detail/${identity.evidenceId}`);
+    await card.getByRole('button', {name: '詳細を表示', exact: true}).click();
+    const detailReceipt = await detailRead;
+    assert.equal(detailReceipt.ok, true);
+    const liveEvidence = await detailReceipt.response.json();
+    assert.equal(liveEvidence.order_id, identity.orderId);
+    assert.equal(liveEvidence.workflow_revision, liveWorkflow.revision);
+    diagnostics.end();
     assert.equal(liveEvidence.order_id, identity.orderId);
     assert.equal(liveEvidence.execution_lineage?.evidence_run_id, identity.evidenceId);
     assert.equal(liveEvidence.execution_lineage?.selected_pdf_receipt?.document_id, identity.documentId);

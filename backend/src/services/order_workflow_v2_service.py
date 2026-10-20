@@ -1675,34 +1675,65 @@ def _workflow_menu_amount_resolution(session, order, workflow):
     return {"status": "unresolved", "blocker": error, "message": error, "affected_lines": []}
 
 
+def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None) -> dict[str, Any]:
+    ocr_job = None
+    if workflow is None:
+        serialized = _serialize_uninitialized_workflow(order)
+    else:
+        meta = _workflow_meta(workflow)
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        serialized = _serialize_workflow_checked(
+            session, order=order, workflow=workflow, ocr_job=ocr_job, _analysis=_analysis,
+        )
+    resolution = _workflow_menu_amount_resolution(session, order, workflow)
+    serialized["menu_amount_resolution"] = resolution
+    if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
+        serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
+    if not serialized.get("context_suggestion"):
+        serialized["context_suggestion"] = _order_context_suggestion(order)
+    return serialized
+
+
 def get_workflow_readonly(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
-        row = _get_workflow_readonly(session, order.id)
-        if row is None:
-            serialized = _serialize_uninitialized_workflow(order)
-            resolution = _workflow_menu_amount_resolution(session, order, row)
-            serialized["menu_amount_resolution"] = resolution
-            if resolution["status"] == "unresolved":
-                serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
-            return serialized, None
-        meta = _workflow_meta(row)
-        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
-        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
-        serialized = _serialize_workflow_checked(session, order=order, workflow=row, ocr_job=ocr_job)
-        resolution = _workflow_menu_amount_resolution(session, order, row)
-        serialized["menu_amount_resolution"] = resolution
-        if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
-            serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
-        if not serialized.get("context_suggestion"):
-            serialized["context_suggestion"] = _order_context_suggestion(order)
-        return serialized, None
+        return _workflow_read_projection(session, order, _get_workflow_readonly(session, order.id)), None
 
 
 def get_workflow(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
     return get_workflow_readonly(order_id)
+
+
+def get_ocr_progress(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Return only the recorded OCR job identity and progress for one workflow."""
+    with session_scope() as session, session.no_autoflush:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_workflow_readonly(session, order.id)
+        if workflow is None:
+            return {
+                "order_id": order.id,
+                "workflow_revision": 0,
+                "state": "not_initialized",
+                "ocr_job": None,
+            }, None
+        meta = _workflow_meta(workflow)
+        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
+        job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        serialized = _serialize_workflow(workflow, ocr_job=job)
+        if job is not None and serialized["common_job_status"] is None:
+            return None, "ocr_job_ownership_mismatch"
+        return {
+            "order_id": order.id,
+            "workflow_revision": _workflow_revision(workflow),
+            "state": serialized["state"],
+            "ocr_job": serialized["ocr_job"],
+            "common_job_status": serialized["common_job_status"],
+        }, None
 
 
 def get_quad_review(order_id: str, *, document_id: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
@@ -2924,7 +2955,7 @@ def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         return _project_ocr_candidates(session, order=order, workflow=workflow)
 
 
-def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_rows=None, _analysis=None):
+def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_rows=None, _analysis=None, checked_workflow=None):
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     if _analysis is None:
         _analysis = _EvidenceAnalysis()
@@ -2951,11 +2982,10 @@ def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_r
             else:
                 hidden_template_mismatch_result_count += 1
     selected_ocr_result_id = workflow.evidence_run_id if workflow is not None else None
-    checked_workflow = (
-        _serialize_workflow_checked(session, order=order, workflow=workflow, _analysis=_analysis)
-        if workflow is not None
-        else None
-    )
+    if checked_workflow is None and workflow is not None:
+        checked_workflow = _serialize_workflow_checked(
+            session, order=order, workflow=workflow, _analysis=_analysis,
+        )
     return {
         "order_id": order.id,
         "selected_ocr_result_id": selected_ocr_result_id,
@@ -4823,8 +4853,6 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             if template_error:
                 return None, template_error
         _inspection_next("history_query")
-        # Candidate projection requires the existing full representation.
-        history_details = history_details or include_ocr_results
         ocr_results = read_history(session, order.id) if history_details else read_history_summary(session, order.id)
         if not history_details and workflow is not None and workflow.evidence_run_id:
             for index, row in enumerate(ocr_results):
@@ -4869,10 +4897,8 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
         result = {
             "order_id": order.id,
             "source": "workflow_v2_inspection",
-            "workflow": (
-                _inspection_call("workflow_serialize", _serialize_workflow_checked, session, order=order, workflow=workflow, _analysis=analysis)
-                if workflow is not None
-                else _inspection_call("workflow_serialize", _serialize_uninitialized_workflow, order)
+            "workflow": _inspection_call(
+                "workflow_serialize", _workflow_read_projection, session, order, workflow, _analysis=analysis,
             ),
             "ocr_results": [
                 _inspection_call(
@@ -4925,7 +4951,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             serialized_rows = {row.id: serialized for row, serialized in zip(ocr_results, result["ocr_results"])}
             candidates, error = _project_ocr_candidates(
                 session, order=order, workflow=workflow, rows=ocr_results, serialized_rows=serialized_rows,
-                _analysis=analysis,
+                _analysis=analysis, checked_workflow=result["workflow"],
             )
             if error:
                 return None, error

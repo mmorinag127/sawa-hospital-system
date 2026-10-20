@@ -23,7 +23,7 @@ async function setup() {
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic', facilities: [] } }));
   t.on('get', BASE, () => state.pending ? state.pending.promise : { data: clone(state.value) });
   t.on('get', `${BASE}/ocr-results`, () => ({ data: { results: [] } }));
-  t.on('get', `${BASE}/inspection?include_ocr_results=true`, () => ({ data: { ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER), saved_sheet: null, pre_save_checks: {} } }));
+  t.on('get', `${BASE}/inspection?include_ocr_results=true&history_details=false`, () => state.pending ? state.pending.promise : ({ data: { workflow: clone(state.value), ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER), saved_sheet: null, pre_save_checks: {} } }));
   t.on('get', `/orders/${ORDER}`, () => ({ data: { id: ORDER,
     current_version: { document_id: 'pdf-A' }, versions: [{ document_id: 'pdf-A', is_current: true }] } }));
   t.on('get', `/orders/${ORDER}/week-options`, () => ({ data: { options: [] } }));
@@ -117,6 +117,12 @@ test('live workflow refuses mismatched order job attempt and domain without rend
       value => { value.ocr_job = null; },
     ]) {
       const value = fixtureWorkflow(); change(value);
+      if (value.order_id !== ORDER) {
+        const before = f.probe.current.workflow;
+        await assert.rejects(refresh(f,value), /注文が一致/);
+        assert.equal(f.probe.current.workflow,before);
+        continue;
+      }
       await refresh(f, value);
       assert.equal(f.probe.current.commonJobStatus, null);
       assert.ok(f.h.document.body.textContent.includes('ジョブ記録未取得'));
@@ -138,7 +144,7 @@ test('live refresh preserves selected job when old expected-job response carries
     newer.ocr_job.ocr_job_id = newer.common_job_status.jobId = 'successor-job';
     newer.ocr_job.workflow_attempt_id = newer.common_job_status.attemptIdentity = 'attempt-B';
     newer.common_job_status.state = 'succeeded';
-    await f.h.settle(() => pending.resolve({ data: newer }));
+    await f.h.settle(() => pending.resolve({ data: {workflow:newer} }));
     assert.equal(await request, false);
     assert.equal(f.probe.current.workflow, original);
     assert.equal(f.probe.current.commonJobStatus, original.common_job_status);

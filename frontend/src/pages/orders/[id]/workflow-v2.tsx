@@ -257,6 +257,7 @@ type ContextSuggestion = {
 
 type OcrResult = {
   ocr_result_id: string;
+  detail_state?: "not_loaded";
   selectable?: boolean;
   recognition_acceptance?: { edited_by: string; created_at: string; values: Record<string, string> } | null;
   recognition_review?: {
@@ -276,6 +277,7 @@ type OcrResult = {
 };
 
 type InspectionPayload = {
+  order_id?: string;
   ocr_candidates?: {
     order_id: string;
     selected_ocr_result_id: string | null;
@@ -1325,6 +1327,14 @@ export default function OrderWorkflowV2Page() {
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
+  const [rawInspection, setRawInspection] = useState<InspectionPayload | null>(null);
+  const ocrCompletionRefreshRef = useRef<string | null>(null);
+  const ocrDetailRequestRef = useRef(0);
+  const ocrDetailAbortRef = useRef<AbortController | null>(null);
+  const rawInspectionRequestRef = useRef(0);
+  const rawInspectionAbortRef = useRef<AbortController | null>(null);
+  const rawInspectionOpenRef = useRef(false);
+  const rawInspectionJson = useMemo(() => rawInspection ? formatJson(rawInspection) : "", [rawInspection]);
   const [contextForm, setContextForm] = useState(emptyContext);
   const [weekDraft, setWeekDraft] = useState<string>("");
   const [weekOptions, setWeekOptions] = useState<WeekOption[]>([]);
@@ -2366,9 +2376,12 @@ export default function OrderWorkflowV2Page() {
     const requestedOrderId = orderId;
     const refreshGeneration = refreshGenerationRef.current + 1;
     refreshGenerationRef.current = refreshGeneration;
+    ocrDetailRequestRef.current += 1;
+    ocrDetailAbortRef.current?.abort();
+    rawInspectionRequestRef.current += 1;
+    rawInspectionAbortRef.current?.abort();
     const responses = await Promise.all([
-      apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`),
-      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true`),
+      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false`),
       apiClient.get<OrderDetail>(`/orders/${orderId}`),
     ]).catch(err=>{
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
@@ -2376,12 +2389,16 @@ export default function OrderWorkflowV2Page() {
       return null;
     });
     if (!responses) return;
-    const [workflowRes, inspectionRes, orderRes]=responses;
-    if (
-      refreshGeneration !== refreshGenerationRef.current
+    const [inspectionRes, orderRes]=responses;
+    const workflowRes = {data: inspectionRes.data.workflow};
+    const staleRead = refreshGeneration !== refreshGenerationRef.current
       || requestedOrderId !== activeOrderIdRef.current
-      || !ownsPageInput(own) || !callerCurrent()
-    ) return;
+      || !ownsPageInput(own) || !callerCurrent();
+    if (staleRead) return;
+    if (!workflowRes.data) throw new Error("workflow 読取応答が不正です。");
+    if (workflowRes.data.order_id !== requestedOrderId) {
+      throw new Error("workflow 読取応答の注文が一致しません。");
+    }
     if (expectedJob!==null) {
       if ("executionKind" in expectedJob) {
         const actual = nativeOcrOwner(workflowRes.data.ocr_job, requestedOrderId);
@@ -2403,7 +2420,7 @@ export default function OrderWorkflowV2Page() {
       || candidates.hidden_template_mismatch_result_count < 0) {
       throw new Error("OCR候補の読取応答が不正です。");
     }
-    return adopt(() => {
+    const adopted = adopt(() => {
       adoptReadWorkflow(workflowRes.data);
       setOrderDetail(orderRes.data);
       applyPreSaveState(
@@ -2415,6 +2432,8 @@ export default function OrderWorkflowV2Page() {
       }
       setOcrResults(candidates.results);
       setInspection(inspectionData);
+      rawInspectionRequestRef.current += 1;
+      setRawInspection(null);
       const savedSheet = inspectionRes.data.saved_sheet?.sheet;
       const canReplaceSheet = !sheetDirtyRef.current && pendingSheetCellEditsRef.current.size === 0 && canAdoptReadEditorInput("sheet");
       if (savedSheet && canReplaceSheet) {
@@ -2447,6 +2466,70 @@ export default function OrderWorkflowV2Page() {
       }
       return true;
     });
+    if (adopted && rawInspectionOpenRef.current) void loadRawInspection(true);
+    return adopted;
+  };
+
+  const loadOcrResultDetail = async (ocrResultId: string, callerCurrent: () => boolean = () => true) => {
+    if (!orderId) return null;
+    const own = capturePageOwner();
+    if (!ownsPageInput(own) || !callerCurrent()) return null;
+    const revision = workflowRevisionRef.current?.revision;
+    const refreshGeneration = refreshGenerationRef.current;
+    ocrDetailAbortRef.current?.abort();
+    const controller = new AbortController();
+    const request = ++ocrDetailRequestRef.current;
+    ocrDetailAbortRef.current = controller;
+    let response: {data: OcrResult & {workflow_revision?: number}};
+    try {
+      response = await apiClient.get<OcrResult & {workflow_revision?: number}>(
+        `/orders/${orderId}/workflow-v2/inspection-detail/${ocrResultId}`, {signal: controller.signal},
+      );
+    } catch (err) {
+      if (controller.signal.aborted || request !== ocrDetailRequestRef.current
+        || !ownsPageInput(own) || !callerCurrent()) return null;
+      throw err;
+    }
+    if (!ownsPageInput(own) || !callerCurrent() || request !== ocrDetailRequestRef.current) return null;
+    if (refreshGeneration !== refreshGenerationRef.current || response.data.ocr_result_id !== ocrResultId
+      || response.data.workflow_revision !== revision || workflowRevisionRef.current?.revision !== revision) {
+      throw new Error("状態更新のため再読込が必要です。");
+    }
+    setOcrResults((current) => current.map((item) => item.ocr_result_id === ocrResultId ? response.data : item));
+    return response.data;
+  };
+
+  const loadRawInspection = async (open: boolean) => {
+    rawInspectionOpenRef.current = open;
+    if (!open) {
+      rawInspectionRequestRef.current += 1;
+      rawInspectionAbortRef.current?.abort();
+      rawInspectionAbortRef.current = null;
+      setRawInspection(null);
+      return;
+    }
+    if (!orderId) return;
+    const own = capturePageOwner();
+    const request = ++rawInspectionRequestRef.current;
+    const refreshGeneration = refreshGenerationRef.current;
+    const revision = workflowRevisionRef.current?.revision;
+    rawInspectionAbortRef.current?.abort();
+    const controller = new AbortController();
+    rawInspectionAbortRef.current = controller;
+    try {
+      const response = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?history_details=true`, {signal: controller.signal});
+      if (!ownsPageInput(own) || request !== rawInspectionRequestRef.current
+        || !rawInspectionOpenRef.current) return;
+      if (refreshGeneration !== refreshGenerationRef.current || response.data.order_id !== orderId
+        || response.data.workflow?.revision !== revision || workflowRevisionRef.current?.revision !== revision) {
+        setError("状態更新のため再読込が必要です。");
+        return;
+      }
+      setRawInspection(response.data);
+    } catch (err) {
+      if (ownsPageInput(own) && request === rawInspectionRequestRef.current && rawInspectionOpenRef.current
+        && !controller.signal.aborted) setError(formatApiError(err, "raw JSON の取得に失敗しました"));
+    }
   };
 
   useEffect(() => {
@@ -2456,6 +2539,13 @@ export default function OrderWorkflowV2Page() {
     workflowEditorVersionsRef.current = {};
     sheetAutoEditJobInputRef.current = null;
     pendingSheetCellEditsRef.current.clear();
+    ocrCompletionRefreshRef.current = null;
+    ocrDetailRequestRef.current += 1;
+    ocrDetailAbortRef.current?.abort();
+    rawInspectionRequestRef.current += 1;
+    rawInspectionAbortRef.current?.abort();
+    rawInspectionOpenRef.current = false;
+    setRawInspection(null);
     setSheetDirty(false);
     setSheetPayload(null);
     setSheetJson(formatJson(defaultSheet));
@@ -2465,6 +2555,13 @@ export default function OrderWorkflowV2Page() {
     setSelectedAnomalyIndex(null);
     setSelectedAutoEditIndex(null);
   }, [orderId]);
+
+  useEffect(() => () => {
+    ocrDetailRequestRef.current += 1;
+    ocrDetailAbortRef.current?.abort();
+    rawInspectionRequestRef.current += 1;
+    rawInspectionAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (!orderId) return;
@@ -2514,6 +2611,8 @@ export default function OrderWorkflowV2Page() {
       return undefined;
     }
     let active=true;
+    let polling=false;
+    const progressController = new AbortController();
     const current=()=> {
       const recorded = workflowJobRef.current;
       if (!active || !ownsPageContext(own) || recorded.orderId!==own.context.orderId
@@ -2525,19 +2624,55 @@ export default function OrderWorkflowV2Page() {
       return actual !== null && actual.executionId===nativeOwner?.executionId;
     };
     const timer = window.setInterval(() => {
-      if (!current()) return;
+      if (!current() || polling) return;
+      polling=true;
       const readOwn=capturePageOwner();
+      const readGeneration=refreshGenerationRef.current;
+      let progressAccepted=false;
       const readCurrent=()=>current() && ownsPageInput(readOwn);
-      void refreshAll(readCurrent,native ? nativeOwner! : {jobId,attemptId:attemptId as string}).then(accepted=>{
-        if (accepted===false && readCurrent()) {
+      void apiClient.get<Pick<WorkflowV2, "order_id" | "state" | "ocr_job" | "common_job_status"> & {workflow_revision?: number}>(
+        `/orders/${orderId}/workflow-v2/ocr-progress`,
+        {signal: progressController.signal},
+      ).then(async (response) => {
+        if (!readCurrent() || readGeneration !== refreshGenerationRef.current) return;
+        progressAccepted=true;
+        const progress = response.data;
+        const actual = native ? nativeOcrOwner(progress.ocr_job, orderId) : null;
+        const owned = progress.order_id === orderId
+          && progress.ocr_job?.ocr_job_id === jobId
+          && (native ? actual?.executionId === nativeOwner?.executionId : progress.ocr_job?.workflow_attempt_id === attemptId);
+        if (!owned && readCurrent()) {
           setError("OCR進捗のjobが変更、またはattemptが変更されました。元のjobの進捗読取を停止しています。");
           active=false; window.clearInterval(timer);
+          return;
+        }
+        if (!owned) return;
+        if (progress.workflow_revision !== workflowRevisionRef.current?.revision) {
+          await refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+          return;
+        }
+        if (progress.state === "ocr_running") {
+          setWorkflow((currentWorkflow) => currentWorkflow?.order_id === orderId
+            && currentWorkflow.revision === progress.workflow_revision
+            ? {...currentWorkflow, ocr_job: progress.ocr_job, common_job_status: progress.common_job_status}
+            : currentWorkflow);
+          return;
+        }
+        const completionKey = `${jobId}:${native ? nativeOwner?.executionId : attemptId}`;
+        if (ocrCompletionRefreshRef.current === completionKey) return;
+        const accepted = await refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+        if (accepted === true && readCurrent()) {
+          ocrCompletionRefreshRef.current = completionKey;
+          active=false;
+          window.clearInterval(timer);
         }
       }).catch((err) => {
-        if (readCurrent()) setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+        if (readCurrent() && (progressAccepted || readGeneration === refreshGenerationRef.current)) setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+      }).finally(() => {
+        polling=false;
       });
     }, 3000);
-    return () => {active=false;window.clearInterval(timer);};
+    return () => {active=false;progressController.abort();window.clearInterval(timer);};
   }, [orderId,workflow?.order_id,workflow?.state,workflow?.ocr_job?.order_id,workflow?.ocr_job?.ocr_job_id,workflow?.ocr_job?.workflow_attempt_id,
     workflow?.ocr_job?.native_ingest?.mode,workflow?.ocr_job?.native_ingest?.intake_protocol,workflow?.ocr_job?.native_ingest?.execution_id,
     Boolean(workflow?.ocr_job && "native_ingest" in workflow.ocr_job),effectiveSelectedDocumentId,router.asPath]);
@@ -2835,6 +2970,8 @@ export default function OrderWorkflowV2Page() {
       () => operation === pageOperationGenerationRef.current && busyOwner === busyGenerationRef.current,
       () => operation === pageOperationGenerationRef.current,
     );
+    rawInspectionRequestRef.current += 1;
+    setRawInspection(null);
     setError("");
     setMessage("");
     try {
@@ -5547,7 +5684,14 @@ export default function OrderWorkflowV2Page() {
                         </div>
                       ) : null}
                     </div>
-                    <div className="ocr-overlay-preview-card">
+                  {item.detail_state === "not_loaded" ? (
+                    <div className="notice warning" role="status">
+                      詳細未取得
+                      <Button className="btn ghost workflow-ordinary-control" type="button" disabled={Boolean(busy)} onClick={() => {
+                        void loadOcrResultDetail(item.ocr_result_id).catch((err) => setError(formatApiError(err, "OCR結果詳細の取得に失敗しました")));
+                      }}>詳細を表示</Button>
+                    </div>
+                  ) : <div className="ocr-overlay-preview-card">
                       <div className="preview-header">
                         <div>
                           <span className="field-label">{ocrPreviewMode === "original" ? "原本PDF" : "OCR Overlay"}</span>
@@ -5598,12 +5742,12 @@ export default function OrderWorkflowV2Page() {
                         </div>
                       )}
                     </div>
-                  </div>
+                  }</div>
                   <div className="row-actions">
-                    <Button className="btn workflow-ordinary-control" type="button" onClick={() => item.selectable === true ? selectOcr(item.ocr_result_id) : loadRecognitionAcceptance(item.ocr_result_id)} disabled={Boolean(busy) || (item.selectable !== true && !item.recognition_review?.count)}>
+                    <Button className="btn workflow-ordinary-control" type="button" onClick={() => item.selectable === true ? selectOcr(item.ocr_result_id) : loadRecognitionAcceptance(item.ocr_result_id)} disabled={Boolean(busy) || item.detail_state === "not_loaded" || (item.selectable !== true && !item.recognition_review?.count)}>
                       {item.selectable === true ? "正解にする" : item.recognition_review?.count ? "確認して正解にする" : "正解にする"}
                     </Button>
-                    <Button className="btn danger workflow-ordinary-control" type="button" onClick={() => deleteOcr(item.ocr_result_id)} disabled={Boolean(busy)}>
+                    <Button className="btn danger workflow-ordinary-control" type="button" onClick={() => deleteOcr(item.ocr_result_id)} disabled={Boolean(busy) || item.detail_state === "not_loaded"}>
                       完全削除
                     </Button>
                   </div>
@@ -6415,9 +6559,9 @@ export default function OrderWorkflowV2Page() {
             確認専用ページで見る
           </Link>
         ) : null}
-        <details className="json-details">
+        <details className="json-details" onToggle={(event) => void loadRawInspection(event.currentTarget.open)}>
           <summary>デバッグ用 raw JSON を開く</summary>
-          <pre>{formatJson(inspection || workflow)}</pre>
+          {rawInspection ? <pre>{rawInspectionJson}</pre> : <p>読み込み中...</p>}
         </details>
       </section>
 

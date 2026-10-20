@@ -23,7 +23,8 @@ function harness(){
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
     selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},sheetDirtyRef:{current:false},unsavedSessionRef:{current:null},sheetPayload:null,
-    window:{confirm:()=>state.confirmReplacement},
+    window:{confirm:()=>state.confirmReplacement},AbortController,
+    rawInspectionRequestRef:{current:0},setRawInspection:()=>{},
     setSheetPayload:value=>{if(value===null)state.discard++;state.sheetPayload=value;context.sheetPayload=value;context.sheetPayloadRef.current=value;},setSheetDirty:value=>{state.sheetDirty=value;},setSheetJson:value=>{state.sheetJson=value;},setSheetJsonStale:value=>{state.sheetJsonStale=value;},
     workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},
     setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},
@@ -359,13 +360,19 @@ for(const missing of ['saved','selected','both','null','empty'])test(`missing st
 function refreshHarness(){
   const h=harness();
   Object.assign(h.context,{refreshGenerationRef:{current:0},sheetDirtyRef:{current:false},pendingSheetCellEditsRef:{current:new Map()},
+    ocrDetailRequestRef:{current:0},ocrDetailAbortRef:{current:null},rawInspectionRequestRef:{current:0},
+    rawInspectionAbortRef:{current:null},rawInspectionOpenRef:{current:false},ocrCompletionRefreshRef:{current:null},setRawInspection:()=>{},
     workflowJobRef:{current:{orderId:'order-A',jobId:'recorded-job',attemptId:'recorded-attempt',state:'ocr_running'}},
-    setWorkflow:value=>{h.state.workflow=value;h.context.workflow=value;},setOrderDetail:value=>{h.state.order=value;},applyPreSaveState:()=>{},
+    setWorkflow:value=>{const next=typeof value==='function'?value(h.context.workflow):value;h.state.workflow=next;h.context.workflow=next;},setOrderDetail:value=>{h.state.order=value;},applyPreSaveState:()=>{},
     setOcrResults:value=>{h.state.ocr=value;},setInspection:value=>{h.state.inspection=value;},normalizeSheetPayload:value=>value,
     setSheetPayload:()=>{},setSheetJsonStale:()=>{},setContextForm:()=>{},setWeekDraft:()=>{},weekValueFromRange:()=>'',emptyContext:{facility_id:'',week_start:'',week_end:''}});
   h.context.refreshAll=(...args)=>actual('refreshAll',h.context)(...args);
-  h.response=url=>({data:url.endsWith('/workflow-v2')?{order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued',attempt_count:0}}:
-    url.endsWith('/inspection?include_ocr_results=true')?{saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}: {id:'order-A'}});
+  h.response=url=>{
+    const workflow={order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued',attempt_count:0}};
+    return {data:url.endsWith('/ocr-progress')?{...workflow,workflow_revision:8}:
+      url.includes('/inspection?')?{workflow,saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}:
+      url.endsWith('/workflow-v2')?workflow:{id:'order-A'}};
+  };
   return h;
 }
 function refreshEffect(context,marker){
@@ -374,7 +381,7 @@ function refreshEffect(context,marker){
 }
 for(const polling of [false,true])for(const kind of ['pdf','order','route','auth','manual','sheet','unmount','cleanup'])test(`actual ${polling?'OCR polling':'initial refresh'} rejection after ${kind} does not overwrite error`,async()=>{
   const h=refreshHarness(),pending=deferred();let tick;
-  Object.assign(h.context,{workflow:{state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt'}},window:{setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{}}});
+  Object.assign(h.context,{workflow:{order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt'}},window:{setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{}}});
   h.context.apiClient.get=()=>pending.promise;
   const cleanup=refreshEffect(h.context,polling?'OCR進捗の取得に失敗しました':'workflow-v2 の取得に失敗しました');if(polling)tick();
   if(kind==='cleanup')cleanup();else h.retire(kind);h.state.error='new-error';pending.reject(Error('old'));
@@ -383,7 +390,7 @@ for(const polling of [false,true])for(const kind of ['pdf','order','route','auth
 
 for(const polling of [false,true])test(`actual ${polling?'polling':'initial'} refresh preserves queued own job and surfaces current rejection`,async()=>{
   const h=refreshHarness();let tick;
-  Object.assign(h.context,{workflow:{state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt'}},window:{setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{}}});h.context.apiClient.get=async url=>h.response(url);
+  Object.assign(h.context,{workflow:{order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt'}},window:{setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{}}});h.context.apiClient.get=async url=>h.response(url);
   const cleanup=refreshEffect(h.context,polling?'OCR進捗の取得に失敗しました':'workflow-v2 の取得に失敗しました');if(polling)tick();
   for(let i=0;i<12;i++)await Promise.resolve();assert.equal(h.state.workflow.ocr_job.status,'queued');assert.equal(h.state.workflow.ocr_job.attempt_count,0);assert.equal(h.state.workflow.state,'ocr_running');cleanup();
   h.context.apiClient.get=async()=>{throw Error('own failure');};
@@ -398,7 +405,7 @@ test('actual refresh superseded rejection cannot overwrite a successful newer re
 });
 
 function pollingHarness(){
-  const h=refreshHarness();h.context.workflow={order_id:'order-A',state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued'}};
+  const h=refreshHarness();h.context.workflow={order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued'}};
   h.timer={tick:null,cleared:0};
   h.context.window={setInterval:fn=>{h.timer.tick=fn;return 1;},clearInterval:()=>{h.timer.cleared++;}};
   h.start=()=>refreshEffect(h.context,'OCR進捗の取得に失敗しました');
@@ -408,10 +415,10 @@ const settle=async()=>{for(let i=0;i<16;i++)await Promise.resolve();};
 
 test('actual polling same job different returned attempt cannot adopt response or send another old-attempt tick',async()=>{
   const h=pollingHarness();let calls=0;h.state.workflow=h.context.workflow;
-  h.context.apiClient.get=async url=>{calls++;const response=h.response(url);if(url.endsWith('/workflow-v2'))response.data.ocr_job.workflow_attempt_id='replacement-attempt';return response;};
+  h.context.apiClient.get=async url=>{calls++;const response=h.response(url);if(url.endsWith('/ocr-progress'))response.data.ocr_job.workflow_attempt_id='replacement-attempt';return response;};
   const cleanup=h.start();h.timer.tick();await settle();
   assert.equal(h.state.workflow.ocr_job.workflow_attempt_id,'recorded-attempt');assert.match(h.state.error,/attempt/);
-  h.timer.tick();await settle();assert.equal(calls,3);cleanup();
+  h.timer.tick();await settle();assert.equal(calls,1);cleanup();
 });
 
 test('actual polling missing recorded attempt does not dispatch',()=>{
@@ -428,17 +435,19 @@ test('actual polling same-job replacement attempt before first tick never dispat
 for(const edit of ['manual','sheet'])for(const outcome of ['success','error'])test(`actual polling ${edit} edit retires old ${outcome} but next tick reads same job without rebasing/resetting dirty editor`,async()=>{
   const h=pollingHarness(),pending=deferred();let calls=0;
   h.context.sheetDirtyRef.current=true;h.context.pendingSheetCellEditsRef.current.set('own-cell',{quantity:0});
-  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,3);
+  h.context.apiClient.get=()=>{calls++;return pending.promise;};const cleanup=h.start();h.timer.tick();assert.equal(calls,1);
   h.retire(edit);const editor=edit==='manual'?'quad':'sheet';const base=h.context.editorVersion(editor).baseRevision;
   h.state.error='new-input-error';
   if(outcome==='success')pending.resolve(h.response('/orders/order-A/workflow-v2'));else pending.reject(Error('old-input-failure'));
   await settle();assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'new-input-error');assert.equal(h.state.discard,0);
   h.context.apiClient.get=async url=>{
     calls++;const response=h.response(url);
-    if(url.endsWith('/workflow-v2')){response.data.revision=9;response.data.ocr_job.status='running';response.data.ocr_job.progress_step=2;}
+    if(url.endsWith('/ocr-progress')) response.data.workflow_revision=9;
+    const workflow=response.data.workflow;
+    if(workflow){workflow.revision=9;workflow.ocr_job.status='running';workflow.ocr_job.progress_step=2;}
     return response;
   };
-  h.timer.tick();await settle();assert.equal(calls,6);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
+  h.timer.tick();await settle();assert.equal(calls,4);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
   assert.equal(h.state.discard,0);assert.equal(h.context.pendingSheetCellEditsRef.current.get('own-cell').quantity,0);
   assert.equal(h.context.editorVersion(editor).dirty,true);assert.equal(h.context.editorVersion(editor).baseRevision,base);
   assert.equal(h.context.captureWorkflowInputVersion(editor).revision,base);assert.equal(h.context.workflowRevisionRef.current.revision,9);
@@ -453,14 +462,14 @@ for(const kind of ['pdf','order','route','auth','job','attempt','unmount','clean
   else if(kind==='cleanup')cleanup();else h.retire(kind);
   h.state.error='current-error';
   if(outcome==='success')pending.resolve(h.response('/orders/order-A/workflow-v2'));else pending.reject(Error('old'));
-  await settle();h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'current-error');cleanup();
+  await settle();h.timer.tick();await settle();assert.equal(calls,1);assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'current-error');cleanup();
 });
 
 test('actual polling stops on returned different queued job rather than adopting it under old job ownership',async()=>{
   const h=pollingHarness();let calls=0;h.state.workflow=h.context.workflow;
-  h.context.apiClient.get=async url=>{calls++;const response=h.response(url);if(url.endsWith('/workflow-v2'))response.data.ocr_job.ocr_job_id='different-recorded-job';return response;};
-  const cleanup=h.start();h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');
-  assert.match(h.state.error,/jobが変更/);assert.equal(h.timer.cleared,1);h.timer.tick();await settle();assert.equal(calls,3);cleanup();
+  h.context.apiClient.get=async url=>{calls++;const response=h.response(url);if(url.endsWith('/ocr-progress'))response.data.ocr_job.ocr_job_id='different-recorded-job';return response;};
+  const cleanup=h.start();h.timer.tick();await settle();assert.equal(calls,1);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');
+  assert.match(h.state.error,/jobが変更/);assert.equal(h.timer.cleared,1);h.timer.tick();await settle();assert.equal(calls,1);cleanup();
 });
 
 test('actual polling missing job stops without guessing, and current transient rejection permits next same-job read',async()=>{
