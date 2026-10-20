@@ -823,6 +823,8 @@ def build_facility_template_diagnostics(
 
 
 def _parse_menu_date(value: object) -> date | None:
+    from src.services import menu_service
+
     return menu_service.parse_menu_date(value)
 
 
