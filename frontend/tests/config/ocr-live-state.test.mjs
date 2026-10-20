@@ -33,7 +33,7 @@ function fixture(selected, mutate = () => {}) {
     ocr_candidates: {order_id: identity.orderId, selected_ocr_result_id: workflow.selected_ocr_result_id,
       results: [selected ? structuredClone(evidence) : {ocr_result_id: identity.evidenceId, selected: false, detail_state: 'not_loaded'}]}});
   const events = new EventEmitter(), page = new EventEmitter();
-  const clicks = [], requests = []; let reloaded = false, blank = false, connected = true;
+  const clicks = [], requests = []; let reloaded = false, blank = false, connected = true, rawOpen = false;
   const base = `/api/orders/${identity.orderId}`;
   function respond(path, data) {
     requests.push(path);
@@ -52,17 +52,20 @@ function fixture(selected, mutate = () => {}) {
   const text = () => `${evidence.recognition_acceptance ? '確認済み' : '要確認'}: 1セル ${identity.evidenceId}`;
   function locator(name = '') {
     return {
-      filter: () => locator(name), locator: () => locator('image-parent'),
+      filter: () => locator(name), locator: child => locator(name === 'details.json-details' ? `raw-${child}` : 'image-parent'),
       getByRole: (role, options = {}) => locator(options.name || role),
       getByLabel: label => locator(label), getByText: label => locator(label),
       count: async () => name === '詳細を表示' ? (selected ? 0 : 1) : name === 'input[type="password"]' ? 0 : 1,
-      innerText: async () => text(),
+      innerText: async () => name === 'raw-pre' ? JSON.stringify(inspection()) : text(),
       getAttribute: async () => evidence.overlay_url,
       evaluate: async fn => fn({complete: true, naturalWidth: 100, naturalHeight: 80}),
       screenshot: async () => {}, scrollIntoViewIfNeeded: async () => {},
       async click() {
         clicks.push(name);
-        if (name === '詳細を表示') {
+        if (name === 'raw-summary') {
+          rawOpen = !rawOpen;
+          if (rawOpen) respond(base + '/workflow-v2/inspection?history_details=true', inspection());
+        } else if (name === '詳細を表示') {
           assert.equal(selected, false);
           respond(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`, {...evidence, workflow_revision: workflow.revision});
         } else if (name === '確認して正解にする') {
@@ -109,7 +112,8 @@ function fixture(selected, mutate = () => {}) {
       if (loc.name === '確認して正解にする') assert.equal(selected, false);
       if (loc.name === '確認した値を採用して次へ') assert.equal(blank, true);
     },
-    toBeVisible: async () => assert.ok(loc),
+    toBeVisible: async () => {assert.ok(loc); if(loc.name === 'raw-pre') assert.equal(rawOpen, true);},
+    toHaveCount: async value => {assert.equal(loc.name, 'raw-pre'); assert.equal(rawOpen ? 1 : 0, value);},
     toHaveValue: async value => {assert.equal(blank, true); assert.equal(value, '');},
     toHaveJSProperty: async (key, value) => {assert.equal(key, 'complete'); assert.equal(value, true);},
   });
@@ -130,6 +134,8 @@ for (const selected of [false, true]) test(`full OCR verifier executes ${selecte
     assert.ok(result.timings.some(x => x.check === 'open-ocr-detail'));
     assert.ok(result.timings.some(x => x.check === 'verify-state-preserved'));
     assert.equal(result.unexpectedWriteCount, 0);
+    assert.equal(f.requests.filter(x => x.endsWith('/inspection?history_details=true')).length, 1);
+    assert.equal(f.clicks.filter(x => x === 'raw-summary').length, 2);
   } finally {rmSync(output, {recursive: true, force: true});}
 });
 

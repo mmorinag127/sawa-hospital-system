@@ -11,7 +11,7 @@ const phases = new Set([
   'validate-artifact', 'launch-browser', 'configure-private-context', 'open-workflow',
   'verify-deploy-version', 'await-workflow-reads', 'verify-live-identity',
   'verify-visible-ocr-image', 'capture-visible-ocr-image', 'capture-workflow-page',
-  'validate-readonly', 'finished', 'open-ocr-detail', 'verify-state-preserved',
+  'validate-readonly', 'finished', 'open-ocr-detail', 'verify-state-preserved', 'verify-raw-json',
   'await-network-idle', 'verify-review-state', 'open-step2', 'verify-review-controls', 'verify-evidence-text',
 ]);
 
@@ -44,7 +44,21 @@ export function diagnosticTimeline(result, now = () => Date.now()) {
 
 export function safeAssertionName(error) {
   const location = /(?:\/|\\)(verify-(?:ocr|recognition-review)-live\.mjs):(\d+):\d+/.exec(error?.stack || '');
-  return error?.name === 'AssertionError' && location ? `${location[1]}:L${location[2]}` : null;
+  return ['AssertionError', 'TimeoutError'].includes(error?.name) && location ? `${location[1]}:L${location[2]}` : null;
+}
+
+export async function gateReadonlyResource(route, {origin, allowedExternalUrls, externalGate, onWrite}) {
+  const request = route.request();
+  if (!allowedMethods.has(request.method())) {
+    onWrite();
+    return route.abort('blockedbyclient');
+  }
+  if (new URL(request.url()).origin === origin) return route.continue();
+  // CSS/font/document loads must settle before browser actionability can complete.
+  if (request.resourceType() !== 'image') return route.abort('blockedbyclient');
+  await externalGate;
+  if (allowedExternalUrls.has(request.url())) return route.continue();
+  return route.abort('blockedbyclient');
 }
 
 export async function readLiveCandidate({ inspection, workflow, identity, page, readDetail, requireUnselected = false }) {
@@ -417,21 +431,13 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     let releaseExternalGate;
     const externalGate = new Promise(resolve => { releaseExternalGate = resolve; });
     releaseExternalRequests = () => releaseExternalGate();
-    await context.route('**/*', async route => {
-      const request = route.request();
-      const url = new URL(request.url());
-      if (!allowedMethods.has(request.method())) {
-        result.unexpectedWriteCount++;
-        return route.abort('blockedbyclient');
-      }
-      if (url.origin !== origin) {
-        await externalGate;
-        if (allowedExternalUrls.has(request.url())) return route.continue();
-        return route.abort('blockedbyclient');
-      }
-      return route.continue();
-    });
+    await context.route('**/*', route => gateReadonlyResource(route, {
+      origin, allowedExternalUrls, externalGate, onWrite: () => result.unexpectedWriteCount++,
+    }));
     page = await context.newPage();
+    const rawUrl = `${origin}/api/orders/${identity.orderId}/workflow-v2/inspection?history_details=true`;
+    let rawRequests = 0;
+    page.on('request', request => { if (request.method() === 'GET' && request.url() === rawUrl) rawRequests++; });
     result.readTimings = {};
     const watchRead = (name, suffix) => {
       const timing = {};
@@ -542,6 +548,26 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
         return receipt.response.json();
       }});
     assert.deepEqual(liveStateSnapshot(finalInspection, finalEvidence), initialState);
+    diagnostics.end();
+    diagnostics.begin('verify-raw-json');
+    assert.equal(rawRequests, 0);
+    const raw = page.locator('details.json-details').filter({hasText: 'デバッグ用 raw JSON を開く'});
+    await expect(raw.locator('pre')).toHaveCount(0);
+    const rawRead = watchRead('raw-inspection', '/workflow-v2/inspection?history_details=true');
+    await raw.locator('summary').click();
+    const rawReceipt = await rawRead;
+    assert.equal(rawReceipt.ok, true);
+    const rawPayload = await rawReceipt.response.json();
+    assert.equal(rawPayload.order_id, identity.orderId);
+    assert.equal(rawPayload.workflow.order_id, identity.orderId);
+    assert.equal(rawPayload.workflow.revision, liveWorkflow.revision);
+    assert.equal(rawPayload.workflow.selected_ocr_result_id, liveWorkflow.selected_ocr_result_id);
+    await expect(raw.locator('pre')).toBeVisible();
+    assert.deepEqual(JSON.parse(await raw.locator('pre').innerText()), rawPayload);
+    assert.equal(rawRequests, 1);
+    await raw.locator('summary').click();
+    await expect(raw.locator('pre')).toHaveCount(0);
+    assert.equal(rawRequests, 1);
     diagnostics.end();
     result.phase = 'validate-readonly';
     assert.equal(result.unexpectedWriteCount, 0);
