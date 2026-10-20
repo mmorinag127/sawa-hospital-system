@@ -141,30 +141,32 @@ test("cancelled detail and delayed order-A reads cannot appear in order B", asyn
   } finally { await h.close(); }
 });
 
-test("raw JSON is fetched/formatted only when open; full response replaces the complete snapshot", async () => {
+test("same-revision raw JSON is only rendered when open and does not replace inspection or PDF", async () => {
   const pending = deferred();
   const { h, t } = await setup(t => {
     t.on("get", detailUrl("A"), () => pending.promise);
     t.on("get", url("A"), call => ({
       data: call.config?.params?.history_details === false ? value("A") : {
-        ...value("A", 8), workflow: { ...value("A", 8).workflow, headline: "new snapshot" },
-        ocr_results: [{ ...detailValue("A", 8), selected: true }],
-        saved_sheet: { sheet: { fields: ["qty"], rows: [["42"]] } },
+        ...value("A"), source: "full-only-data",
+        ocr_results: [value("A").ocr_results[0], detailValue("A")],
       },
     }));
   });
   try {
     assert.equal(t.calls.filter(c => c.url === url("A")).length, 1);
     assert.equal(h.document.querySelector("details pre"), null);
+    const state = h.document.querySelector(".state-panel").textContent;
+    const pdf = h.document.querySelector("iframe").src;
     await h.click(h.button("詳細を確認"));
     await toggle(h, true);
     await h.waitFor(() => h.document.querySelector("details pre"));
     assert.equal(t.calls.filter(c => c.url === url("A")).length, 2);
-    assert.match(h.document.querySelector("details pre").textContent, /new snapshot/);
-    assert.match(h.document.querySelector(".state-panel").textContent, /new snapshot/);
-    assert.match(h.document.querySelector(".sheet-table-wrap").textContent, /42/);
+    assert.match(h.document.querySelector("details pre").textContent, /full-only-data/);
+    assert.equal(h.document.querySelector(".state-panel").textContent, state);
+    assert.equal(h.document.querySelector("iframe").src, pdf);
+    assert.equal(t.calls.find(c => c.url === detailUrl("A")).config.signal.aborted, false);
     await h.settle(() => pending.resolve({ data: detailValue("A", 7) }));
-    assert.match(h.document.querySelector(".state-panel").textContent, /new snapshot/);
+    assert.match(h.document.querySelector(".candidate-grid").textContent, /検証済み・採用可能/);
     await toggle(h, false);
     assert.equal(h.document.querySelector("details pre"), null);
     await toggle(h, true);
@@ -195,12 +197,15 @@ test("raw failure retry, close cancellation and late response invalidation", asy
   } finally { await h.close(); }
 });
 
-test("late initial response, raw response and URL ownership retire on order switch", async () => {
+for (const initialPending of [true, false]) test(`late ${initialPending ? "initial" : "raw"} response and URL ownership retire on order switch`, async () => {
   const initial = deferred(), raw = deferred();
   const { h, t } = await setup(t => t.on("get", url("A"), call =>
-    call.config?.params?.history_details === false ? initial.promise : raw.promise));
+    call.config?.params?.history_details === false
+      ? initialPending ? initial.promise : { data: value("A") }
+      : raw.promise));
   try {
-    await toggle(h, true);
+    if (initialPending) assert.equal(h.document.querySelector("details"), null);
+    else await toggle(h, true);
     Object.assign(h.nav.router, { query: { id: "B" }, asPath: "/orders/B/inspection-v2" });
     await h.render();
     await h.settle(() => {
@@ -215,20 +220,68 @@ test("late initial response, raw response and URL ownership retire on order swit
   } finally { await h.close(); }
 });
 
-test("full snapshot generation rejects a late initial summary for the same order", async () => {
+test("raw cannot start before the initial revision is available", async () => {
   const initial = deferred();
-  const { h } = await setup(t => t.on("get", url("A"), call =>
+  const { h, t } = await setup(t => t.on("get", url("A"), call =>
     call.config?.params?.history_details === false ? initial.promise : {
-      data: { ...value("A", 8), workflow: { ...value("A", 8).workflow, headline: "fresh full snapshot" } },
+      data: value("A"),
     }));
   try {
+    assert.equal(h.document.querySelector("details"), null);
+    assert.equal(t.calls.filter(c => c.url === url("A")).length, 1);
+    await h.settle(() => initial.resolve({ data: value("A") }));
     await toggle(h, true);
     await h.waitFor(() => h.document.querySelector("details pre"));
-    await h.settle(() => initial.resolve({
-      data: { ...value("A"), workflow: { ...value("A").workflow, headline: "stale summary" } },
-    }));
-    assert.match(h.document.querySelector(".state-panel").textContent, /fresh full snapshot/);
-    assert.doesNotMatch(h.document.body.textContent, /stale summary/);
+    assert.equal(t.calls.filter(c => c.url === url("A")).length, 2);
+  } finally { await h.close(); }
+});
+
+test("raw revision mismatch preserves inspection/PDF until whole-page reload", async () => {
+  const { h, t } = await setup(t => t.on("get", url("A"), call => ({
+    data: call.config?.params?.history_details === false ? value("A") : {
+      ...value("A", 8), workflow: { ...value("A", 8).workflow, headline: "updated workflow" },
+    },
+  })));
+  try {
+    const state = h.document.querySelector(".state-panel").textContent;
+    const pdf = h.document.querySelector("iframe").src;
+    await toggle(h, true);
+    assert.match(h.document.body.textContent, /注文の状態が更新されました/);
+    assert.equal(h.document.querySelector("details pre"), null);
+    assert.equal(h.document.querySelector(".state-panel").textContent, state);
+    assert.equal(h.document.querySelector("iframe").src, pdf);
+    t.on("get", url("A"), () => ({ data: {
+      ...value("A", 8), workflow: { ...value("A", 8).workflow, headline: "updated workflow" },
+    } }));
+    await h.click(h.button("画面全体を再読み込み"));
+    assert.match(h.document.querySelector(".state-panel").textContent, /updated workflow/);
+    assert.notEqual(h.document.querySelector("iframe").src, pdf);
+    await toggle(h, true);
+    await h.waitFor(() => h.document.querySelector("details pre"));
+    assert.doesNotMatch(h.document.body.textContent, /注文の状態が更新されました/);
+  } finally { await h.close(); }
+});
+
+test("whole-page reload invalidates a pending raw response even at the same revision", async () => {
+  const pending = deferred();
+  let pdfCalls = 0;
+  const { h, t } = await setup(t => {
+    t.on("get", "/orders/A/document", () => {
+      if (++pdfCalls === 1) throw new Error("PDF failed");
+      return { data: new Blob(["retry PDF"]) };
+    });
+    t.on("get", url("A"), call => call.config?.params?.history_details === false
+      ? { data: value("A") } : pending.promise);
+  });
+  try {
+    await toggle(h, true);
+    const request = t.calls.at(-1);
+    await h.click(h.button("画面全体を再読み込み"));
+    assert.equal(request.config.signal.aborted, true);
+    await h.settle(() => pending.resolve({ data: { ...value("A"), source: "retired response" } }));
+    assert.equal(h.document.querySelector("details pre"), null);
+    assert.doesNotMatch(h.document.body.textContent, /retired response/);
+    assert.ok(h.document.querySelector("iframe"));
   } finally { await h.close(); }
 });
 

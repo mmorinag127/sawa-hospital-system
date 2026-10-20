@@ -223,6 +223,8 @@ function InspectionView({ orderId }: { orderId: string }) {
   };
 
   const loadRaw = async () => {
+    const revision = inspection?.workflow?.revision;
+    if (loading || typeof revision !== "number") return;
     rawRequest.current?.abort();
     const controller = new AbortController();
     rawRequest.current = controller;
@@ -235,17 +237,11 @@ function InspectionView({ orderId }: { orderId: string }) {
         `/orders/${orderId}/workflow-v2/inspection`, { signal: controller.signal },
       );
       if (controller.signal.aborted || generation !== requestGeneration.current) return;
-      ++requestGeneration.current;
-      detailRequest.current?.abort();
-      setDetail(null);
-      setDetailId("");
-      setDetailError("");
-      setDetailLoading(false);
-      setInspection(response.data);
+      if (response.data.workflow?.revision !== revision) {
+        setError("注文の状態が更新されました。画面全体を再読み込みしてください。");
+        return;
+      }
       setRawPayload(response.data);
-      setError("");
-      setLoading(false);
-      setRawLoading(false);
     } catch (err: any) {
       if (!controller.signal.aborted && generation === requestGeneration.current) setRawError(String(err?.response?.data?.detail || err?.message || "JSONの取得に失敗しました"));
     } finally {
@@ -517,7 +513,7 @@ function InspectionView({ orderId }: { orderId: string }) {
             </div>
           ))}
         </div>
-        <details className="json-details" open={rawOpen} onToggle={(event) => {
+        {!loading && typeof inspection?.workflow?.revision === "number" ? <details className="json-details" open={rawOpen} onToggle={(event) => {
           const open = event.currentTarget.open;
           if (open === rawOpen) return;
           setRawOpen(open);
@@ -535,7 +531,7 @@ function InspectionView({ orderId }: { orderId: string }) {
             {rawError ? <p role="alert">{rawError}<button type="button" onClick={loadRaw}>再試行</button></p> : null}
             {rawPayload ? <pre>{formatJson(rawPayload)}</pre> : null}
           </> : null}
-        </details>
+        </details> : null}
       </section>
 
       <style jsx>{`
