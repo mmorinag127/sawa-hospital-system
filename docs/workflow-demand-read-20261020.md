@@ -132,3 +132,49 @@ as required by its macOS launch environment. These are local regression and
 fixture results, not a successful staging rerun. Product code, UI parameters,
 business values, authentication, DB, and Actions were not changed. No commit,
 push, or deployment was performed by this implementation task.
+
+## PR115 verifier UI-readiness correction
+
+- Base: `dd13c080`; branch: `codex/hospital-live-ui-readiness-20261021`.
+- Actions `39443672180` deployed successfully. Artifacts under
+  `/private/tmp/sawa-pr115-live-ui` show the review dialog passed; OCR case 1
+  reached image/page capture but crashed during the post-reload detail read.
+  Case 2 was not executed. This is not whole-flow acceptance.
+- Parent server-log evidence: reload at 15:13:56.012, inspection started at
+  15:13:57.079 and completed in 0.917529 seconds; order started at
+  15:13:57.082 and completed in 1.053654 seconds. The verifier awaited only
+  inspection, while the production page awaited both responses. No subsequent
+  inspection-detail request was recorded.
+- A mounted production-page regression reproduces an enabled STEP2 click
+  while workflow is still loading, followed by the delayed workflow-state
+  effect resetting the page to Step1. With DOM readiness synchronization,
+  no early click occurs and the Step2 candidate remains after effects settle.
+- Both verifiers now await inspection and order on initial load and reload,
+  validate order/document/revision ownership, and wait for the visible state
+  headline to leave its loading state before interaction. These waits use
+  existing assertion deadlines; no fixed sleep, force click, retry loop,
+  timeout extension, product change, or authentication change was introduced.
+- The detail promise attaches success/error handlers immediately, before the
+  detail-button click. Rejections are rethrown when consumed, never treated as
+  successful evidence. Early detail failures and click failures on both
+  initial load and reload execute through the full verifiers in fixtures,
+  save failed result JSON, close their browsers, and produce no unhandled
+  rejection. Existing successful selected/unselected paths remain covered.
+
+Regression command (production DOM with synthetic transport, not live OCR):
+
+```sh
+cd /Users/mmorinag/Sawa/2025.12/worktrees/hospital-workflow-demand-read-20261020/frontend
+node --test --test-concurrency=1 \
+  tests/config/ocr-ui-readiness.test.mjs \
+  tests/config/ocr-live-state.test.mjs \
+  tests/config/ocr-live-diagnostics.test.mjs \
+  tests/config/ocr-first-request.test.mjs \
+  tests/recognition-review-live-contract.test.cjs
+```
+
+Result: 86 passed, 0 failed, 0 skipped. Log:
+`/tmp/live-ui-readiness-tests.log`. The product DOM harness emits its existing
+jsdom warning about the JSX style attribute; no test failed. No business
+data, quantities, authentication, product code, or Actions were changed.
+No commit/push/deploy or staging rerun was performed for this correction.
