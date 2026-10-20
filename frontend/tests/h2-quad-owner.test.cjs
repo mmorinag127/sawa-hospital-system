@@ -13,7 +13,7 @@ function actual(name,context){
 const plain=value=>JSON.parse(JSON.stringify(value));
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
 function harness(){
-  const state={auth:'A',review:null,points:[],loading:false,error:'',quadMessage:'',busy:'',message:'',step:1.5,discard:0,calls:[],headerMessage:'',rowMessage:'',facilityMessage:'',facilitySaving:false,copySaving:false};
+  const state={auth:'A',review:null,points:[],loading:false,error:'',quadMessage:'',busy:'',message:'',step:1.5,discard:0,calls:[],headerMessage:'',rowMessage:'',facilityMessage:'',facilitySaving:false,copySaving:false,confirmReplacement:true};
   const receipt={workflow_revision:8,selected_pdf_receipt:{order_id:'order-A',document_id:'pdf-A',generation:null,sha256:'recorded'},
     selected_version_input:null,input_digest:'actual-input',geometry_source_digest:'recorded-geometry-proof',configured_input_digest:'actual-config',order_input_identity:{facility_code:'A',week_code:'W'},suggested_quad_px:[[0,0],[10,0],[10,20],[0,20]],unknown:{zero:0}};
   const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image',calendar_days:Array.from({length:7},(_,index)=>({date:`2026-10-${25+index}`,expected_band_count:8}))};
@@ -22,13 +22,14 @@ function harness(){
     workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},facilitySaveReadOwnerRef:{current:null},
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
-    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},sheetDirtyRef:{current:false},sheetPayload:null,
-    setSheetPayload:value=>{state.sheetPayload=value;context.sheetPayload=value;},setSheetDirty:value=>{state.sheetDirty=value;},setSheetJsonStale:value=>{state.sheetJsonStale=value;},
+    selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},sheetDirtyRef:{current:false},unsavedSessionRef:{current:null},sheetPayload:null,
+    window:{confirm:()=>state.confirmReplacement},
+    setSheetPayload:value=>{if(value===null)state.discard++;state.sheetPayload=value;context.sheetPayload=value;context.sheetPayloadRef.current=value;},setSheetDirty:value=>{state.sheetDirty=value;},setSheetJson:value=>{state.sheetJson=value;},setSheetJsonStale:value=>{state.sheetJsonStale=value;},
     workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},
     setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},
     workflowJobRef:{current:{orderId:'order-A',jobId:null,attemptId:null,state:'context_confirmed'}},
     quadAuth:()=>state.auth,quadReview:review,hasActiveSessionAuthHeader:()=>state.auth!==null,browserSessionKey:()=>state.auth,
-    setBusyState:value=>{state.busy=value;},setSelectedDocumentIdState:()=>{},setQuadReview:value=>{state.review=value;},setManualQuadPoints:value=>{state.points=plain(value);},
+    setBusyState:value=>{state.busy=value;},setSelectedDocumentIdState:()=>{},setQuadReview:value=>{state.review=value;},setManualQuadPoints:value=>{state.points=plain(value);},setManualQuadMode:value=>{state.manualQuadMode=value;},
     setQuadReviewLoading:value=>{state.loading=value;},setQuadReviewMessage:value=>{state.quadMessage=value;},setError:value=>{state.error=value;},setMessage:value=>{state.message=value;},setVisibleStep:value=>{state.step=value;},
     contextFacilityResolution:{status:'ready'},contextForm:{facility_id:'facility-A'},facilityTemplateColumnDraft:[{quantity:0,unknown:null}],expandedCellCopyMode:'disabled',
     buildFacilityTemplateColumnsPayload:rows=>plain(rows),normalizeFacilityTemplateColumns:rows=>rows,normalizeExpandedCellCopyMode:value=>value,
@@ -36,12 +37,12 @@ function harness(){
     setExpandedCellCopySaving:value=>{state.copySaving=value;},setExpandedCellCopyMode:value=>{state.copy=value;},
     setHeaderAxisLoading:value=>{state.headerLoading=value;},setRowAxisLoading:value=>{state.rowLoading=value;},setHeaderAxisMessage:value=>{state.headerMessage=value;},setRowAxisMessage:value=>{state.rowMessage=value;},
     headerAxisReview:null,rowAxisReview:null,headerAxisXs:[0,10],rowAxisYs:[0,20],rowDayBoundaries:['0','8','16','24','32','40','48','56'],
-    setHeaderAxisReview:value=>{state.headerReview=value;context.headerAxisReview=value;},setRowAxisReview:value=>{state.rowReview=value;context.rowAxisReview=value;},
+    setHeaderAxisReview:value=>{state.headerReview=value;context.headerAxisReview=value;},setRowAxisReview:value=>{state.rowReview=value;context.rowAxisReview=value;},setRecognitionReview:value=>{state.recognitionReview=value;},setRecognitionValues:value=>{state.recognitionValues=value;},
     setHeaderAxisXs:value=>{state.xs=plain(value);},setRowAxisYs:value=>{state.ys=plain(value);},setSelectedHeaderAxisIndex:()=>{},setSelectedRowAxisIndex:()=>{},setHeaderAxisAddMode:()=>{},setRowAxisAddMode:()=>{},
     getHeaderAxisTimeoutMs:()=>120000,getHeaderAxisExpectedCount:()=>2,
     setSheetAutoEditResult:()=>{},setLocalAnomalyReview:()=>{},setSelectedAnomalyIndex:()=>{},setSelectedAutoEditIndex:()=>{},
     refreshAll:async current=>{if(current&&!current())throw Error('retired refresh');},loadFacilityTemplateStatus:async()=>{},
-    discardSheetDraft:()=>{state.discard++;context.sheetEditGenerationRef.current++;},invalidateSheetPreSaveChecks:()=>{},
+    defaultSheet:{},formatJson:value=>JSON.stringify(value),invalidateSheetPreSaveChecks:()=>{},
     isPositiveWorkflowRevision:value=>Number.isInteger(value)&&value>0,workflowRevisionTokenFromRead:value=>({revision:value.revision,bootstrap:false}),setWorkflow:value=>{context.workflow=value;},
     formatApiError:(error,message)=>`${message}:${error.message}`,
     apiClient:{get:async(url,config)=>{state.calls.push({method:'GET',url,config});return{data:review};},
@@ -49,7 +50,7 @@ function harness(){
       post:async(url,body,config)=>{state.calls.push({method:'POST',url,body,config});return{data:{workflow:{order_id:'order-A',revision:10}}};}}
   };
   // Ownership and adoption checks use production closures, not harness substitutes.
-  for(const name of ['sameRecordedValue','sameQuadOverrideSource','setBusy','setSelectedDocumentId','editorVersion','beginWorkflowEditorEdit','finishWorkflowEditorEdit','markSheetDirty','markSheetJsonStale','flushPendingSheetCellEdits','canAdoptReadEditorInput','captureWorkflowInputVersion','workflowMutationConfig','workflowFromMutationResponse','adoptReadWorkflow','adoptOwnWorkflowCommandResponse','capturePageOwner','ownsPageContext','ownsPageInput','outputEditorSignature','captureActionInput','ownsActionInput','createActionBoundary','retireOutput','captureQuadOwner','ownsQuadContext','ownsQuadInput','captureAxisOwner','ownsAxisInput','executeWorkflowMutation','loadAxisReview','saveAxisAndRerun','loadHeaderAxisReview','loadRowAxisReview','runAction'])context[name]=(...args)=>actual(name,context)(...args);
+  for(const name of ['sameRecordedValue','sameQuadOverrideSource','setBusy','setSelectedDocumentId','editorVersion','hasUnsavedWorkflowInput','confirmWorkflowReplacement','beginWorkflowEditorEdit','finishWorkflowEditorEdit','markSheetDirty','markSheetJsonStale','markSheetClean','discardSheetDraft','retireReplacedWorkflowInput','flushPendingSheetCellEdits','canAdoptReadEditorInput','captureWorkflowInputVersion','workflowMutationConfig','workflowFromMutationResponse','adoptReadWorkflow','adoptOwnWorkflowCommandResponse','capturePageOwner','ownsPageContext','ownsPageInput','outputEditorSignature','captureActionInput','ownsActionInput','createActionBoundary','retireOutput','captureQuadOwner','ownsQuadContext','ownsQuadInput','captureAxisOwner','ownsAxisInput','executeWorkflowMutation','loadAxisReview','saveAxisAndRerun','loadHeaderAxisReview','loadRowAxisReview','runAction'])context[name]=(...args)=>actual(name,context)(...args);
   const load=()=>actual('loadQuadReview',context)();
   const save=()=>actual('saveQuadAndRerun',context)('manual_override',receipt.suggested_quad_px);
   const seed=()=>{context.quadSourceRef.current={review,context:{...context.quadContextRef.current},generation:context.quadContextGenerationRef.current,auth:state.auth};state.review=review;};
@@ -275,7 +276,7 @@ for(const axis of ['header','row'])test(`actual ${axis} source receipt and origi
   const h=axisHarness(axis);await h.loadAxis();assert.equal(h.state.calls[0].config.params.document_id,'pdf-A');
   h.context.beginWorkflowEditorEdit(axis);await h.saveAxis();
   assert.equal(h.state.calls[1].body.source_receipt,h.receipt);assert.equal(h.state.calls[1].config.headers['If-Match'],'"8"');
-  assert.equal(h.state.calls[2].config.headers['If-Match'],'"9"');assert.equal(h.state.calls[2].body.document_id,'pdf-A');assert.equal(h.state.discard,0);
+  assert.equal(h.state.calls[2].config.headers['If-Match'],'"9"');assert.equal(h.state.calls[2].body.document_id,'pdf-A');assert.equal(h.state.discard,1);
 });
 
 for(const axis of ['header','row'])for(const kind of ['pdf','order','route','auth','manual','sheet','unmount'])for(const outcome of ['success','error'])test(`actual ${axis} GET ${outcome} after ${kind} alone never adopts old review/points`,async()=>{
@@ -330,7 +331,7 @@ test('actual competing quad command retires only old command and preserves succe
 for(const axis of ['header','row'])test(`actual competing ${axis} correction owns only successor`,async()=>{
   const h=axisHarness(axis);await h.loadAxis();const first=deferred(),second=deferred();let n=0;h.context.apiClient.put=()=>++n===1?first.promise:second.promise;
   const a=h.saveAxis(),b=h.saveAxis();first.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await a;assert.equal(h.state.busy,`${axis} axis save`);assert.equal(h.state.discard,0);
-  second.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await b;assert.equal(h.state.busy,'');assert.equal(h.state.discard,0);
+  second.resolve({data:{workflow:{order_id:'order-A',revision:9}}});await b;assert.equal(h.state.busy,'');assert.equal(h.state.discard,1);
 });
 
 test('stable geometry proof accepts own saved points across changed full mutation digest without rewriting PUT receipt',async()=>{
