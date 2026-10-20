@@ -1,0 +1,194 @@
+name: Verify Existing Staging OCR UI
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: "Full SHA expected on the currently serving staging web"
+        required: true
+        type: string
+      artifact_run_id:
+        description: "Existing successful staging backend OCR artifact run"
+        required: true
+        type: string
+      review_order_id:
+        description: "Artifact-bound unselected order for read-only review dialog"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-stg-ocr-ui-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' &&
+      github.repository == 'mmorinag127/sawa-hospital-system' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      WEB_URL: https://web-stg-avlnzjjrca-dt.a.run.app
+      EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+      OCR_EXISTING_RUN: ${{ inputs.artifact_run_id }}
+      REVIEW_ORDER_ID: ${{ inputs.review_order_id }}
+      GOOGLE_OAUTH_CLIENT_ID: ${{ vars.STG_GOOGLE_OAUTH_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate owner source and exact tree parity
+        env:
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/develop
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          test "$REPOSITORY_OWNER" = mmorinag127
+          test "$ACTOR" = "$REPOSITORY_OWNER"
+          test "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$OCR_EXISTING_RUN" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$REVIEW_ORDER_ID" =~ ^ORD[a-f0-9]{8}$ ]] || exit 1
+          [[ "$GOOGLE_OAUTH_CLIENT_ID" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]] || exit 1
+          test "$GOOGLE_OAUTH_CLIENT_ID" != 167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "$EXPECTED_SOURCE_SHA^{commit}")" = "$EXPECTED_SOURCE_SHA"
+          git merge-base --is-ancestor "$EXPECTED_SOURCE_SHA" HEAD
+          git diff --exit-code --quiet "$EXPECTED_SOURCE_SHA" HEAD -- . \
+            ':(top,exclude,literal).github/workflows/verify-stg-ocr-ui.yml' \
+            ':(top,exclude,literal)infra/terraform/tests/test_stg_ocr_ui_readonly.py' \
+            ':(top,exclude,literal)docs/workflow-demand-read-20261020.md'
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Validate existing staging OCR artifact provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/verify_existing_ocr_artifact.py "$OCR_EXISTING_RUN"
+      - uses: actions/download-artifact@v4
+        with:
+          name: live-ocr-stg
+          path: tmp/ocr-verification
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: mmorinag127/sawa-hospital-system
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Prepare existing OCR UI verifiers
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: sawahospitalsystem
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - name: Verify current web before and after existing read-only UI checks
+        shell: python
+        env:
+          LIVE_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+        run: |
+          import json, os, re, subprocess
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.request import build_opener, HTTPRedirectHandler
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  raise ValueError("public_login_redirect")
+
+          class VersionFooter(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.active, self.count, self.text = False, 0, []
+              def handle_starttag(self, tag, attrs):
+                  if tag == "footer" and dict(attrs).get("aria-label") == "deploy version":
+                      self.active = True
+                      self.count += 1
+              def handle_endtag(self, tag):
+                  if tag == "footer":
+                      self.active = False
+              def handle_data(self, data):
+                  if self.active:
+                      self.text.append(data)
+
+          output = Path("tmp/ocr-live")
+          output.mkdir(parents=True, exist_ok=True)
+          report = {"verification_source_sha": os.environ["GITHUB_SHA"],
+              "expected_deployed_source_sha": os.environ["EXPECTED_SOURCE_SHA"], "status": "failed"}
+
+          def check_version(phase):
+              url = "https://web-stg-avlnzjjrca-dt.a.run.app/login"
+              with build_opener(NoRedirect()).open(url, timeout=30) as response:
+                  if response.status != 200 or response.geturl() != url:
+                      raise ValueError("public_login_response")
+                  if response.headers.get_content_type() != "text/html":
+                      raise ValueError("public_login_content_type")
+                  body = response.read(2 * 1024 * 1024 + 1)
+              if len(body) > 2 * 1024 * 1024:
+                  raise ValueError("public_login_size")
+              footer = VersionFooter()
+              footer.feed(body.decode("utf-8"))
+              versions = re.findall(r"\bversion\s+([0-9a-f]{12})\b", "".join(footer.text))
+              if footer.count != 1 or len(versions) != 1:
+                  raise ValueError("public_login_version")
+              report[phase + "_observed_version_prefix"] = versions[0]
+              if versions[0] != os.environ["EXPECTED_SOURCE_SHA"][:12]:
+                  raise ValueError("public_login_version_changed")
+              resolved = subprocess.check_output(
+                  ["git", "rev-parse", "--verify", versions[0] + "^{commit}"],
+                  stderr=subprocess.DEVNULL, text=True).strip()
+              if resolved != os.environ["EXPECTED_SOURCE_SHA"]:
+                  raise ValueError("ambiguous_source_prefix")
+              report[phase + "_resolved_deployed_source_sha"] = resolved
+
+          phase = "before"
+          try:
+              check_version(phase)
+              # Only verifier child processes use the serving SHA for their existing UI version checks.
+              child_env = {**os.environ, "GITHUB_SHA": os.environ["EXPECTED_SOURCE_SHA"]}
+              for name, script in (("ocr", "verify-ocr-live.mjs"), ("review", "verify-recognition-review-live.mjs")):
+                  phase = name
+                  result = subprocess.run(["node", "frontend/scripts/" + script,
+                      "tmp/ocr-verification", str(output)], env=child_env,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  report[name + "_exit_code"] = result.returncode
+          except Exception:
+              report["failure_phase"] = phase
+          finally:
+              if "before_resolved_deployed_source_sha" in report:
+                  try:
+                      check_version("after")
+                  except Exception:
+                      report["failure_phase"] = "after"
+              if ("failure_phase" not in report and report.get("ocr_exit_code") == 0
+                      and report.get("review_exit_code") == 0):
+                  report["status"] = "passed"
+              # Case JSON retains passed versus selected-invalid blocked; neither is rewritten.
+              (output / "source-check.json").write_text(json.dumps(report, indent=2))
+          raise SystemExit(0 if report["status"] == "passed" else 1)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: readonly-ocr-ui-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/ocr-live/
+          retention-days: 7
+          if-no-files-found: warn

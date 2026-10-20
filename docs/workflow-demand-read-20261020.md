@@ -304,3 +304,67 @@ mismatches, malformed/private-valued blockers, canonical receipt integrity,
 reload blocker/state changes, normal selected/unselected flows and existing
 request deadlines. No product/auth/DB/business-value changes, commit, push or
 deployment. Parent staging verification remains pending.
+
+## Standalone staging read-only UI verification
+
+- Base: `1cde1e785e6e1267b1a29311a72b29cf3c7f767e`; branch:
+  `codex/hospital-stg-readonly-verification-20261021`.
+- New `.github/workflows/verify-stg-ocr-ui.yml` is manual, repository-owner
+  (including rerun actor), develop-only, staging-environment verification.
+  It does not share deploy concurrency or cancel other runs. No build,
+  deployment, service update, IAM, DB or business-data mutation is included.
+- Required inputs: full `expected_source_sha`, numeric `artifact_run_id`,
+  and artifact-bound `review_order_id`. Before credentials are acquired,
+  the gate requires the expected commit to be an ancestor of checked-out
+  `GITHUB_SHA`, and zero full-tree differences except these exact three paths:
+  `.github/workflows/verify-stg-ocr-ui.yml`,
+  `infra/terraform/tests/test_stg_ocr_ui_readonly.py`,
+  `docs/workflow-demand-read-20261020.md`. No runtime path allowlist is used.
+- The existing artifact provenance script, artifact identity checks, both
+  existing UI verifier CLIs, npm/Playwright preparation, staging WIF provider,
+  service account and ID-token audience are reused unchanged. Permissions
+  remain contents read, actions read, id-token write. If actual WIF policy
+  rejects this workflow, stop; no credential/IAM bypass is authorized.
+- Public `/login` GET before and after UI checks parses the real
+  `footer[aria-label="deploy version"]`. Exactly one 12-hex version prefix must
+  match the expected SHA and resolve unambiguously to that commit locally.
+  Redirects, non-HTML/error responses, absent/ambiguous stamps and version
+  changes fail closed. The artifact records observed prefixes and resolved
+  deployed SHA separately from the verification job's real `GITHUB_SHA`.
+  Only verifier child environments receive the expected serving SHA as
+  `GITHUB_SHA`, preserving their existing on-screen version assertions.
+  The wrapper uses `shell: python`, not a heredoc.
+- OCR exit failure (including selected-invalid blocked) does not prevent
+  the separate review verifier or the post-check. Original per-case result
+  JSON is never rewritten; blocked remains blocked and the workflow remains
+  unsuccessful, not relabeled as passed. Evidence upload is `always()`.
+  Existing verifier request deadlines are untouched.
+- These three paths do not match existing deploy-stg push filters. Existing
+  scripts, product sources and deploy-stg.yml were not edited. No commit,
+  push, dispatch, cancellation or deployment was performed.
+
+Focused local command:
+
+```sh
+cd /Users/mmorinag/Sawa/2025.12/worktrees/hospital-workflow-demand-read-20261020
+/Users/mmorinag/Sawa/2025.12/worktrees/modernization-20261004/hospital-main/backend/.venv/bin/python \
+  -m unittest infra/terraform/tests/test_stg_ocr_ui_readonly.py -v
+```
+
+Result: **5 tests passed** (including table-driven subcases), no skips.
+Actual temporary Git repositories exercise the source gate for owner/input
+rejection, the three exact exclusions, runtime/script/agent/unknown-file
+changes and near-miss exclusion paths. Synthetic HTML/process tests exercise
+pre/post version checks, source-SHA separation, mismatch/invalid HTML,
+redirect rejection, blocked evidence preservation and post-check on errors.
+An initial macOS Bash 3.2 failure exposed reliance on errexit for standalone
+regex tests; all input regex guards now explicitly `exit 1` on failure.
+
+Local results are not formal CI, WIF authorization, or live UI proof. Existing
+CI uses explicit infra test filenames; it was not changed to auto-discover
+this new test. Parent owns formal CI, latest-develop integration and the
+two-order image/reload/raw run. Parent reported deployment run `39468413142`
+cancelled before deploy and later run `39469701422` at
+`520eeec387a33d9d8da65f42c51189110cf7f4c6` running; neither is assumed here
+to establish the serving SHA. A serving source that differs outside the
+three exclusions must fail the gate, not trigger a wider exception or deploy.
