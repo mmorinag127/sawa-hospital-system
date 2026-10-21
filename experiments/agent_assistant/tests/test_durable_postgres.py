@@ -121,3 +121,71 @@ def test_response_snapshot_reads_once_and_preserves_committed_version(tmp_path,d
     assert len(calls)==2  # one response snapshot plus the concurrent writer
     assert store.get(run['id'])['status']=='completed'
     assert store.budget()['spent_cents']==4
+
+
+def test_legacy_raw_ledger_migrates_without_losing_business_or_cost_state(tmp_path,database):
+    from contextlib import closing
+    from experiments.agent_assistant.durable import decode_ledger, BLOB_HEADER
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    run,_=a.create('operator','legacy-ledger-request','test',['shift'],100,provider='gemini')
+    a.update(run['id'],status='waiting_input',spent=37,reserved=63)
+    a.event(run['id'],'operator_answer',{'text':'指定した厨房と釜で実施'})
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:
+            c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
+            raw=decode_ledger(c.fetchone()[0])
+            c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1',(raw,))
+    assert a.get(run['id'])['spent']==37
+    assert a.events(run['id'])[0]['payload']['text']=='指定した厨房と釜で実施'
+    a.update(run['id'],status='stopped',reserved=0)
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:
+            c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
+            assert bytes(c.fetchone()[0]).startswith(BLOB_HEADER)
+    b=PostgresStore(tmp_path,database);b.recover()
+    assert b.get(run['id'])['status']=='stopped'
+    assert b.budget()['spent_cents']==37 and b.budget()['reserved_cents']==0
+    assert b.events(run['id'])[0]['payload']['text']=='指定した厨房と釜で実施'
+    with pytest.raises(Conflict,match='交代'):a.get(run['id'])
+
+
+def test_originals_restore_from_known_raw_or_compressed_storage_and_reject_corruption(tmp_path,database):
+    from contextlib import closing
+    from experiments.agent_assistant.durable import BLOB_HEADER
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    run,_=a.create('operator','file-codec-request','test',['hospital'],100)
+    original=tmp_path/'runs'/run['id']/'before/hospital/verified.pdf'
+    original.parent.mkdir(parents=True);raw=b'%PDF-approved-source\n'+b'trial data'*100_000;original.write_bytes(raw)
+    a.persist_files(run['id'])
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:
+            c.execute('SELECT path,digest,payload FROM sawa_agent_trial.files')
+            path,digest,payload=c.fetchone()
+            assert digest==hashlib.sha256(raw).hexdigest()
+            assert bytes(payload).startswith(BLOB_HEADER) and len(payload)<len(raw)//10
+    original.unlink();a.hydrate();assert original.read_bytes()==raw
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:c.execute('UPDATE sawa_agent_trial.files SET payload=%s WHERE path=%s',(raw,path))
+    original.unlink();a.hydrate();assert original.read_bytes()==raw
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:c.execute('UPDATE sawa_agent_trial.files SET payload=%s WHERE path=%s',(b'corrupted',path))
+    with pytest.raises(Conflict):a.hydrate()
+    assert original.read_bytes()==raw
+
+
+def test_corrupt_legacy_ledger_is_never_reinitialized(tmp_path,database):
+    from contextlib import closing
+    from experiments.agent_assistant.durable import decode_ledger
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    run,_=a.create('operator','corrupt-legacy-request','test',['shift'],100)
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:
+            c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
+            damaged=decode_ledger(c.fetchone()[0])[:-100]
+            c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1',(damaged,))
+    with pytest.raises(Conflict,match='破損'):a.get(run['id'])
+    with pytest.raises(Conflict,match='破損'):PostgresStore(tmp_path,database)
+    with closing(database()) as pg,pg:
+        with pg.cursor() as c:
+            c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
+            assert bytes(c.fetchone()[0])==damaged
