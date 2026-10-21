@@ -44,7 +44,7 @@ test('schools precede the date, persist across day changes, and stale targets ca
   await h.wait(()=>h.document.querySelector('input[name=school]'));
   const day=h.document.querySelector('input[type=date]');assert.equal(day.disabled,true);assert.deepEqual(Object.keys(requests[0]),[]);
   assert.ok(h.document.querySelector('.school-choices').compareDocumentPosition(day)&4);
-  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.some(x=>x.facility_id===8));assert.equal(day.disabled,false);
+  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.some(x=>x.facility_id===8));assert.equal(day.disabled,false);assert.doesNotMatch(h.document.body.textContent,/この日の献立は未登録/);
   await h.change(day,'2026-07-01');await h.wait(()=>!!resolveOld);
   await h.change(day,'2026-07-02');await h.wait(()=>h.document.body.textContent.includes('新しい日の献立'));
   assert.equal(h.document.querySelector('input[name=school]').checked,true);
