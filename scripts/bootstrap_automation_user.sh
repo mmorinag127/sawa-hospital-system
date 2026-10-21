@@ -11,7 +11,8 @@ case "${2:-shift}" in
   *) echo "Unknown automation system" >&2; exit 1 ;;
 esac
 instance="$(gcloud run services describe "$WEB_SERVICE" --project "$PROJECT_ID" --region "$REGION" \
-  --format=json | jq -r '.spec.template.metadata.annotations["run.googleapis.com/cloudsql-instances"] // empty')"
+  --format=json | jq -er --arg project "$PROJECT_ID" --arg region "$REGION" --arg service "$WEB_SERVICE" \
+    -f scripts/staging_bootstrap_instance.jq)"
 if [[ -z "$instance" ]]; then
   echo "Cloud SQL instance annotation is required" >&2
   exit 1

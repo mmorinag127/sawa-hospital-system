@@ -485,12 +485,12 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
 
 
 @pytest.mark.parametrize("backend_changed", [True, False])
-@pytest.mark.parametrize("failed", [None, "source-gate", "build-frontend", "automation-bootstrap", "menu-master-migration", "deploy-backend"])
+@pytest.mark.parametrize("failed", [None, "source-gate", "build-frontend", "build-agent", "automation-bootstrap", "menu-master-migration", "deploy-backend"])
 @pytest.mark.parametrize("failure_result", ["failure", "cancelled", "skipped"])
 def test_frontend_condition_allows_only_compatible_dependency_results(backend_changed, failed, failure_result):
     jobs = yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]
     expression = jobs["deploy-frontend"]["if"]
-    for job in ("source-gate", "build-frontend", "automation-bootstrap", "menu-master-migration", "deploy-backend"):
+    for job in ("source-gate", "build-frontend", "build-agent", "automation-bootstrap", "menu-master-migration", "deploy-backend"):
         result = failure_result if failed == job else "skipped" if not backend_changed and job in {"automation-bootstrap", "menu-master-migration", "deploy-backend"} else "success"
         expression = expression.replace(f"needs.{job}.result", repr(result))
     expression = expression.replace("needs.source-gate.outputs.backend_changed", repr(str(backend_changed).lower()))
