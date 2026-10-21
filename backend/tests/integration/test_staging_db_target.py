@@ -188,9 +188,7 @@ def test_both_staging_bootstraps_share_the_proxy_resolver():
 def test_bootstrap_shell_passes_one_resolved_target_and_stops_on_failure(cloud_case, tmp_path, case, system):
     import json
     import os
-    import socket
     import subprocess
-    import threading
     if case == 'multiple':
         test_staging_agent_sidecar_keeps_ingress_as_database_source(
             cloud_case, gate.INSTANCE + ',sawahospitalsystem:asia-northeast2:school-lunch-stg')
@@ -207,16 +205,21 @@ def test_bootstrap_shell_passes_one_resolved_target_and_stops_on_failure(cloud_c
     programs = {
         'uv': header +
             'resolve = "--instance-only" in sys.argv\n'
-            'if not resolve:\n'
-            ' for _ in range(100):\n'
-            '  if os.path.exists(os.environ["CALL_LOG"]) and "proxy" in open(os.environ["CALL_LOG"]).read(): break\n'
-            '  time.sleep(.01)\n'
             'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["resolve" if resolve else "db", *sys.argv[1:]]) + "\\n")\n'
             'if resolve:\n'
             ' if os.environ["CASE"] == "blocked": sys.exit(1)\n'
             ' print(os.environ["RESOLVED_INSTANCE"])\n',
         'curl': header + 'import shutil\nshutil.copyfile(os.environ["PROXY_TEMPLATE"], sys.argv[sys.argv.index("-o") + 1])\n',
         'sha256sum': '#!/bin/sh\ncat >/dev/null\n',
+        'readiness': header +
+            'for _ in range(500):\n'
+            ' if os.path.exists(os.environ["CALL_LOG"]) and "proxy" in open(os.environ["CALL_LOG"]).read(): break\n'
+            ' time.sleep(.01)\n'
+            'else: sys.exit(2)\n'
+            'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["readiness", *sys.argv[1:]]) + "\\n")\n'
+            'sys.exit(1 if os.environ["READINESS"] == "timeout" else 0)\n',
+        'sleep': header +
+            'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["sleep", *sys.argv[1:]]) + "\\n")\n',
     }
     for name, content in programs.items():
         path = binaries / name
@@ -227,40 +230,42 @@ def test_bootstrap_shell_passes_one_resolved_target_and_stops_on_failure(cloud_c
         'AUTOMATION_AUTH_EMAIL': 'synthetic-shift', 'SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL': 'synthetic-school',
         'PROJECT_ID': gate.PROJECT, 'REGION': gate.REGION, 'WEB_SERVICE': 'web-stg',
         'CASE': case, 'CALL_LOG': str(log), 'PROXY_TEMPLATE': str(proxy), 'RESOLVED_INSTANCE': instance}
-    # This listener is only a readiness stub: no database or cloud proxy is run.
-    listener = None
-    thread = None
-    if case != 'blocked':
-        listener = socket.socket()
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(('127.0.0.1', 5432))
-        listener.listen(1)
-        listener.settimeout(10)
-        def accept():
-            connection, _ = listener.accept()
-            connection.close()
-        thread = threading.Thread(target=accept)
-        thread.start()
-    try:
-        result = subprocess.run(['bash', str(ROOT / 'scripts/bootstrap_automation_user.sh'), 'stg', system],
+    # Replace only Bash's socket probe in a temporary copy; exercise its real
+    # resolver, proxy arguments, retry loop and DB invocation without any socket.
+    source = (ROOT / 'scripts/bootstrap_automation_user.sh').read_text()
+    probe = '(echo > /dev/tcp/127.0.0.1/5432)'
+    assert source.count(probe) == 1
+    shell = tmp_path / 'bootstrap.sh'
+    shell.write_text(source.replace(probe, 'readiness 127.0.0.1 5432'))
+    for readiness in (['ready'] if case == 'blocked' else ['ready', 'timeout']):
+        log.unlink(missing_ok=True)
+        environment['READINESS'] = readiness
+        result = subprocess.run(['bash', str(shell), 'stg', system],
             cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=15)
-    finally:
-        if thread is not None:
-            thread.join(timeout=11)
-        if listener is not None:
-            listener.close()
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    if case == 'blocked':
-        assert result.returncode != 0
-        assert [call[0] for call in calls] == ['resolve']
-    else:
-        assert result.returncode == 0, result.stderr
-        assert [call for call in calls if call[0] == 'proxy'] == [
-            ['proxy', '--address', '127.0.0.1', '--port', '5432', instance]]
-        db = [call for call in calls if call[0] == 'db']
-        assert len(db) == 1
-        assert ('scripts/portal_automation_db_bootstrap.py' if system == 'shift'
-            else 'scripts/price_automation_db_bootstrap.py') in db[0]
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        expected = [['resolve', 'run', '--extra', 'dev', 'python',
+            '../scripts/staging_db_target.py', '--instance-only',
+            '--project-id', gate.PROJECT, '--region', gate.REGION, '--service', 'web-stg']]
+        if case == 'blocked':
+            assert result.returncode != 0
+            assert calls == expected
+            continue
+        expected.append(['proxy', '--address', '127.0.0.1', '--port', '5432', instance])
+        if readiness == 'timeout':
+            expected.extend([['readiness', '127.0.0.1', '5432'], ['sleep', '1']] * 30)
+            assert result.returncode != 0
+            assert 'Cloud SQL proxy did not become ready' in result.stderr
+        else:
+            expected.append(['readiness', '127.0.0.1', '5432'])
+            expected.append(['db', 'run', '--extra', 'dev', 'python',
+                ('scripts/portal_automation_db_bootstrap.py' if system == 'shift'
+                 else 'scripts/price_automation_db_bootstrap.py'),
+                '--environment', 'stg', '--project-id', gate.PROJECT, '--region', gate.REGION,
+                '--service', 'web-stg', '--email',
+                ('synthetic-shift' if system == 'shift' else 'synthetic-school'),
+                '--db-host', '127.0.0.1', '--db-port', '5432'])
+            assert result.returncode == 0, result.stderr
+        assert calls == expected
 
 
 def test_revision_image_digest_accepts_existing_single_container_shape(cloud_case):
