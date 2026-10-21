@@ -178,7 +178,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             cfg = config.get("domains", {}).get(name, {})
             baseline = Path(cfg.get("baseline", "/__not_configured__"))
             domains[name] = {"configured": bool(cfg), "baseline_ready": (baseline / "trial-manifest.json").is_file() and (baseline / "database.sqlite3").is_file(),
-                             "data": json.loads((baseline / "trial-manifest.json").read_text()).get("data") if (baseline / "trial-manifest.json").is_file() else None,
+                             "data": "registered_staging_snapshot" if cfg.get('registered_source') else json.loads((baseline / "trial-manifest.json").read_text()).get("data") if (baseline / "trial-manifest.json").is_file() else None,
                              "ocr_pipeline_configured": bool(cfg.get("env", {}).get("OCR_PIPELINE_BUCKET")) if name == "hospital" else None}
         return {"trial": True, "provider_id": store.provider(), "provider": LABELS[store.provider()], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
                 "budget": store.budget(), "notice": "専用コピーを使用。既存環境への反映はありません。"}

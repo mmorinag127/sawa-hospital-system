@@ -49,6 +49,7 @@ def configuration(root):
                 if os.environ.get(key): domains[domain]['env'][key]=os.environ[key]
             domains[domain]['env']['WORKFLOW_V2_LLM_MODEL']=os.environ['GEMINI_AGENT_MODEL']
         elif domain == 'school-lunch':
+            domains[domain]['registered_source'] = True
             for key in ('GEMINI_API_KEY','GOOGLE_API_KEY'):
                 if os.environ.get(key): domains[domain]['env'][key]=os.environ[key]
         if domain != 'hospital':

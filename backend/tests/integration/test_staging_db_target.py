@@ -116,10 +116,12 @@ def test_actual_shape_resolves_both_active_and_intended_without_new_env(cloud_ca
         assert 'private-password' not in repr(config)
 
 
-def test_staging_agent_sidecar_keeps_ingress_as_database_source(cloud_case):
+@pytest.mark.parametrize('attachment',[gate.INSTANCE,gate.INSTANCE+',sawahospitalsystem:asia-northeast2:school-lunch-stg'])
+def test_staging_agent_sidecar_keeps_ingress_as_database_source(cloud_case,attachment):
     documents, _, _, _ = cloud_case
     for descriptor in (documents['services', 'web-stg']['spec']['template'],
                        documents['revisions', 'web-stg-r1']):
+        descriptor['metadata']['annotations']['run.googleapis.com/cloudsql-instances']=attachment
         front = descriptor['spec']['containers'][0]
         front['ports'] = [{'containerPort': 8080}]
         descriptor['spec']['containers'].append({'name': 'agent-runtime',

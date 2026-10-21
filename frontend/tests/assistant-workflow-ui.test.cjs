@@ -34,11 +34,23 @@ test('selection auto-loads, exact question reply, approval, output and rollback 
   await h.click(h.button('別の作業を始める'));assert.ok(h.document.querySelector('.request-panel'));assert.equal(h.document.querySelector('.active-work'),null);
  }finally{await h.close();}
 });
-test('old target response cannot replace a newer day and school',async()=>{
- let resolveOld;let requests=[];const h=await mount({targets:async(url,{inputs})=>{requests.push(inputs);if(requests.length===1)return new Promise(r=>resolveOld=r);return {selection_id:'new',choices:inputs.facility_id?[{key:'new-menu',label:'新しい日の献立',data:{}}]:[],schools:[{id:1,name:'合成校'}],layouts:[]};}});try{
-  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('一括作成')));let day=h.document.querySelector('input[type=date]');await h.change(day,'2026-11-02');await h.wait(()=>requests.length===1);await h.change(day,'2026-11-03');await h.wait(()=>requests.length===2&&h.document.querySelector('input[name=school]'));
-  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.length===3&&h.document.body.textContent.includes('新しい日の献立'));
-  await h.settle(()=>resolveOld({selection_id:'old',choices:[{key:'old',label:'古い日の献立',data:{}}],schools:[],layouts:[]}));assert.doesNotMatch(h.document.body.textContent,/古い日の献立/);assert.ok(h.document.body.textContent.includes('新しい日の献立'));
+test('schools precede the date, persist across day changes, and stale targets cannot replace the current day',async()=>{
+ let resolveOld;const requests=[];const h=await mount({targets:async(url,{inputs})=>{
+  requests.push(inputs);
+  if(inputs.service_date==='2026-07-01')return new Promise(r=>resolveOld=r);
+  return {selection_id:'new',choices:inputs.facility_id&&inputs.service_date?[{key:'new-menu',label:'新しい日の献立',data:{}}]:[],schools:[{id:8,name:'合成登録校'}],layouts:[]};
+ }});try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('一括作成')));
+  await h.wait(()=>h.document.querySelector('input[name=school]'));
+  const day=h.document.querySelector('input[type=date]');assert.equal(day.disabled,true);assert.deepEqual(Object.keys(requests[0]),[]);
+  assert.ok(h.document.querySelector('.school-choices').compareDocumentPosition(day)&4);
+  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.some(x=>x.facility_id===8));assert.equal(day.disabled,false);
+  await h.change(day,'2026-07-01');await h.wait(()=>!!resolveOld);
+  await h.change(day,'2026-07-02');await h.wait(()=>h.document.body.textContent.includes('新しい日の献立'));
+  assert.equal(h.document.querySelector('input[name=school]').checked,true);
+  assert.ok(requests.filter(x=>x.service_date).every(x=>x.facility_id===8));
+  await h.settle(()=>resolveOld({selection_id:'old',choices:[{key:'old',label:'古い日の献立',data:{}}],schools:[],layouts:[]}));
+  assert.doesNotMatch(h.document.body.textContent,/古い日の献立/);assert.ok(h.document.body.textContent.includes('新しい日の献立'));
   await h.click(h.button('この内容で始める'));const call=h.calls.find(c=>c.url===base+'/runs'&&c.method==='post');assert.deepEqual(call.body.target_keys,['new-menu']);assert.equal(call.body.selection_id,'new');
  }finally{await h.close();}
 });
