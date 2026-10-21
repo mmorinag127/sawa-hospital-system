@@ -19,7 +19,7 @@ type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: 
 type Selection = { selection_id: string; choices: {key:string;label:string;data:Record<string,any>}[]; schools:{id:number;name:string}[]; layouts:{id:number;name:string;version:number}[] };
 type TaskReview = {id:string;state:string;summary:string;evidence:{operation:string;data:any}[];actions:{operation:string;parameters:any}[];decision?:{approve:boolean;message:string}};
 type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";text:string;question_id?:string;options?:string[];process_context?:{answered:number;total:number;kind?:string}};
-type Run = { provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
+type Run = { request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
   events?: { id: number; kind: string; payload: Record<string, any> }[];
   artifacts?: { id: string; name: string; size: number }[] };
 type Budget = { monthly_cents: number; spent_cents: number; reserved_cents: number; available_cents: number; notice: string };
@@ -39,6 +39,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const selectedId=useRef<string|undefined>(undefined);
   const initialOpened=useRef(false);
   const pendingRequests=useRef(0);
+  const reconcilingCreate=useRef(false);
   const [choosingTask,setChoosingTask]=useState(true);
   const [loadingTargets,setLoadingTargets]=useState(false);
   const [config, setConfig] = useState<Configuration | null>(null);
@@ -65,6 +66,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [pendingReply,setPendingReply]=useState<{runId:string;questionId?:string}|null>(null);
   const [pendingDecision,setPendingDecision]=useState<{runId:string;reviewId:string;faxId?:string}|null>(null);
   const [confirmRollback,setConfirmRollback]=useState(false);
+  const [pendingCreate,setPendingCreate]=useState<string|null>(null);
   const [requestKey, setRequestKey] = useState("");
   const [source, setSource] = useState<File | null>(null);
   const [sourceChecked, setSourceChecked] = useState(false);
@@ -90,6 +92,32 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     if(!initialOpened.current){initialOpened.current=true;const pending=r.data.filter(x=>!["completed","stopped","rolled_back","failed"].includes(x.status));if(!adminView && !id && pending.length===1){id=pending[0].id;selectedId.current=id;}}
     if (id) { const response=await apiClient.get<Run>(`/assistant-trial/runs/${id}`); if(selectedId.current===id)receiveRun(response.data); }
   }
+  async function reconcileCreate(key:string) {
+    if(reconcilingCreate.current)return;
+    reconcilingCreate.current=true;
+    try {
+    const response=await apiClient.get<Run[]>("/assistant-trial/runs");
+    setRuns(response.data);
+    const matches=response.data.filter(run=>run.request_key===key);
+    if(matches.length!==1)return;
+    const run=matches[0];
+    if(selectedId.current!==run.id){selectedId.current=run.id;setSelected(run);}
+    setPendingCreate(null);setRequestKey("");
+    await refreshAfterCommand(run.id);
+    } finally {reconcilingCreate.current=false;}
+  }
+  useEffect(()=>{
+    if(!pendingCreate)return;
+    let active=true,polling=false;
+    const timer=setInterval(async()=>{
+      if(!active || polling)return;
+      polling=true;
+      try {await reconcileCreate(pendingCreate);}
+      catch {if(active)setPollNotice("受付状況を再確認しています。同じ依頼は再送していません。");}
+      finally {polling=false;}
+    },5000);
+    return ()=>{active=false;clearInterval(timer);};
+  },[pendingCreate]);
   async function refreshAfterCommand(id: string) {
     try { await load(id); setPollNotice(""); }
     catch { setPollNotice("進捗を取得できませんでした。再確認しています。作業は再送していません。"); }
@@ -151,8 +179,18 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     e.preventDefault();
     await act(async () => {
       const key = requestKey || crypto.randomUUID(); setRequestKey(key);
-      const response = await assistantApi.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(taskId === "hospital_pending_faxes" ? {} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
-      selectedId.current=response.data.id; setSelected(response.data); setRequestKey(""); await refreshAfterCommand(response.data.id);
+      setPendingCreate(key);
+      try {
+        const response = await assistantApi.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(taskId === "hospital_pending_faxes" ? {} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
+        if(selectedId.current!==response.data.id){selectedId.current=response.data.id;setSelected(response.data);}
+        setPendingCreate(null);setRequestKey("");await refreshAfterCommand(response.data.id);
+      } catch(e:any) {
+        if(!e.response || e.response.status>=500){
+          try {await reconcileCreate(key);}catch {setPollNotice("受付状況を再確認しています。同じ依頼は再送していません。");}
+          return;
+        }
+        setPendingCreate(null);throw e;
+      }
     });
   }
   async function control(action: string) {
@@ -214,6 +252,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
     {selected && pollNotice && <p role="status" className="muted">{pollNotice}</p>}
+    {pendingCreate && <p className="assistant-notice">依頼の受付を確認しています。同じ依頼は再送していません。</p>}
     {replyPending && <p className="assistant-notice">回答の反映を確認しています。同じ回答は再送していません。</p>}
       {decisionPending && <p role="status" className="assistant-notice">承認・訂正の反映を確認しています。同じ操作は再送していません。</p>}
     {adminView && config?.providers && <section className="assistant-panel"><h2>エージェントの接続先</h2><p>変更は新しい依頼から適用します。実行中・確認待ちの依頼は元の接続先で続けます。</p><div className="answer-options">{config.providers.map(provider=><button key={provider.id} disabled={busy} aria-pressed={config.provider_id===provider.id} onClick={()=>act(async()=>{await apiClient.put("/assistant-trial/provider",{provider:provider.id});await load(selected?.id);})}>{provider.label}{config.provider_id===provider.id?"（使用中）":""}</button>)}</div>{config.providers.map(provider=><p key={provider.id}>{provider.label}：{provider.missing.length?"未設定："+provider.missing.join("、"):"設定済み"}</p>)}<p className="muted">Geminiの料金は報告トークン数と管理者が設定した単価による概算です。思考トークンを含み、割引・無料枠は適用しません。Claudeは接続先の定価換算値です。請求確定額とは異なります。</p></section>}
@@ -230,7 +269,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         {task?.date && serviceDate && selection && schoolId && <div className="assistant-notice">{selection.choices.length ? <><strong>この日の献立をまとめて処理します</strong><p>{selection.choices.map(x=>x.label).join(" ／ ")}</p><p>作業工程表・動線図・実施価格を一度に確認できます。</p></> : "この日の献立は未登録です。月次の「献立・調理手配書を取り込む」を先に行ってください。"}</div>}
         {selection && !task?.date && <fieldset className="target-choices"><legend>{task?.target_kind==="school" ? "学校を選んでください" : taskId==="shift_absence" ? "欠勤する職員を選んでください" : "作業する対象を選んでください"}</legend>{!selection.choices.length && <p className="muted">{task?.target_kind==="menu" && !schoolId ? "学校を選ぶと、登録済みの献立が表示されます。" : "対象がありません。登録内容・対象月を確認してください。"}</p>}{selection.choices.map(choice=><label className="target-choice" key={choice.key}><input type={task?.target_kind==="school" || task?.target_kind==="month" ? "radio" : "checkbox"} name="target" checked={targetKeys.includes(choice.key)} onChange={e=>{setTargetKeys(keys=>task?.target_kind==="school" || task?.target_kind==="month" ? [choice.key] : e.target.checked ? [...keys,choice.key] : keys.filter(k=>k!==choice.key));setRequestKey("");}}/><span>{choice.label}</span></label>)}</fieldset>}
         {task?.target_kind==="menu" && !task.date && !!selection?.choices.length && <fieldset className="target-choices"><legend>使う図面を選んでください</legend>{selection.layouts.map(x=><label className="target-choice" key={x.id}><input type="radio" name="layout" value={x.id} checked={layoutId===String(x.id)} onChange={()=>setLayoutId(String(x.id))}/><span>{x.name}（版 {x.version}）</span></label>)}</fieldset>}
-        <div className="assistant-footer"><div><p className="muted">{ready ? "開始後は、画面に届く質問への回答と内容の確認だけで進みます。" : loadingTargets ? "対象を確認しています。" : config?.missing.length ? "管理者の接続設定を待っています。" : "対象を選ぶと、作業を開始できます。"}</p></div><button className="primary" disabled={busy || !ready || loadingTargets}>この内容で始める</button></div>
+        <div className="assistant-footer"><div><p className="muted">{ready ? "開始後は、画面に届く質問への回答と内容の確認だけで進みます。" : loadingTargets ? "対象を確認しています。" : config?.missing.length ? "管理者の接続設定を待っています。" : "対象を選ぶと、作業を開始できます。"}</p></div><button className="primary" disabled={busy || !!pendingCreate || !ready || loadingTargets}>この内容で始める</button></div>
         {task && taskId!=="hospital_pending_faxes" && <button type="button" className="quiet retry-targets" disabled={loadingTargets || busy || !!task.month && !targetMonth || !!task.date && !serviceDate && task.domain!=="school-lunch" || taskId==="shift_absence" && !absenceDate} onClick={()=>fetchTargets()}>対象を再読み込み</button>}
       </form>}
     </section>}

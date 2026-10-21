@@ -331,3 +331,58 @@ test('unknown answer is reconciled without resending while stop remains usable',
   assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/reply')).length,1);
  }finally{await h.close();}
 });
+
+
+test('accepted creation with a lost response opens only its exact request key without resending',async()=>{
+ const h=await mount({beforePost:async(url,body)=>{if(url===base+'/runs'){h.setRun({...makeRun(),request_key:body.request_key});throw {response:{status:503}};}}});
+ try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
+  await h.click(h.button('この内容で始める'));
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.ok(h.document.querySelector('.active-work'));
+  assert.match(h.document.body.textContent,/登録内容で作成しますか/);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url===base+'/runs').length,1);
+ }finally{await h.close();}
+});
+
+test('unknown creation waits for its exact request in history and never adopts another run',async()=>{
+ let key;
+ const h=await mount({beforePost:async(url,body)=>{if(url===base+'/runs'){key=body.request_key;throw new Error('timeout');}}});
+ try{
+  h.setRun({...makeRun(),id:'other',request_key:'other-request'});
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
+  await h.click(h.button('この内容で始める'));
+  assert.match(h.document.body.textContent,/同じ依頼は再送していません/);
+  assert.equal(h.document.querySelector('.active-work'),null);
+  assert.equal(h.button('この内容で始める').disabled,true);
+  h.setRun({...makeRun(),request_key:key});await h.poll();
+  assert.ok(h.document.querySelector('.active-work'));
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url===base+'/runs').length,1);
+ }finally{await h.close();}
+});
+
+test('known creation rejection is displayed and does not enter unknown-outcome polling',async()=>{
+ const h=await mount({beforePost:async url=>{if(url===base+'/runs')throw {response:{status:409,data:{detail:'確認待ちの依頼があります'}}};}});
+ try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
+  await h.click(h.button('この内容で始める'));
+  assert.match(h.document.querySelector('.assistant-error').textContent,/確認待ちの依頼/);
+  assert.doesNotMatch(h.document.body.textContent,/受付を確認しています/);
+  assert.equal(h.button('この内容で始める').disabled,false);
+ }finally{await h.close();}
+});
+
+
+test('creation reconciliation never overlaps a slow initial history lookup with polling',async()=>{
+ let created=false,release,reads=0;
+ const h=await mount({beforeGet:async url=>{if(created&&url===base+'/runs'){reads++;await new Promise(r=>release=r);}},beforePost:async(url,body)=>{if(url===base+'/runs'){created=true;h.setRun({...makeRun(),request_key:body.request_key});throw new Error('timeout');}}});
+ try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
+  await h.click(h.button('この内容で始める'));
+  assert.equal(reads,1);
+  await h.poll();await h.poll();assert.equal(reads,1);
+  created=false;release();await h.wait(()=>h.document.querySelector('.active-work'));
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url===base+'/runs').length,1);
+ }finally{if(release)release();await h.close();}
+});
