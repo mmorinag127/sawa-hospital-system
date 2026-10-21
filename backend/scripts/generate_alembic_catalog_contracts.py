@@ -1,11 +1,15 @@
 """Deduplicate observed catalogs; never infer schemas from ORM metadata."""
 
 import argparse
+import copy
 import hashlib
 import json
 from pathlib import Path
 
-from src.maintenance.formal_migration_schema import formal_revision_chain, table_shapes
+from src.maintenance.formal_migration_schema import (
+    formal_revision_chain, table_shapes, column_identity_policy,
+    _normalize_reflected_index_aliases, _named_columns,
+)
 
 
 def main():
@@ -23,28 +27,40 @@ def main():
     if args.output.exists():
         raise RuntimeError("catalog blocked: generated contract output already exists")
     base = json.loads(args.base_contract.read_text())
-    result = {"format": 1, "sources": {}, "shapes": {}, "revisions": {}}
+    result = copy.deepcopy(base)
     for dialect in ("sqlite", "postgresql"):
-        result["revisions"][dialect] = {}
-        for revision in revisions:
+        result["revisions"].setdefault(dialect, {})
+        for index, revision in enumerate(revisions):
             path = args.snapshot_dir / f"{dialect}-{revision}.json"
             raw = path.read_bytes()
             snapshot = json.loads(raw)
-            result["sources"][path.name] = hashlib.sha256(raw).hexdigest()
             refs = {}
-            for table, shape in table_shapes(snapshot, dialect).items():
+            observed = table_shapes(snapshot, dialect)
+            for table, shape in observed.items():
                 encoded = json.dumps(shape, sort_keys=True, separators=(",", ":")).encode()
                 reference = hashlib.sha256(encoded).hexdigest()
-                result["shapes"][reference] = shape
                 refs[table] = reference
             actual = {"tables": refs, "views": snapshot["views"]}
             expected = base.get("revisions", {}).get(dialect, {}).get(revision)
             if expected is not None:
+                policy = column_identity_policy(expected, dialect, revision)
                 if expected["views"] != actual["views"] or set(expected["tables"]) != set(actual["tables"]):
                     raise RuntimeError(f"catalog blocked: historical {dialect} {revision} table/view drift")
                 for table, expected_ref in expected["tables"].items():
-                    if base["shapes"][expected_ref] != result["shapes"][actual["tables"][table]]:
+                    prior = _normalize_reflected_index_aliases(base["shapes"][expected_ref], dialect)
+                    current = observed[table]
+                    if policy == "name":
+                        prior, current = _named_columns(prior), _named_columns(current)
+                    if prior != current:
                         raise RuntimeError(f"catalog blocked: historical {dialect} {revision} {table} drift")
+                continue
+            if int(revision) >= 35:
+                previous = result["revisions"][dialect][revisions[index - 1]]
+                actual["column_identity"] = column_identity_policy(previous, dialect, revisions[index - 1])
+                column_identity_policy(actual, dialect, revision)
+            result["sources"][path.name] = hashlib.sha256(raw).hexdigest()
+            for table, shape in observed.items():
+                result["shapes"].setdefault(refs[table], shape)
             result["revisions"][dialect][revision] = actual
     args.output.write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
     print(f"shapes={len(result['shapes'])} bytes={args.output.stat().st_size}")

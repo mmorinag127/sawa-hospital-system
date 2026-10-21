@@ -14,7 +14,7 @@ test("school lunch links establish the shared HttpOnly session before navigation
   assert.match(navigation, /getStoredAuthHeader\(\)/);
   assert.match(navigation, /SCHOOL_LUNCH_HOME = "\/school-lunch"/);
   assert.match(navigation, /\/school-lunch\/api\/backend\/shared-auth\/me/);
-  assert.match(navigation, /headers: \{ Authorization: authorization \}/);
+  assert.match(navigation, /headers: authorization \? \{ Authorization: authorization \} : \{\}/);
   assert.match(navigation, /credentials: "same-origin"/);
   assert.match(navigation, /await prepareSystemDestination\(destination, authorization\)[\s\S]*window\.location\.assign\(target\)/);
   assert.match(navigation, /if \(!response\.ok\) throw new LoginNavigationError/);

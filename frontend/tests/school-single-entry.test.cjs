@@ -62,9 +62,10 @@ for (const destination of [
 });
 
 test('unauthenticated ordinary entry retains the root as the login return destination', async () => {
-  const h = scenario('');
+  const h = scenario('', 401);
   await h.api.enterSchoolLunch({preventDefault() {}});
-  assert.equal(h.calls.length, 0);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].options.headers.Authorization, undefined);
   assert.equal(h.stored.get('auth_next'), '/school-lunch');
   assert.equal(new URL(h.navigation[0], 'https://sawa.invalid').searchParams.get('next'), '/school-lunch');
 });

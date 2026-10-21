@@ -43,6 +43,7 @@ export const markAuthCacheChanged = () => {
 };
 
 export const clearBrowserSession = () => {
+  window.sessionStorage.removeItem("sawa_server_session");
   window.sessionStorage.removeItem("auth_header");
   window.sessionStorage.removeItem("auth_next");
   window.sessionStorage.removeItem(SESSION_KEY);
