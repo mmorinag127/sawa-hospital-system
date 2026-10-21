@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.portal_prod_db_bootstrap import _load_service_db_config  # noqa: E402
+sys.path.insert(0, str(ROOT.parent / "scripts"))
+from staging_db_target import load_service_db_config as _load_staging_service_db_config  # noqa: E402
 from src.services.portal_access_bootstrap_service import PortalAccessBootstrapError  # noqa: E402
 from src.services.portal_automation_bootstrap_service import (  # noqa: E402
     PortalAutomationBootstrapError,
@@ -43,7 +45,8 @@ def _run() -> int:
         raise PortalAutomationBootstrapError("Cloud Run region must be asia-northeast2")
     if args.service not in {f"web-{args.environment}", f"worker-{args.environment}"}:
         raise PortalAutomationBootstrapError("Cloud Run service does not match environment")
-    config = _load_service_db_config(args.project_id, args.region, args.service)
+    loader = _load_staging_service_db_config if args.environment == "stg" else _load_service_db_config
+    config = loader(args.project_id, args.region, args.service)
     engine = create_engine(
         URL.create(
             "postgresql+psycopg2",

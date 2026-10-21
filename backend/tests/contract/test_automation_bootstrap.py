@@ -164,7 +164,7 @@ def test_cli_reuses_cloud_run_config_and_db_transaction(engine, monkeypatch, env
     args = _args(environment)
     monkeypatch.setattr(cli, "parse_args", lambda: args)
     config = Mock(return_value=SimpleNamespace(db_user="user", db_password="p@ss", db_name="db"))
-    monkeypatch.setattr(cli, "_load_service_db_config", config)
+    monkeypatch.setattr(cli, "_load_staging_service_db_config" if environment == "stg" else "_load_service_db_config", config)
     create = Mock(return_value=engine)
     monkeypatch.setattr(cli, "create_engine", create)
     dispose = Mock()
@@ -190,7 +190,7 @@ def test_cli_guard_precedes_cloud_access(monkeypatch, invalid):
         args.email = _email("prod")
     monkeypatch.setattr(cli, "parse_args", lambda: args)
     load = Mock()
-    monkeypatch.setattr(cli, "_load_service_db_config", load)
+    monkeypatch.setattr(cli, "_load_staging_service_db_config", load)
     assert cli.main() == 1
     load.assert_not_called()
 
@@ -220,7 +220,7 @@ def test_cli_errors_never_expose_secrets(monkeypatch, capsys, failure_at):
         create.side_effect = RuntimeError(secret)
     else:
         engine.begin.side_effect = RuntimeError(secret)
-    monkeypatch.setattr(cli, "_load_service_db_config", config)
+    monkeypatch.setattr(cli, "_load_staging_service_db_config", config)
     monkeypatch.setattr(cli, "create_engine", create)
     assert cli.main() == 1
     captured = capsys.readouterr()
@@ -234,7 +234,7 @@ def test_cli_reports_shared_schema_guard(monkeypatch, capsys):
     _context(monkeypatch, "stg")
     monkeypatch.setattr(cli, "parse_args", lambda: _args("stg"))
     message = "user_system_access system_key constraint must allow only hospital, shift, and school-lunch"
-    monkeypatch.setattr(cli, "_load_service_db_config", Mock(side_effect=cli.PortalAccessBootstrapError(message)))
+    monkeypatch.setattr(cli, "_load_staging_service_db_config", Mock(side_effect=cli.PortalAccessBootstrapError(message)))
     assert cli.main() == 1
     assert capsys.readouterr().err == f"blocked: {message}\n"
 
@@ -255,7 +255,7 @@ def test_cli_pins_project_and_region_before_cloud_access(
     monkeypatch.setattr(cli, "parse_args", lambda: args)
     load = Mock()
     create = Mock()
-    monkeypatch.setattr(cli, "_load_service_db_config", load)
+    monkeypatch.setattr(cli, "_load_staging_service_db_config" if environment == "stg" else "_load_service_db_config", load)
     monkeypatch.setattr(cli, "create_engine", create)
     assert cli.main() == 1
     load.assert_not_called()

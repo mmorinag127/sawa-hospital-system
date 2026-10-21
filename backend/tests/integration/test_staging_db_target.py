@@ -131,6 +131,143 @@ def test_staging_agent_sidecar_keeps_ingress_as_database_source(cloud_case,attac
     assert load().db_name == 'orders'
 
 
+@pytest.mark.parametrize('case', ['single', 'multiple', 'missing', 'mismatch', 'duplicate'])
+def test_bootstrap_instance_cli_uses_strict_runtime_target(cloud_case, monkeypatch, capsys, case):
+    documents, _, _, _ = cloud_case
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    monkeypatch.setenv('GITHUB_REF', 'refs/heads/develop')
+    if case == 'multiple':
+        test_staging_agent_sidecar_keeps_ingress_as_database_source(
+            cloud_case, gate.INSTANCE + ',sawahospitalsystem:asia-northeast2:school-lunch-stg')
+    for descriptor in (documents['services', 'web-stg']['spec']['template'], documents['revisions', 'web-stg-r1']):
+        annotations = descriptor['metadata']['annotations']
+        if case == 'missing':
+            annotations.clear()
+        elif case == 'duplicate':
+            annotations['run.googleapis.com/cloudsql-instances'] = gate.INSTANCE + ',' + gate.INSTANCE
+        elif case == 'mismatch':
+            env_set(descriptor, 'DB_HOST', '/cloudsql/sawahospitalsystem:asia-northeast2:school-lunch-stg')
+    result = gate.main(['--instance-only', '--project-id', gate.PROJECT, '--region', gate.REGION, '--service', 'web-stg'])
+    output = capsys.readouterr()
+    if case in ('single', 'multiple'):
+        assert result == 0 and output.out == gate.INSTANCE + '\n' and output.err == ''
+    else:
+        assert result == 1 and output.out == '' and output.err.startswith('staging-db-')
+    assert 'private-password' not in output.out + output.err
+    assert 'private-access' not in output.out + output.err
+
+
+def test_instance_cli_rejects_local_and_masks_unexpected_errors(monkeypatch, capsys):
+    argv = ['--instance-only', '--project-id', gate.PROJECT, '--region', gate.REGION, '--service', 'web-stg']
+    resolver = Mock(side_effect=RuntimeError('private-password'))
+    monkeypatch.setattr(gate, 'load_service_db_config', resolver)
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    assert gate.main(argv) == 1
+    resolver.assert_not_called()
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    monkeypatch.setenv('GITHUB_REF', 'refs/heads/develop')
+    assert gate.main(argv) == 1
+    output = capsys.readouterr()
+    assert output.out == '' and 'private-password' not in output.err
+    assert 'staging-db-target-resolution-failed' in output.err
+
+
+def test_both_staging_bootstraps_share_the_proxy_resolver():
+    from scripts import portal_automation_db_bootstrap as portal, price_automation_db_bootstrap as price
+    assert portal._load_staging_service_db_config is gate.load_service_db_config
+    assert price._load_service_db_config is gate.load_service_db_config
+    assert portal._load_service_db_config is gate.transport._load_service_db_config
+    shell = (ROOT / 'scripts/bootstrap_automation_user.sh').read_text()
+    assert 'staging_db_target.py --instance-only' in shell
+    assert 'cloudsql-instances' not in shell
+    assert '"$proxy" --address 127.0.0.1 --port 5432 "$instance"' in shell
+
+
+@pytest.mark.parametrize('case', ['single', 'multiple', 'blocked'])
+@pytest.mark.parametrize('system', ['shift', 'school-lunch'])
+def test_bootstrap_shell_passes_one_resolved_target_and_stops_on_failure(cloud_case, tmp_path, case, system):
+    import json
+    import os
+    import subprocess
+    if case == 'multiple':
+        test_staging_agent_sidecar_keeps_ingress_as_database_source(
+            cloud_case, gate.INSTANCE + ',sawahospitalsystem:asia-northeast2:school-lunch-stg')
+    instance = load().instance_connection_name
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    (tmp_path / 'backend').mkdir()
+    log = tmp_path / 'calls.jsonl'
+    proxy = tmp_path / 'proxy-template'
+    header = '#!' + sys.executable + '\nimport os, sys, json, time\n'
+    proxy.write_text(header +
+        'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["proxy", *sys.argv[1:]]) + "\\n")\n'
+        'time.sleep(60)\n')
+    programs = {
+        'uv': header +
+            'resolve = "--instance-only" in sys.argv\n'
+            'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["resolve" if resolve else "db", *sys.argv[1:]]) + "\\n")\n'
+            'if resolve:\n'
+            ' if os.environ["CASE"] == "blocked": sys.exit(1)\n'
+            ' print(os.environ["RESOLVED_INSTANCE"])\n',
+        'curl': header + 'import shutil\nshutil.copyfile(os.environ["PROXY_TEMPLATE"], sys.argv[sys.argv.index("-o") + 1])\n',
+        'sha256sum': '#!/bin/sh\ncat >/dev/null\n',
+        'readiness': header +
+            'for _ in range(500):\n'
+            ' if os.path.exists(os.environ["CALL_LOG"]) and "proxy" in open(os.environ["CALL_LOG"]).read(): break\n'
+            ' time.sleep(.01)\n'
+            'else: sys.exit(2)\n'
+            'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["readiness", *sys.argv[1:]]) + "\\n")\n'
+            'sys.exit(1 if os.environ["READINESS"] == "timeout" else 0)\n',
+        'sleep': header +
+            'with open(os.environ["CALL_LOG"], "a") as f: f.write(json.dumps(["sleep", *sys.argv[1:]]) + "\\n")\n',
+    }
+    for name, content in programs.items():
+        path = binaries / name
+        path.write_text(content)
+        path.chmod(0o700)
+    environment = {**os.environ, 'PATH': str(binaries) + os.pathsep + os.defpath,
+        'GITHUB_ACTIONS': 'true', 'GITHUB_REF': 'refs/heads/develop',
+        'AUTOMATION_AUTH_EMAIL': 'synthetic-shift', 'SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL': 'synthetic-school',
+        'PROJECT_ID': gate.PROJECT, 'REGION': gate.REGION, 'WEB_SERVICE': 'web-stg',
+        'CASE': case, 'CALL_LOG': str(log), 'PROXY_TEMPLATE': str(proxy), 'RESOLVED_INSTANCE': instance}
+    # Replace only Bash's socket probe in a temporary copy; exercise its real
+    # resolver, proxy arguments, retry loop and DB invocation without any socket.
+    source = (ROOT / 'scripts/bootstrap_automation_user.sh').read_text()
+    probe = '(echo > /dev/tcp/127.0.0.1/5432)'
+    assert source.count(probe) == 1
+    shell = tmp_path / 'bootstrap.sh'
+    shell.write_text(source.replace(probe, 'readiness 127.0.0.1 5432'))
+    for readiness in (['ready'] if case == 'blocked' else ['ready', 'timeout']):
+        log.unlink(missing_ok=True)
+        environment['READINESS'] = readiness
+        result = subprocess.run(['bash', str(shell), 'stg', system],
+            cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=15)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        expected = [['resolve', 'run', '--extra', 'dev', 'python',
+            '../scripts/staging_db_target.py', '--instance-only',
+            '--project-id', gate.PROJECT, '--region', gate.REGION, '--service', 'web-stg']]
+        if case == 'blocked':
+            assert result.returncode != 0
+            assert calls == expected
+            continue
+        expected.append(['proxy', '--address', '127.0.0.1', '--port', '5432', instance])
+        if readiness == 'timeout':
+            expected.extend([['readiness', '127.0.0.1', '5432'], ['sleep', '1']] * 30)
+            assert result.returncode != 0
+            assert 'Cloud SQL proxy did not become ready' in result.stderr
+        else:
+            expected.append(['readiness', '127.0.0.1', '5432'])
+            expected.append(['db', 'run', '--extra', 'dev', 'python',
+                ('scripts/portal_automation_db_bootstrap.py' if system == 'shift'
+                 else 'scripts/price_automation_db_bootstrap.py'),
+                '--environment', 'stg', '--project-id', gate.PROJECT, '--region', gate.REGION,
+                '--service', 'web-stg', '--email',
+                ('synthetic-shift' if system == 'shift' else 'synthetic-school'),
+                '--db-host', '127.0.0.1', '--db-port', '5432'])
+            assert result.returncode == 0, result.stderr
+        assert calls == expected
+
+
 def test_revision_image_digest_accepts_existing_single_container_shape(cloud_case):
     documents, _, _, _ = cloud_case
     revision = documents['revisions', 'worker-stg-r1']

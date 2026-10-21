@@ -10,13 +10,9 @@ case "${2:-shift}" in
   school-lunch) bootstrap_script=price_automation_db_bootstrap.py; bootstrap_email="$SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL" ;;
   *) echo "Unknown automation system" >&2; exit 1 ;;
 esac
-instance="$(gcloud run services describe "$WEB_SERVICE" --project "$PROJECT_ID" --region "$REGION" \
-  --format=json | jq -er --arg project "$PROJECT_ID" --arg region "$REGION" --arg service "$WEB_SERVICE" \
-    -f scripts/staging_bootstrap_instance.jq)"
-if [[ -z "$instance" ]]; then
-  echo "Cloud SQL instance annotation is required" >&2
-  exit 1
-fi
+cd backend
+instance="$(uv run --extra dev python ../scripts/staging_db_target.py --instance-only \
+  --project-id "$PROJECT_ID" --region "$REGION" --service "$WEB_SERVICE")"
 proxy="$(mktemp)"
 curl -fsSL -o "$proxy" https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.24.1/cloud-sql-proxy.linux.amd64
 echo "fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb  $proxy" | sha256sum -c -
@@ -33,7 +29,6 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [[ "$ready" == 1 ]] || { echo "Cloud SQL proxy did not become ready" >&2; exit 1; }
-cd backend
 uv run --extra dev python "scripts/$bootstrap_script" \
   --environment stg --project-id "$PROJECT_ID" --region "$REGION" \
   --service "$WEB_SERVICE" --email "$bootstrap_email" \

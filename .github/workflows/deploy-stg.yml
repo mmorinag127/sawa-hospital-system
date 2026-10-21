@@ -68,6 +68,11 @@ on:
         required: false
         type: boolean
         default: false
+      diagnose_workflow_demand_parity:
+        description: "Read-only workflow demand comparison; excludes deployment and other verification"
+        required: false
+        type: boolean
+        default: false
       verify_output_source_order_id:
         description: "Optional existing staging order ID for read-only canonical output-source verification"
         required: false
@@ -110,6 +115,72 @@ env:
   SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
 
 jobs:
+  diagnose-workflow-demand-parity:
+    needs: source-gate
+    if: >-
+      needs.source-gate.result == 'success' && inputs.mode == 'normal' && inputs.diagnose_workflow_demand_parity == true &&
+      github.repository == 'mmorinag127/sawa-hospital-system' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch'
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DIAGNOSTIC_ENVIRONMENT: staging
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify named source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor 5e30eefee4f5daddc0f97b6c29cbd1ddc5172496 HEAD
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Install locked diagnostic runtime
+        run: uv sync --project backend --extra dev --frozen --python 3.11
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: sawahospitalsystem
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Download pinned Cloud SQL proxy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/demand-cloud-sql-proxy" 'https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.24.1/cloud-sql-proxy.linux.amd64'
+          printf '%s  %s\n' 'fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb' "$RUNNER_TEMP/demand-cloud-sql-proxy" | sha256sum -c -
+          chmod 700 "$RUNNER_TEMP/demand-cloud-sql-proxy"
+      - name: Compare identical staging read snapshot
+        run: |
+          set -euo pipefail
+          backend/.venv/bin/python -B scripts/verify_workflow_demand_parity.py \
+            --product "$GITHUB_WORKSPACE" --proxy "$RUNNER_TEMP/demand-cloud-sql-proxy" \
+            --summary "$RUNNER_TEMP/demand-parity-summary"
+      - name: Remove private inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -x backend/.venv/bin/python ]; then
+            backend/.venv/bin/python -B scripts/verify_workflow_demand_parity.py \
+              --product "$GITHUB_WORKSPACE" --cleanup --summary "$RUNNER_TEMP/demand-parity-summary"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workflow-demand-parity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/demand-parity-summary/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   diagnose-reviewed-ocr:
     needs: source-gate
     if: >-
@@ -346,6 +417,7 @@ jobs:
           CONTACT_REPLAY: ${{ inputs.diagnose_saved_contact_replay }}
           REVIEWED_DIAGNOSTIC: ${{ inputs.diagnose_reviewed_ocr }}
           REVIEWED_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_reviewed_ocr) }}
+          DEMAND_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_workflow_demand_parity) }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
@@ -373,9 +445,24 @@ jobs:
               test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$OCR_MANIFEST$OCR_EXISTING_RUN$MENU_MANIFEST$REVIEW_ORDER$OUTPUT_ORDER$OUTPUT_DATE"
               test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
               test -z "$CONTACT_REPLAY" || test "$CONTACT_REPLAY" = false
+              test "${DEMAND_DIAGNOSTIC_JSON:-}" != true
               ;;
             false:false|:null|:) ;;
             *) echo "invalid_diagnostic_flag" >&2; exit 1 ;;
+          esac
+          case "${DEMAND_DIAGNOSTIC_JSON:-}" in
+            true)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              test "${DEPLOY_MODE:-normal}" = normal
+              test "$ACTOR" = "$REPOSITORY_OWNER"
+              test "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+              test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$OCR_MANIFEST$OCR_EXISTING_RUN$MENU_MANIFEST$REVIEW_ORDER$OUTPUT_ORDER$OUTPUT_DATE"
+              test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
+              test -z "$CONTACT_REPLAY" || test "$CONTACT_REPLAY" = false
+              test "$REVIEWED_DIAGNOSTIC_JSON" != true
+              ;;
+            false|null|'') ;;
+            *) echo "invalid_demand_diagnostic_flag" >&2; exit 1 ;;
           esac
           case "$GITHUB_EVENT_NAME:${DEPLOY_MODE:-normal}" in
             push:normal|workflow_dispatch:normal)
@@ -417,8 +504,14 @@ jobs:
         env:
           DEPLOY_MODE: ${{ inputs.mode }}
           REVIEWED_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_reviewed_ocr) }}
+          DEMAND_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_workflow_demand_parity) }}
         run: |
           set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = normal ] && [ "${DEMAND_DIAGNOSTIC_JSON:-}" = true ]; then
+            echo "backend_changed=false" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = normal ] && [ "${REVIEWED_DIAGNOSTIC_JSON:-}" = true ]; then
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
             echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
