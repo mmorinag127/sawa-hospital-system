@@ -421,3 +421,26 @@ def test_each_background_tool_rechecks_sawa_authorization(tmp_path, monkeypatch,
         assert store.get(run["id"])["status"] == "stopping"
     else:
         assert result["needs_operator_confirmation"] and store.get(run["id"])["status"] == "waiting_input"
+
+
+@pytest.mark.parametrize('status,receipt,allowed', [
+    ('rollback_stop_pending', {'restored':True,'scope':'this_request_sandbox'}, True),
+    ('rollback_stop_pending', {}, False),
+    ('rollback_stop_pending', {'restored':False,'scope':'this_request_sandbox'}, False),
+    ('rollback_stop_pending', {'restored':True,'scope':'other'}, False),
+    ('stop_pending', {'restored':True,'scope':'this_request_sandbox'}, False),
+    ('reconciliation_required', {'restored':True,'scope':'this_request_sandbox'}, False),
+])
+def test_only_verified_restoration_releases_active_sandbox_without_refunding(tmp_path,status,receipt,allowed):
+    store=Store(tmp_path);store.set_budget(500)
+    old,_=store.create('u','old-key','old',['hospital'],200,provider='gemini')
+    store.update(old['id'],status=status,spent=17,reserved=183)
+    store.event(old['id'],'rollback',receipt)
+    if allowed:
+        new,_=store.create('u','new-key','new',['school-lunch'],300,provider='gemini')
+        assert new['status']=='preparing'
+        assert store.budget()['available_cents']==0
+        with pytest.raises(Conflict):store.create('u','over-key','over',['shift'],1)
+    else:
+        with pytest.raises(Conflict,match='他の依頼'):store.create('u','new-key','new',['shift'],100)
+    assert store.get(old['id'])['spent']==17 and store.get(old['id'])['reserved']==183

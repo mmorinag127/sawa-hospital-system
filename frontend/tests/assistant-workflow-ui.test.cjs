@@ -240,3 +240,13 @@ test('stop uses a control deadline and stopping never promises business progress
   assert.doesNotMatch(h.document.body.textContent,/エージェントが作業を進めています/);
  }finally{await h.close();}
 });
+
+test('restored request can start another task while remote cost uncertainty remains visible',async()=>{
+ const h=await mount({initial:{...makeRun('rollback_stop_pending'),spent:10,reserved:290}});try{
+  assert.match(h.document.body.textContent,/接続先の停止確認中/);
+  assert.equal(h.button('開始前に戻す').disabled,true);
+  await h.click(h.button('別の作業を始める'));
+  assert.match(h.document.body.textContent,/どの作業を行いますか/);
+  assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+ }finally{await h.close();}
+});

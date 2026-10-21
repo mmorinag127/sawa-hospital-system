@@ -233,3 +233,36 @@ def test_gemini_stop_and_restore_keep_cost_and_remove_only_request_changes(tmp_p
         assert any(e['kind']=='rollback' for e in store.events(run['id']))
         await agent.client.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'in_progress', 'rejected', 'timeout'])
+def test_stop_during_create_keeps_receipt_without_executing_late_tools(tmp_path, monkeypatch, outcome):
+    entered=asyncio.Event();release=asyncio.Event();cancelled=[];posts=[]
+    async def handler(request):
+        if request.method=='POST' and not request.url.path.endswith('/cancel'):
+            posts.append(True);entered.set();await release.wait()
+            if outcome=='timeout':raise httpx.ReadTimeout('synthetic private message')
+            if outcome=='rejected':return httpx.Response(400,json={})
+            return httpx.Response(200,json=interaction('late', [('late-call','shift_get_staff',{'parameters':{}})], status=outcome))
+        if request.method=='POST':cancelled.append(True)
+        return httpx.Response(200,json=interaction('late',status='cancelled' if cancelled else outcome))
+    agent,store,_,tools,run=fixture(tmp_path,monkeypatch,handler)
+    native=[]
+    async def forbidden(*args,**kwargs):native.append(True);raise AssertionError('late native call')
+    tools.execute=forbidden
+    async def scenario():
+        await agent.start(run);await entered.wait()
+        stop=asyncio.create_task(agent.stop(run['id']))
+        await asyncio.sleep(0)
+        assert store.get(run['id'])['generation']>run['generation']
+        release.set();await stop
+        assert not native and len(posts)==1
+        if outcome=='timeout':
+            assert agent.unsettled(run['id']) and store.get(run['id'])['status']=='stop_pending'
+            assert store.get(run['id'])['reserved']==100
+        else:
+            assert not agent.unsettled(run['id']) and store.get(run['id'])['status']=='stopped'
+            assert store.get(run['id'])['reserved']==0
+            assert bool(cancelled)==(outcome=='in_progress')
+        await agent.client.aclose()
+    asyncio.run(scenario())

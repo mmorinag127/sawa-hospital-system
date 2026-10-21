@@ -146,7 +146,12 @@ class Store:
             if total + cap > limit:
                 raise Conflict("月次予算の空きがありません。上限または実行中の依頼を確認してください")
             # Sandbox ports are private to one active request; no concurrent writers.
-            if db.execute("SELECT 1 FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')").fetchone():
+            for active in db.execute("SELECT id,status FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')"):
+                if active['status'] == 'rollback_stop_pending':
+                    receipt = db.execute("SELECT payload FROM events WHERE run_id=? AND kind='rollback' ORDER BY id DESC LIMIT 1", (active['id'],)).fetchone()
+                    restored = json.loads(receipt['payload']) if receipt else {}
+                    if restored.get('restored') is True and restored.get('scope') == 'this_request_sandbox':
+                        continue
                 raise Conflict("他の依頼を処理中です")
             ident = uuid4().hex
             db.execute("INSERT INTO runs(id,request_key,owner,instruction,domains,status,month,cap,reserved,created,updated) VALUES(?,?,?,?,?,'preparing',?,?,?,?,?)",

@@ -198,7 +198,7 @@ class PostgresStore(Store):
     def recover(self):
         with self.tx() as db:
             # A model or native job may still be settling. Preserve costs/reservations.
-            db.execute("UPDATE runs SET generation=generation+1,status='reconciliation_required',updated=? WHERE status NOT IN ('rolled_back','completed','stopped','failed','budget_reached')",(now(),))
+            db.execute("UPDATE runs SET generation=generation+1,status=CASE WHEN status IN ('stop_pending','rollback_stop_pending') THEN status ELSE 'reconciliation_required' END,updated=? WHERE status NOT IN ('rolled_back','completed','stopped','failed','budget_reached')",(now(),))
 
 
 def cloud_store(root):
