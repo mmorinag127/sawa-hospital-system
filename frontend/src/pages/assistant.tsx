@@ -1,9 +1,18 @@
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
+import type { AxiosRequestConfig } from "axios";
 import DrawingQuestion, {QuestionMap} from "../components/assistant/DrawingQuestion";
 import ResultView from "../components/assistant/ResultView";
 import ShiftReview, {ShiftReviewData} from "../components/assistant/ShiftReview";
+
+const BUSINESS_TIMEOUT = 300000;
+const assistantApi = {
+  post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
+    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|stop|rollback|refresh-usage)|faxes\/[^/]+\/decision)$/.test(url);
+    return apiClient.post<T>(url,data,business ? {...options,timeout:BUSINESS_TIMEOUT} : options);
+  },
+};
 
 type Task = { id: string; domain: string; label: string; description: string; steps: string[]; target_kind?: string; month?: boolean; date?:boolean; default_month?: string };
 type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: string; week: string }; decision?: { message: string }; review?: { id: string; summary: string; sheet: { header?: any[]; fields?: any[]; rows?: any[][] }; original: { id: string; name: string } } };
@@ -29,6 +38,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const pageRef=useRef<HTMLElement>(null);
   const selectedId=useRef<string|undefined>(undefined);
   const initialOpened=useRef(false);
+  const pendingRequests=useRef(0);
   const [choosingTask,setChoosingTask]=useState(true);
   const [loadingTargets,setLoadingTargets]=useState(false);
   const [config, setConfig] = useState<Configuration | null>(null);
@@ -51,6 +61,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [error, setError] = useState("");
   const [pollNotice, setPollNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [controlling,setControlling]=useState(false);
+  const [pendingReply,setPendingReply]=useState<{runId:string;questionId?:string}|null>(null);
+  const [pendingDecision,setPendingDecision]=useState<{runId:string;reviewId:string;faxId?:string}|null>(null);
   const [confirmRollback,setConfirmRollback]=useState(false);
   const [requestKey, setRequestKey] = useState("");
   const [source, setSource] = useState<File | null>(null);
@@ -59,6 +72,15 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   function receiveRun(run: Run) {
     setSelected(run);
     setRuns(rows => rows.map(row => row.id === run.id ? run : row));
+    setPendingReply(pending=>pending?.runId===run.id && (run.status!=="waiting_input" || run.pending_question?.question_id!==pending.questionId) ? null : pending);
+    setPendingDecision(pending=>{
+      if(!pending || pending.runId!==run.id)return pending;
+      const fax=pending.faxId ? run.fax_items?.find(fax=>fax.fax_id===pending.faxId) : undefined;
+      const review=pending.faxId ? fax?.review : run.task_review;
+      const state=pending.faxId ? fax?.state : run.task_review?.state;
+      return ["completed","stopped","rolled_back","rollback_stop_pending","failed","reconciliation_required"].includes(run.status)
+        || review && review.id!==pending.reviewId || state && state!=="awaiting_approval" ? null : pending;
+    });
   }
 
   async function load(id?: string) {
@@ -103,14 +125,33 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
 
   function showError(e: any) { const detail=e?.response?.data?.detail;setError(typeof detail==="string" ? detail : Array.isArray(detail) ? detail.map(item=>item.msg || item.message).filter(Boolean).join("。") : detail?.message || e?.message || "処理を進められませんでした。入力内容を確認してください。"); }
   async function act(fn: () => Promise<void>) {
-    setError(""); setBusy(true);
-    try { await fn(); } catch (e) { showError(e); } finally { setBusy(false); }
+    pendingRequests.current++;setError(""); setBusy(true);
+    try { await fn(); } catch (e) { showError(e); } finally { pendingRequests.current--;setBusy(pendingRequests.current>0); }
+  }
+  async function submitDecision(url:string,data:{review_id:string;approve:boolean;message:string},faxId?:string) {
+    if(!selected)return;
+    setPendingDecision({runId:selected.id,reviewId:data.review_id,faxId});
+    try {await assistantApi.post(url,data);setPendingDecision(null);}
+    catch(e:any) {
+      if(!e.response || e.response.status>=500)return;
+      setPendingDecision(null);throw e;
+    }
+  }
+  async function submitReply(data:{message:string;question_id?:string;option?:string}) {
+    if(!selected)return;
+    const id=selected.id;
+    setPendingReply({runId:id,questionId:data.question_id});
+    try {await assistantApi.post(`/assistant-trial/runs/${id}/reply`,data);setPendingReply(null);}
+    catch(e:any) {
+      if(!e.response || e.response.status>=500)return;
+      setPendingReply(null);throw e;
+    }
   }
   async function send(e: FormEvent) {
     e.preventDefault();
     await act(async () => {
       const key = requestKey || crypto.randomUUID(); setRequestKey(key);
-      const response = await apiClient.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(taskId === "hospital_pending_faxes" ? {} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
+      const response = await assistantApi.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(taskId === "hospital_pending_faxes" ? {} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
       selectedId.current=response.data.id; setSelected(response.data); setRequestKey(""); await refreshAfterCommand(response.data.id);
     });
   }
@@ -118,7 +159,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     if (!selected) return;
     setConfirmRollback(false);
     const id = selected.id;
-    await act(async () => { await apiClient.post(`/assistant-trial/runs/${id}/${action}`,undefined,{timeout:180000}); await refreshAfterCommand(id); });
+    setControlling(true);
+    try {await act(async () => { await assistantApi.post(`/assistant-trial/runs/${id}/${action}`); await refreshAfterCommand(id); });}
+    finally {setControlling(false);}
   }
   const task = tasks.find(t => t.id === taskId && t.domain === domain);
   const targetsReady=taskId==="hospital_pending_faxes" || !!selection && !!targetKeys.length && (task?.target_kind!=="menu" || !!task?.date || !!layoutId);
@@ -127,26 +170,28 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   async function fetchTargets(facility=schoolId) {
     resetTargets();const request=targetRequest.current;
     setLoadingTargets(true);
-    try {const response=await apiClient.post<Selection>(`/assistant-trial/tasks/${taskId}/targets`,{inputs:{...(task?.month ? {month:targetMonth}:{}),...(task?.date && serviceDate ? {service_date:serviceDate}:{}),...(facility && task?.target_kind==="menu" ? {facility_id:Number(facility)}:{}),...(taskId==="shift_absence" ? {absence_date:absenceDate}:{})}});if(request!==targetRequest.current)return;setSelection(response.data);setTargetKeys(task?.date ? response.data.choices.map(x=>x.key):[]);setLayoutId("");setRequestKey("");} catch(e) {if(request===targetRequest.current)showError(e);} finally {if(request===targetRequest.current)setLoadingTargets(false);}
+    try {const response=await assistantApi.post<Selection>(`/assistant-trial/tasks/${taskId}/targets`,{inputs:{...(task?.month ? {month:targetMonth}:{}),...(task?.date && serviceDate ? {service_date:serviceDate}:{}),...(facility && task?.target_kind==="menu" ? {facility_id:Number(facility)}:{}),...(taskId==="shift_absence" ? {absence_date:absenceDate}:{})}});if(request!==targetRequest.current)return;setSelection(response.data);setTargetKeys(task?.date ? response.data.choices.map(x=>x.key):[]);setLayoutId("");setRequestKey("");} catch(e) {if(request===targetRequest.current)showError(e);} finally {if(request===targetRequest.current)setLoadingTargets(false);}
   }
   async function taskDecision(approve:boolean) {
     if (!selected?.task_review) return;
-    await act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/decision`,{review_id:selected.task_review!.id,approve,message:reviewMessage});setReviewMessage("");await refreshAfterCommand(selected.id);});
+    await act(async()=>{await submitDecision(`/assistant-trial/runs/${selected.id}/decision`,{review_id:selected.task_review!.id,approve,message:reviewMessage});setReviewMessage("");await refreshAfterCommand(selected.id);});
   }
   async function download(file: { id: string; name: string }) {
     if (!selected) return;
-    const response = await apiClient.get(`/assistant-trial/runs/${selected.id}/artifacts/${file.id}`, { responseType: "blob" });
+    const response = await apiClient.get(`/assistant-trial/runs/${selected.id}/artifacts/${file.id}`, { responseType: "blob",timeout:BUSINESS_TIMEOUT });
     const url = URL.createObjectURL(response.data); const link = document.createElement("a"); link.href = url; link.download = file.name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
   async function decide(fax: Fax, approve: boolean) {
     if (!selected || !fax.review) return;
-    await act(async () => { await apiClient.post(`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/decision`, { review_id: fax.review!.id, approve, message: corrections[fax.fax_id] || "" }); await refreshAfterCommand(selected.id); });
+    await act(async () => { await submitDecision(`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/decision`, { review_id: fax.review!.id, approve, message: corrections[fax.fax_id] || "" },fax.fax_id); await refreshAfterCommand(selected.id); });
   }
   const terminal=!!selected && ["completed","stopped","rolled_back","failed"].includes(selected.status);
   const awaitingSource=selected?.status==="waiting_input" && selected.task_id==="lunch_import" && !selected.events?.some(event=>event.kind==="source");
   const awaitingReview=selected?.status==="running" && selected.task_review?.state==="awaiting_approval";
   const faxReviews=selected?.fax_items?.filter(fax=>fax.state==="awaiting_approval") || [];
   const question=selected?.status==="waiting_input" ? selected.pending_question : undefined;
+  const decisionPending=!!selected && pendingDecision?.runId===selected.id;
+  const replyPending=!!selected && pendingReply?.runId===selected.id;
   const needsAnswer=selected?.status==="waiting_input" && !awaitingSource;
   const stage=selected ? selected.status==="completed" ? 3 : selected.task_review || selected.fax_items?.some(fax=>!!fax.review) || needsAnswer || awaitingSource ? 2 : 1 : choosingTask ? 0 : 1;
   const attention=!!selected && ["failed","reconciliation_required","budget_reached","stop_pending","rollback_stop_pending"].includes(selected.status);
@@ -169,6 +214,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
     {selected && pollNotice && <p role="status" className="muted">{pollNotice}</p>}
+    {replyPending && <p className="assistant-notice">回答の反映を確認しています。同じ回答は再送していません。</p>}
+      {decisionPending && <p role="status" className="assistant-notice">承認・訂正の反映を確認しています。同じ操作は再送していません。</p>}
     {adminView && config?.providers && <section className="assistant-panel"><h2>エージェントの接続先</h2><p>変更は新しい依頼から適用します。実行中・確認待ちの依頼は元の接続先で続けます。</p><div className="answer-options">{config.providers.map(provider=><button key={provider.id} disabled={busy} aria-pressed={config.provider_id===provider.id} onClick={()=>act(async()=>{await apiClient.put("/assistant-trial/provider",{provider:provider.id});await load(selected?.id);})}>{provider.label}{config.provider_id===provider.id?"（使用中）":""}</button>)}</div>{config.providers.map(provider=><p key={provider.id}>{provider.label}：{provider.missing.length?"未設定："+provider.missing.join("、"):"設定済み"}</p>)}<p className="muted">Geminiの料金は報告トークン数と管理者が設定した単価による概算です。思考トークンを含み、割引・無料枠は適用しません。Claudeは接続先の定価換算値です。請求確定額とは異なります。</p></section>}
     {adminView && config && <section className="assistant-panel"><h2>今月の利用料金</h2><dl className="costs"><div><dt>使用額（概算・定価換算）</dt><dd>{dollars(config.budget.spent_cents)}</dd></div><div><dt>実行中の予約額</dt><dd>{dollars(config.budget.reserved_cents)}</dd></div><div><dt>月次上限</dt><dd>{dollars(config.budget.monthly_cents)}</dd></div><div><dt>利用可能額</dt><dd>{dollars(config.budget.available_cents)}</dd></div></dl><p className="muted">{config.budget.notice} 米ドル表示です。既存OCR等の料金は含みません。</p><form onSubmit={e=>{e.preventDefault();act(async()=>{await apiClient.put("/assistant-trial/budget",{monthly_cents:cents(month)});await load(selected?.id);});}}><label>月次予算（USD）<input value={month} onChange={e=>setMonth(e.target.value)} inputMode="decimal" placeholder={(config.budget.monthly_cents/100).toFixed(2)} required/></label><button className="primary" disabled={busy}>上限を保存する</button></form></section>}
     {!adminView && config && (config.missing.length>0 || (selected ? selected.domains.some(key=>!config.domains[key]?.baseline_ready) : choosingTask ? !Object.values(config.domains).some(value=>value.baseline_ready) : !config.domains[domain]?.baseline_ready)) && <div className="assistant-notice"><strong>試用の準備中です</strong><p>管理者の接続・試用データ設定が完了すると、選んだ作業を開始できます。</p><details><summary>設定状況</summary><p>{config.missing.length ? "接続先が未設定です。" : "接続先は設定済みです。"}</p>{Object.entries(config.domains).map(([key,value])=><p key={key}>{labels[key]}：{value.baseline_ready ? value.data==="empty_schema_no_real_order_test" ? "業務データの準備が必要" : "準備済み" : "未設定"}</p>)}</details></div>}
@@ -192,21 +239,21 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       <div className={terminal ? "next-action finished" : "next-action"} role="status"><span className="next-action-marker" aria-hidden="true">{selected.status==="completed" ? "✓" : needsAnswer || awaitingReview || awaitingSource || faxReviews.length ? "?" : "…"}</span><div><h3>{nextTitle}</h3><p>{selected.status==="completed" ? selected.artifacts?.length ? "保存・出力が終わりました。下の完成ファイルを確認できます。" : "確認が完了しました。内容は下の確認結果と履歴で見ることができます。" : selected.status==="rolled_back" ? "この依頼で行った変更は戻しました。実行履歴は残っています。" : selected.status==="stopped" ? "これ以上の処理は行いません。変更も戻したい場合は「開始前に戻す」を選んでください。" : selected.status==="stopping" ? "追加の業務書込みを停止しました。接続先の停止と利用料金を確認しています。" : awaitingSource ? "選択した学校・対象月の原本を添付してください。" : awaitingReview || faxReviews.length ? "結果を確認し、そのまま進めるか、訂正したい箇所を教えてください。" : needsAnswer ? "回答すると、続きの作業を自動で進めます。" : selected.status==="budget_reached" ? "作業は未完了です。管理画面で利用上限を確認してください。" : ["stop_pending","rollback_stop_pending"].includes(selected.status) ? "業務の書込みは停止済みです。「停止を再確認する」で、接続先の停止を確認できます。" : attention ? "処理は完了していません。下の理由を確認してください。" : "この画面でお待ちください。確認が必要になったら質問が表示されます。"}</p>{attentionReason && <p className="attention-reason">{attentionReason}</p>}</div></div>
       {terminal && renderArtifacts()}
       {adminView && <p>使用額 {dollars(selected.spent)}</p>}
-      {needsAnswer && <section className="answer-panel" aria-label="エージェントからの質問"><p className="process-question-progress" hidden={!question?.process_context}>{question?.process_context?.kind?.startsWith("execution.") ? "時刻・担当者・作業区分の確認" : "調理方法・作業場所の確認"}：{question?.process_context?.answered} / {question?.process_context?.total}{question?.process_context?.kind?.startsWith("execution.") ? "項目" : "工程"}</p><h3>{question?.text || latestAgentText || "確認事項への回答をお願いします"}</h3>{question?.question_map ? <DrawingQuestion key={selected.id+question.question_id} runId={selected.id} questionId={question.question_id!} map={question.question_map} busy={busy} onAnswer={option=>act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:option,question_id:question.question_id,option});await refreshAfterCommand(selected.id);})}/> : <><div className="answer-options">{question?.options?.map(option=><button disabled={busy} key={option} onClick={()=>act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:option,question_id:question.question_id,option});await refreshAfterCommand(selected.id);})}>{option}</button>)}</div>{question?.process_context?.kind!=="grouping" && <form onSubmit={e=>{e.preventDefault();act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:reply,question_id:question?.question_id});setReply("");await refreshAfterCommand(selected.id);});}}><label>{question?.options?.length ? "文章でも回答できます" : "回答"}<textarea value={reply} onChange={e=>setReply(e.target.value)} placeholder="ここに回答を入力してください" required/></label><button className="primary" disabled={busy || !reply.trim()}>回答して続ける</button></form>}</>}</section>}
-      {awaitingSource && <form className="answer-panel" onSubmit={e=>{e.preventDefault();act(async()=>{if(!source || !sourceChecked)throw new Error("原本の学校・対象月を確認してください");const form=new FormData();form.append("file",source);form.append("domain","school-lunch");form.append("binding",JSON.stringify({facility_id:String(selected.task_inputs!.inputs!.facility_id),month:selected.task_inputs!.inputs!.month}));await apiClient.post(`/assistant-trial/runs/${selected.id}/sources`,form);await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:"選択した学校・対象月と原本を照合しました。",question_id:selected.pending_question?.question_id});setSource(null);setSourceChecked(false);await refreshAfterCommand(selected.id);});}}><label>献立・調理手配書の原本<input type="file" accept=".pdf,.xls,.xlsx" required onChange={e=>{setSource(e.target.files?.[0] || null);setSourceChecked(false);}}/></label><p>学校：{selected.task_inputs?.targets?.[0]?.label} ／ 対象月：{selected.task_inputs?.inputs?.month}</p><label className="check-line"><input type="checkbox" checked={sourceChecked} required onChange={e=>setSourceChecked(e.target.checked)}/>原本の学校・対象月が、表示内容と一致しています</label><button className="primary" disabled={busy || !source || !sourceChecked}>原本を添付して続ける</button></form>}
+      {needsAnswer && <section className="answer-panel" aria-label="エージェントからの質問"><p className="process-question-progress" hidden={!question?.process_context}>{question?.process_context?.kind?.startsWith("execution.") ? "時刻・担当者・作業区分の確認" : "調理方法・作業場所の確認"}：{question?.process_context?.answered} / {question?.process_context?.total}{question?.process_context?.kind?.startsWith("execution.") ? "項目" : "工程"}</p><h3>{question?.text || latestAgentText || "確認事項への回答をお願いします"}</h3>{question?.question_map ? <DrawingQuestion key={selected.id+question.question_id} runId={selected.id} questionId={question.question_id!} map={question.question_map} busy={busy || replyPending} onAnswer={option=>act(async()=>{await submitReply({message:option,question_id:question.question_id,option});await refreshAfterCommand(selected.id);})}/> : <><div className="answer-options">{question?.options?.map(option=><button disabled={busy || replyPending} key={option} onClick={()=>act(async()=>{await submitReply({message:option,question_id:question.question_id,option});await refreshAfterCommand(selected.id);})}>{option}</button>)}</div>{question?.process_context?.kind!=="grouping" && <form onSubmit={e=>{e.preventDefault();act(async()=>{await submitReply({message:reply,question_id:question?.question_id});setReply("");await refreshAfterCommand(selected.id);});}}><label>{question?.options?.length ? "文章でも回答できます" : "回答"}<textarea value={reply} onChange={e=>setReply(e.target.value)} placeholder="ここに回答を入力してください" required/></label><button className="primary" disabled={busy || replyPending || !reply.trim()}>回答して続ける</button></form>}</>}</section>}
+      {awaitingSource && <form className="answer-panel" onSubmit={e=>{e.preventDefault();act(async()=>{if(!source || !sourceChecked)throw new Error("原本の学校・対象月を確認してください");const form=new FormData();form.append("file",source);form.append("domain","school-lunch");form.append("binding",JSON.stringify({facility_id:String(selected.task_inputs!.inputs!.facility_id),month:selected.task_inputs!.inputs!.month}));await assistantApi.post(`/assistant-trial/runs/${selected.id}/sources`,form);await submitReply({message:"選択した学校・対象月と原本を照合しました。",question_id:selected.pending_question?.question_id});setSource(null);setSourceChecked(false);await refreshAfterCommand(selected.id);});}}><label>献立・調理手配書の原本<input type="file" accept=".pdf,.xls,.xlsx" required onChange={e=>{setSource(e.target.files?.[0] || null);setSourceChecked(false);}}/></label><p>学校：{selected.task_inputs?.targets?.[0]?.label} ／ 対象月：{selected.task_inputs?.inputs?.month}</p><label className="check-line"><input type="checkbox" checked={sourceChecked} required onChange={e=>setSourceChecked(e.target.checked)}/>原本の学校・対象月が、表示内容と一致しています</label><button className="primary" disabled={busy || !source || !sourceChecked}>原本を添付して続ける</button></form>}
       {selected.task_review && <div className="result-archive"><section className="review-panel" key={selected.task_review.id} aria-label="結果の確認と承認"><h3>{awaitingReview ? "作成した内容" : "確認した内容"}</h3><p>{selected.task_review.summary}</p>{selected.lunch_review && <section className="evidence"><h4>食材ごとの当日の実績</h4><ResultView value={selected.lunch_review} expanded/></section>}{selected.shift_review ? <ShiftReview value={selected.shift_review}/> : selected.task_review.evidence.filter(entry=>!selected.lunch_review || entry.operation!=="lunch_get_process").map((entry,i)=><section className="evidence" key={i}><h4>{({shift_get_run:"勤務表",shift_get_validation:"人員不足・勤務制約",shift_get_constraints:"希望休・勤務条件",shift_get_staff:"職員",shift_get_demands:"必要人数",shift_get_workdays:"勤務日",shift_get_settings:"勤務設定",shift_get_period:"勤務期間",lunch_get_menus:"献立",lunch_get_process:"調理工程",lunch_get_schedules:"工程表",lunch_get_routes:"動線図",lunch_get_procurement:"必要量・在庫・発注案",lunch_get_price_source:"実施価格の計算入力",lunch_get_price_result:"実施価格",lunch_get_price_quantities:"原本の1人量",lunch_get_source_document:"原本の抽出結果",lunch_get_source_review:"原本の照合結果",hospital_get_recognition_review:"原本セルと認識値",hospital_get_fax:"FAXの状態",hospital_get_workflow:"確定注文の状態"} as Record<string,string>)[entry.operation] || "業務情報"}</h4><ResultView value={entry.data} expanded/></section>)}
         {!selected.shift_review && !!selected.task_review.actions.length && <section className="evidence"><h4>承認後に保存する内容</h4>{selected.task_review.actions.map((action,i)=><ResultView key={i} value={action.parameters.body} expanded/>)}</section>}
-        {awaitingReview && <div className="review-decisions"><section className="approval-choice"><h4>この内容でよければ</h4><p className="muted">確認した内容で保存・出力へ進みます。</p><button className="primary" disabled={busy} onClick={()=>taskDecision(true)}>この内容で進める</button></section><form className="correction-panel" onSubmit={e=>{e.preventDefault();taskDecision(false);}}><label>訂正してほしい箇所<textarea value={reviewMessage} onChange={e=>setReviewMessage(e.target.value)} placeholder="訂正が必要なときだけ入力してください" required/></label><button disabled={busy || !reviewMessage.trim()}>訂正を依頼する</button></form></div>}
+        {awaitingReview && <div className="review-decisions"><section className="approval-choice"><h4>この内容でよければ</h4><p className="muted">確認した内容で保存・出力へ進みます。</p><button className="primary" disabled={busy || decisionPending} onClick={()=>taskDecision(true)}>この内容で進める</button></section><form className="correction-panel" onSubmit={e=>{e.preventDefault();taskDecision(false);}}><label>訂正してほしい箇所<textarea value={reviewMessage} onChange={e=>setReviewMessage(e.target.value)} placeholder="訂正が必要なときだけ入力してください" required/></label><button disabled={busy || decisionPending || !reviewMessage.trim()}>訂正を依頼する</button></form></div>}
         {selected.shift_review && awaitingReview && <p className="assistant-notice">承認すると、この勤務表を確定してExcelを出力します。</p>}
         {!awaitingReview && <p className="muted">{({awaiting_approval:"処理状態の確認が必要です",approved:"承認済み",needs_correction:"訂正を依頼しました",stale:"元データが変わったため、再確認が必要です"} as Record<string,string>)[selected.task_review.state]}</p>}
         {selected.task_review.decision?.message && <p>{selected.task_review.decision.message}</p>}
       </section></div>}
-      {!!selected.fax_items?.length && <section className="fax-list"><h3>FAXの処理状況 <small>{selected.fax_items.filter(fax=>fax.state==="completed").length} / {selected.fax_items.length}件完了</small></h3>{[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=><article key={fax.fax_id} className="fax-item"><h4>{fax.snapshot.name}</h4><p>{fax.snapshot.facility} ／ {fax.snapshot.week} ／ {({pending:"処理待ち",processing:"読み取り中",ready:"内容を照合中",awaiting_approval:"内容を確認してください",approved:"確定処理中",needs_correction:"訂正中",completed:"注文確定済み",blocked:"要確認"} as Record<string,string>)[fax.state] || fax.state}</p>{fax.review && <><p>{fax.review.summary}</p><button disabled={busy} onClick={()=>act(()=>download(fax.review!.original))}>原本PDFを開く</button><section><h4>読み取った数量</h4><div className="sheet"><table><thead><tr>{(fax.review.sheet.header || fax.review.sheet.fields || []).map((cell,i)=><th key={i}>{String(cell ?? "")}</th>)}</tr></thead><tbody>{fax.review.sheet.rows?.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j}>{String(cell ?? "")}</td>)}</tr>)}</tbody></table></div></section>{fax.state==="awaiting_approval" && selected.status==="running" && <><button className="primary" disabled={busy} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button><section className="correction-panel"><h4>訂正してほしい箇所がある</h4><label>訂正内容<textarea value={corrections[fax.fax_id] || ""} onChange={e=>setCorrections(c=>({...c,[fax.fax_id]:e.target.value}))}/></label><button disabled={busy || !corrections[fax.fax_id]?.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button></section></>}</>}{fax.decision?.message && <p>{fax.decision.message}</p>}</article>)}</section>}
+      {!!selected.fax_items?.length && <section className="fax-list"><h3>FAXの処理状況 <small>{selected.fax_items.filter(fax=>fax.state==="completed").length} / {selected.fax_items.length}件完了</small></h3>{[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=><article key={fax.fax_id} className="fax-item"><h4>{fax.snapshot.name}</h4><p>{fax.snapshot.facility} ／ {fax.snapshot.week} ／ {({pending:"処理待ち",processing:"読み取り中",ready:"内容を照合中",awaiting_approval:"内容を確認してください",approved:"確定処理中",needs_correction:"訂正中",completed:"注文確定済み",blocked:"要確認"} as Record<string,string>)[fax.state] || fax.state}</p>{fax.review && <><p>{fax.review.summary}</p><button disabled={busy} onClick={()=>act(()=>download(fax.review!.original))}>原本PDFを開く</button><section><h4>読み取った数量</h4><div className="sheet"><table><thead><tr>{(fax.review.sheet.header || fax.review.sheet.fields || []).map((cell,i)=><th key={i}>{String(cell ?? "")}</th>)}</tr></thead><tbody>{fax.review.sheet.rows?.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j}>{String(cell ?? "")}</td>)}</tr>)}</tbody></table></div></section>{fax.state==="awaiting_approval" && selected.status==="running" && <><button className="primary" disabled={busy || decisionPending} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button><section className="correction-panel"><h4>訂正してほしい箇所がある</h4><label>訂正内容<textarea value={corrections[fax.fax_id] || ""} onChange={e=>setCorrections(c=>({...c,[fax.fax_id]:e.target.value}))}/></label><button disabled={busy || decisionPending || !corrections[fax.fax_id]?.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button></section></>}</>}{fax.decision?.message && <p>{fax.decision.message}</p>}</article>)}</section>}
       {!terminal && renderArtifacts()}
       {(terminal || selected.status==="rollback_stop_pending") && !adminView && <div className="assistant-footer"><span className="muted">この作業の内容は履歴から確認できます。</span><button className="primary" onClick={newTask}>別の作業を始める</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{selected.conversation?.length ? `（${selected.conversation.length}件）` : ""}</summary><div role="log">{selected.conversation?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
-      <div className="work-controls"><button disabled={busy || terminal || selected.status==="stopping"} onClick={()=>control("stop")}>{["stop_pending","rollback_stop_pending"].includes(selected.status) ? "停止を再確認する" : "作業を停止する"}</button><button className="quiet" disabled={busy || ["rolled_back","rollback_stop_pending"].includes(selected.status)} onClick={()=>setConfirmRollback(true)}>開始前に戻す</button>{adminView && <button onClick={()=>control("refresh-usage")} disabled={busy}>料金を再取得</button>}</div>
-      {confirmRollback && <div className="rollback-confirmation" role="alert"><h3>この依頼の変更を、開始前へ戻しますか？</h3><p>処理を停止し、この依頼で保存した内容を戻します。履歴と利用料金は残ります。</p><div className="answer-options"><button className="danger" disabled={busy} onClick={()=>control("rollback")}>開始前へ戻す</button><button disabled={busy} onClick={()=>setConfirmRollback(false)}>キャンセル</button></div></div>}
+      <div className="work-controls"><button disabled={controlling || terminal || selected.status==="stopping"} onClick={()=>control("stop")}>{["stop_pending","rollback_stop_pending"].includes(selected.status) ? "停止を再確認する" : "作業を停止する"}</button><button className="quiet" disabled={controlling || ["rolled_back","rollback_stop_pending"].includes(selected.status)} onClick={()=>setConfirmRollback(true)}>開始前に戻す</button>{adminView && <button onClick={()=>control("refresh-usage")} disabled={busy}>料金を再取得</button>}</div>
+      {confirmRollback && <div className="rollback-confirmation" role="alert"><h3>この依頼の変更を、開始前へ戻しますか？</h3><p>処理を停止し、この依頼で保存した内容を戻します。履歴と利用料金は残ります。</p><div className="answer-options"><button className="danger" disabled={controlling} onClick={()=>control("rollback")}>開始前へ戻す</button><button disabled={controlling} onClick={()=>setConfirmRollback(false)}>キャンセル</button></div></div>}
       <details className="technical-details"><summary>処理の詳細</summary><ol>{selected.events?.map(event=><li key={event.id}>{event.kind==="agent.message" ? event.payload.content?.filter((c:any)=>c.type==="text").map((c:any,i:number)=><p key={i}>{c.text}</p>) : event.kind==="tool_result" ? <p>{event.payload.tool}：{event.payload.result?.error || event.payload.result?.question || (event.payload.result?.ok===false ? "APIが処理を拒否しました" : "実行結果を記録しました")}</p> : event.kind==="completion_evidence" ? <p>{event.payload.summary}</p> : ["notice","error","operator_reply","rollback"].includes(event.kind) ? <p>{event.payload.message || event.payload.notice}</p> : null}</li>)}</ol></details>
     </section>}
     <details className="assistant-panel history-panel" open={adminView}><summary>作業の履歴 <span>{runs.length}件</span></summary>{!runs.length && <p className="muted">まだ依頼した作業はありません。</p>}<ul>{runs.map(run=><li key={run.id}><button className="history-row" disabled={busy} onClick={()=>openRun(run.id)}><span><strong>{run.instruction}</strong><small>{run.domains.map(id=>labels[id]).join(" ／ ")}</small></span><span className="status-tag">{states[run.status] || run.status}{adminView ? ` · ${run.provider==="gemini"?"Gemini・概算":"Claude・定価換算"} ${dollars(run.spent)}` : ""}</span></button></li>)}</ul></details>

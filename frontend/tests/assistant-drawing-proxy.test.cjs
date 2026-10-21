@@ -8,8 +8,13 @@ test('authenticated drawing proxy preserves question identity and source respons
  assert.equal(res.code,200);assert.equal(new URL(seen[1]).searchParams.get('question_id'),'question-3');assert.equal(res.body.toString(),'<svg/>');assert.equal(headers['cache-control'],'no-store');assert.equal(headers['x-content-type-options'],'nosniff');assert.match(headers['content-security-policy'],/sandbox/);
 });
 
-test('only stop rollback and usage checks receive the longer authenticated deadline',async()=>{
- for(const [method,segments,expected] of [['POST',['runs','r1','stop'],180000],['POST',['runs','r1','rollback'],180000],['POST',['runs','r1','refresh-usage'],180000],['POST',['runs','r1','reply'],60000],['GET',['runs','r1','stop'],60000]]){
+test('business mutations and artifact reads share a deadline while authentication stays bounded',async()=>{
+ for(const [method,segments,expected] of [
+  ['POST',['runs','r1','stop'],270000],['POST',['runs','r1','rollback'],270000],['POST',['runs','r1','refresh-usage'],270000],
+  ['POST',['runs','r1','reply'],270000],['POST',['runs','r1','decision'],270000],['POST',['runs','r1','faxes','f1','decision'],270000],
+  ['POST',['runs'],60000],['POST',['tasks','task1','targets'],60000],['PUT',['budget'],60000],['PUT',['provider'],60000],
+  ['GET',['runs','r1','artifacts','a1'],270000],['GET',['runs','r1','stop'],60000],['GET',['runs','r1'],60000]
+ ]){
   const exports={},timeouts=[],seen=[];
   const source=fs.readFileSync(require('node:path').resolve(__dirname,'../src/pages/api/assistant-trial/[[...path]].ts'),'utf8');
   const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
