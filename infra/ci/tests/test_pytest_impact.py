@@ -143,6 +143,13 @@ def test_env():
         self.env.update({key: "second-run" for key in names})
         self.assertEqual(len(self.run_tests()["reused"]), 3)
 
+    def test_environment_key_enumeration_always_executes(self):
+        self.env["INVOCATION_ID"] = "first-run"
+        self.write("test_example.py", "import os\ndef test_keys():\n    assert 'INVOCATION_ID' in list(os.environ)\n")
+        self.run_tests()
+        self.env.pop("INVOCATION_ID")
+        self.assertIn("test_example.py::test_keys", self.run_tests(1)["selected"])
+
     def test_each_runner_identity_read_always_executes(self):
         names = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
                  "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID")

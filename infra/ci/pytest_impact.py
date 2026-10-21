@@ -348,6 +348,7 @@ def pytest_terminal_summary(terminalreporter):
 # Observe conftest/module import inputs too, before sessionstart and collection.
 sys.addaudithook(audit)
 _environment_getitem = os._Environ.__getitem__
+_environment_iter = os._Environ.__iter__
 
 
 def observed_environment(self, key):
@@ -359,3 +360,12 @@ def observed_environment(self, key):
 
 
 os._Environ.__getitem__ = observed_environment
+
+
+def observed_environment_iter(self):
+    if not BUSY and not GLOBAL_UNSAFE and not framework_read():
+        record_unsafe("volatile-environment")
+    return _environment_iter(self)
+
+
+os._Environ.__iter__ = observed_environment_iter
