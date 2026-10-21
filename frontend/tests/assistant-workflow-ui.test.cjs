@@ -9,13 +9,13 @@ const tasks=[
  {id:'lunch_import',domain:'school-lunch',label:'献立・調理手配書を取り込む',description:'月次の原本を取り込みます',steps:[],month:true,target_kind:'school'}];
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
-async function mount({initial=null,targets,adminView=false,beforeGet}={}){
+async function mount({initial=null,targets,adminView=false,beforeGet,beforePost}={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/assistant',pretendToBeVisual:true});const saved=new Map();
  for(const key of ['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','HTMLInputElement','HTMLSelectElement','HTMLTextAreaElement','FormData']){saved.set(key,Object.getOwnPropertyDescriptor(global,key));Object.defineProperty(global,key,{configurable:true,writable:true,value:dom.window[key]});}
  saved.set('IS_REACT_ACT_ENVIRONMENT',Object.getOwnPropertyDescriptor(global,'IS_REACT_ACT_ENVIRONMENT'));global.IS_REACT_ACT_ENVIRONMENT=true;
  const React=require('react'),{createRoot}=require('react-dom/client');const intervals=[],calls=[],cache=new Map();let run=initial;
- const api={async get(url,options){calls.push({method:'get',url});if(beforeGet)await beforeGet(url);if(url.includes('/question-drawings/'))return {data:new Blob(['<svg/>'],{type:'image/svg+xml'})};if(url===base+'/config')return {data:config};if(url===base+'/tasks')return {data:tasks};if(url===base+'/budget')return {data:config.budget};if(url===base+'/runs')return {data:run?[run]:[]};if(url===base+'/runs/r1')return {data:structuredClone(run)};throw Error(url);},async post(url,body,options){calls.push({method:'post',url,options,body:JSON.parse(JSON.stringify(body||{}))});if(url.endsWith('/targets'))return {data:await(targets?targets(url,body):{selection_id:'s1',choices:[{key:'2026-11',label:'11月の勤務計画',data:{}}],schools:[],layouts:[]})};if(url===base+'/runs'){run=makeRun();return {data:structuredClone(run)};}if(url.endsWith('/reply')){run={...run,status:'running',pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'作成した勤務表を確認してください',evidence:[{operation:'shift_get_run',data:{assignments:[{staff_name:'合成人員',work_date:'2026-11-02',position:'担当',quantity:0}]}},{operation:'shift_get_constraints',data:{rows:[{reason:'全件表示の確認'}]}}],actions:[]}};return {data:run};}if(url.endsWith('/decision')){run={...run,status:body.approve?'completed':'running',task_review:{...run.task_review,state:body.approve?'approved':'needs_correction'},artifacts:body.approve?[{id:'a1',name:'勤務表.xlsx',size:1000}]:[]};return {data:run};}if(url.endsWith('/stop')){run={...run,status:'stopped'};return {data:run};}if(url.endsWith('/rollback')){run={...run,status:'rolled_back',task_review:null};return {data:run};}throw Error(url);}};
- function load(file){if(cache.has(file))return cache.get(file);const exports={};cache.set(file,exports);const source=fs.readFileSync(file,'utf8');const code=ts.transpileModule(source,{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(code,{exports,require(name){if(name==='next/link')return {__esModule:true,default:({href,children,...props})=>React.createElement('a',{href,...props},children)};if(name.endsWith('/apiClient'))return {apiClient:api};if(name.startsWith('.'))return load(path.resolve(path.dirname(file),name)+'.tsx');return require(name);},setTimeout,clearTimeout,setInterval(fn){intervals.push(fn);return intervals.length;},clearInterval(){},crypto:require('node:crypto').webcrypto,URL,FormData:dom.window.FormData,console});return exports;}
+ const api={async get(url,options){calls.push({method:'get',url,options});if(beforeGet)await beforeGet(url);if(url.includes('/artifacts/'))return {data:new Blob(['synthetic artifact'])};if(url.includes('/question-drawings/'))return {data:new Blob(['<svg/>'],{type:'image/svg+xml'})};if(url===base+'/config')return {data:config};if(url===base+'/tasks')return {data:tasks};if(url===base+'/budget')return {data:config.budget};if(url===base+'/runs')return {data:run?[run]:[]};if(url===base+'/runs/r1')return {data:structuredClone(run)};throw Error(url);},async post(url,body,options){calls.push({method:'post',url,options,body:JSON.parse(JSON.stringify(body||{}))});if(beforePost){const result=await beforePost(url,body,options);if(result)return result;}if(url.endsWith('/targets'))return {data:await(targets?targets(url,body):{selection_id:'s1',choices:[{key:'2026-11',label:'11月の勤務計画',data:{}}],schools:[],layouts:[]})};if(url===base+'/runs'){run=makeRun();return {data:structuredClone(run)};}if(url.endsWith('/reply')){run={...run,status:'running',pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'作成した勤務表を確認してください',evidence:[{operation:'shift_get_run',data:{assignments:[{staff_name:'合成人員',work_date:'2026-11-02',position:'担当',quantity:0}]}},{operation:'shift_get_constraints',data:{rows:[{reason:'全件表示の確認'}]}}],actions:[]}};return {data:run};}if(url.endsWith('/decision')){run={...run,status:body.approve?'completed':'running',task_review:{...run.task_review,state:body.approve?'approved':'needs_correction'},artifacts:body.approve?[{id:'a1',name:'勤務表.xlsx',size:1000}]:[]};return {data:run};}if(url.endsWith('/stop')){run={...run,status:'stopped'};return {data:run};}if(url.endsWith('/rollback')){run={...run,status:'rolled_back',task_review:null};return {data:run};}throw Error(url);}};
+ function load(file){if(cache.has(file))return cache.get(file);const exports={};cache.set(file,exports);const source=fs.readFileSync(file,'utf8');const code=ts.transpileModule(source,{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(code,{exports,require(name){if(name==='next/link')return {__esModule:true,default:({href,children,...props})=>React.createElement('a',{href,...props},children)};if(name.endsWith('/apiClient'))return {apiClient:api};if(name.startsWith('.'))return load(path.resolve(path.dirname(file),name)+'.tsx');return require(name);},setTimeout(fn,delay){const timer=setTimeout(fn,delay);if(delay>=60000)timer.unref();return timer;},clearTimeout,setInterval(fn){intervals.push(fn);return intervals.length;},clearInterval(){},crypto:require('node:crypto').webcrypto,URL,FormData:dom.window.FormData,console});return exports;}
  const screen=load(path.resolve(__dirname,'../src/pages/assistant.tsx'));const root=createRoot(document.getElementById('root'));const settle=async(fn=()=>{})=>React.act(async()=>{await fn();await new Promise(r=>setTimeout(r,0));});
  api.put=async(url,body)=>{calls.push({method:'put',url,body:JSON.parse(JSON.stringify(body))});if(url.endsWith('/provider'))config.provider_id=body.provider;return {data:config};};
  await settle(()=>root.render(React.createElement(screen.AssistantScreen,{adminView})));
@@ -233,7 +233,7 @@ test('pending FAX runs without selection targets render and retain stop and roll
 test('stop uses a control deadline and stopping never promises business progress',async()=>{
  const h=await mount({initial:makeRun('running')});try{
   await h.click(h.button('作業を停止する'));
-  assert.equal(h.calls.find(c=>c.url.endsWith('/stop')).options.timeout,180000);
+  assert.equal(h.calls.find(c=>c.url.endsWith('/stop')).options.timeout,300000);
   h.setRun({...h.run,status:'stopping'});await h.poll();
   assert.match(h.document.body.textContent,/作業の停止を確認しています/);
   assert.match(h.document.body.textContent,/追加の業務書込みを停止しました/);
@@ -248,5 +248,86 @@ test('restored request can start another task while remote cost uncertainty rema
   await h.click(h.button('別の作業を始める'));
   assert.match(h.document.body.textContent,/どの作業を行いますか/);
   assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+ }finally{await h.close();}
+});
+
+test('uncertain approval is reconciled by polling without a second submission or false failure',async()=>{
+ const initial={...makeRun('running'),pending_question:null,task_review:{id:'review-unknown',state:'awaiting_approval',summary:'確認',evidence:[],actions:[]}};
+ const h=await mount({initial,beforePost:async url=>{if(url.endsWith('/decision'))throw Object.assign(new Error('timeout'),{code:'ECONNABORTED'});}});
+ try{
+  await h.click(h.button('この内容で進める'));
+  assert.match(h.document.body.textContent,/同じ操作は再送していません/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.equal(h.button('この内容で進める').disabled,true);
+  assert.equal(h.button('作業を停止する').disabled,false);
+  assert.equal(h.calls.find(c=>c.url.endsWith('/decision')).options.timeout,300000);
+  h.setRun({...initial,status:'completed',task_review:{...initial.task_review,state:'approved'}});await h.poll();
+  assert.doesNotMatch(h.document.body.textContent,/同じ操作は再送/);
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
+ }finally{await h.close();}
+});
+
+test('FAX approval timeout preserves its review identity and clears only after saved decision',async()=>{
+ const fax={fax_id:'fax1',state:'awaiting_approval',snapshot:{name:'synthetic.pdf',facility:'合成施設',week:'合成試験週'},review:{id:'fax-review',summary:'原本照合済み',sheet:{fields:['数量'],rows:[[20]]},original:{id:'original',name:'synthetic.pdf'}}};
+ const initial={...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],task_inputs:{},pending_question:null,fax_items:[fax]};
+ const h=await mount({initial,beforePost:async url=>{if(url.endsWith('/decision'))throw {response:{status:503}};}});
+ try{
+  await h.click(h.button('この内容で確定へ進む'));
+  assert.equal(h.button('この内容で確定へ進む').disabled,true);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.equal(h.calls.find(c=>c.url.endsWith('/decision')).body.review_id,'fax-review');
+  h.setRun({...initial,fax_items:[{...fax,state:'approved',decision:{approve:true}}]});await h.poll();
+  assert.doesNotMatch(h.document.body.textContent,/同じ操作は再送/);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
+ }finally{await h.close();}
+});
+
+test('a rejected approval remains editable and is not labelled as an unknown outcome',async()=>{
+ const initial={...makeRun('running'),pending_question:null,task_review:{id:'review-rejected',state:'awaiting_approval',summary:'確認',evidence:[],actions:[]}};
+ const h=await mount({initial,beforePost:async url=>{if(url.endsWith('/decision'))throw {response:{status:422,data:{detail:'食数を確認してください'}}};}});
+ try{
+  await h.click(h.button('この内容で進める'));assert.match(h.document.querySelector('.assistant-error').textContent,/食数を確認/);
+  assert.equal(h.button('この内容で進める').disabled,false);assert.doesNotMatch(h.document.body.textContent,/同じ操作は再送/);
+ }finally{await h.close();}
+});
+
+test('stop stays available during an in-flight answer without clearing other outstanding work',async()=>{
+ let release;
+ const h=await mount({initial:makeRun(),beforePost:async url=>{if(url.endsWith('/reply')){await new Promise(r=>release=r);return {data:{}};}}});
+ try{
+  await h.click(h.button('登録内容で進める'));assert.equal(h.button('作業を停止する').disabled,false);
+  await h.click(h.button('作業を停止する'));assert.match(h.document.body.textContent,/作業を停止しました/);
+  assert.equal(h.button('開始前に戻す').disabled,false);
+  release();await h.settle();assert.match(h.document.body.textContent,/作業を停止しました/);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/reply')).length,1);assert.equal(h.calls.filter(c=>c.url.endsWith('/stop')).length,1);
+ }finally{if(release)release();await h.close();}
+});
+
+test('artifact retrieval uses the business deadline',async()=>{
+ const h=await mount({initial:{...makeRun('completed'),artifacts:[{id:'a1',name:'帳票.xlsx',size:100}]}});
+ try{
+  h.document.defaultView.HTMLAnchorElement.prototype.click=()=>{};
+  await h.click(h.button('翌月のシフト案を作るシフト完了'));
+  await h.click(h.button('ダウンロード'));
+  assert.equal(h.calls.find(c=>c.url.endsWith('/artifacts/a1')).options.timeout,300000);
+ }finally{await h.close();}
+});
+
+
+test('unknown answer is reconciled without resending while stop remains usable',async()=>{
+ const initial=makeRun();
+ const h=await mount({initial,beforePost:async url=>{if(url.endsWith('/reply'))throw {response:{status:503}};}});
+ try{
+  await h.click(h.button('登録内容で進める'));
+  assert.match(h.document.body.textContent,/同じ回答は再送していません/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.equal(h.button('登録内容で進める').disabled,true);
+  assert.equal(h.button('回答して続ける').disabled,true);
+  assert.equal(h.button('作業を停止する').disabled,false);
+  h.setRun({...initial,pending_question:{...initial.pending_question,question_id:'question-2',text:'次の確認',options:['次の回答']}});await h.poll();
+  assert.doesNotMatch(h.document.body.textContent,/同じ回答は再送/);
+  assert.equal(h.button('次の回答').disabled,false);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/reply')).length,1);
  }finally{await h.close();}
 });

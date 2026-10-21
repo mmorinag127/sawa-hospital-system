@@ -32,10 +32,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username || endpoint.password || (endpoint.protocol === "http:" && !["127.0.0.1", "localhost"].includes(endpoint.hostname))) {
     res.status(503).json({ detail: "試用サービスの接続先設定が不正です" }); return;
   }
-  const isControl = req.method === "POST" && segments.length === 3 && segments[0] === "runs" && ["stop","rollback","refresh-usage"].includes(segments[2]);
+  const isBusinessRequest = segments[0] === "runs" && (
+    req.method === "POST" && (segments.length === 3 && ["reply","decision","stop","rollback","refresh-usage"].includes(segments[2])
+      || segments.length === 5 && segments[2] === "faxes" && segments[4] === "decision")
+    || req.method === "GET" && segments.length === 4 && segments[2] === "artifacts"
+  );
   const response = await fetch(`${target.replace(/\/$/, "")}/${segments.join("/")}?${query}`, {
     method: req.method, headers: { "X-Trial-Token": process.env.SAWA_TRIAL_WEB_TOKEN, Authorization: token, ...(req.headers["content-type"] ? { "Content-Type": req.headers["content-type"] } : {}) },
-    body: chunks.length ? Buffer.concat(chunks) : undefined, signal: AbortSignal.timeout(isControl ? 180000 : 60000), redirect: "error",
+    body: chunks.length ? Buffer.concat(chunks) : undefined, signal: AbortSignal.timeout(isBusinessRequest ? 270000 : 60000), redirect: "error",
   });
   res.status(response.status);
   for (const key of ["content-type", "content-disposition", "x-content-sha256", "cache-control", "content-security-policy", "x-content-type-options"]) { const value = response.headers.get(key); if (value) res.setHeader(key, value); }
