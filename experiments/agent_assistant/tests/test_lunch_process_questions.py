@@ -252,3 +252,25 @@ def test_grouping_question_is_stale_after_source_change_and_cannot_answer_after_
         assert 'cook' not in tools.flow.questions.state(run)['documents'][0]['work_groups']
         assert not native.writes
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('legacy_locations',[{}, {'旧台': [.1,.2]}])
+def test_canonical_drawing_equipment_does_not_require_legacy_layout_points(tmp_path,legacy_locations):
+    async def scenario():
+        store,native,tools,run=setup(tmp_path)
+        native.data['/api/school-lunch/route-diagrams/layouts'][0]['locations']=legacy_locations
+        q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'canonical-question')
+        assert q.get('waiting_input'),q
+        assert '下処理台1' in q['options'] and '旧台' not in q['options']
+        assert q.get('question_map',{}).get('hotspots'),q
+        for index,label in enumerate(['下処理台1','下処理台2','一緒に調理しました','回転釜B']):
+            if index:q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'canonical-q'+str(index))
+            await reply(tools,run,q,label)
+        state=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'canonical-ready')
+        assert state['complete']
+        for index,parameters in enumerate(state['process_saves']):
+            saved=await tools.execute(run['id'],0,'lunch_save_process',{'parameters':parameters},'canonical-save'+str(index))
+            assert saved.get('ok'),saved
+        process=native.data['/api/school-lunch/menu-executions/101/process']['document']
+        assert process['steps'][0]['equipment']['id']=='table-1'
+    asyncio.run(scenario())

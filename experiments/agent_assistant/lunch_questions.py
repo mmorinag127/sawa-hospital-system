@@ -80,7 +80,7 @@ class LunchQuestions:
         if not inputs.get('layout_id'): raise Conflict('使用する図面を先に回答してください')
         layouts = await self.flow.read(run, 'lunch_get_layouts', {'query': query})
         layout = next((x for x in layouts if x['id'] == inputs['layout_id'] and x['version'] == inputs['layout_version']), None)
-        if not layout or not layout.get('locations'): raise Conflict('選択した図面の作業場所が未登録、または図面が変更されています')
+        if not layout: raise Conflict('選択した図面が見つからない、または図面が変更されています')
         menus = await self.flow.read(run, 'lunch_get_menus', {'query': query})
         expected = {str(t['data']['id']): t['data']['version'] for t in context['targets']}
         actual = {str(m['id']): m['version'] for m in menus if m['service_date'] == inputs['service_date']}
@@ -193,7 +193,7 @@ class LunchQuestions:
                     item['work_groups'][step['id']] = work
                 index, group = next((i,g) for i,g in enumerate(work['groups']) if 'equipment' not in g)
                 equipment = step.get('equipment') or {}; kind = equipment.get('type')
-                candidates = [x for x in template['equipment'] if x.get('type') and (not kind or x['type'] == kind) and x['name'] in state['sources']['layout']['locations']]
+                candidates = [x for x in template['equipment'] if x.get('type') and (not kind or x['type'] == kind)]
                 choices = [{'value': x, 'label': x['name'] if sum(c['name'] == x['name'] for c in candidates) == 1 else f"{x['name']}（ID:{x['id']}）"} for x in candidates]
                 picture = await self.drawing(run, item['menu_id'], selected)
                 geometry = {e['id']: e for e in picture['equipment']}
