@@ -122,7 +122,20 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     try { await load(id); setPollNotice(""); }
     catch { setPollNotice("進捗を取得できませんでした。再確認しています。作業は再送していません。"); }
   }
-  useEffect(() => { load().catch(showError); }, []);
+  useEffect(() => {
+    let active=true,timer:ReturnType<typeof setTimeout>;
+    async function initialLoad(){
+      try {await load();if(active)setPollNotice("");}
+      catch(e:any){
+        if(!active)return;
+        if(e.response && e.response.status<500){showError(e);return;}
+        setPollNotice("作業一覧を再確認しています。業務操作は再送していません。");
+        timer=setTimeout(initialLoad,5000);
+      }
+    }
+    void initialLoad();
+    return ()=>{active=false;clearTimeout(timer);};
+  }, []);
   useEffect(() => {
     setPollNotice("");
     if (!selected) return;
@@ -251,7 +264,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   return <main className="assistant-page" ref={pageRef}>
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
-    {selected && pollNotice && <p role="status" className="muted">{pollNotice}</p>}
+    {pollNotice && <p role="status" className="muted">{pollNotice}</p>}
     {pendingCreate && <p className="assistant-notice">依頼の受付を確認しています。同じ依頼は再送していません。</p>}
     {replyPending && <p className="assistant-notice">回答の反映を確認しています。同じ回答は再送していません。</p>}
       {decisionPending && <p role="status" className="assistant-notice">承認・訂正の反映を確認しています。同じ操作は再送していません。</p>}
