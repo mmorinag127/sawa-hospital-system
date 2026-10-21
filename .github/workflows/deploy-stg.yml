@@ -445,12 +445,12 @@ jobs:
               test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$OCR_MANIFEST$OCR_EXISTING_RUN$MENU_MANIFEST$REVIEW_ORDER$OUTPUT_ORDER$OUTPUT_DATE"
               test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
               test -z "$CONTACT_REPLAY" || test "$CONTACT_REPLAY" = false
-              test "$DEMAND_DIAGNOSTIC_JSON" != true
+              test "${DEMAND_DIAGNOSTIC_JSON:-}" != true
               ;;
             false:false|:null|:) ;;
             *) echo "invalid_diagnostic_flag" >&2; exit 1 ;;
           esac
-          case "$DEMAND_DIAGNOSTIC_JSON" in
+          case "${DEMAND_DIAGNOSTIC_JSON:-}" in
             true)
               test "$GITHUB_EVENT_NAME" = workflow_dispatch
               test "${DEPLOY_MODE:-normal}" = normal
