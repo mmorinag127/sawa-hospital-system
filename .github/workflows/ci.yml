@@ -63,6 +63,7 @@ jobs:
       PYTEST_ADDOPTS: -p pytest_impact --testmon
       SAWA_IMPACT_ROOT: ${{ github.workspace }}
       SAWA_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}
+      SAWA_IMPACT_SPLIT_RUNS: '1'
       TESTMON_DATAFILE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}/testmon.sqlite
       SAWA_IMPACT_FULL: ${{ (inputs.full_tests || startsWith(github.ref, 'refs/heads/release/prod-')) && '1' || '0' }}
     steps:
@@ -242,7 +243,7 @@ jobs:
         with:
           name: test-impact-${{ matrix.suite }}
           include-hidden-files: true
-          path: .ci-impact/${{ matrix.suite }}/selection.json
+          path: .ci-impact/${{ matrix.suite }}/**/selection.json
       - name: Upload backend logs
         if: always()
         uses: actions/upload-artifact@v4

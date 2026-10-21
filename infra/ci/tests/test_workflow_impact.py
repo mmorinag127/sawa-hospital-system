@@ -40,6 +40,13 @@ class WorkflowImpact(unittest.TestCase):
             self.assertNotIn("if", step)
             self.assertNotIn("NODE_OPTIONS", step.get("env", {}))
 
+    def test_multiple_backend_pytest_commands_keep_separate_reports(self):
+        backend = self.jobs["backend"]
+        self.assertEqual(backend["env"]["SAWA_IMPACT_SPLIT_RUNS"], "1")
+        artifact = next(s for s in backend["steps"] if s.get("name") == "Upload per-test selection report")
+        self.assertEqual(artifact["with"]["path"], ".ci-impact/${{ matrix.suite }}/**/selection.json")
+        self.assertEqual(artifact["if"], "always()")
+
     def test_cache_key_is_identical_before_and_after_generated_bytecode(self):
         for name in ("backend", "frontend"):
             steps = self.jobs[name]["steps"]

@@ -74,6 +74,34 @@ def test_data():
         self.assertIn("test_example.py::test_data", changed["selected"])
         self.assertEqual(changed["reasons"]["test_example.py::test_data"], "file-input-changed")
 
+    def test_separate_invocations_reuse_independently_and_keep_each_report(self):
+        self.env["SAWA_IMPACT_SPLIT_RUNS"] = "1"
+        self.write("test_other.py", "from pathlib import Path\ndef test_other():\n assert Path('other.txt').read_text() == 'original'\n")
+        self.write("other.txt", "original")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        def run(name, *, report_name, expected=0):
+            result = subprocess.run([sys.executable, "-m", "pytest", "-p", "testmon.pytest_testmon",
+                "-p", "pytest_impact", "--testmon", "-q", name,
+                "--junitxml=" + str(self.root / report_name)],
+                cwd=self.root, env=self.env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, expected, (result.stdout + result.stderr)[-6000:])
+        run("test_example.py", report_name="first.xml")
+        run("test_other.py", report_name="second.xml")
+        run("test_example.py", report_name="different-first.xml")
+        run("test_other.py", report_name="different-second.xml")
+        reports = [json.loads(path.read_text()) for path in self.state.glob("*/selection.json")]
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(sorted(len(report["reused"]) for report in reports), [1, 3])
+        self.assertTrue(all(not report["selected"] for report in reports))
+        self.write("other.txt", "changed")
+        run("test_other.py", report_name="changed.xml", expected=1)
+        reports = [json.loads(path.read_text()) for path in self.state.glob("*/selection.json")]
+        changed = next(report for report in reports if report["selected"])
+        self.assertEqual(changed["selected"], ["test_other.py::test_other"])
+        self.assertEqual(changed["reasons"]["test_other.py::test_other"], "file-input-changed")
+        unchanged = next(report for report in reports if report["reused"])
+        self.assertEqual(len(unchanged["reused"]), 3)
+
     def test_conftest_import_input_change_is_not_hidden(self):
         self.write("conftest.py", """from pathlib import Path
 import pytest
