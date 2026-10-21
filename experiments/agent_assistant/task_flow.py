@@ -99,7 +99,7 @@ class TaskFlow:
         if spec.get('month'):
             month_bounds(inputs.get('month'))
         if inputs.get('facility_id') is not None and (type(inputs['facility_id']) is not int or inputs['facility_id']<=0): raise ValueError('学校を一覧から選択してください')
-        if spec.get('date'):
+        if spec.get('date') and inputs.get('service_date') is not None:
             if not isinstance(inputs.get('service_date'),str): raise ValueError('対象日を選択してください')
             day=date.fromisoformat(inputs['service_date'])
             if day.isoformat()!=inputs['service_date']: raise ValueError('対象日はYYYY-MM-DDで指定してください')
@@ -155,7 +155,7 @@ class TaskFlow:
                 schools = rows(await self.read(run,'lunch_get_schools'))
                 if kind == 'school':
                     choices = [dict(key=str(x['id']),label=x['name'],data=x) for x in schools]
-                elif inputs.get('facility_id'):
+                elif inputs.get('facility_id') and inputs.get('month'):
                     if str(inputs['facility_id']) not in {str(x['id']) for x in schools}:
                         raise Conflict('一覧にある学校を選択してください')
                     query = {'facility_id':int(inputs['facility_id']),'month':inputs['month']}
@@ -177,7 +177,7 @@ class TaskFlow:
             self.tools.authorizations.pop(run['id'],None)
 
     def selection(self, task_id, owner, selection_id, keys, layout_id=None):
-        with self.store.tx() as db:
+        with self.store.read() as db:
             row = db.execute('SELECT * FROM selections WHERE id=? AND owner=? AND task_id=?',(selection_id,owner,task_id)).fetchone()
         if not row or not keys or len(keys) != len(set(keys)):
             raise ValueError('対象一覧から作業対象を選択してください')
@@ -221,7 +221,7 @@ class TaskFlow:
         return {'ok':True,'layout':layout}
 
     def review(self, run_id):
-        with self.store.tx() as db:
+        with self.store.read() as db:
             row = db.execute('SELECT payload FROM task_reviews WHERE run_id=?',(run_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
@@ -230,7 +230,7 @@ class TaskFlow:
             db.execute('INSERT INTO task_reviews VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET payload=excluded.payload', (run_id,json.dumps(review,ensure_ascii=False)))
 
     def commands(self, run_id):
-        with self.store.tx() as db:
+        with self.store.read() as db:
             data = db.execute("SELECT rowid,* FROM commands WHERE run_id=? AND status='done'",(run_id,)).fetchall()
         return [{**dict(x),'request':json.loads(x['request']),'result':json.loads(x['result'])} for x in data]
 
@@ -486,7 +486,7 @@ class TaskFlow:
             raise Conflict('依頼は停止されました')
         if not approve and not message.strip():
             raise ValueError('訂正してほしい箇所を入力してください')
-        with self.store.tx() as db:
+        with self.store.read() as db:
             last_command=db.execute('SELECT COALESCE(MAX(rowid),0) FROM commands WHERE run_id=?',(run['id'],)).fetchone()[0]
         review.update(state='approved' if approve else 'needs_correction',decision=decision,approved_after=last_command)
         self.save_review(run['id'],review)

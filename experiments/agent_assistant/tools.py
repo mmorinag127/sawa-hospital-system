@@ -110,7 +110,7 @@ class Tools:
                 if current['generation']!=generation or current['status']!='running': raise Conflict('依頼は停止または変更されました')
                 request={'name':name,'arguments':raw}
                 encoded=json.dumps(request,sort_keys=True,ensure_ascii=False)
-                with self.store.tx() as db:
+                with self.store.read() as db:
                     previous=db.execute('SELECT request,result,status FROM commands WHERE run_id=? AND id=?',(run_id,command_id)).fetchone()
                 if previous:
                     if previous['request']!=encoded or previous['status']!='done': raise Conflict('命令IDの内容または結果が一致しません')
@@ -487,7 +487,7 @@ class Tools:
         import fitz
         if set(args) != {"artifact_id", "page"} or type(args["page"]) is not int or args["page"] < 1:
             raise ValueError("原本IDと1以上のページ番号が必要です")
-        with self.store.tx() as db:
+        with self.store.read() as db:
             artifact = db.execute("SELECT * FROM artifacts WHERE id=? AND run_id=?", (args["artifact_id"], run_id)).fetchone()
         if not artifact:
             raise ValueError("この依頼の原本が見つかりません")
@@ -507,7 +507,7 @@ class Tools:
     def hospital_output_commands(self, run_id, artifact_ids):
         kinds = {"hospital_export_labels": "labels", "hospital_export_delivery_notes": "delivery",
                  "hospital_export_aggregate": "aggregate"}
-        with self.store.tx() as db:
+        with self.store.read() as db:
             rows = db.execute("SELECT request,result FROM commands WHERE run_id=? AND status='done'", (run_id,)).fetchall()
         outputs = {}
         for row in rows:
@@ -523,7 +523,7 @@ class Tools:
     async def verify_hospital_outputs(self, run, artifact_ids):
         checks = {}
         for artifact_id, target in self.hospital_output_commands(run["id"], artifact_ids).items():
-            with self.store.tx() as db:
+            with self.store.read() as db:
                 row = db.execute("SELECT * FROM artifacts WHERE id=? AND run_id=?", (artifact_id, run["id"])).fetchone()
             if row is None:
                 raise Conflict("検査対象の帳票がありません")
@@ -555,7 +555,7 @@ class Tools:
             raise Conflict("この依頼は停止または変更されました。完了にはできません")
         if any(job["state"] != "returned" for job in self.sandbox.local_jobs(run)):
             raise Conflict("未完了または失敗した非同期実行があります")
-        with self.store.tx() as db:
+        with self.store.read() as db:
             reads = []
             for ident in args["evidence_commands"]:
                 row = db.execute("SELECT rowid,* FROM commands WHERE run_id=? AND id=?", (run_id, ident)).fetchone()

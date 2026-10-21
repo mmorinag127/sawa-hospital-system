@@ -94,3 +94,19 @@ def test_multiple_layouts_need_chat_answer(tmp_path):
     store.event(run['id'],'operator_reply',{'message':'図面B（ID:10）'})
     tools.flow.choose_layout(run,10)
     assert store.get(run['id'])['task_inputs']['inputs']['layout_id']==10
+
+
+def test_registered_schools_can_be_chosen_before_date_and_do_not_depend_on_it(tmp_path):
+    async def scenario():
+        _,native,tools,_=setup(tmp_path)
+        native.data['/api/school-lunch/facilities'].append({'id':8,'name':'合成登録校B'})
+        before=await tools.flow.options('lunch_daily_bundle',{},'operator','')
+        assert {x['id'] for x in before['schools']}=={1,8}
+        assert before['choices']==[]
+        day=await tools.flow.options('lunch_daily_bundle',{'facility_id':1,'service_date':'2026-11-02'},'operator','')
+        changed=await tools.flow.options('lunch_daily_bundle',{'facility_id':1,'service_date':'2026-11-03'},'operator','')
+        assert day['schools']==changed['schools']==before['schools']
+        assert [x['key'] for x in day['choices']]==['101']
+        assert changed['choices']==[]
+        assert changed['inputs']['facility_id']==1
+    asyncio.run(scenario())

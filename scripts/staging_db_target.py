@@ -126,8 +126,12 @@ def _entries(descriptor, service):
 
 
 def resolve_runtime(descriptor, image, service):
-    require(descriptor.get('metadata', {}).get('annotations', {}).get('run.googleapis.com/cloudsql-instances') == INSTANCE,
-            'instance-annotation-mismatch')
+    attachment=descriptor.get('metadata', {}).get('annotations', {}).get('run.googleapis.com/cloudsql-instances')
+    school_instance=PROJECT+':'+REGION+':school-lunch-stg'
+    registered_school_sidecar=(service=='web-stg' and attachment==INSTANCE+','+school_instance
+        and len(descriptor.get('spec',{}).get('containers',[]))==2
+        and _container(descriptor,service) is descriptor['spec']['containers'][0])
+    require(attachment==INSTANCE or registered_school_sidecar,'instance-annotation-mismatch')
     values = {}
     for item in image.get('Env', []):
         require(isinstance(item, str) and '=' in item, 'image-env-shape-unknown')

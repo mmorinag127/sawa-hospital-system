@@ -9,17 +9,17 @@ const tasks=[
  {id:'lunch_import',domain:'school-lunch',label:'献立・調理手配書を取り込む',description:'月次の原本を取り込みます',steps:[],month:true,target_kind:'school'}];
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
-async function mount({initial=null,targets,adminView=false}={}){
+async function mount({initial=null,targets,adminView=false,beforeGet}={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/assistant',pretendToBeVisual:true});const saved=new Map();
  for(const key of ['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','HTMLInputElement','HTMLSelectElement','HTMLTextAreaElement','FormData']){saved.set(key,Object.getOwnPropertyDescriptor(global,key));Object.defineProperty(global,key,{configurable:true,writable:true,value:dom.window[key]});}
  saved.set('IS_REACT_ACT_ENVIRONMENT',Object.getOwnPropertyDescriptor(global,'IS_REACT_ACT_ENVIRONMENT'));global.IS_REACT_ACT_ENVIRONMENT=true;
  const React=require('react'),{createRoot}=require('react-dom/client');const intervals=[],calls=[],cache=new Map();let run=initial;
- const api={async get(url,options){calls.push({method:'get',url});if(url.includes('/question-drawings/'))return {data:new Blob(['<svg/>'],{type:'image/svg+xml'})};if(url===base+'/config')return {data:config};if(url===base+'/tasks')return {data:tasks};if(url===base+'/budget')return {data:config.budget};if(url===base+'/runs')return {data:run?[run]:[]};if(url===base+'/runs/r1')return {data:structuredClone(run)};throw Error(url);},async post(url,body){calls.push({method:'post',url,body:JSON.parse(JSON.stringify(body||{}))});if(url.endsWith('/targets'))return {data:await(targets?targets(url,body):{selection_id:'s1',choices:[{key:'2026-11',label:'11月の勤務計画',data:{}}],schools:[],layouts:[]})};if(url===base+'/runs'){run=makeRun();return {data:structuredClone(run)};}if(url.endsWith('/reply')){run={...run,status:'running',pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'作成した勤務表を確認してください',evidence:[{operation:'shift_get_run',data:{assignments:[{staff_name:'合成人員',work_date:'2026-11-02',position:'担当',quantity:0}]}},{operation:'shift_get_constraints',data:{rows:[{reason:'全件表示の確認'}]}}],actions:[]}};return {data:run};}if(url.endsWith('/decision')){run={...run,status:body.approve?'completed':'running',task_review:{...run.task_review,state:body.approve?'approved':'needs_correction'},artifacts:body.approve?[{id:'a1',name:'勤務表.xlsx',size:1000}]:[]};return {data:run};}if(url.endsWith('/stop')){run={...run,status:'stopped'};return {data:run};}if(url.endsWith('/rollback')){run={...run,status:'rolled_back',task_review:null};return {data:run};}throw Error(url);}};
+ const api={async get(url,options){calls.push({method:'get',url});if(beforeGet)await beforeGet(url);if(url.includes('/question-drawings/'))return {data:new Blob(['<svg/>'],{type:'image/svg+xml'})};if(url===base+'/config')return {data:config};if(url===base+'/tasks')return {data:tasks};if(url===base+'/budget')return {data:config.budget};if(url===base+'/runs')return {data:run?[run]:[]};if(url===base+'/runs/r1')return {data:structuredClone(run)};throw Error(url);},async post(url,body){calls.push({method:'post',url,body:JSON.parse(JSON.stringify(body||{}))});if(url.endsWith('/targets'))return {data:await(targets?targets(url,body):{selection_id:'s1',choices:[{key:'2026-11',label:'11月の勤務計画',data:{}}],schools:[],layouts:[]})};if(url===base+'/runs'){run=makeRun();return {data:structuredClone(run)};}if(url.endsWith('/reply')){run={...run,status:'running',pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'作成した勤務表を確認してください',evidence:[{operation:'shift_get_run',data:{assignments:[{staff_name:'合成人員',work_date:'2026-11-02',position:'担当',quantity:0}]}},{operation:'shift_get_constraints',data:{rows:[{reason:'全件表示の確認'}]}}],actions:[]}};return {data:run};}if(url.endsWith('/decision')){run={...run,status:body.approve?'completed':'running',task_review:{...run.task_review,state:body.approve?'approved':'needs_correction'},artifacts:body.approve?[{id:'a1',name:'勤務表.xlsx',size:1000}]:[]};return {data:run};}if(url.endsWith('/stop')){run={...run,status:'stopped'};return {data:run};}if(url.endsWith('/rollback')){run={...run,status:'rolled_back',task_review:null};return {data:run};}throw Error(url);}};
  function load(file){if(cache.has(file))return cache.get(file);const exports={};cache.set(file,exports);const source=fs.readFileSync(file,'utf8');const code=ts.transpileModule(source,{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(code,{exports,require(name){if(name==='next/link')return {__esModule:true,default:({href,children,...props})=>React.createElement('a',{href,...props},children)};if(name.endsWith('/apiClient'))return {apiClient:api};if(name.startsWith('.'))return load(path.resolve(path.dirname(file),name)+'.tsx');return require(name);},setTimeout,clearTimeout,setInterval(fn){intervals.push(fn);return intervals.length;},clearInterval(){},crypto:require('node:crypto').webcrypto,URL,FormData:dom.window.FormData,console});return exports;}
  const screen=load(path.resolve(__dirname,'../src/pages/assistant.tsx'));const root=createRoot(document.getElementById('root'));const settle=async(fn=()=>{})=>React.act(async()=>{await fn();await new Promise(r=>setTimeout(r,0));});
  api.put=async(url,body)=>{calls.push({method:'put',url,body:JSON.parse(JSON.stringify(body))});if(url.endsWith('/provider'))config.provider_id=body.provider;return {data:config};};
  await settle(()=>root.render(React.createElement(screen.AssistantScreen,{adminView})));
- const h={document:dom.window.document,calls,get run(){return run},setRun(value){run=value},settle,async poll(){await settle(()=>intervals.at(-1)());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};return h;
+ const h={document:dom.window.document,calls,tick:()=>intervals.at(-1)(),get run(){return run},setRun(value){run=value},settle,async poll(){await settle(()=>intervals.at(-1)());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};return h;
 }
 test('selection auto-loads, exact question reply, approval, output and rollback stay in one screen',async()=>{
  const h=await mount();try{
@@ -34,11 +34,23 @@ test('selection auto-loads, exact question reply, approval, output and rollback 
   await h.click(h.button('別の作業を始める'));assert.ok(h.document.querySelector('.request-panel'));assert.equal(h.document.querySelector('.active-work'),null);
  }finally{await h.close();}
 });
-test('old target response cannot replace a newer day and school',async()=>{
- let resolveOld;let requests=[];const h=await mount({targets:async(url,{inputs})=>{requests.push(inputs);if(requests.length===1)return new Promise(r=>resolveOld=r);return {selection_id:'new',choices:inputs.facility_id?[{key:'new-menu',label:'新しい日の献立',data:{}}]:[],schools:[{id:1,name:'合成校'}],layouts:[]};}});try{
-  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('一括作成')));let day=h.document.querySelector('input[type=date]');await h.change(day,'2026-11-02');await h.wait(()=>requests.length===1);await h.change(day,'2026-11-03');await h.wait(()=>requests.length===2&&h.document.querySelector('input[name=school]'));
-  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.length===3&&h.document.body.textContent.includes('新しい日の献立'));
-  await h.settle(()=>resolveOld({selection_id:'old',choices:[{key:'old',label:'古い日の献立',data:{}}],schools:[],layouts:[]}));assert.doesNotMatch(h.document.body.textContent,/古い日の献立/);assert.ok(h.document.body.textContent.includes('新しい日の献立'));
+test('schools precede the date, persist across day changes, and stale targets cannot replace the current day',async()=>{
+ let resolveOld;const requests=[];const h=await mount({targets:async(url,{inputs})=>{
+  requests.push(inputs);
+  if(inputs.service_date==='2026-07-01')return new Promise(r=>resolveOld=r);
+  return {selection_id:'new',choices:inputs.facility_id&&inputs.service_date?[{key:'new-menu',label:'新しい日の献立',data:{}}]:[],schools:[{id:8,name:'合成登録校'}],layouts:[]};
+ }});try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('一括作成')));
+  await h.wait(()=>h.document.querySelector('input[name=school]'));
+  const day=h.document.querySelector('input[type=date]');assert.equal(day.disabled,true);assert.deepEqual(Object.keys(requests[0]),[]);
+  assert.ok(h.document.querySelector('.school-choices').compareDocumentPosition(day)&4);
+  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.some(x=>x.facility_id===8));assert.equal(day.disabled,false);
+  await h.change(day,'2026-07-01');await h.wait(()=>!!resolveOld);
+  await h.change(day,'2026-07-02');await h.wait(()=>h.document.body.textContent.includes('新しい日の献立'));
+  assert.equal(h.document.querySelector('input[name=school]').checked,true);
+  assert.ok(requests.filter(x=>x.service_date).every(x=>x.facility_id===8));
+  await h.settle(()=>resolveOld({selection_id:'old',choices:[{key:'old',label:'古い日の献立',data:{}}],schools:[],layouts:[]}));
+  assert.doesNotMatch(h.document.body.textContent,/古い日の献立/);assert.ok(h.document.body.textContent.includes('新しい日の献立'));
   await h.click(h.button('この内容で始める'));const call=h.calls.find(c=>c.url===base+'/runs'&&c.method==='post');assert.deepEqual(call.body.target_keys,['new-menu']);assert.equal(call.body.selection_id,'new');
  }finally{await h.close();}
 });
@@ -134,4 +146,24 @@ test('lunch review shows saved food and actual equipment names before approval',
   assert.doesNotMatch(review.textContent,/内部工程を重複表示しない/);
   await h.click(h.button('この内容で進める'));assert.equal(h.calls.find(c=>c.url.endsWith('/decision')).body.review_id,'lunch-review');
  }finally{await h.close();}
+});
+
+
+test('slow polling never overlaps requests and resumes after completion',async()=>{
+ let hold=false,release;
+ const gate=new Promise(resolve=>{release=resolve});
+ const h=await mount({initial:makeRun(),beforeGet:async url=>{if(hold&&url===base+'/runs/r1')await gate;}});
+ try{
+  hold=true;
+  const count=()=>h.calls.filter(x=>x.url===base+'/runs/r1').length;
+  const before=count();
+  await h.settle(async()=>{
+   const first=h.tick();
+   await Promise.resolve();
+   await h.tick();
+   assert.equal(count(),before+1);
+   release();await first;
+  });
+  await h.poll();assert.equal(count(),before+2);
+ }finally{release();await h.close();}
 });

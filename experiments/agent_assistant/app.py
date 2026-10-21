@@ -178,7 +178,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             cfg = config.get("domains", {}).get(name, {})
             baseline = Path(cfg.get("baseline", "/__not_configured__"))
             domains[name] = {"configured": bool(cfg), "baseline_ready": (baseline / "trial-manifest.json").is_file() and (baseline / "database.sqlite3").is_file(),
-                             "data": json.loads((baseline / "trial-manifest.json").read_text()).get("data") if (baseline / "trial-manifest.json").is_file() else None,
+                             "data": "registered_staging_snapshot" if cfg.get('registered_source') else json.loads((baseline / "trial-manifest.json").read_text()).get("data") if (baseline / "trial-manifest.json").is_file() else None,
                              "ocr_pipeline_configured": bool(cfg.get("env", {}).get("OCR_PIPELINE_BUCKET")) if name == "hospital" else None}
         return {"trial": True, "provider_id": store.provider(), "provider": LABELS[store.provider()], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
                 "budget": store.budget(), "notice": "専用コピーを使用。既存環境への反映はありません。"}
@@ -268,7 +268,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.get("/runs/{ident}")
     def run_detail(ident: str):
         run = store.get(ident, owner)
-        with store.tx() as db:
+        with store.read() as db:
             artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
         events = store.events(ident)
         from .shift_review import build_shift_review
@@ -405,7 +405,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run = store.get(ident, owner)
         if run["status"] in ("rolled_back", "rollback_stop_pending"):
             raise Conflict("復元前の出力は旧版です。履歴は保持されていますが業務出力として配布しません")
-        with store.tx() as db:
+        with store.read() as db:
             row = db.execute("SELECT * FROM artifacts WHERE id=? AND run_id=?", (artifact_id, ident)).fetchone()
         if not row:
             raise KeyError(artifact_id)

@@ -31,7 +31,7 @@ class WorkflowCompletion:
         from .catalog import OPERATIONS
         operation = OPERATIONS.get(name)
         if operation and operation.method != 'GET':
-            with self.tools.store.tx() as db:
+            with self.tools.store.read() as db:
                 pending = db.execute("SELECT request FROM commands WHERE run_id=? AND status!='done'",(run['id'],)).fetchall()
             import json
             if any((op := OPERATIONS.get(json.loads(row['request'])['name'])) and op.method != 'GET' for row in pending):

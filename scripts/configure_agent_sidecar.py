@@ -28,7 +28,7 @@ def envmap(container): return {item['name']:item for item in container.get('env'
 def value(name,text): return {'name':name,'value':text}
 
 
-def configure(web,worker,config,frontend_image,agent_image,token):
+def configure(web,worker,config,frontend_image,agent_image,token,*,school):
     if '@sha256:' not in frontend_image or '@sha256:' not in agent_image:
         raise RuntimeError('immutable image digests are required')
     spec=web['spec']['template']['spec']; containers=spec['containers']
@@ -46,6 +46,18 @@ def configure(web,worker,config,frontend_image,agent_image,token):
         front_env[name]=value(name,text)
     front['env']=list(front_env.values())
     env=[backend_env[k] for k in required]
+    school_spec=school['spec']['template']
+    school_instance='sawahospitalsystem:asia-northeast2:school-lunch-stg'
+    if school_spec.get('metadata',{}).get('annotations',{}).get('run.googleapis.com/cloudsql-instances') != school_instance:
+        raise RuntimeError('registered school staging database source is unresolved')
+    school_containers=school_spec['spec']['containers']
+    if len(school_containers)!=1:
+        raise RuntimeError('registered school API container is unresolved')
+    school_database=envmap(school_containers[0]).get('DATABASE_URL',{})
+    ref=school_database.get('valueFrom',{}).get('secretKeyRef',{})
+    if ref.get('name')!='school-lunch-stg-database-url' or set(school_database)!={'name','valueFrom'}:
+        raise RuntimeError('registered school database secret source is unresolved')
+    env.append({**school_database,'name':'SAWA_TRIAL_SCHOOL_DATABASE_URL'})
     env.extend(backend_env[k] for k in ('OCR_PIPELINE_URL','OCR_PIPELINE_TARGET_AUDIENCE') if k in backend_env)
     env.extend(value(k,v) for k,v in {
         'SAWA_TRIAL_WEB_TOKEN':token,'SAWA_TRIAL_OPERATOR_ACCOUNT':config['operator_account'],
@@ -61,6 +73,10 @@ def configure(web,worker,config,frontend_image,agent_image,token):
     others=[c for c in containers[1:] if c.get('name')!='agent-runtime']
     spec['containers']=[front,*others,agent]
     annotations=web['spec']['template'].setdefault('metadata',{}).setdefault('annotations',{})
+    order_instance='sawahospitalsystem:asia-northeast2:orders-stg'
+    if annotations.get('run.googleapis.com/cloudsql-instances') not in (order_instance,order_instance+','+school_instance):
+        raise RuntimeError('existing staging Cloud SQL attachment is unresolved')
+    annotations['run.googleapis.com/cloudsql-instances']=order_instance+','+school_instance
     annotations['run.googleapis.com/cpu-throttling']='false'
     annotations['autoscaling.knative.dev/minScale']='0'
     annotations['autoscaling.knative.dev/maxScale']='1'
@@ -81,7 +97,7 @@ def main():
     print('::add-mask::'+token)
     config=json.loads(Path('agent_runtime/staging.json').read_text())
     document=configure(service('web-stg'),service('worker-stg'),config,os.environ['IMAGE'],
-                       os.environ['SAWA_AGENT_RUNTIME_IMAGE'],token)
+                       os.environ['SAWA_AGENT_RUNTIME_IMAGE'],token,school=service('price-api-stg'))
     path=Path(os.environ['RUNNER_TEMP'])/'sawa-agent-sidecar.json'
     path.write_text(json.dumps(document));path.chmod(0o600)
     try:

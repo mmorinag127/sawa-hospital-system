@@ -72,6 +72,11 @@ class Sandbox:
             with sqlite3.connect(f"file:{baseline / 'database.sqlite3'}?mode=ro", uri=True) as src:
                 with sqlite3.connect(before / domain / "database.sqlite3") as dst:
                     src.backup(dst)
+            if cfg.get('registered_source'):
+                if domain != 'school-lunch':
+                    raise Conflict('登録学校のコピー元は学校給食専用です')
+                from .school_source import copy_registered
+                copy_registered(before / domain)
         copy_tree(before, directory / "data")
         initialized = False
         for domain in run["domains"]:

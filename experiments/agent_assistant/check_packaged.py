@@ -15,6 +15,8 @@ async def check():
     if any(not shutil.which(binary) for binary in ('soffice','pdftoppm')) or not list(Path('/usr/share/fonts').rglob('NotoSansCJK*.ttc')):
         raise RuntimeError('Native workbook PDF conversion and Japanese fonts are required')
     config=configuration('/opt/sawa-agent')
+    # Image smoke uses only the declared synthetic baselines, with no cloud reads.
+    config['domains']['school-lunch']['registered_source']=False
     root=Path('/tmp/sawa-agent-image-smoke')
     try:
         for domain,cfg in config['domains'].items():
