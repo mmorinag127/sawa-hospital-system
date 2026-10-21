@@ -34,9 +34,9 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
     def write(self, name, text):
         (self.root / name).write_text(text)
 
-    def run_tests(self, expected=0):
+    def run_tests(self, expected=0, *, isolated=True):
         result = subprocess.run(
-            ["node", "--import", str(REGISTER), "--test", "example.test.mjs"],
+            ["node", "--import", str(REGISTER), *(["--test"] if isolated else []), "example.test.mjs"],
             cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, expected, (result.stdout + result.stderr)[-6000:])
         reports = list(self.state.glob("*.report.json"))
@@ -104,12 +104,21 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
             for key in RUN_IDENTITIES:
                 stream.write(f"\ntest('{key}', () => assert.equal(process.env.{key}, 'first-run'));\n")
         self.env.update({key: "first-run" for key in RUN_IDENTITIES})
-        self.run_tests()
+        self.run_tests(isolated=False)
         self.env.update({key: "second-run" for key in RUN_IDENTITIES})
-        report = self.run_tests(1)
+        report = self.run_tests(1, isolated=False)
         for key in RUN_IDENTITIES:
             self.assertIn(f"example.test.mjs::{key}#0", report["selected"])
             self.assertIn("volatile-environment", report["untracked"][f"example.test.mjs::{key}#0"])
+
+    def test_native_worker_identity_read_always_executes(self):
+        self.env["NODE_TEST_WORKER_ID"] = "inherited-worker"
+        with (self.root / "example.test.mjs").open("a") as stream:
+            stream.write("\ntest('native worker', () => assert.equal(typeof process.env.NODE_TEST_WORKER_ID, 'string'));\n")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertIn("example.test.mjs::native worker#0", report["selected"])
+        self.assertIn("volatile-environment", report["untracked"]["example.test.mjs::native worker#0"])
 
     def test_environment_mutation_preserves_native_behavior(self):
         with (self.root / "example.test.mjs").open("a") as stream:
