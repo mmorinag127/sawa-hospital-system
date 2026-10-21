@@ -1,4 +1,7 @@
 from pathlib import Path
+import hashlib
+import re
+import tempfile
 import unittest
 
 import yaml
@@ -36,6 +39,35 @@ class WorkflowImpact(unittest.TestCase):
             step = next(s for s in frontend["steps"] if s.get("name") == name)
             self.assertNotIn("if", step)
             self.assertNotIn("NODE_OPTIONS", step.get("env", {}))
+
+    def test_cache_key_is_identical_before_and_after_generated_bytecode(self):
+        for name in ("backend", "frontend"):
+            steps = self.jobs[name]["steps"]
+            restore = next(s for s in steps if s.get("uses") == "actions/cache/restore@v4")
+            save = next(s for s in steps if s.get("uses") == "actions/cache/save@v4")
+            self.assertEqual(restore["with"]["key"], save["with"]["key"])
+            patterns = re.findall("'([^']+)'", restore["with"]["key"].split("hashFiles(")[1].split(")")[0])
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "infra/ci/tracker.py"
+                source.parent.mkdir(parents=True)
+                source.write_text("original")
+                node = root / "infra/ci/node-impact/core.cjs"
+                node.parent.mkdir()
+                node.write_text("original")
+                def fingerprint():
+                    files = sorted({p for pattern in patterns for p in root.glob(pattern) if p.is_file()})
+                    return hashlib.sha256(b"".join(p.read_bytes() for p in files)).digest()
+                before = fingerprint()
+                bytecode = source.parent / "__pycache__/tracker.cpython-311.pyc"
+                bytecode.parent.mkdir()
+                bytecode.write_bytes(b"generated runtime output")
+                self.assertEqual(before, fingerprint())
+                source.write_text("changed")
+                self.assertNotEqual(before, fingerprint())
+                source.write_text("original")
+                node.write_text("changed")
+                self.assertNotEqual(before, fingerprint())
 
 
 if __name__ == "__main__":
