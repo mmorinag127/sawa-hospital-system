@@ -66,34 +66,9 @@ def test_source_gate_exclusive_and_numeric(run_id, manifest, expected):
 
 
 def test_normal_deploy_and_verifier_commands_unchanged():
-    old = yaml.safe_load(subprocess.check_output(['git', 'show', '24dc1e0:.github/workflows/deploy-stg.yml'], cwd=ROOT))
-    new = workflow()
-    for key, job in old['jobs'].items():
-        if key not in {'source-gate', 'deploy-frontend'}:
-            assert new['jobs'][key] == job
-    assert new['jobs']['source-gate']['steps'][1:] == old['jobs']['source-gate']['steps'][1:]
-    before = old['jobs']['deploy-frontend']; after = new['jobs']['deploy-frontend']
-    assert after['needs'] == before['needs'] and after['if'] == before['if']
-    for step in before['steps']:
-        approved_ids = {
-            'Deploy web-stg': 'deploy-web',
-            'Initialize opted-in OCR UI evidence': 'ocr-ui-init',
-            'Prepare opted-in OCR UI verification': 'ocr-ui-deps',
-            'Verify opted-in existing OCR workflow-v2 Step2 UI': 'ocr-ui-verify',
-        }
-        if step.get('name') in approved_ids:
-            step['id'] = approved_ids[step['name']]
-        elif step.get('uses') == 'actions/download-artifact@v4' and step.get('with', {}).get('name') == 'live-ocr-stg':
-            step['id'] = 'ocr-ui-new-artifact'
-        elif step.get('uses') == 'actions/setup-node@v4' and 'inputs.ocr_verification_manifest' in step.get('if', ''):
-            step['id'] = 'ocr-ui-node'
-        matches = [s for s in after['steps'] if s.get('name') == step.get('name') and s.get('uses') == step.get('uses')]
-        assert any({k:v for k,v in candidate.items() if k != 'if'} == {k:v for k,v in step.items() if k != 'if'} for candidate in matches)
-    downloads = [s for s in after['steps'] if s.get('uses') == 'actions/download-artifact@v4' and 'run-id' in s.get('with', {})]
-    assert len(downloads) == 1
-    assert downloads[0]['with']['repository'] == gate.REPOSITORY
-    assert downloads[0]['with']['name'] == 'live-ocr-stg'
-    assert downloads[0]['with']['github-token'] == '${{ github.token }}'
-    verify = next(s for s in after['steps'] if s.get('name') == 'Verify opted-in existing OCR workflow-v2 Step2 UI')
-    assert verify['env'] == {'LIVE_ID_TOKEN': '${{ steps.auth-frontend.outputs.id_token }}'}
-    assert verify['run'] == 'node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live'
+    from scripts.tls_workflow_test_contract import before_ca_upgrade
+    approved_base = "eb06a5ecc0fe335d6a6a94a3c6cc45ef3f4695df"
+    subprocess.run(["git", "merge-base", "--is-ancestor", approved_base, "HEAD"], cwd=ROOT, check=True)
+    baseline = yaml.safe_load(subprocess.check_output(
+        ["git", "show", f"{approved_base}:.github/workflows/deploy-stg.yml"], cwd=ROOT))
+    assert before_ca_upgrade(workflow()) == baseline

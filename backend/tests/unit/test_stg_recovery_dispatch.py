@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 import yaml
+from scripts.tls_workflow_test_contract import before_ca_upgrade
 
 ROOT = Path(__file__).resolve().parents[3]
 BASE = '1088dc633e7203e0bce2203d45c165da50d38ba5'
@@ -21,86 +22,21 @@ def workflow():
 
 
 def test_normal_jobs_dependencies_and_checks_unchanged():
-    old, new = baseline(PATH), workflow()
-    assert new['concurrency'] == old['concurrency']
-    assert new['env'] == old['env']
-    for name, job in old['jobs'].items():
-        if name != 'source-gate':
-            if name in ('deploy-backend', 'deploy-frontend'):
-                original = 'IMAGE="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT_ID" --format=\'value(image_summary.fully_qualified_digest)\')"'
-                replacement = 'IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"'
-                matches = [step for step in job['steps'] if original in step.get('run', '')]
-                assert len(matches) == 1
-                assert matches[0]['run'].count(original) == 1
-                matches[0]['run'] = matches[0]['run'].replace(original, replacement)
-            if name == 'deploy-frontend':
-                job['permissions']['actions'] = 'read'
-                expanded = {
-                    'Initialize opted-in OCR UI evidence',
-                    'Prepare opted-in OCR UI verification',
-                    'Verify opted-in existing OCR workflow-v2 Step2 UI',
-                }
-                for step in job['steps']:
-                    if (step.get('name') in expanded or
-                        (step.get('uses') == 'actions/setup-node@v4' and "inputs.ocr_verification_manifest" in step.get('if', '')) or
-                        step.get('with', {}).get('name') == 'live-ocr-ui-stg-${{ github.run_id }}-${{ github.run_attempt }}'):
-                        assert "inputs.ocr_verification_manifest != ''" in step['if']
-                        step['if'] = step['if'].replace("inputs.ocr_verification_manifest != ''",
-                            "(inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')")
-                index = next(i for i, step in enumerate(job['steps']) if step.get('uses') == 'actions/download-artifact@v4' and step.get('with', {}).get('name') == 'live-ocr-stg') + 1
-                job['steps'][index:index] = [
-                    {'name': 'Validate existing staging OCR artifact provenance',
-                     'if': "github.event_name == 'workflow_dispatch' && inputs.ocr_existing_artifact_run_id != ''",
-                     'env': {'GH_TOKEN': '${{ github.token }}', 'OCR_EXISTING_RUN': '${{ inputs.ocr_existing_artifact_run_id }}'},
-                     'run': 'python3 scripts/verify_existing_ocr_artifact.py "$OCR_EXISTING_RUN"'},
-                    {'uses': 'actions/download-artifact@v4',
-                     'if': "github.event_name == 'workflow_dispatch' && inputs.ocr_existing_artifact_run_id != ''",
-                     'with': {'name': 'live-ocr-stg', 'path': 'tmp/ocr-verification',
-                              'run-id': '${{ inputs.ocr_existing_artifact_run_id }}', 'github-token': '${{ github.token }}',
-                              'repository': 'mmorinag127/sawa-hospital-system'}},
-                ]
-                continuation = {
-                    'Initialize opted-in OCR UI evidence': ('ocr-ui-init', "!cancelled() && needs.source-gate.result == 'success' && steps.auth-frontend.outcome == 'success' && steps.deploy-web.outcome == 'success' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')"),
-                    'Validate existing staging OCR artifact provenance': ('ocr-ui-provenance', "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_existing_artifact_run_id != '' && inputs.ocr_verification_manifest == ''"),
-                    'Prepare opted-in OCR UI verification': ('ocr-ui-deps', "!cancelled() && steps.ocr-ui-node.outcome == 'success'"),
-                    'Verify opted-in existing OCR workflow-v2 Step2 UI': ('ocr-ui-verify', "!cancelled() && steps.ocr-ui-deps.outcome == 'success'"),
-                }
-                for step in job['steps']:
-                    if step.get('name') == 'Deploy web-stg':
-                        step['id'] = 'deploy-web'
-                    if step.get('name') in continuation:
-                        step['id'], step['if'] = continuation[step['name']]
-                    elif step.get('uses') == 'actions/download-artifact@v4' and step.get('with', {}).get('name') == 'live-ocr-stg':
-                        if 'run-id' in step['with']:
-                            step['id'] = 'ocr-ui-existing-artifact'
-                            step['if'] = "!cancelled() && steps.ocr-ui-provenance.outcome == 'success'"
-                        else:
-                            step['id'] = 'ocr-ui-new-artifact'
-                            step['if'] = "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_verification_manifest != '' && inputs.ocr_existing_artifact_run_id == '' && needs.deploy-backend.result == 'success'"
-                    elif step.get('uses') == 'actions/setup-node@v4' and 'inputs.ocr_verification_manifest' in step.get('if', ''):
-                        step['id'] = 'ocr-ui-node'
-                        step['if'] = "!cancelled() && (steps.ocr-ui-new-artifact.outcome == 'success' || steps.ocr-ui-existing-artifact.outcome == 'success')"
-            assert new['jobs'][name] == job
-    old_steps = old['jobs']['source-gate']['steps']
-    new_steps = new['jobs']['source-gate']['steps'][1:]
-    for old_step, new_step in zip(old_steps, new_steps, strict=True):
-        if old_step.get('id') != 'changes':
-            assert new_step == old_step
-        else:
-            # The existing normal change detection body stays byte-for-byte intact.
-            normal_body = old_step['run'].split('set -euo pipefail\n', 1)[1]
-            assert new_step['run'].endswith(normal_body)
+    from scripts.tls_workflow_test_contract import before_ca_upgrade
+    approved_base = "eb06a5ecc0fe335d6a6a94a3c6cc45ef3f4695df"
+    subprocess.run(["git", "merge-base", "--is-ancestor", approved_base, "HEAD"], cwd=ROOT, check=True)
+    baseline = yaml.safe_load(subprocess.check_output(
+        ["git", "show", f"{approved_base}:.github/workflows/deploy-stg.yml"], cwd=ROOT))
+    assert before_ca_upgrade(workflow()) == baseline
 
 
 def test_recovery_is_in_authorized_workflow_with_original_steps():
-    current = workflow()
+    current = before_ca_upgrade(workflow())
     recovery = current['jobs']['recover-web']
     old = baseline('.github/workflows/recover-stg-web-image.yml')
-    expected_steps = old['jobs']['recover-web']['steps']
-    build = next(step for step in expected_steps if step.get('id') == 'build')
-    build['run'] = build['run'].replace(
-        'gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" --format=\'value(image_summary.fully_qualified_digest)\'',
-        'docker image inspect "$image" --format \'{{index .RepoDigests 0}}\'')
+    expected_steps = yaml.safe_load(subprocess.check_output(
+        ['git', 'show', '6b3ee83058c72bd7c2857fd3034191f575495a05:.github/workflows/deploy-stg.yml'],
+        cwd=ROOT))['jobs']['recover-web']['steps']
     assert recovery['steps'] == expected_steps
     assert recovery['needs'] == 'source-gate'
     assert recovery['permissions'] == old['permissions']

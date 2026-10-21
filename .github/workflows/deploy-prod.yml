@@ -27,6 +27,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  NODE_OPTIONS: --use-openssl-ca
+  CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE: /etc/ssl/certs/ca-certificates.crt
   PROJECT_ID: sawahospitalsystem
   REGION: asia-northeast2
   WEB_SERVICE: web-prod
@@ -59,6 +61,24 @@ jobs:
     outputs:
       order_id: ${{ steps.order.outputs.order_id }}
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -106,6 +126,24 @@ jobs:
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: google-github-actions/auth@v3
         with:
@@ -141,6 +179,9 @@ jobs:
             --label "sawa.backend_base_fingerprint=${current_base_fingerprint}" \
             -t "$image" \
             backend
+          docker run --rm --entrypoint python \
+            -v "$PWD/scripts/verify_tls_trust.py:/tmp/verify_tls_trust.py:ro" \
+            "$image" /tmp/verify_tls_trust.py --online
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - id: prepare
@@ -167,6 +208,9 @@ jobs:
             --label "sawa.release_branch=${GITHUB_REF_NAME}" \
             -t "$image" \
             "$deploy_dir"
+          docker run --rm --entrypoint python \
+            -v "$PWD/scripts/verify_tls_trust.py:/tmp/verify_tls_trust.py:ro" \
+            "$image" /tmp/verify_tls_trust.py --online
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
@@ -179,6 +223,24 @@ jobs:
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: google-github-actions/auth@v3
         with:
@@ -212,6 +274,9 @@ jobs:
             --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
             -t "$image" \
             "$deploy_dir"
+          docker run --rm --entrypoint node \
+            -v "$PWD/scripts/verify_tls_trust.mjs:/tmp/verify_tls_trust.mjs:ro" \
+            "$image" /tmp/verify_tls_trust.mjs
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
@@ -223,6 +288,24 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - name: Approved for production deploy
         run: echo "production deploy approved"
 
@@ -240,8 +323,28 @@ jobs:
       PORTAL_BOOTSTRAP_ADMIN_EMAIL: ${{ vars.PROD_PORTAL_BOOTSTRAP_ADMIN_EMAIL }}
       PORTAL_DEPLOY_VERIFICATION_EMAIL: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
       - id: auth-db
         uses: google-github-actions/auth@v3
         with:
@@ -332,8 +435,28 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
       - id: auth-backend
         uses: google-github-actions/auth@v3
         with:
@@ -406,6 +529,24 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - id: auth-frontend
         uses: google-github-actions/auth@v3

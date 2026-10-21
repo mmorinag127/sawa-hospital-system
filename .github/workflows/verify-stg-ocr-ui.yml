@@ -23,6 +23,10 @@ concurrency:
   group: verify-stg-ocr-ui-${{ github.run_id }}
   cancel-in-progress: false
 
+env:
+  NODE_OPTIONS: --use-openssl-ca
+  CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE: /etc/ssl/certs/ca-certificates.crt
+
 jobs:
   verify:
     if: >-
@@ -43,6 +47,24 @@ jobs:
       REVIEW_ORDER_ID: ${{ inputs.review_order_id }}
       GOOGLE_OAUTH_CLIENT_ID: ${{ vars.STG_GOOGLE_OAUTH_CLIENT_ID }}
     steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0

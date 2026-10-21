@@ -3,8 +3,8 @@
   "working_diff_sha256": "aa57380984e9f4aa390d6e78c2178b4ee9ed5c3e9a7b573b63e4ba2732fea1ee",
   "files": {
     "backend/.dockerignore": "eac1f6c03c0f0a4720853b53e1ab37c7b633c31820aa05cbda28a0f5304c964d",
-    "backend/Dockerfile": "eb6f92d222adf60b9c01c3b05460948d938f7329c7f2062217db4dcf4f091e7b",
-    "backend/Dockerfile.solve-worker": "125087ad381e5551aa62dd3413cd7bd9834dcb5aa20785142cb3dadf3d3162d4",
+    "backend/Dockerfile": "10d27fe14558d083ac6e927c111da513e3102b57f3ae78d363c379474acebfbb",
+    "backend/Dockerfile.solve-worker": "4c059cc05e00a4fb5768a1d16206060c08e2c9592ab8b904f4cbce505cb96748",
     "backend/alembic.ini": "27512fceb7639f07bf5392f016f62e838684ed9e1012b25e3e9008135255c9fb",
     "backend/migrations/env.py": "4e31627f44e67e4850f43b629699e1fd33f288d538b8d2f6f39f9bf22cc86c7e",
     "backend/migrations/script.py.mako": "79c2370604c824dd035b74de289314e5d8d7ae2e8120f94b9286341a835fff44",
@@ -19,7 +19,7 @@
     "backend/migrations/versions/e6a4c8b9d210_add_rule_profiles.py": "e87fec94532af06dc194a82f115dd8570d00b2658cead61ae72e7f3d79b3c7d3",
     "backend/migrations/versions/f2c1a9e7b4d6_add_skill_revisions.py": "3dba69c3bf090f8b2d49f4400e6f041a6be1026f2521cba7d7bfa2dd08f2fa44",
     "backend/migrations/versions/f7c31a9e204b_add_dated_assignments_and_status_reasons.py": "8d28f167ca77c450525c13c6e97f3aed4e79c962cb1d1dd042ee1db4da27ae76",
-    "backend/requirements.txt": "826524a130d618596883cd85b9d314ece734df80252d0321ea503b5beaf35cb4",
+    "backend/requirements.txt": "cd5d74e444cb203256a8ac2f2c2cd0eaf115207953e5175a93190575d5daee11",
     "backend/shift_scheduler_backend/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "backend/shift_scheduler_backend/agent_trial_transport.py": "403e0598cbe14995e16dd6dc681747fa2b39869c201612859dc663a06a206dce",
     "backend/shift_scheduler_backend/assignment_validation.py": "456d0f791f1b9649323099f0a47d4a2596b1a3642d9bb071d3394b7d28b35c78",
@@ -61,5 +61,17 @@
     "backend/shift_scheduler_backend/storage.py": "38f0d523b9f36b4c9c99924ea3976c2ad70820d655aae0d101165d09aee1b0c2",
     "backend/shift_scheduler_backend/validation_snapshot.py": "fb6105b9ea6b8b9e89bfa84410128820470991319f12a37ba4a36034be304781",
     "pyproject.toml": "42b0341bfda9cdcc3213295e8942e7ed8221b95d294df3b5520333d6e5ff6642"
-  }
+  },
+  "security_patches": [
+    {
+      "purpose": "emSign CA trust-store remediation",
+      "repository": "mmorinag127/sawa-hospital-system",
+      "commit": "df3cb20133b6a213d9d9d2628f6f2918e295f941",
+      "files": [
+        "backend/Dockerfile",
+        "backend/Dockerfile.solve-worker",
+        "backend/requirements.txt"
+      ]
+    }
+  ]
 }

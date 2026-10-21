@@ -1,10 +1,18 @@
-FROM node:24-slim AS deps
+FROM node:24-trixie-slim AS trusted-base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419+deb13u1' \
+    && rm -rf /var/lib/apt/lists/*
+ENV NODE_OPTIONS=--use-openssl-ca \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs
+
+FROM trusted-base AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY vendor ./vendor
 RUN npm ci
 
-FROM node:24-slim AS builder
+FROM trusted-base AS builder
 WORKDIR /app
 ARG NEXT_PUBLIC_API_BASE_URL=/api
 ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID=
@@ -28,7 +36,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
-FROM node:24-slim AS runner
+FROM trusted-base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
