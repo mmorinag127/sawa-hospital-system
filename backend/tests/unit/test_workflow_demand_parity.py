@@ -429,6 +429,82 @@ def test_import_or_nested_db_connections_cannot_escape():
     engine.dispose()
 
 
+@pytest.mark.parametrize("code,expected", [("57014", "57014"), ("25P02", "25P02"),
+    (None, None), ("57014 secret SQL", None)])
+def test_first_db_error_survives_aborted_transaction_and_listener_is_removed(monkeypatch, code, expected):
+    import sqlite3
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import DBAPIError
+    class QueryCanceled(sqlite3.OperationalError):
+        pgcode = code
+    class InFailedSqlTransaction(sqlite3.OperationalError):
+        pgcode = "25P02"
+    engine = create_engine("sqlite:///:memory:")
+    report = {}
+    with engine.connect() as connection, connection.begin():
+        errors = iter([QueryCanceled("secret original SQL"), InFailedSqlTransaction("secret subsequent SQL")])
+        def execute(*args, **kwargs):
+            raise next(errors)
+        monkeypatch.setattr(engine.dialect, "do_execute", execute)
+        with parity.first_db_failure(engine, report, lambda: "capture"):
+            for stage in ("baseline_inspection", "current_inspection"):
+                with pytest.raises(parity.ReadFailure):
+                    parity.read_phase(stage, connection.execute, text("SELECT 'private value'"))
+            assert report == {"sqlstate": expected, "exception_class": "QueryCanceled", "stop": "baseline_inspection"}
+            assert connection.in_transaction()
+            assert parity.READ_STAGE.get() is None
+        report.clear()
+        monkeypatch.setattr(engine.dialect, "do_execute", lambda *a, **kw: (_ for _ in ()).throw(QueryCanceled("secret")))
+        with pytest.raises(DBAPIError):
+            connection.execute(text("SELECT 1"))
+        assert report == {}
+    engine.dispose()
+
+
+def test_diagnostic_timeout_preserves_transaction_options():
+    import ast
+    tree = ast.parse(Path(parity.__file__).read_text())
+    create = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "create_engine")
+    options = {item.arg: ast.literal_eval(item.value) for item in create.keywords}
+    assert options == {"isolation_level": "REPEATABLE READ",
+        "execution_options": {"postgresql_readonly": True},
+        "connect_args": {"options": "-c default_transaction_read_only=on -c statement_timeout=60000 -c lock_timeout=1000"}}
+
+
+@pytest.mark.parametrize("outer_failure", [False, True])
+def test_cli_preserves_first_db_failure_without_false_success(monkeypatch, tmp_path, outer_failure):
+    actions_env(monkeypatch)
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setattr(parity, "context", lambda product: "a" * 40)
+    monkeypatch.setattr(parity.diagnostic, "command", lambda args: b"")
+    first = {"sqlstate": "57014", "exception_class": "QueryCanceled", "stop": "baseline_inspection"}
+    @contextmanager
+    def connection(proxy, proof, db_failure, stage):
+        assert stage() == "staging_connection"
+        db_failure.update(first)
+        yield object()
+    @contextmanager
+    def session(*args):
+        yield object()
+    def capture(*args):
+        if outer_failure:
+            raise RuntimeError("25P02 secret SQL and values")
+        return [{"function_parity": {"equal": True}, "native_input": {"status": "captured"}}]
+    monkeypatch.setattr(parity, "staging_connection", connection)
+    monkeypatch.setattr(parity, "readonly_session", session)
+    monkeypatch.setattr(parity, "capture", capture)
+    proxy = tmp_path / "proxy"
+    proxy.touch()
+    summary = tmp_path / "summary"
+    monkeypatch.setattr("sys.argv", ["verify", "--product", str(ROOT), "--proxy", str(proxy), "--summary", str(summary)])
+    assert parity.main() == 2
+    output = (summary / ("failure.json" if outer_failure else "comparison.json")).read_text()
+    assert json.loads(output)["first_db_failure"] == first
+    assert "secret" not in output and "25P02" not in output
+    assert not (tmp_path / "demand-parity-123-1").exists()
+
+
 def test_readonly_session_keeps_external_transaction_and_blocks_commit(monkeypatch):
     from sqlalchemy import create_engine, text
     engine = create_engine("sqlite:///:memory:")
