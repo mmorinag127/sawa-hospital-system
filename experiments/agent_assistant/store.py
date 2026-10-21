@@ -1,5 +1,6 @@
 """Durable trial ledger. Dollar values are integer US cents, never floats."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ def billing_month():
 
 class Store:
     def __init__(self, root: Path):
+        self._read_snapshot = ContextVar("agent_read_snapshot", default=None)
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = self.root / "ledger.sqlite3"
@@ -64,6 +66,8 @@ class Store:
 
     @contextmanager
     def tx(self):
+        if self._read_snapshot.get() is not None:
+            raise Conflict("読取スナップショット内では変更できません")
         db = sqlite3.connect(self.path, timeout=15)
         db.row_factory = sqlite3.Row
         try:
@@ -78,9 +82,23 @@ class Store:
 
     @contextmanager
     def read(self):
+        snapshot = self._read_snapshot.get()
+        if snapshot is not None:
+            yield snapshot
+            return
         with self.tx() as db:
             db.execute('PRAGMA query_only=ON')
             yield db
+
+    @contextmanager
+    def snapshot(self):
+        """Keep every part of one response on the same committed ledger."""
+        with self.read() as db:
+            token = self._read_snapshot.set(db)
+            try:
+                yield
+            finally:
+                self._read_snapshot.reset(token)
 
     def budget(self):
         month = billing_month()

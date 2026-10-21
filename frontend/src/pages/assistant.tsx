@@ -49,21 +49,32 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [month, setMonth] = useState("");
   const [reply, setReply] = useState("");
   const [error, setError] = useState("");
+  const [pollNotice, setPollNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmRollback,setConfirmRollback]=useState(false);
   const [requestKey, setRequestKey] = useState("");
   const [source, setSource] = useState<File | null>(null);
   const [sourceChecked, setSourceChecked] = useState(false);
 
+  function receiveRun(run: Run) {
+    setSelected(run);
+    setRuns(rows => rows.map(row => row.id === run.id ? run : row));
+  }
+
   async function load(id?: string) {
     const [c, r, t] = await Promise.all([apiClient.get<Configuration>("/assistant-trial/config"), apiClient.get<Run[]>("/assistant-trial/runs"), apiClient.get<Task[]>("/assistant-trial/tasks")]);
     setTasks(t.data);
     setConfig(c.data); setRuns(r.data);
     if(!initialOpened.current){initialOpened.current=true;const pending=r.data.filter(x=>!["completed","stopped","rolled_back","failed"].includes(x.status));if(!adminView && !id && pending.length===1){id=pending[0].id;selectedId.current=id;}}
-    if (id) { const response=await apiClient.get<Run>(`/assistant-trial/runs/${id}`); if(selectedId.current===id)setSelected(response.data); }
+    if (id) { const response=await apiClient.get<Run>(`/assistant-trial/runs/${id}`); if(selectedId.current===id)receiveRun(response.data); }
+  }
+  async function refreshAfterCommand(id: string) {
+    try { await load(id); setPollNotice(""); }
+    catch { setPollNotice("進捗を取得できませんでした。再確認しています。作業は再送していません。"); }
   }
   useEffect(() => { load().catch(showError); }, []);
   useEffect(() => {
+    setPollNotice("");
     if (!selected) return;
     let active = true;
     const id = selected.id;
@@ -72,13 +83,19 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       if (polling) return;
       polling = true;
       try {
-        const [r, b] = await Promise.all([apiClient.get<Run>(`/assistant-trial/runs/${id}`), apiClient.get<Budget>("/assistant-trial/budget")]);
-        if (active && selectedId.current===id) { setSelected(r.data); setConfig(c => c ? { ...c, budget: b.data } : c); }
-      } catch (e) { if (active) showError(e); }
+        const r = await apiClient.get<Run>(`/assistant-trial/runs/${id}`);
+        if (active && selectedId.current===id) { receiveRun(r.data); setPollNotice(""); }
+        if (adminView) {
+          try {
+            const b = await apiClient.get<Budget>("/assistant-trial/budget");
+            if (active && selectedId.current===id) setConfig(c => c ? { ...c, budget: b.data } : c);
+          } catch { if (active) setPollNotice("利用料金を取得できませんでした。再確認しています。"); }
+        }
+      } catch { if (active) setPollNotice("進捗を取得できませんでした。再確認しています。作業は再送していません。"); }
       finally { polling = false; }
     }, 2500);
     return () => { active = false; clearInterval(timer); };
-  }, [selected?.id]);
+  }, [selected?.id, adminView]);
 
   useEffect(()=>{setSource(null);setSourceChecked(false);setConfirmRollback(false);},[selected?.id]);
   useEffect(()=>{setReply("");},[selected?.id,selected?.pending_question?.question_id]);
@@ -94,14 +111,14 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     await act(async () => {
       const key = requestKey || crypto.randomUUID(); setRequestKey(key);
       const response = await apiClient.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(taskId === "hospital_pending_faxes" ? {} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
-      selectedId.current=response.data.id; setSelected(response.data); setRequestKey(""); await load(response.data.id);
+      selectedId.current=response.data.id; setSelected(response.data); setRequestKey(""); await refreshAfterCommand(response.data.id);
     });
   }
   async function control(action: string) {
     if (!selected) return;
     setConfirmRollback(false);
     const id = selected.id;
-    await act(async () => { await apiClient.post(`/assistant-trial/runs/${id}/${action}`); await load(id); });
+    await act(async () => { await apiClient.post(`/assistant-trial/runs/${id}/${action}`); await refreshAfterCommand(id); });
   }
   const task = tasks.find(t => t.id === taskId && t.domain === domain);
   const targetsReady=taskId==="hospital_pending_faxes" || !!selection && !!targetKeys.length && (task?.target_kind!=="menu" || !!task?.date || !!layoutId);
@@ -114,7 +131,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   }
   async function taskDecision(approve:boolean) {
     if (!selected?.task_review) return;
-    await act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/decision`,{review_id:selected.task_review!.id,approve,message:reviewMessage});setReviewMessage("");await load(selected.id);});
+    await act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/decision`,{review_id:selected.task_review!.id,approve,message:reviewMessage});setReviewMessage("");await refreshAfterCommand(selected.id);});
   }
   async function download(file: { id: string; name: string }) {
     if (!selected) return;
@@ -123,7 +140,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   }
   async function decide(fax: Fax, approve: boolean) {
     if (!selected || !fax.review) return;
-    await act(async () => { await apiClient.post(`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/decision`, { review_id: fax.review!.id, approve, message: corrections[fax.fax_id] || "" }); await load(selected.id); });
+    await act(async () => { await apiClient.post(`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/decision`, { review_id: fax.review!.id, approve, message: corrections[fax.fax_id] || "" }); await refreshAfterCommand(selected.id); });
   }
   const terminal=!!selected && ["completed","stopped","rolled_back","failed"].includes(selected.status);
   const awaitingSource=selected?.status==="waiting_input" && selected.task_id==="lunch_import" && !selected.events?.some(event=>event.kind==="source");
@@ -151,6 +168,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   return <main className="assistant-page" ref={pageRef}>
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
+    {selected && pollNotice && <p role="status" className="muted">{pollNotice}</p>}
     {adminView && config?.providers && <section className="assistant-panel"><h2>エージェントの接続先</h2><p>変更は新しい依頼から適用します。実行中・確認待ちの依頼は元の接続先で続けます。</p><div className="answer-options">{config.providers.map(provider=><button key={provider.id} disabled={busy} aria-pressed={config.provider_id===provider.id} onClick={()=>act(async()=>{await apiClient.put("/assistant-trial/provider",{provider:provider.id});await load(selected?.id);})}>{provider.label}{config.provider_id===provider.id?"（使用中）":""}</button>)}</div>{config.providers.map(provider=><p key={provider.id}>{provider.label}：{provider.missing.length?"未設定："+provider.missing.join("、"):"設定済み"}</p>)}<p className="muted">Geminiの料金は報告トークン数と管理者が設定した単価による概算です。思考トークンを含み、割引・無料枠は適用しません。Claudeは接続先の定価換算値です。請求確定額とは異なります。</p></section>}
     {adminView && config && <section className="assistant-panel"><h2>今月の利用料金</h2><dl className="costs"><div><dt>使用額（概算・定価換算）</dt><dd>{dollars(config.budget.spent_cents)}</dd></div><div><dt>実行中の予約額</dt><dd>{dollars(config.budget.reserved_cents)}</dd></div><div><dt>月次上限</dt><dd>{dollars(config.budget.monthly_cents)}</dd></div><div><dt>利用可能額</dt><dd>{dollars(config.budget.available_cents)}</dd></div></dl><p className="muted">{config.budget.notice} 米ドル表示です。既存OCR等の料金は含みません。</p><form onSubmit={e=>{e.preventDefault();act(async()=>{await apiClient.put("/assistant-trial/budget",{monthly_cents:cents(month)});await load(selected?.id);});}}><label>月次予算（USD）<input value={month} onChange={e=>setMonth(e.target.value)} inputMode="decimal" placeholder={(config.budget.monthly_cents/100).toFixed(2)} required/></label><button className="primary" disabled={busy}>上限を保存する</button></form></section>}
     {!adminView && config && (config.missing.length>0 || (selected ? selected.domains.some(key=>!config.domains[key]?.baseline_ready) : choosingTask ? !Object.values(config.domains).some(value=>value.baseline_ready) : !config.domains[domain]?.baseline_ready)) && <div className="assistant-notice"><strong>試用の準備中です</strong><p>管理者の接続・試用データ設定が完了すると、選んだ作業を開始できます。</p><details><summary>設定状況</summary><p>{config.missing.length ? "接続先が未設定です。" : "接続先は設定済みです。"}</p>{Object.entries(config.domains).map(([key,value])=><p key={key}>{labels[key]}：{value.baseline_ready ? value.data==="empty_schema_no_real_order_test" ? "業務データの準備が必要" : "準備済み" : "未設定"}</p>)}</details></div>}
@@ -162,7 +180,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         <div className="assistant-fields">{task?.month && <label>対象月<input type="month" value={targetMonth} required onChange={e=>{setTargetMonth(e.target.value);resetTargets();}}/></label>}{taskId==="shift_absence" && <label>欠勤日<input type="date" value={absenceDate} required onChange={e=>{setAbsenceDate(e.target.value);resetTargets();}}/></label>}{task?.target_kind==="menu" && !!selection?.schools.length && <fieldset className="target-choices school-choices"><legend>学校を選んでください</legend>{selection.schools.map(x=><label className="target-choice" key={x.id}><input type="radio" name="school" value={x.id} checked={schoolId===String(x.id)} onChange={()=>{setSchoolId(String(x.id));resetTargets();}}/><span>{x.name}</span></label>)}</fieldset>}{task?.date && <label>対象日<input type="date" disabled={!schoolId} value={serviceDate} required onChange={e=>{setServiceDate(e.target.value);resetTargets();}}/></label>}</div>
         {loadingTargets && <p role="status" className="muted">登録済みの対象を確認しています…</p>}
         {taskId==="hospital_pending_faxes" && <div className="assistant-notice">未処理のFAXを取得し、処理できたものから確認をお願いします。施設・期間や数量に不明点があれば質問します。</div>}
-        {task?.date && selection && schoolId && <div className="assistant-notice">{selection.choices.length ? <><strong>この日の献立をまとめて処理します</strong><p>{selection.choices.map(x=>x.label).join(" ／ ")}</p><p>作業工程表・動線図・実施価格を一度に確認できます。</p></> : "この日の献立は未登録です。月次の「献立・調理手配書を取り込む」を先に行ってください。"}</div>}
+        {task?.date && serviceDate && selection && schoolId && <div className="assistant-notice">{selection.choices.length ? <><strong>この日の献立をまとめて処理します</strong><p>{selection.choices.map(x=>x.label).join(" ／ ")}</p><p>作業工程表・動線図・実施価格を一度に確認できます。</p></> : "この日の献立は未登録です。月次の「献立・調理手配書を取り込む」を先に行ってください。"}</div>}
         {selection && !task?.date && <fieldset className="target-choices"><legend>{task?.target_kind==="school" ? "学校を選んでください" : taskId==="shift_absence" ? "欠勤する職員を選んでください" : "作業する対象を選んでください"}</legend>{!selection.choices.length && <p className="muted">{task?.target_kind==="menu" && !schoolId ? "学校を選ぶと、登録済みの献立が表示されます。" : "対象がありません。登録内容・対象月を確認してください。"}</p>}{selection.choices.map(choice=><label className="target-choice" key={choice.key}><input type={task?.target_kind==="school" || task?.target_kind==="month" ? "radio" : "checkbox"} name="target" checked={targetKeys.includes(choice.key)} onChange={e=>{setTargetKeys(keys=>task?.target_kind==="school" || task?.target_kind==="month" ? [choice.key] : e.target.checked ? [...keys,choice.key] : keys.filter(k=>k!==choice.key));setRequestKey("");}}/><span>{choice.label}</span></label>)}</fieldset>}
         {task?.target_kind==="menu" && !task.date && !!selection?.choices.length && <fieldset className="target-choices"><legend>使う図面を選んでください</legend>{selection.layouts.map(x=><label className="target-choice" key={x.id}><input type="radio" name="layout" value={x.id} checked={layoutId===String(x.id)} onChange={()=>setLayoutId(String(x.id))}/><span>{x.name}（版 {x.version}）</span></label>)}</fieldset>}
         <div className="assistant-footer"><div><p className="muted">{ready ? "開始後は、画面に届く質問への回答と内容の確認だけで進みます。" : loadingTargets ? "対象を確認しています。" : config?.missing.length ? "管理者の接続設定を待っています。" : "対象を選ぶと、作業を開始できます。"}</p></div><button className="primary" disabled={busy || !ready || loadingTargets}>この内容で始める</button></div>
@@ -174,8 +192,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       <div className={terminal ? "next-action finished" : "next-action"} role="status"><span className="next-action-marker" aria-hidden="true">{selected.status==="completed" ? "✓" : needsAnswer || awaitingReview || awaitingSource || faxReviews.length ? "?" : "…"}</span><div><h3>{nextTitle}</h3><p>{selected.status==="completed" ? selected.artifacts?.length ? "保存・出力が終わりました。下の完成ファイルを確認できます。" : "確認が完了しました。内容は下の確認結果と履歴で見ることができます。" : selected.status==="rolled_back" ? "この依頼で行った変更は戻しました。実行履歴は残っています。" : selected.status==="stopped" ? "これ以上の処理は行いません。変更も戻したい場合は「開始前に戻す」を選んでください。" : awaitingSource ? "選択した学校・対象月の原本を添付してください。" : awaitingReview || faxReviews.length ? "結果を確認し、そのまま進めるか、訂正したい箇所を教えてください。" : needsAnswer ? "回答すると、続きの作業を自動で進めます。" : selected.status==="budget_reached" ? "作業は未完了です。管理画面で利用上限を確認してください。" : ["stop_pending","rollback_stop_pending"].includes(selected.status) ? "業務の書込みは停止済みです。「停止を再確認する」で、接続先の停止を確認できます。" : attention ? "処理は完了していません。下の理由を確認してください。" : "この画面でお待ちください。確認が必要になったら質問が表示されます。"}</p>{attentionReason && <p className="attention-reason">{attentionReason}</p>}</div></div>
       {terminal && renderArtifacts()}
       {adminView && <p>使用額 {dollars(selected.spent)}</p>}
-      {needsAnswer && <section className="answer-panel" aria-label="エージェントからの質問"><p className="process-question-progress" hidden={!question?.process_context}>調理方法・作業場所の確認：{question?.process_context?.answered} / {question?.process_context?.total}工程</p><h3>{question?.text || latestAgentText || "確認事項への回答をお願いします"}</h3>{question?.question_map ? <DrawingQuestion key={selected.id+question.question_id} runId={selected.id} questionId={question.question_id!} map={question.question_map} busy={busy} onAnswer={option=>act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:option,question_id:question.question_id,option});await load(selected.id);})}/> : <><div className="answer-options">{question?.options?.map(option=><button disabled={busy} key={option} onClick={()=>act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:option,question_id:question.question_id,option});await load(selected.id);})}>{option}</button>)}</div>{question?.process_context?.kind!=="grouping" && <form onSubmit={e=>{e.preventDefault();act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:reply,question_id:question?.question_id});setReply("");await load(selected.id);});}}><label>{question?.options?.length ? "文章でも回答できます" : "回答"}<textarea value={reply} onChange={e=>setReply(e.target.value)} placeholder="ここに回答を入力してください" required/></label><button className="primary" disabled={busy || !reply.trim()}>回答して続ける</button></form>}</>}</section>}
-      {awaitingSource && <form className="answer-panel" onSubmit={e=>{e.preventDefault();act(async()=>{if(!source || !sourceChecked)throw new Error("原本の学校・対象月を確認してください");const form=new FormData();form.append("file",source);form.append("domain","school-lunch");form.append("binding",JSON.stringify({facility_id:String(selected.task_inputs!.inputs.facility_id),month:selected.task_inputs!.inputs.month}));await apiClient.post(`/assistant-trial/runs/${selected.id}/sources`,form);await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:"選択した学校・対象月と原本を照合しました。",question_id:selected.pending_question?.question_id});setSource(null);setSourceChecked(false);await load(selected.id);});}}><label>献立・調理手配書の原本<input type="file" accept=".pdf,.xls,.xlsx" required onChange={e=>{setSource(e.target.files?.[0] || null);setSourceChecked(false);}}/></label><p>学校：{selected.task_inputs?.targets[0]?.label} ／ 対象月：{selected.task_inputs?.inputs.month}</p><label className="check-line"><input type="checkbox" checked={sourceChecked} required onChange={e=>setSourceChecked(e.target.checked)}/>原本の学校・対象月が、表示内容と一致しています</label><button className="primary" disabled={busy || !source || !sourceChecked}>原本を添付して続ける</button></form>}
+      {needsAnswer && <section className="answer-panel" aria-label="エージェントからの質問"><p className="process-question-progress" hidden={!question?.process_context}>調理方法・作業場所の確認：{question?.process_context?.answered} / {question?.process_context?.total}工程</p><h3>{question?.text || latestAgentText || "確認事項への回答をお願いします"}</h3>{question?.question_map ? <DrawingQuestion key={selected.id+question.question_id} runId={selected.id} questionId={question.question_id!} map={question.question_map} busy={busy} onAnswer={option=>act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:option,question_id:question.question_id,option});await refreshAfterCommand(selected.id);})}/> : <><div className="answer-options">{question?.options?.map(option=><button disabled={busy} key={option} onClick={()=>act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:option,question_id:question.question_id,option});await refreshAfterCommand(selected.id);})}>{option}</button>)}</div>{question?.process_context?.kind!=="grouping" && <form onSubmit={e=>{e.preventDefault();act(async()=>{await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:reply,question_id:question?.question_id});setReply("");await refreshAfterCommand(selected.id);});}}><label>{question?.options?.length ? "文章でも回答できます" : "回答"}<textarea value={reply} onChange={e=>setReply(e.target.value)} placeholder="ここに回答を入力してください" required/></label><button className="primary" disabled={busy || !reply.trim()}>回答して続ける</button></form>}</>}</section>}
+      {awaitingSource && <form className="answer-panel" onSubmit={e=>{e.preventDefault();act(async()=>{if(!source || !sourceChecked)throw new Error("原本の学校・対象月を確認してください");const form=new FormData();form.append("file",source);form.append("domain","school-lunch");form.append("binding",JSON.stringify({facility_id:String(selected.task_inputs!.inputs.facility_id),month:selected.task_inputs!.inputs.month}));await apiClient.post(`/assistant-trial/runs/${selected.id}/sources`,form);await apiClient.post(`/assistant-trial/runs/${selected.id}/reply`,{message:"選択した学校・対象月と原本を照合しました。",question_id:selected.pending_question?.question_id});setSource(null);setSourceChecked(false);await refreshAfterCommand(selected.id);});}}><label>献立・調理手配書の原本<input type="file" accept=".pdf,.xls,.xlsx" required onChange={e=>{setSource(e.target.files?.[0] || null);setSourceChecked(false);}}/></label><p>学校：{selected.task_inputs?.targets[0]?.label} ／ 対象月：{selected.task_inputs?.inputs.month}</p><label className="check-line"><input type="checkbox" checked={sourceChecked} required onChange={e=>setSourceChecked(e.target.checked)}/>原本の学校・対象月が、表示内容と一致しています</label><button className="primary" disabled={busy || !source || !sourceChecked}>原本を添付して続ける</button></form>}
       {selected.task_review && <div className="result-archive"><section className="review-panel" key={selected.task_review.id} aria-label="結果の確認と承認"><h3>{awaitingReview ? "作成した内容" : "確認した内容"}</h3><p>{selected.task_review.summary}</p>{selected.lunch_review && <section className="evidence"><h4>食材ごとの当日の実績</h4><ResultView value={selected.lunch_review} expanded/></section>}{selected.shift_review ? <ShiftReview value={selected.shift_review}/> : selected.task_review.evidence.filter(entry=>!selected.lunch_review || entry.operation!=="lunch_get_process").map((entry,i)=><section className="evidence" key={i}><h4>{({shift_get_run:"勤務表",shift_get_validation:"人員不足・勤務制約",shift_get_constraints:"希望休・勤務条件",shift_get_staff:"職員",shift_get_demands:"必要人数",shift_get_workdays:"勤務日",shift_get_settings:"勤務設定",shift_get_period:"勤務期間",lunch_get_menus:"献立",lunch_get_process:"調理工程",lunch_get_schedules:"工程表",lunch_get_routes:"動線図",lunch_get_procurement:"必要量・在庫・発注案",lunch_get_price_source:"実施価格の計算入力",lunch_get_price_result:"実施価格",lunch_get_price_quantities:"原本の1人量",lunch_get_source_document:"原本の抽出結果",lunch_get_source_review:"原本の照合結果",hospital_get_recognition_review:"原本セルと認識値",hospital_get_fax:"FAXの状態",hospital_get_workflow:"確定注文の状態"} as Record<string,string>)[entry.operation] || "業務情報"}</h4><ResultView value={entry.data} expanded/></section>)}
         {!selected.shift_review && !!selected.task_review.actions.length && <section className="evidence"><h4>承認後に保存する内容</h4>{selected.task_review.actions.map((action,i)=><ResultView key={i} value={action.parameters.body} expanded/>)}</section>}
         {awaitingReview && <div className="review-decisions"><section className="approval-choice"><h4>この内容でよければ</h4><p className="muted">確認した内容で保存・出力へ進みます。</p><button className="primary" disabled={busy} onClick={()=>taskDecision(true)}>この内容で進める</button></section><form className="correction-panel" onSubmit={e=>{e.preventDefault();taskDecision(false);}}><label>訂正してほしい箇所<textarea value={reviewMessage} onChange={e=>setReviewMessage(e.target.value)} placeholder="訂正が必要なときだけ入力してください" required/></label><button disabled={busy || !reviewMessage.trim()}>訂正を依頼する</button></form></div>}

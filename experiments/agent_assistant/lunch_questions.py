@@ -80,7 +80,7 @@ class LunchQuestions:
         if not inputs.get('layout_id'): raise Conflict('使用する図面を先に回答してください')
         layouts = await self.flow.read(run, 'lunch_get_layouts', {'query': query})
         layout = next((x for x in layouts if x['id'] == inputs['layout_id'] and x['version'] == inputs['layout_version']), None)
-        if not layout or not layout.get('locations'): raise Conflict('選択した図面の作業場所が未登録、または図面が変更されています')
+        if not layout: raise Conflict('選択した図面が見つからない、または図面が変更されています')
         menus = await self.flow.read(run, 'lunch_get_menus', {'query': query})
         expected = {str(t['data']['id']): t['data']['version'] for t in context['targets']}
         actual = {str(m['id']): m['version'] for m in menus if m['service_date'] == inputs['service_date']}
@@ -174,7 +174,12 @@ class LunchQuestions:
             document = item['document']; templates = source['options']['templates']
             selected = (document.get('route_config') or {}).get('template_id')
             if not selected:
-                choices = [{'value': t['template_id'], 'label': f"{t['template_id']}（版 {t['template_version']}）"} for t in templates]
+                choices = []
+                for template in templates:
+                    picture = await self.drawing(run, item['menu_id'], template['template_id'])
+                    if picture['template_version'] != template['template_version'] or not isinstance(picture.get('title'), str) or not picture['title'].strip():
+                        raise Conflict('原本図面の名称・版を確認できません')
+                    choices.append({'value': template['template_id'], 'label': picture['title']})
                 return self.question(run, state, command_id, item, 'template', 'template', f"「{item['name']}」で使用した厨房図面はどれですか？", choices)
             template = next((t for t in templates if t['template_id'] == selected), None)
             if not template: raise Conflict('工程の厨房図面が登録候補にありません')
@@ -193,9 +198,11 @@ class LunchQuestions:
                     item['work_groups'][step['id']] = work
                 index, group = next((i,g) for i,g in enumerate(work['groups']) if 'equipment' not in g)
                 equipment = step.get('equipment') or {}; kind = equipment.get('type')
-                candidates = [x for x in template['equipment'] if x.get('type') and (not kind or x['type'] == kind) and x['name'] in state['sources']['layout']['locations']]
+                candidates = [x for x in template['equipment'] if x.get('type') and (not kind or x['type'] == kind)]
                 choices = [{'value': x, 'label': x['name'] if sum(c['name'] == x['name'] for c in candidates) == 1 else f"{x['name']}（ID:{x['id']}）"} for x in candidates]
                 picture = await self.drawing(run, item['menu_id'], selected)
+                if picture['template_version'] != template['template_version']:
+                    raise Conflict('候補設備と原本図面の版が一致しません')
                 geometry = {e['id']: e for e in picture['equipment']}
                 if any(c['value']['id'] not in geometry or geometry[c['value']['id']]['name'] != c['value']['name'] for c in choices):
                     raise Conflict('候補設備と原本の箇所を一意に対応付けられません')

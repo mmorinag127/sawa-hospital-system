@@ -44,7 +44,7 @@ test('schools precede the date, persist across day changes, and stale targets ca
   await h.wait(()=>h.document.querySelector('input[name=school]'));
   const day=h.document.querySelector('input[type=date]');assert.equal(day.disabled,true);assert.deepEqual(Object.keys(requests[0]),[]);
   assert.ok(h.document.querySelector('.school-choices').compareDocumentPosition(day)&4);
-  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.some(x=>x.facility_id===8));assert.equal(day.disabled,false);
+  await h.click(h.document.querySelector('input[name=school]'));await h.wait(()=>requests.some(x=>x.facility_id===8));assert.equal(day.disabled,false);assert.doesNotMatch(h.document.body.textContent,/この日の献立は未登録/);
   await h.change(day,'2026-07-01');await h.wait(()=>!!resolveOld);
   await h.change(day,'2026-07-02');await h.wait(()=>h.document.body.textContent.includes('新しい日の献立'));
   assert.equal(h.document.querySelector('input[name=school]').checked,true);
@@ -166,4 +166,53 @@ test('slow polling never overlaps requests and resumes after completion',async()
   });
   await h.poll();assert.equal(count(),before+2);
  }finally{release();await h.close();}
+});
+
+
+test('a failed progress read preserves the task and retries without resending commands',async()=>{
+ let fail=false;
+ const h=await mount({initial:makeRun(),beforeGet:async url=>{if(fail&&url===base+'/runs/r1')throw Error('timeout of 30000ms exceeded');}});
+ try{
+  fail=true;await h.poll();
+  assert.match(h.document.body.textContent,/進捗を取得できませんでした/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.ok(h.document.querySelector('.answer-panel'));
+  assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+  assert.equal(h.calls.filter(c=>c.url===base+'/budget').length,0);
+  fail=false;h.setRun({...h.run,status:'completed',pending_question:null});await h.poll();
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.doesNotMatch(h.document.body.textContent,/進捗を取得できませんでした/);
+  await h.click(h.button('別の作業を始める'));
+  assert.doesNotMatch(h.document.body.textContent,/続きがある作業/);
+  assert.match(h.document.querySelector('.history-row').textContent,/完了/);
+ }finally{await h.close();}
+});
+
+test('admin usage read failure never discards the latest task status',async()=>{
+ let fail=false;
+ const h=await mount({initial:makeRun(),adminView:true,beforeGet:async url=>{if(fail&&url===base+'/budget')throw Error('unavailable');}});
+ try{
+  await h.click(h.document.querySelector('.history-row'));fail=true;
+  h.setRun({...h.run,status:'completed',pending_question:null});await h.poll();
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.match(h.document.body.textContent,/利用料金を取得できませんでした/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+ }finally{await h.close();}
+});
+
+
+test('an accepted approval with a failed refresh is not reported as a failed command',async()=>{
+ let fail=false;
+ const initial={...makeRun('running'),pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'確認済みの試験案',evidence:[],actions:[]}};
+ const h=await mount({initial,beforeGet:async url=>{if(fail&&url===base+'/runs/r1')throw Error('timeout of 30000ms exceeded');}});
+ try{
+  fail=true;await h.click(h.button('この内容で進める'));
+  assert.match(h.document.body.textContent,/進捗を取得できませんでした/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
+  fail=false;await h.poll();
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.doesNotMatch(h.document.body.textContent,/進捗を取得できませんでした/);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
+ }finally{await h.close();}
 });
