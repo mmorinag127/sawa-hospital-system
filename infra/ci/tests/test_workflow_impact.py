@@ -19,7 +19,7 @@ class WorkflowImpact(unittest.TestCase):
             self.assertEqual(saves[0]["if"],
                              "success() && github.event_name == 'push' && github.ref == 'refs/heads/develop'")
             self.assertEqual(self.jobs[name]["env"]["SAWA_IMPACT_FULL"],
-                             "${{ github.event_name == 'push' && '1' || '0' }}")
+                             "${{ (inputs.full_tests || startsWith(github.ref, 'refs/heads/release/prod-')) && '1' || '0' }}")
 
     def test_dependency_state_separated_and_tooling_versioned(self):
         for name in ("backend", "frontend"):
