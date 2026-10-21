@@ -702,6 +702,7 @@ def dispatch_environment():
         "GITHUB_REF": "refs/heads/develop", "GITHUB_EVENT_NAME": "workflow_dispatch",
         "DEPLOY_MODE": "normal", "REPOSITORY_OWNER": "mmorinag127",
         "REVIEWED_DIAGNOSTIC": "true", "REVIEWED_DIAGNOSTIC_JSON": "true",
+        "DEMAND_DIAGNOSTIC_JSON": "false",
         "ACTOR": "mmorinag127", "TRIGGERING_ACTOR": "mmorinag127",
         "RECOVERY_CONFIRMATION": "", "EXPECTED_REVISION": "", "EXPECTED_IMAGE": "",
         "OCR_MANIFEST": "", "OCR_EXISTING_RUN": "", "MENU_MANIFEST": "", "REVIEW_ORDER": "",
@@ -745,6 +746,7 @@ def test_valid_diagnostic_disables_both_change_outputs(tmp_path):
 
 def job_allowed(expression, **overrides):
     values = {"inputs.mode": "normal", "inputs.diagnose_reviewed_ocr": True, "github.repository": diag.REPOSITORY,
+        "inputs.diagnose_workflow_demand_parity": False,
         "github.actor": "mmorinag127", "github.triggering_actor": "mmorinag127",
         "github.repository_owner": "mmorinag127", "github.ref": "refs/heads/develop",
         "github.event_name": "workflow_dispatch", "inputs.diagnose_saved_contact_replay": False,
@@ -784,6 +786,7 @@ def dispatch_route(env, tmp_path):
             implicit_success = all(outcomes[dependency] == "success" for dependency in dependencies)
             values = {"inputs.mode": env["DEPLOY_MODE"],
                 "inputs.diagnose_reviewed_ocr": env.get("REVIEWED_DIAGNOSTIC_JSON") == "true",
+                "inputs.diagnose_workflow_demand_parity": env.get("DEMAND_DIAGNOSTIC_JSON") == "true",
                 "inputs.diagnose_saved_contact_replay": env.get("CONTACT_REPLAY") == "true",
                 "github.repository": env["GITHUB_REPOSITORY"], "github.ref": env["GITHUB_REF"],
                 "github.event_name": env["GITHUB_EVENT_NAME"], "github.actor": env["ACTOR"],
@@ -802,7 +805,7 @@ def dispatch_route(env, tmp_path):
 
 def test_diagnostic_source_gate_and_dependency_graph_disable_every_side_effect_job(tmp_path):
     jobs = staging_workflow()["jobs"]
-    assert set(jobs) == {"source-gate", "diagnose-reviewed-ocr", "diagnose-contact-replay", "recover-web",
+    assert set(jobs) == {"source-gate", "diagnose-reviewed-ocr", "diagnose-workflow-demand-parity", "diagnose-contact-replay", "recover-web",
         "automation-bootstrap", "menu-master-migration", "build-backend", "build-frontend", "build-agent",
         "deploy-backend", "deploy-frontend"}
     outcomes, outputs = dispatch_route(dispatch_environment(), tmp_path)
@@ -817,6 +820,41 @@ def test_diagnostic_source_gate_and_dependency_graph_disable_every_side_effect_j
         ("github.ref", "refs/heads/main"), ("github.repository", "other/repo"),
         ("github.event_name", "push"), ("needs.source-gate.result", "failure")]:
         assert not job_allowed(expression, **{key: value})
+
+
+def test_demand_parity_dispatch_excludes_all_deploy_and_other_diagnostic_jobs(tmp_path):
+    env = {**dispatch_environment(), "REVIEWED_DIAGNOSTIC": "false",
+        "REVIEWED_DIAGNOSTIC_JSON": "false", "DEMAND_DIAGNOSTIC_JSON": "true"}
+    outcomes, outputs = dispatch_route(env, tmp_path)
+    assert outputs == {"backend_changed": "false", "frontend_changed": "false"}
+    assert {name for name, value in outcomes.items() if value == "success"} == {
+        "source-gate", "diagnose-workflow-demand-parity"}
+    job = staging_workflow()["jobs"]["diagnose-workflow-demand-parity"]
+    assert job["environment"] == "staging"
+    assert job["permissions"] == {"contents": "read", "id-token": "write"}
+    assert job["steps"][-1]["with"]["path"] == "${{ runner.temp }}/demand-parity-summary/*.json"
+    for step in job["steps"]:
+        if "run" in step:
+            assert subprocess.run(["bash", "-n"], input=step["run"], text=True,
+                capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("key,value", [
+    ("REVIEWED_DIAGNOSTIC", "true"), ("REVIEWED_DIAGNOSTIC_JSON", "true"),
+    ("DEMAND_DIAGNOSTIC_JSON", "unknown"), ("CONTACT_REPLAY", "true"),
+    ("VERIFY_MENU", "true"), ("OCR_MANIFEST", "manifest"), ("MENU_MANIFEST", "manifest"),
+    ("OCR_EXISTING_RUN", "123"), ("OUTPUT_ORDER", "ORD581f55d6"),
+    ("ACTOR", "other"), ("TRIGGERING_ACTOR", "other"),
+    ("GITHUB_REF", "refs/heads/main"), ("GITHUB_EVENT_NAME", "push"),
+    ("DEPLOY_MODE", "recover-web-image"),
+])
+def test_demand_parity_rejects_conflicts_and_foreign_context(key, value, tmp_path):
+    env = {**dispatch_environment(), "REVIEWED_DIAGNOSTIC": "false",
+        "REVIEWED_DIAGNOSTIC_JSON": "false", "DEMAND_DIAGNOSTIC_JSON": "true", key: value}
+    outcomes, outputs = dispatch_route(env, tmp_path)
+    assert outcomes["source-gate"] == "failure"
+    assert outputs == {}
+    assert all(value == "skipped" for name, value in outcomes.items() if name != "source-gate")
 
 
 @pytest.mark.parametrize("event,mode", [("push", ""), ("workflow_dispatch", "normal"),
