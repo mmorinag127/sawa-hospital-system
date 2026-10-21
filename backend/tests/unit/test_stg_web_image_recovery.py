@@ -59,6 +59,12 @@ def test_tag_resolution_and_generated_name_preserve_all_runtime_settings():
     assert (before, revision) == originals
 
 
+def test_recovery_accepts_revision_spec_digest_when_status_digest_is_absent():
+    before, revision = runtime_pair()
+    del revision['status']['imageDigest']
+    r.verify_original_runtime(before, revision, REV, OLD_IMAGE)
+
+
 def test_export_omits_server_revision_name_but_active_revision_is_still_required():
     before, revision = runtime_pair()
     del before['spec']['template']['metadata']['name']
@@ -217,6 +223,22 @@ def test_tag_digest_mismatch_or_registry_failure_stops(monkeypatch, status, mani
         p.protect_image(IMAGE, 'frontend')
 
 
+def test_protection_uses_web_ingress_digest_when_status_digest_is_absent(monkeypatch):
+    descriptor = {'spec': {'containers': [
+        {'image': IMAGE, 'ports': [{'containerPort': 8080}]},
+        {'name': 'agent-runtime', 'image': p.PREFIX + 'agent-runtime@sha256:' + 'b' * 64},
+    ]}, 'status': {}}
+    monkeypatch.setattr(p, 'SERVICES', {'web-stg': 'frontend'})
+    monkeypatch.setattr(p, 'cloud', Mock(side_effect=[
+        {'status': {'traffic': [{'revisionName': REV}], 'latestReadyRevisionName': REV,
+                    'latestCreatedRevisionName': REV}}, descriptor,
+    ]))
+    protect = Mock()
+    monkeypatch.setattr(p, 'protect_image', protect)
+    p.protect_current()
+    protect.assert_called_once_with(IMAGE, 'frontend')
+
+
 @pytest.fixture
 def recovery(monkeypatch):
     monkeypatch.setenv('GITHUB_SHA', SHA)
@@ -239,8 +261,11 @@ def recovery(monkeypatch):
 
     def cloud(*args, **kwargs):
         if args[:3] == ('run', 'revisions', 'describe'):
-            return {'metadata': {'name': args[3]}, 'spec': spec()['spec']['template']['spec'],
-                    'status': {'imageDigest': OLD_IMAGE if args[3] == REV else IMAGE}}
+            image = OLD_IMAGE if args[3] == REV else IMAGE
+            runtime = spec()['spec']['template']['spec']
+            runtime['containers'][0]['image'] = image
+            return {'metadata': {'name': args[3]}, 'spec': runtime,
+                    'status': {'imageDigest': image}}
         if args[:2] == ('projects', 'describe'):
             return {'projectNumber': '167795504375'}
         if args[:3] == ('run', 'services', 'replace'):

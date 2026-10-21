@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from run_stg_menu_master_migration import cloud_sql_proxy  # noqa: E402
 from staging_db_target import (  # noqa: E402
     StagingConfigBlocked, load_service_db_config as _load_service_db_config,
-    read_http, image_config, REGISTRY,
+    read_http, image_config, revision_image_digest, REGISTRY,
 )
 from stg_menu_master_safety import Blocked, SA_EMAIL, cleanup_owned, fingerprint, preflight, require  # noqa: E402
 
@@ -94,7 +94,7 @@ def deployed_sources(sha):
         require(revision.startswith(service + "-"), "serving-revision-missing")
         rev = cloud("run", "revisions", "describe", revision, "--project=sawahospitalsystem", "--region=asia-northeast2")
         require(any(c.get("type") == "Ready" and c.get("status") == "True" for c in rev["status"].get("conditions", [])), "serving-revision-not-ready")
-        digest = rev["status"].get("imageDigest", "")
+        digest = revision_image_digest(rev, service)
         image_source(digest, component, sha, access_token)
         sources[service] = {"revision": revision, "imageDigest": digest, "sourceSHA": sha}
     return sources

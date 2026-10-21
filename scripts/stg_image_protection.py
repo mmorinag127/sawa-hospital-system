@@ -13,6 +13,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'backend')]
 
 from stg_ocr_producer_deploy import Blocked, cloud, command, PROJECT, REGION, DEPLOY
 from registry_image_digest import resolve_image_digest
+from staging_db_target import revision_image_digest
 
 PREFIX = f'{REGION}-docker.pkg.dev/{PROJECT}/backend/'
 REPOSITORY = f'projects/{PROJECT}/locations/{REGION}/repositories/backend'
@@ -108,7 +109,10 @@ def protect_current():
                 'staging_revision_source_unknown')
         for revision in sorted(revisions):
             descriptor = cloud('run', 'revisions', 'describe', revision, f'--region={REGION}')
-            protect_image(descriptor.get('status', {}).get('imageDigest', ''), component)
+            image = (revision_image_digest(descriptor, service)
+                     if service in ('web-stg', 'worker-stg')
+                     else descriptor.get('status', {}).get('imageDigest', ''))
+            protect_image(image, component)
 
 
 def main():

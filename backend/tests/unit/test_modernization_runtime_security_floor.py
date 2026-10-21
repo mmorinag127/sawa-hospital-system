@@ -126,12 +126,12 @@ def test_actual_installed_distribution_meets_fixed_security_range(name):
 
 @pytest.mark.parametrize("path,baseline", [
     (BACKEND / "requirements.txt", {
-        "fastapi": "0.136.1", "pillow": "12.3.0", "pymupdf": "1.24.14",
+        "fastapi": "0.136.1", "pillow": "13.0.0", "pymupdf": "1.24.14",
         "pdfplumber": "0.11.9", "pdfminer-six": "20251230", "pypdfium2": "5.5.0",
         "yomitoku": "0.9.5", "huggingface-hub": "0.36.2",
     }),
     (ROOT / "ocr_pipeline" / "requirements.txt", {
-        "pillow": "12.3.0", "opencv-python-headless": "4.10.0.84", "pypdfium2": "4.30.0",
+        "pillow": "13.0.0", "opencv-python-headless": "4.10.0.84", "pypdfium2": "4.30.0",
         "yomitoku": "0.9.5", "huggingface-hub": "0.36.2",
     }),
 ])
@@ -157,7 +157,7 @@ def test_explicit_model_platform_source_pins_remain_unchanged(path, system, mach
 
 def test_nonbatch_locked_pins_and_known_grpc_risk_not_silently_changed(sources):
     baseline = {"fastapi": "0.136.1",
-                "pillow": "12.3.0", "grpcio": "1.80.0", "grpcio-status": "1.80.0"}
+                "pillow": "13.0.0", "grpcio": "1.80.0", "grpcio-status": "1.80.0"}
     for name, pinned in baseline.items():
         assert one([package for package in sources["lock"]["package"] if package["name"] == name])["version"] == pinned
 

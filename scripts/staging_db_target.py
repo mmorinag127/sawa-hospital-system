@@ -102,6 +102,19 @@ def _container(descriptor, service):
     return containers[0]
 
 
+def revision_image_digest(descriptor, service):
+    """Return the verified ingress image; Cloud Run may omit status.imageDigest."""
+    component = 'frontend' if service == 'web-stg' else 'backend' if service == 'worker-stg' else None
+    require(component is not None, 'revision-service-unsupported')
+    image = _container(descriptor, service).get('image', '')
+    prefix = REGISTRY + '/sawahospitalsystem/backend/' + component + '@'
+    require(bool(re.fullmatch(re.escape(prefix) + r'sha256:[0-9a-f]{64}', image)),
+            'immutable-revision-image-required')
+    reported = descriptor.get('status', {}).get('imageDigest')
+    require(reported in (None, '', image), 'revision-image-digest-mismatch')
+    return image
+
+
 def _entries(descriptor, service):
     entries = {}
     for entry in _container(descriptor, service).get('env', []):
@@ -169,7 +182,8 @@ def load_service_db_config(project, region, service, *, expected_revision=None):
         revision = describe('revisions', name)
         require(revision.get('metadata', {}).get('name') == name, 'revision-descriptor-mismatch')
         require(any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in revision.get('status', {}).get('conditions', [])), 'revision-not-ready')
-        image = image_config(revision.get('status', {}).get('imageDigest', ''), 'frontend' if service == 'web-stg' else 'backend', access)
+        image = image_config(revision_image_digest(revision, service),
+                             'frontend' if service == 'web-stg' else 'backend', access)
         configs[name] = resolve_runtime(revision, image, service)
         if name == intended:
             require(_entries(template, service) == _entries(revision, service), 'intended-revision-env-mismatch')
