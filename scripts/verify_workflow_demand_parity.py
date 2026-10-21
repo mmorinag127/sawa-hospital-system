@@ -2,6 +2,7 @@
 import argparse
 import ast
 from contextlib import contextmanager, ExitStack, redirect_stdout, redirect_stderr
+from contextvars import ContextVar
 from copy import deepcopy
 import hashlib
 import importlib.util
@@ -28,6 +29,7 @@ FIELDS = (
 )
 START_FIELDS = ("configured_input", "physical_menu_entries")
 BUCKETS = {"sawahospitalsystem-stg-raw", "sawahospitalsystem-stg-templates"}
+READ_STAGE = ContextVar("parity_read_stage", default=None)
 
 
 def load_helper(name):
@@ -58,10 +60,30 @@ class ReadFailure(Exception):
 
 
 def read_phase(stage, function, *args, **kwargs):
+    token = READ_STAGE.set(stage)
     try:
         return function(*args, **kwargs)
     except Exception as error:
         raise ReadFailure(error, stage) from None
+    finally:
+        READ_STAGE.reset(token)
+
+
+@contextmanager
+def first_db_failure(engine, report, stage):
+    from sqlalchemy import event
+    def remember(context):
+        if report:
+            return
+        error = context.original_exception
+        code = getattr(error, "sqlstate", None) or getattr(error, "pgcode", None)
+        report.update(sqlstate=code if isinstance(code, str) and re.fullmatch(r"[0-9A-Z]{5}", code) else None,
+            exception_class=type(error).__name__, stop=READ_STAGE.get() or stage())
+    event.listen(engine, "handle_error", remember)
+    try:
+        yield
+    finally:
+        event.remove(engine, "handle_error", remember)
 
 
 def source_hash(product, ref, path):
@@ -143,12 +165,17 @@ def capture_native(session, order, job, guard):
         return {**report, "stop": "native_capture_14_field_contract"}
     try:
         with guard.nonworkflow_execution_context(captured):
-            start = guard.processing_start_read_input()
+            start = read_phase("processing_start_read_input", guard.processing_start_read_input)
+    except ReadFailure as error:
+        return {**report, **error.summary}
     except Exception as error:
         return {**report, **failure(error, "processing_start_read_input")}
     report["start_owned"] = differences(start, owned, START_FIELDS)
     try:
-        current = guard._order_execution_input(session, order, lock=False, original_input=owned)
+        current = read_phase("_order_execution_input", guard._order_execution_input,
+            session, order, lock=False, original_input=owned)
+    except ReadFailure as error:
+        return {**report, **error.summary}
     except Exception as error:
         return {**report, **failure(error, "_order_execution_input")}
     if set(current) - {"workflow", "workflow_revision"} != set(FIELDS):
@@ -406,7 +433,7 @@ def canonical_environment():
 
 
 @contextmanager
-def staging_connection(proxy, runtime_proof=None):
+def staging_connection(proxy, runtime_proof=None, db_failure=None, stage=lambda: "staging_connection"):
     from sqlalchemy import create_engine
     from sqlalchemy.engine import URL
     from staging_db_target import load_service_db_config, PROJECT, REGION, INSTANCE
@@ -430,8 +457,9 @@ def staging_connection(proxy, runtime_proof=None):
             engine = create_engine(URL.create("postgresql+psycopg2", username=config.db_user,
                 password=config.db_password, database=config.db_name, query={"host": str(path.parent)}),
                 isolation_level="REPEATABLE READ", execution_options={"postgresql_readonly": True},
-                connect_args={"options": "-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=1000"})
-            with engine.connect() as connection, connection.begin():
+                connect_args={"options": "-c default_transaction_read_only=on -c statement_timeout=60000 -c lock_timeout=1000"})
+            with first_db_failure(engine, db_failure if db_failure is not None else {}, stage), \
+                    engine.connect() as connection, connection.begin():
                 yield connection
                 connection.rollback()
         finally:
@@ -456,6 +484,7 @@ def main():
     private = None
     stage = "context"
     summary_ready = False
+    db_failure = {}
     try:
         current = context(args.product)
         private = diagnostic.owned_path().with_name("demand-parity-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
@@ -488,7 +517,7 @@ def main():
         runtime_proof, receipts = {}, []
         with log.open("w") as stream, redirect_stdout(stream), redirect_stderr(stream):
             stage = "staging_connection"
-            with staging_connection(args.proxy, runtime_proof) as connection:
+            with staging_connection(args.proxy, runtime_proof, db_failure, lambda: stage) as connection:
                 stage = "readonly_session"
                 with readonly_session(connection) as session, no_extra_database_connections():
                     stage = "capture"
@@ -499,11 +528,15 @@ def main():
             "excluded_proofs": ["unknown_x source change", "Pillow image parity: separate 105-image proof"],
             "comparison": "full inspection after detail fetch; old workflow GET authoritative; no value normalization",
             "orders": results}
+        if db_failure:
+            report["first_db_failure"] = db_failure
         diagnostic.write_json(args.summary / "comparison.json", report)
-        return 0 if all(item["function_parity"].get("equal") is True and
+        return 0 if not db_failure and all(item["function_parity"].get("equal") is True and
             item["native_input"]["status"] == "captured" for item in results) else 2
     except Exception as error:
         sanitized = failure(error, stage)
+        if db_failure:
+            sanitized["first_db_failure"] = db_failure
         if summary_ready:
             diagnostic.write_json(args.summary / "failure.json", sanitized)
         print(json.dumps(sanitized), file=sys.stderr)
