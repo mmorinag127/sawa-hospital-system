@@ -42,6 +42,13 @@ def value(item):
     if isinstance(item, time):
         return item.isoformat()
     if isinstance(item, Decimal):
+        # Native SQLite Numeric readers use binary floats. Refuse any source
+        # quantity that would change at its recorded decimal scale.
+        if not item.is_finite():
+            raise Conflict('登録数量が有限値ではありません')
+        scale = max(0, -item.as_tuple().exponent)
+        if Decimal(format(float(item), f'.{scale}f')) != item:
+            raise Conflict('登録数量の精度を依頼コピーで保持できません')
         return str(item)
     return item
 

@@ -84,3 +84,8 @@ def test_native_scalar_conversions_preserve_dates_times_decimals_and_original_by
     assert source.value(Decimal('1.250000'))=='1.250000'
     assert source.value(datetime(2026,7,1,9,30,tzinfo=timezone.utc))=='2026-07-01 09:30:00'
     assert source.value(memoryview(b'original'))==b'original'
+
+
+@pytest.mark.parametrize('amount',['999999999999.123456','999999999999.123400','NaN'])
+def test_numeric_values_that_native_sqlite_would_change_are_blocked(amount):
+    with pytest.raises(Conflict):source.value(Decimal(amount))
