@@ -14,6 +14,12 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      full_tests:
+        description: Run every test regardless of unchanged dependencies
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -58,7 +64,7 @@ jobs:
       SAWA_IMPACT_ROOT: ${{ github.workspace }}
       SAWA_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}
       TESTMON_DATAFILE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}/testmon.sqlite
-      SAWA_IMPACT_FULL: ${{ github.event_name == 'push' && '1' || '0' }}
+      SAWA_IMPACT_FULL: ${{ (inputs.full_tests || startsWith(github.ref, 'refs/heads/release/prod-')) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -261,7 +267,7 @@ jobs:
     env:
       SAWA_IMPACT_ROOT: ${{ github.workspace }}
       SAWA_NODE_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/frontend
-      SAWA_IMPACT_FULL: ${{ github.event_name == 'push' && '1' || '0' }}
+      SAWA_IMPACT_FULL: ${{ (inputs.full_tests || startsWith(github.ref, 'refs/heads/release/prod-')) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
