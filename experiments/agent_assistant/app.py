@@ -268,7 +268,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.get("/runs/{ident}")
     def run_detail(ident: str):
         run = store.get(ident, owner)
-        with store.tx() as db:
+        with store.read() as db:
             artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
         events = store.events(ident)
         from .shift_review import build_shift_review
@@ -405,7 +405,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run = store.get(ident, owner)
         if run["status"] in ("rolled_back", "rollback_stop_pending"):
             raise Conflict("復元前の出力は旧版です。履歴は保持されていますが業務出力として配布しません")
-        with store.tx() as db:
+        with store.read() as db:
             row = db.execute("SELECT * FROM artifacts WHERE id=? AND run_id=?", (artifact_id, ident)).fetchone()
         if not row:
             raise KeyError(artifact_id)

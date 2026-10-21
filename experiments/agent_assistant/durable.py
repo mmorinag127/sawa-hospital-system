@@ -35,9 +35,20 @@ class PostgresStore(Store):
 
     @contextmanager
     def tx(self):
+        with self._transaction(readonly=False) as db:
+            yield db
+
+    @contextmanager
+    def read(self):
+        with self._transaction(readonly=True) as db:
+            yield db
+
+    @contextmanager
+    def _transaction(self, *, readonly):
         with closing(self.connect()) as pg, pg:
+            pg.set_session(readonly=readonly)
             with pg.cursor() as c:
-                c.execute('SELECT epoch,payload FROM sawa_agent_trial.ledger WHERE id=1 FOR UPDATE')
+                c.execute('SELECT epoch,payload FROM sawa_agent_trial.ledger WHERE id=1' + ('' if readonly else ' FOR UPDATE'))
                 epoch, payload = c.fetchone()
                 if epoch != self.epoch:
                     raise Conflict('実行環境が交代しました。画面を再読み込みし、履歴から停止・巻き戻しを行ってください')
@@ -46,9 +57,12 @@ class PostgresStore(Store):
                 try:
                     if payload is not None:
                         db.deserialize(bytes(payload))
-                    db.execute('BEGIN IMMEDIATE')
+                    db.execute('PRAGMA query_only=' + ('ON' if readonly else 'OFF'))
+                    db.execute('BEGIN' if readonly else 'BEGIN IMMEDIATE')
                     yield db
                     db.commit()
+                    if readonly:
+                        return
                     # Persist a sealed artifact before acknowledging its ledger row.
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='artifacts'").fetchone():
                         for row in db.execute('SELECT path,sha256 FROM artifacts'):

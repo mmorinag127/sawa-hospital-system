@@ -76,9 +76,15 @@ class Store:
         finally:
             db.close()
 
+    @contextmanager
+    def read(self):
+        with self.tx() as db:
+            db.execute('PRAGMA query_only=ON')
+            yield db
+
     def budget(self):
         month = billing_month()
-        with self.tx() as db:
+        with self.read() as db:
             limit = db.execute("SELECT monthly_cents FROM settings").fetchone()[0]
             spent, reserved = db.execute("SELECT COALESCE(SUM(spent),0),COALESCE(SUM(reserved),0) FROM runs WHERE month=?", (month,)).fetchone()
         return dict(month=month, currency="USD", monthly_cents=limit, spent_cents=spent,
@@ -94,7 +100,7 @@ class Store:
         return self.budget()
 
     def provider(self, value=None):
-        with self.tx() as db:
+        with (self.read() if value is None else self.tx()) as db:
             if value is not None:
                 if value not in ('claude', 'gemini'): raise ValueError('ClaudeまたはGeminiを選択してください')
                 db.execute('UPDATE settings SET provider=? WHERE id=1', (value,))
@@ -141,14 +147,14 @@ class Store:
         return data
 
     def get(self, ident, owner=None):
-        with self.tx() as db:
+        with self.read() as db:
             row = db.execute("SELECT * FROM runs WHERE id=?", (ident,)).fetchone()
             if not row or (owner is not None and row["owner"] != owner):
                 raise KeyError("依頼が見つかりません")
             return self.decode(row)
 
     def listing(self, owner):
-        with self.tx() as db:
+        with self.read() as db:
             return [self.decode(row) for row in db.execute("SELECT * FROM runs WHERE owner=? ORDER BY created DESC LIMIT 100", (owner,))]
 
     def update(self, ident, **values):
@@ -172,7 +178,7 @@ class Store:
             return cur.rowcount == 1
 
     def events(self, ident):
-        with self.tx() as db:
+        with self.read() as db:
             return [{**dict(row), "payload": json.loads(row["payload"])} for row in db.execute("SELECT * FROM events WHERE run_id=? ORDER BY id", (ident,))]
 
     def command(self, ident, command_id, request):

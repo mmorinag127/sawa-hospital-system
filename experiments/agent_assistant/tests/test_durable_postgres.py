@@ -67,3 +67,32 @@ def test_completed_artifacts_survive_without_claiming_active_work_resumed(tmp_pa
     b=PostgresStore(tmp_path,database);b.recover()
     assert b.get(run['id'])['status']=='completed'
     assert b.get(run['id'])['spent']==12
+
+
+def test_readers_do_not_wait_for_writer_or_rewrite_ledger(tmp_path,database):
+    from concurrent.futures import ThreadPoolExecutor
+    import sqlite3
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    def version():
+        from contextlib import closing
+        with closing(database()) as pg, pg:
+            with pg.cursor() as c:
+                c.execute('SELECT xmin::text FROM sawa_agent_trial.ledger WHERE id=1')
+                return c.fetchone()[0]
+    before=version()
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        # The committed snapshot remains readable while an approval/update holds
+        # the ledger row; no polling request may join its update-lock queue.
+        with a.tx() as db:
+            db.execute('UPDATE settings SET monthly_cents=2000 WHERE id=1')
+            futures=[pool.submit(a.budget) for _ in range(6)]
+            assert [f.result(timeout=3)['monthly_cents'] for f in futures]==[1000]*6
+            assert version()==before
+        assert a.budget()['monthly_cents']==2000
+    after=version()
+    with pytest.raises(sqlite3.OperationalError,match='readonly'):
+        with a.read() as db:db.execute('UPDATE settings SET monthly_cents=9999 WHERE id=1')
+    assert a.budget()['monthly_cents']==2000 and version()==after
+    b=PostgresStore(tmp_path,database)
+    with pytest.raises(Conflict,match='交代'):a.budget()
+    assert b.budget()['monthly_cents']==2000

@@ -26,7 +26,7 @@ class FaxWorkflow:
         return response
 
     def items(self, run_id):
-        with self.store.tx() as db:
+        with self.store.read() as db:
             rows = db.execute("SELECT * FROM fax_items WHERE run_id=? ORDER BY rowid", (run_id,)).fetchall()
         return [{**dict(row), "snapshot": json.loads(row["snapshot"]),
                  "review": json.loads(row["review"]) if row["review"] else None,
@@ -47,7 +47,7 @@ class FaxWorkflow:
                  encode(item['review']), encode(item['decision'])))
 
     async def initialize(self, run):
-        with self.store.tx() as db:
+        with self.store.read() as db:
             exists = db.execute("SELECT 1 FROM fax_batches WHERE run_id=?", (run["id"],)).fetchone()
         if exists:
             return
@@ -85,7 +85,7 @@ class FaxWorkflow:
 
     def accepted_recovery(self, run, item):
         if run.get("task_id") != "hospital_review_faxes": return False
-        with self.store.tx() as db:
+        with self.store.read() as db:
             commands=db.execute("SELECT request,result FROM commands WHERE run_id=? AND status='done'",(run["id"],)).fetchall()
         for row in commands:
             request=json.loads(row["request"]); result=json.loads(row["result"])
@@ -281,7 +281,7 @@ class FaxWorkflow:
         run = self.store.get(run_id)
         if not self.active(run):
             return
-        with self.store.tx() as db:
+        with self.store.read() as db:
             if not db.execute("SELECT 1 FROM fax_batches WHERE run_id=?", (run_id,)).fetchone():
                 raise Conflict("未処理FAXを取得していません")
             rows = db.execute("SELECT rowid,request,result FROM commands WHERE run_id=? AND status='done'", (run_id,)).fetchall()

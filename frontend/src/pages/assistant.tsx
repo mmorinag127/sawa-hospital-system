@@ -67,11 +67,15 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     if (!selected) return;
     let active = true;
     const id = selected.id;
+    let polling = false;
     const timer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
       try {
         const [r, b] = await Promise.all([apiClient.get<Run>(`/assistant-trial/runs/${id}`), apiClient.get<Budget>("/assistant-trial/budget")]);
         if (active && selectedId.current===id) { setSelected(r.data); setConfig(c => c ? { ...c, budget: b.data } : c); }
       } catch (e) { if (active) showError(e); }
+      finally { polling = false; }
     }, 2500);
     return () => { active = false; clearInterval(timer); };
   }, [selected?.id]);
