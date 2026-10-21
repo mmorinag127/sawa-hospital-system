@@ -18,6 +18,8 @@ Node は Node 24 の resolve hook と CommonJS loader のラッパーでモジ�
 
 キャッシュは suite と実行イメージ（`ImageOS`・`ImageVersion`）ごとに分離し、成功した develop push のみ保存する。初回・キャッシュ失効時は全件実行する。Python/Node のバージョン、設定や追跡ツールの変更でも再計測する。実行イメージを識別できない場合はキャッシュを共有せず、CIを失敗させる。
 
+起動ID・ログ用ID・プロセスID・メモリ監視パス・Node worker ID は業務設定と分離する。これらを参照するテストは、環境変数の反射的な参照も含め再実行する。参照しないテストへは起動ごとのID変化を伝播しない。通常のアプリ設定変更は引き続き再実行対象とする。
+
 Actions の `test-impact-*` / `frontend-test-selection` artifact に実行・再利用したテスト ID を残す。通常の JUnit / テストログも維持する。再利用した Node テストは理由付き skip として表示されるが、その根拠は個別 ID の成功履歴と依存ハッシュである。
 
 ## 安全性の検証
