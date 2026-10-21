@@ -15,7 +15,7 @@ from run_stg_menu_master_migration import (
     require_staging_context, cloud_sql_proxy, _load_service_db_config,
     STAGING_INSTANCE, STAGING_DATABASE,
 )
-from staging_db_target import verify_connection_target
+from staging_db_target import StagingConfigBlocked, verify_connection_target
 from src.maintenance.live_schema_adoption import adopt
 from src.maintenance.formal_migration_schema import require_formal_head
 
@@ -71,6 +71,9 @@ def run():
 if __name__ == "__main__":
     try:
         run()
+    except StagingConfigBlocked as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1)
     except Exception:
         print("Staging schema adoption/upgrade failed; database details suppressed", file=sys.stderr)
         raise SystemExit(1)

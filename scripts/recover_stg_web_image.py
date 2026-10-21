@@ -14,7 +14,8 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'scripts'), str(ROOT / 'backend')]
 from stg_image_protection import (require, require_context, immutable_image, ensure_policy,
                                  protect_image, protect_current, PREFIX)
 from stg_ocr_producer_deploy import Blocked, cloud, PROJECT, REGION, comparable, ready_revision
-from staging_db_target import image_config, _access_token, resolve_runtime, load_service_db_config
+from staging_db_target import (StagingConfigBlocked, _container, image_config, _access_token,
+                               resolve_runtime, load_service_db_config, revision_image_digest)
 from run_stg_runtime_schema_preflight import validate_catalog, run as runtime_preflight
 from run_stg_menu_master_migration import cloud_sql_proxy
 from sqlalchemy import create_engine
@@ -37,6 +38,20 @@ def iam():
     return cloud('run', 'services', 'get-iam-policy', SERVICE, f'--region={REGION}')
 
 
+def web_container(descriptor):
+    try:
+        return _container(descriptor, SERVICE)
+    except StagingConfigBlocked as error:
+        raise Blocked(str(error)) from None
+
+
+def web_revision_image(descriptor):
+    try:
+        return revision_image_digest(descriptor, SERVICE)
+    except StagingConfigBlocked as error:
+        raise Blocked(str(error)) from None
+
+
 def replacement(before, image, namespace):
     immutable_image(image, 'frontend')
     require(before.get('apiVersion') == 'serving.knative.dev/v1' and before.get('kind') == 'Service'
@@ -46,7 +61,7 @@ def replacement(before, image, namespace):
     spec = desired['spec']['template']['spec']
     require(bool(re.fullmatch(r'[a-z0-9-]+@sawahospitalsystem\.iam\.gserviceaccount\.com',
                              spec.get('serviceAccountName', ''))), 'runtime_identity_unknown')
-    require(len(spec.get('containers', [])) == 1, 'single_container_required')
+    web_container({'spec': spec})
     require(desired['spec'].get('traffic') == [{'latestRevision': True, 'percent': 100}],
             'explicit_latest_traffic_required')
     spec['containers'][0]['image'] = image
@@ -81,10 +96,8 @@ def verify_original_runtime(before, revision, expected_revision, expected_image)
     requested = template['spec']
     observed = deepcopy(revision.get('spec', {}))
     containers = observed.get('containers', [])
-    require(len(requested.get('containers', [])) == 1 and len(containers) == 1,
-            'single_container_required')
-    require(containers[0].get('image') == expected_image
-            and revision.get('status', {}).get('imageDigest') == expected_image,
+    web_container({'spec': requested})
+    require(web_revision_image(revision) == expected_image,
             'original_image_changed')
     source = requested['containers'][0]
     require(bool(re.fullmatch(re.escape(PREFIX + 'frontend') +
@@ -120,7 +133,7 @@ def recover(image, expected_revision, expected_image):
             str(initial.get('status', {}).get('observedGeneration'))
             and initial.get('metadata', {}).get('generation') is not None, 'service_not_observed')
     revision = cloud('run', 'revisions', 'describe', expected_revision, f'--region={REGION}')
-    require(revision.get('status', {}).get('imageDigest') == expected_image, 'original_image_changed')
+    require(web_revision_image(revision) == expected_image, 'original_image_changed')
     before = exported()
     policy = iam()
     require(isinstance(policy.get('bindings'), list) and bool(policy.get('etag')), 'original_IAM_unknown')
@@ -150,7 +163,7 @@ def recover(image, expected_revision, expected_image):
     require(ready != expected_revision, 'new_revision_required')
     require(comparable(exported()) == desired and iam() == policy, 'runtime_settings_or_IAM_changed')
     observed = cloud('run', 'revisions', 'describe', ready, f'--region={REGION}')
-    require(observed.get('status', {}).get('imageDigest') == image, 'ready_image_mismatch')
+    require(web_revision_image(observed) == image, 'ready_image_mismatch')
     PHASE = 'post_recovery_database_read_only'
     runtime_preflight()
     PHASE = 'protect_current_stg_images'

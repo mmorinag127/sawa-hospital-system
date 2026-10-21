@@ -125,7 +125,51 @@ def test_staging_agent_sidecar_keeps_ingress_as_database_source(cloud_case):
         descriptor['spec']['containers'].append({'name': 'agent-runtime',
             'image': gate.REGISTRY + '/sawahospitalsystem/backend/agent-runtime@sha256:' + 'b' * 64,
             'env': [{'name': 'DB_HOST', 'value': 'must-not-be-used-as-ingress'}]})
+    del documents['revisions', 'web-stg-r1']['status']['imageDigest']
     assert load().db_name == 'orders'
+
+
+def test_revision_image_digest_accepts_existing_single_container_shape(cloud_case):
+    documents, _, _, _ = cloud_case
+    revision = documents['revisions', 'worker-stg-r1']
+    assert gate.revision_image_digest(revision, 'worker-stg') == revision['spec']['containers'][0]['image']
+
+
+@pytest.mark.parametrize('case', ['repository', 'tag', 'mismatch', 'noimage', 'multiple-unknown'])
+def test_revision_image_digest_rejects_ambiguous_or_nonimmutable_source(cloud_case, case):
+    documents, _, _, _ = cloud_case
+    revision = documents['revisions', 'web-stg-r1']
+    ingress = revision['spec']['containers'][0]
+    if case == 'repository':
+        ingress['image'] = ingress['image'].replace('/frontend@', '/other@')
+    elif case == 'tag':
+        ingress['image'] = ingress['image'].split('@')[0] + ':latest'
+    elif case == 'mismatch':
+        revision['status']['imageDigest'] = ingress['image'].replace('a' * 64, 'c' * 64)
+    elif case == 'noimage':
+        del ingress['image']
+    else:
+        ingress['ports'] = [{'containerPort': 8080}]
+        revision['spec']['containers'].append({'name': 'unknown-runtime',
+                                                'image': ingress['image']})
+    with pytest.raises(gate.StagingConfigBlocked):
+        gate.revision_image_digest(revision, 'web-stg')
+
+
+def test_live_source_check_uses_ingress_digest_when_web_status_digest_is_absent(cloud_case, monkeypatch):
+    documents, _, _, _ = cloud_case
+    revision = documents['revisions', 'web-stg-r1']
+    revision['spec']['containers'][0]['ports'] = [{'containerPort': 8080}]
+    revision['spec']['containers'].append({'name': 'agent-runtime',
+        'image': gate.REGISTRY + '/sawahospitalsystem/backend/agent-runtime@sha256:' + 'b' * 64})
+    del revision['status']['imageDigest']
+    monkeypatch.setattr(live, 'private_command', lambda args: 'registry-token')
+    monkeypatch.setattr(live, 'cloud', lambda *args: deepcopy(documents[args[1], args[3]]))
+    proof = Mock()
+    monkeypatch.setattr(live, 'image_source', proof)
+    sources = live.deployed_sources('c' * 40)
+    assert sources['web-stg']['imageDigest'] == revision['spec']['containers'][0]['image']
+    proof.assert_any_call(revision['spec']['containers'][0]['image'], 'frontend', 'c' * 40, 'registry-token')
 
 
 @pytest.mark.parametrize('case', ['worker', 'name', 'tag', 'ports', 'order', 'third'])
