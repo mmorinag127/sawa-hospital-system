@@ -96,3 +96,28 @@ def test_readers_do_not_wait_for_writer_or_rewrite_ledger(tmp_path,database):
     b=PostgresStore(tmp_path,database)
     with pytest.raises(Conflict,match='交代'):a.budget()
     assert b.budget()['monthly_cents']==2000
+
+
+def test_response_snapshot_reads_once_and_preserves_committed_version(tmp_path,database):
+    from concurrent.futures import ThreadPoolExecutor
+    calls=[]
+    def counted():
+        calls.append(1)
+        return database()
+    store=PostgresStore(tmp_path,counted)
+    store.set_budget(1000)
+    run,_=store.create('operator','snapshot-request','test',['shift'],100)
+    calls.clear()
+    with store.snapshot():
+        assert store.get(run['id'])['status']=='preparing'
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(store.update,run['id'],status='completed',spent=4,reserved=0).result(timeout=3)
+        # Reads in the response cannot mix an old status with a newer decision.
+        assert store.get(run['id'])['status']=='preparing'
+        assert store.events(run['id'])==[]
+        assert store.budget()['spent_cents']==0
+        with pytest.raises(Conflict,match='読取スナップショット'):
+            store.update(run['id'],status='failed')
+    assert len(calls)==2  # one response snapshot plus the concurrent writer
+    assert store.get(run['id'])['status']=='completed'
+    assert store.budget()['spent_cents']==4

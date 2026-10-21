@@ -35,11 +35,17 @@ class PostgresStore(Store):
 
     @contextmanager
     def tx(self):
+        if self._read_snapshot.get() is not None:
+            raise Conflict("読取スナップショット内では変更できません")
         with self._transaction(readonly=False) as db:
             yield db
 
     @contextmanager
     def read(self):
+        snapshot = self._read_snapshot.get()
+        if snapshot is not None:
+            yield snapshot
+            return
         with self._transaction(readonly=True) as db:
             yield db
 

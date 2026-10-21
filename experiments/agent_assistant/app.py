@@ -267,17 +267,18 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
 
     @app.get("/runs/{ident}")
     def run_detail(ident: str):
-        run = store.get(ident, owner)
-        with store.read() as db:
-            artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
-        events = store.events(ident)
-        from .shift_review import build_shift_review
-        from .lunch_review import build_lunch_review
-        review = tools.flow.review(ident) if run['status'] not in ('rolled_back','rollback_stop_pending') else None
-        reference = next((event['payload'] for event in events if event['kind']=='shift_reference'),None)
-        shift_review = build_shift_review(review,reference) if review and (run.get('task_id') or '').startswith('shift_') else None
-        lunch_review = build_lunch_review(review,run.get('task_inputs',{}).get('process_questions')) if run.get('task_id')=='lunch_daily_bundle' else None
-        return {**run, "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if run["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(run), "task_review": review, "fax_items": tools.faxes.items(ident) if tools.faxes.active(run) and run["status"] not in ("rolled_back", "rollback_stop_pending") else []}
+        with store.snapshot():
+            run = store.get(ident, owner)
+            with store.read() as db:
+                artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
+            events = store.events(ident)
+            from .shift_review import build_shift_review
+            from .lunch_review import build_lunch_review
+            review = tools.flow.review(ident) if run['status'] not in ('rolled_back','rollback_stop_pending') else None
+            reference = next((event['payload'] for event in events if event['kind']=='shift_reference'),None)
+            shift_review = build_shift_review(review,reference) if review and (run.get('task_id') or '').startswith('shift_') else None
+            lunch_review = build_lunch_review(review,run.get('task_inputs',{}).get('process_questions')) if run.get('task_id')=='lunch_daily_bundle' else None
+            return {**run, "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if run["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(run), "task_review": review, "fax_items": tools.faxes.items(ident) if tools.faxes.active(run) and run["status"] not in ("rolled_back", "rollback_stop_pending") else []}
 
     @app.post("/runs/{ident}/faxes/{fax_id}/decision")
     async def decide_fax(ident: str, fax_id: str, payload: FaxDecision, request: Request):
