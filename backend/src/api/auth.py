@@ -254,6 +254,12 @@ def get_current_user(request: Request) -> UserContext:
     portal_user = _portal_user(request)
     if portal_user:
         return portal_user
+    from src.services import portal_session_service as sessions
+    bearer = _get_bearer_token(request)
+    if bearer and bearer.startswith("ps_"):
+        return sessions.authenticate(bearer, request)
+    if not request.headers.get("authorization") and request.cookies.get(sessions.COOKIE):
+        return sessions.authenticate(request.cookies[sessions.COOKIE], request, cookie_auth=True)
     google_email = _google_email_or_none(request)
     if not google_email:
         _raise_unauthorized()

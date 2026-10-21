@@ -218,6 +218,18 @@ jobs:
             tests/unit/test_native_ingest_protocol.py \
             --junitxml=.logs/review-resolution-junit.xml \
             -q -rs 2>&1 | tee .logs/review-resolution.log
+      - name: Verify portal login and server session
+        if: matrix.suite == 'us1-4'
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/contract/test_portal_google_auth.py \
+            tests/unit/test_portal_session.py \
+            tests/unit/test_portal_session_catalog.py \
+            tests/unit/test_portal_auth_failure_contract.py \
+            --junitxml=.logs/portal-session-junit.xml \
+            -q -rs 2>&1 | tee .logs/portal-session.log
       - name: Save trusted test dependencies
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/develop'
         uses: actions/cache/save@v4

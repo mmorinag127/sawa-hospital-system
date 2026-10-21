@@ -11,9 +11,11 @@ test("canonical logout expires sibling HttpOnly cookie before returning a non-ca
   const headers = {};
   let broadcast = 0;
   let redirected = "";
+  let resolveLogout;
   const context = { exports: {}, window: { location: { replace: url => { redirected = url; } } },
-    require: name => name === "react" ? { useEffect: fn => fn() } :
-      name === "react/jsx-runtime" ? { jsx: () => null } : { broadcastLogout: () => broadcast++ } };
+    fetch: () => new Promise(resolve => { resolveLogout = resolve; }),
+    require: name => name === "react" ? { useEffect: fn => fn(), useState: value => [value, () => {}] } :
+      name === "react/jsx-runtime" ? { jsx: () => null } : name.endsWith("apiClient") ? {portalCsrfHeaders: () => ({})} : { broadcastLogout: () => broadcast++ } };
   vm.runInNewContext(ts.transpileModule(read("pages/logout.tsx"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, context);
@@ -21,6 +23,10 @@ test("canonical logout expires sibling HttpOnly cookie before returning a non-ca
   assert.match(headers["Cache-Control"], /no-store/);
   assert.ok(headers["Set-Cookie"].includes("sawa_school_lunch_auth=; Path=/school-lunch; HttpOnly; Secure; SameSite=Strict; Max-Age=0"));
   context.exports.default();
+  assert.equal(broadcast, 0);
+  assert.equal(redirected, "");
+  resolveLogout({ok: true});
+  for (let i = 0; i < 5; i++) await Promise.resolve();
   assert.equal(broadcast, 1);
   assert.equal(redirected, "/login");
 });

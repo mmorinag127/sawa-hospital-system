@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { portalProxyHeaders } from "./services/portalProxySession";
 
 // Canonicalize to the stable `a.run.app` domain (matches existing OAuth allowed origins).
 const CANONICAL_HOST = "web-prod-avlnzjjrca-dt.a.run.app";
@@ -17,15 +18,23 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(url, 308);
   }
   const pathname = request.nextUrl.pathname;
+  let headers: Headers;
+  try {
+    headers = portalProxyHeaders(pathname, request.method, request.headers,
+      Object.fromEntries(request.cookies.getAll().map(cookie => [cookie.name, cookie.value])),
+      process.env.PORTAL_PUBLIC_ORIGIN || "");
+  } catch {
+    return NextResponse.json({ error: "portal_session_request_rejected" }, { status: 403 });
+  }
   if (pathname === "/hospital") {
     const url = request.nextUrl.clone();
     url.pathname = "/hospital-dashboard";
-    return NextResponse.rewrite(url);
+    return NextResponse.rewrite(url, { request: { headers } });
   }
   if (pathname.startsWith("/hospital/")) {
     const url = request.nextUrl.clone();
     url.pathname = pathname.slice("/hospital".length) || "/";
-    return NextResponse.rewrite(url);
+    return NextResponse.rewrite(url, { request: { headers } });
   }
   const hospitalRoots = new Set([
     "orders", "weekly-orders", "pdf-upload", "daily-delivery-notes", "totals",
@@ -41,7 +50,7 @@ export function proxy(request: NextRequest) {
     url.pathname = `/hospital${pathname}`;
     return NextResponse.redirect(url, 308);
   }
-  return NextResponse.next();
+  return NextResponse.next({ request: { headers } });
 }
 
 export const config = {
