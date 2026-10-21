@@ -49,21 +49,28 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [month, setMonth] = useState("");
   const [reply, setReply] = useState("");
   const [error, setError] = useState("");
+  const [pollNotice, setPollNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmRollback,setConfirmRollback]=useState(false);
   const [requestKey, setRequestKey] = useState("");
   const [source, setSource] = useState<File | null>(null);
   const [sourceChecked, setSourceChecked] = useState(false);
 
+  function receiveRun(run: Run) {
+    setSelected(run);
+    setRuns(rows => rows.map(row => row.id === run.id ? run : row));
+  }
+
   async function load(id?: string) {
     const [c, r, t] = await Promise.all([apiClient.get<Configuration>("/assistant-trial/config"), apiClient.get<Run[]>("/assistant-trial/runs"), apiClient.get<Task[]>("/assistant-trial/tasks")]);
     setTasks(t.data);
     setConfig(c.data); setRuns(r.data);
     if(!initialOpened.current){initialOpened.current=true;const pending=r.data.filter(x=>!["completed","stopped","rolled_back","failed"].includes(x.status));if(!adminView && !id && pending.length===1){id=pending[0].id;selectedId.current=id;}}
-    if (id) { const response=await apiClient.get<Run>(`/assistant-trial/runs/${id}`); if(selectedId.current===id)setSelected(response.data); }
+    if (id) { const response=await apiClient.get<Run>(`/assistant-trial/runs/${id}`); if(selectedId.current===id)receiveRun(response.data); }
   }
   useEffect(() => { load().catch(showError); }, []);
   useEffect(() => {
+    setPollNotice("");
     if (!selected) return;
     let active = true;
     const id = selected.id;
@@ -72,13 +79,19 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       if (polling) return;
       polling = true;
       try {
-        const [r, b] = await Promise.all([apiClient.get<Run>(`/assistant-trial/runs/${id}`), apiClient.get<Budget>("/assistant-trial/budget")]);
-        if (active && selectedId.current===id) { setSelected(r.data); setConfig(c => c ? { ...c, budget: b.data } : c); }
-      } catch (e) { if (active) showError(e); }
+        const r = await apiClient.get<Run>(`/assistant-trial/runs/${id}`);
+        if (active && selectedId.current===id) { receiveRun(r.data); setPollNotice(""); }
+        if (adminView) {
+          try {
+            const b = await apiClient.get<Budget>("/assistant-trial/budget");
+            if (active && selectedId.current===id) setConfig(c => c ? { ...c, budget: b.data } : c);
+          } catch { if (active) setPollNotice("利用料金を取得できませんでした。再確認しています。"); }
+        }
+      } catch { if (active) setPollNotice("進捗を取得できませんでした。再確認しています。作業は再送していません。"); }
       finally { polling = false; }
     }, 2500);
     return () => { active = false; clearInterval(timer); };
-  }, [selected?.id]);
+  }, [selected?.id, adminView]);
 
   useEffect(()=>{setSource(null);setSourceChecked(false);setConfirmRollback(false);},[selected?.id]);
   useEffect(()=>{setReply("");},[selected?.id,selected?.pending_question?.question_id]);
@@ -151,6 +164,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   return <main className="assistant-page" ref={pageRef}>
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
+    {selected && pollNotice && <p role="status" className="muted">{pollNotice}</p>}
     {adminView && config?.providers && <section className="assistant-panel"><h2>エージェントの接続先</h2><p>変更は新しい依頼から適用します。実行中・確認待ちの依頼は元の接続先で続けます。</p><div className="answer-options">{config.providers.map(provider=><button key={provider.id} disabled={busy} aria-pressed={config.provider_id===provider.id} onClick={()=>act(async()=>{await apiClient.put("/assistant-trial/provider",{provider:provider.id});await load(selected?.id);})}>{provider.label}{config.provider_id===provider.id?"（使用中）":""}</button>)}</div>{config.providers.map(provider=><p key={provider.id}>{provider.label}：{provider.missing.length?"未設定："+provider.missing.join("、"):"設定済み"}</p>)}<p className="muted">Geminiの料金は報告トークン数と管理者が設定した単価による概算です。思考トークンを含み、割引・無料枠は適用しません。Claudeは接続先の定価換算値です。請求確定額とは異なります。</p></section>}
     {adminView && config && <section className="assistant-panel"><h2>今月の利用料金</h2><dl className="costs"><div><dt>使用額（概算・定価換算）</dt><dd>{dollars(config.budget.spent_cents)}</dd></div><div><dt>実行中の予約額</dt><dd>{dollars(config.budget.reserved_cents)}</dd></div><div><dt>月次上限</dt><dd>{dollars(config.budget.monthly_cents)}</dd></div><div><dt>利用可能額</dt><dd>{dollars(config.budget.available_cents)}</dd></div></dl><p className="muted">{config.budget.notice} 米ドル表示です。既存OCR等の料金は含みません。</p><form onSubmit={e=>{e.preventDefault();act(async()=>{await apiClient.put("/assistant-trial/budget",{monthly_cents:cents(month)});await load(selected?.id);});}}><label>月次予算（USD）<input value={month} onChange={e=>setMonth(e.target.value)} inputMode="decimal" placeholder={(config.budget.monthly_cents/100).toFixed(2)} required/></label><button className="primary" disabled={busy}>上限を保存する</button></form></section>}
     {!adminView && config && (config.missing.length>0 || (selected ? selected.domains.some(key=>!config.domains[key]?.baseline_ready) : choosingTask ? !Object.values(config.domains).some(value=>value.baseline_ready) : !config.domains[domain]?.baseline_ready)) && <div className="assistant-notice"><strong>試用の準備中です</strong><p>管理者の接続・試用データ設定が完了すると、選んだ作業を開始できます。</p><details><summary>設定状況</summary><p>{config.missing.length ? "接続先が未設定です。" : "接続先は設定済みです。"}</p>{Object.entries(config.domains).map(([key,value])=><p key={key}>{labels[key]}：{value.baseline_ready ? value.data==="empty_schema_no_real_order_test" ? "業務データの準備が必要" : "準備済み" : "未設定"}</p>)}</details></div>}

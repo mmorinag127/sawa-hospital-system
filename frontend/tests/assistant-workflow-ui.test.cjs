@@ -167,3 +167,35 @@ test('slow polling never overlaps requests and resumes after completion',async()
   await h.poll();assert.equal(count(),before+2);
  }finally{release();await h.close();}
 });
+
+
+test('a failed progress read preserves the task and retries without resending commands',async()=>{
+ let fail=false;
+ const h=await mount({initial:makeRun(),beforeGet:async url=>{if(fail&&url===base+'/runs/r1')throw Error('timeout of 30000ms exceeded');}});
+ try{
+  fail=true;await h.poll();
+  assert.match(h.document.body.textContent,/進捗を取得できませんでした/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.ok(h.document.querySelector('.answer-panel'));
+  assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+  assert.equal(h.calls.filter(c=>c.url===base+'/budget').length,0);
+  fail=false;h.setRun({...h.run,status:'completed',pending_question:null});await h.poll();
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.doesNotMatch(h.document.body.textContent,/進捗を取得できませんでした/);
+  await h.click(h.button('別の作業を始める'));
+  assert.doesNotMatch(h.document.body.textContent,/続きがある作業/);
+  assert.match(h.document.querySelector('.history-row').textContent,/完了/);
+ }finally{await h.close();}
+});
+
+test('admin usage read failure never discards the latest task status',async()=>{
+ let fail=false;
+ const h=await mount({initial:makeRun(),adminView:true,beforeGet:async url=>{if(fail&&url===base+'/budget')throw Error('unavailable');}});
+ try{
+  await h.click(h.document.querySelector('.history-row'));fail=true;
+  h.setRun({...h.run,status:'completed',pending_question:null});await h.poll();
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.match(h.document.body.textContent,/利用料金を取得できませんでした/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+ }finally{await h.close();}
+});
