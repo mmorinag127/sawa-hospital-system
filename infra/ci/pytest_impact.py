@@ -21,6 +21,12 @@ import pytest
 SCHEMA = 1
 ROOT = Path(os.environ["SAWA_IMPACT_ROOT"]).resolve()
 STATE = Path(os.environ["SAWA_IMPACT_STATE"]).resolve()
+if os.environ.get("SAWA_IMPACT_SPLIT_RUNS") == "1":
+    # Keep separate pytest commands independent, ignoring run-owned reports.
+    arguments = [value for value in sys.argv[1:] if not value.startswith(
+        ("--basetemp=", "--junitxml=", "--durations="))]
+    STATE /= hashlib.sha256(json.dumps(arguments).encode()).hexdigest()[:20]
+    os.environ["TESTMON_DATAFILE"] = str(STATE / "testmon.sqlite")
 META = STATE / "inputs.json"
 DB = Path(os.environ["TESTMON_DATAFILE"]).resolve()
 REPORT = STATE / "selection.json"
