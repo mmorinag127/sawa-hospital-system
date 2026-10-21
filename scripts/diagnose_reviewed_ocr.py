@@ -340,7 +340,7 @@ def offline(product, private, output, build, *, variant="baseline", runtime=None
     import cv2
     versions = {name: importlib.metadata.version(name) for name in ("Pillow", "numpy")}
     distribution = "opencv-python-headless" if build == "headless" else "opencv-python"
-    require(versions == {"Pillow": "12.3.0", "numpy": "2.4.2"} and cv2.__version__ == "5.0.0"
+    require(versions == {"Pillow": "13.0.0", "numpy": "2.4.2"} and cv2.__version__ == "5.0.0"
         and importlib.metadata.version(distribution) == "5.0.0.93",
         "diagnostic_runtime_changed")
     module_root = (runtime or product / "backend/.venv") if build == "headless" else Path(os.environ["RUNNER_TEMP"]) / "reviewed-opencv-gui"

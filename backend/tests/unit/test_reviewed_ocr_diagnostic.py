@@ -516,7 +516,7 @@ def test_offline_original_mode_runs_four_real_guards_and_default_keeps_faults(
     monkeypatch.setattr(cv2, "__version__", "5.0.0")
     monkeypatch.setattr(cv2, "__file__", str(ROOT / "backend/.venv/cv2/__init__.py"))
     monkeypatch.setattr(diag.importlib.metadata, "version",
-        lambda name: {"Pillow": "12.3.0", "numpy": "2.4.2", "opencv-python-headless": "5.0.0.93"}[name])
+        lambda name: {"Pillow": "13.0.0", "numpy": "2.4.2", "opencv-python-headless": "5.0.0.93"}[name])
     private = tmp_path / "private"
     private.mkdir()
     payload = json.loads(row()["payload_raw"])
