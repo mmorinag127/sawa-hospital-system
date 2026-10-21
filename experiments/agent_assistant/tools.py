@@ -56,7 +56,7 @@ class Tools:
                      + (" 動線図のversionはMCPが保存状態から設定する。モデルによる指定・原本上書きは不要。" if name=='lunch_generate_route' else ""),
                      input_schema={"type": "object", "properties": {"parameters": Arguments.model_json_schema()}, "required": ["parameters"], "additionalProperties": False})
                 for name, op in OPERATIONS.items() if op.domain in domains] + [
-            dict(name="ask_lunch_process_question", description="日次の全献立・全食材の各工程について、一緒・別々の調理を先に確認し、別々なら食材ごとに登録設備から作業場所・使用する釜を順に質問する。全回答後は変更禁止のprocess_savesを返す。そのままlunch_save_processで保存する。入力変更・利用者の訂正依頼後のみrestart=trueで再質問できる。", input_schema={"type":"object","properties":{"restart":{"type":"boolean"}},"additionalProperties":False}),
+            dict(name="ask_lunch_process_question", description="日次の全献立・全食材の各工程について、一緒・別々の調理を先に確認し、別々なら食材ごとに登録設備から作業場所・使用する釜を順に質問する。工程表に不足する開始・終了時刻、担当者、汚染区分、作業段階も質問する。全回答後は変更禁止のprocess_savesを返す。そのままlunch_save_processで保存する。入力変更・利用者の訂正依頼後のみrestart=trueで再質問できる。", input_schema={"type":"object","properties":{"restart":{"type":"boolean"}},"additionalProperties":False}),
             dict(name="choose_task_layout", description="チャットで利用者が回答した図面だけを日次業務に採用する。", input_schema={"type":"object","properties":{"layout_id":{"type":"integer","minimum":1}},"required":["layout_id"],"additionalProperties":False}),
             dict(name="get_task_context", description="利用者が画面で選択した対象・期間・指定・確認回答を取得する。", input_schema={"type":"object","properties":{},"additionalProperties":False}),
             dict(name="request_task_approval", description="ネイティブGETの結果と予定する確定操作を利用者へ提示する。自分では承認できない。", input_schema={"type":"object","properties":{"summary":{"type":"string","minLength":1,"maxLength":4000},"evidence_commands":{"type":"array","items":{"type":"string"},"minItems":1},"actions":{"type":"array","items":{"type":"object","properties":{"operation":{"type":"string"},"parameters":Arguments.model_json_schema()},"required":["operation","parameters"],"additionalProperties":False}}},"required":["summary","evidence_commands","actions"],"additionalProperties":False}),
@@ -243,6 +243,9 @@ class Tools:
                 state = await self.flow.questions.checked(run)
                 if state['pending'] or any(len(item['answers']) != len(item['document']['steps']) for item in state['documents']):
                     raise Conflict('未回答の作業場所・使用する釜があります')
+                from .lunch_execution_questions import missing
+                if any(missing(item['document']) for item in state['documents']):
+                    raise Conflict('工程の開始・終了時刻、担当者、汚染区分、作業段階への回答が必要です')
             except (ValueError, Conflict) as exc:
                 result={'error':str(exc),'command_id':command_id}
                 self.store.finish_command(run_id,command_id,result)

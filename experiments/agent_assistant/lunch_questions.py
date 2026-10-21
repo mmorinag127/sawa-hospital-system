@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .conversation import question_result
 from .store import Conflict
+from . import lunch_execution_questions as execution
 
 MARKER = 'agent_daily_question'
 
@@ -209,18 +210,27 @@ class LunchQuestions:
                 state.setdefault('drawings', {})[str(item['menu_id'])] = picture
                 ingredient = '・'.join(names[mid] if sum(m['name']==names[mid] for m in document['ingredients'])==1 else names[mid]+'（ID:'+mid+'）' for mid in group['ingredient_ids']); suffix = 'どの釜を使いましたか？' if kind == '回転釜' else 'どこで作業しましたか？'
                 return self.question(run, state, command_id, item, step['id'], 'equipment', f"「{item['name']}」の {ingredient}\n{step['operation']} は、{suffix}", choices, picture, index)
+            actual = execution.question(item)
+            if actual:
+                key, field, text, choices = actual
+                return self.question(run, state, command_id, item, key, 'execution.'+field, text, choices)
         self.save(run, state)
         return {'ok': True, 'complete': True, 'process_saves': [self.payload(state, item) for item in state['documents'] if not item['saved']]}
 
     def question(self, run, state, command_id, item, key, field, text, choices, picture=None, group_index=None):
-        if not choices: raise Conflict('この工程で使用できる登録済みの場所・設備がありません。図面・設備登録を確認してください')
+        if not choices and field not in ('execution.start_time', 'execution.end_time', 'execution.assignees'):
+            raise Conflict('この工程で使用できる登録済みの場所・設備がありません。図面・設備登録を確認してください')
         if len({c['label'] for c in choices}) != len(choices): raise Conflict('設備の表示名とIDが重複しています')
         state['pending'] = {'question_id': command_id, 'menu_id': item['menu_id'], 'key': key, 'field': field, 'choices': choices, 'group_index': group_index}
         self.save(run, state)
         # More than eight registered candidates remain available by exact text;
         # the UI displays every registered choice through its dedicated field.
         result = question_result({'question': text, 'options': [c['label'] for c in choices[:8]]}, command_id)
-        result.update(process_choices=[c['label'] for c in choices], process_context={'menu_name': item['name'], 'ingredients': item['lineage'].get(key, []), 'operation': next((s['operation'] for s in item['document']['steps'] if s['id'] == key), '厨房図面'), 'kind': field, 'material_ids': item['material_ids'].get(key, []) if group_index is None else item['work_groups'][key]['groups'][group_index]['ingredient_ids'], **work_progress(state['documents'])})
+        progress = work_progress(state['documents'])
+        if field.startswith('execution.'):
+            answered = sum(len(fields) for document in state['documents'] for fields in document.get('execution_answers', {}).values())
+            progress = {'answered': answered, 'total': answered + sum(len(execution.missing(document['document'])) for document in state['documents'])}
+        result.update(process_choices=[c['label'] for c in choices], process_context={'menu_name': item['name'], 'ingredients': item['lineage'].get(key, []), 'operation': next((s['operation'] for s in item['document']['steps'] if s['id'] == key), '厨房図面'), 'kind': field, 'material_ids': item['material_ids'].get(key, []) if group_index is None else item['work_groups'][key]['groups'][group_index]['ingredient_ids'], **progress})
         if picture is not None:
             geometry = {e['id']: e for e in picture['equipment']}
             result['question_map'] = {k: picture[k] for k in ('template_id', 'template_version', 'sha256', 'view_box', 'title')}
@@ -232,6 +242,8 @@ class LunchQuestions:
         if not state or not state['pending']: return None
         state = await self.checked(run); pending = state['pending']
         if pending['question_id'] != question_id: raise Conflict('最新の作業場所の質問に回答してください')
+        if pending['field'] in ('execution.start_time', 'execution.end_time', 'execution.assignees'):
+            return {'label': message, 'value': execution.parse(pending['field'].split('.', 1)[1], message)}
         selected = [c for c in pending['choices'] if message in (c['label'], c['value'].get('name') if isinstance(c['value'], dict) else c['value'])]
         if len(selected) != 1: raise Conflict('表示された登録済みの場所・設備を選んでください。未登録の場所は採用しません')
         return selected[0]
@@ -241,7 +253,12 @@ class LunchQuestions:
         state = self.state(run); pending = state['pending']
         item = next(i for i in state['documents'] if i['menu_id'] == pending['menu_id'])
         if pending['field'] == 'template':
-            item['document']['route_config'] = {**(item['document'].get('route_config') or {}), 'template_id': selected['value']}
+            item['document']['route_config'] = {'step_ports': {}, **(item['document'].get('route_config') or {}), 'template_id': selected['value']}
+        elif pending['field'].startswith('execution.'):
+            step = next(s for s in item['document']['steps'] if s['id'] == pending['key'])
+            execution.apply(step, pending['field'].split('.', 1)[1], selected['value'])
+            item.setdefault('execution_answers', {}).setdefault(step['id'], {})[pending['field']] = pending['question_id']
+            item['saved'] = False
         elif pending['field'] == 'grouping':
             ids = item['material_ids'][pending['key']]
             groups = [ids] if selected['value'] == 'together' else [[mid] for mid in ids]
@@ -271,6 +288,8 @@ class LunchQuestions:
         state = await self.checked(run)
         if state['pending'] or any(len(i['answers']) != len(i['document']['steps']) for i in state['documents']):
             raise Conflict('未回答の作業場所・使用する釜があります')
+        if any(execution.missing(i['document']) for i in state['documents']):
+            raise Conflict('工程の開始・終了時刻、担当者、汚染区分、作業段階への回答が必要です')
         if name == 'lunch_save_process':
             item = next((i for i in state['documents'] if str(i['menu_id']) == str(args.ids.get('menu_id'))), None)
             if not item or item['saved'] or args.body != self.payload(state, item)['body']:

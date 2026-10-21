@@ -216,3 +216,16 @@ test('an accepted approval with a failed refresh is not reported as a failed com
   assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
  }finally{await h.close();}
 });
+
+test('pending FAX runs without selection targets render and retain stop and rollback controls',async()=>{
+ const initial={...makeRun('running'),task_id:'hospital_pending_faxes',instruction:'未処理FAXを処理する',domains:['hospital'],task_inputs:{},pending_question:undefined};
+ const h=await mount({initial});try{
+  assert.match(h.document.body.textContent,/エージェントが作業を進めています/);
+  assert.equal(h.document.querySelector('.context-strip'),null);
+  assert.equal(h.button('作業を停止する').disabled,false);
+  h.setRun({...initial,status:'waiting_input',pending_question:{id:'fax-q',role:'assistant',question_id:'fax-question',text:'原本を確認してください',options:['確認しました']}});
+  await h.poll();assert.match(h.document.querySelector('.answer-panel').textContent,/原本を確認/);
+  h.setRun({...initial,status:'completed'});await h.poll();assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.equal(h.button('開始前に戻す').disabled,false);
+ }finally{await h.close();}
+});
