@@ -11,7 +11,8 @@ from sqlalchemy.engine import URL
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.portal_automation_db_bootstrap import parse_args
-from scripts.portal_prod_db_bootstrap import _load_service_db_config
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from staging_db_target import load_service_db_config as _load_service_db_config
 from src.services.portal_access_bootstrap_service import PortalAccessBootstrapError
 from src.services.price_automation_bootstrap_service import require_price_automation_context, run_price_automation_bootstrap
 

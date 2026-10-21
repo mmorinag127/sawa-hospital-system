@@ -5,11 +5,15 @@ import json
 import math
 import re
 import subprocess
+import sys
+from pathlib import Path
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from sqlalchemy import text
+if __name__ == '__main__':
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from scripts import portal_prod_db_bootstrap as transport
 
 PROJECT = 'sawahospitalsystem'
@@ -199,3 +203,30 @@ def verify_connection_target(connection, *, database=DATABASE, role=ROLE):
     require(connection.dialect.name == 'postgresql', 'postgres-required')
     require(tuple(connection.execute(text('SELECT current_database(), current_user')).one()) == (database, role),
             'connected-database-or-role-mismatch')
+
+
+def main(argv=None):
+    """Resolve one staging proxy target without printing connection credentials."""
+    import argparse
+    import os
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--project-id', required=True)
+    parser.add_argument('--region', required=True)
+    parser.add_argument('--service', required=True, choices=('web-stg', 'worker-stg'))
+    parser.add_argument('--instance-only', action='store_true', required=True)
+    args = parser.parse_args(argv)
+    try:
+        require(os.environ.get('GITHUB_ACTIONS') == 'true'
+                and os.environ.get('GITHUB_REF') == 'refs/heads/develop', 'staging-actions-required')
+        config = load_service_db_config(args.project_id, args.region, args.service)
+        print(config.instance_connection_name)
+        return 0
+    except StagingConfigBlocked as error:
+        print(str(error), file=sys.stderr)
+    except Exception:
+        print('staging-db-target-resolution-failed', file=sys.stderr)
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
