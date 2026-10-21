@@ -25,6 +25,7 @@ class PerTestImpact(unittest.TestCase):
             "SAWA_IMPACT_STATE": str(self.state),
             "TESTMON_DATAFILE": str(self.state / "testmon.sqlite"),
             "SAWA_IMPACT_FULL": "0",
+            "SAWA_IMPACT_SPLIT_RUNS": "0",
         }
         self.write("leaf.py", "def value():\n    return 1\n")
         self.write("operations.py", "import leaf\ndef first():\n    return leaf.value()\ndef second():\n    return 2\n")
