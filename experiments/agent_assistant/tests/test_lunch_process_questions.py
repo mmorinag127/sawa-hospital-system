@@ -274,3 +274,26 @@ def test_canonical_drawing_equipment_does_not_require_legacy_layout_points(tmp_p
         process=native.data['/api/school-lunch/menu-executions/101/process']['document']
         assert process['steps'][0]['equipment']['id']=='table-1'
     asyncio.run(scenario())
+
+
+def test_template_question_uses_verified_original_title_instead_of_internal_id(tmp_path):
+    async def scenario():
+        store,native,tools,run=setup(tmp_path)
+        native.data['/api/school-lunch/menu-executions/101/process']['document']['route_config']=None
+        native.data['/api/school-lunch/menu-executions/101/process/question-drawing']['title']='厨房基本図面 — ご飯用'
+        q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'drawing-choice')
+        assert q.get('waiting_input') and q['options']==['厨房基本図面 — ご飯用'],q
+        await reply(tools,run,q,q['options'][0])
+        next_question=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'equipment-choice')
+        assert next_question['question_map']['template_id']=='kitchen-rice'
+        assert not native.writes
+    asyncio.run(scenario())
+
+
+def test_original_drawing_version_must_match_equipment_options(tmp_path):
+    async def scenario():
+        _,native,tools,run=setup(tmp_path)
+        native.data['/api/school-lunch/menu-executions/101/process/question-drawing']['template_version']=2
+        q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'changed-drawing-version')
+        assert '版が一致しません' in q['error'] and not native.writes
+    asyncio.run(scenario())
