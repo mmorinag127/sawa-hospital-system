@@ -10,8 +10,68 @@ import hashlib
 from pathlib import Path
 import shutil
 import sqlite3
+import zlib
 
 from .store import Store, Conflict, now
+
+
+SQLITE_HEADER = b"SQLite format 3\0"
+BLOB_HEADER = b"SAWA-Blob-Zlib:1\0"
+
+
+def encode_blob(raw):
+    """Keep transport lossless; hashes always describe the original bytes."""
+    return BLOB_HEADER + hashlib.sha256(raw).digest() + zlib.compress(raw)
+
+
+def decode_blob(payload, *, expected=None):
+    raw = bytes(payload)
+    # An existing file is identified by its persisted content hash, not a guess.
+    if expected and hashlib.sha256(raw).hexdigest() == expected:
+        return raw
+    if not raw.startswith(BLOB_HEADER):
+        raise Conflict('保存済み試用データの形式を確認できません')
+    digest_start = len(BLOB_HEADER)
+    digest = raw[digest_start:digest_start + 32]
+    try:
+        decoder = zlib.decompressobj()
+        decoded = decoder.decompress(raw[digest_start + 32:]) + decoder.flush()
+    except zlib.error as exc:
+        raise Conflict('保存済み試用データを復元できません') from exc
+    actual = hashlib.sha256(decoded)
+    if (not decoder.eof or decoder.unused_data or decoder.unconsumed_tail
+            or actual.digest() != digest or (expected and actual.hexdigest() != expected)):
+        raise Conflict('保存済み試用データの内容を照合できません')
+    return decoded
+
+
+def encode_ledger(raw):
+    if not raw.startswith(SQLITE_HEADER):
+        raise Conflict('保存する実行履歴の形式が不正です')
+    return encode_blob(raw)
+
+
+def decode_ledger(payload):
+    raw = bytes(payload)
+    decoded = raw if raw.startswith(SQLITE_HEADER) else decode_blob(raw)
+    if not decoded.startswith(SQLITE_HEADER):
+        raise Conflict('保存済み実行履歴の形式を確認できません')
+    page_size = int.from_bytes(decoded[16:18], 'big')
+    page_size = 65536 if page_size == 1 else page_size
+    pages = int.from_bytes(decoded[28:32], 'big')
+    if (len(decoded) < 100 or page_size < 512 or page_size > 65536
+            or page_size & (page_size - 1) or not pages or len(decoded) != page_size * pages):
+        raise Conflict('保存済み実行履歴が破損しています')
+    # Validate both supported formats before schema initialization can write.
+    try:
+        with closing(sqlite3.connect(':memory:')) as check:
+            check.deserialize(decoded)
+            check.execute('PRAGMA query_only=ON')
+            if check.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                raise Conflict('保存済み実行履歴が破損しています')
+    except sqlite3.Error as exc:
+        raise Conflict('保存済み実行履歴が破損しています') from exc
+    return decoded
 
 
 class PostgresStore(Store):
@@ -62,7 +122,7 @@ class PostgresStore(Store):
                 db.row_factory = sqlite3.Row
                 try:
                     if payload is not None:
-                        db.deserialize(bytes(payload))
+                        db.deserialize(decode_ledger(payload))
                     db.execute('PRAGMA query_only=' + ('ON' if readonly else 'OFF'))
                     db.execute('BEGIN' if readonly else 'BEGIN IMMEDIATE')
                     yield db
@@ -73,7 +133,7 @@ class PostgresStore(Store):
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='artifacts'").fetchone():
                         for row in db.execute('SELECT path,sha256 FROM artifacts'):
                             self._file(c, Path(row['path']), expected=row['sha256'])
-                    c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1', (db.serialize(),))
+                    c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1', (encode_ledger(db.serialize()),))
                 except BaseException:
                     db.rollback()
                     raise
@@ -103,7 +163,7 @@ class PostgresStore(Store):
             if old[0] != digest:
                 raise Conflict('保存済み原本・帳票の上書きは禁止されています')
             return
-        cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s)', (relative,digest,content))
+        cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s)', (relative,digest,encode_blob(content)))
 
     def persist_files(self, ident):
         root = self.root / 'runs' / ident
@@ -125,10 +185,11 @@ class PostgresStore(Store):
                 for relative,digest,payload in c:
                     path = self.root / relative
                     path, checked = self._relative(path)
-                    if checked != relative or hashlib.sha256(bytes(payload)).hexdigest() != digest:
+                    content = decode_blob(payload, expected=digest)
+                    if checked != relative:
                         raise Conflict('保存済みの試用原本・帳票を照合できません')
                     path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-                    path.write_bytes(bytes(payload))
+                    path.write_bytes(content)
         for before in (self.root / 'runs').glob('*/before'):
             data = before.parent / 'data'
             if not data.exists():
