@@ -26,6 +26,23 @@ def install(native):
     native.data['/api/school-lunch/menu-executions/101/process/question-drawing'] = {'template_id':'kitchen-rice','template_version':1,'title':'合成試験図面','view_box':[0,0,900,600],'sha256':hashlib.sha256(svg).hexdigest(),'svg_base64':base64.b64encode(svg).decode(),'equipment':[{'id':e['id'],'name':e['name'],'bounds':[100+i*150,100,100,80]} for i,e in enumerate(equipment)]}
     request = native.request
     async def write(run, domain, method, path, **kwargs):
+        if method == 'POST' and path == '/api/school-lunch/route-diagrams/layouts':
+            native.writes.append((path,deepcopy(kwargs)))
+            layouts=native.data[path]; ident=max(x['id'] for x in layouts)+1
+            row={'id':ident,'facility_id':1,'name':kwargs['body']['name'],'version':1,'locations':{},'image':'data:image/png;base64,'+base64.b64encode(kwargs['files']['file'][1]).decode()}
+            layouts.append(row);return httpx.Response(200,json=deepcopy(row))
+        if method == 'PUT' and path.startswith('/api/school-lunch/route-diagrams/layouts/'):
+            native.writes.append((path,deepcopy(kwargs)))
+            row=next(x for x in native.data['/api/school-lunch/route-diagrams/layouts'] if x['id']==int(path.rsplit('/',1)[1]))
+            assert kwargs['body']['version']==row['version']
+            row.update(locations=deepcopy(kwargs['body']['locations']),version=row['version']+1)
+            return httpx.Response(200,json=deepcopy(row))
+        if method == 'POST' and path == '/api/school-lunch/route-diagrams/generate':
+            native.writes.append((path,deepcopy(kwargs)))
+            row=native.data['/api/school-lunch/route-diagrams'][0]
+            layout=next(x for x in native.data['/api/school-lunch/route-diagrams/layouts'] if x['id']==kwargs['body']['layout_id'])
+            row.update(layout_id=layout['id'],layout_version=layout['version'],version=row['version']+1)
+            return httpx.Response(200,json=deepcopy(row))
         if method == 'PUT' and path == '/api/school-lunch/menu-executions/101/process':
             native.writes.append((path, deepcopy(kwargs)))
             value = native.data[path]; value.update(document=deepcopy(kwargs['body']['document']), version=value['version'] + 1, recipe_revision=value['recipe_revision'] + 1, revision=value['revision'] + 1)
