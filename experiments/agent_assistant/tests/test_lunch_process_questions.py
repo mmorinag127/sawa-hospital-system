@@ -200,6 +200,8 @@ def test_grouping_answer_controls_generic_ingredient_place_questions_and_exact_s
         graph['ingredients']=[{'id':'a','name':'キャベツ','state':''},{'id':'b','name':'豚肉','state':''},{'id':'c','name':'豆腐','state':''}]
         graph['steps']=[{'id':'wash','operation':'洗う','inputs':[{'ingredient_id':m['id']} for m in graph['ingredients']],'equipment':{'type':'作業台','id':None},'conditions':{},'basis':{},'outputs':[]},
                         {'id':'heat','operation':'加熱する','inputs':[{'step_id':'wash'}],'equipment':{'type':'回転釜','id':None},'conditions':{},'basis':{},'outputs':[]}]
+        for step in graph['steps']:
+            step['execution']={'start_time':'08:00','end_time':'08:30','assignees':['合成試験担当'],'work_zone':'non_contaminated','phase':'cook','kettle_use':None,'uses_raw_meat':None}
         before=deepcopy(graph)
         async def ask(index):return await tools.execute(run['id'],0,'ask_lunch_process_question',{},'generic-'+str(index))
         q=await ask(0)
@@ -290,10 +292,76 @@ def test_template_question_uses_verified_original_title_instead_of_internal_id(t
     asyncio.run(scenario())
 
 
+def test_new_template_uses_native_empty_port_map_before_strict_save_readback(tmp_path):
+    async def scenario():
+        store,native,tools,run=setup(tmp_path)
+        native.data['/api/school-lunch/menu-executions/101/process']['document']['route_config']=None
+        q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'new-template')
+        await reply(tools,run,q,q['options'][0])
+        state=tools.flow.questions.state(run)
+        assert state['documents'][0]['document']['route_config']=={'template_id':'kitchen-rice','step_ports':{}}
+        await complete(tools,run)
+        state=tools.flow.questions.state(run)
+        assert state['documents'][0]['saved']
+        saved=native.data['/api/school-lunch/menu-executions/101/process']['document']
+        assert saved['route_config']=={'template_id':'kitchen-rice','step_ports':{}}
+        assert [s['equipment']['id'] for s in saved['steps']]==['table-1','table-2','kettle-b']
+    asyncio.run(scenario())
+
+
 def test_original_drawing_version_must_match_equipment_options(tmp_path):
     async def scenario():
         _,native,tools,run=setup(tmp_path)
         native.data['/api/school-lunch/menu-executions/101/process/question-drawing']['template_version']=2
         q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'changed-drawing-version')
         assert '版が一致しません' in q['error'] and not native.writes
+    asyncio.run(scenario())
+
+
+def test_missing_execution_is_answered_through_bound_questions_before_save(tmp_path):
+    async def scenario():
+        store,native,tools,run=setup(tmp_path)
+        document=native.data['/api/school-lunch/menu-executions/101/process']['document']
+        document['steps'][0]['execution']=None
+        preserved=deepcopy(document['steps'][1]['execution'])
+        for index, selection in enumerate(['下処理台1','下処理台2','一緒に調理しました','回転釜B']):
+            q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'place-'+str(index))
+            await reply(tools,run,q,selection)
+        values=['08:30','08:40','合成担当A、合成担当B','汚染区域（肉・魚）','下処理']
+        for index,answer in enumerate(values):
+            q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'actual-'+str(index))
+            assert q.get('waiting_input') and not q.get('complete')
+            if index==0:
+                assert q['options']==[] and '開始時刻' in q['question']
+                with pytest.raises(Conflict,match='24時間'):await tools.flow.questions.validate_reply(run,'25:90',q['command_id'])
+                with pytest.raises(Conflict,match='最新'):await tools.flow.questions.validate_reply(run,'08:30','stale')
+            with pytest.raises(Conflict):await tools.flow.questions.gate(run,'review')
+            assert not native.writes
+            await reply(tools,run,q,answer)
+        done=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'actual-complete')
+        assert done['complete']
+        saved=await tools.execute(run['id'],0,'save_lunch_process_answers',{},'save-actual')
+        assert saved['ok'],saved
+        result=native.data['/api/school-lunch/menu-executions/101/process']['document']['steps']
+        assert result[0]['execution']=={'start_time':'08:30','end_time':'08:40','assignees':['合成担当A','合成担当B'],'work_zone':'contaminated_meat_fish','phase':'prep','kettle_use':None,'uses_raw_meat':None}
+        assert result[1]['execution']==preserved
+    asyncio.run(scenario())
+
+
+def test_execution_question_rejects_changed_sources_and_stopped_reply(tmp_path):
+    async def scenario():
+        store,native,tools,run=setup(tmp_path)
+        document=native.data['/api/school-lunch/menu-executions/101/process']['document']
+        document['steps'][0]['execution']=None
+        for index,selection in enumerate(['下処理台1','下処理台2','一緒に調理しました','回転釜B']):
+            q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'place-'+str(index))
+            await reply(tools,run,q,selection)
+        q=await tools.execute(run['id'],0,'ask_lunch_process_question',{},'actual')
+        native.data['/api/school-lunch/menu-executions'][0]['version']+=1
+        with pytest.raises(Conflict):await tools.flow.questions.validate_reply(run,'08:30',q['command_id'])
+        native.data['/api/school-lunch/menu-executions'][0]['version']-=1
+        selected=await tools.flow.questions.validate_reply(run,'08:30',q['command_id'])
+        store.fence(run['id'])
+        with pytest.raises(Conflict):tools.flow.questions.accept_reply(run,selected)
+        assert not native.writes
     asyncio.run(scenario())

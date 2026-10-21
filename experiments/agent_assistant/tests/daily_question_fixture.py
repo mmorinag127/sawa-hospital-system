@@ -13,6 +13,10 @@ def install(native):
         {'id': 'cut-potato', 'operation': '切る', 'inputs': [{'ingredient_id': 'm2'}], 'equipment': {'type': '作業台', 'id': None}, 'basis': {}, 'conditions': {}, 'outputs': []},
         {'id': 'cook', 'operation': '煮る', 'inputs': [{'step_id': 'cut-carrot'}, {'step_id': 'cut-potato'}], 'equipment': {'type': '回転釜', 'id': None}, 'basis': {}, 'conditions': {}, 'outputs': []}],
         'route_config': {'template_id': 'kitchen-rice', 'step_ports': {}}}
+    for index, step in enumerate(document['steps']):
+        step['execution'] = {'start_time':f'08:{index*10:02d}', 'end_time':f'08:{(index+1)*10:02d}',
+            'assignees':['合成試験担当'], 'work_zone':'non_contaminated', 'phase':'cook',
+            'kettle_use':None, 'uses_raw_meat':None}
     native.data['/api/school-lunch/menu-executions/101/process'] = {'menu': {'id': 101, 'name': menu['name'], 'facility_id': 1, 'service_date': menu['service_date'], 'version': menu['version']}, 'version': 1, 'recipe_revision': 1, 'revision': 1, 'status': 'draft', 'scope': 'day', 'document': document, 'proposal': None}
     equipment = [{'id': 'table-1', 'name': '下処理台1', 'type': '作業台', 'ports': []}, {'id': 'table-2', 'name': '下処理台2', 'type': '作業台', 'ports': []}, {'id': 'kettle-a', 'name': '回転釜A', 'type': '回転釜', 'ports': []}, {'id': 'kettle-b', 'name': '回転釜B', 'type': '回転釜', 'ports': []}]
     native.data['/api/school-lunch/menu-executions/101/process/route-options'] = {'templates': [{'template_id': 'kitchen-rice', 'template_version': 1, 'equipment': equipment}], 'colors': [], 'day_colors': []}
@@ -33,7 +37,7 @@ def install(native):
 
 async def reply(tools, run, result, selection):
     current = tools.store.get(run['id'])
-    check_answer(tools.store.events(run['id']), selection, result['command_id'], selection)
+    check_answer(tools.store.events(run['id']), selection, result['command_id'], selection if result.get('options') else None)
     selected = await tools.flow.questions.validate_reply(current, selection, result['command_id'])
     tools.flow.questions.accept_reply(current, selected)
     tools.store.event(run['id'], 'operator_reply', {'message': selection, 'question_id': result['command_id'], 'option': selection})
