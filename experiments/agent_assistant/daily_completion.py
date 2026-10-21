@@ -77,9 +77,11 @@ class DailyCompletion:
     async def prepare(self,ident,generation,raw,command):
         if raw: raise ValueError('入力項目はありません')
         run=self.current(ident,generation)
+        from .canonical_route_layout import prepare
+        run=await prepare(self.tools,run)
         inputs=run['task_inputs']['inputs']
         generated=[c for c in self.tools.flow.commands(ident) if c['request']['name'] in ('lunch_generate_route','lunch_save_route')
-                   and c['result'].get('ok') and c['request']['arguments'].get('parameters',{}).get('body',{}).get('service_date')==inputs['service_date']]
+                   and c['result'].get('ok') and c['request']['arguments'].get('parameters',{}).get('body',{}).get('service_date')==inputs['service_date'] and c['request']['arguments'].get('parameters',{}).get('body',{}).get('layout_id')==inputs['layout_id']]
         if not generated:
             result=await self.tools.execute(ident,generation,'lunch_generate_route',{'parameters':{
                 'query':{'facility_id':inputs['facility_id'],'month':inputs['month']},

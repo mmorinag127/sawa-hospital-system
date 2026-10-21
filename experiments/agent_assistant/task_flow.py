@@ -92,7 +92,8 @@ class TaskFlow:
             params=parameters.get('query',{}), authorization=self.tools.authorizations.get(run['id']))
         if not response.is_success or 'application/json' not in response.headers.get('content-type',''):
             raise Conflict(f'{op.description}（HTTP {response.status_code}）')
-        return public_intake_data(name,response.json())
+        from .daily_scope import selected
+        return selected(run,name,public_intake_data(name,response.json()))
 
     async def options(self, task_id, inputs, owner, authorization):
         spec = TASKS[task_id]

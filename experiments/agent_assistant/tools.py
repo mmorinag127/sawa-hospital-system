@@ -472,7 +472,8 @@ class Tools:
             await self.flow.after(run, name, args, response.json() if "application/json" in response.headers.get("content-type", "") else {})
             await self.faxes.after_write(run, name, args, response.json() if "application/json" in response.headers.get("content-type", "") else {})
         if "application/json" in response.headers.get("content-type", ""):
-            return {"ok": True, "status": response.status_code, "data": public_intake_data(name,response.json()),
+            from .daily_scope import selected
+            return {"ok": True, "status": response.status_code, "data": selected(run,name,public_intake_data(name,response.json())),
                     "verification_required": op.method != "GET"}
         await self.flow.verify_output(run, name)
         if len(response.content) == 0:
