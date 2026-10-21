@@ -28,7 +28,7 @@ def envmap(container): return {item['name']:item for item in container.get('env'
 def value(name,text): return {'name':name,'value':text}
 
 
-def configure(web,worker,config,frontend_image,agent_image,token,*,school):
+def configure(web,worker,config,frontend_image,agent_image,token,*,school,portal_origin=None):
     if '@sha256:' not in frontend_image or '@sha256:' not in agent_image:
         raise RuntimeError('immutable image digests are required')
     spec=web['spec']['template']['spec']; containers=spec['containers']
@@ -38,6 +38,10 @@ def configure(web,worker,config,frontend_image,agent_image,token,*,school):
     front=ingress[0]; front.setdefault('name','web')
     front['image']=frontend_image
     front_env=envmap(front); backend_env=envmap(worker['spec']['template']['spec']['containers'][0])
+    if portal_origin is not None:
+        if portal_origin != 'https://web-stg-avlnzjjrca-dt.a.run.app':
+            raise RuntimeError('staging portal origin is unresolved')
+        front_env['PORTAL_PUBLIC_ORIGIN']=value('PORTAL_PUBLIC_ORIGIN',portal_origin)
     required=('DB_HOST','DB_NAME','DB_USER','DB_PASSWORD','GEMINI_API_KEY','GOOGLE_OAUTH_CLIENT_ID','OCR_PIPELINE_BUCKET')
     if any(name not in backend_env for name in required):
         raise RuntimeError('existing staging database/model settings are incomplete')
@@ -97,7 +101,8 @@ def main():
     print('::add-mask::'+token)
     config=json.loads(Path('agent_runtime/staging.json').read_text())
     document=configure(service('web-stg'),service('worker-stg'),config,os.environ['IMAGE'],
-                       os.environ['SAWA_AGENT_RUNTIME_IMAGE'],token,school=service('price-api-stg'))
+                       os.environ['SAWA_AGENT_RUNTIME_IMAGE'],token,school=service('price-api-stg'),
+                       portal_origin=os.environ['PORTAL_PUBLIC_ORIGIN'])
     path=Path(os.environ['RUNNER_TEMP'])/'sawa-agent-sidecar.json'
     path.write_text(json.dumps(document));path.chmod(0o600)
     try:

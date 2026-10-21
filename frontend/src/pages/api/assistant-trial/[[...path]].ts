@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { portalProxyHeaders } from "../../../services/portalProxySession";
 
 export const config = { api: { bodyParser: false, responseLimit: "25mb" } };
 
@@ -7,11 +8,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (process.env.SAWA_ASSISTANT_TRIAL_ENABLED !== "true" || !process.env.SAWA_TRIAL_WEB_TOKEN) {
     res.status(404).json({ detail: "試用版は有効になっていません" }); return;
   }
-  const token = req.headers.authorization;
+  const incoming = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value !== undefined) incoming.set(key, Array.isArray(value) ? value.join(",") : value);
+  }
+  let token: string | null;
+  try {
+    token = portalProxyHeaders("/api/assistant-trial", req.method || "GET", incoming,
+      req.cookies || {}, process.env.PORTAL_PUBLIC_ORIGIN || "").get("authorization");
+  } catch {
+    res.status(403).json({ detail: "認証リクエストを確認できません" }); return;
+  }
   if (!token?.startsWith("Bearer ") || !process.env.API_PROXY_TARGET) {
     res.status(401).json({ detail: "SAWAへログインしてください" }); return;
   }
-  const auth = await fetch(`${process.env.API_PROXY_TARGET.replace(/\/$/, "")}/portal/auth/me`, { headers: { Authorization: token }, signal: AbortSignal.timeout(10000) });
+  const auth = await fetch(`${process.env.API_PROXY_TARGET.replace(/\/$/, "")}/portal/auth/me`, { headers: { Authorization: token }, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(10000) });
   if (!auth.ok) { res.status(auth.status).json({ detail: "SAWAの利用権限を確認できません" }); return; }
   const identity = await auth.json();
   // The experimental service is explicitly a single authorized operator workspace.

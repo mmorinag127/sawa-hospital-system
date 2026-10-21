@@ -206,6 +206,11 @@ fi
 
 echo "[3/7] deploy ${WEB_SERVICE}"
 WEB_PUBLIC_ARGS=()
+WEB_SESSION_ARGS=()
+if [[ "$WEB_SERVICE" == "web-stg" ]]; then
+  test "${PORTAL_PUBLIC_ORIGIN:?PORTAL_PUBLIC_ORIGIN is required}" = "$WEB_URL"
+  WEB_SESSION_ARGS=(--update-env-vars="PORTAL_PUBLIC_ORIGIN=$PORTAL_PUBLIC_ORIGIN")
+fi
 if [[ "${ALLOW_UNAUTHENTICATED_WEB:-0}" == "1" ]]; then
   WEB_PUBLIC_ARGS+=(--allow-unauthenticated)
 fi
@@ -215,7 +220,7 @@ else
   WEB_CONTAINER_ARGS=()
   WEB_CONTAINER_NAME="$(gcloud run services describe "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=json | python3 -c 'import json,sys; c=json.load(sys.stdin)["spec"]["template"]["spec"]["containers"]; print(c[0].get("name", "") if len(c)>1 else "")')"
   if [[ -n "$WEB_CONTAINER_NAME" ]]; then WEB_CONTAINER_ARGS=(--container="$WEB_CONTAINER_NAME"); fi
-  gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" "${WEB_CONTAINER_ARGS[@]}" --image="$IMAGE" "${WEB_PUBLIC_ARGS[@]}" --quiet
+  gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" "${WEB_CONTAINER_ARGS[@]}" --image="$IMAGE" "${WEB_PUBLIC_ARGS[@]}" "${WEB_SESSION_ARGS[@]}" --quiet
 fi
 gcloud run services update-traffic "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --to-latest --quiet
 

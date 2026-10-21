@@ -187,9 +187,30 @@ test("Secret Manager migration defaults to retaining legacy access for phase one
   assert.match(prodExample, /retain_legacy_project_secret_accessor = true/);
 });
 
-test("login pages allow the Google popup to return credentials", () => {
+test("existing opener policy is preserved while human login uses same-tab redirect", () => {
   const nextConfig = read("frontend/next.config.js");
 
   assert.match(nextConfig, /key: "Cross-Origin-Opener-Policy"/);
   assert.match(nextConfig, /value: "same-origin-allow-popups"/);
+  assert.match(read("frontend/src/pages/login.tsx"), /ux_mode: "redirect"/);
+});
+
+test("staging session settings use approved explicit lifetimes in worker and both web transports", () => {
+  const source = read(".github/workflows/deploy-stg.yml");
+  const workflow = yaml.load(source);
+  assert.equal(workflow.env.PORTAL_PUBLIC_ORIGIN, workflow.env.WEB_URL);
+  assert.equal(workflow.env.PORTAL_SESSION_ABSOLUTE_SECONDS, "604800");
+  assert.equal(workflow.env.PORTAL_SESSION_IDLE_SECONDS, "86400");
+  assert.equal(workflow.env.PORTAL_LOGIN_TTL_SECONDS, "300");
+  const deploy = workflow.jobs["deploy-backend"].steps.find(step => step.name === "Deploy worker-stg").run;
+  for (const key of ["PORTAL_PUBLIC_ORIGIN", "PORTAL_SESSION_ABSOLUTE_SECONDS", "PORTAL_SESSION_IDLE_SECONDS", "PORTAL_LOGIN_TTL_SECONDS"]) {
+    assert.ok(deploy.includes(key + "=${" + key + "}"));
+  }
+  const web = read("scripts/deploy_web_with_checks.sh");
+  assert.match(web, /if \[\[ "\$WEB_SERVICE" == "web-stg" \]\]/);
+  assert.match(web, /--update-env-vars="PORTAL_PUBLIC_ORIGIN=\$PORTAL_PUBLIC_ORIGIN"/);
+  assert.match(web, /gcloud run deploy[^\n]*"\$\{WEB_SESSION_ARGS\[@\]\}"/);
+  const sidecar = read("scripts/configure_agent_sidecar.py");
+  assert.match(sidecar, /front_env\['PORTAL_PUBLIC_ORIGIN'\]=value\('PORTAL_PUBLIC_ORIGIN',portal_origin\)/);
+  assert.match(sidecar, /portal_origin=os.environ\['PORTAL_PUBLIC_ORIGIN'\]/);
 });

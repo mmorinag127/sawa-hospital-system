@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { GetServerSideProps } from "next";
 import { broadcastLogout } from "../services/browserSession";
+import { portalCsrfHeaders } from "../services/apiClient";
 
 // Clear sibling HttpOnly cookies at their exact paths on the shared origin.
 // This does not depend on the school-lunch backend being available.
@@ -15,10 +16,15 @@ export const getServerSideProps: GetServerSideProps = async ({ res }) => {
 };
 
 export default function LogoutPage() {
+  const [message, setMessage] = useState("ログアウト処理中です。");
   useEffect(() => {
-    broadcastLogout();
-    window.google?.accounts?.id?.disableAutoSelect?.();
-    window.location.replace("/login");
+    void fetch("/api/portal/auth/logout", { method: "POST", credentials: "same-origin", headers: portalCsrfHeaders(), redirect: "error" })
+      .then((response) => {
+        if (!response.ok) throw new Error("logout failed");
+        broadcastLogout();
+        window.google?.accounts?.id?.disableAutoSelect?.();
+        window.location.replace("/login");
+      }).catch(() => setMessage("ログアウトを確認できませんでした。再読み込みして再試行してください。"));
   }, []);
-  return <p role="status">ログアウト処理中です。</p>;
+  return <p role="status">{message}</p>;
 }

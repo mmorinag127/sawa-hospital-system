@@ -14,14 +14,14 @@ export class LoginNavigationError extends Error {
 export async function prepareSystemDestination(destination: string, authorization: string, signal?: AbortSignal): Promise<string> {
   const target = validateLoginDestination(destination);
   if (!target) throw new LoginNavigationError(400, "復帰先が不正です。統合トップから開き直してください。");
-  if (!authorization.startsWith("Bearer ") || !authorization.slice(7).trim()) throw new LoginNavigationError(401, "Googleでログインしてください。");
+  if (authorization && (!authorization.startsWith("Bearer ") || !authorization.slice(7).trim())) throw new LoginNavigationError(401, "Googleでログインしてください。");
   const pathname = new URL(target, "https://sawa.invalid").pathname;
   const lunch = pathname === "/school-lunch" || pathname.startsWith("/school-lunch/");
   const system = pathname === "/shift" || pathname.startsWith("/shift/") ? "shift" : pathname === "/hospital" || pathname.startsWith("/hospital/") ? "hospital" : "";
   let response: Response;
   try {
     response = await fetch(lunch ? SCHOOL_LUNCH_SESSION_ENDPOINT : `/api/portal/auth/me${system ? `?system=${system}` : ""}`, {
-      method: "GET", headers: { Authorization: authorization }, credentials: "same-origin", cache: "no-store", redirect: "error", signal,
+      method: "GET", headers: authorization ? { Authorization: authorization } : {}, credentials: "same-origin", cache: "no-store", redirect: "error", signal,
     });
   } catch {
     throw new LoginNavigationError(503, "認証サービスに接続できません。時間をおいてもう一度お試しください。");
@@ -32,6 +32,7 @@ export async function prepareSystemDestination(destination: string, authorizatio
     "認証サービスを確認できません。時間をおいてもう一度お試しください。");
   let identity: {role?: string; auth_disabled?: boolean; session_generation?: unknown};
   try { identity = await response.json(); } catch { throw new LoginNavigationError(503, "認証サービスの応答を確認できませんでした。"); }
+  if (signal?.aborted) throw new LoginNavigationError(409, "認証確認を中止しました。");
   if (!identity || identity.auth_disabled || !["admin", "operator"].includes(identity.role || "")) throw new LoginNavigationError(403, "利用者の権限を確認できませんでした。");
   if (lunch) publishSchoolLunchSessionGeneration(identity.session_generation);
   return target;
