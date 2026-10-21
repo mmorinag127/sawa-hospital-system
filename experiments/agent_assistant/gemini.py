@@ -155,6 +155,19 @@ class Gemini(Managed):
             self.store.usage(ident, self.store.get(ident)['usage'], terminal=True)
         return value
 
+    async def dispatch_receipt(self, ident, dispatch, body):
+        try:
+            value = await self.request('POST', body=body)
+        except RequestRejected:
+            self.store.event(ident, 'gemini_rejected', {'dispatch': dispatch})
+            raise
+        interaction_id = value.get('id')
+        if not isinstance(interaction_id, str) or not interaction_id:
+            raise Conflict('Geminiの実行IDがありません')
+        self.store.event(ident, 'gemini_response', {'id': interaction_id, 'dispatch': dispatch})
+        self.store.update(ident, session_id=interaction_id)
+        return value
+
     async def consume_gemini(self, ident, generation, state, inputs):
         try:
             while True:
@@ -187,15 +200,15 @@ class Gemini(Managed):
                 if run['session_id']: body['previous_interaction_id'] = run['session_id']
                 dispatch = uuid4().hex
                 self.store.event(ident, 'gemini_dispatch', {'id': dispatch})
+                receipt = asyncio.create_task(self.dispatch_receipt(ident, dispatch, body))
                 try:
-                    value = await self.request('POST', body=body)
-                except RequestRejected:
-                    self.store.event(ident, 'gemini_rejected', {'dispatch': dispatch})
+                    value = await asyncio.shield(receipt)
+                except asyncio.CancelledError:
+                    # Stop fences business writes first. Keep the bounded HTTP
+                    # response alive so its ID can still be cancelled/accounted.
+                    await asyncio.gather(receipt, return_exceptions=True)
                     raise
-                interaction_id = value.get('id')
-                if not isinstance(interaction_id, str) or not interaction_id: raise Conflict('Geminiの実行IDがありません')
-                self.store.event(ident, 'gemini_response', {'id': interaction_id, 'dispatch': dispatch})
-                self.store.update(ident, session_id=interaction_id)
+                interaction_id = value['id']
                 self.current(ident, generation)
                 while value.get('status') in ('in_progress', 'queued'):
                     await asyncio.sleep(.5)

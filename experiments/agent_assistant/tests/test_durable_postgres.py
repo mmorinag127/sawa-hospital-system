@@ -189,3 +189,19 @@ def test_corrupt_legacy_ledger_is_never_reinitialized(tmp_path,database):
         with pg.cursor() as c:
             c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
             assert bytes(c.fetchone()[0])==damaged
+
+
+@pytest.mark.parametrize('status',['stop_pending','rollback_stop_pending'])
+def test_restart_preserves_stop_uncertainty_and_restoration_receipt(tmp_path,database,status):
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    run,_=a.create('u','stop-restart','old',['hospital'],200,provider='gemini')
+    a.update(run['id'],status=status,spent=17,reserved=183)
+    a.event(run['id'],'rollback',{'restored':True,'scope':'this_request_sandbox'})
+    b=PostgresStore(tmp_path,database);b.recover()
+    recovered=b.get(run['id'])
+    assert recovered['status']==status and recovered['generation']==run['generation']+1
+    assert recovered['spent']==17 and recovered['reserved']==183
+    if status=='rollback_stop_pending':
+        assert b.create('u','next-work','new',['shift'],100)[0]['status']=='preparing'
+    else:
+        with pytest.raises(Conflict,match='他の依頼'):b.create('u','next-work','new',['shift'],100)
