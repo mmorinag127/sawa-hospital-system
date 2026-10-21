@@ -33,8 +33,10 @@ const context = hash(JSON.stringify({ version: 1, node: process.version, platfor
   tracked: [...tracked].sort(), configs, env }));
 const destination = path.join(state, `${hash(local)}.json`);
 let previous = {};
+let previousContextMatches = false;
 try {
   const saved = JSON.parse(read(destination, 'utf8'));
+  previousContextMatches = saved.context === context;
   if (saved.context === context && saved.tests && typeof saved.tests === 'object') previous = saved.tests;
 } catch { /* Missing/corrupt dependency state executes tests. */ }
 if (process.env.SAWA_IMPACT_FULL === '1') previous = {};
@@ -44,7 +46,8 @@ const globalInputs = {};
 const globalUnsafe = new Set();
 const records = new Map();
 const counts = new Map();
-const report = { selected: [], reused: [] };
+const report = { selected: [], reused: [], reasons: {}, durations_seconds: {}, untracked: {},
+  previous_context_matches: previousContextMatches, previous_count: Object.keys(previous).length };
 let used = false;
 
 function unsafe(reason) {
@@ -146,11 +149,14 @@ function wrapTest(original, forced = {}) {
     const reusable = callback && callback.length < 2 && !options.skip && !options.todo && !options.only &&
       !globalUnsafe.size && valid(old);
     if (reusable) {
+      report.reasons[id] = 'unchanged-dependencies';
       report.reused.push(id);
       records.set(id, old);
       return original(name, { ...options, skip: 'unchanged dependencies (verified previous success)' }, callback);
     }
     report.selected.push(id);
+    report.reasons[id] = globalUnsafe.size || old?.unsafe?.length ? 'untracked-input' :
+      !old ? 'missing-baseline-or-full' : 'changed-dependency-or-failed-test';
     if (!callback) return original(...args);
     if (callback.length > 1) {
       globalUnsafe.add('callback-style');
@@ -160,13 +166,18 @@ function wrapTest(original, forced = {}) {
     records.set(id, record);
     return original(name, options, async function (t) {
       return storage.run(record, async () => {
+        const started = process.hrtime.bigint();
         const target = new Proxy(t, { get(object, key) {
           const value = Reflect.get(object, key, object);
           if (['test', 'before', 'after', 'beforeEach', 'afterEach', 'skip', 'todo'].includes(key)) unsafe('nested-or-hook');
           return typeof value === 'function' ? value.bind(object) : value;
         } });
-        await callback.call(this, target);
-        record.passed = !options.skip && !options.todo;
+        try {
+          await callback.call(this, target);
+          record.passed = !options.skip && !options.todo;
+        } finally {
+          report.durations_seconds[id] = Number(process.hrtime.bigint() - started) / 1e9;
+        }
       });
     });
   }
@@ -198,6 +209,7 @@ process.on('exit', (code) => {
     tests[id] = { passed: code === 0 && record.passed,
       inputs: { ...globalInputs, ...record.inputs },
       unsafe: [...new Set([...globalUnsafe, ...record.unsafe])] };
+    if (tests[id].unsafe.length) report.untracked[id] = tests[id].unsafe;
   }
   write(destination, JSON.stringify({ context, tests }));
   write(destination + '.report.json', JSON.stringify(report, null, 2));

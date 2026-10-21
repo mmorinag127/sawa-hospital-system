@@ -42,13 +42,30 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         return json.loads(reports[0].read_text())
 
     def test_individual_file_dependencies(self):
-        self.assertEqual(len(self.run_tests()["selected"]), 2)
-        self.assertEqual(len(self.run_tests()["reused"]), 2)
+        first = self.run_tests()
+        self.assertEqual(len(first["selected"]), 2)
+        self.assertFalse(first["previous_context_matches"])
+        self.assertEqual(first["previous_count"], 0)
+        same = self.run_tests()
+        self.assertEqual(len(same["reused"]), 2)
+        self.assertTrue(same["previous_context_matches"])
+        self.assertEqual(same["previous_count"], 2)
         self.write("first.txt", "broken")
         changed = self.run_tests(1)
         self.assertEqual(changed["selected"], ["example.test.mjs::first#0"],
                          [p.read_text() for p in self.state.glob("*.json")])
         self.assertEqual(changed["reused"], ["example.test.mjs::second#0"])
+        self.assertEqual(changed["reasons"]["example.test.mjs::first#0"], "changed-dependency-or-failed-test")
+        self.assertGreaterEqual(changed["durations_seconds"]["example.test.mjs::first#0"], 0)
+
+    def test_configuration_change_explains_baseline_invalidation(self):
+        self.run_tests()
+        self.env["IMPACT_APPLICATION_SETTING"] = "changed"
+        changed = self.run_tests()
+        self.assertFalse(changed["previous_context_matches"])
+        self.assertEqual(changed["previous_count"], 0)
+        self.assertEqual(len(changed["selected"]), 2)
+        self.assertTrue(all(reason == "missing-baseline-or-full" for reason in changed["reasons"].values()))
 
     def test_changed_test_executes_assertions(self):
         self.run_tests()
@@ -89,7 +106,9 @@ import {execFileSync} from 'node:child_process';
 test('process', () => execFileSync(process.execPath, ['-e', '']));
 """)
         self.run_tests()
-        self.assertIn("example.test.mjs::process#0", self.run_tests()["selected"])
+        report = self.run_tests()
+        self.assertIn("example.test.mjs::process#0", report["selected"])
+        self.assertIn("subprocess", report["untracked"]["example.test.mjs::process#0"])
 
     def test_commonjs_loader(self):
         self.write("helper.cjs", "const test = require('node:test'); test('commonjs', () => {});")
