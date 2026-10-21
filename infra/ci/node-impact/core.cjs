@@ -22,6 +22,8 @@ const fileHash = (file) => {
   try { return hash(read(file)); } catch { return null; } finally { busy = wasBusy; }
 };
 const volatile = new Set(['HOME', 'PWD', 'OLDPWD', 'PATH', 'TMP', 'TEMP', 'TMPDIR', 'SHLVL', '_',
+  'INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID', 'MEMORY_PRESSURE_WATCH',
+  'MEMORY_PRESSURE_WRITE', 'NODE_TEST_WORKER_ID',
   'NODE_OPTIONS', 'NODE_TEST_CONTEXT', 'SAWA_IMPACT_ROOT', 'SAWA_NODE_IMPACT_STATE', 'SAWA_IMPACT_FULL']);
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !volatile.has(key) && !/^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key)).sort());
@@ -31,11 +33,16 @@ const configs = Object.fromEntries([...tracked].sort().filter((name) =>
   .map((name) => [name, fileHash(path.join(root, name))]));
 const context = hash(JSON.stringify({ version: 1, node: process.version, platform: process.platform,
   tracked: [...tracked].sort(), configs, env }));
+// Diagnose cache misses without persisting environment values or changing selection.
+const contextParts = Object.fromEntries(Object.entries({ node: process.version, platform: process.platform,
+  tracked: [...tracked].sort(), configs, environment: env }).map(([key, value]) => [key, hash(JSON.stringify(value))]));
 const destination = path.join(state, `${hash(local)}.json`);
 let previous = {};
 let previousContextMatches = false;
+let previousParts = {};
 try {
   const saved = JSON.parse(read(destination, 'utf8'));
+  previousParts = saved.context_parts || {};
   previousContextMatches = saved.context === context;
   if (saved.context === context && saved.tests && typeof saved.tests === 'object') previous = saved.tests;
 } catch { /* Missing/corrupt dependency state executes tests. */ }
@@ -47,7 +54,8 @@ const globalUnsafe = new Set();
 const records = new Map();
 const counts = new Map();
 const report = { selected: [], reused: [], reasons: {}, durations_seconds: {}, untracked: {},
-  previous_context_matches: previousContextMatches, previous_count: Object.keys(previous).length };
+  previous_context_matches: previousContextMatches, previous_count: Object.keys(previous).length,
+  changed_context_parts: Object.keys(contextParts).filter((key) => previousParts[key] !== contextParts[key]) };
 let used = false;
 
 function unsafe(reason) {
@@ -111,20 +119,33 @@ for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execF
 wrapMethod(require('node:net').Socket.prototype, 'connect', () => unsafe('network'));
 syncBuiltinESMExports();
 const environment = process.env;
+function observeEnvironment(key) {
+  if (!busy && !globalUnsafe.size && typeof key === 'string' &&
+      (volatile.has(key) || /^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key))) {
+    const caller = new Error().stack?.split('\n')[3] || '';
+    if (!caller.includes('(node:') && !caller.includes('at node:')) unsafe('volatile-environment');
+  }
+}
 process.env = new Proxy(environment, {
   set(target, key, value) {
     target[key] = value;
     return true;
   },
   get(target, key) {
-    if (!busy && !globalUnsafe.size && typeof key === 'string' &&
-        (volatile.has(key) || /^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key))) {
-      const caller = new Error().stack?.split('\n')[2] || '';
-      if (!caller.includes('(node:') && !caller.includes('at node:')) {
-        unsafe('volatile-environment');
-      }
-    }
+    observeEnvironment(key);
     return Reflect.get(target, key);
+  },
+  has(target, key) {
+    observeEnvironment(key);
+    return Reflect.has(target, key);
+  },
+  getOwnPropertyDescriptor(target, key) {
+    observeEnvironment(key);
+    return Reflect.getOwnPropertyDescriptor(target, key);
+  },
+  ownKeys(target) {
+    observeEnvironment('INVOCATION_ID');
+    return Reflect.ownKeys(target);
   },
 });
 
@@ -211,7 +232,7 @@ process.on('exit', (code) => {
       unsafe: [...new Set([...globalUnsafe, ...record.unsafe])] };
     if (tests[id].unsafe.length) report.untracked[id] = tests[id].unsafe;
   }
-  write(destination, JSON.stringify({ context, tests }));
+  write(destination, JSON.stringify({ context, tests, context_parts: contextParts }));
   write(destination + '.report.json', JSON.stringify(report, null, 2));
 });
 

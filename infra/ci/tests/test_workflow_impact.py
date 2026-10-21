@@ -2,6 +2,8 @@ from pathlib import Path
 import hashlib
 import re
 import tempfile
+import os
+import subprocess
 import unittest
 
 import yaml
@@ -39,6 +41,30 @@ class WorkflowImpact(unittest.TestCase):
             step = next(s for s in frontend["steps"] if s.get("name") == name)
             self.assertNotIn("if", step)
             self.assertNotIn("NODE_OPTIONS", step.get("env", {}))
+
+    def test_hosted_image_namespaces_restore_and_save(self):
+        for name in ("backend", "frontend"):
+            steps = self.jobs[name]["steps"]
+            identify = next(s for s in steps if s.get("id") == "impact-runtime")
+            restore = next(s for s in steps if s.get("uses") == "actions/cache/restore@v4")
+            save = next(s for s in steps if s.get("uses") == "actions/cache/save@v4")
+            self.assertLess(steps.index(identify), steps.index(restore))
+            token = "${{ steps.impact-runtime.outputs.image }}"
+            for key in (restore["with"]["key"], restore["with"]["restore-keys"], save["with"]["key"]):
+                self.assertIn(token, key)
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                env = {**os.environ, "GITHUB_OUTPUT": str(output), "ImageOS": "ubuntu24"}
+                identities = []
+                for image in ("20261018.339.1", "20261012.334.1"):
+                    output.write_text("")
+                    subprocess.run(["bash", "-c", identify["run"]], env={**env, "ImageVersion": image}, check=True)
+                    identities.append(output.read_text())
+                self.assertNotEqual(*identities)
+                output.write_text("")
+                failed = subprocess.run(["bash", "-c", identify["run"]], env={**env, "ImageVersion": ""})
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertEqual(output.read_text(), "")
 
     def test_multiple_backend_pytest_commands_keep_separate_reports(self):
         backend = self.jobs["backend"]

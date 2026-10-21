@@ -7,6 +7,8 @@ import unittest
 
 
 REGISTER = Path(__file__).resolve().parents[1] / "node-impact/register.mjs"
+RUN_IDENTITIES = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
+                  "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID")
 
 
 class NodeImpact(unittest.TestCase):
@@ -32,9 +34,9 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
     def write(self, name, text):
         (self.root / name).write_text(text)
 
-    def run_tests(self, expected=0):
+    def run_tests(self, expected=0, *, isolated=True):
         result = subprocess.run(
-            ["node", "--import", str(REGISTER), "--test", "example.test.mjs"],
+            ["node", "--import", str(REGISTER), *(["--test"] if isolated else []), "example.test.mjs"],
             cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, expected, (result.stdout + result.stderr)[-6000:])
         reports = list(self.state.glob("*.report.json"))
@@ -59,13 +61,17 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         self.assertGreaterEqual(changed["durations_seconds"]["example.test.mjs::first#0"], 0)
 
     def test_configuration_change_explains_baseline_invalidation(self):
+        self.env["IMPACT_APPLICATION_SETTING"] = "original-private-value"
         self.run_tests()
-        self.env["IMPACT_APPLICATION_SETTING"] = "changed"
+        self.env["IMPACT_APPLICATION_SETTING"] = "changed-private-value"
         changed = self.run_tests()
         self.assertFalse(changed["previous_context_matches"])
         self.assertEqual(changed["previous_count"], 0)
         self.assertEqual(len(changed["selected"]), 2)
         self.assertTrue(all(reason == "missing-baseline-or-full" for reason in changed["reasons"].values()))
+        self.assertEqual(changed["changed_context_parts"], ["environment"])
+        for file in self.state.glob("*.json"):
+            self.assertNotIn("private-value", file.read_text())
 
     def test_changed_test_executes_assertions(self):
         self.run_tests()
@@ -87,6 +93,33 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         self.env["GITHUB_REF"] = "changed"
         self.assertIn("example.test.mjs::environment#0", self.run_tests(1)["selected"])
 
+    def test_unread_runner_identities_do_not_invalidate_tests(self):
+        self.env.update({key: "first-run" for key in RUN_IDENTITIES})
+        self.run_tests()
+        self.env.update({key: "second-run" for key in RUN_IDENTITIES})
+        self.assertEqual(len(self.run_tests()["reused"]), 2)
+
+    def test_each_runner_identity_read_always_executes(self):
+        with (self.root / "example.test.mjs").open("a") as stream:
+            for key in RUN_IDENTITIES:
+                stream.write(f"\ntest('{key}', () => assert.equal(process.env.{key}, 'first-run'));\n")
+        self.env.update({key: "first-run" for key in RUN_IDENTITIES})
+        self.run_tests(isolated=False)
+        self.env.update({key: "second-run" for key in RUN_IDENTITIES})
+        report = self.run_tests(1, isolated=False)
+        for key in RUN_IDENTITIES:
+            self.assertIn(f"example.test.mjs::{key}#0", report["selected"])
+            self.assertIn("volatile-environment", report["untracked"][f"example.test.mjs::{key}#0"])
+
+    def test_native_worker_identity_read_always_executes(self):
+        self.env["NODE_TEST_WORKER_ID"] = "inherited-worker"
+        with (self.root / "example.test.mjs").open("a") as stream:
+            stream.write("\ntest('native worker', () => assert.equal(typeof process.env.NODE_TEST_WORKER_ID, 'string'));\n")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertIn("example.test.mjs::native worker#0", report["selected"])
+        self.assertIn("volatile-environment", report["untracked"]["example.test.mjs::native worker#0"])
+
     def test_environment_mutation_preserves_native_behavior(self):
         with (self.root / "example.test.mjs").open("a") as stream:
             stream.write("""
@@ -98,6 +131,21 @@ test('environment write', () => {
 });
 """)
         self.assertEqual(len(self.run_tests()["selected"]), 3)
+
+    def test_reflective_runner_environment_reads_always_execute(self):
+        self.env["INVOCATION_ID"] = "first-run"
+        with (self.root / "example.test.mjs").open("a") as stream:
+            stream.write("""
+test('descriptor', () => assert.equal(Object.getOwnPropertyDescriptor(process.env, 'INVOCATION_ID').value, 'first-run'));
+test('presence', () => assert.ok('INVOCATION_ID' in process.env));
+test('enumeration', () => assert.ok(Object.keys(process.env).includes('INVOCATION_ID')));
+""")
+        self.run_tests()
+        self.env["INVOCATION_ID"] = "second-run"
+        report = self.run_tests(1)
+        for name in ("descriptor", "presence", "enumeration"):
+            self.assertIn(f"example.test.mjs::{name}#0", report["selected"])
+            self.assertIn("volatile-environment", report["untracked"][f"example.test.mjs::{name}#0"])
 
     def test_subprocess_never_reused(self):
         with (self.root / "example.test.mjs").open("a") as stream:
