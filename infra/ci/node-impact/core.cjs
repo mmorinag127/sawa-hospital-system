@@ -31,11 +31,20 @@ const configs = Object.fromEntries([...tracked].sort().filter((name) =>
   .map((name) => [name, fileHash(path.join(root, name))]));
 const context = hash(JSON.stringify({ version: 1, node: process.version, platform: process.platform,
   tracked: [...tracked].sort(), configs, env }));
+// Diagnose cache misses without persisting environment values or changing selection.
+const contextParts = Object.fromEntries(Object.entries({ node: process.version, platform: process.platform,
+  tracked: [...tracked].sort(), configs, environment: env }).map(([key, value]) => [key, hash(JSON.stringify(value))]));
+const environmentWithout = Object.fromEntries(Object.keys(env).map((excluded) =>
+  [excluded, hash(JSON.stringify(Object.fromEntries(Object.entries(env).filter(([key]) => key !== excluded))))]));
 const destination = path.join(state, `${hash(local)}.json`);
 let previous = {};
 let previousContextMatches = false;
+let previousParts = {};
+let previousEnvironmentWithout = {};
 try {
   const saved = JSON.parse(read(destination, 'utf8'));
+  previousParts = saved.context_parts || {};
+  previousEnvironmentWithout = saved.environment_without || {};
   previousContextMatches = saved.context === context;
   if (saved.context === context && saved.tests && typeof saved.tests === 'object') previous = saved.tests;
 } catch { /* Missing/corrupt dependency state executes tests. */ }
@@ -47,7 +56,11 @@ const globalUnsafe = new Set();
 const records = new Map();
 const counts = new Map();
 const report = { selected: [], reused: [], reasons: {}, durations_seconds: {}, untracked: {},
-  previous_context_matches: previousContextMatches, previous_count: Object.keys(previous).length };
+  previous_context_matches: previousContextMatches, previous_count: Object.keys(previous).length,
+  changed_context_parts: Object.keys(contextParts).filter((key) => previousParts[key] !== contextParts[key]),
+  environment_keys: Object.keys(env),
+  single_environment_difference: Object.keys(environmentWithout).filter((key) =>
+    previousParts.environment !== contextParts.environment && previousEnvironmentWithout[key] === environmentWithout[key]) };
 let used = false;
 
 function unsafe(reason) {
@@ -211,7 +224,7 @@ process.on('exit', (code) => {
       unsafe: [...new Set([...globalUnsafe, ...record.unsafe])] };
     if (tests[id].unsafe.length) report.untracked[id] = tests[id].unsafe;
   }
-  write(destination, JSON.stringify({ context, tests }));
+  write(destination, JSON.stringify({ context, tests, context_parts: contextParts, environment_without: environmentWithout }));
   write(destination + '.report.json', JSON.stringify(report, null, 2));
 });
 

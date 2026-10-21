@@ -59,13 +59,19 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         self.assertGreaterEqual(changed["durations_seconds"]["example.test.mjs::first#0"], 0)
 
     def test_configuration_change_explains_baseline_invalidation(self):
+        self.env["IMPACT_APPLICATION_SETTING"] = "original-private-value"
         self.run_tests()
-        self.env["IMPACT_APPLICATION_SETTING"] = "changed"
+        self.env["IMPACT_APPLICATION_SETTING"] = "changed-private-value"
         changed = self.run_tests()
         self.assertFalse(changed["previous_context_matches"])
         self.assertEqual(changed["previous_count"], 0)
         self.assertEqual(len(changed["selected"]), 2)
         self.assertTrue(all(reason == "missing-baseline-or-full" for reason in changed["reasons"].values()))
+        self.assertEqual(changed["changed_context_parts"], ["environment"])
+        self.assertEqual(changed["single_environment_difference"], ["IMPACT_APPLICATION_SETTING"])
+        self.assertIn("IMPACT_APPLICATION_SETTING", changed["environment_keys"])
+        for file in self.state.glob("*.json"):
+            self.assertNotIn("private-value", file.read_text())
 
     def test_changed_test_executes_assertions(self):
         self.run_tests()
