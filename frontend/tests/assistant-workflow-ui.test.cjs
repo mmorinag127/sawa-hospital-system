@@ -199,3 +199,20 @@ test('admin usage read failure never discards the latest task status',async()=>{
   assert.equal(h.document.querySelector('.assistant-error'),null);
  }finally{await h.close();}
 });
+
+
+test('an accepted approval with a failed refresh is not reported as a failed command',async()=>{
+ let fail=false;
+ const initial={...makeRun('running'),pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'確認済みの試験案',evidence:[],actions:[]}};
+ const h=await mount({initial,beforeGet:async url=>{if(fail&&url===base+'/runs/r1')throw Error('timeout of 30000ms exceeded');}});
+ try{
+  fail=true;await h.click(h.button('この内容で進める'));
+  assert.match(h.document.body.textContent,/進捗を取得できませんでした/);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
+  fail=false;await h.poll();
+  assert.match(h.document.body.textContent,/作業が完了しました/);
+  assert.doesNotMatch(h.document.body.textContent,/進捗を取得できませんでした/);
+  assert.equal(h.calls.filter(c=>c.method==='post'&&c.url.endsWith('/decision')).length,1);
+ }finally{await h.close();}
+});
