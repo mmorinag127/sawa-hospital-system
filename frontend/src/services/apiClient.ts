@@ -33,7 +33,31 @@ const getSessionAuthHeader = () => {
 export const hasActiveSessionAuthHeader = () =>
   typeof window !== "undefined" &&
   !sessionWasLoggedOut() &&
-  getSessionAuthHeader().startsWith("Bearer ");
+  (getSessionAuthHeader().startsWith("Bearer ") || !!window.sessionStorage.getItem("sawa_server_session"));
+
+export const portalCsrfHeaders = (): Record<string, string> => {
+  const csrf = readCookieValue("__Host-sawa_csrf");
+  return csrf ? { "X-Sawa-CSRF": csrf } : {};
+};
+
+export const establishServerSession = async (signal?: AbortSignal) => {
+  const owner = browserSessionKey();
+  const logout = window.localStorage.getItem("sawa_logout_generation");
+  const authorization = getSessionAuthHeader();
+  const response = await fetch("/api/portal/auth/me", { credentials: "same-origin", cache: "no-store", redirect: "error", signal });
+  if (!response.ok) throw Object.assign(new Error("Session unavailable"), { status: response.status });
+  const user = await response.json();
+  if (!["admin", "operator"].includes(user.role) || typeof user.session_generation !== "string" || !user.session_generation) throw new Error("Invalid session response");
+  if (signal?.aborted || owner !== browserSessionKey() || authorization !== getSessionAuthHeader() ||
+      logout !== window.localStorage.getItem("sawa_logout_generation")) throw new Error("Session request cancelled");
+  window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
+  clearLegacyAuthStorage();
+  const previous = window.sessionStorage.getItem("sawa_server_session");
+  window.sessionStorage.setItem("sawa_server_session", user.session_generation);
+  markSessionCurrent();
+  if (previous !== user.session_generation) markAuthCacheChanged();
+  return user;
+};
 
 export const getStoredAuthHeader = () => {
   if (typeof window === "undefined") return "";
@@ -82,6 +106,10 @@ export const setBearerToken = (token: string) => {
 };
 
 export const clearAuth = () => {
+  if (typeof window !== "undefined" && window.sessionStorage.getItem("sawa_server_session")) {
+    window.sessionStorage.removeItem("sawa_server_session");
+    markAuthCacheChanged();
+  }
   setStoredAuthHeader("");
 };
 
@@ -118,6 +146,10 @@ apiClient.interceptors.request.use((config) => {
   if (header) {
     const headers = AxiosHeaders.from(config.headers || ({} as AxiosRequestHeaders));
     headers.set("Authorization", header);
+    config.headers = headers;
+  } else if (!["get", "head", "options"].includes((config.method || "get").toLowerCase())) {
+    const headers = AxiosHeaders.from(config.headers || ({} as AxiosRequestHeaders));
+    for (const [key, value] of Object.entries(portalCsrfHeaders())) headers.set(key, value);
     config.headers = headers;
   }
   return config;

@@ -14,6 +14,12 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      full_tests:
+        description: Run every test regardless of unchanged dependencies
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -58,7 +64,7 @@ jobs:
       SAWA_IMPACT_ROOT: ${{ github.workspace }}
       SAWA_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}
       TESTMON_DATAFILE: ${{ github.workspace }}/.ci-impact/${{ matrix.suite }}/testmon.sqlite
-      SAWA_IMPACT_FULL: ${{ github.event_name == 'push' && '1' || '0' }}
+      SAWA_IMPACT_FULL: ${{ (inputs.full_tests || startsWith(github.ref, 'refs/heads/release/prod-')) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -77,9 +83,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ci-impact/${{ matrix.suite }}
-          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
           restore-keys: |
-            test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**', '.github/workflows/ci.yml') }}-
+            test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-
       - name: Install CPU torch for OCR contract tests
         working-directory: backend
         run: |
@@ -212,12 +218,24 @@ jobs:
             tests/unit/test_native_ingest_protocol.py \
             --junitxml=.logs/review-resolution-junit.xml \
             -q -rs 2>&1 | tee .logs/review-resolution.log
+      - name: Verify portal login and server session
+        if: matrix.suite == 'us1-4'
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/contract/test_portal_google_auth.py \
+            tests/unit/test_portal_session.py \
+            tests/unit/test_portal_session_catalog.py \
+            tests/unit/test_portal_auth_failure_contract.py \
+            --junitxml=.logs/portal-session-junit.xml \
+            -q -rs 2>&1 | tee .logs/portal-session.log
       - name: Save trusted test dependencies
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/develop'
         uses: actions/cache/save@v4
         with:
           path: .ci-impact/${{ matrix.suite }}
-          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
       - name: Upload per-test selection report
         if: always()
         uses: actions/upload-artifact@v4
@@ -261,7 +279,7 @@ jobs:
     env:
       SAWA_IMPACT_ROOT: ${{ github.workspace }}
       SAWA_NODE_IMPACT_STATE: ${{ github.workspace }}/.ci-impact/frontend
-      SAWA_IMPACT_FULL: ${{ github.event_name == 'push' && '1' || '0' }}
+      SAWA_IMPACT_FULL: ${{ (inputs.full_tests || startsWith(github.ref, 'refs/heads/release/prod-')) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -278,9 +296,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ci-impact/frontend
-          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
           restore-keys: |
-            node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**', '.github/workflows/ci.yml') }}-
+            node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-
       - name: Verify Node test selection safety
         run: python3 -m unittest discover -s infra/ci/tests -p test_node_impact.py -v
       - name: Frontend dependency audit
@@ -309,7 +327,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ci-impact/frontend
-          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
       - name: Upload frontend test selection
         if: always()
         uses: actions/upload-artifact@v4

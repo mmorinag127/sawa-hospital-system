@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import PublicNav from "../components/PublicNav";
-import { setBearerToken } from "../services/apiClient";
 import { resolveLoginDestination } from "../services/loginDestination";
-import { prepareSystemDestination } from "../services/systemNavigation";
-import { watchBrowserLogout } from "../services/browserSession";
 
 declare global {
   interface Window {
@@ -13,70 +10,45 @@ declare global {
 }
 
 export default function LoginPage() {
-  const envClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
-  const [clientId, setClientId] = useState(envClientId);
+  const [loginConfig, setLoginConfig] = useState<{client_id: string; nonce: string; login_uri: string} | null>(null);
+  const clientId = loginConfig?.client_id || "";
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const [googleReady, setGoogleReady] = useState(false);
   const [message, setMessage] = useState("");
   const [configMessage, setConfigMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const submitting = useRef(false);
-  const mounted = useRef(true);
-  const attempt = useRef<AbortController | null>(null);
-
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; attempt.current?.abort(); }; }, []);
+  const configRequest = useRef<Promise<{client_id: string; nonce: string; login_uri: string}> | null>(null);
 
   useEffect(() => {
     const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
-    if (portalUrl && new URL(portalUrl).origin !== window.location.origin) {
-      try {
+    try {
+      if (portalUrl && new URL(portalUrl).origin !== window.location.origin) {
         const login = new URL("/login", portalUrl);
         login.searchParams.set("next", resolveLoginDestination(window.location.search, window.sessionStorage.getItem("auth_next")));
         window.location.replace(login.toString());
-      } catch { setMessage("復帰先が不正です。統合トップから開き直してください。"); }
-    }
+      }
+    } catch { setMessage("復帰先が不正です。統合トップから開き直してください。"); }
   }, []);
-
-  const redirectAfterLogin = async (credential: string) => {
-    if (submitting.current) return;
-    submitting.current = true;
-    setBusy(true);
-    setMessage("");
-    const controller = new AbortController();
-    attempt.current = controller;
-    const stopWatching = watchBrowserLogout(() => controller.abort());
-    try {
-      const next = resolveLoginDestination(window.location.search, window.sessionStorage.getItem("auth_next"));
-      const destination = await prepareSystemDestination(next, `Bearer ${credential}`, controller.signal);
-      if (!mounted.current || controller.signal.aborted) return;
-      setBearerToken(credential);
-      window.sessionStorage.removeItem("auth_next");
-      // A full navigation runs the subsystem's server-side session guard.
-      window.location.replace(destination);
-    } catch (error) {
-      if (mounted.current) setMessage(error instanceof Error ? error.message : "ログインを確認できませんでした。");
-    } finally {
-      stopWatching();
-      attempt.current = null;
-      submitting.current = false;
-      if (mounted.current) setBusy(false);
-    }
-  };
 
   useEffect(() => {
     let active = true;
     const loadConfig = async () => {
       try {
-        const res = await fetch("/api/auth/config", { cache: "no-store" });
-        if (!res.ok) throw new Error("config fetch failed");
-        const data = await res.json();
-        const apiClientId = typeof data?.google_client_id === "string" ? data.google_client_id : "";
-        if (active && apiClientId) {
-          setClientId(apiClientId);
+        // StrictMode repeats effects; a second challenge response could replace the nonce cookie.
+        if (!configRequest.current) configRequest.current = (async () => {
+          const next = resolveLoginDestination(window.location.search, window.sessionStorage.getItem("auth_next"));
+          const res = await fetch(`/api/portal/auth/start?${new URLSearchParams({next})}`, { cache: "no-store", credentials: "same-origin", redirect: "error" });
+          if (!res.ok) throw new Error("config fetch failed");
+          const data = await res.json();
+          if (![data.client_id, data.nonce, data.login_uri].every(value => typeof value === "string" && value)) throw new Error("invalid login configuration");
+          return data;
+        })();
+        const data = await configRequest.current;
+        if (active) {
+          setLoginConfig(data);
           setConfigMessage("");
         }
       } catch (err) {
-        if (active && !envClientId) {
+        if (active) {
           setConfigMessage("ログイン設定の取得に失敗しました。");
         }
       }
@@ -85,21 +57,17 @@ export default function LoginPage() {
     return () => {
       active = false;
     };
-  }, [envClientId]);
+  }, []);
 
   useEffect(() => {
-    if (!clientId) return;
+    if (!loginConfig) return;
     const initialize = () => {
       if (!window.google?.accounts?.id || !googleButtonRef.current) return;
       window.google.accounts.id.initialize({
         client_id: clientId,
-        callback: (response: { credential?: string }) => {
-          if (!response?.credential) {
-            setMessage("Googleログインに失敗しました。");
-            return;
-          }
-          void redirectAfterLogin(response.credential);
-        },
+        ux_mode: "redirect",
+        login_uri: loginConfig.login_uri,
+        nonce: loginConfig.nonce,
       });
       window.google.accounts.id.renderButton(googleButtonRef.current, {
         theme: "outline",
@@ -126,7 +94,7 @@ export default function LoginPage() {
     script.addEventListener("load", initialize);
     document.head.appendChild(script);
     return () => script.removeEventListener("load", initialize);
-  }, [clientId]);
+  }, [loginConfig]);
 
   return (
     <main className="page">
@@ -158,16 +126,13 @@ export default function LoginPage() {
             {!googleReady && <p className="subtle">ボタンを読み込み中...</p>}
             {configMessage ? <p className="message">{configMessage}</p> : null}
           </>
+        ) : configMessage ? (
+          <p className="message" role="alert">{configMessage}</p>
         ) : (
-          <p className="message">
-            Google Client ID が未設定です。
-            <br />
-            <span className="subtle">NEXT_PUBLIC_GOOGLE_CLIENT_ID を設定してください。</span>
-          </p>
+          <p className="subtle" role="status">ログイン設定を読み込み中...</p>
         )}
       </section>
 
-      {busy && <p role="status">利用権限を確認して、元の画面を開いています…</p>}
       {message && <p className="message" role="alert">{message}</p>}
 
       <style jsx>{`

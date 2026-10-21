@@ -6,14 +6,14 @@ const ts = require("typescript");
 const vm = require("node:vm");
 
 const storage = () => { const data = new Map(); return { getItem: k => data.get(k) ?? null, setItem: (k, v) => data.set(k, String(v)), removeItem: k => data.delete(k) }; };
-const load = () => {
+const load = (fetch) => {
   const events = []; const sessionStorage = storage(); const localStorage = storage();
   const window = { sessionStorage, localStorage, location: { origin: "http://localhost", pathname: "/menu-masters", search: "", hash: "" }, crypto: { randomUUID: () => `id-${events.length}` }, addEventListener() {}, removeEventListener() {}, dispatchEvent: e => events.push(e.type) };
   const browser = fs.readFileSync(path.join(__dirname, "../src/services/browserSession.ts"), "utf8");
   const browserContext = { exports: {}, window, document: { cookie: "" }, Event: class { constructor(type) { this.type = type; } } };
   vm.runInNewContext(ts.transpileModule(browser, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, browserContext);
   const api = fs.readFileSync(path.join(__dirname, "../src/services/apiClient.ts"), "utf8");
-  const context = { exports: {}, window, document: browserContext.document, process: { env: {} }, require: name => name === "./browserSession" ? browserContext.exports : name === "./loginDestination" ? { loginUrlFor: () => "/login" } : require(name) };
+  const context = { exports: {}, window, fetch, document: browserContext.document, process: { env: {} }, require: name => name === "./browserSession" ? browserContext.exports : name === "./loginDestination" ? { loginUrlFor: () => "/login" } : require(name) };
   vm.runInNewContext(ts.transpileModule(api, { compilerOptions: { module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText, context);
   return { api: context.exports, sessionStorage, localStorage, events, window, document: browserContext.document };
 };
@@ -23,6 +23,30 @@ test("session auth is render-safe and clear is idempotent", () => {
   t.api.setBearerToken("fixture-token"); const generation = t.sessionStorage.getItem("sawa_auth_cache_generation"); assert.equal(t.api.hasActiveSessionAuthHeader(), true);
   t.api.clearAuth(); assert.equal(t.sessionStorage.getItem("auth_header"), null); assert.notEqual(t.sessionStorage.getItem("sawa_auth_cache_generation"), generation);
   const afterFirst = t.events.length; const afterGeneration = t.sessionStorage.getItem("sawa_auth_cache_generation"); t.api.clearAuth(); assert.equal(t.events.length, afterFirst); assert.equal(t.sessionStorage.getItem("sawa_auth_cache_generation"), afterGeneration);
+});
+
+test("cookie session stores only generation and repeated me does not remount caches", async () => {
+  const t = load(async () => ({ ok: true, json: async () => ({role: "admin", session_generation: "generation"}) }));
+  await t.api.establishServerSession();
+  assert.equal(t.sessionStorage.getItem("auth_header"), null);
+  assert.equal(t.api.hasActiveSessionAuthHeader(), true);
+  const events = t.events.length;
+  await t.api.establishServerSession();
+  assert.equal(t.events.length, events);
+});
+
+for (const race of ["logout", "new-auth", "abort"]) test(`late server me cannot undo ${race}`, async () => {
+  let resolve;
+  const t = load(() => new Promise(done => { resolve = done; }));
+  const controller = new AbortController();
+  const result = t.api.establishServerSession(controller.signal);
+  if (race === "logout") t.localStorage.setItem("sawa_logout_generation", "logout");
+  if (race === "new-auth") t.api.setBearerToken("machine-new");
+  if (race === "abort") controller.abort();
+  resolve({ ok: true, json: async () => ({role: "admin", session_generation: "stale"}) });
+  await assert.rejects(result);
+  assert.equal(t.sessionStorage.getItem("sawa_server_session"), null);
+  if (race === "new-auth") assert.equal(t.sessionStorage.getItem("auth_header"), "Bearer machine-new");
 });
 
 const deferred401 = async (t) => {
