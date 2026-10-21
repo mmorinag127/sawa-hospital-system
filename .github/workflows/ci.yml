@@ -80,13 +80,20 @@ jobs:
         run: python -m pip install -e ".[dev]" --no-build-isolation
       - name: Install per-test dependency tracker
         run: python -m pip install "pytest-testmon==2.2.0"
+      - name: Identify test runner image
+        id: impact-runtime
+        run: |
+          set -euo pipefail
+          test -n "$ImageOS"
+          test -n "$ImageVersion"
+          printf 'image=%s-%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
       - name: Restore trusted test dependencies
         uses: actions/cache/restore@v4
         with:
           path: .ci-impact/${{ matrix.suite }}
-          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: test-impact-v1-${{ runner.os }}-${{ steps.impact-runtime.outputs.image }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
           restore-keys: |
-            test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-
+            test-impact-v1-${{ runner.os }}-${{ steps.impact-runtime.outputs.image }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-
       - name: Install CPU torch for OCR contract tests
         working-directory: backend
         run: |
@@ -236,7 +243,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ci-impact/${{ matrix.suite }}
-          key: test-impact-v1-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: test-impact-v1-${{ runner.os }}-${{ steps.impact-runtime.outputs.image }}-${{ matrix.suite }}-${{ hashFiles('backend/pyproject.toml', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
       - name: Upload per-test selection report
         if: always()
         uses: actions/upload-artifact@v4
@@ -293,13 +300,20 @@ jobs:
       - name: Install frontend deps
         working-directory: frontend
         run: npm ci
+      - name: Identify test runner image
+        id: impact-runtime
+        run: |
+          set -euo pipefail
+          test -n "$ImageOS"
+          test -n "$ImageVersion"
+          printf 'image=%s-%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
       - name: Restore trusted frontend test dependencies
         uses: actions/cache/restore@v4
         with:
           path: .ci-impact/frontend
-          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: node-impact-v1-${{ runner.os }}-${{ steps.impact-runtime.outputs.image }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
           restore-keys: |
-            node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-
+            node-impact-v1-${{ runner.os }}-${{ steps.impact-runtime.outputs.image }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-
       - name: Verify Node test selection safety
         run: python3 -m unittest discover -s infra/ci/tests -p test_node_impact.py -v
       - name: Frontend dependency audit
@@ -328,7 +342,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ci-impact/frontend
-          key: node-impact-v1-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          key: node-impact-v1-${{ runner.os }}-${{ steps.impact-runtime.outputs.image }}-${{ hashFiles('frontend/package-lock.json', 'infra/ci/**/*.py', 'infra/ci/**/*.mjs', 'infra/ci/**/*.cjs', '.github/workflows/ci.yml') }}-${{ github.sha }}
       - name: Upload frontend test selection
         if: always()
         uses: actions/upload-artifact@v4
