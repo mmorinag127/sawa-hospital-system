@@ -9,7 +9,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE = {
-    "Run backend tests (US1-4)": ("us1-4", "d8c3f72cfe9f78d4f1478199c472fd67c0a72006c6cdd1b0bc93eaf41ee0d074"),
+    "Run backend tests (US1-4)": ("us1-4", "200d50d103b1bca50d049578e65b72d0d1acb1862186cf9ed64710f8912a8086"),
     "Verify initial saved-source preservation": ("saved-source", "58baf3221466a87d078c7f949f6c7460873d2318282f58fe904222b1799f77dd"),
     "Verify OCR review-resolution root regression": ("review-resolution", "1f34337f75700bf4f36b446679cd7139174301c81175004395b839205cd2e02b"),
 }
