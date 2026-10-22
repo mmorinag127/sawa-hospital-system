@@ -6,6 +6,7 @@ import pytest
 from src.db import session_scope
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.ocr_job import OcrJob
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services import hakodate_ocr_evidence_service as evidence
 from src.services import order_service, order_workflow_v2_service as workflow
 from test_recognition_review_acceptance import reviewed_order, snapshot
@@ -23,8 +24,14 @@ def test_quantity_raw_content_and_score_do_not_require_review(monkeypatch, raw, 
 
 
 @pytest.mark.parametrize("reviewed_order", [None, "numeric", "empty"], indirect=True)
-def test_historic_content_rejection_builds_editable_sheet_without_acceptance(reviewed_order):
+@pytest.mark.parametrize("sealed_manifest", [True, False])
+def test_historic_content_rejection_builds_editable_sheet_without_acceptance(reviewed_order, sealed_manifest):
     identity, evidence_id, review, engine = reviewed_order
+    if not sealed_manifest:
+        with session_scope() as session:
+            row = session.get(OrderOcrEvidenceRun, evidence_id)
+            row.artifact_manifest_json = {key: value for key, value in row.artifact_manifest_json.items()
+                                          if key != "original_hakodate_source"}
     original = deepcopy(snapshot(engine)["order_ocr_evidence_runs"])
     with session_scope() as session:
         revision = session.get(OrderWorkflowState, identity).revision
@@ -94,3 +101,28 @@ def test_structural_pipeline_blocker_is_not_a_quantity_content_rejection():
     assert evidence.quantity_content_rejection_only(payload)
     payload["hakodate_canonical_pipeline"]["blockers"].append("hakodate_target_cell_map_missing")
     assert not evidence.quantity_content_rejection_only(payload)
+
+
+def test_large_ocr_json_uses_registered_compression_without_dropping_values():
+    import base64
+    import json
+    import random
+    from fastapi import FastAPI
+    from fastapi.middleware.gzip import GZipMiddleware
+    from fastapi.testclient import TestClient
+    from src.main import app
+    configured = next(m for m in app.user_middleware if m.cls is GZipMiddleware)
+    transport = FastAPI()
+    transport.add_middleware(configured.cls, **configured.kwargs)
+    payload = {'raw': ['-', '--', '', '０１'], 'original_evidence': base64.b64encode(
+        random.Random(20261022).randbytes(25 * 1024 * 1024)).decode('ascii')}
+    @transport.get('/evidence')
+    def evidence():
+        return payload
+    with TestClient(transport) as client:
+        response = client.get('/evidence', headers={'Accept-Encoding': 'gzip'})
+    assert response.status_code == 200
+    assert response.headers['content-encoding'] == 'gzip'
+    assert int(response.headers['content-length']) < 32 * 1024 * 1024
+    assert len(response.content) > 32 * 1024 * 1024
+    assert json.loads(response.content) == payload

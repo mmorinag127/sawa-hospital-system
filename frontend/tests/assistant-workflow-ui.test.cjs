@@ -21,6 +21,19 @@ async function mount({initial=null,targets,adminView=false,beforeGet,beforePost}
  await settle(()=>root.render(React.createElement(screen.AssistantScreen,{adminView})));
  const h={document:dom.window.document,calls,retryLoad:()=>settle(()=>timeouts.shift()()),tick:()=>intervals.at(-1)(),get run(){return run},setRun(value){run=value},settle,async poll(){await settle(()=>intervals.at(-1)());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};return h;
 }
+test('restart reconciliation resumes once and displays the same saved question',async()=>{
+ let h;h=await mount({initial:{...makeRun('reconciliation_required'),pending_question:null},beforePost:async url=>{
+  if(url.endsWith('/resume')){h.setRun(makeRun());return {data:h.run};}
+ }});try{
+  assert.equal(h.document.querySelector('.answer-panel'),null);
+  await h.click(h.button('保存済みの結果を確認して再開'));
+  const request=h.calls.filter(c=>c.url.endsWith('/resume'));
+  assert.equal(request.length,1);assert.equal(request[0].options.timeout,300000);
+  assert.match(h.document.querySelector('.answer-panel').textContent,/登録内容で作成しますか/);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/reply')).length,0);
+  assert.equal(h.calls.filter(c=>c.url===base+'/runs'&&c.method==='post').length,0);
+ }finally{await h.close();}
+});
 test('selection auto-loads, exact question reply, approval, output and rollback stay in one screen',async()=>{
  const h=await mount();try{
   assert.equal(h.document.querySelector('.assistant-domain-tabs'),null);assert.equal(h.document.querySelectorAll('.task-domain-group').length,3);const task=[...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('翌月のシフト案'));await h.click(task);

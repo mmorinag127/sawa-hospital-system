@@ -399,3 +399,24 @@ def test_malformed_output_stops_without_recalculation(saved, bad):
     with pytest.raises(ValueError, match="output_invalid"):
         service.accepted_output_payload(snapshot)
     assert snapshot == before
+
+
+def test_capture_preserves_duplicate_saved_row_ids_and_detects_changes(saved):
+    sheet = deepcopy(SHEET)
+    sheet["row_ids"] = ["saved-row", "saved-row"]
+    sheet["rows"] = [[None, "?", ""], ["raw", "", "manual"]]
+    saved.execute(update(OrderSheetDraft.__table__).where(OrderSheetDraft.id == "D").values(draft_sheet_json=sheet))
+    from src.services.order_service import _explicit_draft_row_identities
+    with pytest.raises(ValueError, match="saved_draft_row_identity_duplicate"):
+        _explicit_draft_row_identities(sheet, sheet["rows"])
+    before = all_rows(saved)
+    snapshot = service.capture_saved_source(saved, "O")
+    receipt = service.source_receipt(snapshot)
+    assert service.current_sheet_payload(snapshot) == sheet
+    assert service.validate_saved_source(saved, receipt) == snapshot
+    assert all_rows(saved) == before
+    changed = deepcopy(sheet)
+    changed["row_ids"][1] = "changed-row"
+    saved.execute(update(OrderSheetDraft.__table__).where(OrderSheetDraft.id == "D").values(draft_sheet_json=changed))
+    with pytest.raises(ValueError, match="initial_saved_source_changed"):
+        service.validate_saved_source(saved, receipt)

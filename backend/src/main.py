@@ -2,6 +2,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from src.api import (
@@ -35,6 +36,8 @@ from src.maintenance.formal_migration_schema import require_formal_head
 
 app = FastAPI(title="Hospital Order System API")
 app.add_middleware(DatasetMiddleware)
+# Full OCR evidence can exceed Cloud Run's buffered response limit.
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=1)
 
 
 @app.exception_handler(SelectedEvidenceRejected)

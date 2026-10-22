@@ -98,7 +98,7 @@ def outcome(action):
         return ("error", type(exc), str(exc))
 
 
-def test_operation_reuses_only_pure_replay_and_rechecks_every_receipt(published, monkeypatch):
+def test_operation_rechecks_original_receipts_without_rerendering(published, monkeypatch):
     before = deepcopy(published)
     replay = Mock(wraps=contact_sheet.build_recognizer_contact_sheet)
     checkpoint = Mock(wraps=checkpoints.load_recognizer_checkpoint)
@@ -111,15 +111,16 @@ def test_operation_reuses_only_pure_replay_and_rechecks_every_receipt(published,
     first_reads = list(load.call_args_list)
     right = artifacts.validate_payload(deepcopy(published), _analysis=analysis)
     assert left == right and published == before
-    assert replay.call_count == 2
+    assert replay.call_count == 0
     assert checkpoint.call_count == 2
     assert load.call_args_list[len(first_reads):] == first_reads
     assert all(call.kwargs == {"verification": True} for call in load.call_args_list)
-    # A new operation and standalone public validators must replay from bytes.
+    # Each operation still reopens the original checkpoint and artifact bytes.
     artifacts.validate_payload(published, _analysis=artifacts._EvidenceAnalysis())
     artifacts.validate_payload(published)
     artifacts.validate_payload(published)
-    assert replay.call_count == 5
+    assert replay.call_count == 0
+    assert checkpoint.call_count == 5
 
 
 @pytest.mark.parametrize("key", ["metadata", *artifacts.REQUIRED_OUTPUTS, "preprocess_observation"])

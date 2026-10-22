@@ -8,7 +8,7 @@ from anthropic import AsyncAnthropic
 from .mcp_server import call_local
 from .store import Conflict, billing_month
 from .tasks import TASKS
-from .conversation import check_answer
+from .conversation import check_answer, record_question_receipt
 
 SYSTEM = """あなたはSAWAの業務アシスタントです。応答は短い日本語にします。
 病院注文・シフト・学校給食の既存業務APIだけを、許可されたMCPツールから使います。
@@ -88,10 +88,11 @@ class Managed:
             raise
         self.tasks[run_id] = asyncio.create_task(self.consume(run_id, stream))
 
-    async def consume(self, run_id, stream=None):
+    async def consume(self, run_id, stream=None, *, replay=frozenset()):
         run = self.store.get(run_id)
         generation = run["generation"]
         api = self.api()
+        replay = set(replay)
         try:
             # Disconnections require reconciliation, never an automatic mutation replay.
             async with (stream or await api.events.stream(run["session_id"])) as stream:
@@ -102,12 +103,16 @@ class Managed:
                     if current["generation"] != generation:
                         break
                     fresh = self.store.event(run_id, kind, event, event_id)
-                    if not fresh:
+                    recover_call = kind == 'agent.custom_tool_use' and event_id in replay
+                    replay.discard(event_id)
+                    if not fresh and not recover_call:
                         continue
                     if kind == "agent.custom_tool_use":
                         # Recorded-but-not-executed events can be recovered using their command receipt.
                         result = await call_local(self.mcp, self.tools, run_id, generation, event["name"], event["input"], event_id)
                         if result.get("waiting_input") or result.get("needs_operator_confirmation"):
+                            record_question_receipt(self.store, run_id, event['name'], result)
+                            self.store.update(run_id, status='waiting_input')
                             # Keep the provider's custom call pending until the human answers.
                             # Sending its result now would resume model work before that answer.
                             self.store.event(run_id, "operator_wait", {"command_id": event_id, "result": result})

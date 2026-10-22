@@ -14,6 +14,7 @@ from .managed import Managed, SYSTEM
 from .mcp_server import call_local
 from .store import Conflict
 from .tasks import TASKS
+from .conversation import record_question_receipt
 
 QUIET = {'requires_action', 'completed', 'failed', 'cancelled', 'incomplete'}
 SETTINGS = ('GEMINI_AGENT_MODEL', 'GEMINI_AGENT_INPUT_USD_PER_MILLION', 'GEMINI_AGENT_OUTPUT_USD_PER_MILLION')
@@ -179,6 +180,8 @@ class Gemini(Managed):
                         command = command_identity(state['interaction'], call['id'])
                         result = await call_local(self.mcp, self.tools, ident, generation, call['name'], call['arguments'], command)
                         if result.get('waiting_input') or result.get('needs_operator_confirmation'):
+                            record_question_receipt(self.store, ident, call['name'], result)
+                            self.store.update(ident, status='waiting_input')
                             state['pending'] = command; self.checkpoint(ident, state)
                             self.store.event(ident, 'operator_wait', {'command_id': command, 'result': result})
                             return

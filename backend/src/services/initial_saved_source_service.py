@@ -147,8 +147,7 @@ def capture_saved_source(session, order_id):
             or any(not isinstance(sheet.get(key), list) or not sheet[key] for key in (("fields", "rows") if fixture else ("fields", "rows", "row_ids")))
             or any(not isinstance(row, list) for row in sheet["rows"])
             or (not fixture and (len(sheet["rows"]) != len(sheet["row_ids"])
-                or any(not isinstance(value, str) or not value for value in sheet["row_ids"])
-                or len(set(sheet["row_ids"])) != len(sheet["row_ids"])))):
+                or any(not isinstance(value, str) or not value for value in sheet["row_ids"])))):
         raise ValueError("initial_saved_source_saved_sheet_invalid")
     for row in (bagging, output):
         if row is not None and (row["source_saved_sheet_id"] != draft["id"]

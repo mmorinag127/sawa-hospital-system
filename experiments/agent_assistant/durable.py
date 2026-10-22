@@ -2,13 +2,12 @@
 
 The existing SQLite ledger schema is serialized inside one PostgreSQL row lock.
 It is never placed on a FUSE mount. Before-images and sealed files are stored in
-that same database; working business databases remain disposable per-run copies.
+that same database; working copies are checkpointed with their command receipts.
 A replacement instance fences its predecessor and requires explicit recovery.
 """
 from contextlib import contextmanager, closing
 import hashlib
 from pathlib import Path
-import shutil
 import sqlite3
 import zlib
 
@@ -79,6 +78,7 @@ class PostgresStore(Store):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.connect = connect
+        self.working_ready = False
         with closing(connect()) as pg, pg:
             with pg.cursor() as c:
                 c.execute('CREATE SCHEMA IF NOT EXISTS sawa_agent_trial')
@@ -92,6 +92,7 @@ class PostgresStore(Store):
                 self.epoch,self.new_ledger = c.fetchone()
         super().__init__(self.root)
         self.hydrate()
+        self.working_ready = True
 
     @contextmanager
     def tx(self):
@@ -126,9 +127,23 @@ class PostgresStore(Store):
                     db.execute('PRAGMA query_only=' + ('ON' if readonly else 'OFF'))
                     db.execute('BEGIN' if readonly else 'BEGIN IMMEDIATE')
                     yield db
-                    db.commit()
                     if readonly:
+                        db.commit()
                         return
+                    db.execute('CREATE TABLE IF NOT EXISTS working_copies(run_id TEXT PRIMARY KEY,manifest TEXT NOT NULL)')
+                    if self.working_ready:
+                        from .working_copy import checkpoint
+                        for row in db.execute('SELECT id FROM runs').fetchall():
+                            manifest = checkpoint(self.root, row['id'], c, encode_blob)
+                            if manifest is not None:
+                                db.execute('INSERT INTO working_copies VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (row['id'], manifest))
+                            # A question receipt must never commit before the
+                            # original drawing or source binding it references.
+                            for name in ('before','sources','question-drawings'):
+                                for path in sorted((self.root/'runs'/row['id']/name).rglob('*')):
+                                    if path.is_file():
+                                        self._file(c, path)
+                    db.commit()
                     # Persist a sealed artifact before acknowledging its ledger row.
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='artifacts'").fetchone():
                         for row in db.execute('SELECT path,sha256 FROM artifacts'):
@@ -190,10 +205,17 @@ class PostgresStore(Store):
                         raise Conflict('保存済みの試用原本・帳票を照合できません')
                     path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
                     path.write_bytes(content)
-        for before in (self.root / 'runs').glob('*/before'):
-            data = before.parent / 'data'
-            if not data.exists():
-                shutil.copytree(before,data)
+        from .working_copy import restore
+        with self.read() as db:
+            snapshots = db.execute('SELECT run_id,manifest FROM working_copies').fetchall()
+        for row in snapshots:
+            restore(self.root, row['run_id'], row['manifest'])
+
+    def require_working_copy(self, ident):
+        with self.read() as db:
+            row = db.execute('SELECT manifest FROM working_copies WHERE run_id=?', (ident,)).fetchone()
+        if not row:
+            raise Conflict('保存済み作業データがない旧依頼です。開始前データでは再開しません')
 
     def recover(self):
         with self.tx() as db:
