@@ -56,6 +56,26 @@ test("production hides selector and an unavailable replay option cannot be chose
   } finally { if (h) await h.close(); global.fetch = originalFetch; }
 });
 
+test("an unknown cookie stops business requests but keeps the Test recovery choice visible", async () => {
+  const originalFetch = global.fetch;
+  let h;
+  global.fetch = async () => Response.json({ enabled: true, selected: "prod", error: "選択したコピーは利用できません。", options: [
+    { id: "test", label: "テスト用", available: true },
+  ] });
+  try {
+    h = await harness.mount("src/components/StagingDatasetSelect.tsx", {
+      component(loader) {
+        loader.load("src/services/stagingDataset.ts").initializeDocumentDataset({ invalid: true });
+        return loader.load("src/components/StagingDatasetSelect.tsx").default;
+      },
+    });
+    await h.waitFor(() => h.document.querySelector("select"));
+    assert.equal(h.document.querySelector('option[value="test"]').disabled, false);
+    assert.match(h.document.body.textContent, /選択したコピーは利用できません/);
+    assert.throws(() => h.loader.load("src/services/stagingDataset.ts").datasetHeaders(), /dataset_unconfirmed/);
+  } finally { if (h) await h.close(); global.fetch = originalFetch; }
+});
+
 test("successful switch waits for all systems before publishing one selection", async () => {
   const originalFetch = global.fetch;
   const calls = [];

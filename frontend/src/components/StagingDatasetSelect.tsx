@@ -34,7 +34,9 @@ export default function StagingDatasetSelect() {
         if (requestController.signal.aborted) return;
         if (value.enabled && value.selected) {
           window.sessionStorage.setItem(DATASET_KEY, value.selected);
-          if (!documentDatasetMatches(value.selected)) { window.location.reload(); return; }
+          if (value.options?.some(option => option.id === value.selected && option.available) && !documentDatasetMatches(value.selected)) {
+            window.location.reload(); return;
+          }
         }
         setError("");
         setState(value);
