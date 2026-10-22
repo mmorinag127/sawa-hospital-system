@@ -1631,6 +1631,8 @@ def _build_menu_master_checks(session, items: list[MonthlyMenuItem], entries: li
 
 
 def _update_menu_master_in_session(session, master: MenuMaster, body: dict) -> None:
+    current = serialize_menu_master(master)
+    body = {key: value for key, value in body.items() if key not in current or value != current[key]}
     if "name" in body:
         next_name = str(body.get("name") or "").strip()
         if not next_name:

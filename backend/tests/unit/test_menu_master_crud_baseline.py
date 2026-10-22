@@ -62,6 +62,38 @@ def test_missing_values_remain_missing_and_explicit_zero_is_not_replaced():
     assert saved["qty_per_serving"] is saved["bag_max_qty"] is None
 
 
+@pytest.mark.parametrize("temperature,accessories", [("温菜", None), ("冷菜", [" 塩 "])])
+def test_category_update_preserves_untouched_stored_representations(temperature, accessories):
+    with service.session_scope() as session:
+        master = MenuMaster(id="legacy", name=" Test Fish ", normalized_name="testfish",
+                            unit_type="個", qty_per_serving=0, bag_max_qty=10,
+                            bag_max_unit="個", temp_type=temperature, daypart="lunch",
+                            category="主菜", condiments=accessories)
+        session.add(master)
+        session.flush()
+        before = {column.name: getattr(master, column.name) for column in MenuMaster.__table__.columns}
+    item = service.get_menu_master("legacy")
+    saved = service.save_menu_master("legacy", {**item, "category": "副菜"}, expected_revision=item["revision"])
+    assert saved["category"] == "副菜"
+    with service.session_scope() as session:
+        master = session.get(MenuMaster, "legacy")
+        after = {column.name: getattr(master, column.name) for column in MenuMaster.__table__.columns}
+    for field in before.keys() - {"category", "revision", "updated_at"}:
+        assert after[field] == before[field], field
+    assert service.get_menu_master("legacy")["category"] == "副菜"
+
+
+def test_explicit_temperature_and_accessory_edits_still_apply():
+    with service.session_scope() as session:
+        session.add(MenuMaster(id="legacy", name="Fish", normalized_name="fish",
+                               temp_type="温菜", condiments=["塩"]))
+    item = service.get_menu_master("legacy")
+    saved = service.save_menu_master("legacy", {"temp_type": "cold", "condiments": []},
+                                     expected_revision=item["revision"])
+    assert saved["temp_type"] == "cold"
+    assert saved["condiments"] == []
+
+
 def test_duplicate_create_returns_existing_record_without_changing_values():
     first = service.create_menu_master({"name": "Test Fish", "unit_type": "cut", "qty_per_serving": 1})
     duplicate = service.create_menu_master({"name": "testfish", "unit_type": "g", "qty_per_serving": 100})

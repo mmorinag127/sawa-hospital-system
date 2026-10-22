@@ -34,6 +34,22 @@ test("menu master update carries the actually read integer revision and rejects 
   assert.throws(() => api.createMenuMasterPayload({ ...draft, bag_max_qty: "nope" }), /数値/);
 });
 
+test("editing category does not resend or normalize untouched legacy fields", () => {
+  const record = { id: "MNU1", revision: 7, ...draft };
+  assert.deepEqual(plain(api.updateMenuMasterPayload(record, { ...draft, category: "副菜" })),
+    { category: "副菜", revision: 7 });
+  assert.deepEqual(plain(api.updateMenuMasterPayload(record, { category: "副菜" })),
+    { category: "副菜", revision: 7 });
+  assert.deepEqual(plain(api.updateMenuMasterPayload(record, { ...draft })), { revision: 7 });
+});
+
+test("an explicit clear and zero remain updates while untouched fields are omitted", () => {
+  const record = { id: "MNU1", revision: 7, ...draft, qty_per_serving: 12 };
+  assert.deepEqual(plain(api.updateMenuMasterPayload(record,
+    { ...record, category: "", condiments: [], qty_per_serving: 0 })),
+    { category: null, condiments: [], qty_per_serving: 0, revision: 7 });
+});
+
 test("menu master list uses explicit bounded pages rather than a hidden all-record limit", () => {
   assert.deepEqual(plain(api.listMenuMasterParams(" 鮭 ", 2)), { q: "鮭", offset: 100, limit: 50, sort: "name", order: "asc" });
   assert.deepEqual(plain(api.listMenuMasterParams("", 0, 25)), { offset: 0, limit: 25, sort: "name", order: "asc" });
