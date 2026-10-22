@@ -6,12 +6,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-function load(file, window, requireSource = () => ({})) {
+function load(file, window, requireSource = () => ({}), append = '') {
   const exports = {};
-  const source = fs.readFileSync(path.join(__dirname, '../src', file), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src', file), 'utf8') + append;
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true,
-  } }).outputText, { exports, window, process: { env: {} }, require: requireSource });
+  } }).outputText, { exports, window, crypto: require('node:crypto').webcrypto, process: { env: {} }, require: requireSource });
   return exports;
 }
 const boundary = window => load('services/stagingDataset.ts', window);
@@ -65,4 +65,60 @@ test('server document props use each request cookie without sharing client state
   const ast = ts.createSourceFile('_app.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const component = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'App');
   assert.equal(component.body.statements[0].expression.expression.getText(ast), 'initializeDocumentDataset');
+});
+
+test('browser business drafts keep the existing Test key and separate every copy', () => {
+  const stored = new Map([['business-draft', '{"raw":[0,null," 1 "]}']]);
+  const original = stored.get('business-draft');
+  for (const dataset of ['test', 'replay-one', 'replay-two']) {
+    const api = boundary({});
+    api.initializeDocumentDataset({ dataset });
+    const key = api.datasetStorageKey('business-draft');
+    assert.equal(key, dataset === 'test' ? 'business-draft' : `business-draft:${dataset}`);
+    if (dataset === 'test') assert.equal(stored.get(key), original);
+    else { assert.equal(stored.get(key), undefined); stored.set(key, dataset); }
+    api.initializeDocumentDataset({ dataset: 'replay-other' });
+    assert.equal(api.datasetStorageKey('business-draft'), key);
+  }
+  assert.equal(stored.get('business-draft'), original);
+  assert.throws(() => boundary({}).datasetStorageKey('business-draft'), /dataset_unconfirmed/);
+});
+
+const shiftPage = path.join(__dirname, '../src/pages/index.tsx');
+if (fs.readFileSync(shiftPage, 'utf8').includes('readCreateDraft')) test('actual Shift resume cannot adopt a Test draft in a copy document', () => {
+  const original = { period: { startDate: '2026-10-01', endDateExclusive: '2026-10-08' }, createStep: 3, wishStaffId: '7', wishDate: '2026-10-02', addingWish: true };
+  const values = new Map([['sawa.shift.create-draft', JSON.stringify(original)]]);
+  const browser = { sessionStorage: { getItem: key => values.get(key) ?? null } };
+  for (const dataset of ['test', 'replay-copy']) {
+    const api = boundary(browser); api.initializeDocumentDataset({ dataset });
+    const page = load('pages/index.tsx', browser, name => name === '../services/stagingDataset' ? api : {}, '\nexport { readCreateDraft };');
+    assert.equal(JSON.stringify(page.readCreateDraft()), dataset === 'test' ? JSON.stringify(original) : 'null');
+    if (dataset !== 'test') {
+      values.set(api.datasetStorageKey('sawa.shift.create-draft'), JSON.stringify({ ...original, wishStaffId: '8' }));
+      assert.equal(page.readCreateDraft().wishStaffId, '8');
+    }
+  }
+  assert.equal(values.get('sawa.shift.create-draft'), JSON.stringify(original));
+});
+
+if (fs.existsSync(path.join(__dirname, '../src/services/catalogDraft.ts'))) test('actual School catalog retain/recover/clear never changes the other dataset draft', () => {
+  const stored = new Map();
+  const browser = { sessionStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) } };
+  const catalog = dataset => {
+    const api = boundary(browser); api.initializeDocumentDataset({ dataset });
+    return load('services/catalogDraft.ts', browser, name => name === './stagingDataset' ? api : { currentCatalogOwner: () => 'same-operator' });
+  };
+  const testDraft = catalog('test'), copyDraft = catalog('replay-copy');
+  const raw = { name: ' original ', document: { quantities: [0, null, ' 1 '] } };
+  const originalId = testDraft.retainCatalogDraft(null, raw);
+  const originalBytes = stored.get('sawa-catalog-recovery');
+  assert.equal(copyDraft.recoverCatalogDraft(), null);
+  copyDraft.clearCatalogDraft();
+  assert.equal(stored.get('sawa-catalog-recovery'), originalBytes);
+  const copyId = copyDraft.retainCatalogDraft(null, { ...raw, name: ' copy ' });
+  assert.equal(copyDraft.recoverCatalogDraft().id, copyId);
+  copyDraft.clearCatalogDraft(copyId);
+  assert.equal(copyDraft.recoverCatalogDraft(), null);
+  assert.equal(testDraft.recoverCatalogDraft().id, originalId);
+  assert.equal(stored.get('sawa-catalog-recovery'), originalBytes);
 });

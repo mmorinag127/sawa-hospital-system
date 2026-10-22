@@ -32,6 +32,12 @@ export const datasetHeaders = (): Record<string, string> => {
   return { "X-Sawa-Dataset": documentDataset.dataset };
 };
 
+export function datasetStorageKey(key: string): string {
+  if (typeof window === "undefined") throw new Error("dataset_unconfirmed");
+  const dataset = datasetHeaders()["X-Sawa-Dataset"];
+  return dataset === "test" ? key : `${key}:${dataset}`;
+}
+
 export function forwardDatasetHeaders(headers: Record<string, string | string[] | undefined>, cookies: Partial<Record<string, string>>, method: string): Record<string, string> {
   const explicit = headers["x-sawa-dataset"];
   const cookie = cookies[DATASET_KEY];
