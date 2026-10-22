@@ -49,18 +49,12 @@ def test_raw_digits_not_replaced_by_stronger_diagnostic_candidate(monkeypatch, r
     ('-', .8, 'hakodate_ocr_quantity_non_numeric'),
     ('I', .8, 'hakodate_ocr_quantity_non_numeric'),
 ])
-def test_unresolved_raw_has_typed_review_not_topk_value(monkeypatch, raw, score, reason):
+def test_quantity_raw_remains_editable_without_topk_substitution(monkeypatch, raw, score, reason):
     source = run(monkeypatch, raw, score)
-    assert source['resolution_state'] == 'review_required'
-    assert source['resolved_value'] is source['ocr_text'] is source['ocr_normalized'] is None
-    assert source['quantity_source_issue'] == reason
-    assert source['recognizer_accepted'] is False
-    rec = record(source)
-    rec['raw_text'] = raw
-    assert evidence.recognition_review([rec]) == {
-        'count':1, 'cells':[{'sheet_cell':'E11','raw_text':raw,'reason':reason}]}
-    with pytest.raises(ValueError, match='unresolved'):
-        evidence.validate_ocr_quantity_source(rec)
+    assert source['resolution_state'] == 'resolved'
+    assert source['resolved_value'] == raw
+    assert evidence.recognition_review([record(source)]) == {'count':0, 'cells':[]}
+    assert evidence.validate_ocr_quantity_source(record(source)) == raw
 
 
 def test_exact_existing_threshold_inclusive(monkeypatch):
@@ -82,25 +76,19 @@ def test_empty_raw_never_promoted_by_numeric_candidates(monkeypatch):
     {'recognizer_accepted_candidate':{'text':'1','normalized_digits':'1'}},
     {'ocr_normalized':'1'},
 ])
-def test_candidate_substitution_rejected_by_common_resolution_and_validator(monkeypatch, change):
+def test_raw_wins_over_derived_candidate_diagnostics(monkeypatch, change):
     source = run(monkeypatch, '26')
     source.update(deepcopy(change))
-    resolution = evidence.recognition_resolution(source)
-    assert resolution == {'resolution_state':'review_required','resolved_value':None,
-        'quantity_source_issue':'hakodate_ocr_quantity_candidate_conflict'}
-    with pytest.raises(ValueError, match='unresolved'):
-        evidence.validate_ocr_quantity_source(record(source))
-    rec = record(source)
-    rec['raw_text'] = '26'
-    assert evidence.recognition_review([rec])['cells'][0]['reason'] == resolution['quantity_source_issue']
+    assert evidence.recognition_resolution(source) == {'resolution_state':'resolved', 'resolved_value':'26'}
+    assert evidence.validate_ocr_quantity_source(record(source)) == '26'
 
 
-def test_white_prediction_and_preprocess_loss_guards_remain(monkeypatch):
+def test_image_diagnostics_do_not_replace_quantity_raw(monkeypatch):
     white = run(monkeypatch, '1', white=True)
-    assert white['quantity_source_issue'] == 'hakodate_blank_input_nonempty_prediction'
+    assert white['resolved_value'] == '1'
     source = run(monkeypatch, '26')
     source['recognizer_preprocess_ink_removed'] = True
-    assert evidence.recognition_resolution(source)['quantity_source_issue'] == 'hakodate_preprocess_ink_loss'
+    assert evidence.recognition_resolution(source)['resolved_value'] == '26'
 
 
 def test_note_remains_literal_not_numeric_candidate(monkeypatch):
@@ -127,12 +115,11 @@ def test_renderer_region_serialization_uses_real_engine_and_keeps_operator():
 
 
 @pytest.mark.parametrize('candidate', [None, {}, {'text':'1','normalized_digits':'1'}])
-def test_true_candidate_flag_requires_present_same_raw_payload(monkeypatch, candidate):
+def test_candidate_flags_do_not_replace_quantity_raw(monkeypatch, candidate):
     source = run(monkeypatch, '26')
     source.update(recognizer_candidate_accepted=True, recognizer_accepted_candidate=candidate)
-    assert evidence.recognition_resolution(source)['resolution_state'] == 'review_required'
-    with pytest.raises(ValueError, match='unresolved'):
-        evidence.validate_ocr_quantity_source(record(source))
+    assert evidence.recognition_resolution(source)['resolved_value'] == '26'
+    assert evidence.validate_ocr_quantity_source(record(source)) == '26'
 
 
 @pytest.mark.skipif(not os.environ.get('HAKODATE_BLANK_ROOT_ARTIFACT_DIR'),

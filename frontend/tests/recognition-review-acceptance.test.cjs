@@ -53,6 +53,20 @@ async function setup({ normal = false, job = null, initialStep = 2 } = {}) {
 const mutations = f => f.t.calls.filter(call => ['put', 'post', 'delete'].includes(call.method));
 async function open(f) {await f.h.click(f.h.button('確認して正解にする')); await f.h.waitFor(() => f.probe.current.recognitionReview !== null && !f.probe.current.busy);}
 
+test('quantity-only historical rejection offers sheet creation without a content-error gate', async () => {
+  const f = await setup({initialStep: 1, job: {status: 'failed', result_state: 'review_required',
+    quantity_content_editable: true, recovery_action: 'review_recognition_cells',
+    error_user_message: '旧数量内容エラー', recognition_review: {count: 10, cells: copy(flags)}}});
+  try {
+    assert.match(f.h.document.body.textContent, /Step2: シートを作成できます/);
+    assert.doesNotMatch(f.h.document.body.textContent, /旧数量内容エラー|10セルの数量を確定できない/);
+    await f.h.click(f.h.button('Step2でシートを作成'));
+    assert.equal(f.probe.current.visibleStep, 2);
+    assert.equal(f.h.document.querySelector('[role="dialog"]'), null);
+    assert.equal(mutations(f).length, 0);
+  } finally {await f.h.close();}
+});
+
 test('failed job shows its ten exact review reasons above Step1 and opens images without adopting quantities', async () => {
   const f = await setup({initialStep: 1, job: {status: 'failed', result_state: 'review_required',
     recovery_action: 'review_recognition_cells', evidence_run_id: 'ocr-A',

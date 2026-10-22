@@ -83,6 +83,7 @@ type WorkflowV2 = {
     error_user_message?: string | null;
     recovery_action?: string | null;
     evidence_run_id?: string | null;
+    quantity_content_editable?: boolean;
     recognition_review?: {count: number; cells: Array<{sheet_cell: string; raw_text: string; reason: string}>} | null;
   } | null;
 };
@@ -1986,18 +1987,21 @@ export default function OrderWorkflowV2Page() {
       ? nativeStatusOwner !== null && workflow.common_job_status.attemptIdentity === nativeStatusOwner.executionId
       : workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null))
     ? workflow.common_job_status : null;
-  const ocrJobErrorMessage = String(
+  const quantityContentEditable = workflow?.ocr_job?.quantity_content_editable === true;
+  const ocrJobErrorMessage = quantityContentEditable ? "" : String(
     workflow?.ocr_job?.error_user_message
       || workflow?.ocr_job?.error_detail
       || workflow?.ocr_job?.error_message
       || workflow?.ocr_job?.error
       || "",
   ).trim();
-  const ocrJobRecoveryAction = String(workflow?.ocr_job?.recovery_action || "").trim();
+  const ocrJobRecoveryAction = quantityContentEditable ? "" : String(workflow?.ocr_job?.recovery_action || "").trim();
   const recognitionReviewPending = workflow?.state === "ocr_failed"
     && workflow?.ocr_job?.result_state === "review_required"
     && ocrJobRecoveryAction === "review_recognition_cells";
-  const currentStateLabel = recognitionReviewPending ? "Step2: 読み取り結果の確認待ち" : stateLabel(workflow?.state);
+  const currentStateLabel = quantityContentEditable && workflow?.state === "ocr_failed"
+    ? "Step2: シートを作成できます"
+    : recognitionReviewPending ? "Step2: 読み取り結果の確認待ち" : stateLabel(workflow?.state);
   const canReviewQuad = Boolean(orderId && workflowContextConfirmed && workflow?.template_version_id);
   const quadReviewRequired = ocrJobRecoveryAction === "review_or_edit_quad"
     || workflowBlockers.includes("quad_estimation_failed")
@@ -4588,7 +4592,7 @@ export default function OrderWorkflowV2Page() {
         <div className="state-panel-main">
           <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{currentStateLabel}</h2>
-          <p className="subtle">{recognitionReviewPending ? "要確認セルの原画像と読み取り原文をStep2で確認し、空欄または数値を指定してください。" : workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          <p className="subtle">{quantityContentEditable && !workflow?.saved_sheet_id ? "読み取りは完了しています。Step2で読み取り結果を選び、シートを作成して数量を手動修正してください。" : recognitionReviewPending ? "要確認セルの原画像と読み取り原文をStep2で確認し、空欄または数値を指定してください。" : workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
           {workflow?.recognition_override_invalidation ? <p role="status">
             {({quad: "4点", header_axis: "ヘッダー", row_axis: "行・日境界"} as Record<string, string>)[workflow.recognition_override_invalidation.geometry_kind] ?? "幾何"}補正が変更されたため、以前のセル手入力は履歴に保持し、新しいセルには適用しません。保存済みシートは保持しています。
           </p> : null}
@@ -4660,7 +4664,8 @@ export default function OrderWorkflowV2Page() {
             </DialogActions>
           </Dialog>
           {selectedOcr?.selectable === true && selectedOcr.recognition_acceptance ? <p>読み取り結果は利用者確認済みです。以下は認識実行時のジョブ履歴です。</p> : null}
-          {commonJobStatus ? recognitionReviewPending ? <details><summary>認識ジョブの履歴</summary><JobStatus job={commonJobStatus} showDetails /></details> : <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
+          {quantityContentEditable && !workflow?.saved_sheet_id ? <Button className="btn ghost workflow-ordinary-control" disabled={Boolean(busy)} onClick={() => setVisibleStep(2)}>Step2でシートを作成</Button> : null}
+          {commonJobStatus ? recognitionReviewPending || quantityContentEditable ? <details><summary>認識ジョブの履歴</summary><JobStatus job={commonJobStatus} showDetails /></details> : <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
           ) : null}
@@ -4684,7 +4689,7 @@ export default function OrderWorkflowV2Page() {
           </div>
           <div className="summary-primary-card">
             <span className="field-label">OCR</span>
-            <p className="summary-value">{ocrResults.length}件 / {recognitionReviewPending ? "読み取り結果の確認待ち" : formatOcrProgress(workflow)}</p>
+            <p className="summary-value">{ocrResults.length}件 / {quantityContentEditable ? "読み取り完了" : recognitionReviewPending ? "読み取り結果の確認待ち" : formatOcrProgress(workflow)}</p>
             <p className="summary-subline">処理時間: {formatElapsedSeconds(workflow?.ocr_job?.elapsed_seconds)}</p>
           </div>
           <div className="summary-primary-card">

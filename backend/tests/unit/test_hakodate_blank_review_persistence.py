@@ -22,7 +22,7 @@ from src.hakodate_best_method_runtime import render_best_method_overlay_all_faci
 
 
 @pytest.mark.parametrize('full_rerun', [False, True])
-def test_real_producer_retains_review_and_fenced_writer_saves_nonselectable_result(connected_physical_pipeline, monkeypatch, full_rerun):
+def test_real_producer_retains_raw_and_fenced_writer_saves_editable_result(connected_physical_pipeline, monkeypatch, full_rerun):
     order_id, _receipt, _start, item, _output = connected_physical_pipeline
 
     def recognize(*, raw_rectified_bgr, regions, truth):
@@ -58,22 +58,20 @@ def test_real_producer_retains_review_and_fenced_writer_saves_nonselectable_resu
             if full_rerun:
                 saved, error = orders.rerun_ocr_evidence_only(order_id, job_id=job_id,
                     project_sheet=False, refresh_workflow=False, selected_document_id=pdf['document_id'])
-                assert error == 'evidence_unusable', (error, saved)
-                assert saved['terminal_receipt']['status'] == 'failed'
+                assert error is None, (error, saved)
+                assert saved['terminal_receipt']['status'] == 'done'
                 payload = saved['payload_json']
             else:
                 payload = orders._hakodate_canonical_payload_from_manifest_item(order_id=order_id, facility_id='fixture', item={})
             review = payload['hakodate_recognition_review']
-            assert review['count'] == len(review['cells']) == len(item['original_expected_sheet_cells'])
-            assert [cell['sheet_cell'] for cell in review['cells']] == item['original_expected_sheet_cells']
-            assert all(cell['raw_text'] == '1' for cell in review['cells'])
-            assert payload['hakodate_canonical_pipeline']['status'] == 'blocked'
-            assert orders._classify_owned_evidence_payload(payload)['persistable'] is False
+            assert review == {'count': 0, 'cells': []}
+            assert payload['hakodate_canonical_pipeline']['status'] == 'ready'
+            assert orders._classify_owned_evidence_payload(payload)['persistable'] is True
             if not full_rerun:
                 saved = evidence.persist_evidence_run(order_id, payload, template_version_id=template_id,
-                    status='diagnostic_only', source='own-recognizer', producer_version='fixture/v1',
+                    status='ready', source='own-recognizer', producer_version='fixture/v1',
                     workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
-            assert saved['status'] == 'diagnostic_only'
+            assert saved['status'] == 'ready'
             assert saved['payload_json']['hakodate_recognition_review'] == review
             assert all(row['raw_text'] == '1' for row in saved['payload_json']['hakodate_ocr_evidence_records'])
     finally:
@@ -81,12 +79,12 @@ def test_real_producer_retains_review_and_fenced_writer_saves_nonselectable_resu
             variable.reset(token)
     with session_scope() as session:
         row = session.get(OrderOcrEvidenceRun, saved['id'])
-        assert not evidence.evidence_run_is_selectable(row)
+        assert evidence.evidence_run_is_selectable(row)
         assert evidence._serialize_evidence_run(row, include_payload=True)['payload_json']['hakodate_recognition_review'] == review
         if full_rerun:
             job = session.get(OcrJob, job_id)
-            assert job.status == 'failed'
-            assert job.metrics['recovery_action'] == 'review_recognition_cells'
+            assert job.status == 'done'
+            assert not job.metrics.get('recovery_action')
             assert job.metrics['recognition_checkpoint']
     records = payload['hakodate_ocr_evidence_records']
     verified_inputs = artifacts.validate_payload(payload)
@@ -94,8 +92,7 @@ def test_real_producer_retains_review_and_fenced_writer_saves_nonselectable_resu
     forged_ready = deepcopy(payload)
     forged_ready['hakodate_canonical_pipeline']['status'] = 'ready'
     forged_ready['hakodate_canonical_pipeline']['blockers'] = []
-    with pytest.raises(ValueError, match='hakodate_ocr_quantity_unresolved'):
-        orders._validate_hakodate_owned_artifacts(forged_ready, payload['hakodate_repair_source_receipt'])
+    orders._validate_hakodate_owned_artifacts(forged_ready, payload['hakodate_repair_source_receipt'])
     for mutation in ('issue', 'hash', 'contract', 'summary', 'missing_input'):
         changed = deepcopy(payload)
         source = changed['hakodate_ocr_evidence_records'][0]['engine_metadata']['recognizer_output']
@@ -106,7 +103,7 @@ def test_real_producer_retains_review_and_fenced_writer_saves_nonselectable_resu
         elif mutation == 'contract':
             source['recognizer_input_evidence']['contract'] = 'unknown'
         elif mutation == 'summary':
-            changed['hakodate_recognition_review']['count'] = 0
+            changed['hakodate_recognition_review']['count'] = 1
         else:
             source.pop('recognizer_input_evidence')
         with pytest.raises(ValueError, match='hakodate_recogn'):

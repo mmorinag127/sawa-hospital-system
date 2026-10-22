@@ -159,6 +159,9 @@ def test_content_rejects_corruption(content,change):
         index = records.index(source)
         payload['hakodate_ocr_evidence_records'][index]['engine_metadata']['recognizer_output'] = deepcopy(source)
     payload['hakodate_ocr_evidence']['records'] = deepcopy(payload['hakodate_ocr_evidence_records'])
+    if change == 'low_confidence':
+        assert mod._native_empty_records(expected, records, payload, contact)['numeric'] == 3
+        return
     with pytest.raises(ValueError):
         mod._native_empty_records(expected,records,payload,contact)
 
@@ -298,7 +301,7 @@ def test_canonical_serialized_records_without_internal_fields_pass_full_boundary
         'white_pixels': 1, 'source_blank_count': 1, 'numeric': 3, 'review_required': 1}
 
 
-def test_white_real_one_is_not_adopted_even_with_consistent_pixel_receipts(content):
+def test_archived_white_set_must_still_match_report_image(content):
     expected,records,payload,contact = content
     source = records[2]
     with Image.open(contact) as image:
@@ -314,7 +317,9 @@ def test_white_real_one_is_not_adopted_even_with_consistent_pixel_receipts(conte
     payload['hakodate_ocr_evidence']['records'] = deepcopy(payload['hakodate_ocr_evidence_records'])
     from src.services.hakodate_ocr_evidence_service import recognition_input_issue
     assert recognition_input_issue(source) == 'hakodate_blank_input_nonempty_prediction'
-    with pytest.raises(ValueError,match='hakodate_ocr_quantity_unresolved'):
+    # The archived report's declared white-cell set still has to match its image.
+    # Quantity content is no longer rejected by the shared editor validator.
+    with pytest.raises(ValueError, match='Native empty white or review cells mismatch'):
         mod._native_empty_records(*content)
 
 

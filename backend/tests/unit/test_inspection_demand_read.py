@@ -168,7 +168,7 @@ def test_history_projection_preserves_database_and_order():
             assert session.get(OrderOcrEvidenceRun, row.id).payload_json == payload
 
 
-def test_api_auth_flags_and_detail_contract(monkeypatch):
+def test_api_auth_flags_and_detail_contract(monkeypatch, authored_april_context):
     from fastapi.testclient import TestClient
     from src.main import app
     from tests.contract.auth_support import registered_hospital_operator

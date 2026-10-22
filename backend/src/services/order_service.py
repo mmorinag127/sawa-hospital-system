@@ -9078,8 +9078,10 @@ def _validate_hakodate_recognition_review(payload, records, verified_inputs):
                 continue
             if metadata.get("recognizer_output") != original:
                 raise ValueError("hakodate_recognizer_input_evidence_changed")
+            if record.get("raw_text") != original.get("recognizer_raw_text", original.get("raw_text")):
+                raise ValueError("hakodate_recognizer_input_evidence_changed")
             evidence = original.get("recognizer_input_evidence")
-            hakodate_ocr_evidence_service.recognition_input_issue(original)
+            hakodate_ocr_evidence_service.validate_recognizer_input_geometry(original)
             if not isinstance(evidence, dict):
                 raise ValueError("hakodate_recognizer_input_evidence_invalid")
             x0, y0, x1, y1 = evidence["bbox"]
@@ -9087,11 +9089,11 @@ def _validate_hakodate_recognition_review(payload, records, verified_inputs):
             if evidence != observed or original.get("ocr_contact_crop_box") != evidence["bbox"]:
                 raise ValueError("hakodate_recognizer_input_evidence_changed")
             if "resolution_state" in original:
-                state = "review_required" if hakodate_ocr_evidence_service.recognition_input_issue(original) else "resolved"
-                if original["resolution_state"] != state or record.get("resolution_state") != state:
+                state = original["resolution_state"]
+                if state not in {"resolved", "review_required"} or record.get("resolution_state") != state:
                     raise ValueError("hakodate_ocr_quantity_source_conflict")
             if original.get("resolution_state") == "review_required":
-                if (not hakodate_ocr_evidence_service.recognition_input_issue(original)
+                if (not original.get("quantity_source_issue")
                         or any(original.get(key) is not None for key in ("resolved_value", "ocr_text", "ocr_normalized", "pred_digits"))
                         or record.get("normalized_value") is not None):
                     raise ValueError("hakodate_ocr_quantity_source_conflict")
@@ -9110,10 +9112,7 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
     if not isinstance(source, dict) or not snapshots_equal(source, expected_source):
         raise ValueError("hakodate_artifact_source_mismatch")
     pipeline = payload.get("hakodate_canonical_pipeline") or {}
-    review = payload.get("hakodate_recognition_review")
-    review_outcome = ((allow_review or bool(accepted)) and isinstance(review, dict)
-                     and type(review.get("count")) is int and review["count"] > 0
-                     and isinstance(pipeline, dict) and pipeline.get("status") == "blocked")
+    review_outcome = hakodate_ocr_evidence_service.quantity_content_rejection_only(payload)
     if not isinstance(pipeline, dict) or (pipeline.get("status") != "ready" and not review_outcome) or pipeline.get("version") != HAKODATE_CANONICAL_PIPELINE_VERSION:
         raise ValueError("hakodate_canonical_outcome_required")
     expected = pipeline.get("expected_sheet_cells")
@@ -9179,8 +9178,6 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
         _validate_hakodate_recognition_review(payload, records, verified_inputs)
         if review_inputs is not None:
             _analysis.recognition_review = deepcopy(review_inputs)
-    if not allow_review and not accepted and isinstance(review, dict) and review.get("count", 0) > 0:
-        raise ValueError("hakodate_ocr_quantity_unresolved")
 
 
 def _validate_selected_hakodate_artifacts(evidence, captured, *, allow_review=False, _analysis=None):
@@ -12957,7 +12954,7 @@ def _complete_ocr_rerun_in_session(session, order_id, job_id, evidence, *, error
     review_failure = (error in RECOGNITION_REJECTIONS and evidence_id
                       and metrics_patch.get("recognition_review")
                       and metrics_patch.get("recovery_action") == "review_recognition_cells")
-    if error and not review_failure:
+    if not error or not review_failure:
         metrics_patch = {**metrics_patch, "recognition_review": None,
                          "recovery_action": metrics_patch.get("recovery_action"),
                          "error_user_message": metrics_patch.get("error_user_message")}
@@ -24371,7 +24368,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         raw_value = cell.get("value_normalized")
         if raw_value is None:
             raw_value = cell.get("value_text")
-        value = str(raw_value if raw_value is not None else "").strip()
+        value = str(raw_value if raw_value is not None else "")
         if cell.get("assignment_state") not in {"assigned", "blank", "blank_evidence"}:
             skipped.append({**cell, "skip_reason": "assignment_state_unresolved", "value": value})
             continue
@@ -24414,7 +24411,8 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         previous = rows[row_index][col_index]
         confidence = cell.get("assignment_confidence")
         operator_reviewed = bool(cell.get("operator_values"))
-        classification = "accepted" if operator_reviewed else _hakodate_ocr_classification_for_confidence(confidence)
+        classification = ("accepted" if role == "quantity" or operator_reviewed
+                          else _hakodate_ocr_classification_for_confidence(confidence))
         confidence_tier = "operator" if operator_reviewed else _hakodate_ocr_confidence_tier(confidence)
         placement_basis = "operator_review" if operator_reviewed else _hakodate_ocr_placement_basis_for_confidence(confidence)
         if value and role == "quantity":

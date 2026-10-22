@@ -739,6 +739,7 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None) -> dict[str, 
         return None
     metrics = job.metrics if isinstance(job.metrics, dict) else {}
     diagnostics = {}
+    quantity_content_editable = False
     evidence_id = _normalize_id(metrics.get("evidence_run_id"))
     from src.services.ocr_failure_diagnostics import RECOGNITION_REJECTIONS
     review_failure = (job.status == "failed" and job.error_message in RECOGNITION_REJECTIONS
@@ -753,6 +754,7 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None) -> dict[str, 
                 and execution.get("evidence_run_id") == evidence.id and execution.get("disposition") == "rejected"):
             from src.services.ocr_failure_diagnostics import recognition_failure_details
             diagnostics = recognition_failure_details(payload, evidence_run_id=evidence.id)
+            quantity_content_editable = ocr_evidence_service.evidence_run_is_selectable(evidence)
     elapsed_seconds = _coerce_float(metrics.get("ocr_elapsed_seconds") or metrics.get("elapsed_seconds"))
     started_at = _coerce_datetime(metrics.get("ocr_started_at") or metrics.get("run_started_at"))
     finished_at = _coerce_datetime(
@@ -780,6 +782,7 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None) -> dict[str, 
         "order_document_id": job.order_document_id,
         "input_artifact_digest": job.input_artifact_digest,
         "status": job.status,
+        "quantity_content_editable": quantity_content_editable,
         "template_version_id": job.template_version_id,
         "created_at": _serialize_datetime(job.created_at),
         "updated_at": _serialize_datetime(job.updated_at),
@@ -932,7 +935,10 @@ def _ensure_ocr_job_lineage(
 def _evidence_selection_blocker(row: OrderOcrEvidenceRun, *, _analysis=None) -> str | None:
     from src.services.recognition_acceptance_service import KEY
     if row.status == "diagnostic_only" and KEY not in (row.artifact_manifest_json or {}):
-        return "ocr_diagnostic_result_not_selectable"
+        # Shared selectability also permits historic quantity-content rejections
+        # after validating the original artifacts and target identities.
+        error = ocr_evidence_service.evidence_run_selectability_error(row, _analysis=_analysis)
+        return "ocr_diagnostic_result_not_selectable" if error else None
     if row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"} or row.producer_version == "legacy-cache-mirror/v1":
         return "legacy_ocr_evidence_not_selectable"
     if not ocr_evidence_service.evidence_run_is_selectable(row, _analysis=_analysis):

@@ -212,7 +212,9 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
         if assigned_target_count <= 0 and not resolved_blank_targets:
             blockers.append("hakodate_assignment_missing")
 
-    if not accepted and isinstance(canonical_pipeline, dict) and str(canonical_pipeline.get("status") or "").strip().lower() == "blocked":
+    if (not accepted and isinstance(canonical_pipeline, dict)
+            and str(canonical_pipeline.get("status") or "").strip().lower() == "blocked"
+            and not hakodate_ocr_evidence_service.quantity_content_rejection_only(payload)):
         blockers.extend(
             str(item).strip()
             for item in (canonical_pipeline.get("blockers") or [])
@@ -769,6 +771,7 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
                         else _analysis.accepted_values(payload))
     except (ValueError, KeyError, TypeError) as exc:
         return str(exc) or "evidence_unusable"
+    content_only_rejection = hakodate_ocr_evidence_service.quantity_content_rejection_only(payload)
     if any(key in payload for key in ("hakodate_preprocessing", "hakodate_ocr_evidence", "hakodate_target_cell_map", "hakodate_ocr_evidence_records", "hakodate_overlay")) and not isinstance(payload.get("hakodate_canonical_pipeline"), dict):
         return "evidence_unusable"
     if isinstance(payload.get("hakodate_canonical_pipeline"), dict):
@@ -802,7 +805,7 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
         return "evidence_unusable"
     if (row.payload_json or {}).get("canonical_adoption_allowed") is False:
         return "evidence_unusable"
-    if (row.status == "diagnostic_only" and not accepted) or row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"}:
+    if (row.status == "diagnostic_only" and not accepted and not content_only_rejection) or row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"}:
         return "evidence_unusable"
     if row.producer_version == "legacy-cache-mirror/v1":
         return "evidence_unusable"
@@ -812,7 +815,7 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
             return "evidence_unusable"
         if (execution.get("workflow_attempt_id") is None) != (execution.get("workflow_revision") is None):
             return "evidence_unusable"
-        if execution.get("disposition") not in ("pipeline_result", "accepted") and not (accepted and execution.get("disposition") == "rejected"):
+        if execution.get("disposition") not in ("pipeline_result", "accepted") and not ((accepted or content_only_rejection) and execution.get("disposition") == "rejected"):
             return "evidence_unusable"
     return None
 
@@ -851,7 +854,7 @@ def _serialize_evidence_run(
     manifest = copy.deepcopy(row.artifact_manifest_json) if isinstance(row.artifact_manifest_json, dict) else None
     capabilities = _build_capabilities(recognition_acceptance.payload_for_evidence(row) if acceptance is not None else payload_json, _analysis=_analysis)
     capabilities["legacy_editable"] = bool(str(row.schema_version or "").startswith("v1_legacy"))
-    if row.status == "diagnostic_only" and acceptance is None:
+    if row.status == "diagnostic_only" and acceptance is None and not evidence_run_is_selectable(row, _analysis=_analysis):
         capabilities = {key: False for key in capabilities}
     degraded_reasons = _build_degraded_reasons(payload_json, capabilities, _analysis=_analysis)
     serialized = {
