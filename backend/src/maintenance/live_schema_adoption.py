@@ -9,7 +9,7 @@ from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 
 from src.maintenance.formal_migration_schema import (
-    ALEMBIC_CONFIG, CONTRACT, _normalize_reflected_index_aliases,
+    ALEMBIC_CONFIG, CONTRACT, _normalize_reflected_catalog_aliases,
     read_catalog, require_revision_catalog, table_shapes,
     column_identity_policy,
 )
@@ -43,7 +43,7 @@ def _require_baseline(connection, contract):
     actual = table_shapes(catalog, "postgresql")
     matched = []
     for name, baseline in contract["adoption_baselines"].items():
-        expected = {table: _normalize_reflected_index_aliases(contract["shapes"][ref], "postgresql")
+        expected = {table: _normalize_reflected_catalog_aliases(contract["shapes"][ref], "postgresql")
                     for table, ref in baseline["tables"].items()}
         if actual == expected and catalog["views"] == baseline["views"]:
             matched.append(name)
@@ -91,13 +91,26 @@ def _normalize(connection, contract, actual):
                                + f"CHECK (status IN {tuple(statuses)!r})")
 
 
+def _adoption_plan(contract):
+    scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
+    heads = scripts.get_heads()
+    if len(heads) != 1:
+        raise RuntimeError("adoption blocked: exactly one reviewed target is required")
+    target = heads[0]
+    final = contract["revisions"].get("postgresql", {}).get(target)
+    if final is None or column_identity_policy(final, "postgresql", target) != "name":
+        raise RuntimeError("adoption blocked: observed target PostgreSQL contract is required")
+    revisions = list(reversed(list(scripts.iterate_revisions(target, "0026"))))
+    if "0035" not in [revision.revision for revision in revisions]:
+        raise RuntimeError("adoption blocked: reviewed preservation migration is required")
+    return target, revisions
+
+
 def adopt(connection):
     if connection.dialect.name != "postgresql" or connection.in_transaction():
         raise RuntimeError("adoption requires PostgreSQL and its own transaction")
     contract = json.loads(CONTRACT.read_text())
-    final = contract["revisions"].get("postgresql", {}).get("0035")
-    if final is None or column_identity_policy(final, "postgresql", "0035") != "name":
-        raise RuntimeError("adoption blocked: observed 0035 PostgreSQL contract is required")
+    target, revisions = _adoption_plan(contract)
     with connection.begin():
         acquired = connection.execute(sa.text("SELECT pg_try_advisory_xact_lock(:n,:k)"),
                                       {"n": MIGRATION_LOCK[0], "k": MIGRATION_LOCK[1]}).scalar_one()
@@ -114,17 +127,14 @@ def adopt(connection):
         columns = {table: [column["name"] for column in shape["columns"]] for table, shape in actual.items()}
         before = _fingerprint(connection, columns)
         _normalize(connection, contract, actual)
-        scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
-        if scripts.get_heads() != ["0035"]:
-            raise RuntimeError("adoption blocked: reviewed target is 0035")
         with Operations.context(MigrationContext.configure(connection)):
-            for revision in range(27, 36):
-                scripts.get_revision(f"{revision:04}").module.upgrade()
+            for revision in revisions:
+                revision.module.upgrade()
         after = _fingerprint(connection, columns)
         if before != after:
             raise RuntimeError("adoption blocked: existing values changed")
         # Version table shape participates in the final guard; success row is written only afterwards.
         connection.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))")
-        require_revision_catalog(connection, "0035")
-        connection.execute(sa.text("INSERT INTO alembic_version(version_num) VALUES ('0035')"))
-    return {"baseline": baseline, "revision": "0035", "preserved": before, "source_unchanged": before == after}
+        require_revision_catalog(connection, target)
+        connection.execute(sa.text("INSERT INTO alembic_version(version_num) VALUES (:target)"), {"target": target})
+    return {"baseline": baseline, "revision": target, "preserved": before, "source_unchanged": before == after}
