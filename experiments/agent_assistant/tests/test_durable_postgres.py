@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 
 import pytest
 
@@ -41,6 +42,11 @@ def test_restart_keeps_costs_before_images_outputs_and_fences_previous(tmp_path,
     original=root/'before/hospital/database.sqlite3'
     original.parent.mkdir(parents=True);original.write_bytes(b'original-copy')
     a.persist_files(ident)
+    working=root/'data/hospital/database.sqlite3'
+    working.parent.mkdir(parents=True)
+    with sqlite3.connect(working) as db:
+        db.execute('CREATE TABLE quantities(value INTEGER)')
+        db.execute('INSERT INTO quantities VALUES(21)')
     output=root/'artifacts/sealed';output.parent.mkdir();output.write_bytes(b'official-output')
     digest=hashlib.sha256(output.read_bytes()).hexdigest()
     with a.tx() as db:db.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?)',('sealed',ident,str(output),'label.xlsx',digest,output.stat().st_size))
@@ -52,7 +58,9 @@ def test_restart_keeps_costs_before_images_outputs_and_fences_previous(tmp_path,
     assert recovered['generation']==run['generation']+1
     assert recovered['spent']==47 and recovered['reserved']==153
     assert original.read_bytes()==b'original-copy'
-    assert (root/'data/hospital/database.sqlite3').read_bytes()==b'original-copy'
+    with sqlite3.connect(root/'data/hospital/database.sqlite3') as db:
+        assert db.execute('SELECT value FROM quantities').fetchone()[0] == 21
+    b.require_working_copy(ident)
     assert output.read_bytes()==b'official-output'
     with pytest.raises(Conflict,match='交代'):a.update(ident,status='completed')
     with pytest.raises(Conflict,match='交代'):a.persist_files(ident)
@@ -67,6 +75,104 @@ def test_completed_artifacts_survive_without_claiming_active_work_resumed(tmp_pa
     b=PostgresStore(tmp_path,database);b.recover()
     assert b.get(run['id'])['status']=='completed'
     assert b.get(run['id'])['spent']==12
+
+
+def test_legacy_before_image_is_never_used_as_a_resume_copy(tmp_path, database):
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    run,_=a.create('operator','legacy-request','test',['shift'],100)
+    original=tmp_path/'runs'/run['id']/'before/shift/database.sqlite3'
+    original.parent.mkdir(parents=True);original.write_bytes(b'original-only')
+    a.persist_files(run['id'])
+    shutil.rmtree(original.parents[2])
+    b=PostgresStore(tmp_path,database);b.recover()
+    assert original.read_bytes()==b'original-only'
+    assert not (original.parents[2]/'data').exists()
+    with pytest.raises(Conflict,match='開始前データ'):b.require_working_copy(run['id'])
+    assert b.get(run['id'])['reserved']==100
+
+
+def test_pre_checkpoint_ledger_starts_and_only_legacy_run_is_blocked(tmp_path,database):
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.durable import encode_ledger
+    PostgresStore(tmp_path/'runtime',database)
+    old=Store(tmp_path/'legacy');old.set_budget(1000)
+    run,_=old.create('operator','pre-checkpoint-request','test',['shift'],100)
+    old.update(run['id'],status='waiting_input',spent=17,reserved=83)
+    with old.read() as db:
+        assert not db.execute("SELECT name FROM sqlite_master WHERE name='working_copies'").fetchone()
+    with database() as pg:
+        with pg.cursor() as c:
+            c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1',(encode_ledger(old.path.read_bytes()),))
+    current=PostgresStore(tmp_path/'runtime',database);current.recover()
+    assert current.get(run['id'])['spent']==17 and current.get(run['id'])['reserved']==83
+    assert current.get(run['id'])['status']=='reconciliation_required'
+    with pytest.raises(Conflict,match='開始前データ'):current.require_working_copy(run['id'])
+
+
+def test_restart_recovers_committed_wal_and_exact_question_through_resume(tmp_path, database, monkeypatch):
+    import asyncio
+    import httpx
+    from experiments.agent_assistant.sandbox import Sandbox
+    from experiments.agent_assistant.tools import Tools
+    from experiments.agent_assistant.providers import Providers
+    from experiments.agent_assistant.mcp_server import build_mcp
+    from experiments.agent_assistant.conversation import pending_question
+    from experiments.agent_assistant.gemini import command_identity
+    from experiments.agent_assistant.tests.test_gemini import interaction
+    for key,value in {'GEMINI_API_KEY':'synthetic','GEMINI_AGENT_MODEL':'gemini-test',
+                      'GEMINI_AGENT_INPUT_USD_PER_MILLION':'1','GEMINI_AGENT_OUTPUT_USD_PER_MILLION':'2'}.items():
+        monkeypatch.setenv(key,value)
+    a=PostgresStore(tmp_path,database);a.set_budget(1000)
+    run,_=a.create('operator','wal-restart-request','test',['shift'],100,provider='gemini')
+    ident=run['id'];root=tmp_path/'runs'/ident
+    original=root/'before/shift/database.sqlite3';original.parent.mkdir(parents=True)
+    with sqlite3.connect(original) as db:
+        db.execute('CREATE TABLE quantities(value INTEGER)');db.execute('INSERT INTO quantities VALUES(7)')
+    working=root/'data/shift/database.sqlite3';working.parent.mkdir(parents=True)
+    shutil.copyfile(original,working)
+    a.persist_files(ident)
+    db=sqlite3.connect(working)
+    try:
+        db.execute('PRAGMA journal_mode=WAL');db.execute('UPDATE quantities SET value=21');db.commit()
+        args={'question':'この内容でよいですか？','options':['はい','いいえ']}
+        command=command_identity('turn','question')
+        a.command(ident,command,{'name':'ask_operator','arguments':args})
+        drawing=b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="10" height="10"/></svg>'
+        digest=hashlib.sha256(drawing).hexdigest()
+        drawing_path=root/'question-drawings'/(digest+'.svg');drawing_path.parent.mkdir()
+        drawing_path.write_bytes(drawing)
+        result={'waiting_input':True,'question':args['question'],'options':args['options'],'command_id':command,
+                'question_map':{'sha256':digest,'view_box':[0,0,100,100],'hotspots':[]}}
+        a.finish_command(ident,command,result)
+        a.event(ident,'operator_wait',{'command_id':command,'result':result})
+        a.event(ident,'gemini_dispatch',{'id':'dispatch'})
+        a.event(ident,'gemini_response',{'id':'turn','dispatch':'dispatch'})
+        response=interaction('turn',[('question','ask_operator',args)])
+        a.event(ident,'gemini_state',{'interaction':'turn','calls':response['steps'],'results':[],'index':0,'pending':command})
+        a.update(ident,status='waiting_input',session_id='turn')
+    finally:db.close()
+    shutil.rmtree(root)
+    b=PostgresStore(tmp_path,database);b.recover()
+    sandbox=Sandbox(tmp_path,{},durable_store=b);tools=Tools(b,sandbox)
+    requests=[]
+    def handler(request):
+        requests.append(request.method)
+        assert request.method=='GET'
+        return httpx.Response(200,json=response)
+    client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider=Providers(b,sandbox,tools,build_mcp(tools),{},gemini_client=client)
+    async def scenario():
+        resumed=await provider.resume(ident)
+        assert resumed['status']=='waiting_input' and resumed['generation']==1
+        assert resumed['spent']+resumed['reserved']==100
+        assert pending_question(b.events(ident))['question_id']==command
+        assert pending_question(b.events(ident))['question_map']['sha256']==digest
+        assert drawing_path.read_bytes()==drawing
+        assert requests==['GET']
+        await client.aclose()
+    asyncio.run(scenario())
+    with sqlite3.connect(working) as db:assert db.execute('SELECT value FROM quantities').fetchone()[0]==21
+    with sqlite3.connect(original) as db:assert db.execute('SELECT value FROM quantities').fetchone()[0]==7
 
 
 def test_readers_do_not_wait_for_writer_or_rewrite_ledger(tmp_path,database):

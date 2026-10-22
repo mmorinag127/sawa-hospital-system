@@ -53,3 +53,15 @@ def check_answer(events, message, question_id=None, option=None):
         raise Conflict("回答する質問を指定してください")
     if option is not None and (option not in pending["options"] or message != option):
         raise ValueError("提示された選択肢を選んでください")
+
+
+def record_question_receipt(store, ident, name, result):
+    """Repair the receipt/event crash window without creating a second question."""
+    command = result.get('command_id')
+    if not command or not result.get('question'):
+        return
+    if any(e['kind'] == 'tool_result' and e['payload'].get('result', {}).get('command_id') == command
+           for e in store.events(ident)):
+        return
+    store.event(ident, 'tool_result', {'tool': name, 'result': {k: v for k, v in result.items() if k != '_content'}},
+                'recovery-question:' + command)

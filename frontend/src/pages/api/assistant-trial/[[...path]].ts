@@ -44,7 +44,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(503).json({ detail: "試用サービスの接続先設定が不正です" }); return;
   }
   const isBusinessRequest = segments[0] === "runs" && (
-    req.method === "POST" && (segments.length === 3 && ["reply","decision","stop","rollback","refresh-usage"].includes(segments[2])
+    req.method === "POST" && (segments.length === 3 && ["reply","decision","resume","stop","rollback","refresh-usage"].includes(segments[2])
       || segments.length === 5 && segments[2] === "faxes" && segments[4] === "decision")
     || req.method === "GET" && segments.length === 4 && segments[2] === "artifacts"
   );

@@ -321,6 +321,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await managed.reply(ident, payload.message, payload.question_id, payload.option)
         return store.get(ident, owner)
 
+    @app.post("/runs/{ident}/resume")
+    async def resume(ident: str, request: Request):
+        run = store.get(ident, owner)
+        await authorize(request.headers.get('authorization', ''), run['domains'])
+        async with control_lock(ident):
+            tools.authorizations[ident] = request.headers.get('authorization', '')
+            return await managed.resume(ident)
+
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):
         store.get(ident, owner)
