@@ -397,12 +397,31 @@ def test_native_terminal_metrics_keep_actual_review_distinct_from_hard_failure(m
     execution = {'job_id': 'job', 'order_id': 'order', 'execution_id': 'execution', 'ingest_ocr_mode': 'hakodate'}
     with nonworkflow_execution_context(execution):
         receipt = order_service._complete_ocr_rerun_in_session(session, 'order', 'job',
-            None if hard else {'id': 'diagnostic-evidence'}, error='geometry_unresolved' if hard else 'review',
-            metrics_patch={'result_state': 'hard_failed', 'processing_stage': 'native_ingest_failed'} if hard else {},
+            None if hard else {'id': 'diagnostic-evidence'}, error='geometry_unresolved' if hard else 'evidence_unusable',
+            metrics_patch={'result_state': 'hard_failed', 'processing_stage': 'native_ingest_failed'} if hard else {
+                'recovery_action': 'review_recognition_cells',
+                'recognition_review': {'count': 1, 'cells': [
+                    {'sheet_cell': 'H17', 'raw_text': '-', 'reason': 'hakodate_ocr_quantity_non_numeric'}]},
+            },
             failure_metrics_override=hard)
     assert receipt['status'] == 'failed'
     assert job.metrics['result_state'] == ('hard_failed' if hard else 'review_required')
     assert receipt['evidence_run_id'] == (None if hard else 'diagnostic-evidence')
+
+
+def test_native_terminal_without_review_details_is_a_hard_failure(monkeypatch):
+    from src.services.workflow_attempt_guard_service import nonworkflow_execution_context
+    job = Row(id='job', metrics={}, status='running', error_message=None)
+    session = Row(get=lambda *args: job, flush=lambda: None)
+    monkeypatch.setattr(order_service, '_workflow_attempt_write_fence', lambda *args, **kwargs: True)
+    execution = {'job_id': 'job', 'order_id': 'order', 'execution_id': 'execution', 'ingest_ocr_mode': 'hakodate'}
+    with nonworkflow_execution_context(execution):
+        receipt = order_service._complete_ocr_rerun_in_session(session, 'order', 'job',
+            {'id': 'diagnostic-evidence'}, error='review', metrics_patch={})
+    assert receipt['status'] == 'failed'
+    assert job.metrics['result_state'] == 'hard_failed'
+    assert job.metrics['recognition_review'] is None
+    assert job.metrics['recovery_action'] is None
 
 
 @pytest.mark.parametrize('outcome', ['done', 'recognition_review_required'])
