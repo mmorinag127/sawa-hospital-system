@@ -3,7 +3,8 @@ FROM ${BASE_IMAGE}
 USER root
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libreoffice-calc fonts-noto-cjk \
  && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419+deb13u1' \
  && rm -rf /var/lib/apt/lists/*

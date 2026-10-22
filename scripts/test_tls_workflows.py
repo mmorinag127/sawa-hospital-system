@@ -57,6 +57,12 @@ class TLSWorkflowTests(unittest.TestCase):
         self.assertIn(probe, dockerfile)
         self.assertGreater(dockerfile.index(probe), dockerfile.rindex("/bin/pip install"))
 
+    def test_all_hospital_grpc_runtimes_use_os_roots(self):
+        expected = "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt"
+        for path in ("backend/Dockerfile.base", "ocr_pipeline/Dockerfile", "agent_runtime/Dockerfile"):
+            dockerfile = (ROOT / path).read_text()
+            self.assertIn(expected, dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

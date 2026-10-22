@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import ssl
 import unittest
 import urllib.error
@@ -47,6 +48,12 @@ class TrustVerificationTests(unittest.TestCase):
         with patch.object(trust.urllib.request, "urlopen", return_value=response):
             with self.assertRaises(RuntimeError):
                 trust.inspect_store("test", self.context(), True)
+
+    def test_grpc_requires_the_os_ca_file(self):
+        with patch.dict(os.environ, {"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH": "/missing"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                with patch.object(trust.Path, "is_file", return_value=False):
+                    trust.verify_grpc_roots()
 
 
 if __name__ == "__main__":
