@@ -56,7 +56,7 @@ def fixture(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def login(fixture):
+def login(fixture, origin="https://accounts.google.com"):
     client, _, claims = fixture
     response = client.get("/portal/auth/start", params={"next": "/shift/"})
     assert response.status_code == 200
@@ -66,7 +66,17 @@ def login(fixture):
     assert response.json()["login_uri"] == ORIGIN + "/api/portal/auth/callback"
     client.cookies.set("g_csrf_token", "csrf-google")
     return client.post("/portal/auth/callback", data={"credential": "synthetic-google-token", "g_csrf_token": "csrf-google"},
-                       headers={"Origin": "https://accounts.google.com"}, follow_redirects=False)
+                       headers={"Origin": origin}, follow_redirects=False)
+
+
+def test_redirect_opaque_origin_retains_authenticated_session_flow(fixture):
+    client, scope, _ = fixture
+    response = login(fixture, origin="null")
+    assert response.status_code == 303
+    assert client.get("/portal/auth/me").status_code == 200
+    with scope() as session:
+        assert session.query(PortalSession).count() == 1
+        assert session.query(PortalLoginAttempt).count() == 0
 
 
 def request(method="GET", headers=None):
@@ -155,16 +165,17 @@ def test_user_update_failure_rolls_back_revocation_and_audit(fixture, monkeypatc
         assert session.query(AuditLog).count() == 0
 
 
+@pytest.mark.parametrize("origin", ["https://accounts.google.com", "null"])
 @pytest.mark.parametrize("key,value", [("aud", "other"), ("iss", "evil"), ("exp", 0), ("sub", ""),
     ("email_verified", False), ("email", "unregistered@example.invalid"), ("nonce", "wrong")])
-def test_callback_rejects_claims(fixture, key, value):
+def test_callback_rejects_claims(fixture, key, value, origin):
     client, scope, claims = fixture
     config = client.get("/portal/auth/start").json()
     claims["nonce"] = config["nonce"]
     claims[key] = value
     client.cookies.set("g_csrf_token", "fixture")
     response = client.post("/portal/auth/callback", data={"credential": "fixture", "g_csrf_token": "fixture"},
-                           headers={"Origin": "https://accounts.google.com"})
+                           headers={"Origin": origin})
     assert response.status_code in (401, 403)
     with scope() as session:
         assert session.query(PortalSession).count() == 0
@@ -305,8 +316,9 @@ def test_machine_bearer_mutation_does_not_require_human_cookie_csrf(fixture, mon
     assert client.get("/portal/auth/me", headers={"Authorization": "Bearer machine-token"}).status_code == 401
 
 
-@pytest.mark.parametrize("failure", ["signature", "csrf", "origin", "expired-challenge"])
-def test_callback_boundary_failures_do_not_issue_session(fixture, monkeypatch, failure):
+@pytest.mark.parametrize("origin", ["https://accounts.google.com", "null"])
+@pytest.mark.parametrize("failure", ["signature", "csrf", "origin", "missing-origin", "missing-challenge", "expired-challenge"])
+def test_callback_boundary_failures_do_not_issue_session(fixture, monkeypatch, failure, origin):
     client, scope, claims = fixture
     claims["nonce"] = client.get("/portal/auth/start").json()["nonce"]
     client.cookies.set("g_csrf_token", "correct")
@@ -317,8 +329,11 @@ def test_callback_boundary_failures_do_not_issue_session(fixture, monkeypatch, f
     if failure == "expired-challenge":
         with scope() as session:
             session.query(PortalLoginAttempt).one().expires_at = datetime.utcnow() - timedelta(seconds=1)
+    if failure == "missing-challenge":
+        client.cookies.delete(sessions.LOGIN_COOKIE)
+    headers = {} if failure == "missing-origin" else {"Origin": "https://evil.invalid" if failure == "origin" else origin}
     result = client.post("/portal/auth/callback", data={"credential": "private-credential", "g_csrf_token": "wrong" if failure == "csrf" else "correct"},
-                        headers={"Origin": "https://evil.invalid" if failure == "origin" else "https://accounts.google.com"})
+                        headers=headers)
     assert result.status_code in (401, 403)
     assert "private" not in result.text
     with scope() as session:
