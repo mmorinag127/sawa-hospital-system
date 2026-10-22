@@ -2,14 +2,15 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const load = require("./helpers/staging-dataset-module.cjs");
 
-test("selection headers are per-document and contain no connection string", () => {
-  let selected = null;
+test("selection headers remain pinned to the document cookie, never mutable storage", () => {
+  let selected = "test";
   const api = load({ sessionStorage: { getItem: () => selected } });
-  assert.deepEqual(JSON.parse(JSON.stringify(api.datasetHeaders())), {});
-  selected = "replay-synthetic";
-  assert.deepEqual(JSON.parse(JSON.stringify(api.datasetHeaders())), { "X-Sawa-Dataset": selected });
+  assert.throws(() => api.datasetHeaders(), /dataset_unconfirmed/);
+  api.initializeDocumentDataset(api.datasetFromCookie("sawa_stg_dataset=replay-synthetic"));
+  assert.equal(api.datasetHeaders()["X-Sawa-Dataset"], "replay-synthetic");
   selected = "test";
-  assert.equal(api.datasetHeaders()["X-Sawa-Dataset"], "test");
+  api.initializeDocumentDataset({ dataset: "test" });
+  assert.equal(api.datasetHeaders()["X-Sawa-Dataset"], "replay-synthetic");
 });
 
 test("proxies preserve snapshot selection on GET, and reject old-page writes after switching", () => {
