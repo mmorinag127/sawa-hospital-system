@@ -71,8 +71,8 @@ def configure_pipeline(f, monkeypatch):
     monkeypatch.setenv("OCR_PIPELINE_OUTPUT_READ_TIMEOUT_SECONDS", "4.5")
     monkeypatch.setenv("OCR_MAIN_PROVIDER", "pipeline")
     monkeypatch.setenv("OCR_ARTIFACT_DIR", str(f.root / "published"))
-    monkeypatch.setattr(execution, "engine", f.engine)
-    monkeypatch.setattr(slots, "engine", f.engine)
+    monkeypatch.setattr(execution, "get_engine", lambda: f.engine)
+    monkeypatch.setattr(slots, "get_engine", lambda: f.engine)
 
 
 def response_from_receipt(receipt, status="done"):

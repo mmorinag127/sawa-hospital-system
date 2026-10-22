@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 from urllib.parse import quote, urlparse
+from src import staging_data as datasets
 
 from src.services import workflow_ocr_delivery_service as delivery
 from src.services.workflow_ocr_delivery_execution_service import execution_mutex
@@ -47,9 +48,10 @@ def task_contract(delivery_id, generation):
         return local.contract(delivery_id, generation, "workflow")
     parent = f'projects/{config["PROJECT_ID"]}/locations/{config["LOCATION"]}/queues/{config["QUEUE"]}'
     return {
-        "name": parent + "/tasks/" + delivery_id + "-g" + str(generation),
+        "name": parent + "/tasks/" + datasets.delivery_namespace() + delivery_id + "-g" + str(generation),
         "http_request": {
             "http_method": "POST",
+            **({"headers": datasets.delivery_headers()} if datasets.delivery_headers() else {}),
             "url": config["TARGET_URL"].rstrip("/") + "/worker/workflow-ocr-deliveries/"
                 + quote(delivery_id, safe="") + "/" + str(generation),
             "oidc_token": {"service_account_email": config["SERVICE_ACCOUNT_EMAIL"], "audience": config["AUDIENCE"]},
@@ -64,7 +66,7 @@ def next_task_contract(original, delivery_id, generation):
         return local.contract(delivery_id, generation, "workflow")
     contract = deepcopy(original)
     parent = original["name"].rsplit("/tasks/", 1)[0]
-    contract["name"] = parent + "/tasks/" + delivery_id + "-g" + str(generation)
+    contract["name"] = original["name"].rsplit("-g", 1)[0] + "-g" + str(generation)
     contract["http_request"]["url"] = original["http_request"]["url"].rsplit("/", 1)[0] + "/" + str(generation)
     return contract
 
@@ -84,6 +86,7 @@ def inspect_task(client, contract):
     if (task.name != contract["name"] or request.url != expected["url"]
             or request.http_method != tasks_v2.HttpMethod.POST
             or bool(request.body)
+            or request.headers.get(datasets.HEADER) != expected.get("headers", {}).get(datasets.HEADER)
             or tasks_v2.HttpRequest.pb(request).HasField("oauth_token")
             or request.oidc_token.service_account_email != expected["oidc_token"]["service_account_email"]
             or request.oidc_token.audience != expected["oidc_token"]["audience"]
@@ -100,6 +103,11 @@ def dispatch(delivery_id, generation):
     if observed is None:
         return {"action": "noop"}
     contract = observed["task_contract"]
+    if datasets.current_dataset() != "test":
+        http = contract.get("http_request", {})
+        if (http.get("headers", {}).get(datasets.HEADER) != datasets.current_dataset()
+                or "-stg-" not in urlparse(http.get("url", "")).netloc):
+            raise datasets.DatasetUnavailable("staging_dataset_original_delivery_not_replayable")
     from src.services import agent_trial_transport as trial_transport
     if trial_transport.enabled() and contract.get("mode") != "request_local":
         raise ValueError("request_local_saved_contract_required")

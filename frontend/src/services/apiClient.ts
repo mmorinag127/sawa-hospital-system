@@ -2,6 +2,7 @@ import axios, { AxiosHeaders, type AxiosRequestHeaders } from "axios";
 import { flushSync } from "react-dom";
 import { browserSessionKey, markAuthCacheChanged, markSessionCurrent, sessionWasLoggedOut } from "./browserSession";
 import { loginUrlFor } from "./loginDestination";
+import { datasetHeaders } from "./stagingDataset";
 
 const AUTH_STORAGE_KEY = "auth_header";
 const LEGACY_AUTH_COOKIE_KEY = "auth_header";
@@ -141,6 +142,9 @@ export const apiClient = axios.create({
 const requestSessions = new WeakMap<object, string>();
 
 apiClient.interceptors.request.use((config) => {
+  const selectedHeaders = AxiosHeaders.from(config.headers || ({} as AxiosRequestHeaders));
+  for (const [key, value] of Object.entries(datasetHeaders())) selectedHeaders.set(key, value);
+  config.headers = selectedHeaders;
   const header = getStoredAuthHeader();
   requestSessions.set(config, browserSessionKey());
   if (header) {

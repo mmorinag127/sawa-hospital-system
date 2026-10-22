@@ -21,6 +21,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image, ImageDraw
 import pytest
+from src import staging_data as datasets
 
 ROOT = Path(__file__).resolve().parents[3]
 GRID = ROOT / "backend/src/services/grid_detector.py"
@@ -35,7 +36,7 @@ _markup_spec = spec_from_file_location("source_case_figure_markup", ROOT / "ocr_
 _figure_markup = module_from_spec(_markup_spec)
 _markup_spec.loader.exec_module(_figure_markup)
 URI_BINDINGS = {name: getattr(_uri_codec, name) for name in (
-    "format_gcs_uri", "parse_gcs_uri", "decorate_gcs_uri", "validate_generation", "validate_source_query", "signing_query")}
+    "format_gcs_uri", "parse_gcs_uri", "decorate_gcs_uri", "validate_generation", "validate_source_query", "signing_query", "staging_output_prefix")}
 
 
 def definitions(path, names, bindings):
@@ -45,7 +46,7 @@ def definitions(path, names, bindings):
     namespace = {"__name__": "h2_source_case", "dataclass": dataclass, "BytesIO": BytesIO,
                  "Path": Path, "Any": Any, "Iterable": Iterable, "Optional": Optional,
                  "Tuple": Tuple, "np": np, "Image": Image, "tempfile": tempfile,
-                 "figure_markup": _figure_markup, **URI_BINDINGS, **bindings}
+                 "figure_markup": _figure_markup, "datasets": datasets, **URI_BINDINGS, **bindings}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
 

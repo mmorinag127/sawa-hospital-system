@@ -67,7 +67,12 @@ function nonrender(source){
 }
 for(const [file,marker,counts]of cases)test(file+' full source contract, unexecuted definition',()=>{
   const live=fs.readFileSync(file,'utf8');
-  const source=file==='src/pages/auth/automation.tsx'?execFileSync('git',['show','2e8acf3:frontend/'+file],{encoding:'utf8'}):live;
+  let source=file==='src/pages/auth/automation.tsx'?execFileSync('git',['show','2e8acf3:frontend/'+file],{encoding:'utf8'}):live;
+  if(file==='src/components/UnifiedShell.tsx') {
+    const addition='          {!publicPage ? <StagingDatasetSelect /> : null}\n';
+    assert.equal(source.split(addition).length-1,1);
+    source=source.replace(addition,'').replace('import StagingDatasetSelect from "./StagingDatasetSelect";\n','');
+  }
   if(file==='src/pages/auth/automation.tsx') {
     execFileSync('git',['merge-base','--is-ancestor','227cae9','HEAD']);
     assert.equal(live,execFileSync('git',['show','227cae9:frontend/'+file],{encoding:'utf8'}));

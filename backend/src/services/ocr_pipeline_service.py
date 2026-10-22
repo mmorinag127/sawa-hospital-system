@@ -198,6 +198,10 @@ def _get_prefix(env_name: str, fallback: str) -> str:
     prefix = os.getenv(env_name, fallback)
     if prefix and not prefix.endswith("/"):
         prefix = f"{prefix}/"
+    if env_name == "OCR_PIPELINE_INPUT_PREFIX":
+        from src.staging_data import current_dataset, storage_prefix
+        if current_dataset() != "test":
+            prefix += storage_prefix()
     return prefix
 
 
@@ -230,6 +234,8 @@ def _parse_gs_uri(uri: str) -> tuple[str, str] | None:
 
 
 def _owned_pipeline_output_name(output_prefix: str, source: dict) -> str:
+    from src.services.storage_uri import staging_output_prefix
+    output_prefix = staging_output_prefix(output_prefix, source["input_reference"])
     identity = {key: value for key, value in source.items() if key != "output_reference"}
     digest = sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return f"{output_prefix}{digest}/{os.path.basename(parse_gcs_uri(source['input_reference']).object_name)}.g{source['input_generation']}.json"
@@ -431,6 +437,9 @@ def run_ocr_pipeline(
             stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
             input_name = f"{input_prefix}{safe_job_id}_{stamp}.pdf"
             metadata = {}
+            from src.staging_data import current_dataset
+            if current_dataset() != "test":
+                metadata["staging_dataset"] = current_dataset()
             from src.services.workflow_attempt_guard_service import processing_start_pdf_receipt
             selected_pdf = processing_start_pdf_receipt()
             metadata["selected_pdf_receipt"] = json.dumps(selected_pdf, separators=(",", ":"))

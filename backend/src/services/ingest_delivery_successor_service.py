@@ -567,6 +567,13 @@ def dispatch(identity, generation):
             row.visit_count += 1
             row.updated_at = datetime.utcnow()
             contract, state = deepcopy(row.task_contract), row.state
+        from src import staging_data as datasets
+        if datasets.current_dataset() != "test":
+            from urllib.parse import urlsplit
+            http = contract.get("http_request", {})
+            if (http.get("headers", {}).get(datasets.HEADER) != datasets.current_dataset()
+                    or "-stg-" not in urlsplit(http.get("url", "")).netloc):
+                raise datasets.DatasetUnavailable("staging_dataset_original_delivery_not_replayable")
         from google.cloud import tasks_v2
         from google.api_core.exceptions import AlreadyExists
         import base64

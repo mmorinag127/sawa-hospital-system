@@ -13,7 +13,7 @@ const load = (fetch) => {
   const browserContext = { exports: {}, window, document: { cookie: "" }, Event: class { constructor(type) { this.type = type; } } };
   vm.runInNewContext(ts.transpileModule(browser, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, browserContext);
   const api = fs.readFileSync(path.join(__dirname, "../src/services/apiClient.ts"), "utf8");
-  const context = { exports: {}, window, fetch, document: browserContext.document, process: { env: {} }, require: name => name === "./browserSession" ? browserContext.exports : name === "./loginDestination" ? { loginUrlFor: () => "/login" } : require(name) };
+  const context = { exports: {}, window, fetch, document: browserContext.document, process: { env: {} }, require: name => name === "./stagingDataset" ? require("./helpers/staging-dataset-module.cjs")(window) : name === "./browserSession" ? browserContext.exports : name === "./loginDestination" ? { loginUrlFor: () => "/login" } : require(name) };
   vm.runInNewContext(ts.transpileModule(api, { compilerOptions: { module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText, context);
   return { api: context.exports, sessionStorage, localStorage, events, window, document: browserContext.document };
 };

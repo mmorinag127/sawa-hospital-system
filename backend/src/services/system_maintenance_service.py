@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import local_directory
+
 import json
 import os
 import zipfile
@@ -10,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import MetaData, delete, func, select
 
-from src.db import DB_URI, engine, session_scope
+from src.db import current_database_uri, get_engine, session_scope
 from src.models.ingest_job import IngestJob
 from src.models.ocr_job import OcrJob
 from src.models.ocr_training_sample import OcrTrainingSample
@@ -84,10 +86,10 @@ def _read_int_env(name: str, default: int) -> int:
 
 
 def _resolve_sqlite_path() -> Path | None:
-    if not DB_URI.startswith("sqlite"):
+    if not current_database_uri().startswith("sqlite"):
         return None
-    if DB_URI.startswith("sqlite:///"):
-        raw = DB_URI[len("sqlite:///") :]
+    if current_database_uri().startswith("sqlite:///"):
+        raw = current_database_uri()[len("sqlite:///") :]
         if raw.startswith("./"):
             return Path.cwd() / raw[2:]
         return Path(raw)
@@ -193,12 +195,12 @@ def export_database_snapshot(*, max_rows_per_table: int | None = None) -> tuple[
         max_rows = max(1, min(int(max_rows_per_table), 5000000))
 
     metadata = MetaData()
-    metadata.reflect(bind=engine)
+    metadata.reflect(bind=get_engine())
     table_names = sorted(metadata.tables.keys())
 
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     filename = f"db_snapshot_{stamp}.zip"
-    output_path = _EXPORT_DIR / filename
+    output_path = local_directory(_EXPORT_DIR) / filename
 
     manifest_items: list[dict[str, Any]] = []
     with session_scope() as session:
@@ -228,7 +230,7 @@ def export_database_snapshot(*, max_rows_per_table: int | None = None) -> tuple[
                 )
             manifest_payload = {
                 "exported_at": datetime.utcnow().isoformat(),
-                "db_uri_type": "sqlite" if DB_URI.startswith("sqlite") else "sql",
+                "db_uri_type": "sqlite" if current_database_uri().startswith("sqlite") else "sql",
                 "tables": manifest_items,
                 "max_rows_per_table": max_rows,
             }

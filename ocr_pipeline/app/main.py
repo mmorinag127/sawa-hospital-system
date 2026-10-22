@@ -28,7 +28,7 @@ from app.rois import crop_rois, load_template_config, validate_captured_config
 from app.template_match import choose_template_and_warp
 from app.template_resolution import build_template_resolution
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, prewarm_analyzer, run_yomitoku
-from app.storage_uri import decorate_gcs_uri, format_gcs_uri, parse_gcs_uri, validate_generation, validate_source_query
+from app.storage_uri import decorate_gcs_uri, format_gcs_uri, parse_gcs_uri, staging_output_prefix, validate_generation, validate_source_query
 from app import figure_markup
 
 
@@ -50,6 +50,7 @@ _OUTPUT_OWNER = ContextVar("pipeline_output_owner", default=None)
 
 
 def _owned_output_name(output_prefix, source):
+    output_prefix = staging_output_prefix(output_prefix, source["input_reference"])
     identity = {key: value for key, value in source.items() if key != "output_reference"}
     return f"{output_prefix}{_terminal_digest(identity)}/{Path(parse_gcs_uri(source['input_reference']).object_name).name}.g{source['input_generation']}.json"
 
@@ -375,6 +376,18 @@ def _verify_selected_pdf_input(blob, data):
         raise ValueError("selected_pdf_digest_required")
     if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
         raise ValueError("selected_pdf_bytes_changed")
+    dataset = (blob.metadata or {}).get("staging_dataset")
+    if dataset is not None:
+        from app.staging_data import dataset_context, read_object, verify_copy
+        with dataset_context(dataset):
+            uri, generation, digest = read_object(receipt["storage_uri"], feature="order", generation=receipt.get("generation"))
+            physical = parse_gcs_uri(uri)
+            original = gcs.bucket(physical.bucket).blob(physical.object_name, generation=int(generation) if generation else None)
+            content = original.download_as_bytes(if_generation_match=int(generation) if generation else None, timeout=30, retry=None)
+            verify_copy(content, digest)
+            if hashlib.sha256(content).hexdigest() != receipt["sha256"]:
+                raise ValueError("selected_pdf_bytes_changed")
+        return
     if urlsplit(receipt["storage_uri"]).scheme == "gs":
         source = parse_gcs_uri(receipt["storage_uri"])
         generation = receipt.get("generation")

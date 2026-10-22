@@ -7,6 +7,7 @@ from typing import Union
 from urllib.parse import urlparse, parse_qs
 import json
 import re
+from src import staging_data as datasets
 from src.services.storage_uri import format_gcs_uri, parse_gcs_uri, signing_query, validate_generation, image_references, replace_image_references
 
 StoragePath = Union[str, Path]
@@ -20,13 +21,13 @@ class StorageService:
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def save_bytes(self, relative_path: str, data: bytes) -> str:
-        target = self.base_path / relative_path
+        target = datasets.local_directory(self.base_path) / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         return str(target)
 
     def open(self, relative_path: str) -> bytes:
-        target = self.base_path / relative_path
+        target = datasets.local_directory(self.base_path) / relative_path
         return target.read_bytes()
 
 
@@ -39,12 +40,13 @@ def load_bytes_from_uri(uri: str, *, generation: str | None = None, verification
         return value
 
     uri = _ENV_REF_PATTERN.sub(_replace_env_ref, uri)
+    uri, generation, copy_digest = datasets.read_object(uri, feature="order", generation=generation)
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
         if generation is not None:
             raise ValueError("storage_generation_requires_gcs")
         path = Path(parsed.path if parsed.scheme else uri)
-        return path.read_bytes()
+        return datasets.verify_copy(path.read_bytes(), copy_digest)
     if parsed.scheme == "gs":
         source = parse_gcs_uri(uri)
         if generation is not None:
@@ -57,8 +59,8 @@ def load_bytes_from_uri(uri: str, *, generation: str | None = None, verification
         options = {"timeout": 30, "retry": None} if verification else {}
         if generation is not None:
             blob = client.bucket(source.bucket).blob(source.object_name, generation=int(generation))
-            return blob.download_as_bytes(if_generation_match=int(generation), **options)
-        return client.bucket(source.bucket).blob(source.object_name).download_as_bytes(**options)
+            return datasets.verify_copy(blob.download_as_bytes(if_generation_match=int(generation), **options), copy_digest)
+        return datasets.verify_copy(client.bucket(source.bucket).blob(source.object_name).download_as_bytes(**options), copy_digest)
     raise ValueError(f"unsupported storage uri: {uri}")
 
 
@@ -80,6 +82,11 @@ def _verify_selected_pdf_source(receipt):
     if receipt.get("parent") is not None:
         verify_selected_pdf_source(receipt["parent"])
     uri = receipt["storage_uri"]
+    if datasets.current_dataset() != "test":
+        data = load_bytes_from_uri(uri, generation=receipt.get("generation"), verification=True)
+        if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+            raise ValueError("selected_pdf_bytes_changed")
+        return
     parsed = urlparse(uri)
     if parsed.scheme == "gs":
         source = parse_gcs_uri(uri)
@@ -257,6 +264,7 @@ def save_bytes_to_gcs(
 ) -> str:
     if not bucket or not object_path:
         raise ValueError("bucket and object_path are required")
+    bucket, object_path = datasets.write_object(bucket, object_path)
     format_gcs_uri(bucket, object_path)
     client = client or _get_thread_gcs_client()
     blob = client.bucket(bucket).blob(object_path)
@@ -266,6 +274,10 @@ def save_bytes_to_gcs(
 
 
 def generate_signed_url(bucket: str, object_path: str, expires_in_seconds: int = 3600, *, generation: str | None = None, query_parameters: dict[str, str] | None = None) -> str:
+    if datasets.current_dataset() != "test":
+        uri, generation, _digest = datasets.read_object(format_gcs_uri(bucket, object_path, generation), feature="order", generation=generation)
+        physical = parse_gcs_uri(uri)
+        bucket, object_path = physical.bucket, physical.object_name
     if generation is not None:
         generation = validate_generation(generation)
     format_gcs_uri(bucket, object_path, generation)

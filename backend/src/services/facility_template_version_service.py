@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import inspect
+from src.db import get_engine
 
 if TYPE_CHECKING:
     from src.models.facility_template_version import FacilityTemplateVersion
@@ -18,13 +19,12 @@ _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = False
 
 
 def ensure_facility_template_version_schema() -> None:
-    from src.db import engine
     from src.models.facility_template_version import FacilityTemplateVersion
 
     global _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED
     if _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED:
         return
-    inspector = inspect(engine)
+    inspector = inspect(get_engine())
     if "facility_template_versions" not in set(inspector.get_table_names()):
         raise RuntimeError(
             "facility template version schema is not migrated; run migrations through 0025: "
@@ -41,7 +41,7 @@ def ensure_facility_template_version_schema() -> None:
             "facility template version schema is not migrated; run migrations through 0025: "
             + ", ".join(f"facility_template_versions.{column}" for column in missing_columns)
         )
-    if engine.dialect.name == "postgresql":
+    if get_engine().dialect.name == "postgresql":
         indexes = {str(index.get("name") or "") for index in inspector.get_indexes("facility_template_versions")}
         missing_indexes = sorted(
             {"ix_facility_template_versions_valid_from", "ix_facility_template_versions_valid_to"} - indexes

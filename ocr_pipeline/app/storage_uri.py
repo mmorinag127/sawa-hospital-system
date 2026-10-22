@@ -12,6 +12,14 @@ class GcsUri(NamedTuple):
     fragment: str
 
 
+def staging_output_prefix(prefix, input_reference):
+    name = parse_gcs_uri(input_reference).object_name
+    match = re.match(r"input/stg-replay/(replay-[a-z0-9][a-z0-9-]{0,47})/", name)
+    if match:
+        return prefix + "stg-replay/" + match.group(1) + "/"
+    return prefix
+
+
 def validate_generation(value) -> str:
     if isinstance(value, bool) or not re.fullmatch(r"[1-9][0-9]*", str(value)):
         raise ValueError("storage_generation_invalid")

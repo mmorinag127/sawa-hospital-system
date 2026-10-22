@@ -73,7 +73,7 @@ def seed_history_inputs(engine, root, monkeypatch):
     monkeypatch.setenv("ORDERS_OUTPUT_DIR", str(output))
     monkeypatch.setattr(order_form_service, "_FAX_SOURCE_TEMPLATE_DIR", root)
     monkeypatch.setattr(order_form_service, "_OUTPUT_DIR", output)
-    monkeypatch.setattr(menu_service, "engine", engine)
+    monkeypatch.setattr(menu_service, "get_engine", lambda: engine)
     with session_scope() as session:
         session.add(Facility(id="synthetic-facility", name="Synthetic fixture facility"))
         session.flush()

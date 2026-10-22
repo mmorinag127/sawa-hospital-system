@@ -9,7 +9,7 @@ from urllib.parse import unquote, urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import update
-from src.db import session_scope
+from src.db import control_session_scope as session_scope
 from src.models.portal_session import PortalSession
 from src.models.user import User
 

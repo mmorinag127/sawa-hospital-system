@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import delete, inspect, select
 
-from src.db import engine, session_scope
+from src.db import get_engine, session_scope
 from src.models.menu import BaseMenuCycleItem
 from src.services import menu_edit_revision_service, menu_service
 from src.services.menu_vocabulary import normalize_diet_type
@@ -16,7 +16,7 @@ class BaseMenuSchemaNotMigrated(RuntimeError):
 
 
 def _require_base_menu_schema() -> None:
-    inspector = inspect(engine)
+    inspector = inspect(get_engine())
     if "base_menu_cycle_items" not in inspector.get_table_names():
         raise BaseMenuSchemaNotMigrated(
             "base menu schema is not migrated; run migration 0015: base_menu_cycle_items"
