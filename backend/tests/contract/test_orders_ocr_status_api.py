@@ -1825,7 +1825,7 @@ def test_download_document_does_not_fetch_signed_substitute_when_own_read_fails(
     monkeypatch.setattr(
         orders_api.order_service,
         "get_order_by_id",
-        lambda _order_id: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
+        lambda _order_id, *, allow_unresolved_menu_amount=False: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
     )
 
     from hashlib import sha256
@@ -1859,7 +1859,7 @@ def test_download_document_never_borrows_archived_ocr_input_when_selected_source
     monkeypatch.setattr(
         orders_api.order_service,
         "get_order_by_id",
-        lambda _order_id: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
+        lambda _order_id, *, allow_unresolved_menu_amount=False: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
     )
 
     from hashlib import sha256
@@ -1897,7 +1897,7 @@ def test_download_document_requires_authoritative_proof_before_source_read(monke
     monkeypatch.setattr(
         orders_api.order_service,
         "get_order_by_id",
-        lambda _order_id: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
+        lambda _order_id, *, allow_unresolved_menu_amount=False: {"id": order_id, "document": "gs://bucket/path/document.pdf"},
     )
 
     from src.services import storage_service, workflow_attempt_guard_service

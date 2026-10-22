@@ -110,7 +110,7 @@ def test_download_document_uses_selected_document_version(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
         "get_order_by_id",
-        lambda _order_id: {
+        lambda _order_id, *, allow_unresolved_menu_amount=False: {
             "id": "ORDdocversion",
             "document": "gs://bucket/current.pdf",
             "versions": [
@@ -184,7 +184,7 @@ def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypa
     monkeypatch.setattr(
         orders_api.order_service,
         "get_order_by_id",
-        lambda _order_id: {
+        lambda _order_id, *, allow_unresolved_menu_amount=False: {
             "id": "ORDocrinput",
             "facility": "FAC00001",
             "document": "gs://bucket/current.pdf",
