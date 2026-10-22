@@ -734,10 +734,25 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         return _serialize_workflow(row, ocr_job=ocr_job), None
 
 
-def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
+def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None) -> dict[str, Any] | None:
     if job is None:
         return None
     metrics = job.metrics if isinstance(job.metrics, dict) else {}
+    diagnostics = {}
+    evidence_id = _normalize_id(metrics.get("evidence_run_id"))
+    from src.services.ocr_failure_diagnostics import RECOGNITION_REJECTIONS
+    review_failure = (job.status == "failed" and job.error_message in RECOGNITION_REJECTIONS
+            and metrics.get("result_state") == "review_required"
+            and metrics.get("recovery_action") == "review_recognition_cells")
+    if session is not None and evidence_id and review_failure:
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id)
+        payload = evidence.payload_json if evidence is not None and isinstance(evidence.payload_json, dict) else {}
+        execution = payload.get("_ocr_execution")
+        if (evidence is not None and evidence.order_id == job.order_id
+                and isinstance(execution, dict) and execution.get("job_id") == job.id
+                and execution.get("evidence_run_id") == evidence.id and execution.get("disposition") == "rejected"):
+            from src.services.ocr_failure_diagnostics import recognition_failure_details
+            diagnostics = recognition_failure_details(payload, evidence_run_id=evidence.id)
     elapsed_seconds = _coerce_float(metrics.get("ocr_elapsed_seconds") or metrics.get("elapsed_seconds"))
     started_at = _coerce_datetime(metrics.get("ocr_started_at") or metrics.get("run_started_at"))
     finished_at = _coerce_datetime(
@@ -753,6 +768,11 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
     error_detail = _normalize_id(metrics.get("error_detail")) or None
     error_user_message = _normalize_id(metrics.get("error_user_message")) or None
     recovery_action = _normalize_id(metrics.get("recovery_action")) or None
+    if session is not None and review_failure and not diagnostics:
+        review_failure = False
+    if recovery_action == "review_recognition_cells" and not review_failure and not metrics.get("recognition_checkpoint"):
+        recovery_action = None
+        error_user_message = None
     return {
         "ocr_job_id": job.id,
         "order_id": job.order_id,
@@ -775,6 +795,8 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         "error_detail": error_detail,
         "error_user_message": error_user_message,
         "recovery_action": recovery_action,
+        "evidence_run_id": evidence_id or None,
+        "recognition_review": copy.deepcopy(metrics.get("recognition_review")) if review_failure else None,
         **({"native_ingest": {
             "mode": "hakodate", "execution_id": metrics["nonworkflow_execution"]["execution_id"],
             "intake_protocol": metrics["nonworkflow_execution"].get("intake_protocol"),
@@ -782,6 +804,7 @@ def _serialize_ocr_job(job: OcrJob | None) -> dict[str, Any] | None:
         }} if isinstance(metrics.get("nonworkflow_execution"), dict)
             and metrics["nonworkflow_execution"].get("ingest_ocr_mode") == "hakodate" else {}),
         **progress,
+        **diagnostics,
     }
 
 
@@ -998,6 +1021,7 @@ def _serialize_workflow(
     *,
     ocr_job: OcrJob | None = None,
     meta_override: dict[str, Any] | None = None,
+    session: Any = None,
 ) -> dict[str, Any]:
     meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(row)
     effective_template_id = _effective_workflow_template_id(meta)
@@ -1032,7 +1056,7 @@ def _serialize_workflow(
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
-        "ocr_job": _serialize_ocr_job(ocr_job),
+        "ocr_job": _serialize_ocr_job(ocr_job, session=session),
         "common_job_status": _recorded_workflow_job_status(row, meta, ocr_job),
         "blockers": list(row.blockers_json or []),
         "warnings": list(row.warnings_json or []),
@@ -1375,7 +1399,7 @@ def _serialize_workflow_checked(
         meta=meta,
         session=session,
     )
-    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta)
+    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session)
     canonical_state = _canonical_workflow_v2_state(workflow, meta)
     lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta, _analysis=_analysis)
     if lineage_error:
@@ -1724,7 +1748,7 @@ def get_ocr_progress(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         meta = _workflow_meta(workflow)
         ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
         job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
-        serialized = _serialize_workflow(workflow, ocr_job=job)
+        serialized = _serialize_workflow(workflow, ocr_job=job, session=session)
         if job is not None and serialized["common_job_status"] is None:
             return None, "ocr_job_ownership_mismatch"
         return {

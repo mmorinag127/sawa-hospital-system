@@ -4413,6 +4413,9 @@ def _complete_first_pass_job_in_session(session, order, document, execution_inpu
         "processing_stage": "evidence_ready" if applied else "rejected_review_saved",
         "result_state": "evidence_ready" if applied else "review_required",
     }
+    if not applied:
+        from src.services.ocr_failure_diagnostics import recognition_failure_details
+        job.metrics = {**job.metrics, **recognition_failure_details(evidence.get("payload_json") or {}, evidence_run_id=evidence["id"])}
     receipt = {
         "job_id": job.id, "execution_id": execution_input["execution_id"],
         "document_id": document.id, "evidence_run_id": evidence["id"],
@@ -12950,12 +12953,20 @@ def _complete_ocr_rerun_in_session(session, order_id, job_id, evidence, *, error
         "workflow_attempt_id": attempt, "workflow_revision": revision,
         "evidence_run_id": evidence_id, "status": job.status, "error": error,
     }
+    from src.services.ocr_failure_diagnostics import RECOGNITION_REJECTIONS
+    review_failure = (error in RECOGNITION_REJECTIONS and evidence_id
+                      and metrics_patch.get("recognition_review")
+                      and metrics_patch.get("recovery_action") == "review_recognition_cells")
+    if error and not review_failure:
+        metrics_patch = {**metrics_patch, "recognition_review": None,
+                         "recovery_action": metrics_patch.get("recovery_action"),
+                         "error_user_message": metrics_patch.get("error_user_message")}
     job.metrics = {
         **merge_own_job_metrics_patch(job.metrics, metrics_patch, own_outcome=True),
         "evidence_run_id": evidence_id, "adopted": False,
         "status": job.status, "error": error,
-        "processing_stage": "rejected_review_saved" if error and not failure_metrics_override else metrics_patch.get("processing_stage", "evidence_ready"),
-        "result_state": "review_required" if error and not failure_metrics_override else metrics_patch.get("result_state", "evidence_ready"),
+        "processing_stage": "rejected_review_saved" if review_failure and not failure_metrics_override else metrics_patch.get("processing_stage", "validation" if error else "evidence_ready"),
+        "result_state": ("review_required" if review_failure and not failure_metrics_override else "hard_failed") if error else metrics_patch.get("result_state", "evidence_ready"),
         "rerun_terminal_receipt": deepcopy(receipt),
     }
     session.flush()
@@ -13057,6 +13068,9 @@ def _persist_ocr_rerun_completion(
             job.output_reference = output_reference
         if isinstance(own_payload, dict):
             job.template_id = own_payload.get("template_id")
+        from src.services.ocr_failure_diagnostics import recognition_failure_details, RECOGNITION_REJECTIONS
+        if error in RECOGNITION_REJECTIONS and evidence is not None and isinstance(own_payload, dict):
+            metrics_patch = {**(metrics_patch or {}), **recognition_failure_details(own_payload, evidence_run_id=evidence["id"])}
         execution = current_nonworkflow_execution()
         native_hard_failure = False
         if execution is not None and execution.get("ingest_ocr_mode") == "hakodate" and error:
@@ -13749,6 +13763,7 @@ def _rerun_ocr_evidence_only_with_input(
             schema_version="v2_hakodate_evidence_rerun", producer_version="hakodate_best_method_pipeline",
             metrics_patch={
                 **pipeline_metrics_patch, **runtime_metrics, "hakodate_live_pipeline": True,
+                **({"error_detail": state.get("message")} if error else {}),
                 "new_evidence_available": not project_sheet and not error,
             },
         )
