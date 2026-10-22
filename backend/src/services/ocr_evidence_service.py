@@ -783,6 +783,12 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
         try:
             validated_source = order_service._validate_hakodate_original_execution(payload, _analysis=_analysis, _accepted_values=accepted)
             original_source = (row.artifact_manifest_json or {}).get("original_hakodate_source")
+            if content_only_rejection:
+                # Diagnostic persistence predates the ready-result manifest seal.
+                # Its immutable execution start and artifact packet are the source.
+                if original_source is not None and not snapshots_equal(original_source, validated_source):
+                    raise ValueError("hakodate_original_expectation_changed")
+                original_source = validated_source
             if accepted:
                 original_source = payload[recognition_acceptance.KEY].get("original_hakodate_source")
                 if original_source != validated_source:

@@ -324,3 +324,14 @@ def test_real_producer_serializer_packet_persistence_never_selects_or_overrides_
     finally:
         for variable,token in reversed(variables): variable.reset(token)
     assert state() == before
+
+
+def test_adoption_uses_original_contact_without_rerendering(tmp_path, monkeypatch):
+    manifest, rows, contact, source = packet(tmp_path, monkeypatch)
+    from src.services import hakodate_recognizer_contact_sheet as renderer
+    def forbidden(**kwargs):
+        raise AssertionError('adoption must not rerender recognized pixels')
+    monkeypatch.setattr(renderer, 'build_recognizer_contact_sheet', forbidden)
+    before = json.dumps(rows, sort_keys=True)
+    observation.validate_artifact(json.dumps(manifest).encode(), rows, contact, source)
+    assert json.dumps(rows, sort_keys=True) == before

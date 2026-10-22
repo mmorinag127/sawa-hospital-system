@@ -9193,7 +9193,7 @@ def _validate_selected_hakodate_artifacts(evidence, captured, *, allow_review=Fa
         raise ValueError("hakodate_selected_evidence_lineage_missing")
     manifest = evidence.get("artifact_manifest_json") or {}
     from src.services.recognition_acceptance_service import KEY
-    if allow_review or KEY in manifest:
+    if allow_review or KEY in manifest or hakodate_ocr_evidence_service.quantity_content_rejection_only(payload):
         original_source = _original_hakodate_execution_source(payload)
         if KEY in manifest and manifest[KEY].get("original_hakodate_source") != original_source:
             raise ValueError("recognition_acceptance_changed")
