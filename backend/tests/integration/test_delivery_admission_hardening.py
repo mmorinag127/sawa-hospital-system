@@ -222,7 +222,7 @@ def test_real_recovery_loop_skips_unacknowledged_delivery(database, payload, mon
 @pytest.fixture
 def store(database, monkeypatch):
     from src.services import workflow_ocr_delivery_execution_service as exclusion
-    monkeypatch.setattr(exclusion, 'engine', database)
+    monkeypatch.setattr(exclusion, 'get_engine', lambda: database)
     for key, value in {"PROJECT_ID":"fixture-project", "LOCATION":"fixture-location", "QUEUE":"fixture-queue",
         "TARGET_URL":"https://fixture.invalid", "SERVICE_ACCOUNT_EMAIL":"fixture@fixture.iam.gserviceaccount.com",
         "AUDIENCE":"fixture-audience", "DISPATCH_DEADLINE_SECONDS":"15"}.items():
