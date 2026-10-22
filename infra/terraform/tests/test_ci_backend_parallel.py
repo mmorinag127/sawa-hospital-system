@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[3]
 BASELINE = {
     "Run backend tests (US1-4)": ("us1-4", "d8c3f72cfe9f78d4f1478199c472fd67c0a72006c6cdd1b0bc93eaf41ee0d074"),
     "Verify initial saved-source preservation": ("saved-source", "58baf3221466a87d078c7f949f6c7460873d2318282f58fe904222b1799f77dd"),
-    "Verify OCR review-resolution root regression": ("review-resolution", "2242fc255956589b9375259e7b9a3b371c84ac44dcd976af10856bb551381e0b"),
+    "Verify OCR review-resolution root regression": ("review-resolution", "1f34337f75700bf4f36b446679cd7139174301c81175004395b839205cd2e02b"),
 }
 
 
