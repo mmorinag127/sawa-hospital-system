@@ -100,6 +100,43 @@ def test_rejected_diagnostic_keeps_own_id_without_canonical_cache(rerun_transact
     assert job.metrics["adopted"] is False
 
 
+@pytest.mark.parametrize("reason,raw", [("hakodate_ocr_quantity_non_numeric", "--"),
+                                      ("hakodate_ocr_quantity_low_confidence", "12")])
+def test_rejected_recognition_keeps_cell_diagnostics_with_terminal_receipt(rerun_transaction, reason, raw):
+    job, state, _ = rerun_transaction
+    review = {"count": 1, "cells": [{"sheet_cell": "H17", "raw_text": raw, "reason": reason}]}
+    result, error = order_service._persist_ocr_rerun_completion(
+        "order", job.id, {"hakodate_recognition_review": review}, error="evidence_unusable",
+        metrics_patch={"error_detail": "Hakodate canonical evidence blocked: hakodate_ocr_quantity_unresolved"},
+    )
+    assert error == "evidence_unusable"
+    assert job.status == "failed"
+    assert job.metrics["recognition_review"] == review
+    assert job.metrics["evidence_run_id"] == result["terminal_receipt"]["evidence_run_id"]
+    assert job.metrics["recovery_action"] == "review_recognition_cells"
+    assert "hakodate_ocr_quantity_unresolved" in job.metrics["error_detail"]
+    assert state["cache"] is None
+
+
+def test_execution_exception_with_retained_review_is_hard_failure(rerun_transaction):
+    job, state, _ = rerun_transaction
+    job.metrics = {"recognition_review": {"count": 1}, "recovery_action": "review_recognition_cells",
+                   "error_user_message": "文字認識は完了しました"}
+    payload = {"hakodate_recognition_review": {"count": 1, "cells": [
+        {"sheet_cell": "H17", "raw_text": "-", "reason": "hakodate_ocr_quantity_non_numeric"}]}}
+    _, error = order_service._persist_ocr_rerun_completion(
+        "order", job.id, payload, error="database_write_failed",
+        metrics_patch={"error_detail": "database unavailable", "processing_stage": "persistence"})
+    assert error == "database_write_failed"
+    assert job.metrics["result_state"] == "hard_failed"
+    assert job.metrics["processing_stage"] == "persistence"
+    assert job.metrics["recognition_review"] is None
+    assert job.metrics["recovery_action"] is None
+    assert job.metrics["error_user_message"] is None
+    assert job.metrics["error_detail"] == "database unavailable"
+    assert state["cache"] is None
+
+
 def test_missing_own_result_never_reports_success(rerun_transaction):
     job, state, _ = rerun_transaction
     with pytest.raises(ValueError, match="reparse_pipeline_result_missing"):

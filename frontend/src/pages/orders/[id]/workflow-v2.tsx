@@ -82,6 +82,8 @@ type WorkflowV2 = {
     error_detail?: string | null;
     error_user_message?: string | null;
     recovery_action?: string | null;
+    evidence_run_id?: string | null;
+    recognition_review?: {count: number; cells: Array<{sheet_cell: string; raw_text: string; reason: string}>} | null;
   } | null;
 };
 
@@ -4592,7 +4594,19 @@ export default function OrderWorkflowV2Page() {
           </p> : null}
           {workflow?.state === "ocr_failed" ? <div role="alert">
             {recognitionReviewPending ? <>
-              <Button disabled={Boolean(busy)} onClick={() => setVisibleStep(2)}>Step2で読み取り結果を確認</Button>
+              <p>{ocrJobErrorMessage}</p>
+              <p>原画像と読み取り原文を確認し、空欄または数値を指定してください。再実行だけでは同じ箇所で停止する場合があります。</p>
+              {workflow.ocr_job?.recognition_review?.count ? <details open>
+                <summary>今回のOCRで確認が必要な{workflow.ocr_job.recognition_review.count}セル</summary>
+                <ul>{workflow.ocr_job.recognition_review.cells.map(cell => <li key={cell.sheet_cell}>
+                  {cell.sheet_cell}:「{cell.raw_text || "空欄"}」— {recognitionReviewReason(cell.reason)}
+                </li>)}</ul>
+              </details> : null}
+              <Button disabled={Boolean(busy)} onClick={() => openRecognitionResume()}>今回のセル画像を確認・訂正</Button>
+              <Button disabled={Boolean(busy)} onClick={() => {
+                setVisibleStep(2);
+                if (workflow.ocr_job?.evidence_run_id) void loadOcrResultDetail(workflow.ocr_job.evidence_run_id).catch((err) => setError(formatApiError(err, "OCR結果詳細の取得に失敗しました")));
+              }}>Step2で読み取り結果を確認</Button>
               <details><summary>認識実行時の診断詳細</summary>
                 <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
               </details>
