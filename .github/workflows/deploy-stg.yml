@@ -92,6 +92,8 @@ env:
   NODE_OPTIONS: --use-openssl-ca
   CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE: /etc/ssl/certs/ca-certificates.crt
   PROJECT_ID: sawahospitalsystem
+  SAWA_STG_REPLAY_MANIFEST_URI: ${{ vars.STG_REPLAY_MANIFEST_URI }}
+  SAWA_STG_REPLAY_MANIFEST_SHA256: ${{ vars.STG_REPLAY_MANIFEST_SHA256 }}
   REGION: asia-northeast2
   WEB_SERVICE: web-stg
   WORKER_SERVICE: worker-stg
@@ -1005,6 +1007,8 @@ jobs:
           test "$PORTAL_SESSION_IDLE_SECONDS" = 86400
           test "$PORTAL_LOGIN_TTL_SECONDS" = 300
           test "$(cat hospital-delivery-artifacts/verified-env.txt)" = "$HOSPITAL_DELIVERY_ENV"
+          dataset_env="$(python3 scripts/staging_dataset_config.py --mode env --environment stg)"
+          if [ -n "$dataset_env" ]; then HOSPITAL_DELIVERY_ENV="${HOSPITAL_DELIVERY_ENV},${dataset_env}"; fi
           IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"
           uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component backend
           PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$WORKER_SERVICE" WEB_SERVICE="$WEB_SERVICE" WEB_URL="$WEB_URL" \

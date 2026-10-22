@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.auth import UserContext, automation_system, get_current_user, is_auth_disabled, require_portal_admin, _local_current_user
 from src.api import auth
-from src.db import session_scope
+from src.db import control_session_scope as session_scope
 from src.models.user import AuditLog
 from src.models.user import User
 from src.models.portal_session import PortalSession, PortalLoginAttempt

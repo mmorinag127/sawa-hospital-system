@@ -94,7 +94,7 @@ def store(tmp_path, monkeypatch):
         copy_table(model.__table__)
     metadata.create_all(engine)
     monkeypatch.setattr(db, "SessionLocal", sessionmaker(engine, autoflush=False, future=True))
-    monkeypatch.setattr(menu_service, "engine", engine)
+    monkeypatch.setattr(menu_service, "get_engine", lambda: engine)
     monkeypatch.setattr(menu_service, "_MENU_SCHEMA_INITIALIZED", False)
     menu_service.ensure_menu_schema()
     with db.session_scope() as session:

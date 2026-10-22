@@ -29,9 +29,12 @@ from src.services import facility_service, facility_template_version_service, me
 from src.services.ocr_evidence_service import SelectedEvidenceRejected
 from src.services.read_only_request_guard_service import read_only_request_guard
 from src import db
+from src.api import staging_datasets
+from src.staging_data import DatasetMiddleware
 from src.maintenance.formal_migration_schema import require_formal_head
 
 app = FastAPI(title="Hospital Order System API")
+app.add_middleware(DatasetMiddleware)
 
 
 @app.exception_handler(SelectedEvidenceRejected)
@@ -79,6 +82,7 @@ app.include_router(ocr_registry.router, prefix="")
 app.include_router(base_menus.router, prefix="")
 app.include_router(system.router, prefix="")
 app.include_router(portal.router, prefix="")
+app.include_router(staging_datasets.router)
 
 
 @app.on_event("startup")

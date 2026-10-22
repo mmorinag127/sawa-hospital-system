@@ -288,7 +288,7 @@ def test_public_monthly_build_resolves_full_dated_facility_and_keeps_all_menu_ro
     from src.services import menu_service
 
     # Only database infrastructure is redirected; real schema guards/readers remain active.
-    monkeypatch.setattr(menu_service, "engine", saved.engine)
+    monkeypatch.setattr(menu_service, "get_engine", lambda: saved.engine)
     monkeypatch.setattr(menu_service, "session_scope", saved.session_scope)
     monkeypatch.setattr(menu_service, "_MENU_SCHEMA_INITIALIZED", False)
     entries = monthly_entries()

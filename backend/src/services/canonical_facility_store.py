@@ -361,6 +361,14 @@ def resolve_facility_version(snapshot: MasterSnapshot, facility_id: str, effecti
 
 
 def source_location() -> str:
+    from src.staging_data import current_dataset, data_setting
+    if current_dataset() != "test":
+        uri = data_setting("FACILITY_MASTER_URI", feature="order")
+        from src.staging_data import _staging_uri
+        physical = _staging_uri(uri)
+        if not physical.path.startswith("/stg-replay/" + current_dataset() + "/"):
+            raise CanonicalStoreError("staging_dataset_master_snapshot_mismatch")
+        return uri
     uri = os.getenv("FACILITY_MASTER_URI", "").strip()
     if uri:
         parsed = urlparse(uri)

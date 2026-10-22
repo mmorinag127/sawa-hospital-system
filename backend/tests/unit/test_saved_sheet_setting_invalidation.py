@@ -56,7 +56,7 @@ def store(tmp_path, monkeypatch):
     generator = original_store.__wrapped__(tmp_path, monkeypatch)
     try:
         factory = next(generator)
-        monkeypatch.setattr(menu_service, "engine", factory.kw["bind"])
+        monkeypatch.setattr(menu_service, "get_engine", lambda: factory.kw["bind"])
         yield factory
     finally:
         try:

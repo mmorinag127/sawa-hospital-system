@@ -9,7 +9,7 @@ from typing import Iterator
 from loguru import logger
 from sqlalchemy import text
 
-from src.db import engine
+from src.db import get_engine
 
 
 class OcrExecutionSlotTimeout(RuntimeError):
@@ -68,7 +68,7 @@ def acquire_ocr_execution_slot(*, order_id: str | None = None, job_id: str | Non
     poll_seconds = _poll_seconds()
     deadline = time.monotonic() + timeout_seconds
 
-    if engine.dialect.name != "postgresql":
+    if get_engine().dialect.name != "postgresql":
         semaphore = _local_semaphore(max_slots)
         while not semaphore.acquire(blocking=False):
             if time.monotonic() >= deadline:
@@ -80,7 +80,7 @@ def acquire_ocr_execution_slot(*, order_id: str | None = None, job_id: str | Non
             semaphore.release()
         return
 
-    connection = engine.connect()
+    connection = get_engine().connect()
     acquired_key: int | None = None
     acquired_slot: int | None = None
     try:

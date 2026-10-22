@@ -5,15 +5,15 @@ from pathlib import Path
 import tempfile
 
 from sqlalchemy import text
-from src.db import engine
+from src.db import get_engine
 
 
 @contextmanager
 def execution_mutex(delivery_id):
     key = int.from_bytes(sha256(delivery_id.encode()).digest()[:8], "big", signed=True)
-    if engine.dialect.name == "postgresql":
+    if get_engine().dialect.name == "postgresql":
         # A dedicated session advisory lock survives runner result transactions.
-        with engine.connect() as connection:
+        with get_engine().connect() as connection:
             acquired = bool(connection.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar_one())
             connection.commit()
             try:
@@ -22,11 +22,11 @@ def execution_mutex(delivery_id):
                 if acquired:
                     connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
                     connection.commit()
-    elif engine.dialect.name == "sqlite":
+    elif get_engine().dialect.name == "sqlite":
         import fcntl
-        if not engine.url.database or engine.url.database == ":memory:":
+        if not get_engine().url.database or get_engine().url.database == ":memory:":
             raise ValueError("workflow_ocr_delivery_file_backed_sqlite_required")
-        database = str(Path(engine.url.database).resolve())
+        database = str(Path(get_engine().url.database).resolve())
         lock_id = sha256((database + ":" + delivery_id).encode()).hexdigest()
         with open(Path(tempfile.gettempdir()) / ("sawa-workflow-ocr-" + lock_id + ".lock"), "a") as handle:
             try:

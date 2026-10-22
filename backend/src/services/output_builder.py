@@ -30,6 +30,7 @@ from openpyxl.utils import column_index_from_string, get_column_letter, range_bo
 from openpyxl.xml.functions import xmlfile, tostring as openpyxl_tostring
 
 from src.db import session_scope
+from src.staging_data import local_directory
 from src.models.order import Order
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
@@ -2052,7 +2053,7 @@ def _require_output_adoption(session, original: dict) -> None:
 
 
 def _owned_output_paths(order_id: str) -> tuple[Path, Path, Path]:
-    directory = OUTPUT_DIR / uuid4().hex
+    directory = local_directory(OUTPUT_DIR) / uuid4().hex
     directory.mkdir(parents=True, exist_ok=False)
     return (directory / f"{order_id}_labels.csv", directory / f"{order_id}_delivery.xlsx", directory / f"{order_id}_aggregate.csv")
 
@@ -5300,7 +5301,7 @@ def build_label_workbook_for_order(order_id: str, *, target_date: dt_date | None
     )
     date_part = target_date.isoformat() if target_date else "all"
     filename = _safe_output_filename(f"{date_part}_{facility_name or sheet_name}_labels.xlsx", f"{order_id}_labels.xlsx")
-    path = OUTPUT_DIR / f"{order_id}_labels_{date_part}_{uuid4().hex}.xlsx"
+    path = local_directory(OUTPUT_DIR) / f"{order_id}_labels_{date_part}_{uuid4().hex}.xlsx"
     workbook.save(path)
     return path, filename
 
@@ -5320,7 +5321,7 @@ def build_label_csv_for_order(order_id: str, *, target_date: dt_date | None = No
         raise ValueError("label rows not found")
     date_part = target_date.isoformat() if target_date else "all"
     filename = _safe_output_filename(f"{date_part}_{facility_name or order_id}_labels.csv", f"{order_id}_labels.csv")
-    path = OUTPUT_DIR / f"{order_id}_labels_{date_part}_{uuid4().hex}.csv"
+    path = local_directory(OUTPUT_DIR) / f"{order_id}_labels_{date_part}_{uuid4().hex}.csv"
     _write_label_csv(path, labels, label_fields)
     return path, filename
 
@@ -5340,7 +5341,7 @@ def _create_daily_delivery_sheet(
         raise ValueError("delivery rows not found for target date")
     if invoice_template.get("template_uri"):
         raise ValueError("templated delivery notes cannot be embedded into a rebuilt daily bundle workbook")
-    temp_path = (output_dir if output_dir is not None else OUTPUT_DIR) / f"{order_id}_daily_bundle_{uuid4().hex}.xlsx"
+    temp_path = (output_dir if output_dir is not None else local_directory(OUTPUT_DIR)) / f"{order_id}_daily_bundle_{uuid4().hex}.xlsx"
     try:
         _write_delivery_note(
             temp_path,
@@ -5844,7 +5845,7 @@ def build_weekly_weight_summary_workbook(
             ws.cell(row=day_start + 5, column=1).value = weekdays[current_date.weekday()]
     if remaining_keys:
         raise ValueError("weekly_weight_rows_unconsumed")
-    output_path = OUTPUT_DIR / f"{sheet_title} Weight.xlsx"
+    output_path = local_directory(OUTPUT_DIR) / f"{sheet_title} Weight.xlsx"
     workbook.save(output_path)
     try:
         _patch_weekly_weight_package(output_path, sheet_title=sheet_title)
@@ -5968,7 +5969,7 @@ def build_daily_output_bundle(
     orders = order_service.list_orders_by_line_date(target_date, status=status)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     bundle_name = f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.xlsx"
-    request_dir = OUTPUT_DIR / uuid4().hex
+    request_dir = local_directory(OUTPUT_DIR) / uuid4().hex
     bundle_path = request_dir / bundle_name
 
     manifest_items: list[dict] = []

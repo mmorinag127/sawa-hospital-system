@@ -18,7 +18,7 @@ import pandas as pd
 
 from sqlalchemy import delete, select, inspect, or_, text, func
 
-from src.db import session_scope, engine
+from src.db import session_scope, get_engine
 from src.models.menu import (
     MonthlyMenu,
     MonthlyMenuItem,
@@ -281,7 +281,7 @@ def _monthly_entry_diet_filter(column, diet_type: object):
 
 
 def _menu_schema_missing_items(connection=None) -> list[str]:
-    inspector = inspect(engine if connection is None else connection)
+    inspector = inspect(get_engine() if connection is None else connection)
     tables = set(inspector.get_table_names())
     required: dict[str, set[str]] = {
         "menu_masters": {"condiments", "revision"},
@@ -301,14 +301,14 @@ def _menu_schema_missing_items(connection=None) -> list[str]:
 
 
 def _ensure_monthly_menu_item_identity_index(connection=None) -> None:
-    inspector = inspect(engine if connection is None else connection)
+    inspector = inspect(get_engine() if connection is None else connection)
     if "monthly_menu_items" not in set(inspector.get_table_names()):
         return
     try:
         if connection is not None:
             require_canonical_identity_schema(connection)
         else:
-            with engine.connect() as schema_connection:
+            with get_engine().connect() as schema_connection:
                 require_canonical_identity_schema(schema_connection)
     except MonthlyMenuIdentitySchemaError as exc:
         raise MenuSchemaNotMigrated(str(exc)) from None

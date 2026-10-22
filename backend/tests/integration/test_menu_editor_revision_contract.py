@@ -73,7 +73,7 @@ def revision_store(request, tmp_path, monkeypatch):
         with engine.begin() as connection:
             _apply_0030(connection)
         monkeypatch.setattr(db, "SessionLocal", sessionmaker(engine, autoflush=False))
-        monkeypatch.setattr(base_menu_service, "engine", engine)
+        monkeypatch.setattr(base_menu_service, "get_engine", lambda: engine)
         yield engine
     finally:
         engine.dispose()

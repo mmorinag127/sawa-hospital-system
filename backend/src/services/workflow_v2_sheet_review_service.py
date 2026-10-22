@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import json
 import os
 import re
@@ -1322,7 +1323,8 @@ def propose_auto_sheet_edits(
         combined_payload_patches: list[dict[str, Any]] = []
         failed_chunks = 0
         with ThreadPoolExecutor(max_workers=min(max_workers, len(target_chunks))) as executor:
-            chunk_results = list(executor.map(request_chunk, enumerate(target_chunks)))
+            work = [(copy_context(), item) for item in enumerate(target_chunks)]
+            chunk_results = list(executor.map(lambda item: item[0].run(request_chunk, item[1]), work))
         for payload, meta, chunk_index, target_count in chunk_results:
             chunk_status = _normalize_text(meta.get("status") if isinstance(meta, dict) else "")
             patch_items = payload.get("patches") if isinstance(payload, dict) else []

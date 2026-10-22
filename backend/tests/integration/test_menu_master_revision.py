@@ -97,7 +97,7 @@ def store(database, monkeypatch):
         apply_migration(connection, "0023_monthly_menu_item_identity_indexes.py")
         apply_migration(connection, "0026_user_system_access.py")
     monkeypatch.setattr(db, "SessionLocal", sessionmaker(database, autoflush=False))
-    monkeypatch.setattr(service, "engine", database)
+    monkeypatch.setattr(service, "get_engine", lambda: database)
     monkeypatch.setattr(service, "_MENU_SCHEMA_INITIALIZED", False)
     return database
 

@@ -10,7 +10,7 @@ from google.oauth2 import id_token
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from src.db import session_scope
+from src.db import control_session_scope as session_scope
 
 
 class UserContext:

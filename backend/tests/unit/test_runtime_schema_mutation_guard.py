@@ -8,6 +8,7 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import make_url
+from src.models.facility_template_version import FacilityTemplateVersion
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -105,7 +106,7 @@ def test_base_menu_owned_sqlite_missing_schema_is_unchanged_without_ddl(monkeypa
     from src.services import base_menu_service
 
     engine = create_engine("sqlite://")
-    monkeypatch.setattr(base_menu_service, "engine", engine)
+    monkeypatch.setattr(base_menu_service, "get_engine", lambda: engine)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
     try:
@@ -138,7 +139,7 @@ def test_base_menu_owned_sqlite_partial_schema_is_unchanged_without_ddl(monkeypa
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE base_menu_cycle_items (id VARCHAR PRIMARY KEY, cycle_day INTEGER NOT NULL)"))
-    monkeypatch.setattr(base_menu_service, "engine", engine)
+    monkeypatch.setattr(base_menu_service, "get_engine", lambda: engine)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
     try:
@@ -178,7 +179,7 @@ def test_facility_template_version_owned_sqlite_missing_schema_is_unchanged_with
     from src.services import facility_template_version_service
 
     engine = create_engine("sqlite://")
-    monkeypatch.setattr(facility_template_version_service, "engine", engine)
+    monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
@@ -195,7 +196,7 @@ def test_facility_template_version_owned_sqlite_missing_schema_is_unchanged_with
 def test_facility_template_version_missing_orm_column_blocks_without_runtime_repair(monkeypatch) -> None:
     from src.services import facility_template_version_service
 
-    required = {column.name for column in facility_template_version_service.FacilityTemplateVersion.__table__.columns}
+    required = {column.name for column in FacilityTemplateVersion.__table__.columns}
 
     class PartialSchemaInspector:
         def get_table_names(self):
@@ -216,7 +217,7 @@ def test_facility_template_version_owned_sqlite_partial_schema_is_unchanged_with
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE facility_template_versions (id VARCHAR PRIMARY KEY, facility_id VARCHAR NOT NULL)"))
-    monkeypatch.setattr(facility_template_version_service, "engine", engine)
+    monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
@@ -234,8 +235,8 @@ def test_facility_template_version_migrated_schema_validates_twice_without_ddl(m
     from src.services import facility_template_version_service
 
     engine = create_engine("sqlite://")
-    facility_template_version_service.FacilityTemplateVersion.__table__.create(engine)
-    monkeypatch.setattr(facility_template_version_service, "engine", engine)
+    FacilityTemplateVersion.__table__.create(engine)
+    monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     statements, capture = _capture_sql(engine)
     try:
@@ -255,13 +256,13 @@ def test_runtime_import_and_base_menu_read_emit_no_ddl() -> None:
     def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
         statements.append(str(statement))
 
-    event.listen(base_menu_service.engine, "before_cursor_execute", capture)
+    event.listen(base_menu_service.get_engine(), "before_cursor_execute", capture)
     try:
         importlib.reload(base_menu_service)
         importlib.reload(facility_template_version_service)
         base_menu_service.list_items()
     finally:
-        event.remove(base_menu_service.engine, "before_cursor_execute", capture)
+        event.remove(base_menu_service.get_engine(), "before_cursor_execute", capture)
 
     assert _ddl(statements) == []
     assert len(statements) >= 2
@@ -287,7 +288,7 @@ def test_startup_blocks_missing_or_partial_facility_schema_without_ddl(monkeypat
     if partial:
         with engine.begin() as connection:
             connection.execute(text("CREATE TABLE facility_template_versions (id VARCHAR PRIMARY KEY, facility_id VARCHAR NOT NULL)"))
-    monkeypatch.setattr(facility_template_version_service, "engine", engine)
+    monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: None)
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: None)
@@ -308,8 +309,8 @@ def test_startup_accepts_migrated_facility_schema_without_ddl(monkeypatch, forma
     from src.services import facility_template_version_service
 
     engine = create_engine("sqlite://")
-    facility_template_version_service.FacilityTemplateVersion.__table__.create(engine)
-    monkeypatch.setattr(facility_template_version_service, "engine", engine)
+    FacilityTemplateVersion.__table__.create(engine)
+    monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
     monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: None)
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: None)
@@ -345,7 +346,7 @@ def test_postgres_missing_facility_effective_date_indexes_blocks_without_mutatio
                 "validation_json JSON, valid_from DATE, valid_to DATE, created_by VARCHAR, "
                 "created_at TIMESTAMP NOT NULL, activated_at TIMESTAMP, archived_at TIMESTAMP)"
             ))
-            monkeypatch.setattr(facility_template_version_service, "engine", connection)
+            monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: connection)
             monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
             before = {
                 "columns": tuple(sorted(column["name"] for column in inspect(connection).get_columns("facility_template_versions"))),

@@ -25,7 +25,7 @@ from src.services import order_form_service as forms
 def monthly(tmp_path, monkeypatch):
     saved = SavedSheetFixture(tmp_path, monkeypatch)
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    monkeypatch.setattr(menu_service, "engine", saved.engine)
+    monkeypatch.setattr(menu_service, "get_engine", lambda: saved.engine)
     monkeypatch.setattr(menu_service, "session_scope", saved.session_scope)
     monkeypatch.setattr(menu_service, "_MENU_SCHEMA_INITIALIZED", False)
     with saved.session_scope() as session:

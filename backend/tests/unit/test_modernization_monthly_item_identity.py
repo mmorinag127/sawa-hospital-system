@@ -42,7 +42,7 @@ def store(tmp_path, monkeypatch):
         model.__table__.to_metadata(metadata)
     metadata.create_all(engine)
     monkeypatch.setattr(db, "SessionLocal", sessionmaker(engine, autoflush=False, future=True))
-    monkeypatch.setattr(service, "engine", engine)
+    monkeypatch.setattr(service, "get_engine", lambda: engine)
     monkeypatch.setattr(service, "_MENU_SCHEMA_INITIALIZED", False)
     with db.session_scope() as session:
         session.add_all([

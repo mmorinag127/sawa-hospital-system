@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from urllib.parse import urlparse
+from src import staging_data as datasets
 
 PREFIX = "HOSPITAL_INGEST_DELIVERY_"
 
@@ -38,9 +39,9 @@ def task_contract(delivery_id, generation, config):
         return local.contract(delivery_id, generation, "ingest")
     parent = f'projects/{config["PROJECT_ID"]}/locations/{config["LOCATION"]}/queues/{config["QUEUE"]}'
     body = json.dumps({"delivery_id": delivery_id, "generation": generation}, sort_keys=True, separators=(",", ":"))
-    return {"name": f"{parent}/tasks/{delivery_id}-g{generation}",
+    return {"name": f"{parent}/tasks/{datasets.delivery_namespace()}{delivery_id}-g{generation}",
         "http_request": {"http_method": "POST", "url": config["TARGET_URL"].rstrip("/") + "/worker/ingest-deliveries/process",
-            "body": base64.b64encode(body.encode()).decode(), "headers": {"Content-Type": "application/json"},
+            "body": base64.b64encode(body.encode()).decode(), "headers": {"Content-Type": "application/json", **datasets.delivery_headers()},
             "oidc_token": {"service_account_email": config["SERVICE_ACCOUNT_EMAIL"], "audience": config["AUDIENCE"]}},
         "dispatch_deadline": {"seconds": int(config["DISPATCH_DEADLINE_SECONDS"])}}
 
@@ -50,7 +51,9 @@ def renew_contract(original, delivery_id, generation):
         from src.services import agent_trial_transport as local
         return local.contract(delivery_id, generation, original["kind"])
     contract = deepcopy(original)
-    contract["name"] = original["name"].rsplit("/tasks/", 1)[0] + f"/tasks/{delivery_id}-g{generation}"
+    dataset = original["http_request"].get("headers", {}).get(datasets.HEADER)
+    namespace = dataset + "-" if dataset else ""
+    contract["name"] = original["name"].rsplit("/tasks/", 1)[0] + f"/tasks/{namespace}{delivery_id}-g{generation}"
     contract["http_request"]["body"] = base64.b64encode(json.dumps(
         {"delivery_id": delivery_id, "generation": generation}, sort_keys=True, separators=(",", ":")).encode()).decode()
     return contract
@@ -111,6 +114,11 @@ def dispatch(delivery_id, generation):
     if observed is None:
         return {"action": "noop"}
     contract = observed["task_contract"]
+    if datasets.current_dataset() != "test":
+        http = contract.get("http_request", {})
+        if (http.get("headers", {}).get(datasets.HEADER) != datasets.current_dataset()
+                or "-stg-" not in urlparse(http.get("url", "")).netloc):
+            raise datasets.DatasetUnavailable("staging_dataset_original_delivery_not_replayable")
     from src.services import agent_trial_transport as trial_transport
     if trial_transport.enabled() and contract.get("mode") != "request_local":
         raise ValueError("request_local_saved_contract_required")
