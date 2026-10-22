@@ -28,13 +28,23 @@ function localDependencies(directory) {
 
 test('deps stage copies every declared committed local dependency before npm ci', () => {
   const docker = fs.readFileSync(path.join(frontend, 'Dockerfile'), 'utf8');
-  const deps = docker.split('FROM node:24-slim AS builder')[0];
+  const deps = docker.split('FROM trusted-base AS builder')[0];
   assert.match(deps, /^COPY vendor \.\/vendor$/m);
   assert.ok(deps.indexOf('COPY vendor ./vendor') < deps.indexOf('RUN npm ci'));
   const old = execFileSync('git', ['show', '4a9beb430da25f878eb8a3bdd6e834298c803afe:frontend/Dockerfile'], { cwd: root, encoding: 'utf8' });
   assert.equal((old.match(/FROM node:20-slim/g) || []).length, 3);
-  const expected = old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor')
-    .replaceAll('FROM node:20-slim', 'FROM node:24-slim')
+  const trustedBase = [
+    'FROM node:24-trixie-slim AS trusted-base',
+    'RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \\',
+    '    && dpkg --compare-versions "$(dpkg-query -W -f=\'${Version}\' ca-certificates)" ge \'20250419+deb13u1\' \\',
+    '    && rm -rf /var/lib/apt/lists/*',
+    'ENV NODE_OPTIONS=--use-openssl-ca \\',
+    '    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \\',
+    '    SSL_CERT_DIR=/etc/ssl/certs',
+    '', '',
+  ].join('\n');
+  const expected = trustedBase + old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor')
+    .replaceAll('FROM node:20-slim', 'FROM trusted-base')
     .replace('ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\n', 'ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\nARG NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=false\n')
     .replace('ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\n', 'ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\nENV NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=${NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED}\n');
   assert.equal(docker, expected);

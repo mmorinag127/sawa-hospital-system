@@ -2,7 +2,7 @@
   "source_revision": "f7613fb2e9f78a9ac6c7be8544afa218ed23ad81",
   "working_diff_sha256": "525d2c719556bd3bb966ef5c8a44b7ad33e169f60b2802336f9ca3963425c1e1",
   "files": {
-    "backend/Dockerfile": "10cfbd32e844433bb88ac49351ca2d9728cb0c2b3d946247f5813a3f43d4ee24",
+    "backend/Dockerfile": "f1e62cf30bfcecfac19c2a553c526e3825b1e418a6160d63f60ebb10f320a61b",
     "backend/alembic.ini": "a19975a026a14db3e2df558cf079c07a6725f2aa66d9ad94c460115c09c40925",
     "backend/conftest.py": "65266a48dcd50c7acfd52e6c4f964813aef12cff38d2ed90bd1c8e3ac414125e",
     "backend/migrations/env.py": "f898a678fc960312011b080b25939c69166e9dad538d136d773841bd243d8ddd",
@@ -37,7 +37,7 @@
     "backend/migrations/versions/0028_ocr_source_execution.py": "6afc7e03991da0931b59c432559e2d66dd10dd75e46ac509a61e8427924204e8",
     "backend/migrations/versions/0029_process_patterns.py": "0b01de0f058c133b149f5979ec1346fa7b1a90994e2cdc8bf9731b7656bcc9fb",
     "backend/migrations/versions/0030_shared_menus.py": "877573fc75f3a494503c7136facf77097015fe6ed9ecd6435bf30952bd00d825",
-    "backend/requirements.txt": "891cd4969d8f8659d49906ff2e546d2b7f8cd9447ee58ceb9ed52f4b026e3f41",
+    "backend/requirements.txt": "b984c3f36f9bb2291a293ee545eddd9786b1e37b70dd0e73d83214d35d3bf9d7",
     "backend/src/api/__init__.py": "87ac2145ab9e98a7b78a3ab0e52dd62324fb4ebe25af6c2fc277d94ee5ea3d9d",
     "backend/src/api/auth.py": "3c7dcb5e699032a8a67b9e5c841e3d93096a0f09d75f9f879b82dd191e0b4e39",
     "backend/src/api/auth_config.py": "a4a98485660936073c666094047f482f7adc7f4217a7c99627899942d47e912a",
@@ -172,13 +172,26 @@
     "ocr_pipeline/app/__init__.py": "239d83c6689305933995844468a70102d155047d75da5fe8ac8197008c7d23ff",
     "ocr_pipeline/app/pdf_render.py": "9f547faf6bc21af4466014959928839fb945f637eaa01fbfaa477c22179a84dc",
     "ocr_pipeline/app/yomitoku_runner.py": "006fdffece260585b68c46cdfbf4c7864360d9540c19498502cd800bb6da1cfc",
-    "worker/Dockerfile": "9b56bc9ec6d6c96de0c643df8ed5109304d652542165d708de948729f5329543",
+    "worker/Dockerfile": "3f2d6c28102c9085b4dcd9f7f848f50993a14c0728fee72cda68dd4cf6f459e3",
     "worker/requirements-test.txt": "0ab1665b03138b9696c78d616295dcfe6a7a6bb9bba3ffee130d8d884c23b91d",
-    "worker/requirements.txt": "6a6bc8483d6dd8f3b0ec4878c44575768e4172cfe41f8c7a4aad4f617dcc7781",
+    "worker/requirements.txt": "b0156c337a874895e2b7823e07c2e11872dd5aaeb3685f75a28cbcf0f51ce3b0",
     "worker/scripts/prewarm_yomitoku_models.py": "4d5867ae5ed72469fdfa77838d26f84224539eb4393f905e33e269a967e13998",
     "worker/service/__init__.py": "f7c2bef8d21b43d78c690fb9d54cb26ef47e6bdbeb8d68a886dae59ac079e290",
     "worker/service/main.py": "54e8117c060cb05e47f920e2c57a90a440ee4681079c7a78017f5912ff1fbc10",
     "worker/service/runtime.py": "5b6ab51fc6c472012751f6b107d1170b0ceba22fa2ed460bcdcf04dfafbfdc33",
     "worker/service/shared_backend.py": "d0c48c70fe1edfc0c93fd6ae70df7f3a47a52693d938a4379854fae42e2d62b3"
-  }
+  },
+  "security_patches": [
+    {
+      "purpose": "emSign CA trust-store remediation",
+      "repository": "mmorinag127/sawa-hospital-system",
+      "commit": "df3cb20133b6a213d9d9d2628f6f2918e295f941",
+      "files": [
+        "backend/Dockerfile",
+        "backend/requirements.txt",
+        "worker/Dockerfile",
+        "worker/requirements.txt"
+      ]
+    }
+  ]
 }

@@ -15,7 +15,8 @@ class ImageProofGuards(unittest.TestCase):
         cls.raw = (ROOT / ".github/workflows/modernization-image-ci.yml").read_text()
         cls.workflow = yaml.load(cls.raw, Loader=yaml.BaseLoader)
         cls.job = cls.workflow["jobs"]["frontend-image"]
-        cls.script = cls.job["steps"][1]["run"]
+        cls.script = next(step["run"] for step in cls.job["steps"]
+                          if step.get("name") == "Build actual frontend image and verify vendored dependency")
 
     def test_trigger_identity_and_permissions(self):
         self.assertEqual(set(self.workflow["on"]), {"workflow_dispatch", "push"})
@@ -26,7 +27,9 @@ class ImageProofGuards(unittest.TestCase):
         self.assertEqual(self.workflow["permissions"], {"contents": "read"})
         self.assertEqual(self.job["runs-on"], "ubuntu-24.04")
         self.assertEqual(self.job["timeout-minutes"], "30")
-        self.assertEqual(self.job["steps"][0]["with"]["persist-credentials"], "false")
+        checkout = next(step for step in self.job["steps"]
+                        if step.get("uses", "").startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
 
     def test_real_context_and_failure_evidence(self):
         for value in ("prepare_web_deploy_source.sh", "validate_web_deploy_source.sh",
