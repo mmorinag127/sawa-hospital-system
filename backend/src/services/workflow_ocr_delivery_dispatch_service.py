@@ -86,7 +86,7 @@ def inspect_task(client, contract):
     if (task.name != contract["name"] or request.url != expected["url"]
             or request.http_method != tasks_v2.HttpMethod.POST
             or bool(request.body)
-            or request.headers.get(datasets.HEADER) != expected.get("headers", {}).get(datasets.HEADER)
+            or not datasets.delivery_dataset_matches(request.headers, expected.get("headers", {}).get(datasets.HEADER))
             or tasks_v2.HttpRequest.pb(request).HasField("oauth_token")
             or request.oidc_token.service_account_email != expected["oidc_token"]["service_account_email"]
             or request.oidc_token.audience != expected["oidc_token"]["audience"]

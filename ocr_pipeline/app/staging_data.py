@@ -211,6 +211,11 @@ def delivery_headers():
     return {HEADER: current_dataset()} if current_dataset() != "test" else {}
 
 
+def delivery_dataset_matches(headers, identity):
+    values = [value for key, value in headers.items() if key.lower() == HEADER.lower()]
+    return values == [identity] if identity is not None else not values
+
+
 def delivery_namespace():
     return current_dataset() + "-" if current_dataset() != "test" else ""
 

@@ -205,3 +205,17 @@ def test_replay_refuses_frozen_production_delivery_before_transport(snapshot, mo
     monkeypatch.setattr(tasks_v2, "CloudTasksClient", forbidden_client)
     with data.dataset_context(snapshot["id"]), pytest.raises(data.DatasetUnavailable, match="original_delivery_not_replayable"):
         workflow.dispatch("copied-delivery", 1)
+
+
+@pytest.mark.parametrize("headers,identity,valid", [
+    ({"X-Sawa-Dataset": "replay-case"}, "replay-case", True),
+    ({"x-sawa-dataset": "replay-case"}, "replay-case", True),
+    ({"X-SAWA-DATASET": "replay-case", "Content-Type": "application/json"}, "replay-case", True),
+    ({"X-Sawa-Dataset": "replay-case", "x-sawa-dataset": "replay-other"}, "replay-case", False),
+    ({"X-Sawa-Dataset": "replay-case", "x-sawa-dataset": "replay-case"}, "replay-case", False),
+    ({"x-sawa-dataset": "replay-other"}, "replay-case", False),
+    ({}, "replay-case", False), ({}, None, True),
+    ({"x-sawa-dataset": "replay-case"}, None, False),
+])
+def test_provider_header_case_does_not_change_snapshot_and_duplicate_aliases_stop(headers, identity, valid):
+    assert data.delivery_dataset_matches(headers, identity) is valid
