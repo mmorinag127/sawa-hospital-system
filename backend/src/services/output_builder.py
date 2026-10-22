@@ -30,6 +30,7 @@ from openpyxl.utils import column_index_from_string, get_column_letter, range_bo
 from openpyxl.xml.functions import xmlfile, tostring as openpyxl_tostring
 
 from src.db import session_scope
+from src.staging_data import local_directory
 from src.models.order import Order
 from src.models.output import Bag, LabelRow, DeliveryNote, ManufacturingAggregateRow
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle

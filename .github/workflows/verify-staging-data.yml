@@ -1,0 +1,86 @@
+name: Verify staging dataset isolation
+permissions:
+  contents: read
+env:
+  NODE_OPTIONS: --use-openssl-ca
+  CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE: /etc/ssl/certs/ca-certificates.crt
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Update and verify Ubuntu CA certificates (USN-8944-1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          test "$NODE_OPTIONS" = --use-openssl-ca
+          test -z "${NODE_EXTRA_CA_CERTS:-}"
+          test -z "${NODE_USE_SYSTEM_CA:-}"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' 'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - name: Require owner dispatch
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: test "$ACTOR" = "$OWNER"
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact named source
+        env:
+          SOURCE_REF: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git check-ref-format "refs/heads/$SOURCE_REF"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse "refs/remotes/origin/$SOURCE_REF")" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.22.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: 0.13.4
+          enable-cache: false
+      - name: Run isolated dataset regressions
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          uv sync --project backend --locked --extra dev --python 3.11
+          DB_URI="sqlite:///$RUNNER_TEMP/dataset-control.sqlite" PYTHONPATH=backend backend/.venv/bin/python -m pytest backend/tests/unit/test_staging_dataset_boundary.py backend/tests/unit/test_staging_database_sessions.py backend/tests/unit/test_ingest_delivery_contract.py backend/tests/unit/test_runtime_schema_mutation_guard.py backend/tests/unit/test_stg_ocr_producer_deploy.py backend/tests/unit/test_h2_storage_uri_contract.py backend/tests/unit/test_h2_grid_source_contract.py -q --basetemp=tmp/dataset-ci
+          (cd frontend && npm ci --include=dev && node --test tests/staging-dataset*.test.cjs tests/shell-controls-source.test.cjs tests/api-client-session.test.cjs)
+          (cd frontend && ./node_modules/.bin/tsc --noEmit)
+          test -z "$(git status --porcelain)"
+      - name: Preserve isolated test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-data-order-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            tmp/**/pytest.log
+            tmp/**/server.log
+            tmp/dataset-formal-output
+          if-no-files-found: warn
+    if: github.actor == github.repository_owner
+    timeout-minutes: 60
+'on':
+  push:
+    branches:
+      - codex/stg-db-selection-20261022
+  workflow_dispatch: {}
