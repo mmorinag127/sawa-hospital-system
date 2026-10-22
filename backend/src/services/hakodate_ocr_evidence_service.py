@@ -92,14 +92,13 @@ def _quantity_recognizer_issue(source: dict[str, Any]) -> str | None:
     return None
 
 
-def recognition_input_issue(source: dict[str, Any]) -> str | None:
-    observation_issue = None
-    if 'recognizer_preprocess_observation' in source:
+def validate_recognizer_input_geometry(source: dict[str, Any]) -> None:
+    if "recognizer_preprocess_observation" in source:
         from src.services.hakodate_preprocess_observation import validate_metadata
-        observation_issue = validate_metadata(source)
+        validate_metadata(source)
     evidence = source.get("recognizer_input_evidence")
     if "recognizer_input_evidence" not in source:
-        return _quantity_recognizer_issue(source) or source.get("quantity_source_issue") or None
+        return
     if (not isinstance(evidence, dict) or evidence.get("contract") != "hakodate_contact_crop/v1"
             or type(evidence.get("all_white")) is not bool
             or not isinstance(evidence.get("bbox"), list) or len(evidence["bbox"]) != 4
@@ -111,6 +110,18 @@ def recognition_input_issue(source: dict[str, Any]) -> str | None:
     x0, y0, x1, y1 = evidence["bbox"]
     if x0 < 0 or y0 < 0 or x1 - x0 != evidence["width"] or y1 - y0 != evidence["height"]:
         raise ValueError("hakodate_recognizer_input_evidence_invalid")
+
+
+def recognition_input_issue(source: dict[str, Any]) -> str | None:
+    """Historic recognition diagnostics, never a sheet-generation gate."""
+    validate_recognizer_input_geometry(source)
+    observation_issue = None
+    if 'recognizer_preprocess_observation' in source:
+        from src.services.hakodate_preprocess_observation import validate_metadata
+        observation_issue = validate_metadata(source)
+    evidence = source.get("recognizer_input_evidence")
+    if evidence is None:
+        return _quantity_recognizer_issue(source) or source.get("quantity_source_issue") or None
     if evidence["all_white"] and any(str(source.get(key) or "").strip() for key in
             ("raw_text", "text", "recognizer_raw_text", "ocr_text", "ocr_normalized", "pred_digits")):
         return "hakodate_blank_input_nonempty_prediction"
@@ -122,17 +133,15 @@ def recognition_input_issue(source: dict[str, Any]) -> str | None:
 
 
 def recognition_resolution(source: dict[str, Any]) -> dict[str, Any]:
-    """Keep model diagnostics separate from a usable cell value."""
-    issue = recognition_input_issue(source)
-    if issue:
-        return {"resolution_state": "review_required", "resolved_value": None,
-                "quantity_source_issue": issue}
-    value = source.get("ocr_normalized")
-    if source.get("role") == "quantity":
-        value = normalize_ocr_value(source.get("recognizer_raw_text", source.get("raw_text", "")))
-    elif source.get("role") == "note":
-        value = source.get("recognizer_raw_text", source.get("raw_text", ""))
-    return {"resolution_state": "resolved", "resolved_value": value}
+    """Recognized cell contents belong to the operator's editable sheet."""
+    validate_recognizer_input_geometry(source)
+    if source.get("role") != "quantity":
+        issue = recognition_input_issue(source)
+        if issue:
+            return {"resolution_state": "review_required", "resolved_value": None,
+                    "quantity_source_issue": issue}
+    value = source.get("recognizer_raw_text", source.get("raw_text", ""))
+    return {"resolution_state": "resolved", "resolved_value": str(value if value is not None else "")}
 
 
 def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -143,7 +152,7 @@ def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
         source = metadata.get("recognizer_output")
         if not isinstance(source, dict):
             continue
-        issue = recognition_input_issue(source)
+        issue = source.get("quantity_source_issue") if source.get("resolution_state") == "review_required" else None
         if issue is None:
             continue
         cell = metadata.get("sheet_cell")
@@ -156,47 +165,47 @@ def recognition_review(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {"cells": cells, "count": len(cells)}
 
 
+def quantity_content_rejection_only(payload: dict[str, Any]) -> bool:
+    """Identify historic content-only rejection without changing its artifacts.
+
+    Callers must still validate source receipts, artifacts and cell mappings.
+    """
+    pipeline = payload.get("hakodate_canonical_pipeline")
+    container = payload.get("hakodate_ocr_evidence")
+    records = container.get("records") if isinstance(container, dict) else None
+    if (not isinstance(pipeline, dict) or not isinstance(records, list)
+            or any(not isinstance(record, dict) for record in records)):
+        return False
+    try:
+        review = recognition_review(records)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not review["count"] or payload.get("hakodate_recognition_review") != review:
+        return False
+    identities = {record.get("evidence_id") for record in records}
+    allowed = {f"hakodate_ocr_quantity_unresolved: {identity}" for identity in identities}
+    allowed.add("hakodate_assignment_missing")
+    blockers = pipeline.get("blockers")
+    return (pipeline.get("status") == "blocked" and isinstance(blockers, list)
+            and bool(blockers) and all(item in allowed for item in blockers))
+
+
 def validate_ocr_quantity_source(record: dict[str, Any]) -> str:
-    sources = [record]
-    metadata = record.get("engine_metadata")
-    if isinstance(metadata, dict):
-        if metadata.get("quantity_source_issue"):
-            raise ValueError("hakodate_ocr_quantity_unresolved")
-        original = metadata.get("recognizer_output")
-        if isinstance(original, dict):
-            sources.append(original)
-        original_values = metadata.get("source_values")
-        if isinstance(original_values, dict):
-            sources.append(original_values)
-    values = []
-    for source in sources:
-        if recognition_input_issue(source):
-            raise ValueError("hakodate_ocr_quantity_unresolved")
-        raw_keys = [key for key in ("raw_text", "text", "recognizer_raw_text", "ocr_text") if key in source]
-        if not raw_keys:
-            raise ValueError("hakodate_ocr_quantity_source_missing")
-        for key in raw_keys:
-            value = normalize_ocr_value(source[key])
-            if value and not re.fullmatch(r"[0-9]+", value):
-                raise ValueError("hakodate_ocr_quantity_unresolved")
-            values.append(value)
-        for key in ("normalized_value", "ocr_normalized", "pred_digits", "resolved_value"):
-            if key in source and source[key] is not None:
-                value = normalize_ocr_value(source[key])
-                if value and not re.fullmatch(r"[0-9]+", value):
-                    raise ValueError("hakodate_ocr_quantity_unresolved")
-                values.append(value)
-        candidate = source.get("recognizer_accepted_candidate")
-        if isinstance(candidate, dict):
-            for key in ("text", "normalized_digits"):
-                if key in candidate and candidate[key] is not None:
-                    value = normalize_ocr_value(candidate[key])
-                    if value and not re.fullmatch(r"[0-9]+", value):
-                        raise ValueError("hakodate_ocr_quantity_unresolved")
-                    values.append(value)
-    if len(set(values)) != 1:
-        raise ValueError("hakodate_ocr_quantity_source_conflict")
-    return values[0]
+    # Do not interpret, normalize, or validate quantity contents. Provenance,
+    # target identity and geometry are validated independently before projection.
+    metadata = record.get("engine_metadata") or {}
+    original = metadata.get("recognizer_output")
+    if isinstance(original, dict) and "recognizer_raw_text" in original:
+        value = original["recognizer_raw_text"]
+        if record.get("raw_text", record.get("text")) != value:
+            raise ValueError("hakodate_ocr_quantity_source_conflict")
+    elif "raw_text" in record:
+        value = record["raw_text"]
+    elif "text" in record:
+        value = record["text"]
+    else:
+        raise ValueError("hakodate_ocr_quantity_source_missing")
+    return str(value if value is not None else "")
 
 
 def authored_cell_role(target: dict[str, Any]) -> str:
@@ -219,6 +228,7 @@ def validate_ocr_source_for_role(record: dict[str, Any], role: str, *, accepted_
     if isinstance(metadata, dict):
         sources.extend(metadata[key] for key in ("recognizer_output", "source_values") if isinstance(metadata.get(key), dict))
     for source in sources:
+        validate_recognizer_input_geometry(source)
         if "role" in source and authored_cell_role(source) != role:
             raise ValueError("hakodate_target_role_conflict")
         for key in ("field", "semantic_field"):
@@ -286,13 +296,10 @@ def validate_assigned_ocr_quantity(assignment: dict[str, Any]) -> str:
         raw_texts = [operator_values[identity] if identity in operator_values else raw
                      for identity, raw in zip(identities, raw_texts)]
     values = [
-        validate_ocr_quantity_source({"raw_text": raw, "normalized_value": value})
+        validate_ocr_quantity_source({"raw_text": raw})
         for raw in raw_texts
     ]
-    if (
-        len(set(values)) != 1 or (state == "blank_evidence" and values[0])
-        or (state == "assigned" and not values[0])
-    ):
+    if len(set(values)) != 1 or str(value if value is not None else "") != values[0]:
         raise ValueError("hakodate_ocr_quantity_source_conflict")
     return values[0]
 
@@ -361,7 +368,7 @@ def evidence_from_records(
             "ocr_normalized", "pred_digits", "resolved_value", "recognizer_accepted_candidate", "role", "field", "semantic_field",
         ) if key in record})
         original = metadata.get("recognizer_output")
-        review_required = isinstance(original, dict) and recognition_input_issue(original) is not None
+        review_required = isinstance(original, dict) and original.get("resolution_state") == "review_required"
         normalized_value = None if review_required else raw_text
         source_bbox = _as_float_box(record.get("source_bbox") or record.get("bbox"))
         center = _as_center(record.get("center"), fallback_box=source_bbox)

@@ -240,7 +240,8 @@ def authored_native_payload(f, boundary, quantity, *, note=None):
             crop = contact_crop_evidence(image, [[0, 0], [24, 0], [24, 32], [0, 32]])
         for region in digits:
             region.update(ocr_text=None, ocr_normalized=None, pred_digits=None, resolved_value=None,
-                resolution_state="review_required", recognizer_input_evidence=crop, ocr_contact_crop_box=crop["bbox"])
+                resolution_state="review_required", quantity_source_issue="hakodate_ocr_quantity_non_numeric",
+                recognizer_input_evidence=crop, ocr_contact_crop_box=crop["bbox"])
     Path(outputs["records"]).write_text(json.dumps(digits))
     Path(outputs["ocr_regions"]).write_text(json.dumps(digits))
     packet = artifacts.persist_outputs(order_id=f["order_id"], outputs=outputs, source_receipt=source,
@@ -267,6 +268,8 @@ def authored_native_payload(f, boundary, quantity, *, note=None):
         "hakodate_ocr_evidence": {"records": records}, "hakodate_ocr_evidence_records": deepcopy(records)}
     if review_required:
         payload["hakodate_recognition_review"] = evidence_service.recognition_review(records)
+        payload["hakodate_canonical_pipeline"]["blockers"] = [
+            f"hakodate_ocr_quantity_unresolved: {record['evidence_id']}" for record in records]
     order_service._validate_hakodate_owned_artifacts(payload, source, allow_review=review_required)
     return payload
 

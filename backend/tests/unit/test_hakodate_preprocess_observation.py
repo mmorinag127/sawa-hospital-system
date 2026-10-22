@@ -57,10 +57,10 @@ def test_fresh_empty_raw_resolves_without_value_replacement_or_auto_selection(mo
 
 
 @pytest.mark.parametrize('raw',['1','0','26','-'])
-def test_white_nonempty_raw_remains_review_even_with_valid_observation(monkeypatch,raw):
+def test_white_quantity_raw_remains_editable_with_observation(monkeypatch,raw):
     contact,regions,polygons,_ = prepare(image())
     rows,_ = recognize(monkeypatch,contact,regions,polygons,[raw],[.99])
-    assert rows[0]['recognizer_raw_text'] == raw and rows[0]['resolved_value'] is None
+    assert rows[0]['recognizer_raw_text'] == raw and rows[0]['resolved_value'] == raw
     assert evidence.recognition_input_issue(rows[0]) == 'hakodate_blank_input_nonempty_prediction'
 
 
@@ -69,16 +69,12 @@ def test_nonwhite_numbers_and_nonnumeric_authority_unchanged(monkeypatch,glyph):
     contact,regions,polygons,_ = prepare(image(glyph))
     rows,_ = recognize(monkeypatch,contact,regions,polygons,[glyph],[.99])
     assert rows[0]['recognizer_raw_text'] == glyph
-    if glyph == '-':
-        assert rows[0]['resolved_value'] is None
-        assert evidence.recognition_input_issue(rows[0]) == 'hakodate_ocr_quantity_non_numeric'
-    else:
-        assert rows[0]['resolved_value'] == glyph
-        assert evidence.validate_ocr_quantity_source(record(rows[0])) == glyph
+    assert rows[0]['resolved_value'] == glyph
+    assert evidence.validate_ocr_quantity_source(record(rows[0])) == glyph
 
 
 @pytest.mark.parametrize('white',[True,False])
-def test_actual_warp_mismatch_stops_even_for_empty_raw_or_nonwhite_final(monkeypatch,white):
+def test_warp_diagnostic_does_not_replace_quantity_raw(monkeypatch,white):
     wrong = np.full((60,80,3),255,np.uint8)
     if not white:
         cv2.putText(wrong,'1',(30,40),cv2.FONT_HERSHEY_SIMPLEX,.8,(0,0,0),2)
@@ -86,7 +82,8 @@ def test_actual_warp_mismatch_stops_even_for_empty_raw_or_nonwhite_final(monkeyp
         wrong,[0.,0.,80.,60.],(0,0,80,60),(80,80,160,140)))
     contact,regions,polygons,_ = prepare(image('26'))
     rows,_ = recognize(monkeypatch,contact,regions,polygons,['' if white else '1'],[.99])
-    assert rows[0]['resolution_state'] == 'review_required' and rows[0]['resolved_value'] is None
+    assert rows[0]['resolution_state'] == 'resolved'
+    assert rows[0]['resolved_value'] == rows[0]['recognizer_raw_text']
     assert evidence.recognition_input_issue(rows[0]) == 'hakodate_preprocess_ink_loss'
 
 

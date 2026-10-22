@@ -34,6 +34,7 @@ tests/
 
 <!-- MANUAL ADDITIONS START -->
 ## Operator Rules (Manual)
+- 数量欄の内容はユーザーがシート上で手動修正する。非数値・記号・空欄・認識スコア・候補差異を理由にOCR結果の採用や編集用シート生成を停止しない。認識原文を推測・置換せず編集可能なシートへ転記する。施設・週・テンプレート・原本・セル位置の整合性検査とは分離し、手動修正済みの値を保持する。数量内容の検査で止めたまま、エラー表示の改善だけを修正完了としてはならない。
 - Do not use partial `gcloud run services update` that can drop env vars. If Cloud Run env changes are required, update all env vars in one operation or use IaC only.
 - Do not change behavior in areas already working. Only modify what the user explicitly requests.
 - Before touching Cloud Run settings, enumerate and verify all required env vars; do not proceed if any are missing.

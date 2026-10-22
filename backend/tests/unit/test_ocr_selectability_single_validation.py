@@ -69,7 +69,10 @@ def test_real_validation_and_raw_snapshot_parity(reviewed_order, accepted, basel
     before = deepcopy(vars(row)), snapshot(engine)
     old, old_validations, old_reads = evaluate(baseline, row)
     new, new_validations, new_reads = evaluate(service.evidence_run_selectability_error, row)
-    assert new == old
+    if review is not None and not accepted:
+        assert new is None and old == 'evidence_unusable'
+    else:
+        assert new == old
     assert new_validations == 1
     if new is None:
         assert old_validations == 2

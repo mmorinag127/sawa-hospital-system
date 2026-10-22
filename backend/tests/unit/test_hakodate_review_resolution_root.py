@@ -51,12 +51,21 @@ def record(source):
 
 @pytest.mark.parametrize('role', ['quantity', 'note'])
 @pytest.mark.parametrize('raw', ['1', '0', '26', '-', '--'])
-def test_white_conflict_has_no_resolved_value_and_raw_is_reviewable(monkeypatch, role, raw):
+def test_white_quantity_raw_is_editable_and_note_diagnostics_are_retained(monkeypatch, role, raw):
     rows, _ = recognize(monkeypatch, Image.new('RGB', (80,60), 'white'), [region(role)],
                          [[[0,0],[80,0],[80,60],[0,60]]], [raw])
     source = rows[0]
     assert source['recognizer_raw_text'] == raw and source['recognizer_score'] == .08
     assert source['recognizer_candidates'] == [{'text': '1', 'score': .08}]
+    if role == 'quantity':
+        assert source['resolution_state'] == 'resolved' and source['resolved_value'] == raw
+        records = evidence.evidence_from_records([record(source)], run_id='own', engine='fixture', source_scope='fixture')
+        assigned = evidence.assign_evidence_to_target_cells(evidence_records=records,
+            target_cells=evidence.target_cells_from_regions([region(role)]))
+        assert assigned['blockers'] == []
+        sheet = evidence.sheet_output_from_assigned_results(assignments=assigned['assignments'], blockers=assigned['blockers'])
+        assert sheet['cells']['E11']['value_normalized'] == raw
+        return
     assert source['resolution_state'] == 'review_required'
     assert source['resolved_value'] is source['ocr_text'] is source['ocr_normalized'] is None
     assert not source['recognizer_accepted'] and not source['recognizer_candidate_accepted']
@@ -89,16 +98,12 @@ def test_real_font_numbers_remain_numbers(monkeypatch, raw):
 
 
 @pytest.mark.parametrize('role,raw', [('quantity','-'), ('quantity','--'), ('note','-'), ('note','--')])
-def test_nonnumeric_topk_is_review_for_quantity_but_literal_note(monkeypatch, role, raw):
+def test_nonnumeric_quantity_and_note_remain_literal(monkeypatch, role, raw):
     image = Image.new('RGB', (80,60), 'white'); ImageDraw.Draw(image).line((25,30,50,30), fill='black', width=3)
     rows, _ = recognize(monkeypatch, image, [region(role)], [[[0,0],[80,0],[80,60],[0,60]]], [raw])
     assert rows[0]['recognizer_raw_text'] == raw
-    if role == 'quantity':
-        assert rows[0]['resolved_value'] is None and rows[0]['ocr_normalized'] is None
-        assert rows[0]['quantity_source_issue'] == 'hakodate_ocr_quantity_non_numeric'
-    else:
-        assert rows[0]['resolved_value'] == raw and rows[0]['ocr_normalized'] == raw
-        assert evidence.validate_ocr_source_for_role(record(rows[0]), 'note') == raw
+    assert rows[0]['resolved_value'] == raw and rows[0]['ocr_normalized'] == raw
+    assert evidence.validate_ocr_source_for_role(record(rows[0]), role) == raw
 
 
 @pytest.mark.parametrize('x', range(5))
@@ -113,12 +118,12 @@ def test_thin_digit_erased_at_frame_cannot_become_blank(monkeypatch, x, size):
     if x == 0:
         assert rows[0]['recognizer_input_evidence']['all_white']
     if rows[0]['recognizer_input_evidence']['all_white']:
-        assert rows[0]['resolution_state'] == 'review_required' and rows[0]['resolved_value'] is None
+        assert rows[0]['resolution_state'] == 'resolved' and rows[0]['resolved_value'] == rows[0]['recognizer_raw_text']
         assert rows[0]['recognizer_preprocess_ink_removed']
 
 
 @pytest.mark.parametrize('raw', ['', '1'])
-def test_warp_digit_loss_stops_even_when_model_returns_empty(monkeypatch, raw):
+def test_quantity_model_raw_is_retained_despite_warp_diagnostic(monkeypatch, raw):
     image = Image.new('RGB', (80,60), 'white')
     ImageDraw.Draw(image).text((0,10), '1', font=ImageFont.load_default(size=10), anchor='lt', fill='black')
     authored = {**region(), 'polygon': [[0.,0.],[80.,0.],[80.,60.],[0.,60.]]}
@@ -128,7 +133,7 @@ def test_warp_digit_loss_stops_even_when_model_returns_empty(monkeypatch, raw):
         rectified_fax_bgr=cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR), regions=[authored], line_mask=None, mode='corner_cc')
     rows, _ = recognize(monkeypatch, contact, regions, polygons, [raw])
     assert rows[0]['recognizer_preprocess_ink_removed']
-    assert rows[0]['resolution_state'] == 'review_required' and rows[0]['resolved_value'] is None
+    assert rows[0]['resolution_state'] == 'resolved' and rows[0]['resolved_value'] == rows[0]['recognizer_raw_text']
 
 
 def test_overlay_uses_review_marker_not_raw_one(monkeypatch):
@@ -142,7 +147,7 @@ def test_overlay_uses_review_marker_not_raw_one(monkeypatch):
     assert len(labels) == 1 and labels[0].startswith('?') and '1' not in labels[0]
 
 
-def test_real_producer_persists_unresolved_values_and_keeps_adoption_blocked(connected_physical_pipeline, monkeypatch):
+def test_real_producer_persists_editable_raw_and_validates_artifact_identity(connected_physical_pipeline, monkeypatch):
     from uuid import uuid4
     from src.db import session_scope
     from src.models.order import Order
@@ -171,18 +176,18 @@ def test_real_producer_persists_unresolved_values_and_keeps_adoption_blocked(con
     try:
         with guard.workflow_execution_context(job, order_id, attempt, revision):
             payload = orders._hakodate_canonical_payload_from_manifest_item(order_id=order_id, facility_id='fixture', item={})
-            assert payload['hakodate_recognition_review']['count'] > 0
-            assert all(r['raw_text']=='1' and r['normalized_value'] is None for r in payload['hakodate_ocr_evidence_records'])
+            assert payload['hakodate_recognition_review']['count'] == 0
+            assert all(r['raw_text']=='1' and r['normalized_value'] == '1' for r in payload['hakodate_ocr_evidence_records'])
             saved = store.persist_evidence_run(order_id, payload, template_version_id=template,
-                status='diagnostic_only', source='own-recognizer', producer_version='fixture/v1',
+                status='ready', source='own-recognizer', producer_version='fixture/v1',
                 workflow_job_id=job, workflow_attempt_id=attempt, expected_workflow_revision=revision)
-            assert saved['status']=='diagnostic_only'
+            assert saved['status']=='ready'
             assert saved['payload_json']['hakodate_ocr_evidence_records'] == payload['hakodate_ocr_evidence_records']
-            assert not orders._classify_owned_evidence_payload(payload)['persistable']
+            assert orders._classify_owned_evidence_payload(payload)['persistable']
             from src.services.canonical_ocr_artifact_service import _verify
             outputs = payload['hakodate_canonical_pipeline']['artifact_packet']['outputs']
             verified = {'records':_verify(outputs['records']), 'contact_sheet':_verify(outputs['contact_sheet'])}
-            for key,value in (('normalized_value','1'), ('resolution_state','resolved')):
+            for key,value in (('raw_text','2'), ('resolution_state','review_required')):
                 changed = deepcopy(payload['hakodate_ocr_evidence_records'])
                 changed[0][key] = value
                 with pytest.raises(ValueError): orders._validate_hakodate_recognition_review(payload,changed,verified)
@@ -206,6 +211,14 @@ def test_synthetic_explicit_verifier_contract_and_tamper_rejection(monkeypatch, 
         raw.append(numeric.get(cell,nonnumeric.get(cell,'1')))
         if cell not in white: contact.putpixel((i*8+2,2),(0,0,0))
     rows,metrics=recognize(monkeypatch,contact,regions,polygons,raw)
+    # Explicit historic report fixture: the current producer no longer rejects
+    # quantity contents, while this verifier still reads archived review reports.
+    for row in rows:
+        issue = evidence.recognition_input_issue(row)
+        if issue:
+            row.update(resolution_state='review_required', resolved_value=None,
+                       ocr_text=None, ocr_normalized=None, pred_digits=None,
+                       quantity_source_issue=issue)
     sources=[record(r)['engine_metadata']['recognizer_output'] for r in rows]
     records=evidence.evidence_from_records([record(r) for r in rows],run_id='own',engine='fixture',source_scope='fixture')
     payload={'hakodate_ocr_evidence_records':records,'hakodate_ocr_evidence':{'records':deepcopy(records)},

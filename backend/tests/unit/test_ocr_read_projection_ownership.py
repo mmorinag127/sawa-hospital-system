@@ -115,6 +115,8 @@ def packet_row(tmp_path, monkeypatch):
                 ocr_contact_crop_box=crop["bbox"], resolution_state="review_required" if review else "resolved",
                 resolved_value=None if review else raw, ocr_text=None if review else raw,
                 ocr_normalized=None if review else raw, pred_digits=None if review else raw)
+            if review:
+                original["quantity_source_issue"] = "hakodate_ocr_quantity_non_numeric"
             record.update(normalized_value=None if review else raw,
                 resolution_state="review_required" if review else "resolved")
             if mode == "operatorEdited":
@@ -244,12 +246,9 @@ def test_real_guards_decisions_order_and_immutability(packet_row, mode):
     assert new_trace == old_trace
     assert old_copies == 1 and new_copies == 0
     assert new_trace.count("_validate_hakodate_original_execution") == 1
-    if mode != "review":
-        assert "validate_packet" in new_trace
-        assert "assign_evidence_to_target_cells" in new_trace
-    else:
-        assert "validate_packet" not in new_trace
-    assert new is None if mode in {"ready", "accepted", "operatorEdited"} else new is not None
+    assert "validate_packet" in new_trace
+    assert "assign_evidence_to_target_cells" in new_trace
+    assert new is None if mode in {"ready", "review", "accepted", "operatorEdited"} else new is not None
     assert vars(row) == before
 
 

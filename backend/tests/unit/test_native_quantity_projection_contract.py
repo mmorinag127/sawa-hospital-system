@@ -201,45 +201,23 @@ def test_unmerged_native_cells_do_not_copy_to_neighbor_menu(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("route", ["batch", "evidence"])
 @pytest.mark.parametrize("raw,derived", [("7", "0"), ("0", "7"), ("", "1"), ("1", "0")])
-def test_tampered_native_resolved_value_stops(tmp_path, monkeypatch, route, raw, derived):
+def test_derived_alias_never_replaces_native_raw_in_either_projection(tmp_path, monkeypatch, route, raw, derived):
     base, config, plan = authored_plan(tmp_path, 3)
     records = native_records(monkeypatch, plan, quantity=raw)
     tampered = deepcopy(records)
     target = next(r for r in tampered if r["field"] == "qty.regular_x"
                   and len(r["logical_targets"]) == 3)
     target["resolved_value"] = derived
+    before = deepcopy(tampered)
     if route == "batch":
-        with pytest.raises(ValueError, match="hakodate_ocr_quantity"):
-            batch.sheet_assignments_from_ocr_regions(tampered)
+        grid = batch.sheet_value_grid_from_assignments(batch.sheet_assignments_from_ocr_regions(tampered))
     else:
-        diagnostics = {}
-        result, sheet = project(base, config, plan, tampered, diagnostics=diagnostics)
-        assert result["blockers"] and sheet["blockers"]
-        affected = next(r for r in plan if r["sheet_cell"] == target["sheet_cell"])
-        raw_evidence = [r for r in diagnostics["evidence"]
-                        if r["engine_metadata"]["sheet_cell"] == target["sheet_cell"]]
-        assert len(raw_evidence) == 1
-        assert raw_evidence[0]["resolution_state"] == "review_required"
-        assert raw_evidence[0]["normalized_value"] is None
-        assert raw_evidence[0]["raw_text"] == raw
-        unresolved = [a for a in diagnostics["assignments"] if a["sheet_cell"] == target["sheet_cell"]]
-        assert len(unresolved) == 1
-        assert unresolved[0]["assignment_state"] == "unresolved"
-        assert unresolved[0]["assigned_value"] == ""
-        assert unresolved[0]["raw_texts"] == [raw]
-        assert "resolution_state" not in unresolved[0]
-        for logical in affected["logical_targets"]:
-            cell = sheet["cells"][logical["sheet_cell"]]
-            assert cell["value_normalized"] == ""
-            assert cell["assignment_state"] == "unresolved"
-            assert "resolution_state" not in cell
-            assert cell["raw_texts"] == [raw]
-        assert result["review_state"] == "blocked"
-        for row in result["rows"]:
-            assert row[4:8] == ["", "", "", ""]
-        assert target["raw_text"] == target["recognizer_raw_text"] == raw
-        assert target["resolved_value"] == derived
-    assert next(r for r in records if r["sheet_cell"] == target["sheet_cell"])["resolved_value"] == raw
+        result, grid = project(base, config, plan, tampered)
+        assert result['blockers'] == []
+    for logical in target['logical_targets']:
+        assert grid['cells'][logical['sheet_cell']]['value_normalized'] == raw
+    assert tampered == before
+    assert next(r for r in records if r['sheet_cell'] == target['sheet_cell'])['resolved_value'] == raw
 
 
 def test_null_derived_alias_keeps_existing_nonnull_alias_contract(tmp_path, monkeypatch):
@@ -274,35 +252,22 @@ def test_native_top_level_derived_alias_retained_in_source_values(tmp_path, monk
     assert saved["raw_text"] == "7" and record == before
     assert "resolved_value" in saved["engine_metadata"]["source_values"]
     assert saved["engine_metadata"]["source_values"]["resolved_value"] == derived
-    if derived is None:
-        assert evidence.validate_ocr_quantity_source(saved) == "7"
-    else:
-        with pytest.raises(ValueError, match="hakodate_ocr_quantity"):
-            evidence.validate_ocr_quantity_source(saved)
+    assert evidence.validate_ocr_quantity_source(saved) == '7'
 
 
 @pytest.mark.parametrize("score,white,reason", [(.99, True, "hakodate_blank_input_nonempty_prediction"),
                                               (.01, False, "hakodate_ocr_quantity_low_confidence")])
-def test_real_image_and_confidence_guards_remain_active(tmp_path, monkeypatch, score, white, reason):
+def test_image_and_confidence_diagnostics_do_not_block_quantity_projection(tmp_path, monkeypatch, score, white, reason):
     base, config, plan = authored_plan(tmp_path, 3)
     records = native_records(monkeypatch, plan, quantity="1", score=score, white=white)
     affected = [r for r in records if r["raw_text"] == "1"]
-    assert affected and all(r["quantity_source_issue"] == reason and r["resolved_value"] is None for r in affected)
-    with pytest.raises(ValueError, match="hakodate_ocr_quantity_unresolved"):
-        batch.sheet_assignments_from_ocr_regions(records)
+    assert affected and all(r['resolved_value'] == '1' for r in affected)
+    grid = batch.sheet_value_grid_from_assignments(batch.sheet_assignments_from_ocr_regions(records))
     result, sheet = project(base, config, plan, records)
-    assert result["blockers"] and sheet["blockers"]
-    assert result["review_state"] == "blocked"
+    assert result['blockers'] == sheet['blockers'] == []
     for record in affected:
-        assert record["raw_text"] == record["recognizer_raw_text"] == "1"
-        assert record["resolution_state"] == "review_required"
-        assert record["resolved_value"] is record["ocr_text"] is record["ocr_normalized"] is None
-        for logical in record["logical_targets"]:
-            cell = sheet["cells"][logical["sheet_cell"]]
-            assert cell["value_normalized"] is None
-            assert cell["assignment_state"] == "unresolved"
-            assert cell["resolution_state"] == "review_required"
-            assert cell["raw_texts"] == ["1"]
-    for row in result["rows"]:
-        assert row[4:8] == ["", "", "", ""]
-        assert row[8] == ""
+        assert record['raw_text'] == record['recognizer_raw_text'] == '1'
+        for logical in record['logical_targets']:
+            key = logical['sheet_cell']
+            assert grid['cells'][key]['value_normalized'] == sheet['cells'][key]['value_normalized'] == '1'
+            assert sheet['cells'][key]['raw_texts'] == ['1']

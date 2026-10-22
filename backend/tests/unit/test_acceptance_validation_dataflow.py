@@ -91,6 +91,15 @@ def test_base_parity_counts_reads_and_no_mutation(packet_row, old_functions, mod
     with baseline(old_functions):
         old, old_trace = evaluate(row, analysis_enabled)
     new, new_trace = evaluate(row, analysis_enabled)
+    if mode == "review":
+        assert old == ("value", "hakodate_canonical_outcome_required")
+        assert new == ("value", None)
+        assert vars(row) == before
+        assert new_trace.count("accepted_values") == 1
+        assert new_trace.count("_validate_hakodate_owned_artifacts") == 1
+        assert new_trace.count("load_bytes_from_uri") > 0
+        assert "validate_payload" in new_trace
+        return
     assert new == old
     assert vars(row) == before
     expected_trace = [x for x in old_trace if x != "accepted_values"]

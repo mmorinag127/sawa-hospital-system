@@ -30,7 +30,8 @@ TEN = [(cell, "--" if cell in {"J38", "I50"} else "-") for cell in
 def ten_payload():
     records = []
     for index, (cell, raw) in enumerate(TEN):
-        source = {"role": "quantity", "field": "qty.regular", "raw_text": raw, "recognizer_raw_text": raw}
+        source = {"role": "quantity", "field": "qty.regular", "raw_text": raw, "recognizer_raw_text": raw,
+                  "resolution_state": "review_required", "quantity_source_issue": "hakodate_ocr_quantity_non_numeric"}
         records.append({"evidence_id": f"cell-{index}", "raw_text": raw, "normalized_value": None,
             "source_scope": "hakodate_cell_crop_batch", "engine_metadata": {"sheet_cell": cell, "recognizer_output": source}})
     return {"hakodate_ocr_evidence": {"records": records},
@@ -114,15 +115,17 @@ def reviewed_order(isolated_formal_schema, monkeypatch, tmp_path, request):
             evidence_id = state.evidence_run_id
             source.update(job_id="review-job", workflow_attempt_id="review-attempt", workflow_revision=state.revision)
             mode = getattr(request, "param", None)
-            raw = "7" if mode in {"numeric", "normal"} else "-"
+            raw = "" if mode == "empty" else "7" if mode in {"numeric", "normal"} else "-"
             targets, records = _owned_artifact_fixture(source, raw)
             for record in records:
                 original = record["engine_metadata"]["recognizer_output"]
                 original.update(recognizer_raw_text=raw, resolution_state="review_required",
-                    resolved_value=None, ocr_text=None, ocr_normalized=None, pred_digits=None)
+                    resolved_value=None, ocr_text=None, ocr_normalized=None, pred_digits=None,
+                    quantity_source_issue="hakodate_ocr_quantity_non_numeric")
                 record.update(normalized_value=None, resolution_state="review_required")
                 if mode == "numeric":
-                    original.update(recognizer_digit_score_threshold=0.9, recognizer_score=0.2)
+                    original.update(recognizer_digit_score_threshold=0.9, recognizer_score=0.2,
+                                    quantity_source_issue="hakodate_ocr_quantity_low_confidence")
                 if mode == "normal":
                     original.update(resolution_state="resolved", resolved_value=raw, ocr_text=raw, ocr_normalized=raw, pred_digits=raw)
                     record.update(normalized_value=raw, resolution_state="resolved")

@@ -12,7 +12,7 @@ from src.services import hakodate_ocr_evidence_service as evidence
 
 @pytest.mark.parametrize('text', ['1', '0', '6', '9', '26', '-'])
 @pytest.mark.parametrize('white', [True, False])
-def test_all_cells_recognized_raw_unchanged_and_white_requires_review(monkeypatch, text, white):
+def test_all_quantity_cells_recognized_and_raw_retained_without_content_gate(monkeypatch, text, white):
     image = Image.new('RGB', (20, 20), 'white')
     if not white:
         image.putpixel((5, 5), (0, 0, 0))
@@ -28,7 +28,7 @@ def test_all_cells_recognized_raw_unchanged_and_white_requires_review(monkeypatc
                     'points': points}
     monkeypatch.setattr(runtime, 'YomitokuTextRecognizerTopKWrapper', Recognizer)
     rows, metrics = runtime.run_text_recognizer_direct(recognizer=object(), contact_sheet=image,
-        regions=[{'sheet_cell': 'E31', 'field': 'qty.regular', 'ink_area': 0}], polygons=[polygon],
+        regions=[{'sheet_cell': 'E31', 'field': 'qty.regular', 'role': 'quantity', 'ink_area': 0}], polygons=[polygon],
         score_threshold=0.45, digit_score_threshold=0.05, candidate_digit_score_threshold=0.05,
         enable_context_repair=False)
     assert calls == [[polygon]] and metrics['raw_prediction_count'] == 1
@@ -37,12 +37,9 @@ def test_all_cells_recognized_raw_unchanged_and_white_requires_review(monkeypatc
     assert row['recognizer_score'] == 0.0822547972202301
     assert row['recognizer_input_evidence']['all_white'] is white
     record = {'raw_text': text, 'engine_metadata': {'recognizer_output': row}}
-    if white or text == '-':
-        with pytest.raises(ValueError, match='unresolved|conflict'):
-            evidence.validate_ocr_quantity_source(record)
-    else:
-        assert evidence.validate_ocr_quantity_source(record) == text
-        assert 'quantity_source_issue' not in row
+    assert evidence.validate_ocr_quantity_source(record) == text
+    assert row['resolution_state'] == 'resolved'
+    assert row['resolved_value'] == text
 
 
 def test_missing_legacy_metadata_is_not_blank_evidence():
@@ -50,7 +47,7 @@ def test_missing_legacy_metadata_is_not_blank_evidence():
     assert evidence.validate_ocr_quantity_source({'raw_text': '1'}) == '1'
 
 
-def test_issue_retained_through_evidence_and_unresolved_assignment():
+def test_quantity_diagnostic_metadata_does_not_block_raw_assignment():
     record = {'text': '1', 'confidence': .08, 'bbox': [0, 0, 10, 10],
               'engine_metadata': {'recognizer_output': {'raw_text': '1',
                   'quantity_source_issue': 'hakodate_blank_input_nonempty_prediction'}}}
@@ -59,15 +56,14 @@ def test_issue_retained_through_evidence_and_unresolved_assignment():
         'worksheet_col': 5, 'field': 'qty.regular', 'role': 'quantity', 'bbox': [0, 0, 10, 10]}])
     assigned = evidence.assign_evidence_to_target_cells(evidence_records=records, target_cells=targets)
     assert records[0]['raw_text'] == '1'
-    assert assigned['assignments'][0]['assignment_state'] == 'unresolved'
-    assert any('hakodate_ocr_quantity_unresolved' in value for value in assigned['blockers'])
+    assert assigned['assignments'][0]['assigned_value'] == '1'
+    assert assigned['blockers'] == []
 
 
-def test_operator_label_alone_does_not_clear_issue():
-    with pytest.raises(ValueError, match='unresolved'):
-        evidence.validate_ocr_quantity_source({'raw_text': '1', 'engine_metadata': {
+def test_quantity_raw_is_preserved_independently_of_source_label():
+    assert evidence.validate_ocr_quantity_source({'raw_text': '1', 'engine_metadata': {
             'source': 'operator', 'recognizer_output': {'raw_text': '1',
-                'quantity_source_issue': 'hakodate_blank_input_nonempty_prediction'}}})
+                'quantity_source_issue': 'hakodate_blank_input_nonempty_prediction'}}}) == '1'
     assert evidence.validate_ocr_quantity_source({'raw_text': '26', 'engine_metadata': {
         'source': 'operator', 'edited_by': 'explicit-operator', 'operator_output': {'operator_value': '26'}}}) == '26'
 
@@ -96,13 +92,17 @@ def test_real_contact_exact_white_count():
 
 
 @pytest.mark.parametrize('role,field', [('quantity', 'qty.regular'), ('note', 'note')])
-def test_removed_issue_still_blocks_both_roles_and_lists_raw(role, field):
+def test_historic_diagnostics_are_preserved_without_quantity_gate(role, field):
     image = Image.new('RGB', (10, 10), 'white')
     observed = runtime.contact_crop_evidence(image, [[0, 0], [10, 0], [10, 10], [0, 10]])
-    source = {'raw_text': '1', 'role': role, 'field': field, 'recognizer_input_evidence': observed}
+    source = {'raw_text': '1', 'role': role, 'field': field, 'recognizer_input_evidence': observed,
+              'resolution_state':'review_required', 'quantity_source_issue':'hakodate_blank_input_nonempty_prediction'}
     record = {'raw_text': '1', 'engine_metadata': {'sheet_cell': 'E11', 'recognizer_output': source}}
-    with pytest.raises(ValueError, match='unresolved'):
-        evidence.validate_ocr_source_for_role(record, role)
+    if role == 'quantity':
+        assert evidence.validate_ocr_source_for_role(record, role) == '1'
+    else:
+        with pytest.raises(ValueError, match='unresolved'):
+            evidence.validate_ocr_source_for_role(record, role)
     assert evidence.recognition_review([record]) == {'cells': [{'sheet_cell': 'E11', 'raw_text': '1',
         'reason': 'hakodate_blank_input_nonempty_prediction'}], 'count': 1}
 
