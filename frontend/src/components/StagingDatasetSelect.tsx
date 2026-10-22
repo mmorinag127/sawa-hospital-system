@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DATASET_KEY, DATASET_GENERATION } from "../services/stagingDataset";
+import { DATASET_KEY, DATASET_GENERATION, documentDatasetMatches } from "../services/stagingDataset";
 
 type Choice = { id: string; label: string; available: boolean; snapshot_at?: string };
 type State = { enabled: boolean; selected?: string; options?: Choice[]; error?: string | null };
@@ -32,7 +32,12 @@ export default function StagingDatasetSelect() {
         if (!response.ok) throw new Error("unavailable");
         const value: State = await response.json();
         if (requestController.signal.aborted) return;
-        if (value.enabled && value.selected) window.sessionStorage.setItem(DATASET_KEY, value.selected);
+        if (value.enabled && value.selected) {
+          window.sessionStorage.setItem(DATASET_KEY, value.selected);
+          if (value.options?.some(option => option.id === value.selected && option.available) && !documentDatasetMatches(value.selected)) {
+            window.location.reload(); return;
+          }
+        }
         setError("");
         setState(value);
       }).catch(() => {

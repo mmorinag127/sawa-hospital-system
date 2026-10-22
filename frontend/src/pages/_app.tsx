@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { AppProps } from "next/app";
+import NextApp, { type AppContext, type AppProps } from "next/app";
+import { datasetFromCookie, initializeDocumentDataset, type DocumentDataset } from "../services/stagingDataset";
 import { useRouter } from "next/router";
 import { getStoredAuthHeader, establishServerSession } from "../services/apiClient";
 import PageTemplate from "../components/PageTemplate";
@@ -13,7 +14,8 @@ import "../../public/assistant-workflow.css";
 const PUBLIC_ROUTES = new Set(["/login", "/logout", "/auth/session", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
 const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
 
-export default function App({ Component, pageProps }: AppProps) {
+export default function App({ Component, pageProps, initialDataset }: AppProps & { initialDataset?: DocumentDataset }) {
+  initializeDocumentDataset(initialDataset);
   const router = useRouter();
   const gitSha = process.env.NEXT_PUBLIC_GIT_SHA || "unknown";
   const deployedAt = process.env.NEXT_PUBLIC_DEPLOYED_AT || "unknown";
@@ -58,3 +60,10 @@ export default function App({ Component, pageProps }: AppProps) {
     </UnifiedShell></NavigationBoundary>
   );
 }
+
+App.getInitialProps = async (context: AppContext) => {
+  const props = await NextApp.getInitialProps(context);
+  if (!context.ctx.req) return props;
+  context.ctx.res?.setHeader("Cache-Control", "private, no-store");
+  return { ...props, initialDataset: datasetFromCookie(context.ctx.req.headers.cookie) };
+};

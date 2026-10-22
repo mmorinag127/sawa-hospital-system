@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from sqlalchemy import select, update
 
+from src import staging_data as datasets
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
 from src.models.order import Order
@@ -66,6 +67,20 @@ def _identity(row):
         "request_mode": row.request_mode, "pdf": row.selected_pdf_receipt, "request": row.request_identity}
 
 
+def _captured_task_namespace(contract):
+    http = contract.get("http_request", {})
+    if not isinstance(http, dict):
+        raise ValueError("workflow_ocr_delivery_task_identity_invalid")
+    headers = http.get("headers", {})
+    if not isinstance(headers, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+                                           for key, value in headers.items()):
+        raise ValueError("workflow_ocr_delivery_task_identity_invalid")
+    selected = [value for key, value in headers.items() if key.lower() == datasets.HEADER.lower()]
+    if len(selected) > 1 or selected and not re.fullmatch(r"replay-[a-z0-9][a-z0-9-]{0,47}", selected[0]):
+        raise ValueError("workflow_ocr_delivery_task_identity_invalid")
+    return selected[0] + "-" if selected else ""
+
+
 def _validate_identity(row):
     if (not _positive(row.workflow_revision) or not _positive(row.delivery_generation)
             or not all(isinstance(value, str) and value for value in (
@@ -93,7 +108,8 @@ def _validate_identity(row):
             or not source.get("evidence_run_id") or not re.fullmatch(r"[0-9a-f]{64}", str(source.get("input_sha256", "")))):
         raise ValueError("workflow_ocr_delivery_first_pass_source_invalid")
     if (not isinstance(row.task_contract, dict) or row.task_contract.get("name") != row.task_name
-            or not row.task_name.endswith("/tasks/" + row.id + "-g" + str(row.delivery_generation))):
+            or not row.task_name.endswith("/tasks/" + _captured_task_namespace(row.task_contract)
+                                          + row.id + "-g" + str(row.delivery_generation))):
         raise ValueError("workflow_ocr_delivery_task_identity_invalid")
     selected = request["selected_version_input"]
     if selected is not None and (not isinstance(selected, dict)
@@ -171,6 +187,9 @@ def create_intent_in_session(session, *, order_id, job_id, workflow_attempt_id,
     from src.services.workflow_attempt_guard_service import capture_selected_pdf_receipt, lock_selected_version_input
     delivery_id = f"WOD-{uuid4().hex}"
     contract = task_contract(delivery_id, 1)
+    expected_dataset = datasets.current_dataset() if datasets.current_dataset() != "test" else None
+    if not datasets.delivery_dataset_matches(contract.get("http_request", {}).get("headers", {}), expected_dataset):
+        raise ValueError("workflow_ocr_delivery_task_identity_invalid")
     row = WorkflowOcrDelivery(id=delivery_id, order_id=order_id, job_id=job_id,
         workflow_attempt_id=workflow_attempt_id, workflow_revision=workflow_revision,
         delivery_generation=1, task_name=contract["name"], task_contract=contract,
@@ -357,6 +376,7 @@ def renew_missing_delivery(delivery_id, observed):
         row = _locked(session, delivery_id)
         if row is None or snapshot(row) != observed:
             return False
+        _validate_identity(row)
         if _business_status(session, row) not in {"eligible", "awaiting_output"}:
             return False
         if row.state == CLAIMED and (row.lease_expires_at is None or row.lease_expires_at > _now()):
@@ -364,6 +384,7 @@ def renew_missing_delivery(delivery_id, observed):
         contract = next_task_contract(row.task_contract, row.id, row.delivery_generation + 1)
         row.delivery_generation += 1
         row.task_name, row.task_contract, row.state = contract["name"], contract, PENDING
+        _validate_identity(row)
         row.claim_token = row.lease_expires_at = row.transport_receipt = None
         row.updated_at = _now()
         return True

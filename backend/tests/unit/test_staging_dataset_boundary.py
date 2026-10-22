@@ -219,3 +219,116 @@ def test_replay_refuses_frozen_production_delivery_before_transport(snapshot, mo
 ])
 def test_provider_header_case_does_not_change_snapshot_and_duplicate_aliases_stop(headers, identity, valid):
     assert data.delivery_dataset_matches(headers, identity) is valid
+
+
+def _workflow_identity_row(contract, generation=1):
+    from types import SimpleNamespace
+    from src.services import workflow_ocr_delivery_service as delivery
+    row = SimpleNamespace(id="synthetic-delivery", order_id="synthetic-order", job_id="synthetic-job",
+        workflow_attempt_id="synthetic-attempt", workflow_revision=1, delivery_generation=generation,
+        task_name=contract["name"], task_contract=contract, request_mode="ocr_rerun",
+        selected_pdf_receipt={"uploaded_pdf_id":"synthetic-upload", "document_id":"synthetic-document",
+            "order_id":"synthetic-order", "message_id":"synthetic-message", "storage_uri":"fixture://no-pdf-upload",
+            "sha256":"a"*64},
+        request_identity={"reparse_read_input":{"order":{"id":"synthetic-order"},
+            "configured_input":{"synthetic":True}, "physical_menu_entries":[]},
+            "selected_version_input":None, "selected_document_id":None, "first_pass_source":None,
+            "request_parameters":{key:"ocr_rerun" if key=="request_mode" else None for key in delivery.REQUEST_KEYS}})
+    row.identity_sha256=delivery._digest(delivery._identity(row))
+    return row
+
+
+@pytest.fixture
+def workflow_transport(monkeypatch):
+    from src.services import workflow_ocr_delivery_dispatch_service as transport
+    config={"PROJECT_ID":"synthetic", "LOCATION":"asia-northeast2", "QUEUE":"synthetic",
+        "TARGET_URL":"https://worker-stg-synthetic.a.run.app", "SERVICE_ACCOUNT_EMAIL":"worker@synthetic.iam.gserviceaccount.com",
+        "AUDIENCE":"https://worker-stg-synthetic.a.run.app", "DISPATCH_DEADLINE_SECONDS":"60"}
+    monkeypatch.setattr(transport,"required_config",lambda:config)
+    return transport
+
+
+@pytest.mark.parametrize("selected", ["test", "replay-synthetic"])
+def test_workflow_identity_accepts_generated_contract_and_context_free_retry(snapshot,workflow_transport,selected):
+    from src.services import workflow_ocr_delivery_service as delivery
+    with data.dataset_context(selected):
+        row=_workflow_identity_row(workflow_transport.task_contract("synthetic-delivery",1))
+        delivery._validate_identity(row)
+    # The original browser context has ended. Stored identity, not current Test,
+    # determines the prefix and header for validation and successor generation.
+    assert data.current_dataset()=="test"
+    for generation in (2,3):
+        contract=workflow_transport.next_task_contract(row.task_contract,row.id,generation)
+        row.task_contract=contract;row.task_name=contract["name"];row.delivery_generation=generation
+        delivery._validate_identity(row)
+        assert contract["http_request"].get("headers",{})==({data.HEADER:selected} if selected!="test" else {})
+
+
+@pytest.mark.parametrize("tamper", ["missing-header","foreign-header","foreign-name","duplicate-header","unknown-header"])
+def test_workflow_identity_rejects_cross_dataset_task_components(snapshot,workflow_transport,tamper):
+    from src.services import workflow_ocr_delivery_service as delivery
+    with data.dataset_context(snapshot["id"]):
+        contract=workflow_transport.task_contract("synthetic-delivery",1)
+    if tamper=="missing-header":contract["http_request"]["headers"]={}
+    if tamper=="foreign-header":contract["http_request"]["headers"][data.HEADER]="replay-other"
+    if tamper=="foreign-name":contract["name"]=contract["name"].replace(snapshot["id"],"replay-other")
+    if tamper=="duplicate-header":contract["http_request"]["headers"][data.HEADER.lower()]=snapshot["id"]
+    if tamper=="unknown-header":
+        contract["http_request"]["headers"][data.HEADER]="prod"
+        contract["name"]=contract["name"].replace(snapshot["id"],"prod")
+    with pytest.raises(ValueError,match="^workflow_ocr_delivery_task_identity_invalid$"):
+        delivery._validate_identity(_workflow_identity_row(contract))
+
+
+def test_workflow_create_refuses_a_contract_for_another_selected_context(snapshot,workflow_transport,monkeypatch):
+    from src.services import workflow_ocr_delivery_service as delivery
+    with data.dataset_context(snapshot["id"]):
+        captured=workflow_transport.task_contract("synthetic-delivery",1)
+    monkeypatch.setattr(workflow_transport,"task_contract",lambda *_:captured)
+    with pytest.raises(ValueError,match="^workflow_ocr_delivery_task_identity_invalid$"):
+        delivery.create_intent_in_session(None,order_id="synthetic-order",job_id="synthetic-job",
+            workflow_attempt_id="synthetic-attempt",workflow_revision=1,request_mode="ocr_rerun",
+            selected_pdf_receipt={},request_identity={})
+
+
+def test_workflow_persisted_renewal_retains_copy_after_request_context_ends(snapshot,workflow_transport,tmp_path,monkeypatch):
+    from sqlalchemy.orm import sessionmaker
+    from src import db,models
+    from src.models.ocr_job import OcrJob
+    from src.models.order import Order
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+    from src.services import workflow_ocr_delivery_service as delivery
+    engine=create_engine("sqlite:///"+str(tmp_path/"copy-renewal.sqlite"))
+    models.Base.metadata.create_all(engine)
+    factory=sessionmaker(engine,expire_on_commit=False)
+    monkeypatch.setattr(db,"SessionLocal",factory)
+    monkeypatch.setattr(db,"engine",engine)
+    try:
+        with data.dataset_context(snapshot["id"]):
+            original=_workflow_identity_row(workflow_transport.task_contract("synthetic-delivery",1))
+        with factory() as session:
+            session.add(Order(id=original.order_id,document_uri=original.selected_pdf_receipt["storage_uri"],message_id="synthetic-message"))
+            session.flush()
+            session.add(OrderWorkflowState(order_id=original.order_id,revision=1,state="ocr_running",
+                secondary_actions_json={"workflow_v2":{"ocr_job_id":original.job_id,"ocr_job_attempt_id":original.workflow_attempt_id}}))
+            session.add(OcrJob(id=original.job_id,order_id=original.order_id,status="running",
+                input_reference=original.selected_pdf_receipt["storage_uri"],metrics={
+                    "workflow_attempt_id":original.workflow_attempt_id,"workflow_completion_revision":1,
+                    "workflow_ocr_delivery_id":original.id,"selected_pdf_receipt":original.selected_pdf_receipt,
+                    **{key:original.request_identity[key] for key in ("reparse_read_input","selected_version_input","first_pass_source")},
+                    **original.request_identity["request_parameters"]}))
+            session.flush()
+            row=WorkflowOcrDelivery(**vars(original),state=delivery.PENDING,visit_count=0)
+            session.add(row);session.commit();observed=delivery.snapshot(row)
+        assert data.current_dataset()=="test"
+        assert delivery.renew_missing_delivery(original.id,observed) is True
+        with factory() as session:
+            row=session.get(WorkflowOcrDelivery,original.id)
+            delivery._validate_identity(row)
+            assert row.delivery_generation==2 and row.identity_sha256==original.identity_sha256
+            assert row.request_identity==original.request_identity and row.selected_pdf_receipt==original.selected_pdf_receipt
+            assert row.task_contract["http_request"]["headers"]=={data.HEADER:snapshot["id"]}
+            assert row.task_name.endswith("/tasks/"+snapshot["id"]+"-"+original.id+"-g2")
+    finally:
+        engine.dispose()

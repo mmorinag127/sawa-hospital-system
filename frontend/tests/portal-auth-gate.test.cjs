@@ -16,6 +16,8 @@ function load(file, mocks, globals = {}) {
     require(name) {
       if (name in mocks) return {__esModule: true, ...mocks[name]};
       if (name.startsWith("react")) return require(name);
+      if (name === "next/app") return require(name);
+      if (name === "../services/stagingDataset") return require("./helpers/staging-dataset-module.cjs")(global.window);
       if (name.endsWith(".css")) return {};
       throw new Error("Unexpected import " + name);
     } };

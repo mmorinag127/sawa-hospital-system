@@ -2,6 +2,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const harness = require("./helpers/modernization-react-dom.cjs");
+const mountSelector = () => harness.mount("src/components/StagingDatasetSelect.tsx", {
+  component(loader) {
+    loader.load("src/services/stagingDataset.ts").initializeDocumentDataset({ dataset: "test" });
+    return loader.load("src/components/StagingDatasetSelect.tsx").default;
+  },
+});
 
 test("failed readiness keeps selection and credentials and does not send a switch", async () => {
   const originalFetch = global.fetch;
@@ -16,7 +22,7 @@ test("failed readiness keeps selection and credentials and does not send a switc
   };
   let h;
   try {
-    h = await harness.mount("src/components/StagingDatasetSelect.tsx");
+    h = await mountSelector();
     await h.waitFor(() => h.document.querySelector("select"));
     const storage = h.document.defaultView.sessionStorage;
     const credential = storage.getItem("auth_header");
@@ -37,16 +43,36 @@ test("production hides selector and an unavailable replay option cannot be chose
   let h;
   try {
     global.fetch = async () => Response.json({ enabled: false });
-    h = await harness.mount("src/components/StagingDatasetSelect.tsx");
+    h = await mountSelector();
     await h.settle();
     assert.equal(h.document.querySelector("select"), null);
     await h.close(); h = null;
     global.fetch = async () => Response.json({ enabled: true, selected: "test", options: [
       { id: "test", label: "テスト用", available: true }, { id: "unavailable", label: "本番再現用（準備未完了）", available: false },
     ] });
-    h = await harness.mount("src/components/StagingDatasetSelect.tsx");
+    h = await mountSelector();
     await h.waitFor(() => h.document.querySelector("select"));
     assert.equal(h.document.querySelector('option[value="unavailable"]').disabled, true);
+  } finally { if (h) await h.close(); global.fetch = originalFetch; }
+});
+
+test("an unknown cookie stops business requests but keeps the Test recovery choice visible", async () => {
+  const originalFetch = global.fetch;
+  let h;
+  global.fetch = async () => Response.json({ enabled: true, selected: "prod", error: "選択したコピーは利用できません。", options: [
+    { id: "test", label: "テスト用", available: true },
+  ] });
+  try {
+    h = await harness.mount("src/components/StagingDatasetSelect.tsx", {
+      component(loader) {
+        loader.load("src/services/stagingDataset.ts").initializeDocumentDataset({ invalid: true });
+        return loader.load("src/components/StagingDatasetSelect.tsx").default;
+      },
+    });
+    await h.waitFor(() => h.document.querySelector("select"));
+    assert.equal(h.document.querySelector('option[value="test"]').disabled, false);
+    assert.match(h.document.body.textContent, /選択したコピーは利用できません/);
+    assert.throws(() => h.loader.load("src/services/stagingDataset.ts").datasetHeaders(), /dataset_unconfirmed/);
   } finally { if (h) await h.close(); global.fetch = originalFetch; }
 });
 
@@ -67,7 +93,7 @@ test("successful switch waits for all systems before publishing one selection", 
   };
   let h;
   try {
-    h = await harness.mount("src/components/StagingDatasetSelect.tsx");
+    h = await mountSelector();
     await h.waitFor(() => h.document.querySelector("select"));
     const storage = h.document.defaultView.sessionStorage;
     const credential = storage.getItem("auth_header");
