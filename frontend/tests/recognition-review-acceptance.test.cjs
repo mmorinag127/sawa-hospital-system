@@ -53,6 +53,26 @@ async function setup({ normal = false, job = null, initialStep = 2 } = {}) {
 const mutations = f => f.t.calls.filter(call => ['put', 'post', 'delete'].includes(call.method));
 async function open(f) {await f.h.click(f.h.button('確認して正解にする')); await f.h.waitFor(() => f.probe.current.recognitionReview !== null && !f.probe.current.busy);}
 
+test('failed job shows its ten exact review reasons above Step1 and opens images without adopting quantities', async () => {
+  const f = await setup({initialStep: 1, job: {status: 'failed', result_state: 'review_required',
+    recovery_action: 'review_recognition_cells', evidence_run_id: 'ocr-A',
+    error_user_message: '文字認識は完了しましたが、10セルの数量を確定できないため、自動採用を停止しました。',
+    recognition_review: {count: 10, cells: copy(flags)}}});
+  try {
+    const alert = f.h.document.querySelector('[role="alert"]');
+    assert.match(alert.textContent, /10セルの数量を確定できない/);
+    const list = alert.querySelector('details[open]');
+    assert.ok(list);
+    for (const cell of flags) assert.ok(list.textContent.includes(`${cell.sheet_cell}:「${cell.raw_text}」`));
+    assert.match(list.textContent, /数量として解釈できない文字・記号です/);
+    await f.h.click(f.h.button('今回のセル画像を確認・訂正'));
+    await f.h.waitFor(() => f.probe.current.recognitionReview !== null && !f.probe.current.busy);
+    assert.equal(mutations(f).length, 0);
+    assert.equal(f.state.accepted, false);
+    assert.equal(f.state.selected, null);
+  } finally {await f.h.close();}
+});
+
 test('legacy correction after closing adoption still saves all cells for resume without acceptance or selection', async () => {
   const f = await setup();
   try {

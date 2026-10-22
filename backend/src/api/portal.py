@@ -45,7 +45,9 @@ def start_google_login(request: Request, response: Response, next: str = "/"):
 
 @router.post("/auth/callback")
 async def google_callback(request: Request):
-    if request.headers.get("origin") not in {"https://accounts.google.com", sessions.public_origin()}:
+    # Cross-origin form redirects can serialize their origin as "null".
+    # Identity still requires double-submit CSRF, signed claims and a one-use nonce.
+    if request.headers.get("origin") not in {"null", "https://accounts.google.com", sessions.public_origin()}:
         raise HTTPException(403, "Google callback origin rejected")
     if request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
         raise HTTPException(400, "Invalid Google response")
