@@ -35,6 +35,8 @@ tests/
 <!-- MANUAL ADDITIONS START -->
 ## Operator Rules (Manual)
 - 数量欄の内容はユーザーがシート上で手動修正する。非数値・記号・空欄・認識スコア・候補差異を理由にOCR結果の採用や編集用シート生成を停止しない。認識原文を推測・置換せず編集可能なシートへ転記する。施設・週・テンプレート・原本・セル位置の整合性検査とは分離し、手動修正済みの値を保持する。数量内容の検査で止めたまま、エラー表示の改善だけを修正完了としてはならない。
+- 採用時に保存済みの認識入力画像を別環境のOpenCV/Pillowで再生成し、画素一致を採用条件にしない。固定generation/hashの原本・実行開始receipt・施設/週・セル位置・保存contact cropの対応を検証し、認識原文を再解釈しない。
+- 過去の数量内容による拒否結果はready保存専用の補助manifestがない実データでも試験する。OCR取得はCloud Runの応答上限を超えるサイズで、転送後の原文と出所が完全に保持されることを検証する。
 - Do not use partial `gcloud run services update` that can drop env vars. If Cloud Run env changes are required, update all env vars in one operation or use IaC only.
 - Do not change behavior in areas already working. Only modify what the user explicitly requests.
 - Before touching Cloud Run settings, enumerate and verify all required env vars; do not proceed if any are missing.

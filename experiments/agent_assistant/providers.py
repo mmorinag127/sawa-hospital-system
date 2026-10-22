@@ -32,6 +32,10 @@ class Providers(Managed):
         if self.for_run(ident): return await self.gemini.reply(ident, *args, **kwargs)
         return await super().reply(ident, *args, **kwargs)
 
+    async def resume(self, ident):
+        from .recovery import Recovery
+        return await Recovery(self).resume(ident)
+
     async def stop(self, ident):
         if self.for_run(ident): return await self.gemini.stop(ident)
         return await super().stop(ident)

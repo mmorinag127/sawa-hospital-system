@@ -211,6 +211,9 @@ class Store:
             if row:
                 if row["request"] != encoded:
                     raise Conflict("命令IDが別の内容で再利用されました")
+                if row['status'] == 'recoverable_wait' and request.get('name') in ('wait_for_task_decision', 'wait_for_native_job'):
+                    db.execute("UPDATE commands SET status='executing' WHERE run_id=? AND id=?", (ident, command_id))
+                    return None
                 if row["status"] != "done":
                     raise Conflict("前の命令の結果が未確定です。再送せず履歴を確認してください")
                 return json.loads(row["result"])

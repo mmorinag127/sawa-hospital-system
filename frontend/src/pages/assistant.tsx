@@ -9,7 +9,7 @@ import ShiftReview, {ShiftReviewData} from "../components/assistant/ShiftReview"
 const BUSINESS_TIMEOUT = 300000;
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
-    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|stop|rollback|refresh-usage)|faxes\/[^/]+\/decision)$/.test(url);
+    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage)|faxes\/[^/]+\/decision)$/.test(url);
     return apiClient.post<T>(url,data,business ? {...options,timeout:BUSINESS_TIMEOUT} : options);
   },
 };
@@ -304,6 +304,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {!terminal && renderArtifacts()}
       {(terminal || selected.status==="rollback_stop_pending") && !adminView && <div className="assistant-footer"><span className="muted">この作業の内容は履歴から確認できます。</span><button className="primary" onClick={newTask}>別の作業を始める</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{selected.conversation?.length ? `（${selected.conversation.length}件）` : ""}</summary><div role="log">{selected.conversation?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
+      {selected.status==="reconciliation_required" && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
       <div className="work-controls"><button disabled={controlling || terminal || selected.status==="stopping"} onClick={()=>control("stop")}>{["stop_pending","rollback_stop_pending"].includes(selected.status) ? "停止を再確認する" : "作業を停止する"}</button><button className="quiet" disabled={controlling || ["rolled_back","rollback_stop_pending"].includes(selected.status)} onClick={()=>setConfirmRollback(true)}>開始前に戻す</button>{adminView && <button onClick={()=>control("refresh-usage")} disabled={busy}>料金を再取得</button>}</div>
       {confirmRollback && <div className="rollback-confirmation" role="alert"><h3>この依頼の変更を、開始前へ戻しますか？</h3><p>処理を停止し、この依頼で保存した内容を戻します。履歴と利用料金は残ります。</p><div className="answer-options"><button className="danger" disabled={controlling} onClick={()=>control("rollback")}>開始前へ戻す</button><button disabled={controlling} onClick={()=>setConfirmRollback(false)}>キャンセル</button></div></div>}
       <details className="technical-details"><summary>処理の詳細</summary><ol>{selected.events?.map(event=><li key={event.id}>{event.kind==="agent.message" ? event.payload.content?.filter((c:any)=>c.type==="text").map((c:any,i:number)=><p key={i}>{c.text}</p>) : event.kind==="tool_result" ? <p>{event.payload.tool}：{event.payload.result?.error || event.payload.result?.question || (event.payload.result?.ok===false ? "APIが処理を拒否しました" : "実行結果を記録しました")}</p> : event.kind==="completion_evidence" ? <p>{event.payload.summary}</p> : ["notice","error","operator_reply","rollback"].includes(event.kind) ? <p>{event.payload.message || event.payload.notice}</p> : null}</li>)}</ol></details>

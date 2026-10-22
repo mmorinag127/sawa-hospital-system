@@ -98,7 +98,6 @@ def validate_artifact(data, records, contact_bytes, source_receipt):
     from PIL import Image
     from src.services.hakodate_ocr_checkpoint_service import load_recognizer_checkpoint
     from src.services.snapshot_serialization import canonical_snapshot_json
-    from src.services.hakodate_recognizer_contact_sheet import build_recognizer_contact_sheet
     manifest = json.loads(data)
     if not isinstance(manifest,dict) or manifest.get('contract') != CONTRACT:
         raise ValueError('hakodate_observation_artifact_invalid')
@@ -109,23 +108,49 @@ def validate_artifact(data, records, contact_bytes, source_receipt):
         raise ValueError('hakodate_observation_source_changed')
     state = load_recognizer_checkpoint(checkpoint=checkpoint,item={**checkpoint['resume_item'],
         'selected_pdf_receipt':checkpoint['source']['selected_pdf_receipt']})
-    image, regions, _, skipped = build_recognizer_contact_sheet(rectified_fax_bgr=state['raw_rectified'],
-        regions=state['regions'],line_mask=None,mode='corner_cc')
-    with Image.open(BytesIO(contact_bytes)) as saved:
-        if image.size != saved.size or image.tobytes() != saved.convert('RGB').tobytes():
-            raise ValueError('hakodate_observation_contact_changed')
-    if skipped or len(records) != len(regions):
+    regions = state['regions']
+    source_hash = pixels(state['raw_rectified'])['sha256']
+    if len(records) != len(regions):
         raise ValueError('hakodate_observation_cells_changed')
     observations = []
-    for record, region in zip(records,regions):
-        # Derive contact evidence directly from the verified sheet, not raw OCR.
-        from src.services.hakodate_recognizer_input_evidence import contact_crop_evidence
-        x0,y0,x1,y1 = region['ocr_contact_crop_box']
-        if record.get('recognizer_input_evidence') != contact_crop_evidence(image,[[x0,y0],[x1,y0],[x1,y1],[x0,y1]]):
-            raise ValueError('hakodate_observation_contact_changed')
-        if (validate_metadata(record) or geometry(record) != geometry(region)
-                or record['recognizer_preprocess_observation'] != region['recognizer_preprocess_observation']):
-            raise ValueError('hakodate_observation_source_or_warp_changed')
-        observations.append(record['recognizer_preprocess_observation'])
+    # Adoption verifies the immutable recognizer input, not a new rendering made
+    # by the worker's potentially different OpenCV/Pillow version.
+    with Image.open(BytesIO(contact_bytes)) as image:
+        image = image.convert('RGB')
+        for record, region in zip(records, regions):
+            from src.services.hakodate_recognizer_input_evidence import contact_crop_evidence
+            if geometry(record) != geometry(region):
+                raise ValueError('hakodate_observation_source_or_warp_changed')
+            observation = record.get('recognizer_preprocess_observation') or {}
+            polygon = region.get('polygon')
+            height, width = state['raw_rectified'].shape[:2]
+            if polygon is not None:
+                if (not isinstance(polygon, list) or len(polygon) != 4
+                        or any(not isinstance(point, list) or len(point) != 2
+                               or any(type(v) not in (int, float) or not math.isfinite(v) for v in point)
+                               or not 0 <= point[0] <= width or not 0 <= point[1] <= height
+                               for point in polygon)):
+                    raise ValueError('hakodate_observation_geometry_invalid')
+                expected_box = [math.floor(min(p[0] for p in polygon)), math.floor(min(p[1] for p in polygon)),
+                                math.ceil(max(p[0] for p in polygon)), math.ceil(max(p[1] for p in polygon))]
+            else:
+                x0, y0, x1, y1 = region['bbox']
+                expected_box = [max(0, math.floor(x0-2)), max(0, math.floor(y0-10)),
+                                min(width, math.ceil(x1+2)), min(height, math.ceil(y1+10))]
+            if observation.get('source_crop_box') != expected_box:
+                raise ValueError('hakodate_observation_source_crop_changed')
+            if observation.get('source_sha256') != source_hash or validate_metadata(record):
+                raise ValueError('hakodate_observation_source_or_warp_changed')
+            box = record.get('ocr_contact_crop_box')
+            slot = record.get('ocr_contact_slot')
+            if (not isinstance(box, list) or len(box) != 4 or not isinstance(slot, list) or len(slot) != 4
+                    or any(type(v) is not int for v in box + slot)
+                    or not 0 <= slot[0] <= box[0] < box[2] <= slot[2] <= image.width
+                    or not 0 <= slot[1] <= box[1] < box[3] <= slot[3] <= image.height):
+                raise ValueError('hakodate_observation_contact_changed')
+            x0, y0, x1, y1 = box
+            if record.get('recognizer_input_evidence') != contact_crop_evidence(image, [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]):
+                raise ValueError('hakodate_observation_contact_changed')
+            observations.append(observation)
     if manifest.get('observations') != observations:
         raise ValueError('hakodate_observation_artifact_changed')
