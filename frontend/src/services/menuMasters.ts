@@ -88,7 +88,18 @@ export const updateMenuMasterPayload = (
 ) => {
   if (!Number.isInteger(record.revision) || record.revision < 1)
     throw new Error("保存済み版が不正です。再読込してください。");
-  return { ...normalizeMenuMasterDraft(draft), revision: record.revision };
+  const normalized = normalizeMenuMasterDraft({ ...record, ...draft });
+  const changes: Partial<MenuMasterDraft> = {};
+  for (const key of Object.keys(normalized) as (keyof MenuMasterDraft)[]) {
+    if (!(key in draft)) continue;
+    const next = draft[key];
+    const previous = record[key];
+    const unchanged = Array.isArray(next) && Array.isArray(previous)
+      ? next.length === previous.length && next.every((item, index) => item === previous[index])
+      : next === previous;
+    if (!unchanged) Object.assign(changes, { [key]: normalized[key] });
+  }
+  return { ...changes, revision: record.revision };
 };
 
 export const listMenuMasterParams = (
