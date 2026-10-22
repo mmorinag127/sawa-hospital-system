@@ -691,13 +691,18 @@ def _read_order_authored_facility_config(order_id: str, facility_id: str | None 
             if configured_execution:
                 return config_service.get_authored_facility_config(owner)
             selected_id = str(order.template_version_id or "").strip()
-            projection = lineage.read_projection(session, selected_id) if selected_id else None
-            if projection is None:
-                raise ValueError("original_template_projection_missing")
-            receipt = lineage.verify_projection(projection)
-            if receipt["facility_id"] != owner:
-                raise ValueError("original_template_configured_source_mismatch")
-            config = config_service.validate_selected_authored_facility_config(owner, receipt["authored_version"])
+            from src.services.initial_saved_import_service import get_binding
+            imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+            if imported is not None:
+                config = deepcopy(imported["facility"])
+            else:
+                projection = lineage.read_projection(session, selected_id) if selected_id else None
+                if projection is None:
+                    raise ValueError("original_template_projection_missing")
+                receipt = lineage.verify_projection(projection)
+                if receipt["facility_id"] != owner:
+                    raise ValueError("original_template_configured_source_mismatch")
+                config = config_service.validate_selected_authored_facility_config(owner, receipt["authored_version"])
             if include_context:
                 _, start, end = _parse_sheet_week_value(order.week_code)
                 if start is None or end is None:
