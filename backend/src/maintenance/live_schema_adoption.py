@@ -9,7 +9,7 @@ from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 
 from src.maintenance.formal_migration_schema import (
-    ALEMBIC_CONFIG, CONTRACT, _normalize_reflected_index_aliases,
+    ALEMBIC_CONFIG, CONTRACT, _normalize_reflected_catalog_aliases,
     read_catalog, require_revision_catalog, table_shapes,
     column_identity_policy,
 )
@@ -43,7 +43,7 @@ def _require_baseline(connection, contract):
     actual = table_shapes(catalog, "postgresql")
     matched = []
     for name, baseline in contract["adoption_baselines"].items():
-        expected = {table: _normalize_reflected_index_aliases(contract["shapes"][ref], "postgresql")
+        expected = {table: _normalize_reflected_catalog_aliases(contract["shapes"][ref], "postgresql")
                     for table, ref in baseline["tables"].items()}
         if actual == expected and catalog["views"] == baseline["views"]:
             matched.append(name)
