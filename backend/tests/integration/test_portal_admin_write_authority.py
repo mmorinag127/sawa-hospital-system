@@ -20,6 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src import db
 from src.api import auth, portal
+from sqlite_fixture_template import file_digest, sqlite_engine_from_template
 
 
 BODY = {"account": "target@example.invalid", "role": "operator", "status": "active", "systems": ["hospital"]}
@@ -35,9 +36,15 @@ def snapshot(engine):
 
 
 @pytest.fixture
-def owned(tmp_path, monkeypatch):
-    url = f"sqlite:///{tmp_path / 'authority.sqlite3'}"
-    engine = sa.create_engine(url, connect_args={"check_same_thread": False, "timeout": 5})
+def owned(tmp_path, monkeypatch, formal_sqlite_template):
+    database = tmp_path / "authority.sqlite3"
+    url = f"sqlite:///{database}"
+    template_digest = file_digest(formal_sqlite_template)
+    engine = sqlite_engine_from_template(
+        formal_sqlite_template,
+        database,
+        connect_args={"check_same_thread": False, "timeout": 5},
+    )
 
     def foreign_keys(connection, _record):
         connection.execute("PRAGMA foreign_keys=ON")
@@ -47,10 +54,6 @@ def owned(tmp_path, monkeypatch):
     for key in ("DB_URI", "DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ALEMBIC_DB_URI", url)
-    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-    with engine.connect() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
     with engine.begin() as connection:
         connection.execute(sa.text(
             "INSERT INTO users(id,account,role,status,created_at) VALUES(:id,:account,:role,'active',CURRENT_TIMESTAMP)"
@@ -73,6 +76,7 @@ def owned(tmp_path, monkeypatch):
     finally:
         engine.dispose()
         sa.event.remove(engine, "connect", foreign_keys)
+        assert file_digest(formal_sqlite_template) == template_digest
 
 
 def submit(client, operation, body=None):
