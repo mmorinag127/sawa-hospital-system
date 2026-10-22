@@ -51,6 +51,11 @@ def test_historic_content_rejection_builds_editable_sheet_without_acceptance(rev
     reread, error = workflow.get_saved_sheet(identity)
     assert error is None
     assert reread["sheet"]["rows"] == sheet["rows"]
+    raw_surface, error = order_service.get_ocr_sheet(identity)
+    assert error is None, error
+    assert raw_surface["rows"] == sheet["rows"]
+    raw_workflow, error = workflow.get_workflow_readonly(identity)
+    assert error is None and raw_workflow["state"] == "sheet_saved"
     edited = deepcopy(sheet)
     edited["rows"][0][quantity_columns[0]] = "13"
     current, error = workflow.get_workflow_readonly(identity)
