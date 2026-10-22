@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+from . import staging_data as datasets
 
 
 DEFAULT_GCS_BUCKET_PREFIX = "shift"
@@ -38,7 +39,7 @@ def _normalized_storage_key(object_name: str) -> str:
 
 
 def _local_storage_root() -> Path:
-    return Path(os.getenv("LOCAL_STORAGE_ROOT", DEFAULT_LOCAL_STORAGE_ROOT)).resolve()
+    return datasets.local_directory(Path(os.getenv("LOCAL_STORAGE_ROOT", DEFAULT_LOCAL_STORAGE_ROOT)).resolve())
 
 
 def _create_gcs_client():
@@ -60,6 +61,7 @@ def store_bytes(object_name: str, content: bytes, content_type: str) -> StoredOb
     bucket_name = os.getenv("GCS_BUCKET_NAME", "").strip() or None
 
     if bucket_name:
+        bucket_name, storage_key = datasets.write_object(bucket_name, storage_key)
         try:
             client = _create_gcs_client()
             blob = client.bucket(bucket_name).blob(storage_key)

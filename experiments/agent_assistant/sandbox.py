@@ -124,6 +124,7 @@ class Sandbox:
             env["HF_HOME"] = str(target_cache)
         uri = "sqlite:///"+str(data / "database.sqlite3")
         env.update({"DB_URI": uri, "DATABASE_URL": uri, "SAWA_TRIAL_TOKEN": token,
+                    "SAWA_ENVIRONMENT": "test",
                     "SAWA_TRIAL_MODULE": MODULES[domain], "SAWA_TRIAL_SOURCE": str(worktree / "backend"),
                     "SAWA_TRIAL_DATA": str(data), "SAWA_API_SERVICE_TOKEN": token,
                     "SAWA_REQUIRE_API_AUTH": "true",

@@ -2,6 +2,8 @@ from collections.abc import Generator
 from dataclasses import dataclass
 import os
 from typing import Any
+from functools import lru_cache
+from . import staging_data
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -56,19 +58,30 @@ def configure_database(database_url: str | None = None) -> str:
 
 
 def get_database_url() -> str:
-    return configure_database()
+    return staging_data.database_uri(configure_database(), "shift")
+
+
+@lru_cache(maxsize=4)
+def _replay_runtime(database_url):
+    selected_engine = create_engine(database_url, pool_pre_ping=True)
+    return _DatabaseRuntime(database_url, selected_engine,
+        sessionmaker(bind=selected_engine, autoflush=False, autocommit=False))
+
+
+def _selected_runtime():
+    base = configure_database()
+    assert _runtime is not None
+    if staging_data.current_dataset() == "test":
+        return _runtime
+    return _replay_runtime(staging_data.database_uri(base, "shift"))
 
 
 def get_engine() -> Engine:
-    configure_database()
-    assert _runtime is not None
-    return _runtime.engine
+    return _selected_runtime().engine
 
 
 def get_session_factory() -> sessionmaker[Session]:
-    configure_database()
-    assert _runtime is not None
-    return _runtime.session_factory
+    return _selected_runtime().session_factory
 
 
 class _EngineProxy:

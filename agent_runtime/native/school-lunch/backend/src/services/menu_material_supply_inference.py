@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 from pydantic import Field
 from src.schemas.menu_process import Strict, MaterialSupply, ProcessDocument
-from src.services.process_material_journey import inspect_journeys, supply_options
+from src.services.process_material_journey import inspect_journeys, supply_options, require_available_supplies
 
 
 class SupplyChoice(Strict):
@@ -50,7 +50,7 @@ def build_prompt(document, manifest, name, instructions, material_instructions, 
             equipment=next(p['equipment_id'] for p in manifest['points'] if p['id']==point['id'])
             if equipment in seen: continue
             seen.add(equipment)
-        places.append({k:point[k] for k in ('id','name','role')})
+        places.append({k:point[k] for k in ('id','name','role','unavailable_reason','unavailable_from') if k in point})
     known=observations(manifest['template_id'])
     confirmed=[]
     for example in examples:
@@ -71,6 +71,7 @@ def build_prompt(document, manifest, name, instructions, material_instructions, 
           '見本の観察例・材料の状態・粗い調理手順・用途を使って推論し、reasonに根拠、uncertaintyに現場確認事項を書いてください。'
           '観察例は未確認の一般化で、すべての食材の正解ではありません。製品状態の類推は必ずuncertaintyに明記してください。'
           'idはplacesの登録値だけを使用します。経由の座標、線、入出角度、調理手順は回答しません。'
+          'unavailable_reasonのある場所、unavailable_fromに検品場所IDがある組合せは使用できません。別の保管状態への置換で回避しないでください。'
           'deliveryはinspectionの場所からstoredの保管庫へ、またはdirectで保管なし。on_siteは水など厨房内供給でsource_point_idを指定。'
           '未使用の場所欄は空文字。storageはstoredかdirectとし、unknownのまま返さないでください。'
           '図面の位置や描画都合で冷蔵品を冷凍庫へ替えないでください。'
@@ -105,6 +106,7 @@ def apply_patch(document, manifest, data, raw, model):
     # Validate semantic choices and source identities, not path coordinates.
     remaining=needs_supply(result,manifest)
     if remaining: raise ValueError('搬入推論の場所または役割が不正です：'+','.join(remaining))
+    require_available_supplies(result, manifest)
     return ProcessDocument.model_validate(result).model_dump()
 
 

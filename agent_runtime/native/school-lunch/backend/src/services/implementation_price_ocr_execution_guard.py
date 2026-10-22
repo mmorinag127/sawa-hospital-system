@@ -65,7 +65,8 @@ def source_contract(job):
 
 @contextmanager
 def execution_mutex(job_id):
-    from src.db import engine
+    from src.db import get_engine
+    engine = get_engine()
     if engine.dialect.name == "postgresql":
         with engine.connect() as connection:
             acquired = bool(connection.execute(text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))"),

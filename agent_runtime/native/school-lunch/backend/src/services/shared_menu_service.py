@@ -1,4 +1,5 @@
 from copy import deepcopy
+import unicodedata
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
@@ -28,15 +29,22 @@ def data(menu, revision):
             'latest_revision': revision_data(revision)}
 
 
-def list_(session, query, month):
-    statement = select(SharedMenu).order_by(SharedMenu.name, SharedMenu.id)
+def list_(session, query, month, summary=False):
+    statement = select(SharedMenu, SharedMenuRevision).join(
+        SharedMenuRevision, SharedMenu.head_revision_id == SharedMenuRevision.id
+    ).order_by(SharedMenu.name, SharedMenu.id)
     if query:
         statement = statement.where(SharedMenu.name.ilike('%' + query + '%'))
+    if month:
+        statement = statement.where(SharedMenuRevision.source_month == month)
     items = []
-    for menu in session.scalars(statement).all():
-        revision = session.get(SharedMenuRevision, menu.head_revision_id)
-        if not month or revision.source_month == month:
-            items.append(data(menu, revision))
+    for menu, revision in session.execute(statement).all():
+        item = data(menu, revision)
+        if summary:
+            item['latest_revision'] = {key: item['latest_revision'][key] for key in (
+                'id', 'number', 'status', 'source_month', 'ingredient_count', 'step_count'
+            )}
+        items.append(item)
     return {'items': items}
 
 
@@ -49,6 +57,56 @@ def get(session, shared_menu_id):
     ).order_by(SharedMenuRevision.number.desc())).all()
     return {**data(menu, session.get(SharedMenuRevision, menu.head_revision_id)),
             'revisions': [revision_data(revision) for revision in revisions]}
+
+
+def daily_draft(session, menu):
+    """Offer a unique matching catalog pattern, without adopting or saving it.
+
+    Names and the complete ordered material list must agree. Multiple matching
+    recipes remain an operator choice; no first-candidate selection is allowed.
+    """
+    def identity(value):
+        return ''.join(unicodedata.normalize('NFKC', value).split()).lstrip('★')
+
+    expected = process.seed(menu)['ingredients']
+    names = [identity(item['name']) for item in expected]
+    matches = []
+    for catalog, revision in session.execute(select(SharedMenu, SharedMenuRevision).join(
+            SharedMenuRevision, SharedMenu.head_revision_id == SharedMenuRevision.id)).all():
+        if (identity(catalog.name) == identity(menu.name)
+                and [identity(item['name']) for item in revision.document['ingredients']] == names
+                and revision.document['steps']):
+            matches.append(revision)
+    if len(matches) != 1:
+        return None
+    source = matches[0]
+    mapping = {old['id']: new['id'] for old, new in zip(source.document['ingredients'], expected)}
+    return adoption_document(menu, source, mapping)
+
+
+def adoption_document(menu, source, mapping):
+    """Shared material remapping for an unsaved suggestion and explicit adoption."""
+    document = deepcopy(source.document)
+    expected = process.seed(menu)['ingredients']
+    source_ids = {ingredient['id'] for ingredient in document['ingredients']}
+    expected_ids = {ingredient['id'] for ingredient in expected}
+    if (set(mapping) != source_ids or set(mapping.values()) != expected_ids
+            or len(set(mapping.values())) != len(mapping)):
+        raise HTTPException(422, '共有献立と日次材料を全て明示対応してください')
+    for step in document['steps']:
+        step.pop('execution', None)
+        for item in step['inputs']:
+            if item.get('ingredient_id'):
+                item['ingredient_id'] = mapping[item['ingredient_id']]
+        for output in step.get('outputs', []):
+            if output.get('ingredient_ids') is not None:
+                output['ingredient_ids'] = [mapping[item] for item in output['ingredient_ids']]
+    settings = {mapping[item['id']]: {key: deepcopy(item[key])
+                for key in ('state', 'supply', 'drawing') if item.get(key) is not None}
+                for item in document['ingredients']}
+    document['ingredients'] = [{**deepcopy(item), **settings[item['id']]} for item in expected]
+    document['shared_menu_source'] = {'revision_id': source.id, 'material_mapping': mapping}
+    return document
 
 
 def editor_options(session):
@@ -179,33 +237,7 @@ def adopt(session, menu_id, body):
     source = session.get(SharedMenuRevision, body.shared_menu_revision_id)
     if not source:
         raise HTTPException(404, '共有献立改訂が見つかりません')
-    document = deepcopy(source.document)
-    expected, mapping = process.seed(menu)['ingredients'], body.material_mapping
-    source_ids = {ingredient['id'] for ingredient in document['ingredients']}
-    expected_ids = {ingredient['id'] for ingredient in expected}
-    if (set(mapping) != source_ids or set(mapping.values()) != expected_ids
-            or len(set(mapping.values())) != len(mapping)):
-        raise HTTPException(422, '共有献立と日次材料を全て明示対応してください')
-    for step in document['steps']:
-        step.pop('execution', None)
-        for item in step['inputs']:
-            if item.get('ingredient_id'):
-                item['ingredient_id'] = mapping[item['ingredient_id']]
-        for output in step.get('outputs', []):
-            if output.get('ingredient_ids') is not None:
-                output['ingredient_ids'] = [mapping[item] for item in output['ingredient_ids']]
-    material_settings = {
-        mapping[material['id']]: {
-            key: deepcopy(material[key]) for key in ('supply', 'drawing')
-            if material.get(key) is not None
-        }
-        for material in document['ingredients']
-    }
-    document['ingredients'] = [
-        {**deepcopy(material), **material_settings[material['id']]}
-        for material in expected
-    ]
-    document['shared_menu_source'] = {'revision_id': source.id, 'material_mapping': mapping}
+    document = adoption_document(menu, source, body.material_mapping)
     request = type('AdoptionRequest', (), {
         'menu_version': body.expected_menu_version,
         'expected_version': body.expected_binding_version,

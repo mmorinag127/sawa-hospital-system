@@ -154,6 +154,10 @@ class PlanningCommandResponse(PlanningResponse, Generic[Item]):
     collection_revision: int
 
 
+class PositionDetailResponse(PlanningCollectionResponse[Item], Generic[Item]):
+    position: PositionResponse | None
+
+
 class PlanningDeletedItemResponse(PlanningItemResponse):
     deleted: Literal[True]
 

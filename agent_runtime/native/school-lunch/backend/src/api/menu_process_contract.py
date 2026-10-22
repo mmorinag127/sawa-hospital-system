@@ -1,6 +1,6 @@
 """Documentation only: serializer envelopes, with stored JSON left open."""
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue, Field
 
 
 class Envelope(BaseModel):
@@ -42,6 +42,11 @@ class ProcessProposal(Envelope):
     model: str
     issues: list[str]
     fixed_step_ids: list[str]
+
+
+class ProcessDefaults(Envelope):
+    base_version: int
+    document: dict[str, JsonValue]
 
 
 class ProcessEquipment(Envelope):
@@ -91,6 +96,7 @@ class ProcessContext(Envelope):
     status: Literal['draft', 'confirmed']
     scope: Literal['menu', 'day']
     document: dict[str, JsonValue]
+    suggested_document: dict[str, JsonValue] | None = None
     shared_menu_defaults: SharedMenuDefaults | None
     proposal: ProcessProposal | None
     history: list[ProcessHistory]
@@ -106,6 +112,7 @@ class SupplyPoint(Envelope):
     name: str
     role: Literal['inspection', 'storage', 'on_site']
     unavailable_reason: str = None
+    unavailable_from: dict[str, str] = Field(default_factory=dict)
 
 
 class RoutePort(Envelope):
@@ -119,6 +126,12 @@ class RouteEquipment(Envelope):
     name: str
     type: str | None
     ports: list[RoutePort]
+    bounds: list[float] | None = None
+
+
+class KitchenDiagram(Envelope):
+    svg: str
+    view_box: list[int | float]
 
 
 class RouteTemplate(Envelope):
@@ -126,6 +139,7 @@ class RouteTemplate(Envelope):
     template_version: int
     material_sources: list[SupplyPoint]
     equipment: list[RouteEquipment]
+    diagram: KitchenDiagram | None = None
 
 
 class RouteOptions(Envelope):

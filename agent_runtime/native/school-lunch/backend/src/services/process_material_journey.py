@@ -4,7 +4,9 @@ Only explicit supply settings/graph steps establish storage. Names, recipe
 dates, drawing examples and proximity are not a storage decision source.
 """
 from copy import deepcopy
+from functools import lru_cache
 import hashlib
+import json
 import re
 from src.schemas.menu_process import material_flow
 
@@ -16,7 +18,46 @@ def is_serving_work(step):
                 re.search(r'盛[り]?付|提供|配缶',(step.get('conditions') or {}).get('component_name','')))
 
 
-def supply_options(manifest):
+@lru_cache(maxsize=16)
+def _receipt_connections(svg, manifest_json):
+    """Check declared receiving corridors with the renderer's exact wall solver.
+
+    The cache key includes the complete drawing and manifest, including gates;
+    a changed facility snapshot can never reuse an earlier permission result.
+    This establishes connectivity, not a reservation for all material lanes.
+    """
+    from xml.etree import ElementTree as ET
+    from src.services.kitchen_wall_geometry import (
+        routing_network, endpoint_geometry, route_regions, storage_obstacles,
+    )
+    from src.services.process_route_network_service import _route
+    manifest = json.loads(manifest_json)
+    network = routing_network(ET.fromstring(svg), manifest['flow_network'], manifest)
+    points = {p['id']: p for p in manifest['points']
+              if p['id'] in manifest.get('supply_area_ids', [])}
+    inspections = [p for p in points.values() if p['name'] == '検品室']
+    result = {}
+    for target in points.values():
+        if not re.match(r'冷[蔵凍]庫|米倉庫|食材倉庫', target['name']):
+            continue
+        failures = {}
+        for source in inspections:
+            try:
+                boxes = [supply_area_bounds(p, network) for p in (source, target)]
+                start, end = [((l+r)/2, (t+b)/2) for l,t,r,b in boxes]
+                cells, gates = endpoint_geometry(network, start, end)
+                forbidden = storage_obstacles(network, {'area:'+source['id'], 'area:'+target['id']}, receipt=True)
+                _route(start, end, route_regions(network, receipt=True)+cells+boxes,
+                       network['barriers'], gates, [], 0, forbidden=forbidden,
+                       candidate_geometry=True)
+            except ValueError:
+                failures[source['id']] = (source['name']+'から'+target['name']+
+                    'への搬入経路を図面の登録通路・出入口で確認できません。施設の搬入経路設定を確認してください。')
+        result[target['id']] = failures
+    return result
+
+
+def supply_options(manifest, svg=None):
     result = []
     for point in manifest['points']:
         if point.get('kind') != 'area_anchor' or point['id'] not in manifest.get('supply_area_ids', []):
@@ -32,6 +73,16 @@ def supply_options(manifest):
                 except ValueError as exc:
                     option['unavailable_reason'] = str(exc)
             result.append(option)
+    if manifest.get('flow_network'):
+        if svg is None:
+            # Canonical template for normal editing; snapshot callers pass their
+            # actual SVG and network explicitly below instead of substituting it.
+            from src.services.menu_process_route_service import load_template
+            svg, _ = load_template(manifest['template_id'])
+        connections = _receipt_connections(svg, json.dumps(manifest, sort_keys=True))
+        for option in result:
+            if option['role'] == 'storage':
+                option['unavailable_from'] = dict(connections.get(option['id'], {}))
     # On-site ingredients, e.g. water, must have an explicitly selected place.
     for point in manifest['points']:
         if point.get('kind')=='equipment_port':
@@ -58,9 +109,28 @@ def supply_area_bounds(point, network):
     return bounds
 
 
-def inspect_journeys(document, manifest):
+def require_available_supplies(document, manifest, svg=None):
+    """Reject explicitly selected unusable paths; keep incomplete drafts editable."""
+    options = {p['id']: p for p in supply_options(manifest, svg)}
+    for material in document['ingredients']:
+        if material.get('drawing', {}).get('mode') == 'annotation':
+            continue
+        supply = material.get('supply') or {}
+        if supply.get('template_id') != manifest['template_id']:
+            continue  # Template mismatch is validated by the journey contract.
+        for field in ('inspection_point_id', 'storage_point_id', 'source_point_id'):
+            reason = options.get(supply.get(field), {}).get('unavailable_reason')
+            if reason:
+                raise ValueError(material['name']+'：'+reason)
+        if supply.get('mode') == 'delivery' and supply.get('storage') == 'stored':
+            reason = options.get(supply.get('storage_point_id'), {}).get('unavailable_from', {}).get(supply.get('inspection_point_id'))
+            if reason:
+                raise ValueError(material['name']+'：'+reason)
+
+
+def inspect_journeys(document, manifest, svg=None):
     by_step, by_output = material_flow(document)
-    options = {p['id']:p for p in supply_options(manifest)}
+    options = {p['id']:p for p in supply_options(manifest, svg)}
     children = {s['id']:[] for s in document['steps']}
     for target in document['steps']:
         for ref in target['inputs']:
@@ -99,6 +169,9 @@ def inspect_journeys(document, manifest):
                     issues.append('保管場所が未設定または図面に存在しない')
                 else:
                     point_ids.append(pid)
+                    reason = options[pid].get('unavailable_from', {}).get(supply.get('inspection_point_id'))
+                    if reason:
+                        issues.append(reason)
             elif storage=='direct' and supply.get('storage_point_id'):
                 issues.append('保管せず使用の設定に保管場所が残っている')
         if not starts:
@@ -138,9 +211,9 @@ def inspect_journeys(document, manifest):
     return {'complete':all(not r['issues'] for r in records),'materials':records}
 
 
-def expand_supplies(document, manifest):
+def expand_supplies(document, manifest, svg=None):
     """Compile explicit supply legs, retaining original cooking work verbatim."""
-    audit=inspect_journeys(document,manifest)
+    audit=inspect_journeys(document,manifest,svg)
     if not audit['complete']:
         details=[f"{r['name']}：{'／'.join(r['issues'])}" for r in audit['materials'] if r['issues']]
         raise ValueError('材料の搬入から盛付までの経路が未完成です。作業台から始まる図は生成しません。\n'+'\n'.join(details))

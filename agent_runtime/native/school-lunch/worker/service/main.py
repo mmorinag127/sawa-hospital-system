@@ -21,6 +21,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Sawa Implementation Price OCR Worker", lifespan=lifespan)
+from src.staging_data import DatasetMiddleware
+app.add_middleware(DatasetMiddleware)
 
 
 @app.get("/health")

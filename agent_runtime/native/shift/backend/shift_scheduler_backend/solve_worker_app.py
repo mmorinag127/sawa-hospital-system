@@ -77,6 +77,8 @@ def _session_factory():
 
 def create_app(*, config=None, lease_seconds=None, session_factory=None, clock=None, verifier=None):
     worker = FastAPI(title="Shift solve worker", docs_url=None, redoc_url=None, openapi_url=None)
+    from .staging_data import DatasetMiddleware
+    worker.add_middleware(DatasetMiddleware)
 
     @worker.get("/health")
     def health():

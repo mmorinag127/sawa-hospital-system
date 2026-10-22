@@ -67,8 +67,10 @@ def context(session, menu_id):
         ProcessRecipe.facility_id == menu.facility_id,
         ProcessRecipe.confirmed_revision_id.is_not(None)).order_by(ProcessRecipe.name, ProcessRecipe.id)).all()
     document = deepcopy(revision.document) if revision else seed(menu)
+    from src.services.shared_menu_service import daily_draft
+    suggested_document = daily_draft(session, menu) if revision is None else None
     shared_menu_defaults = None
-    source = document.get('shared_menu_source')
+    source = (suggested_document or document).get('shared_menu_source')
     if source:
         from src.models.shared_menu import SharedMenuRevision
         shared_revision = session.get(SharedMenuRevision, source['revision_id'])
@@ -99,7 +101,8 @@ def context(session, menu_id):
             'recipe_revision': recipe.version if recipe else 0,
             'revision': revision.id if revision else None,
             'status': revision.status if revision else 'draft', 'scope': revision.scope if revision else 'menu',
-            'document': document, 'shared_menu_defaults': shared_menu_defaults, 'proposal': pending,
+            'document': document, 'suggested_document': suggested_document,
+            'shared_menu_defaults': shared_menu_defaults, 'proposal': pending,
             'history': [{'id': r.id, 'number': r.number, 'status': r.status, 'scope': r.scope,
                          'created_at': r.created_at.isoformat(), 'origin': r.origin,
                          'document': remap_materials(r.document, menu, clear_actuals=r.menu_execution_id != menu.id) or deepcopy(r.document),
@@ -352,7 +355,10 @@ def _save_locked(session, menu_id, request, actor_role='operator', *, selected_r
     source = document.get('shared_menu_source')
     old_source = previous.document.get('shared_menu_source') if previous else None
     if not shared_adoption and not selected_recipe and source != old_source:
-        raise HTTPException(422, '共有献立の採用元は専用の採用操作で変更してください。出典を削除・書換えできません。')
+        from src.services.shared_menu_service import daily_draft
+        suggestion = daily_draft(session, menu) if previous is None else None
+        if not suggestion or source != suggestion.get('shared_menu_source'):
+            raise HTTPException(422, '共有献立の採用元は専用の採用操作で変更してください。出典を削除・書換えできません。')
     if source and request.scope != 'day':
         raise HTTPException(422, '共有献立を採用した工程は日次範囲でのみ保存できます。')
     if source:
@@ -371,6 +377,17 @@ def _save_locked(session, menu_id, request, actor_role='operator', *, selected_r
     if document.get('daily_work_source') and request.scope != 'day':
         raise HTTPException(422, '当日の作業回答は日次範囲でのみ保存できます。')
     check_materials(menu, document)
+    supply_templates = {m['supply']['template_id'] for m in document['ingredients']
+                        if m.get('supply') and m['supply'].get('template_id')}
+    if supply_templates:
+        from src.services.menu_process_route_service import load_template
+        from src.services.process_material_journey import require_available_supplies
+        try:
+            for template_id in sorted(supply_templates):
+                svg, manifest = load_template(template_id)
+                require_available_supplies(document, manifest, svg)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     if request.status == 'confirmed':
         try:
             request.document.check_confirmable()

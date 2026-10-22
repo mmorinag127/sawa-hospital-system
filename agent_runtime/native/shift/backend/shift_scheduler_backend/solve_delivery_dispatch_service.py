@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from google.api_core.exceptions import AlreadyExists
 from google.cloud import tasks_v2
+from . import staging_data as datasets
 
 ENV_FIELDS = {
     "project": "SHIFT_SOLVE_TASKS_PROJECT", "location": "SHIFT_SOLVE_TASKS_LOCATION",
@@ -72,19 +73,25 @@ def capture_contract(config, run_id, generation):
     if any(type(value) is not int or value <= 0 for value in (run_id, generation)):
         raise ValueError("shift_transport_identity_invalid")
     return {"schema": 1, "config": asdict(config), "run_id": run_id, "generation": generation,
+        **({"dataset": datasets.current_dataset()} if datasets.current_dataset() != "test" else {}),
         "task_name": tasks_v2.CloudTasksClient.task_path(config.project, config.location, config.queue,
-            f"solve-{run_id}-generation-{generation}"),
+            f"{datasets.delivery_namespace()}solve-{run_id}-generation-{generation}"),
         "body": json.dumps({"run_id": run_id, "generation": generation}, sort_keys=True, separators=(",", ":"))}
 
 
 def validate_contract(contract):
-    if type(contract) is not dict or set(contract) != {"schema", "config", "run_id", "generation", "task_name", "body"}:
+    required = {"schema", "config", "run_id", "generation", "task_name", "body"}
+    if datasets.current_dataset() != "test":
+        required.add("dataset")
+    if type(contract) is not dict or set(contract) != required:
         raise ValueError("shift_transport_contract_invalid")
     if type(contract["schema"]) is not int or contract["schema"] != 1:
         raise ValueError("shift_transport_contract_invalid")
     if type(contract["config"]) is not dict or set(contract["config"]) != set(CloudTaskConfig.__dataclass_fields__):
         raise ValueError("shift_transport_contract_invalid")
     config = CloudTaskConfig(**contract["config"])
+    if datasets.current_dataset() != "test" and "-stg-" not in urlsplit(config.url).netloc:
+        raise datasets.DatasetUnavailable("staging_dataset_original_delivery_not_replayable")
     if contract != capture_contract(config, contract["run_id"], contract["generation"]):
         raise ValueError("shift_transport_contract_invalid")
     return config
@@ -100,7 +107,10 @@ def _headers_match(headers, contract, config):
     expected = {"content-type": "application/json", "user-agent": "Google-Cloud-Tasks",
         "host": urlsplit(config.url).netloc,
         "content-length": str(len(contract["body"].encode()))}
+    if "dataset" in contract:
+        expected[datasets.HEADER.lower()] = contract["dataset"]
     return (observed.get("content-type") == expected["content-type"]
+        and observed.get(datasets.HEADER.lower()) == expected.get(datasets.HEADER.lower())
         and all(name in expected and value == expected[name] for name, value in observed.items()))
 
 
@@ -122,7 +132,7 @@ def send_captured(contract, *, client):
     config = validate_contract(contract)
     task = {"name": contract["task_name"], "dispatch_deadline": {"seconds": config.deadline_seconds},
         "http_request": {"http_method": tasks_v2.HttpMethod.POST, "url": config.url,
-            "headers": {"Content-Type": "application/json"}, "body": contract["body"].encode(),
+            "headers": {"Content-Type": "application/json", **({datasets.HEADER: contract["dataset"]} if "dataset" in contract else {})}, "body": contract["body"].encode(),
             "oidc_token": {"service_account_email": config.service_account, "audience": config.audience}}}
     try:
         actual = client.create_task(request={"parent": contract["task_name"].rsplit("/tasks/", 1)[0],

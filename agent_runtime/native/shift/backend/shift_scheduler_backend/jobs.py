@@ -352,25 +352,112 @@ def _delivery_terminal_time_matches(recorded, persisted):
 
 def serialize_job_status(session, run) -> JobStatusProjection:
     delivery = session.query(models.SolveDelivery).filter_by(solve_run_id=run.id).one_or_none()
+    review = None
     if delivery is not None:
         review = session.query(models.SolveDeliveryReview).filter_by(delivery_id=delivery.id).one_or_none()
-        if review is not None:
-            if review.code != "shift_recovery_requires_review":
-                raise ValueError("shift_delivery_projection_review_invalid")
+    early_result, contract, input_version = _job_status_context(run, delivery, review)
+    if early_result is not None:
+        return early_result
+    reasons = []
+    if run.status in {"failed", "error"}:
+        reasons = session.query(models.Violation).filter_by(solve_run_id=run.id).order_by(models.Violation.id).all()
+    transport_state, failure = _job_status_failure(run, delivery, contract, input_version, reasons)
+    warning = None
+    if delivery is not None and delivery.state == "pending":
+        warning = session.query(models.Violation).filter_by(solve_run_id=run.id,
+            rule_name="shift_task_dispatch_pending").order_by(models.Violation.id).first()
+    return _job_status_result(run, delivery, contract, input_version, transport_state, failure, warning)
+
+
+def _one_job_status_source(rows):
+    from sqlalchemy.exc import MultipleResultsFound
+
+    if len(rows) > 1:
+        raise MultipleResultsFound("Multiple rows were found when one or none was required")
+    return rows[0] if rows else None
+
+
+def load_job_status_sources(session, runs):
+    """Read history status sources in request-local batches, without a cache."""
+    if not runs:
+        return {}, {}, {}, {}
+    run_ids = {run.id for run in runs}
+    deliveries = {}
+    for start in range(0, len(run_ids), 500):
+        for row, persisted_run_id in session.query(
+            models.SolveDelivery, models.SolveDelivery.solve_run_id
+        ).filter(
+            models.SolveDelivery.solve_run_id.in_(list(run_ids)[start:start + 500])
+        ).all():
+            deliveries.setdefault(persisted_run_id, []).append(row)
+    reviews = {}
+    delivery_ids = {row.id for rows in deliveries.values() for row in rows}
+    for start in range(0, len(delivery_ids), 500):
+        for row, persisted_delivery_id in session.query(
+            models.SolveDeliveryReview, models.SolveDeliveryReview.delivery_id
+        ).filter(
+            models.SolveDeliveryReview.delivery_id.in_(list(delivery_ids)[start:start + 500])
+        ).all():
+            reviews.setdefault(persisted_delivery_id, []).append(row)
+    reason_run_ids = []
+    for run in runs:
+        run_deliveries = deliveries.get(run.id, [])
+        if len(run_deliveries) > 1:
+            continue
+        delivery = run_deliveries[0] if run_deliveries else None
+        if delivery is not None and reviews.get(delivery.id):
+            continue
+        if run.status in {"failed", "error"} or delivery is not None and delivery.state == "pending":
+            reason_run_ids.append(run.id)
+    reasons = {}
+    warnings = {}
+    for start in range(0, len(reason_run_ids), 500):
+        for row, persisted_run_id, persisted_rule in session.query(
+            models.Violation, models.Violation.solve_run_id, models.Violation.rule_name
+        ).filter(
+            models.Violation.solve_run_id.in_(reason_run_ids[start:start + 500])
+        ).order_by(models.Violation.id).all():
+            reasons.setdefault(persisted_run_id, []).append(row)
+            if persisted_rule == "shift_task_dispatch_pending":
+                warnings.setdefault(persisted_run_id, row)
+    return deliveries, reviews, reasons, warnings
+
+
+def serialize_job_status_from_sources(run, sources) -> JobStatusProjection:
+    deliveries, reviews, reasons, warnings = sources
+    delivery = _one_job_status_source(deliveries.get(run.id, []))
+    review = _one_job_status_source(reviews.get(delivery.id, [])) if delivery is not None else None
+    return _project_job_status(run, delivery, review, reasons.get(run.id, []), warnings.get(run.id))
+
+
+def _project_job_status(run, delivery, review, reasons, warning) -> JobStatusProjection:
+    early_result, contract, input_version = _job_status_context(run, delivery, review)
+    if early_result is not None:
+        return early_result
+    transport_state, failure = _job_status_failure(run, delivery, contract, input_version, reasons)
+    return _job_status_result(run, delivery, contract, input_version, transport_state, failure, warning)
+
+
+def _job_status_context(run, delivery, review):
+    if delivery is not None and review is not None:
+        if review.code != "shift_recovery_requires_review":
+            raise ValueError("shift_delivery_projection_review_invalid")
+        contract = run.config_json.get("execution_contract") if type(run.config_json) is dict else None
+        input_version = recorded_input_version(run.config_json)
+        from .solve_delivery_service import DeliveryFenced, _validate_delivery_capture
+        try:
+            _validate_delivery_capture(delivery, run)
+            trusted = True
+        except DeliveryFenced:
             trusted = False
-            contract = run.config_json.get("execution_contract") if type(run.config_json) is dict else None
-            input_version = recorded_input_version(run.config_json)
-            from .solve_delivery_service import classify_delivery_review
-            disposition = classify_delivery_review(session, delivery, run)
-            trusted = disposition.capture_trusted
-            return {"domain": "shift", "jobId": run.id, "inputVersion": input_version if trusted else None,
-                "inputReference": None, "attemptIdentity": contract["attemptIdentity"] if trusted else None,
-                "executionContract": deepcopy(contract) if trusted else None,
-                "provenanceAvailability": "recorded" if trusted else "unavailable",
-                "transportState": delivery.state if delivery.state in {"pending", "claimed", "stopping", "terminal"} else None,
-                "businessState": run.status, "state": "blocked", "sourceState": run.status,
-                "failure": {"code": review.code, "message": "Delivery requires operational review"},
-                "artifactReference": run.id}
+        return ({"domain": "shift", "jobId": run.id, "inputVersion": input_version if trusted else None,
+            "inputReference": None, "attemptIdentity": contract["attemptIdentity"] if trusted else None,
+            "executionContract": deepcopy(contract) if trusted else None,
+            "provenanceAvailability": "recorded" if trusted else "unavailable",
+            "transportState": delivery.state if delivery.state in {"pending", "claimed", "stopping", "terminal"} else None,
+            "businessState": run.status, "state": "blocked", "sourceState": run.status,
+            "failure": {"code": review.code, "message": "Delivery requires operational review"},
+            "artifactReference": run.id}, None, None)
     contract = (run.config_json or {}).get("execution_contract")
     input_version = recorded_input_version(run.config_json)
     if delivery is not None and (type(contract) is not dict
@@ -378,9 +465,12 @@ def serialize_job_status(session, run) -> JobStatusProjection:
         raise ValueError("shift_delivery_projection_capture_mismatch")
     if contract is not None and contract["inputVersion"] != input_version:
         raise ValueError("shift_execution_recorded_input_mismatch")
+    return None, contract, input_version
+
+
+def _job_status_failure(run, delivery, contract, input_version, reasons):
     failure = None
     if run.status in {"failed", "error"}:
-        reasons = session.query(models.Violation).filter_by(solve_run_id=run.id).order_by(models.Violation.id).all()
         messages = [row.message for row in reasons if row.severity in {"hard", "error"} and row.message]
         failure = {"code": run.solver_status, "message": "\n".join(messages) or None}
     transport_state = None
@@ -426,9 +516,11 @@ def serialize_job_status(session, run) -> JobStatusProjection:
                         or any(type(value) is not str or not value for value in recorded_failure.values())):
                     raise ValueError("shift_delivery_projection_failure_invalid")
                 failure = {"code": recorded_failure["code"], "message": recorded_failure["reason"]}
+    return transport_state, failure
+
+
+def _job_status_result(run, delivery, contract, input_version, transport_state, failure, warning) -> JobStatusProjection:
     if delivery is not None and delivery.state == "pending":
-        warning = session.query(models.Violation).filter_by(solve_run_id=run.id,
-            rule_name="shift_task_dispatch_pending").order_by(models.Violation.id).first()
         if warning is not None:
             failure = {"code": warning.rule_name, "message": warning.message}
     return {"domain": "shift", "jobId": run.id, "inputVersion": input_version,

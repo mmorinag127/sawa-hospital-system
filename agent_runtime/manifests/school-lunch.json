@@ -1,8 +1,8 @@
 {
-  "source_revision": "f7613fb2e9f78a9ac6c7be8544afa218ed23ad81",
-  "working_diff_sha256": "525d2c719556bd3bb966ef5c8a44b7ad33e169f60b2802336f9ca3963425c1e1",
+  "source_revision": "9ad04a60a7038ad3c751d944f86749dda912ee1e",
+  "working_diff_sha256": "33213bdb71baf6153f8da378bd901dde15844cefb7c5947acd3354aa35df33d4",
   "files": {
-    "backend/Dockerfile": "f1e62cf30bfcecfac19c2a553c526e3825b1e418a6160d63f60ebb10f320a61b",
+    "backend/Dockerfile": "031e6526fc9df589259894d9d2849823abd34850dd2594402616bdc0fd7ffdbd",
     "backend/alembic.ini": "a19975a026a14db3e2df558cf079c07a6725f2aa66d9ad94c460115c09c40925",
     "backend/conftest.py": "65266a48dcd50c7acfd52e6c4f964813aef12cff38d2ed90bd1c8e3ac414125e",
     "backend/migrations/env.py": "f898a678fc960312011b080b25939c69166e9dad538d136d773841bd243d8ddd",
@@ -39,12 +39,12 @@
     "backend/migrations/versions/0030_shared_menus.py": "877573fc75f3a494503c7136facf77097015fe6ed9ecd6435bf30952bd00d825",
     "backend/requirements.txt": "b984c3f36f9bb2291a293ee545eddd9786b1e37b70dd0e73d83214d35d3bf9d7",
     "backend/src/api/__init__.py": "87ac2145ab9e98a7b78a3ab0e52dd62324fb4ebe25af6c2fc277d94ee5ea3d9d",
-    "backend/src/api/auth.py": "3c7dcb5e699032a8a67b9e5c841e3d93096a0f09d75f9f879b82dd191e0b4e39",
+    "backend/src/api/auth.py": "c31546a00c405bfafe2eb8b968a8333c7b4677acb373dcb57a2ca74ad8b58465",
     "backend/src/api/auth_config.py": "a4a98485660936073c666094047f482f7adc7f4217a7c99627899942d47e912a",
     "backend/src/api/health.py": "18e971ef9710b4fab0d0bd4faf8b765022a7e3cf6b6ffd091ccc421af244cb75",
     "backend/src/api/implementation_price_tables.py": "d3d0990349785780f27e8ca93f517cd789c687196085798bd61553605e11ce1a",
-    "backend/src/api/menu_process.py": "e6c3e7c709732421578b46bee23526d9234cb43225244bfe81a73572900b9c97",
-    "backend/src/api/menu_process_contract.py": "b47a3ce3cde223f7073626b88463ac12d37f6f42bd74226cb1b5215d457a1485",
+    "backend/src/api/menu_process.py": "82907f4ec73433c6b085fdd8abd3f25852ab62a7c74b2a573abd90a9bf9c0770",
+    "backend/src/api/menu_process_contract.py": "52ca0188ee44307c00efe13c2af7d9784ce1ff4b26234b1e8a216f392a3b537d",
     "backend/src/api/monthly_overview_contract.py": "146f003a27edd9dc8bb86592c5d4e89ceb75e97d7c0eb5156c68f1611b2d3b8e",
     "backend/src/api/monthly_procurement.py": "e92b0ac5781054c1f531db568ef496aab3aa6ad2e77669cd59baba1a820c6a23",
     "backend/src/api/monthly_procurement_contract.py": "2975d5477b4feb2d53962be9b39af16d2900e98f95c74b4c63b7fce44a475dbe",
@@ -58,7 +58,7 @@
     "backend/src/api/school_lunch_variants.py": "c4a41b890621feddb314527530f0c428141ff684715a19795ec6357aadbe8b2b",
     "backend/src/api/school_scope.py": "98c56c8b63457b62d02fd69c94c85de9236ec5887bd4176c288622ffc393c97d",
     "backend/src/api/school_work_inbox.py": "1aef795c69ef80aa3e743b5334e4a7758711d9ed6036d1797a35f997d2a7a9d7",
-    "backend/src/api/shared_menus.py": "595451f869b6cc1c88e9c3f18d5b5785d39440f34189a445ccd0cd1829401b1e",
+    "backend/src/api/shared_menus.py": "23fdee742a956b7976d6004ad1dd6a5a26fdae9f3ac40c177ce19ed72b407462",
     "backend/src/data/kitchen_svg/equipment-observations.json": "e0dc3709e100462950b0afa90636f92e16420b58bc1394e2da1fc5f0aa57aabb",
     "backend/src/data/kitchen_svg/kitchen-base-bread.json": "3dff906d6e8a52e3d651dbec694766e965a0a9f655a935d8ba30c2521e4c1277",
     "backend/src/data/kitchen_svg/kitchen-base-bread.svg": "d9fbb94210478fcc0ef634a7a0ec09fc224979200f6c37a0c32f31e4a452c988",
@@ -68,8 +68,8 @@
     "backend/src/data/kitchen_svg/process-correction-policy.json": "233a7825fd85a40a8f0c3ecee06d6fcb08aa2cbf81bbe7f8b3b58952d76b9748",
     "backend/src/data/kitchen_svg/supply-observations.json": "451e6bf2cb9bb72f547131f61190f7d14a73c9190ae3e4b115d3b19195ec9dec",
     "backend/src/data/work_schedule_original.xlsx": "20b8b0e58fc9aee7cae0ed0f6d8730028abc8da9f4e0c0513039bccaefc0976a",
-    "backend/src/db.py": "44efe1f709c31bbb5ca4b42f186aae7cf63ec74d2839a524b43ac06859a4b57d",
-    "backend/src/main.py": "6ceda7aaf6ea03c427446ab26ef64df55b01ad65b1fbf2387b7d5dd673b2cfbb",
+    "backend/src/db.py": "0ac3d2e73fe488fd0b9f39bc29acbed56791991e6ca3e41ece24854a0eaa34b0",
+    "backend/src/main.py": "09e99af1ea42adf8892b0c8efb121145afdcd5324eb194aed1354094cc605b2b",
     "backend/src/migration_catalog.py": "d58484a41861ff6404eea30a9d835d131f48c08e3b046394b54bc1b6758dd671",
     "backend/src/migration_catalog_contracts.json": "4410f0ef4e4e7dd500ac7c382c7c979fd614d30e34bb56cbaf4e435499e71344",
     "backend/src/models/__init__.py": "fde5dc19a6929064b52a9eb2e2673226dda15e69ba64ce99e7855b3f4792b43a",
@@ -102,26 +102,26 @@
     "backend/src/services/implementation_price_menu_quantity.py": "d98ba0aaf70b18875c6db80b18932d8f28885405b7cb73c5119d928609ead75e",
     "backend/src/services/implementation_price_ocr_delivery_auth.py": "ae5699808268d6946efd6749bf434a2361db317683820b3fc226c06c8b7a5a4f",
     "backend/src/services/implementation_price_ocr_delivery_service.py": "61e4ada8208f19c72f8f42b5f22742bda99c19e8a83f994a80cbbf9424faeea9",
-    "backend/src/services/implementation_price_ocr_dispatch_service.py": "2fd9f16b02e14c5cd7fa709a5e727041973147b54a7664f357fc2b9275c413a6",
-    "backend/src/services/implementation_price_ocr_execution_guard.py": "ad6c22e13c9d7c0f9e5d2d6f41cef24422de09bf0e6467a0b9bc7ff17f4bfcf8",
+    "backend/src/services/implementation_price_ocr_dispatch_service.py": "5db356fac8bd1c9e6540b7e485c1ad23b65ffa02b3ab272616615a098a10bbb4",
+    "backend/src/services/implementation_price_ocr_execution_guard.py": "fa19fb57030836ba72988176b62fc7279e6f6555348e9bc79d55199ce7b2151c",
     "backend/src/services/implementation_price_ocr_job_service.py": "ba0b3c7e66923429b47cff76cd3701ee93d5ec4882fff38b79e3931a36e0bae8",
     "backend/src/services/implementation_price_scope_service.py": "59725ee638e3de6f5011f68aa2e66cfe5e248b44a94140066062ef47ae098c0b",
-    "backend/src/services/implementation_price_storage.py": "1924d3a3d6510dbd0734632a3bd72db5679fe2519f7837f47e4fcf884dddfa20",
+    "backend/src/services/implementation_price_storage.py": "78d1fa447a13ef456f8e5f3dda20ee724eee142535172f71acf83c5c58e3f481",
     "backend/src/services/implementation_price_table_ocr_service.py": "85cd4b390e76c394573a42716f98f9aa5f2680d408917cf5350fd77767b9112d",
     "backend/src/services/implementation_price_table_service.py": "517814060fc11bcfb5b48f141f51722761149d9cf92480254e0b5bbab005696e",
     "backend/src/services/kitchen_layout_source.py": "a7b7f7e9b284c8e1305a12dc0f2519d6030360d821b4cdc14818ac610d6fc2ca",
     "backend/src/services/kitchen_wall_geometry.py": "538c95005b6227493e461fb44063d1eaba6c1e27cffcf8aaf18c70512a1b682e",
     "backend/src/services/material_drawing_projection.py": "78dc1dfc9051f50312e31f30ca928f4ef3c883168676c176f3bcf971402b06b4",
     "backend/src/services/menu_material_drawing_inference.py": "52613faa331647ab0ecdf416a1525c0c465f75aae5a4669456010c703a0a75e9",
-    "backend/src/services/menu_material_supply_inference.py": "42261409620986c5c06f0c877c934f7d9a964cecf286239c6ae5459bd5376d28",
+    "backend/src/services/menu_material_supply_inference.py": "c60c187962c8e4699a15258ab9992b52a70311a5a3c9cb041f14fbc4f8b6f8ff",
     "backend/src/services/menu_process_decision_inference.py": "a12ef322abb561b6894026945608f642ce0967254e3467084bc5ae138c844695",
     "backend/src/services/menu_process_gemini.py": "8693cc00189ddadcfc6085948748c47cf37a513e92c5e6b5622c99a1ade47b65",
     "backend/src/services/menu_process_planner.py": "84e2a1495d70e7c48a23fade6f0ee0cfd2dc832a8612c439a0ca43d10eca7d50",
     "backend/src/services/menu_process_preview_geometry.py": "faad7f5b88c48601869d4082ec083c9e819d88b0c4c1625b424ed5d09c41cd7b",
     "backend/src/services/menu_process_route_persistence_service.py": "bb00f17d733d2308d72345372a54c2b31cc387cadef26c6bbb6b9d604becedae",
-    "backend/src/services/menu_process_route_service.py": "45f9e27195e83d5db7c677b2e493d03e22c70b34160e0fa175378ba040b6aacd",
+    "backend/src/services/menu_process_route_service.py": "6f2772cc5f85cbd8ccae2dbb813bd4daf21b0224722765f48d03b698e7d0f497",
     "backend/src/services/menu_process_rule_compiler.py": "7077b1a59858d6f0e247f8a5d060f2c0bb8690767baeed4c417349dc89d74997",
-    "backend/src/services/menu_process_service.py": "2c74ad202db52436c617674015cc002d1c1c48b964f40f6ef78fdaab6216ae32",
+    "backend/src/services/menu_process_service.py": "d688bbbe45803cc0fa92ad0488421c6375f2380fd6bf58c8e0926ec677ed1205",
     "backend/src/services/menu_process_source_rules.py": "214c5b6b3d9e0baaa02f715f74911d201617c923db1dc73d79e1afe4fd019099",
     "backend/src/services/menu_route_reuse.py": "226c710d5a3d1da0ecb1cf02d4e1ab9fa87e2807667dbd971d079a7a6cf30264",
     "backend/src/services/monthly_procurement_service.py": "8a8fa998635c1b07db6be5086b645eea9064bb01854d71e613e32d845afc9994",
@@ -133,15 +133,16 @@
     "backend/src/services/process_graph_route_layout.py": "3adc1856cafec470100b18ff206ff2b4a0e6a36e12eaa28593336bbe753a467d",
     "backend/src/services/process_heat_history.py": "0f4909961fe9c19f214dffd2775e18d54b3250cf3ddce9763cc56228dd19c5eb",
     "backend/src/services/process_master_transfer_service.py": "bdb40d2e791fbb666f5d32b0f50294f27a063d81af8076044d3a3161380cb55f",
-    "backend/src/services/process_material_journey.py": "1a0084dfe416568d2c7e4bee976328b243e53a472590f2c90d4b49799435204a",
+    "backend/src/services/process_material_journey.py": "f6c2883e1761d6d507753409ce12401e3ccc7ca53105d6a0b7534cf2969e94aa",
     "backend/src/services/process_pattern_service.py": "79f39669a08984042680107a34a88371af9e7d37fdbd5f9600b7dd39187f9fe3",
     "backend/src/services/process_preparation_validation.py": "1385e27cd93ab8e3016ef9ae637a1207d24fa855267b0d0739a508a1d4900134",
     "backend/src/services/process_question_drawing.py": "70335d44a68a55cb980b042a9ab494980ca3e3a9130a057a679e5841a552a4cb",
     "backend/src/services/process_receipt_legend.py": "0ca2a214666618382cc3e207b6c977a54e55ec8878afaf0cbc3d4a533180199e",
     "backend/src/services/process_route_center_flow_service.py": "0ce7ddb58469796b1ce8139426e23a921a83e0d2cbae5bbc1a1c43053c620220",
     "backend/src/services/process_route_center_geometry.py": "b299e22c7698acfda6587ea24acbf9d9c33de8a430cfd516625d665b3b67ba85",
+    "backend/src/services/process_route_defaults.py": "a07616bd9e4b33a616eb2b832bc0b598672d2b8cba75ef38c2d771a018203a19",
     "backend/src/services/process_route_layout_service.py": "242fe1d58449de7ab948815fb26ccfd39d637576eb702780fd77e8cb7b3b7071",
-    "backend/src/services/process_route_network_service.py": "d5fe62f57a61c0a0f72cb21748ed55f682d18032f4fb73cc25918cb30c45911b",
+    "backend/src/services/process_route_network_service.py": "4dd98ca63f14e242969be1f82ef34f6021bcc2bd1de155cf1123de1d602e9ddb",
     "backend/src/services/process_route_rules_service.py": "780e28d93b9a441cf337d4a8f5bbaa21a893b18a11895438c5f32c878413e9c8",
     "backend/src/services/process_shared_preparation.py": "9a23c03b7121474437bbb93081cf0930040e6c4170cfed94c5a2c3730ef0e27e",
     "backend/src/services/process_source_conflicts.py": "645305988d8085632bfa680b14d820b43e232e7acd4dc5cd0854aa99bcf55a9f",
@@ -163,21 +164,22 @@
     "backend/src/services/school_lunch_timing_service.py": "999475ed3d26b763f0e1c6d5f649d7cbbd4b5d169dcb29e7af40bf293c8c53b2",
     "backend/src/services/school_work_inbox.py": "bfce52ebd4d40403e5d56d83f26ef460c28238996cc3426f076a5b8ee1a9c9ee",
     "backend/src/services/shared_menu_candidates.py": "51d37daa5390185ff202da4e0dff6d314d2e68ba1d6906d183c1cfc0df0edb13",
-    "backend/src/services/shared_menu_service.py": "d0440ef1d1c0fe65e8cb0e09c88d19791b4a0c58fb4925e5d7c4b88b02d35a0e",
+    "backend/src/services/shared_menu_service.py": "732b3ba39c6e79e81573333d14b4e4521d09e4a7d30dc9a5326e6289b2b107a6",
     "backend/src/services/work_schedule_import.py": "704dc9dbce8e81d6018badb14b1ee9941c18ca128efb19ebcd9ac9b6af461f71",
     "backend/src/services/work_schedule_service.py": "aa9e93d12d2a269ed9cfcb08a35391f6b61de63522ed7c4a34cae3f68e006231",
     "backend/src/services/work_schedule_template_export.py": "4d9b583256048b3888b0c11447b4299a186d82a477bcc3efe64ad5a6e3057b25",
     "backend/src/services/workbook_pdf_service.py": "2ad51a1cee55560a6a7e54a44a75342cb5a4d91538e894ae692f3d458b34db5a",
+    "backend/src/staging_data.py": "3903f91b9bde7de7bf5e275da6c55bb415a0f3e81efbcd8d6019604234d8466f",
     "backend/src/storage_types.py": "6f4747abb3b78d2b40c979c12c1c19635be93df59ca0b163c5c88788fd2e56b0",
     "ocr_pipeline/app/__init__.py": "239d83c6689305933995844468a70102d155047d75da5fe8ac8197008c7d23ff",
     "ocr_pipeline/app/pdf_render.py": "9f547faf6bc21af4466014959928839fb945f637eaa01fbfaa477c22179a84dc",
     "ocr_pipeline/app/yomitoku_runner.py": "006fdffece260585b68c46cdfbf4c7864360d9540c19498502cd800bb6da1cfc",
-    "worker/Dockerfile": "3f2d6c28102c9085b4dcd9f7f848f50993a14c0728fee72cda68dd4cf6f459e3",
+    "worker/Dockerfile": "7094afb591d1ed8df5f6e88936bccfd58c5bba96d0ec03ca116ed1d31de0d882",
     "worker/requirements-test.txt": "0ab1665b03138b9696c78d616295dcfe6a7a6bb9bba3ffee130d8d884c23b91d",
     "worker/requirements.txt": "b0156c337a874895e2b7823e07c2e11872dd5aaeb3685f75a28cbcf0f51ce3b0",
     "worker/scripts/prewarm_yomitoku_models.py": "4d5867ae5ed72469fdfa77838d26f84224539eb4393f905e33e269a967e13998",
     "worker/service/__init__.py": "f7c2bef8d21b43d78c690fb9d54cb26ef47e6bdbeb8d68a886dae59ac079e290",
-    "worker/service/main.py": "54e8117c060cb05e47f920e2c57a90a440ee4681079c7a78017f5912ff1fbc10",
+    "worker/service/main.py": "799dcae2ff7911edd723fec689948189b0375bcc107428224bb97bc486706cd4",
     "worker/service/runtime.py": "5b6ab51fc6c472012751f6b107d1170b0ceba22fa2ed460bcdcf04dfafbfdc33",
     "worker/service/shared_backend.py": "d0c48c70fe1edfc0c93fd6ae70df7f3a47a52693d938a4379854fae42e2d62b3"
   },
@@ -193,5 +195,80 @@
         "worker/requirements.txt"
       ]
     }
-  ]
+  ],
+  "upstream_base_revision": "f7613fb2e9f78a9ac6c7be8544afa218ed23ad81",
+  "upstream_delta_sha256": "0c613ba15b8b798dc3868f3ae7d898f0eb5dc8c09ed3855d5ca353412639361a",
+  "retained_extensions": [
+    {
+      "path": "backend/src/api/implementation_price_tables.py",
+      "upstream_sha256": "be5a2ab683ed6d1c67377c873b7f0d7ad84b464f5e84117dac7ec0ba5686c780",
+      "bundled_sha256": "d3d0990349785780f27e8ca93f517cd789c687196085798bd61553605e11ce1a"
+    },
+    {
+      "path": "backend/src/api/menu_process.py",
+      "upstream_sha256": "ee898636ebb70d029e6aa57e2e9f359fc8844f3d77b7207b7b22b9d49188f996",
+      "bundled_sha256": "82907f4ec73433c6b085fdd8abd3f25852ab62a7c74b2a573abd90a9bf9c0770"
+    },
+    {
+      "path": "backend/src/api/menu_process_contract.py",
+      "upstream_sha256": "00ad9103eccae09d7fa518b3b4ab99890bc4002a2e98c159589e18b532bb8d73",
+      "bundled_sha256": "52ca0188ee44307c00efe13c2af7d9784ce1ff4b26234b1e8a216f392a3b537d"
+    },
+    {
+      "path": "backend/src/api/monthly_procurement.py",
+      "upstream_sha256": "a30f926776e4b501d0f7c043f970859f9f522501c6ec2b3d62007765b0d28784",
+      "bundled_sha256": "e92b0ac5781054c1f531db568ef496aab3aa6ad2e77669cd59baba1a820c6a23"
+    },
+    {
+      "path": "backend/src/api/route_diagrams.py",
+      "upstream_sha256": "199e242e720743baf04f4153b0fe3fd2d7c37a1ce32f8f577e88c765433e007c",
+      "bundled_sha256": "0563c493925d051e4bc24fc5026a39087eaa3ec6ff1af3d23bcf92e1c5f237cd"
+    },
+    {
+      "path": "backend/src/schemas/menu_process.py",
+      "upstream_sha256": "3f150d0801ff667b7ff6caf0bda4ec9006dba41976f31eef3e24eaf157a828f5",
+      "bundled_sha256": "a06b43528100cac37cafdda5d0885ccf95e1bcf0e863b02c30551a82264e05a9"
+    },
+    {
+      "path": "backend/src/services/agent_daily_process.py",
+      "upstream_sha256": null,
+      "bundled_sha256": "1f540016d30302f06c037a0bae1767af1dd9ae49c711e835c70d5b86b0b5caf7"
+    },
+    {
+      "path": "backend/src/services/implementation_price_table_service.py",
+      "upstream_sha256": "33216343b838f4612d7f0a85410840d6e8bd9620746e4cd39d61c34a2dff5b81",
+      "bundled_sha256": "517814060fc11bcfb5b48f141f51722761149d9cf92480254e0b5bbab005696e"
+    },
+    {
+      "path": "backend/src/services/menu_process_service.py",
+      "upstream_sha256": "1344692a8e0ecd88a3a40e4741d414bada15eaedba207c59579528b6f02f423d",
+      "bundled_sha256": "d688bbbe45803cc0fa92ad0488421c6375f2380fd6bf58c8e0926ec677ed1205"
+    },
+    {
+      "path": "backend/src/services/process_pattern_service.py",
+      "upstream_sha256": "7a76e9b4c0b95feb4f129bda90bb5c774bc03e2c124927c942116a7085f148b4",
+      "bundled_sha256": "79f39669a08984042680107a34a88371af9e7d37fdbd5f9600b7dd39187f9fe3"
+    },
+    {
+      "path": "backend/src/services/process_question_drawing.py",
+      "upstream_sha256": null,
+      "bundled_sha256": "70335d44a68a55cb980b042a9ab494980ca3e3a9130a057a679e5841a552a4cb"
+    },
+    {
+      "path": "backend/src/services/process_work_schedule.py",
+      "upstream_sha256": "5815e95565c512b2763e2058b1247addf26d438bb18fcb536366f8d8a46beca9",
+      "bundled_sha256": "90f2e4253105813dd1d68a33c3f7736e07fc509c1ee9b7387e2fd7641bab5d63"
+    },
+    {
+      "path": "backend/src/services/route_diagram_service.py",
+      "upstream_sha256": "ca8957b507b90e7744e7a1372af1384a272b1658c44bc457d0d356f286ef1fe2",
+      "bundled_sha256": "0c6beddd3f69ecbc2426bf2619e17fb626ccf80caefad8a0fa0d04236c4795eb"
+    },
+    {
+      "path": "backend/src/services/shared_menu_service.py",
+      "upstream_sha256": "85ead6b2b8f26c8b5122e25e758916c24cfd004d448200ffe779d46583d06090",
+      "bundled_sha256": "732b3ba39c6e79e81573333d14b4e4521d09e4a7d30dc9a5326e6289b2b107a6"
+    }
+  ],
+  "working_diff_basis": "canonical retained_extensions JSON"
 }

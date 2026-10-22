@@ -1,10 +1,12 @@
 import os
+from functools import lru_cache
 from urllib.parse import quote_plus
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from src.migration_catalog import explicit_database_uri
+from src import staging_data
 
 def _build_db_uri() -> str | None:
     user = os.getenv("DB_USER")
@@ -65,8 +67,38 @@ else:
             pass
 
 engine = create_engine(DB_URI, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+_sessions = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
+
+
+@lru_cache(maxsize=4)
+def _replay_engine(uri):
+    from src.migration_catalog import require_runtime_schema
+    selected = create_engine(uri, **engine_kwargs)
+    try:
+        with selected.connect() as connection:
+            require_runtime_schema(connection)
+    except Exception:
+        selected.dispose()
+        raise staging_data.DatasetUnavailable("staging_dataset_schema_not_ready") from None
+    return selected
+
+
+def get_engine():
+    if staging_data.current_dataset() == "test":
+        return engine
+    return _replay_engine(staging_data.database_uri(DB_URI, "school-lunch"))
+
+
+def SessionLocal(**kwargs):
+    return _sessions(bind=get_engine(), **kwargs)
+
+
+@contextmanager
+def control_session_scope():
+    with staging_data.dataset_context("test"):
+        with session_scope() as session:
+            yield session
 
 
 def initialize_database() -> None:
