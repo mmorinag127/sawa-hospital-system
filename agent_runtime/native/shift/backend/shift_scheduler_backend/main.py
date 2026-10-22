@@ -70,7 +70,7 @@ from .rule_assistant import build_rule_candidates
 from .planning_api import router as planning_router
 from .sample_data import seed_sample_data
 from .rule_profiles import effective_rule_config, initialize_initial_profile
-from .pdf_parity import compare_reference_cells, reference_status_count
+from .pdf_parity import compare_reference_cells, reference_status_count, group_candidate_assignments
 from .pdf_seed_data import (
     PDF_PAGE5_END_EXCLUSIVE,
     PDF_PAGE5_START,
@@ -114,6 +114,8 @@ from .solve_contract import (
 )
 
 app = FastAPI(title="Shift Scheduler Backend")
+from .staging_data import DatasetMiddleware
+app.add_middleware(DatasetMiddleware)
 logger = logging.getLogger(__name__)
 app.middleware("http")(require_service_token)
 app.add_middleware(
@@ -124,6 +126,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(planning_router)
+
+
+@app.get("/staging-dataset-ready")
+def staging_dataset_ready():
+    from . import staging_data as datasets
+    if not datasets.staging_runtime():
+        raise HTTPException(404, "Not found")
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    with get_engine().connect() as connection:
+        assert_runtime_schema(connection, ScriptDirectory.from_config(config))
+    return {"dataset": datasets.current_dataset(), "ready": True}
 
 
 class PriorStatusInput(BaseModel):
@@ -1014,6 +1029,7 @@ def _build_shift_matrix_sheet(
     assignments: list[Assignment],
     statuses: list[CandidateStaffStatus],
     session,
+    assignment_cells=None,
 ) -> None:
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
@@ -1036,13 +1052,19 @@ def _build_shift_matrix_sheet(
 
     regular_work_display_blank = bool(_active_settings(session).get("regular_work_display_blank"))
     run_period = _solve_run_period_payload(solve_run)
-    assignment_by_staff_date = {(row.staff_id, row.work_date): row for row in assignments}
+    assignment_by_staff_date = assignment_cells if assignment_cells is not None else group_candidate_assignments(assignments)
     status_by_staff_date = {(row.staff_id, row.work_date): row for row in statuses}
     result_staff_ids = {row.staff_id for row in assignments} | {row.staff_id for row in statuses}
     staff_ids = [
         staff_id for staff_id in _staff_display_order_ids(session) if staff_id in result_staff_ids
     ]
     dates = sorted({row.work_date for row in assignments} | {row.work_date for row in statuses})
+    staff_rows = [
+        (staff_id, slot)
+        for staff_id in staff_ids
+        for slot in range(max(1, max((len(assignment_by_staff_date.get((staff_id, day), [])) for day in dates), default=0)))
+    ]
+    multiple_dates = {day for day in dates if any(len(assignment_by_staff_date.get((staff_id, day), [])) > 1 for staff_id in staff_ids)}
 
     staffs = (
         {
@@ -1088,7 +1110,8 @@ def _build_shift_matrix_sheet(
             for row in (1, 2):
                 sheet[f"{column_letter}{row}"].fill = WEEKEND_FILL
                 sheet[f"{column_letter}{row}"].font = SUNDAY_FONT
-    for row_offset, staff_id in enumerate(staff_ids):
+    wrapped_rows = set()
+    for row_offset, (staff_id, slot) in enumerate(staff_rows):
         staff = staffs[staff_id]
         row_number = 3 + row_offset
         staff_row_fill = (
@@ -1102,19 +1125,28 @@ def _build_shift_matrix_sheet(
 
         for column_index, work_date in enumerate(dates, start=2):
             status = status_by_staff_date.get((staff_id, work_date))
-            assignment = assignment_by_staff_date.get((staff_id, work_date))
-            value = _format_matrix_value(
-                status,
-                assignment,
-                regular_work_display_blank=regular_work_display_blank,
-            )
+            cell_assignments = assignment_by_staff_date.get((staff_id, work_date), [])
+            assignment = cell_assignments[slot] if slot < len(cell_assignments) else None
+            if len(cell_assignments) > 1 and assignment is not None:
+                value = f"{_position_display_name(assignment.position)} / {_template_display_name(assignment.shift_template)}"
+                wrapped_rows.add(row_number)
+            elif slot == 0:
+                value = _format_matrix_value(status, assignment, regular_work_display_blank=regular_work_display_blank)
+            else:
+                value = ""
+                status = None
+            if len(cell_assignments) > 1 and slot == 0 and status is not None and status.work_kind != "position":
+                status_label = _format_matrix_value(status, None, regular_work_display_blank=regular_work_display_blank)
+                if status_label:
+                    value = f"{status_label}\n{value}"
             matrix_cell = sheet.cell(
                 row=row_number,
                 column=column_index,
                 value=_neutralize_spreadsheet_cell(value),
             )
             if _is_half_day_entry(status, assignment):
-                matrix_cell.value = ""
+                if len(cell_assignments) <= 1:
+                    matrix_cell.value = ""
                 matrix_cell.border = DIAGONAL_BORDER
             if work_date.weekday() == 5:
                 matrix_cell.fill = WEEKEND_FILL
@@ -1123,7 +1155,7 @@ def _build_shift_matrix_sheet(
             elif staff_row_fill is not None:
                 matrix_cell.fill = staff_row_fill
 
-    max_row = 2 + len(staff_ids)
+    max_row = 2 + len(staff_rows)
     max_column = 1 + len(dates)
     for row in range(1, max_row + 1):
         for column in range(1, max_column + 1):
@@ -1138,17 +1170,19 @@ def _build_shift_matrix_sheet(
 
     sheet.column_dimensions["A"].width = 12.5
     for column_index in range(2, max_column + 1):
-        sheet.column_dimensions[get_column_letter(column_index)].width = 4.5
+        sheet.column_dimensions[get_column_letter(column_index)].width = 18 if dates[column_index - 2] in multiple_dates else 4.5
     sheet.row_dimensions[1].height = 18
     sheet.row_dimensions[2].height = 18
     for row_number in range(3, max_row + 1):
-        sheet.row_dimensions[row_number].height = 22
+        sheet.row_dimensions[row_number].height = None if row_number in wrapped_rows else 22
 
     sheet.freeze_panes = "B3"
     sheet.print_title_rows = "1:2"
     sheet.page_setup.orientation = "landscape"
-    sheet.page_setup.fitToWidth = 1
-    sheet.page_setup.fitToHeight = 1
+    sheet.page_setup.fitToWidth = 0 if multiple_dates else 1
+    sheet.page_setup.fitToHeight = 0 if multiple_dates else 1
+    if multiple_dates:
+        sheet.print_title_cols = "A:A"
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
     sheet.page_margins.left = 0.2
     sheet.page_margins.right = 0.2
@@ -2123,27 +2157,31 @@ def _get_solve_run_snapshot(solve_run_id, session, candidate_id, prior_for_start
 
 @app.get("/solve-runs", responses={200: {"model": list[SolveRunSummary]}})
 def list_solve_runs(session: Session = Depends(get_session)) -> list[dict]:
+    from sqlalchemy import func
+    from .jobs import load_job_status_sources, serialize_job_status_from_sources
+
     rows = session.query(SolveRun).order_by(SolveRun.id.desc()).all()
+    if not rows:
+        return []
+    job_status_sources = load_job_status_sources(session, rows)
+    assignment_counts = dict(
+        session.query(CandidateSchedule.solve_run_id, func.count(Assignment.id))
+        .join(Assignment, Assignment.candidate_id == CandidateSchedule.id)
+        .filter(CandidateSchedule.candidate_no == 1)
+        .group_by(CandidateSchedule.solve_run_id).all()
+    )
+    confirmed_ids = {run_id for (run_id,) in session.query(ScheduleConfirmation.solve_run_id).all()}
     return [
         {
             "id": row.id,
             **_solve_run_period_payload(row),
-            "job_status": serialize_job_status(session, row),
+            "job_status": serialize_job_status_from_sources(row, job_status_sources),
             "status": row.status,
             "solver_status": row.solver_status,
             "started_at": row.started_at.isoformat() if row.started_at else None,
             "finished_at": row.finished_at.isoformat() if row.finished_at else None,
-            "assignments_count": (
-                session.query(Assignment)
-                .join(CandidateSchedule, CandidateSchedule.id == Assignment.candidate_id)
-                .filter(CandidateSchedule.solve_run_id == row.id)
-                .filter(CandidateSchedule.candidate_no == 1)
-                .count()
-            ),
-            "confirmed": session.query(ScheduleConfirmation)
-            .filter(ScheduleConfirmation.solve_run_id == row.id)
-            .first()
-            is not None,
+            "assignments_count": assignment_counts.get(row.id, 0),
+            "confirmed": row.id in confirmed_ids,
         }
         for row in rows
     ]
@@ -2444,6 +2482,11 @@ def export_solve_run(
     session: Session = Depends(get_session),
     candidate_id: int | None = None,
 ):
+    with candidate_snapshot(session):
+        return _export_solve_run_snapshot(solve_run_id, format, session, candidate_id)
+
+
+def _export_solve_run_snapshot(solve_run_id, format, session, candidate_id):
     solve_run = session.get(SolveRun, solve_run_id)
     if solve_run is None:
         raise HTTPException(status_code=404, detail="solve run not found")
@@ -2462,7 +2505,7 @@ def export_solve_run(
     rows = (
         session.query(Assignment)
         .filter(Assignment.candidate_id == candidate.id)
-        .order_by(Assignment.work_date, Assignment.staff_id)
+        .order_by(Assignment.work_date, Assignment.staff_id, Assignment.id)
         .all()
     )
     statuses = (
@@ -2471,21 +2514,25 @@ def export_solve_run(
         .order_by(CandidateStaffStatus.work_date, CandidateStaffStatus.staff_id)
         .all()
     )
-    assignment_by_staff_date = {(row.staff_id, row.work_date): row for row in rows}
+    assignment_by_staff_date = group_candidate_assignments(rows)
     if statuses:
-        table = [["staff_name", "work_date", "status", "work_kind", "shift_template", "position"]] + [
-            [
-                row.staff.name,
-                row.work_date.isoformat(),
-                row.status,
-                row.work_kind,
-                _template_display_name(row.shift_template),
-                _position_display_name(assignment_by_staff_date[(row.staff_id, row.work_date)].position)
-                if (row.staff_id, row.work_date) in assignment_by_staff_date
-                else "",
-            ]
-            for row in statuses
-        ]
+        table = [["staff_name", "work_date", "status", "work_kind", "shift_template", "position"]]
+        status_by_staff_date = {(row.staff_id, row.work_date): row for row in statuses}
+        for key in sorted(status_by_staff_date.keys() | assignment_by_staff_date.keys(), key=lambda key: (key[1], key[0])):
+            row = status_by_staff_date.get(key)
+            cell_assignments = assignment_by_staff_date.get(key, [])
+            if row is None:
+                table.extend([
+                    assignment.staff.name, assignment.work_date.isoformat(), "working", "position",
+                    _template_display_name(assignment.shift_template), _position_display_name(assignment.position),
+                ] for assignment in cell_assignments)
+                continue
+            for assignment in cell_assignments or [None]:
+                table.append([
+                    row.staff.name, row.work_date.isoformat(), row.status, row.work_kind,
+                    _template_display_name(assignment.shift_template if len(cell_assignments) > 1 else row.shift_template),
+                    _position_display_name(assignment.position) if assignment is not None else "",
+                ])
     else:
         table = [["staff_name", "work_date", "status", "work_kind", "shift_template", "position"]] + [
             [
@@ -2529,7 +2576,7 @@ def export_solve_run(
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "Shift schedule"
-        _build_shift_matrix_sheet(sheet, solve_run, rows, statuses, session)
+        _build_shift_matrix_sheet(sheet, solve_run, rows, statuses, session, assignment_by_staff_date)
         output = BytesIO()
         workbook.save(output)
         output.seek(0)

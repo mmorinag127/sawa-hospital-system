@@ -11,7 +11,7 @@ def shared_menu_editor_options(session=Depends(get_school_lunch_session)):
     return service.editor_options(session)
 
 @router.get('/shared-menus')
-def list_shared_menus(q:str|None=None,source_month:str|None=Query(default=None,pattern=r'^\d{4}-(0[1-9]|1[0-2])$'),session=Depends(get_school_lunch_session)): return service.list_(session,q,source_month)
+def list_shared_menus(q:str|None=None,source_month:str|None=Query(default=None,pattern=r'^\d{4}-(0[1-9]|1[0-2])$'),summary:bool=False,session=Depends(get_school_lunch_session)): return service.list_(session,q,source_month,summary=summary)
 @router.post('/shared-menus')
 def create_shared_menu(body:SharedMenuWrite,session=Depends(get_school_lunch_session)): return service.create(session,body)
 @router.get('/shared-menus/{shared_menu_id}')

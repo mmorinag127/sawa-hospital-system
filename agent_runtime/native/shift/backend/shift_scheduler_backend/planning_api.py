@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_session
 from .planning_api_schemas import (
-    PlanningCollectionResponse, PlanningCommandResponse, PlanningDeleteResponse,
+    PlanningCollectionResponse, PlanningCommandResponse, PlanningDeleteResponse, PositionDetailResponse,
     ShiftTemplateResponse, PositionResponse, WorkdayResponse, DemandResponse,
     PositionPriorityResponse, StaffPositionRuleResponse, StaffPositionPreferenceResponse,
     StaffPairRuleResponse, RotationResponse, ScheduleExceptionResponse, PlanningOverviewResponse, PositionAssignmentRuleResponse,
@@ -965,106 +965,159 @@ def delete_demand(demand_id: int, revision: int | None = None, collection_revisi
     return finalize_command(session, "demands", lambda: {"id": demand_id, "revision": revision + 1, "deleted": True})
 
 
-@router.get("/position-priorities", responses={200: {"model": list[PositionPriorityResponse]}})
-def list_position_priorities(position_id: int | None = None, session: Session = Depends(get_session)) -> list[dict]:
+def _position_detail_payload(session: Session, position_id: int | None, items: list[dict]) -> dict:
+    position = session.get(Position, position_id) if position_id is not None else None
+    if position_id is not None and position is None:
+        raise HTTPException(404, detail="持ち場が見つかりません")
+    return {"items": items, "position": _position_payload(position) if position else None,
+            "collection_revision": command_payload(session, "positions", {})["collection_revision"]}
+
+
+def _read_position_detail(session: Session, position_id: int | None, items) -> dict:
+    _, started = begin_read_snapshot(session, ("positions",))
+    try:
+        result = _position_detail_payload(session, position_id, items())
+    except Exception:
+        end_read_snapshot(session, started, failed=True)
+        raise
+    end_read_snapshot(session, started)
+    return result
+
+
+def _claim_position_detail(session: Session, position_id: int, revision: int | None, collection_revision: int | None) -> None:
+    require_revision(revision, "position_revision")
+    require_revision(collection_revision, "positions_collection_revision")
+    begin_editor_write(session)
+    try:
+        claim_collection(session, "positions", collection_revision)
+        claim_item(session, Position, position_id, revision, "position_revision")
+    except Exception:
+        session.rollback()
+        raise
+
+
+def _finish_position_detail(session: Session, position_id: int, items) -> dict:
+    session.flush()
+    result = _position_detail_payload(session, position_id, items())
+    session.commit()
+    return result
+
+
+@router.get("/position-priorities", responses={200: {"model": PositionDetailResponse[PositionPriorityResponse]}})
+def list_position_priorities(position_id: int | None = None, session: Session = Depends(get_session)) -> dict:
     query = session.query(PositionPriority)
     if position_id is not None:
         query = query.filter(PositionPriority.position_id == position_id)
-    return [_priority_payload(row) for row in query.order_by(PositionPriority.position_id, PositionPriority.rank).all()]
+    return _read_position_detail(session, position_id, lambda: [_priority_payload(row) for row in query.order_by(PositionPriority.position_id, PositionPriority.rank).all()])
 
 
-@router.put("/positions/{position_id}/priorities", responses={200: {"model": list[PositionPriorityResponse]}})
-def save_position_priorities(position_id: int, payload: PrioritiesInput, session: Session = Depends(get_session)) -> list[dict]:
-    if session.get(Position, position_id) is None:
-        raise HTTPException(status_code=404, detail="持ち場が見つかりません")
-    if any(row.mode not in PRIORITY_MODES for row in payload.priorities):
-        raise HTTPException(status_code=422, detail="持ち場の優先順の扱いが正しくありません")
-    ranks = sorted(row.rank for row in payload.priorities)
-    if ranks != list(range(1, len(ranks) + 1)):
-        raise HTTPException(status_code=422, detail="持ち場の優先順は1番から連続して指定してください")
-    _ensure_ids_exist(session, Staff, [row.staff_id for row in payload.priorities], "スタッフ")
-    if len({row.staff_id for row in payload.priorities}) != len(payload.priorities):
-        raise HTTPException(status_code=422, detail="同じスタッフを複数回指定できません")
-    session.query(PositionPriority).filter(PositionPriority.position_id == position_id).delete()
-    rows = [
-        PositionPriority(position_id=position_id, staff_id=item.staff_id, rank=item.rank, mode=item.mode)
-        for item in payload.priorities
-    ]
-    session.add_all(rows)
-    session.commit()
-    return [_priority_payload(row) for row in sorted(rows, key=lambda row: row.rank)]
+@router.put("/positions/{position_id}/priorities", responses={200: {"model": PositionDetailResponse[PositionPriorityResponse]}})
+def save_position_priorities(position_id: int, payload: PrioritiesInput, session: Session = Depends(get_session), revision: int | None = None, collection_revision: int | None = None) -> dict:
+    _claim_position_detail(session, position_id, revision, collection_revision)
+    try:
+        if session.get(Position, position_id) is None:
+            raise HTTPException(status_code=404, detail="持ち場が見つかりません")
+        if any(row.mode not in PRIORITY_MODES for row in payload.priorities):
+            raise HTTPException(status_code=422, detail="持ち場の優先順の扱いが正しくありません")
+        ranks = sorted(row.rank for row in payload.priorities)
+        if ranks != list(range(1, len(ranks) + 1)):
+            raise HTTPException(status_code=422, detail="持ち場の優先順は1番から連続して指定してください")
+        _ensure_ids_exist(session, Staff, [row.staff_id for row in payload.priorities], "スタッフ")
+        if len({row.staff_id for row in payload.priorities}) != len(payload.priorities):
+            raise HTTPException(status_code=422, detail="同じスタッフを複数回指定できません")
+        session.query(PositionPriority).filter(PositionPriority.position_id == position_id).delete()
+        rows = [
+            PositionPriority(position_id=position_id, staff_id=item.staff_id, rank=item.rank, mode=item.mode)
+            for item in payload.priorities
+        ]
+        session.add_all(rows)
+        return _finish_position_detail(session, position_id, lambda: [_priority_payload(row) for row in sorted(rows, key=lambda row: row.rank)])
+    except Exception:
+        session.rollback()
+        raise
 
 
-@router.get("/position-rules", responses={200: {"model": list[StaffPositionRuleResponse]}})
+@router.get("/position-rules", responses={200: {"model": PositionDetailResponse[StaffPositionRuleResponse]}})
 def list_staff_position_rules(
     position_id: int | None = None,
     staff_id: int | None = None,
     session: Session = Depends(get_session),
-) -> list[dict]:
+) -> dict:
     query = session.query(StaffPositionRule)
     if position_id is not None:
         query = query.filter(StaffPositionRule.position_id == position_id)
     if staff_id is not None:
         query = query.filter(StaffPositionRule.staff_id == staff_id)
-    return [
+    return _read_position_detail(session, position_id, lambda: [
         _staff_position_rule_payload(row)
         for row in query.order_by(StaffPositionRule.position_id, StaffPositionRule.staff_id).all()
-    ]
+    ])
 
 
-@router.get("/positions/{position_id}/preferences", responses={200: {"model": list[StaffPositionPreferenceResponse]}})
-def list_position_preferences(position_id: int, session: Session = Depends(get_session)) -> list[dict]:
-    return [
+@router.get("/positions/{position_id}/preferences", responses={200: {"model": PositionDetailResponse[StaffPositionPreferenceResponse]}})
+def list_position_preferences(position_id: int, session: Session = Depends(get_session)) -> dict:
+    return _read_position_detail(session, position_id, lambda: [
         {"staff_id": row.staff_id, "penalty": row.penalty, "reason": row.reason}
         for row in session.query(StaffPositionPreference).filter(
             StaffPositionPreference.position_id == position_id
         ).order_by(StaffPositionPreference.staff_id).all()
-    ]
+    ])
 
 
-@router.put("/positions/{position_id}/preferences", responses={200: {"model": list[StaffPositionPreferenceResponse]}})
+@router.put("/positions/{position_id}/preferences", responses={200: {"model": PositionDetailResponse[StaffPositionPreferenceResponse]}})
 def save_position_preferences(
-    position_id: int, payload: list[StaffPositionPreferenceInput], session: Session = Depends(get_session)
-) -> list[dict]:
-    if session.get(Position, position_id) is None:
-        raise HTTPException(status_code=404, detail="持ち場が見つかりません")
-    _ensure_ids_exist(session, Staff, [row.staff_id for row in payload], "スタッフ")
-    if len({row.staff_id for row in payload}) != len(payload):
-        raise HTTPException(status_code=422, detail="同じスタッフを複数回指定できません")
-    session.query(StaffPositionPreference).filter(StaffPositionPreference.position_id == position_id).delete()
-    session.add_all([StaffPositionPreference(position_id=position_id, **row.model_dump()) for row in payload])
-    session.commit()
-    return list_position_preferences(position_id, session)
+    position_id: int, payload: list[StaffPositionPreferenceInput], session: Session = Depends(get_session), revision: int | None = None, collection_revision: int | None = None
+) -> dict:
+    _claim_position_detail(session, position_id, revision, collection_revision)
+    try:
+        if session.get(Position, position_id) is None:
+            raise HTTPException(status_code=404, detail="持ち場が見つかりません")
+        _ensure_ids_exist(session, Staff, [row.staff_id for row in payload], "スタッフ")
+        if len({row.staff_id for row in payload}) != len(payload):
+            raise HTTPException(status_code=422, detail="同じスタッフを複数回指定できません")
+        session.query(StaffPositionPreference).filter(StaffPositionPreference.position_id == position_id).delete()
+        session.add_all([StaffPositionPreference(position_id=position_id, **row.model_dump()) for row in payload])
+        return _finish_position_detail(session, position_id, lambda: [
+            {"staff_id": row.staff_id, "penalty": row.penalty, "reason": row.reason}
+            for row in session.query(StaffPositionPreference).filter(StaffPositionPreference.position_id == position_id).order_by(StaffPositionPreference.staff_id).all()])
+    except Exception:
+        session.rollback()
+        raise
 
 
-@router.put("/positions/{position_id}/staff-rules", responses={200: {"model": list[StaffPositionRuleResponse]}})
+@router.put("/positions/{position_id}/staff-rules", responses={200: {"model": PositionDetailResponse[StaffPositionRuleResponse]}})
 def save_staff_position_rules(
     position_id: int,
     payload: list[StaffPositionRuleInput],
     session: Session = Depends(get_session),
-) -> list[dict]:
-    if session.get(Position, position_id) is None:
-        raise HTTPException(status_code=404, detail="持ち場が見つかりません")
-    if any(row.kind not in {"allow", "deny"} for row in payload):
-        raise HTTPException(status_code=422, detail="持ち場の許可・禁止条件が正しくありません")
-    _ensure_ids_exist(session, Staff, [row.staff_id for row in payload], "スタッフ")
-    if len({row.staff_id for row in payload}) != len(payload):
-        raise HTTPException(status_code=422, detail="同じスタッフを複数回指定できません")
-    session.query(StaffPositionRule).filter(
-        StaffPositionRule.position_id == position_id
-    ).delete()
-    rows = [
-        StaffPositionRule(
-            position_id=position_id,
-            staff_id=item.staff_id,
-            kind=item.kind,
-            reason=item.reason,
-        )
-        for item in payload
-    ]
-    session.add_all(rows)
-    session.commit()
-    return [_staff_position_rule_payload(row) for row in rows]
+    revision: int | None = None, collection_revision: int | None = None,
+) -> dict:
+    _claim_position_detail(session, position_id, revision, collection_revision)
+    try:
+        if session.get(Position, position_id) is None:
+            raise HTTPException(status_code=404, detail="持ち場が見つかりません")
+        if any(row.kind not in {"allow", "deny"} for row in payload):
+            raise HTTPException(status_code=422, detail="持ち場の許可・禁止条件が正しくありません")
+        _ensure_ids_exist(session, Staff, [row.staff_id for row in payload], "スタッフ")
+        if len({row.staff_id for row in payload}) != len(payload):
+            raise HTTPException(status_code=422, detail="同じスタッフを複数回指定できません")
+        session.query(StaffPositionRule).filter(
+            StaffPositionRule.position_id == position_id
+        ).delete()
+        rows = [
+            StaffPositionRule(
+                position_id=position_id,
+                staff_id=item.staff_id,
+                kind=item.kind,
+                reason=item.reason,
+            )
+            for item in payload
+        ]
+        session.add_all(rows)
+        return _finish_position_detail(session, position_id, lambda: [_staff_position_rule_payload(row) for row in rows])
+    except Exception:
+        session.rollback()
+        raise
 
 
 PAIR_RULE_KINDS = {
@@ -1516,8 +1569,8 @@ def planning_overview(
         "positions": [_position_payload(row) for row in session.query(Position).order_by(Position.name).all()],
         "workdays": list_workdays(start, end, session)["items"],
         "demands": list_demands(start, end, session)["items"],
-        "priorities": list_position_priorities(session=session),
-        "position_rules": list_staff_position_rules(session=session),
+        "priorities": list_position_priorities(session=session)["items"],
+        "position_rules": list_staff_position_rules(session=session)["items"],
         "pair_rules": list_staff_pair_rules(session)["items"],
         "rotations": list_rotations(session, as_of=start)["items"],
         "exceptions": list_exceptions(start, end, session)["items"],

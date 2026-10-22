@@ -11,7 +11,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from sqlalchemy import select
 
-from src.db import session_scope
+from src.db import control_session_scope as session_scope
 from src.models.user import User
 
 

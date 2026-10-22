@@ -26,6 +26,27 @@ def _inside(p, box):
     return box[0] - EPS <= p[0] <= box[2] + EPS and box[1] - EPS <= p[1] <= box[3] + EPS
 
 
+def _allowed_grid_y(xs, ys, regions, barriers):
+    """Reuse exact y-membership sets; keep every original grid candidate."""
+    region_rows = [(l-EPS, r+EPS, {y for y in ys if t-EPS <= y <= b+EPS})
+                   for l,t,r,b in regions]
+    wall_rows = [(w, {y for y in ys if (
+        w['span'][0]-EPS <= y <= w['span'][1]+EPS if w['axis']=='x'
+        else abs(y-w['position']) < 6-EPS)}) for w in barriers]
+    allowed = {}
+    for x in xs:
+        rows = set()
+        for left,right,values in region_rows:
+            if left <= x <= right:
+                rows.update(values)
+        for wall,values in wall_rows:
+            if (abs(x-wall['position']) < 6-EPS if wall['axis']=='x'
+                else wall['span'][0]-EPS <= x <= wall['span'][1]+EPS):
+                rows.difference_update(values)
+        allowed[x] = rows
+    return allowed
+
+
 def _line_intervals(boxes, axis, fixed, *, obstacles=False):
     """Index exact rectangle intersections once per grid line."""
     spans = []
@@ -235,12 +256,7 @@ def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbid
         (ys if w['axis']=='x' else xs).add(target)
     # Point membership is separable by x. Avoid scanning unrelated walls and
     # rectangles at every grid point while producing the identical node set.
-    allowed_y={}
-    for x in xs:
-        ranges=[(t-EPS,b+EPS) for l,t,r,b in regions if l-EPS<=x<=r+EPS]
-        walls=[w for w in barriers if (abs(x-w['position'])<6-EPS if w['axis']=='x' else w['span'][0]-EPS<=x<=w['span'][1]+EPS)]
-        allowed_y[x]={y for y in ys if any(t<=y<=b for t,b in ranges) and not any(
-            (w['span'][0]-EPS<=y<=w['span'][1]+EPS if w['axis']=='x' else abs(y-w['position'])<6-EPS) for w in walls)}
+    allowed_y = _allowed_grid_y(xs, ys, regions, barriers)
     nodes={(x,y) for x in xs for y in ys if y in allowed_y[x]}
     rows={};cols={}
     for p in nodes:

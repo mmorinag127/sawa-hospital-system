@@ -6,6 +6,8 @@ import os
 from hashlib import sha256
 
 import requests
+from urllib.parse import urlsplit
+from src import staging_data as datasets
 
 
 class OcrDispatchConfigurationError(RuntimeError):
@@ -36,7 +38,7 @@ def cloud_task_name(job_id: str, generation: int) -> str:
         _required_env("IMPLEMENTATION_PRICE_OCR_TASKS_PROJECT"),
         _required_env("IMPLEMENTATION_PRICE_OCR_TASKS_LOCATION"),
         _required_env("IMPLEMENTATION_PRICE_OCR_TASKS_QUEUE"),
-        f"ocr-{job_id}-delivery-{generation}")
+        f"{datasets.delivery_namespace()}ocr-{job_id}-delivery-{generation}")
 
 
 def inspect_cloud_task(task_name: str, *, contract) -> str:
@@ -49,6 +51,7 @@ def inspect_cloud_task(task_name: str, *, contract) -> str:
         http = task.http_request
         if (http.url != contract["url"] or int(http.http_method) != 1 or bytes(http.body) != contract["body"].encode()
             or dict(http.headers).get("Content-Type") != "application/json"
+            or not datasets.delivery_dataset_matches(http.headers, contract.get("dataset"))
             or http.oidc_token.service_account_email != contract["service_account"]
             or http.oidc_token.audience != contract["audience"]
             or task.dispatch_deadline.total_seconds() != contract["deadline_seconds"]
@@ -76,6 +79,8 @@ def configured_mode() -> str:
 def capture_contract(job_id, generation, mode):
     contract = {"schema": 1, "url": _worker_process_url(job_id), "method": "POST",
                 "body": json.dumps({"job_id": job_id, "delivery_generation": generation}), "mode": mode}
+    if datasets.current_dataset() != "test":
+        contract["dataset"] = datasets.current_dataset()
     if mode == "cloud_tasks":
         deadline = int(_required_env("IMPLEMENTATION_PRICE_OCR_TASKS_DISPATCH_DEADLINE_SECONDS"))
         if not 1 <= deadline <= 1800:
@@ -96,13 +101,17 @@ def capture_contract(job_id, generation, mode):
 
 
 def send_captured(contract):
+    if datasets.current_dataset() != "test":
+        if (contract.get("dataset") != datasets.current_dataset()
+                or "-stg-" not in urlsplit(contract.get("url", "")).netloc):
+            raise datasets.DatasetUnavailable("staging_dataset_original_delivery_not_replayable")
     if contract["mode"] == "local":
         token = _required_env("IMPLEMENTATION_PRICE_OCR_LOCAL_TOKEN")
         if sha256(token.encode()).hexdigest() != contract["token_digest"]:
             raise OcrDispatchConfigurationError("Local delivery credential changed from original contract")
         try:
             response = requests.post(contract["url"], data=contract["body"].encode(),
-                headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + token, **datasets.delivery_headers()},
                 timeout=contract["timeout_seconds"])
             response.raise_for_status()
             return "exists"
@@ -112,7 +121,7 @@ def send_captured(contract):
     from google.api_core.exceptions import AlreadyExists
     task = {"name": contract["task_name"], "dispatch_deadline": {"seconds": contract["deadline_seconds"]},
         "http_request": {"http_method": tasks_v2.HttpMethod.POST, "url": contract["url"],
-            "headers": {"Content-Type": "application/json"}, "body": contract["body"].encode(),
+            "headers": {"Content-Type": "application/json", **({datasets.HEADER: contract["dataset"]} if "dataset" in contract else {})}, "body": contract["body"].encode(),
             "oidc_token": {"service_account_email": contract["service_account"], "audience": contract["audience"]}}}
     try:
         tasks_v2.CloudTasksClient().create_task(parent=contract["task_name"].rsplit("/tasks/", 1)[0], task=task)

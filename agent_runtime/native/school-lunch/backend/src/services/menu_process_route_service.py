@@ -139,7 +139,10 @@ def options():
     """Expose only actual equipment and exact ports from canonical manifests."""
     result = []
     for template_id in _TEMPLATES:
-        _, manifest = load_template(template_id)
+        svg, manifest = load_template(template_id)
+        root = ET.fromstring(svg)
+        elements = {element.get("id"): element for element in root.iter()}
+        parents = {child: parent for parent in root.iter() for child in parent}
         groups = {}
         for point in manifest["points"]:
             if point.get("kind") != "equipment_port":
@@ -155,13 +158,15 @@ def options():
             {
                 "template_id": template_id,
                 "template_version": manifest["version"],
-                "material_sources": supply_options(manifest),
+                "diagram": {"svg": svg.decode("utf-8"), "view_box": manifest["view_box"]},
+                "material_sources": supply_options(manifest, svg),
                 "equipment": [
                     {
                         "id": equipment_id,
                         "name": ports[0]["name"].rsplit("・", 1)[0],
                         "type": equipment_type(equipment_id, ports[0]["name"]),
                         "ports": ports,
+                        "bounds": list(_equipment_bounds(elements[equipment_id], parents)),
                     }
                     for equipment_id, ports in sorted(groups.items())
                 ],
@@ -523,7 +528,7 @@ def generate_events(revision, menu, profile_document, *, is_preview=False):
         )
     from src.services.material_drawing_projection import require_decisions, project_connections
     require_decisions(document)
-    document, journey_audit = expand_supplies(document, manifest)
+    document, journey_audit = expand_supplies(document, {**manifest, 'flow_network': profile_document['network_snapshot']}, svg)
     document, dispatch_audit = expand_dispatch(document, manifest)
     config = document['route_config']
     ports = config['step_ports']

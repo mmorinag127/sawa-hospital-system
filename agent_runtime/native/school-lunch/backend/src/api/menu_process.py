@@ -155,6 +155,15 @@ def correct_process(menu_id: int, payload: CorrectionRequest, session=Depends(ge
     return service.correct(session, menu_id, payload)
 
 
+@router.post('/menu-executions/{menu_id}/process/prepare-defaults', responses={200: {'model': contract.ProcessDefaults}})
+def prepare_process_defaults(menu_id: int, payload: InferRequest, session=Depends(get_school_lunch_session)):
+    from src.services.process_route_defaults import prepare
+    try:
+        return prepare(session, menu_id, payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post('/menu-executions/{menu_id}/process/use-recipe', responses={200: {'model': contract.ProcessContext}})
 def reuse_process(menu_id: int, payload: UseRecipeRequest, session=Depends(get_school_lunch_session),
                  user=Depends(require_role('operator'))):

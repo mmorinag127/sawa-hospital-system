@@ -4,6 +4,7 @@ import os
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import unquote, urlparse, parse_qs, quote
+from src import staging_data as datasets
 
 
 class StorageConfigurationError(RuntimeError):
@@ -44,8 +45,7 @@ class LocalPdfStorage:
         self.root_dir = Path(root_dir).expanduser()
 
     def save_pdf(self, *, job_id: str, filename: str, pdf_bytes: bytes) -> str:
-        self.root_dir.mkdir(parents=True, exist_ok=True)
-        target = self.root_dir / f"{job_id}-{_sanitize_filename(filename)}"
+        target = datasets.local_directory(self.root_dir) / f"{job_id}-{_sanitize_filename(filename)}"
         with target.open("xb") as output:
             output.write(pdf_bytes)
         return target.resolve().as_uri()
@@ -84,7 +84,8 @@ class GcsPdfStorage:
 
     def save_pdf(self, *, job_id: str, filename: str, pdf_bytes: bytes) -> str:
         object_name = self._object_name(job_id=job_id, filename=filename)
-        bucket = self._storage_client().bucket(self.bucket_name)
+        bucket_name, object_name = datasets.write_object(self.bucket_name, object_name)
+        bucket = self._storage_client().bucket(bucket_name)
         blob = bucket.blob(object_name)
         try:
             blob.upload_from_string(pdf_bytes, content_type="application/pdf", if_generation_match=0)
@@ -94,7 +95,7 @@ class GcsPdfStorage:
             ) from exc
         if blob.generation is None:
             raise StorageConfigurationError("GCS saved source generation is unavailable")
-        return f"gs://{self.bucket_name}/{quote(object_name, safe='/')}?generation={int(blob.generation)}"
+        return f"gs://{bucket_name}/{quote(object_name, safe='/')}?generation={int(blob.generation)}"
 
     def load_pdf(self, reference: str) -> bytes:
         identity = parse_stored_reference(reference)
@@ -127,6 +128,14 @@ def get_write_storage():
 
 
 def load_pdf(reference: str) -> bytes:
+    if datasets.current_dataset() != "test":
+        uri, generation, digest = datasets.read_object(reference, feature="school-lunch")
+        parsed = urlparse(uri)
+        if parsed.scheme != "gs":
+            raise StoredPdfNotFoundError("Staging replay source must be a copied GCS object")
+        from google.cloud import storage
+        blob = storage.Client().bucket(parsed.netloc).blob(unquote(parsed.path.lstrip("/")), generation=int(generation) if generation else None)
+        return datasets.verify_copy(blob.download_as_bytes(if_generation_match=int(generation) if generation else None), digest)
     parsed = urlparse(reference)
     if parsed.scheme == "gs":
         return GcsPdfStorage(bucket_name=parsed.netloc, prefix="").load_pdf(reference)
@@ -153,6 +162,13 @@ def load_job_source(job):
 def storage_identity(reference):
     identity = parse_stored_reference(reference)
     if identity["mode"] == "local":
+        if datasets.current_dataset() != "test":
+            entry = datasets.component("school-lunch")["objects"].get(reference)
+            proof = entry.get("source_identity") if isinstance(entry, dict) else None
+            required = {"mode", "device", "inode", "size", "mtime_ns"}
+            if not isinstance(proof, dict) or set(proof) != required or proof["mode"] != "local":
+                raise StoredPdfNotFoundError("Original local storage proof is unavailable in this snapshot")
+            return dict(proof)
         stat = identity["path"].stat()
         return {"mode": "local", "device": stat.st_dev, "inode": stat.st_ino,
                 "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}

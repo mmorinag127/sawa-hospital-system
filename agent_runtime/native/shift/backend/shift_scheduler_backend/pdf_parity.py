@@ -20,6 +20,20 @@ STATUS_LABELS = {
 CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2, "unreadable": 3}
 
 
+def group_candidate_assignments(assignments: list[Assignment]) -> dict[tuple[int, date], list[Assignment]]:
+    """Keep every assignment in source read order, without choosing a cell winner."""
+    cells: dict[tuple[int, date], list[Assignment]] = defaultdict(list)
+    for row in assignments:
+        cells[(row.staff_id, row.work_date)].append(row)
+    return cells
+
+
+def _assignment_cell_label(assignments: list[Assignment]) -> str:
+    if len(assignments) == 1:
+        return assignments[0].position.name
+    return "\n".join(f"{row.position.name} / {row.shift_template.name}" for row in assignments)
+
+
 def compare_manual_cells(
     session: Session,
     candidate_id: int | None,
@@ -60,24 +74,7 @@ def compare_manual_cells(
         ]
 
     staff_by_id = {row.id: row.name for row in session.query(Staff).all()}
-    actual: dict[tuple[str, date], str] = {}
-    for row in (
-        session.query(Assignment)
-        .filter(Assignment.candidate_id == candidate_id)
-        .order_by(Assignment.work_date, Assignment.staff_id)
-        .all()
-    ):
-        actual[(staff_by_id[row.staff_id], row.work_date)] = row.position.name
-
-    for row in (
-        session.query(CandidateStaffStatus)
-        .filter(CandidateStaffStatus.candidate_id == candidate_id)
-        .order_by(CandidateStaffStatus.work_date, CandidateStaffStatus.staff_id)
-        .all()
-    ):
-        key = (staff_by_id[row.staff_id], row.work_date)
-        if key not in actual:
-            actual[key] = STATUS_LABELS.get(row.work_kind, "")
+    actual = _candidate_cells(session, candidate_id, staff_by_id)
 
     mismatches: list[dict[str, str]] = []
     for staff_name in staff_names:
@@ -198,13 +195,14 @@ def _candidate_cells(
     if candidate_id is None:
         return {}
     actual: dict[tuple[str, date], str] = {}
-    for row in (
+    assignments = (
         session.query(Assignment)
         .filter(Assignment.candidate_id == candidate_id)
-        .order_by(Assignment.work_date, Assignment.staff_id)
+        .order_by(Assignment.work_date, Assignment.staff_id, Assignment.id)
         .all()
-    ):
-        actual[(staff_by_id[row.staff_id], row.work_date)] = row.position.name
+    )
+    for (staff_id, work_date), rows in group_candidate_assignments(assignments).items():
+        actual[(staff_by_id[staff_id], work_date)] = _assignment_cell_label(rows)
     for row in (
         session.query(CandidateStaffStatus)
         .filter(CandidateStaffStatus.candidate_id == candidate_id)
