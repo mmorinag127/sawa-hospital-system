@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import threading
+from contextvars import copy_context
 
 
 def enabled():
@@ -76,5 +77,6 @@ def submit(recorded, identity, generation, kind, callback):
             receipt = {"state": "failed", "error_class": type(exc).__name__}
         receipt["contract"] = recorded
         persist(receipt)
-    threading.Thread(target=execute, daemon=True, name="sawa-request-delivery").start()
+    captured = copy_context()
+    threading.Thread(target=lambda: captured.run(execute), daemon=True, name="sawa-request-delivery").start()
     return {"action": "accepted", "transport": "request_local"}

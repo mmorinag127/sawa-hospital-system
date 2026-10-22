@@ -19,6 +19,13 @@ class OCRPipelineStateConfigError(RuntimeError):
 
 def _state_uri() -> str:
     uri = (os.getenv("OCR_PIPELINE_STATE_URI") or "").strip()
+    from src.staging_data import current_dataset, data_setting
+    if current_dataset() != "test":
+        uri = data_setting("OCR_PIPELINE_STATE_URI", feature="order")
+        from src.staging_data import _staging_uri
+        physical = _staging_uri(uri)
+        if not physical.path.startswith("/stg-replay/" + current_dataset() + "/"):
+            raise OCRPipelineStateConfigError("staging_dataset_state_snapshot_mismatch")
     if not uri:
         raise OCRPipelineStateConfigError("OCR_PIPELINE_STATE_URI is not configured")
     try:

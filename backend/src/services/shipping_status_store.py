@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import local_directory
+
 import csv
 import json
 import os
@@ -12,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select
 
-from src.db import DB_URI, session_scope
+from src.db import current_database_uri, session_scope
 from src.models.shipping_tracking import (
     ShippingTrackingCurrent,
     ShippingTrackingEvent,
@@ -268,10 +270,10 @@ def _read_int_env(name: str, default: int) -> int:
 
 
 def _resolve_sqlite_path() -> Path | None:
-    if not DB_URI.startswith("sqlite"):
+    if not current_database_uri().startswith("sqlite"):
         return None
-    if DB_URI.startswith("sqlite:///"):
-        raw = DB_URI[len("sqlite:///") :]
+    if current_database_uri().startswith("sqlite:///"):
+        raw = current_database_uri()[len("sqlite:///") :]
         if raw.startswith("./"):
             return Path.cwd() / raw[2:]
         return Path(raw)
@@ -1226,7 +1228,7 @@ def export_status_history(
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if normalized_format == "csv":
         filename = f"shipping_tracking_history_{stamp}.csv"
-        output_path = _EXPORT_DIR / filename
+        output_path = local_directory(_EXPORT_DIR) / filename
         fieldnames = [
             "id",
             "ship_date",
@@ -1248,7 +1250,7 @@ def export_status_history(
         return output_path, filename, "text/csv"
 
     filename = f"shipping_tracking_history_{stamp}.json"
-    output_path = _EXPORT_DIR / filename
+    output_path = local_directory(_EXPORT_DIR) / filename
     payload = {
         "exported_at": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
         "timezone": timezone_name,

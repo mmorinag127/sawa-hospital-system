@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { enterSchoolLunch } from "../services/systemNavigation";
 import { broadcastLogout } from "../services/browserSession";
 import { useHydratedPath } from "../hooks/useHydratedPath";
+import StagingDatasetSelect from "./StagingDatasetSelect";
 
 type Props = {
   children: ReactNode;
@@ -37,6 +38,7 @@ export default function UnifiedShell({ children, gitSha, deployedAt, publicPage 
             <span><strong>SAWA</strong><small>統合管理</small></span>
           </a>
           <span className="unified-current">{currentSystem}</span>
+          {!publicPage ? <StagingDatasetSelect /> : null}
           {!publicPage ? (
             <nav className="unified-system-nav" aria-label="システム切替">
               <a href="/" className={path === "/" ? "active" : ""}>統合トップに戻る</a>

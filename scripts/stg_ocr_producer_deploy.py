@@ -102,6 +102,12 @@ def replacement(before, image):
     if runtime.get('serviceAccountName') != RUNTIME or len(runtime.get('containers', [])) != 1:
         raise Blocked('Producer runtime/container mismatch')
     runtime['containers'][0]['image'] = image
+    import runpy
+    snapshot = runpy.run_path(str(Path(__file__).with_name('staging_dataset_config.py')))['configuration'](os.environ)
+    if snapshot:
+        previous = runtime['containers'][0].get('env', [])
+        runtime['containers'][0]['env'] = [entry for entry in previous if entry['name'] not in snapshot] + [
+            {'name': key, 'value': value} for key, value in snapshot.items()]
     return result
 
 

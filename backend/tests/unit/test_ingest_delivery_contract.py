@@ -27,7 +27,7 @@ def store(tmp_path, monkeypatch):
     models.Base.metadata.create_all(engine)
     factory = sessionmaker(engine, autoflush=False, expire_on_commit=True)
     monkeypatch.setattr(db, "SessionLocal", factory)
-    monkeypatch.setattr(exclusion, "engine", engine)
+    monkeypatch.setattr(exclusion, "get_engine", lambda: engine)
     values = {"PROJECT_ID": "fixture-project", "LOCATION": "fixture-location", "QUEUE": "fixture-queue",
         "TARGET_URL": "https://fixture.invalid", "SERVICE_ACCOUNT_EMAIL": "fixture@fixture.iam.gserviceaccount.com",
         "AUDIENCE": "fixture-audience", "DISPATCH_DEADLINE_SECONDS": "15"}

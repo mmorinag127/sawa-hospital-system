@@ -1,9 +1,11 @@
 import os
+from functools import lru_cache
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from src.maintenance.database_target import explicit_database_uri
+from src import staging_data
 
 
 DB_URI = explicit_database_uri()
@@ -44,8 +46,42 @@ else:
             pass
 
 engine = create_engine(DB_URI, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+ControlSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
+
+
+@lru_cache(maxsize=4)
+def _replay_engine(uri):
+    selected = create_engine(uri, **engine_kwargs)
+    from src.maintenance.formal_migration_schema import require_formal_head
+    try:
+        with selected.connect() as connection:
+            require_formal_head(connection)
+    except Exception:
+        selected.dispose()
+        raise staging_data.DatasetUnavailable("staging_dataset_schema_not_ready") from None
+    return selected
+
+
+def get_engine():
+    if staging_data.current_dataset() == "test":
+        return engine
+    return _replay_engine(staging_data.database_uri(DB_URI, "order"))
+
+
+def current_database_uri():
+    return staging_data.database_uri(DB_URI, "order")
+
+
+def SessionLocal(**kwargs):
+    return ControlSessionLocal(bind=get_engine(), **kwargs)
+
+
+@contextmanager
+def control_session_scope():
+    with staging_data.dataset_context("test"):
+        with session_scope() as session:
+            yield session
 
 
 @contextmanager

@@ -35,8 +35,8 @@ from src.services import order_workflow_v2_service as workflow
 @pytest.fixture
 def owned_failure(tmp_path, monkeypatch):
     f = OwnedProducer(tmp_path, monkeypatch)
-    monkeypatch.setattr(execution, "engine", f.engine)
-    monkeypatch.setattr(slots, "engine", f.engine)
+    monkeypatch.setattr(execution, "get_engine", lambda: f.engine)
+    monkeypatch.setattr(slots, "get_engine", lambda: f.engine)
     try:
         positive_path = f.pdf
         positive_bytes = positive_path.read_bytes()

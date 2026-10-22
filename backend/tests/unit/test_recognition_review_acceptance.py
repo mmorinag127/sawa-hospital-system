@@ -327,7 +327,7 @@ def store(isolated_formal_schema, monkeypatch):
     with engine.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-    monkeypatch.setattr(exclusion, "engine", engine)
+    monkeypatch.setattr(exclusion, "get_engine", lambda: engine)
     values = {"PROJECT_ID": "fixture-project", "LOCATION": "fixture-location", "QUEUE": "fixture-queue",
         "TARGET_URL": "https://fixture.invalid", "SERVICE_ACCOUNT_EMAIL": "fixture@fixture.iam.gserviceaccount.com",
         "AUDIENCE": "fixture-audience", "DISPATCH_DEADLINE_SECONDS": "15"}

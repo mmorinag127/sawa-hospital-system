@@ -13,6 +13,7 @@ if _spec is None or _spec.loader is None:
 _codec = module_from_spec(_spec)
 _spec.loader.exec_module(_codec)
 format_gcs_uri = _codec.format_gcs_uri
+staging_output_prefix = _codec.staging_output_prefix
 parse_gcs_uri = _codec.parse_gcs_uri
 validate_generation = _codec.validate_generation
 signing_query = _codec.signing_query

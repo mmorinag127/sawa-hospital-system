@@ -72,7 +72,7 @@ def editable_import(saved, monkeypatch, tmp_path):
         monkeypatch.setattr(module, "session_scope", read_scope)
     monkeypatch.setattr(menu_service, "session_scope", monthly_scope)
     monkeypatch.setattr(workflow, "session_scope", write_scope)
-    monkeypatch.setattr(menu_service, "engine", saved.bind)
+    monkeypatch.setattr(menu_service, "get_engine", lambda: saved.bind)
     facility = authored()["facility"]
     facility["fax_template"]["columns"] = [
         {"index": 0, "source_index": 0, "role": "date"},

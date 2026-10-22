@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import local_directory
+
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 import hashlib
@@ -249,7 +251,7 @@ def _safe_source_workbook_suffix(value: str) -> str:
 def _materialize_source_workbook_uri(uri: str) -> Path:
     data = load_bytes_from_uri(uri)
     digest = hashlib.sha256(data).hexdigest()
-    target = _SOURCE_WORKBOOK_MATERIALIZED_DIR / f"{digest}{_safe_source_workbook_suffix(uri)}"
+    target = local_directory(_SOURCE_WORKBOOK_MATERIALIZED_DIR) / f"{digest}{_safe_source_workbook_suffix(uri)}"
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists():
         target.write_bytes(data)
@@ -259,7 +261,8 @@ def _materialize_source_workbook_uri(uri: str) -> Path:
 def _resolve_source_workbook_path(source_workbook_name: str) -> Path:
     source_ref = str(source_workbook_name or "").strip()
     parsed = urlparse(source_ref)
-    if parsed.scheme in {"gs", "file"}:
+    from src.staging_data import current_dataset
+    if parsed.scheme in {"gs", "file"} or current_dataset() != "test":
         source_path = _materialize_source_workbook_uri(source_ref)
     else:
         direct_path = Path(source_ref)
@@ -957,7 +960,7 @@ def build_order_form_excel(
     file_pattern = _sanitize_filename_fragment(str(resolved_fax_template_id))
     safe_facility_id = _sanitize_filename_fragment(facility_id)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    output_dir = _OUTPUT_DIR / uuid4().hex
+    output_dir = local_directory(_OUTPUT_DIR) / uuid4().hex
     output = output_dir / f"order_form_{safe_facility_id}_{normalized_month}_{file_pattern}_{stamp}.xlsx"
     try:
         buffer = BytesIO()
@@ -1106,7 +1109,8 @@ def _read_saved_sheet_source_workbook(facility: dict, month_id: str) -> dict[str
     source_bytes = None
     for ref in refs:
         parsed = urlparse(ref)
-        if parsed.scheme in {"gs", "file"}:
+        from src.staging_data import current_dataset
+        if parsed.scheme in {"gs", "file"} or current_dataset() != "test":
             data = load_bytes_from_uri(ref)
         elif parsed.scheme:
             raise ValueError("saved sheet source workbook URI invalid")
@@ -1212,7 +1216,7 @@ def build_saved_sheet_order_form_excel(*, order_id: str) -> Path:
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe_facility_id = _sanitize_filename_fragment(facility_id)
     safe_week = _sanitize_filename_fragment(week_sheet_name)
-    output_dir = _OUTPUT_DIR / uuid4().hex
+    output_dir = local_directory(_OUTPUT_DIR) / uuid4().hex
     output = output_dir / f"fax_read_sheet_excel_{normalized_order_id}_{safe_facility_id}_{safe_week}_{stamp}.xlsx"
     with session_scope() as session:
         current = _capture_saved_sheet_order_form_input(session, normalized_order_id)
@@ -1370,7 +1374,7 @@ def _render_fax_order_form_workbook(
 
 def _resolve_fax_output_dir(output_dir: Path | str | None) -> Path:
     if output_dir is None:
-        path = _FAX_OUTPUT_DIR
+        path = local_directory(_FAX_OUTPUT_DIR)
     else:
         path = Path(output_dir)
     path.mkdir(parents=True, exist_ok=True)

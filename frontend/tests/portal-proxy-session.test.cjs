@@ -34,6 +34,31 @@ test("opaque mutation requires same origin and csrf while machine bearer is unch
   assert.equal(proxy("/api/orders", "POST", new Headers({authorization: "Bearer machine-token"}), cookies, "").get("authorization"), "Bearer machine-token");
 });
 
+test("school bootstrap injects once and subsequent checks preserve the cookie generation", () => {
+  const bridge = "/school-lunch/api/backend/shared-auth/me";
+  const headers = new Headers({"sec-fetch-site": "same-origin"});
+  const initial = proxy(bridge, "GET", headers, cookies, origin);
+  assert.equal(initial.get("authorization"), "Bearer " + token);
+  const established = {...cookies, sawa_school_lunch_auth: token, sawa_school_lunch_session_generation: "school-generation"};
+  for (let check = 0; check < 3; check++) {
+    assert.equal(proxy(bridge, "GET", headers, established, origin).get("authorization"), null);
+  }
+  for (const changed of [
+    {...established, sawa_school_lunch_auth: "ps_" + "b".repeat(43)},
+    {...established, sawa_school_lunch_session_generation: ""},
+  ]) {
+    assert.equal(proxy(bridge, "GET", headers, changed, origin).get("authorization"), "Bearer " + token);
+  }
+  assert.throws(() => proxy(bridge, "GET", new Headers({"sec-fetch-site": "cross-site"}), established, origin));
+});
+
+test("school bridge never replaces an explicit bearer with another cookie identity", () => {
+  const explicit = "Bearer ps_" + "b".repeat(43);
+  const result = proxy("/school-lunch/api/backend/shared-auth/me", "GET",
+    new Headers({"sec-fetch-site": "same-origin", authorization: explicit}), cookies, origin);
+  assert.equal(result.get("authorization"), explicit);
+});
+
 test("callback retains Google double-cookie flow and no session is exposed in response", () => {
   assert.equal(proxy("/api/portal/auth/callback", "POST", new Headers({origin: "https://accounts.google.com"}), cookies, origin).get("authorization"), null);
   const source = fs.readFileSync(path.join(__dirname, "../src/proxy.ts"), "utf8");

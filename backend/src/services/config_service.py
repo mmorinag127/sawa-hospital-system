@@ -177,6 +177,13 @@ def load_ingest_policy() -> dict:
     from src.services.workflow_attempt_guard_service import current_nonworkflow_execution, current_workflow_execution, processing_start_configured_input
     if current_nonworkflow_execution() is not None or current_workflow_execution() is not None:
         return processing_start_configured_input()["policy"]
+    from src.staging_data import current_dataset, data_setting
+    if current_dataset() != "test":
+        from src.services.storage_service import load_bytes_from_uri
+        policy = json.loads(load_bytes_from_uri(data_setting("INGEST_POLICY_URI", feature="order")))
+        if not isinstance(policy, dict):
+            raise ValueError("staging_dataset_ingest_policy_invalid")
+        return policy
     return _load_cached_ingest_policy()
 
 

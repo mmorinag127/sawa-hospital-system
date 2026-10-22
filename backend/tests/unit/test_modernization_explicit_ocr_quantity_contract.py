@@ -437,7 +437,7 @@ class PublicSavedCandidate(SavedSheetFixture):
     def __init__(self, tmp_path, monkeypatch):
         super().__init__(tmp_path, monkeypatch)
         monkeypatch.setattr(db, "SessionLocal", self.sessions)
-        monkeypatch.setattr(menu_service, "engine", self.engine)
+        monkeypatch.setattr(menu_service, "get_engine", lambda: self.engine)
         self.authored["fax_template"] = authored_template()
         self.republish()
         path = tmp_path / "synthetic-local-unit.pdf"

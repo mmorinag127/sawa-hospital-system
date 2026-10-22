@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -260,7 +261,8 @@ def save_uploaded_pdf_pages(
     if max_workers <= 1:
         return [_save_pdf_variant(**spec) for spec in page_specs]
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return list(executor.map(lambda spec: _save_pdf_variant(**spec), page_specs))
+        work = [(copy_context(), spec) for spec in page_specs]
+        return list(executor.map(lambda item: item[0].run(_save_pdf_variant, **item[1]), work))
 
 
 def save_uploaded_pdf(

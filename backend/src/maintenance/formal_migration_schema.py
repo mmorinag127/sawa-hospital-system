@@ -102,6 +102,29 @@ def _normalize_reflected_index_aliases(shape, dialect):
     return normalized
 
 
+def _normalize_reflected_catalog_aliases(shape, dialect):
+    normalized = _normalize_reflected_index_aliases(shape, dialect)
+    if dialect != "postgresql" or "checks" not in normalized:
+        return normalized
+    # pg_dump/restore can distribute an array cast over its elements. These
+    # exact spellings have the same three permitted values, including NULL.
+    reviewed = "system_key::text = ANY (ARRAY['hospital'::character varying, 'shift'::character varying, 'school-lunch'::character varying]::text[])"
+    restored = "system_key::text = ANY (ARRAY['hospital'::character varying::text, 'shift'::character varying::text, 'school-lunch'::character varying::text])"
+    reviewed_native = "CHECK (((system_key)::text = ANY ((ARRAY['hospital'::character varying, 'shift'::character varying, 'school-lunch'::character varying])::text[])))"
+    restored_native = "CHECK (((system_key)::text = ANY (ARRAY[('hospital'::character varying)::text, ('shift'::character varying)::text, ('school-lunch'::character varying)::text])))"
+    name = "ck_user_system_access_system_key"
+    normalized = dict(normalized)
+    normalized["checks"] = _ordered([
+        {**item, "sqltext": reviewed} if item.get("name") == name and item.get("sqltext") == restored else item
+        for item in normalized["checks"]])
+    normalized["native"] = _ordered([
+        {**item, "definition": reviewed_native}
+        if item.get("table_name") == "user_system_access" and item.get("constraint_name") == name
+        and item.get("definition") == restored_native else item
+        for item in normalized["native"]])
+    return normalized
+
+
 def table_shapes(snapshot, dialect):
     """Normalize ordering, SQLite SQL tokens and verified PG INCLUDE aliases."""
     shapes = {}
@@ -125,7 +148,7 @@ def table_shapes(snapshot, dialect):
                 item["tokens"] = _clean(tokens)
             native.append(item)
         shapes[name]["native"] = _ordered(native)
-        shapes[name] = _normalize_reflected_index_aliases(shapes[name], dialect)
+        shapes[name] = _normalize_reflected_catalog_aliases(shapes[name], dialect)
     return shapes
 
 
@@ -312,7 +335,7 @@ def require_revision_catalog(connection, revision):
     if catalog["views"] != expected["views"] or set(actual) != set(expected["tables"]):
         raise RuntimeError(f"catalog is partial or incompatible: revision {revision} table/view set mismatch")
     for name, reference in expected["tables"].items():
-        shape = _normalize_reflected_index_aliases(contract["shapes"][reference], dialect)
+        shape = _normalize_reflected_catalog_aliases(contract["shapes"][reference], dialect)
         if policy == "name":
             shape = _named_columns(shape)
             actual[name] = _named_columns(actual[name])

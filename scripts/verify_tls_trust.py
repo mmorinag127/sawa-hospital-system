@@ -3,7 +3,10 @@
 import argparse
 import hashlib
 import importlib
+import importlib.util
 import json
+import os
+from pathlib import Path
 import ssl
 import urllib.error
 import urllib.request
@@ -42,6 +45,18 @@ def inspect_store(label, context, online):
     print(json.dumps({"store": label, "certificates": len(certs), "blocked_roots": 0, "online": online}))
 
 
+def verify_grpc_roots():
+    expected = "/etc/ssl/certs/ca-certificates.crt"
+    configured = os.environ.get("GRPC_DEFAULT_SSL_ROOTS_FILE_PATH")
+    if configured != expected:
+        raise RuntimeError(f"grpc roots path must be {expected}, got {configured!r}")
+    if not Path(configured).is_file():
+        raise RuntimeError(f"grpc roots path is not a file: {configured}")
+    inspect_store("grpc-os-roots", ssl.create_default_context(cafile=configured), False)
+    if importlib.util.find_spec("grpc") is not None:
+        importlib.import_module("grpc")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--online", action="store_true")
@@ -50,6 +65,7 @@ def main():
     if args.cafile:
         inspect_store(args.cafile, ssl.create_default_context(cafile=args.cafile), args.online)
         return
+    verify_grpc_roots()
     inspect_store("openssl", ssl.create_default_context(), args.online)
     for name in ("certifi", "pip._vendor.certifi"):
         bundle = importlib.import_module(name)

@@ -24,7 +24,10 @@ export function portalProxyHeaders(path: string, method: string, headers: Header
   }
   if (bridge && method === "GET") {
     if (headers.get("sec-fetch-site") !== "same-origin" && headers.get("origin") !== origin) throw new Error("portal_csrf_rejected");
-    if (/^ps_[A-Za-z0-9_-]{43}$/.test(session)) result.set("authorization", `Bearer ${session}`);
+    const schoolSessionCurrent = schoolToken === session && !!cookies.sawa_school_lunch_session_generation;
+    if (!authorization && /^ps_[A-Za-z0-9_-]{43}$/.test(session) && !schoolSessionCurrent) {
+      result.set("authorization", `Bearer ${session}`);
+    }
   } else if ((shift || assistant) && /^ps_[A-Za-z0-9_-]{43}$/.test(session)) {
     result.set("authorization", `Bearer ${session}`);
   }
