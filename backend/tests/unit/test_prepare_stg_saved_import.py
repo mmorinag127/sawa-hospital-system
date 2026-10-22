@@ -234,12 +234,24 @@ def test_bootstrap_workflow_is_develop_owner_only_and_does_not_deploy_or_overwri
     assert job["if"] == "github.actor == github.repository_owner && github.ref == 'refs/heads/develop'"
     assert workflow["concurrency"]["group"] == "deploy-stg"
     runs = [step["run"] for step in job["steps"] if "run" in step]
-    assert "sha256sum --check" in runs[1]
-    assert "scripts/run_stg_schema_adoption.py" in runs[2]
-    assert "scripts/prepare_stg_saved_import.py" in runs[3]
-    assert "--if-generation-match=0" in runs[4]
-    assert "cmp " in runs[4]
-    assert "sawahospitalsystem-stg-templates" in runs[0]
+    run_steps = {step["name"]: step["run"] for step in job["steps"] if "run" in step}
+    assert len(run_steps) == len(runs)
+    expected_names = [
+        "Update TLS trust stores",
+        "Verify source and bounded staging object paths",
+        "Download and verify explicit reviewed inputs before database migration",
+        "Adopt reviewed staging schema through formal migrations",
+        "Capture saved results without changing quantities or confirmations",
+        "Publish new object without overwriting an existing canonical source",
+    ]
+    assert list(run_steps) == expected_names
+    assert "sha256sum --check" in run_steps["Download and verify explicit reviewed inputs before database migration"]
+    assert "scripts/run_stg_schema_adoption.py" in run_steps["Adopt reviewed staging schema through formal migrations"]
+    assert "scripts/prepare_stg_saved_import.py" in run_steps["Capture saved results without changing quantities or confirmations"]
+    publish = run_steps["Publish new object without overwriting an existing canonical source"]
+    assert "--if-generation-match=0" in publish
+    assert "cmp " in publish
+    assert "sawahospitalsystem-stg-templates" in run_steps["Verify source and bounded staging object paths"]
     assert all("gcloud run deploy" not in run and "gcloud run services update" not in run for run in runs)
     uploads = [step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"]
     assert [step["with"]["path"] for step in uploads] == ["tmp/canonical-bootstrap/receipt.json"]
