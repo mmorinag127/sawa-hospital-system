@@ -33,6 +33,7 @@ def claimed_import(editable_import, monkeypatch):
                 writer.rollback()
                 raise
     monkeypatch.setattr(delivery, "session_scope", delivery_scope)
+    monkeypatch.setattr(guard, "session_scope", delivery_scope)
     queued, error = workflow.mark_ocr_run_queued("O", "NEW-JOB", input_reference=session.get(Order, "O").document_uri,
                                                request_mode="ocr_rerun", expected_revision=1)
     assert error is None, error
