@@ -236,6 +236,16 @@ jobs:
             tests/unit/test_order_list_response_ownership.py \
             tests/unit/test_ocr_registry_retirement.py \
             --junitxml=.logs/saved-source-junit.xml -q
+      - name: Verify staging copy refresh lifecycle and native PostgreSQL isolation
+        if: matrix.suite == 'saved-source'
+        env:
+          REFRESH_TEST_PG_BIN: /usr/lib/postgresql/16/bin
+          PYTEST_ADDOPTS: ''
+          PYTHONPATH: backend
+        run: |
+          set -euo pipefail
+          DB_URI="sqlite:///$RUNNER_TEMP/copy-refresh-contract.sqlite" python -m pytest backend/tests/unit/test_staging_copy_refresh.py -q
+          python scripts/test_staging_copy_refresh_native.py
       - name: Verify OCR review-resolution root regression
         if: matrix.suite == 'review-resolution'
         working-directory: backend

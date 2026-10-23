@@ -160,3 +160,19 @@ def drain_workflow_ocr_deliveries(request: Request, limit: int,
         return workflow_ocr_delivery_dispatch_service.drain_pending(limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/worker/staging-copy-refresh/{request_id}/{delivery_generation}")
+def execute_staging_copy_refresh(request_id: str, delivery_generation: int, request: Request, authorization: str | None = Header(default=None)):
+    from src.services import staging_copy_refresh_service as refresh
+    from src import staging_data
+    if not staging_data.staging_runtime():
+        raise HTTPException(404, "Not found")
+    _required_worker_identity(request, authorization)
+    import re
+    if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise HTTPException(422, "refresh_request_id_invalid")
+    try:
+        return refresh.execute(request_id, delivery_generation)
+    except refresh.RefreshError as exc:
+        raise HTTPException(503, str(exc)) from None

@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 COOKIE = "sawa_stg_dataset"
 HEADER = "X-Sawa-Dataset"
 _selected = ContextVar("sawa_stg_dataset", default="test")
+_pinned_manifest = ContextVar("sawa_stg_manifest", default=None)
 _IDENTITY = re.compile(r"replay-[a-z0-9][a-z0-9-]{0,47}")
 
 
@@ -37,12 +38,15 @@ def dataset_context(identity):
     if identity != "test":
         if not staging_runtime() or not _IDENTITY.fullmatch(identity):
             raise DatasetUnavailable("staging_dataset_invalid")
-        if manifest()["id"] != identity:
-            raise DatasetUnavailable("staging_dataset_snapshot_unavailable")
+        selected_manifest = manifest_for(identity)
+    else:
+        selected_manifest = None
     token = _selected.set(identity)
+    pinned = _pinned_manifest.set(selected_manifest)
     try:
         yield
     finally:
+        _pinned_manifest.reset(pinned)
         _selected.reset(token)
 
 
@@ -101,7 +105,7 @@ def _read_manifest(uri, digest):
     return value
 
 
-def manifest():
+def legacy_manifest():
     if not staging_runtime():
         raise DatasetUnavailable("staging_dataset_disabled")
     uri = os.environ.get("SAWA_STG_REPLAY_MANIFEST_URI", "")
@@ -114,6 +118,98 @@ def manifest():
         raise
     except Exception as exc:
         raise DatasetUnavailable("staging_dataset_manifest_unavailable") from exc
+
+
+def refresh_control_uri():
+    # A single commit decision is shared; full manifests/PDFs stay in each own bucket.
+    # The immutable initial manifest fixes the coordinator's location.
+    parsed = _staging_uri(legacy_manifest()["components"]["order"]["settings"].get("FACILITY_MASTER_URI", ""))
+    return "gs://" + parsed.netloc + "/stg-replay/control/"
+
+
+def read_registry():
+    from google.api_core.exceptions import NotFound
+    from google.cloud import storage
+    parsed = _staging_uri(refresh_control_uri() + "registry.json")
+    blob = storage.Client().bucket(parsed.netloc).blob(parsed.path.lstrip("/"))
+    try:
+        blob.reload()
+    except NotFound:
+        return initial_registry(), 0
+    except Exception as exc:
+        raise DatasetUnavailable("staging_dataset_registry_unavailable") from exc
+    try:
+        value = json.loads(blob.download_as_bytes(if_generation_match=int(blob.generation)), object_pairs_hook=_unique_object)
+        validate_registry(value)
+        return value, int(blob.generation)
+    except DatasetUnavailable:
+        raise
+    except Exception as exc:
+        raise DatasetUnavailable("staging_dataset_registry_unavailable") from exc
+
+
+def initial_registry():
+    original = legacy_manifest()
+    return {"schema": 1, "active": original["id"], "snapshots": {original["id"]: {
+        "uri": os.environ["SAWA_STG_REPLAY_MANIFEST_URI"],
+        "sha256": os.environ["SAWA_STG_REPLAY_MANIFEST_SHA256"],
+        "snapshot_at": original["snapshot_at"],
+    }}, "refresh": None}
+
+
+def validate_registry(value):
+    if (not isinstance(value, dict) or value.get("schema") != 1
+            or not isinstance(value.get("snapshots"), dict)
+            or value.get("active") not in value["snapshots"]):
+        raise DatasetUnavailable("staging_dataset_registry_invalid")
+    for identity, entry in value["snapshots"].items():
+        if (not _IDENTITY.fullmatch(identity) or not isinstance(entry, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", "")))
+                or not entry.get("snapshot_at")):
+            raise DatasetUnavailable("staging_dataset_registry_invalid")
+        parsed = _staging_uri(entry.get("uri", ""))
+        if not parsed.path.startswith("/stg-replay/" + identity + "/"):
+            raise DatasetUnavailable("staging_dataset_registry_identity_mismatch")
+
+
+def _runtime_manifest(entry):
+    # Publisher mirrors the exact same immutable bytes to each existing stg bucket.
+    # Only registry.json requires shared read access; data/credentials never do.
+    bucket = _staging_uri(os.environ["SAWA_STG_REPLAY_MANIFEST_URI"]).netloc
+    source = _staging_uri(entry["uri"])
+    return _read_manifest("gs://" + bucket + source.path, entry["sha256"])
+
+
+def manifest_for(identity):
+    if not staging_runtime() or not _IDENTITY.fullmatch(identity):
+        raise DatasetUnavailable("staging_dataset_invalid")
+    registry, _ = read_registry()
+    entry = registry["snapshots"].get(identity)
+    if entry is None:
+        raise DatasetUnavailable("staging_dataset_snapshot_unavailable")
+    result = _runtime_manifest(entry)
+    if result["id"] != identity:
+        raise DatasetUnavailable("staging_dataset_registry_identity_mismatch")
+    return result
+
+
+def manifest():
+    pinned = _pinned_manifest.get()
+    if pinned is not None:
+        return pinned
+    registry, _ = read_registry()
+    entry = registry["snapshots"][registry["active"]]
+    result = _runtime_manifest(entry)
+    if result["id"] != registry["active"]:
+        raise DatasetUnavailable("staging_dataset_registry_identity_mismatch")
+    return result
+
+
+def snapshot_choices():
+    registry, _ = read_registry()
+    return [{"id": identity, "label": "本番再現用" + ("（最新）" if identity == registry["active"] else "（以前のコピー）"),
+             "available": True, "snapshot_at": entry["snapshot_at"]}
+            for identity, entry in reversed(list(registry["snapshots"].items()))]
 
 
 def component(name):

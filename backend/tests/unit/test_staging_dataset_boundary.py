@@ -24,6 +24,7 @@ def snapshot(monkeypatch):
     value = {"schema": 1, "id": "replay-synthetic", "state": "ready", "snapshot_at": "2026-10-22T00:00:00Z",
              "components": {name: json.loads(json.dumps(item)) for name in ("order", "shift", "school-lunch")}}
     monkeypatch.setattr(data, "manifest", lambda: value)
+    monkeypatch.setattr(data, "manifest_for", lambda identity: _selected_fixture(data.manifest(), identity))
     return value
 
 
@@ -332,3 +333,9 @@ def test_workflow_persisted_renewal_retains_copy_after_request_context_ends(snap
             assert row.task_name.endswith("/tasks/"+snapshot["id"]+"-"+original.id+"-g2")
     finally:
         engine.dispose()
+
+
+def _selected_fixture(value, identity):
+    if value["id"] != identity:
+        raise data.DatasetUnavailable("staging_dataset_snapshot_unavailable")
+    return value
