@@ -13,9 +13,9 @@ module.exports = defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
+    command: `npm run dev -- --hostname 127.0.0.1 --port ${new URL(baseUrl).port || 3100}`,
     url: baseUrl,
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     timeout: 120 * 1000,
   },
   reporter: [["list"]],
