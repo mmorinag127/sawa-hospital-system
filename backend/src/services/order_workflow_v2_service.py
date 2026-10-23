@@ -2693,8 +2693,6 @@ def mark_ocr_run_queued(
             meta["ocr_job_attempt_id"] = workflow_attempt_id
         meta["template_version_id"] = template_version.id
         meta["template_version_digest"] = template_version.template_digest
-        meta["bagging_result_id"] = None
-        meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
         revision_error = _finalize_workflow_mutation(session, workflow)
         if revision_error:
@@ -2705,6 +2703,15 @@ def mark_ocr_run_queued(
             # Persist the actual final CAS revision without touching workflow again.
             queued_metrics = dict(ocr_job.metrics or {})
             queued_metrics["workflow_completion_revision"] = _workflow_revision(workflow)
+            from src.services.initial_saved_import_service import capture_queued_processing_input
+            try:
+                queued_metrics["reparse_read_input"] = capture_queued_processing_input(
+                    session, order.id, queued_metrics["reparse_read_input"],
+                )
+            except ValueError as exc:
+                session.rollback()
+                return None, str(exc)
+            delivery_request_identity["reparse_read_input"] = queued_metrics["reparse_read_input"]
             ocr_job.metrics = queued_metrics
             session.flush()
             delivery = workflow_ocr_delivery_service.create_intent_in_session(
@@ -2846,8 +2853,6 @@ def mark_ocr_run_completed(
         meta["ocr_job_id"] = normalized_job_id
         meta["latest_ocr_result_id"] = normalized_evidence_run_id or None
         meta["latest_ocr_error"] = normalized_error or None
-        meta["bagging_result_id"] = None
-        meta["output_bundle_id"] = None
         _write_workflow_meta(workflow, meta)
         revision_error = _finalize_workflow_mutation(session, workflow)
         if revision_error:

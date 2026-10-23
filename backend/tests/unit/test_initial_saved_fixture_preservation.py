@@ -103,16 +103,18 @@ def test_ocr_dependent_operations_require_evidence(fixture_import, monkeypatch):
     assert source.capture_saved_source(session, "FIX") == snapshot
 
 
-def test_explicit_new_ocr_selection_keeps_saved_sheet(fixture_import):
+def test_new_ocr_without_saved_template_stops_without_changing_saved_sheet(fixture_import):
     session, _, _, sheet = fixture_import
+    before = all_rows(session)
     with command("FIX", 1):
         imports.begin_owned_import(session, "FIX", expected_revision=1)
         order = session.get(Order, "FIX")
         workflow = session.get(OrderWorkflowState, "FIX")
-        imports.prepare_new_ocr_selection(session, order, workflow)
-        assert order.template_version_id == workflow.template_version_id
-        assert order.template_version_id is not None
+        with pytest.raises(ValueError, match="template_version_required"):
+            imports.prepare_new_ocr_selection(session, order, workflow)
+        assert order.template_version_id is workflow.template_version_id is None
         assert session.get(OrderSheetDraft, "FIX-D").draft_sheet_json == sheet
+        assert all_rows(session) == before
     session.rollback()
 
 
@@ -149,8 +151,9 @@ def test_public_selection_entrypoints_with_missing_original_lineage(fixture_impo
         assert session.get(Order, "FIX").template_version_id is not None
         assert imports.get_binding(session, "FIX") is None
     else:
-        # No real PDF belongs to this verification fixture. Keep the explicit
-        # PDF prerequisite at the public entry rather than crashing on NULL.
+        # A sheet without an original template cannot start a new candidate.
+        # Do not assign a new template to its adopted saved sheet.
         result, error = workflow.mark_ocr_run_queued("FIX", "FIX-JOB",
             input_reference=original["order"]["document_uri"], request_mode="ocr_rerun", expected_revision=1)
-        assert error == "selected_pdf_document_required"
+        assert error == "template_version_required"
+        assert source.capture_saved_source(session, "FIX") == original

@@ -1368,7 +1368,7 @@ def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
 
 
 def _resolve_order_document_version(order_id: str, document_id: str | None = None) -> tuple[dict, dict]:
-    order = order_service.get_order_by_id(order_id)
+    order = order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
     selected_document_id = str(document_id or "").strip()

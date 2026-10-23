@@ -205,6 +205,26 @@ def processing_configuration_matches(session, order_id, captured):
                 "facility": binding["facility"], "policy": binding["configuration"]["policy"]})
 
 
+def capture_queued_processing_input(session, order_id, captured):
+    if captured.get("initial_saved_import") is None:
+        return captured
+    if _owned(session, order_id) is None:
+        raise ValueError("initial_saved_import_ownership_rejected")
+    binding = get_binding(session, order_id)
+    if binding is None:
+        raise ValueError("initial_saved_source_changed")
+    queued = processing_input(session, binding)
+    if set(queued) != set(captured):
+        raise ValueError("initial_saved_ocr_candidate_source_changed")
+    # Import receipts include the owned workflow revision as well as saved data.
+    queue_envelope = {"workflow", "workflow_revision", "initial_saved_source_receipt",
+                      "original_template_lineage", "original_template_source_proof"}
+    for key, value in captured.items():
+        if key not in queue_envelope and queued.get(key) != value:
+            raise ValueError("initial_saved_ocr_candidate_source_changed")
+    return queued
+
+
 def materialization_input_matches(session, order_id, captured):
     binding = get_binding(session, order_id)
     if binding is None or not processing_configuration_matches(session, order_id, captured):
@@ -220,42 +240,24 @@ def materialization_input_matches(session, order_id, captured):
 
 
 def prepare_new_ocr_selection(session, order, workflow):
-    """A requested new OCR uses canonical input, never an old saved receipt."""
+    """Pin the saved configuration for a candidate without adopting a new lineage."""
     binding = get_binding(session, order.id)
     if binding is None:
         return
     if _owned(session, order.id) is None:
         raise ValueError("initial_saved_import_ownership_rejected")
-    from src.services import canonical_facility_lineage as lineage, facility_master_service
     from src.services.order_service import _parse_sheet_week_value
     _, start, end = _parse_sheet_week_value(order.week_code)
     if start is None or end is None:
         raise ValueError("materialization_week_input_mismatch")
-    # Applicability is already selected for this order. A later configuration
-    # must not retarget it, including when the initial version is now closed.
-    version = deepcopy(binding["configuration"]["version"])
-    master = facility_master_service.get_snapshot()
-    config = master.master
-    from src.services.config_service import validate_selected_authored_facility_config
-    validate_selected_authored_facility_config(order.facility_code, version, master=config)
-    receipt = {"facility_id": order.facility_code, "authored_version_id": version["version_id"],
-               "snapshot_digest": digest(version), "source": "canonical_json", "authored_version": version}
-    projection = lineage.projection_values(receipt)
-    selection = {**deepcopy(version["facility"]),
-        "canonical_lineage": {**receipt, "projection_id": projection["id"], "materialized": False},
-        "canonical_source_proof": {"source": "canonical_json", "revision": master.revision,
-                                   "effective_date": start.isoformat()},
-        "facility_template_version_id": projection["id"],
-        "facility_template_version": {}, "effective_date": start.isoformat()}
-    session.flush()
-    _, selected = lineage.materialize(session, selection)
-    order.template_version_id = selected.id
-    workflow.template_version_id = selected.id
+    template = binding["snapshot"]["template"]
+    if template is None:
+        raise ValueError("template_version_required")
     actions = deepcopy(workflow.secondary_actions_json)
     meta = actions.setdefault("workflow_v2", {})
     meta.update({"facility_id": order.facility_code, "week_start": start.isoformat(),
-                 "week_end": end.isoformat(), "template_version_id": selected.id,
-                 "template_version_digest": selected.template_digest})
+                 "week_end": end.isoformat(), "template_version_id": template["id"],
+                 "template_version_digest": template["template_digest"]})
     workflow.secondary_actions_json = actions
     session.flush()
 

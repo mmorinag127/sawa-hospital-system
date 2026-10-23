@@ -189,24 +189,21 @@ def test_outer_command_ownership_is_valid_inside_successful_savepoint(imported):
     assert service.get_binding(session, "O")["snapshot"]["workflow"]["headline"] == "Owned edit before savepoint"
 
 
-def test_explicit_new_ocr_selection_keeps_initial_config_and_retires_old_import(editable_import):
-    from src.services import canonical_facility_lineage as lineage
+def test_explicit_new_ocr_candidate_keeps_initial_config_and_selected_lineage(editable_import):
     session, sheet, original = editable_import
+    configuration = deepcopy(service.get_binding(session, "O")["configuration"])
     with command():
         row = workflow._get_workflow(session, "O")
         service.prepare_new_ocr_selection(session, session.get(Order, "O"), row)
-        selected = lineage.read_projection(session, row.template_version_id)
-        assert lineage.verify_projection(selected)["authored_version"]["initial_snapshot"]
-        assert selected.valid_from is None
-        assert selected.config_json == store.facility_versions(
-            facility_master_service.get_snapshot().master, "F")[0]["facility"]
+        assert row.template_version_id == original["template"]["id"]
         assert workflow._finalize_workflow_mutation(session, row) is None
         session.commit()
-    assert service.get_binding(session, "O") is None
+    binding = service.get_binding(session, "O")
+    assert binding["configuration"] == configuration
     assert session.get(OrderSheetDraft, "D").draft_sheet_json == sheet
     assert session.get(OrderSheetDraft, "D").template_version_id == original["template"]["id"]
-    session.execute(update(Order).where(Order.id == "O").values(template_version_id="T"))
-    with pytest.raises(ValueError, match="retired"):
+    session.execute(update(Order).where(Order.id == "O").values(template_version_id="T-new"))
+    with pytest.raises(ValueError, match="initial_saved_source_changed"):
         service.get_binding(session, "O")
     session.rollback()
 
@@ -271,8 +268,11 @@ def test_new_ocr_queue_and_real_claim_keep_current_attempt_fence(editable_import
     queued, error = workflow.mark_ocr_run_queued("O", "NEW-JOB", input_reference=session.get(Order, "O").document_uri,
                                                request_mode="ocr_rerun", expected_revision=1)
     assert error is None, error
-    assert service.get_binding(session, "O") is None
-    assert session.get(OrderWorkflowState, "O").secondary_actions_json[service.RETIRED]
+    binding = service.get_binding(session, "O")
+    assert binding is not None
+    assert service.RETIRED not in session.get(OrderWorkflowState, "O").secondary_actions_json
+    from src.services import order_service
+    assert order_service.get_ocr_sheet("O") == (binding["snapshot"]["draft"]["draft_sheet_json"], None)
     session.rollback()
     claim = delivery.claim_delivery(queued["delivery"]["id"], 1, lease_expires_at=datetime.utcnow() + timedelta(minutes=5))
     assert not claim.get("duplicate")
@@ -284,6 +284,20 @@ def test_new_ocr_queue_and_real_claim_keep_current_attempt_fence(editable_import
             "NEW-JOB", "O", claim["workflow_attempt_id"], claim["workflow_revision"]):
         assert not guard.lock_current_execution_write(session, "O")
     session.rollback()
+    with delivery.claim_context(claim), order_service.workflow_ocr_write_context(
+            claim["workflow_attempt_id"], claim["workflow_revision"], job_id="NEW-JOB", order_id="O"):
+        receipt = order_service._complete_ocr_rerun_in_session(
+            session, "O", "NEW-JOB", None, error="synthetic_candidate_failure", metrics_patch={},
+        )
+        assert receipt["status"] == "failed"
+        session.commit()
+    preserved = service.get_binding(session, "O")
+    assert preserved["configuration"] == binding["configuration"]
+    assert preserved["snapshot"]["draft"] == binding["snapshot"]["draft"]
+    assert preserved["snapshot"]["evidence"] == binding["snapshot"]["evidence"]
+    assert preserved["snapshot"]["workflow"]["secondary_actions_json"]["workflow_v2"]["bagging_result_id"] == "B"
+    assert preserved["snapshot"]["workflow"]["secondary_actions_json"]["workflow_v2"]["output_bundle_id"] == "P"
+    assert order_service.get_ocr_sheet("O") == (binding["snapshot"]["draft"]["draft_sheet_json"], None)
 
 
 def test_reads_keep_raw_saved_source_and_do_not_grant_write_ownership(imported):
