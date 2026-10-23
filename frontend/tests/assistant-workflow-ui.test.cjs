@@ -9,7 +9,7 @@ const tasks=[
  {id:'lunch_import',domain:'school-lunch',label:'献立・調理手配書を取り込む',description:'月次の原本を取り込みます',steps:[],month:true,target_kind:'school'}];
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
-async function mount({initial=null,targets,adminView=false,beforeGet,beforePost}={}){
+async function mount({initial=null,targets,adminView=false,beforeGet,beforePost,openInitial=true}={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/assistant',pretendToBeVisual:true});const saved=new Map();
  for(const key of ['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','HTMLInputElement','HTMLSelectElement','HTMLTextAreaElement','FormData']){saved.set(key,Object.getOwnPropertyDescriptor(global,key));Object.defineProperty(global,key,{configurable:true,writable:true,value:dom.window[key]});}
  saved.set('IS_REACT_ACT_ENVIRONMENT',Object.getOwnPropertyDescriptor(global,'IS_REACT_ACT_ENVIRONMENT'));global.IS_REACT_ACT_ENVIRONMENT=true;
@@ -19,8 +19,63 @@ async function mount({initial=null,targets,adminView=false,beforeGet,beforePost}
  const screen=load(path.resolve(__dirname,'../src/pages/assistant.tsx'));const root=createRoot(document.getElementById('root'));const settle=async(fn=()=>{})=>React.act(async()=>{await fn();await new Promise(r=>setTimeout(r,0));});
  api.put=async(url,body)=>{calls.push({method:'put',url,body:JSON.parse(JSON.stringify(body))});if(url.endsWith('/provider'))config.provider_id=body.provider;return {data:config};};
  await settle(()=>root.render(React.createElement(screen.AssistantScreen,{adminView})));
- const h={document:dom.window.document,calls,retryLoad:()=>settle(()=>timeouts.shift()()),tick:()=>intervals.at(-1)(),get run(){return run},setRun(value){run=value},settle,async poll(){await settle(()=>intervals.at(-1)());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};return h;
+ const h={document:dom.window.document,calls,retryLoad:()=>settle(()=>timeouts.shift()()),tick:()=>intervals.at(-1)(),get run(){return run},setRun(value){run=value},settle,async poll(){await settle(()=>intervals.at(-1)());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};
+ // Existing run-detail scenarios explicitly enter through history, as an operator does.
+ if(initial && openInitial && !adminView && !['completed','stopped','rolled_back','failed'].includes(initial.status)) {
+  await h.click(h.document.querySelector('.history-row'));
+ }
+ return h;
 }
+test('entry never selects a single old request, regardless of its unfinished state',async()=>{
+ for(const status of ['waiting_input','running','reconciliation_required','stop_pending','rollback_stop_pending']){
+  const initial={...makeRun(status),domains:['school-lunch'],instruction:'以前の給食作業'};
+  const h=await mount({initial,openInitial:false});try{
+   assert.ok(h.document.querySelector('.request-panel'));
+   assert.equal(h.document.querySelector('.active-work'),null);
+   assert.equal(h.calls.filter(c=>c.url===base+'/runs/r1').length,0);
+   assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+   await h.click(h.document.querySelector('.history-row'));
+   assert.match(h.document.querySelector('.active-work').textContent,/以前の給食作業/);
+   await h.click(h.button(status==='rollback_stop_pending'?'別の作業を始める':'作業一覧に戻る'));
+   assert.ok(h.document.querySelector('.request-panel'));
+   assert.equal(h.document.querySelector('.active-work'),null);
+   assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+  }finally{await h.close();}
+ }
+});
+test('stop recheck shows progress and an unchanged pending result without inventing completion',async()=>{
+ let release;const initial=makeRun('stop_pending');
+ const h=await mount({initial,beforePost:async url=>{if(url.endsWith('/stop')){await new Promise(r=>release=r);return {data:initial};}}});try{
+  await h.click(h.button('停止を再確認する'));
+  assert.match(h.document.body.textContent,/接続先へ停止状況を確認しています/);
+  assert.equal(h.button('操作結果を確認中…').disabled,true);
+  release();await h.settle();
+  assert.match(h.document.body.textContent,/停止を再確認しました/);
+  assert.match(h.document.body.textContent,/停止完了はまだ確認できていません/);
+  assert.doesNotMatch(h.document.querySelector('.next-action').textContent,/作業を停止しました/);
+  assert.equal(h.button('停止を再確認する').disabled,false);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/stop')).length,1);
+ }finally{release?.();await h.close();}
+});
+test('late stop response cannot reopen a request after returning to the task list',async()=>{
+ let release;const h=await mount({initial:makeRun('stop_pending'),beforePost:async url=>{if(url.endsWith('/stop')){await new Promise(r=>release=r);return {data:makeRun('stopped')};}}});try{
+  await h.click(h.button('停止を再確認する'));
+  await h.click(h.button('作業一覧に戻る'));
+  release();await h.settle();
+  assert.equal(h.document.querySelector('.active-work'),null);
+  assert.ok(h.document.querySelector('.request-panel'));
+  assert.doesNotMatch(h.document.body.textContent,/停止の確認が完了しました/);
+ }finally{release?.();await h.close();}
+});
+test('unknown stop response remains visibly uncertain and does not resubmit',async()=>{
+ const h=await mount({initial:makeRun('stop_pending'),beforePost:async url=>{if(url.endsWith('/stop'))throw {response:{status:503}};}});try{
+  await h.click(h.button('停止を再確認する'));
+  assert.match(h.document.body.textContent,/操作結果を受信できませんでした/);
+  assert.match(h.document.body.textContent,/停止完了とは判断せず/);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/stop')).length,1);
+  assert.equal(h.document.querySelector('.assistant-error'),null);
+ }finally{await h.close();}
+});
 test('restart reconciliation resumes once and displays the same saved question',async()=>{
  let h;h=await mount({initial:{...makeRun('reconciliation_required'),pending_question:null},beforePost:async url=>{
   if(url.endsWith('/resume')){h.setRun(makeRun());return {data:h.run};}
