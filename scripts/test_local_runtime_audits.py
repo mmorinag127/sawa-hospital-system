@@ -36,7 +36,7 @@ class RuntimeAuditContractTest(unittest.TestCase):
     def test_pins_actual_image_and_preserves_unsuccessful_audit(self):
         identity, source = "sha256:" + "a" * 64, "b" * 40
         inspected = json.dumps({"Id": identity, "Os": "linux", "Architecture": "amd64",
-                                "Config": {"Labels": {"sawa.git_sha": source}}})
+                                "Config": {"Labels": {"sawa.git_sha": source}, "Env": ["ORT_DISABLE_TELEMETRY=1"]}})
         inventory = json.dumps([["example-package", "1.2.3"]])
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(audit.subprocess, "check_output", side_effect=[inspected, inventory]) as capture, \
@@ -55,7 +55,7 @@ class RuntimeAuditContractTest(unittest.TestCase):
     def test_cpu_lookup_is_recorded_and_skipped_or_missing_packages_fail(self):
         identity, source = "sha256:" + "a" * 64, "b" * 40
         inspected = json.dumps({"Id": identity, "Os": "linux", "Architecture": "amd64",
-                                "Config": {"Labels": {"sawa.git_sha": source}}})
+                                "Config": {"Labels": {"sawa.git_sha": source}, "Env": ["ORT_DISABLE_TELEMETRY=1"]}})
         inventory = json.dumps([["torch", "2.13.0+cpu"]])
         for dependencies in ([{"name": "torch", "version": "2.13.0", "vulns": []}],
                              [{"name": "torch", "skip_reason": "unavailable"}], []):

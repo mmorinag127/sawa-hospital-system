@@ -37,6 +37,9 @@ def audit_runtime(image, name, interpreter, source, directory):
             or inspected["Os"] != "linux" or inspected["Architecture"] != "amd64"
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity)):
         raise ValueError("Audit image source differs from the fixed checkout")
+    environment = inspected["Config"].get("Env")
+    if not isinstance(environment, list) or "ORT_DISABLE_TELEMETRY=1" not in environment:
+        raise ValueError("Image must disable the native telemetry provider before startup")
     raw = subprocess.check_output([
         "docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none", "--read-only",
         "--entrypoint", interpreter, identity, "-c", INVENTORY,

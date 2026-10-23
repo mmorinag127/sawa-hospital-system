@@ -70,6 +70,7 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
 
 def run(output: Path) -> int:
     reject_hosted_runner()
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     if not clean_tree():
         raise SystemExit("local hospital tests require a clean tree before execution")
     source_sha_start = git("rev-parse", "HEAD")

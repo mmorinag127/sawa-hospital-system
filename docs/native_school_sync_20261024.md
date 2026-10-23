@@ -113,5 +113,9 @@ The subsequent actual source target is d0f29ec7cef8a455604ee2a8134c63ce8f0de747.
 The four-file Pillow/image bootstrap delta was merged and sealed without
 conflicts using /private/tmp/sawa-native-school-security-followup-20261024.json.
 The current manifest describes that target, not the initial33b30f8 checkpoint.
+The subsequent telemetry startup source0e9a8aaf1f2b72b424f97a9ef73e6dcbfe0b814e
+was merged and sealed using /private/tmp/sawa-native-school-telemetry-sync-20261024.json.
+That current source also includes the OCR app bootstrap, now covered by the
+source update utility's OCR-directory query.
 Current inventory status is in runtime_dependency_inventory_20261024.md;
 the earlier merge evidence does not claim patched runtime acceptance.

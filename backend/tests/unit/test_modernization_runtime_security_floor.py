@@ -450,3 +450,18 @@ def test_producer_http_and_protobuf_source_security_floor():
     parsed = requirements(ROOT / "ocr_pipeline/requirements.txt")
     for name, fixed in (("flask", "3.1.3"), ("protobuf", "6.33.6"), ("google-cloud-firestore", "2.34.1")):
         assert one(named(parsed, name)).specifier == SpecifierSet("==" + fixed)
+
+
+@pytest.mark.parametrize("module,relative", [("src", "backend"), ("app", "ocr_pipeline"), ("experiments.agent_assistant", ".")])
+def test_package_bootstrap_disables_provider_before_native_import(module, relative):
+    import os
+    import subprocess
+    import sys
+
+    code = ("import importlib,os,sys; importlib.import_module(sys.argv[1]); "
+            "assert os.environ['ORT_DISABLE_TELEMETRY']=='1'; "
+            "assert 'onnxruntime' not in sys.modules")
+    result = subprocess.run([sys.executable, "-c", code, module], cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / relative), "ORT_DISABLE_TELEMETRY": "0"},
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr

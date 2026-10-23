@@ -29,8 +29,11 @@ Evidence files in /private/tmp:
 
 ## Actual source synchronization
 
-School source d0f29ec7cef8a455604ee2a8134c63ce8f0de747 includes the torch pair,
-Pillow and both image bootstraps. Shift source
+School dependency checkpoint d0f29ec7cef8a455604ee2a8134c63ce8f0de747 includes
+the torch pair, Pillow and both image bootstraps. Latest school source
+0e9a8aaf1f2b72b424f97a9ef73e6dcbfe0b814e also disables the optional native
+telemetry provider before model imports; see onnx_telemetry_startup_20261024.md.
+Shift source
 01a3869c748f1023847328b1b5f053a2311478c9 includes its five lock upgrades and
 both image bootstraps. Native sources are merged with the existing three-way
 utility, not blindly replaced. Existing native extensions are retained.
