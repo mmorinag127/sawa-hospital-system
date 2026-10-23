@@ -331,7 +331,35 @@ def delete_override(override_id: str) -> dict[str, Any] | None:
         return payload
 
 
+def restore_original_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    restored = []
+    for source in lines:
+        if not source.get("_daily_output_override_applied"):
+            restored.append(source)
+            continue
+        original = source.get("_daily_output_override_original")
+        if not isinstance(original, dict):
+            raise ValueError("daily output override original line receipt missing")
+        line = dict(source)
+        for key in ("menu_qty_per_serving", "menu_unit_type", "actual_unit_type", "actual_amount"):
+            value = original.get(key)
+            if not isinstance(value, dict) or type(value.get("present")) is not bool:
+                raise ValueError("daily output override original line receipt invalid")
+            if value["present"]:
+                if "value" not in value:
+                    raise ValueError("daily output override original line receipt invalid")
+                line[key] = value["value"]
+            else:
+                line.pop(key, None)
+        for key in tuple(line):
+            if key.startswith("_daily_output_override_"):
+                line.pop(key)
+        restored.append(line)
+    return restored
+
+
 def apply_overrides_to_lines(lines: list[dict[str, Any]], facility_id: str | None) -> list[dict[str, Any]]:
+    lines = restore_original_lines(lines)
     facility_code = str(facility_id or "").strip()
     if not facility_code or not lines:
         return lines
@@ -355,8 +383,6 @@ def apply_overrides_to_lines(lines: list[dict[str, Any]], facility_id: str | Non
             .all()
         )
         serialized_rows = [_serialize_override(row) for row in rows]
-    if not serialized_rows:
-        return lines
     override_map = {
         (
             str(row.get("output_date") or ""),
@@ -370,22 +396,6 @@ def apply_overrides_to_lines(lines: list[dict[str, Any]], facility_id: str | Non
     }
     enriched: list[dict[str, Any]] = []
     for line in lines:
-        if line.get("_daily_output_override_applied"):
-            original = line.get("_daily_output_override_original")
-            if not isinstance(original, dict):
-                raise ValueError("daily output override original line receipt missing")
-            line = dict(line)
-            for key in ("menu_qty_per_serving", "menu_unit_type", "actual_unit_type", "actual_amount"):
-                value = original.get(key)
-                if not isinstance(value, dict) or type(value.get("present")) is not bool:
-                    raise ValueError("daily output override original line receipt invalid")
-                if value["present"]:
-                    line[key] = value.get("value")
-                else:
-                    line.pop(key, None)
-            for key in tuple(line):
-                if key.startswith("_daily_output_override_"):
-                    line.pop(key)
         line_date = _ensure_date(line.get("date"))
         if not line_date:
             enriched.append(line)

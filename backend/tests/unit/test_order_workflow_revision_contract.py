@@ -435,7 +435,8 @@ def test_reparse_result_contract_exposes_only_its_persisted_evidence_id():
     assert 'source="reparse-pipeline-result"' in source
     assert "reparse_evidence_persist_failed" in source
     assert "reparse_cache_persist_failed" in source
-    assert "preserve_existing_artifacts=False" in source
+    assert "preserve_existing_artifacts" not in source
+    assert "_preserve_hakodate_artifacts_if_missing" not in source
 
 
 @pytest.mark.parametrize(

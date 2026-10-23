@@ -602,7 +602,7 @@ def test_real_template_targets_to_assignment_and_owned_cache_gate(repair_order, 
         monkeypatch.setattr(config_service, "get_facility_config_for_template", lambda *args: pytest.fail("assignment recaptured current config"))
         assignment = order_service._build_hakodate_evidence_assignment_from_payload(order_id=order_id, facility_id="fixture", template_id="own", payload=payload, facility_config=deepcopy(captured["configured_input"]["facility"]))
         assert [item["assigned_value"] for item in assignment["assignments"]] == ["0", "0"]
-    saved = order_service._save_order_ocr_cache(order_id, payload, synchronous_write_input=captured, augment_hakodate_artifacts=False, preserve_existing_artifacts=False, persist_evidence=False, refresh_workflow=False)
+    saved = order_service._save_order_ocr_cache(order_id, payload, synchronous_write_input=captured, augment_hakodate_artifacts=False, persist_evidence=False, refresh_workflow=False)
     assert (saved is None) is bool(failure)
     with session_scope() as session:
         assert (session.get(OrderOcrCache, order_id) is None) is bool(failure)
@@ -625,7 +625,7 @@ def test_original_workbook_expectation_owned_write_preserves_zero_and_null(repai
     payload = {"hakodate_repair_source_receipt": deepcopy(source), "hakodate_preprocessing": {"target_cell_map": targets}, "hakodate_ocr_evidence": {"records": records}, "hakodate_canonical_pipeline": {"status": "ready", "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION, "expected_sheet_cells": deepcopy(source["expected_sheet_cells"])}}
     _attach_provider_artifact_packet(payload)
     order_service._validate_hakodate_owned_artifacts(payload, source)
-    assert order_service._save_order_ocr_cache(order_id, payload, synchronous_write_input=start, augment_hakodate_artifacts=False, preserve_existing_artifacts=False, persist_evidence=False, refresh_workflow=False) is not None
+    assert order_service._save_order_ocr_cache(order_id, payload, synchronous_write_input=start, augment_hakodate_artifacts=False, persist_evidence=False, refresh_workflow=False) is not None
     with session_scope() as session:
         saved = session.get(OrderOcrCache, order_id).payload
         assert saved["hakodate_preprocessing"]["target_cell_map"][0]["value"] is value

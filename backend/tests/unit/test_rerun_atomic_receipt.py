@@ -36,7 +36,7 @@ def rerun_transaction(monkeypatch):
     def cache(order_id, payload, **kwargs):
         assert kwargs["write_session"] is session
         assert kwargs["job_id"] == job.id
-        assert kwargs["preserve_existing_artifacts"] is False
+        assert "preserve_existing_artifacts" not in kwargs
         assert kwargs["persist_evidence"] is False
         state["cache"] = deepcopy(payload)
         return payload

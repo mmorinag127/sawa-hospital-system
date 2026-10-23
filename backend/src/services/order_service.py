@@ -10296,38 +10296,6 @@ def _augment_hakodate_ocr_payload_artifacts(
     return next_payload
 
 
-def _preserve_hakodate_artifacts_if_missing(
-    *,
-    order_id: str,
-    next_payload: dict[str, Any],
-    existing_payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Prevent lightweight read payloads from deleting reusable Hakodate artifacts."""
-    if not isinstance(existing_payload, dict):
-        return next_payload
-    preserved = dict(next_payload)
-    if preserved.get("hakodate_artifacts_reset_at"):
-        return preserved
-    if not _payload_has_hakodate_target_cells(preserved) and _payload_has_hakodate_target_cells(existing_payload):
-        existing_preprocessing = existing_payload.get("hakodate_preprocessing")
-        if isinstance(existing_preprocessing, dict):
-            next_preprocessing = dict(preserved.get("hakodate_preprocessing") or {})
-            for key in ("target_cell_map", "target_cells", "source", "quality_gate"):
-                if key not in next_preprocessing and key in existing_preprocessing:
-                    next_preprocessing[key] = deepcopy(existing_preprocessing[key])
-            if next_preprocessing:
-                preserved["hakodate_preprocessing"] = next_preprocessing
-        for key in ("hakodate_target_cell_map",):
-            if key not in preserved and key in existing_payload:
-                preserved[key] = deepcopy(existing_payload[key])
-    if (
-        not _payload_has_hakodate_evidence_records(preserved, order_id=order_id)
-        and _payload_has_hakodate_evidence_records(existing_payload, order_id=order_id)
-    ):
-        for key in ("hakodate_ocr_evidence", "hakodate_ocr_evidence_records"):
-            if key not in preserved and key in existing_payload:
-                preserved[key] = deepcopy(existing_payload[key])
-    return preserved
 
 
 def _save_order_ocr_cache(
@@ -10337,8 +10305,7 @@ def _save_order_ocr_cache(
     job_id: str | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
     augment_hakodate_artifacts: bool = True,
-    preserve_existing_artifacts: bool = True,
-    persist_evidence: bool = True,
+    persist_evidence: bool = False,
     refresh_workflow: bool = True,
     write_session: Any = None,
 ) -> dict[str, Any] | None:
@@ -10347,12 +10314,9 @@ def _save_order_ocr_cache(
         return None
     if not normalized_job_id and not isinstance(synchronous_write_input, dict):
         return None
-    if not normalized_job_id:
-        # A synchronous snapshot CAS authorizes this cache repair only. Evidence
-        # persistence remains an async job-owned write with its own fence.
-        persist_evidence = False
-    evidence_payload = deepcopy(payload) if isinstance(payload, dict) else None
-    persisted_evidence = None
+    # Evidence publication belongs to the producer transaction, never this cache.
+    if persist_evidence:
+        return None
     next_payload = dict(payload) if isinstance(payload, dict) else {}
     if synchronous_write_input is not None:
         captured_config = deepcopy(synchronous_write_input["configured_input"])
@@ -10377,6 +10341,8 @@ def _save_order_ocr_cache(
         )
     if (next_payload.get("hakodate_canonical_pipeline") or {}).get("status") == "blocked":
         return None
+    if not _payload_has_hakodate_output_content(next_payload, order_id=order_id):
+        return None
     try:
         with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
             if normalized_job_id:
@@ -10389,49 +10355,17 @@ def _save_order_ocr_cache(
                 )
             if not write_allowed:
                 return None
-            if _payload_has_hakodate_output_content(next_payload, order_id=order_id):
-                receipt = (synchronous_write_input or {}).get("selected_pdf_receipt") or processing_start_pdf_receipt()
-                _validate_hakodate_owned_artifacts(next_payload, _hakodate_owned_source(captured_config, receipt, synchronous_write_input))
-                preserve_existing_artifacts = False
-            if persist_evidence and not _payload_has_hakodate_output_content(next_payload, order_id=order_id):
-                persisted_evidence = persist_ocr_evidence_run(
-                    order_id, evidence_payload,
-                    schema_version="v1_legacy", producer_version="legacy-cache-mirror/v1",
-                    source="legacy-cache-mirror", workflow_job_id=normalized_job_id,
-                    refresh_workflow=False, write_session=session,
-                )
-                if persisted_evidence is None:
-                    session.rollback()
-                    return None
+            receipt = (synchronous_write_input or {}).get("selected_pdf_receipt") or processing_start_pdf_receipt()
+            _validate_hakodate_owned_artifacts(next_payload, _hakodate_owned_source(captured_config, receipt, synchronous_write_input))
             cache = session.get(OrderOcrCache, order_id)
             if not cache:
                 cache = OrderOcrCache(order_id=order_id)
                 session.add(cache)
             existing_payload = cache.payload if isinstance(cache.payload, dict) else {}
-            if normalized_job_id:
-                # Preserve operator edits as their original lineage, never as this run's result.
-                next_payload.pop("_edited_ocr", None)
-                if isinstance(existing_payload.get("_edited_ocr"), dict):
-                    next_payload["_edited_ocr"] = deepcopy(existing_payload["_edited_ocr"])
-            if preserve_existing_artifacts and (
-                isinstance(existing_payload, dict)
-                and _payload_has_page_artifacts(existing_payload)
-                and not _payload_has_page_artifacts(next_payload)
-            ):
-                for preserved_key in ("pages", "combined", "engine", "template_id", "facility_id"):
-                    preserved_value = existing_payload.get(preserved_key)
-                    if preserved_key not in next_payload and preserved_value is not None:
-                        next_payload[preserved_key] = preserved_value
-            if preserve_existing_artifacts:
-                for preserved_key in ("_edited_ocr", "_reparse_debug"):
-                    preserved_value = existing_payload.get(preserved_key)
-                    if isinstance(preserved_value, dict) and preserved_key not in next_payload:
-                        next_payload[preserved_key] = preserved_value
-                next_payload = _preserve_hakodate_artifacts_if_missing(
-                    order_id=order_id,
-                    next_payload=next_payload,
-                    existing_payload=existing_payload,
-                )
+            # Operator revisions retain their own lineage, never the new producer's authority.
+            next_payload.pop("_edited_ocr", None)
+            if isinstance(existing_payload.get("_edited_ocr"), dict):
+                next_payload["_edited_ocr"] = deepcopy(existing_payload["_edited_ocr"])
             cache.payload = next_payload
             cache.updated_at = datetime.utcnow()
             execution_input = current_nonworkflow_execution()
@@ -10440,14 +10374,12 @@ def _save_order_ocr_cache(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Order OCR cache save failed", order_id=order_id, error=str(exc))
         return None
-    if persist_evidence and _payload_has_hakodate_output_content(next_payload, order_id=order_id):
-        persist_evidence = False
     if refresh_workflow and write_session is None:
         try:
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Workflow state refresh failed after OCR cache save", order_id=order_id, error=str(exc))
-    return persisted_evidence if isinstance(persisted_evidence, dict) else {}
+    return {}
 
 
 def _load_order_ocr_cache(order_id: str) -> Optional[dict]:
@@ -13011,7 +12943,6 @@ def _persist_ocr_rerun_completion(
             cache_result = _save_order_ocr_cache(
                 order_id, {**own_payload, "_ocr_execution": deepcopy(evidence["payload_json"]["_ocr_execution"])},
                 job_id=job_id, augment_hakodate_artifacts=False,
-                preserve_existing_artifacts=False,
                 persist_evidence=False, refresh_workflow=False, write_session=session,
             )
             if cache_result is None:
@@ -19818,7 +19749,8 @@ def get_ocr_pages(
     parsed = None
     parsed_source = ""
     order_job_pending = _job_is_pending(job)
-    if _payload_has_page_artifacts(active_evidence_payload):
+    if (_payload_has_page_artifacts(active_evidence_payload)
+            or _payload_has_hakodate_output_content(active_evidence_payload, order_id=order_id)):
         parsed = active_evidence_payload
         parsed_source = "active_evidence"
     elif order_job_pending:
@@ -24767,7 +24699,6 @@ def build_order_hakodate_assignment(
                     job_id=_workflow_ocr_job_id.get(),
                     synchronous_write_input=synchronous_write_input,
                     augment_hakodate_artifacts=False,
-                    preserve_existing_artifacts=False,
                     persist_evidence=False,
                     refresh_workflow=False,
                 )
@@ -30243,7 +30174,7 @@ def _reparse_order_with_attempt(
         cache_payload["_reparse_debug"] = reparse_debug
         cache_saved = _save_order_ocr_cache(
             order_id, cache_payload, job_id=ocr_job_id, persist_evidence=False,
-            preserve_existing_artifacts=False, refresh_workflow=False, write_session=session,
+            refresh_workflow=False, write_session=session,
         )
         if cache_saved is None:
             raise ValueError("reparse_cache_persist_failed")

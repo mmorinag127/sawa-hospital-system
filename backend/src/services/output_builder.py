@@ -1745,6 +1745,7 @@ def build_order_lines_for_outputs(
     timings: dict[str, float] | None = None,
     producer_candidate: dict | None = None,
     accepted_candidate: dict | None = None,
+    include_daily_overrides: bool = True,
 ) -> list[dict]:
     from copy import deepcopy
     if producer_candidate is None:
@@ -1752,12 +1753,22 @@ def build_order_lines_for_outputs(
         lines = accepted.get("output_lines")
         if not isinstance(lines, list):
             raise ValueError("accepted output-lines receipt missing")
-        return deepcopy(lines)
+        copied = deepcopy(lines)
+        if not include_daily_overrides:
+            return daily_output_override_service.restore_original_lines(copied)
+        configured = accepted.get("configured_input")
+        facility = configured.get("facility") if isinstance(configured, dict) else None
+        facility_id = facility.get("facility_id") if isinstance(facility, dict) else None
+        if not isinstance(facility_id, str) or not facility_id.strip():
+            raise ValueError("accepted output facility receipt missing")
+        return daily_output_override_service.apply_overrides_to_lines(copied, facility_id)
     configured = producer_candidate.get("configured_input")
     if not isinstance(configured, dict) or not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
         raise ValueError("bagging captured configuration required")
     total_started = time.perf_counter()
-    facility_id = order.get("facility")
+    facility_id = configured["facility"].get("facility_id")
+    if not isinstance(facility_id, str) or not facility_id.strip():
+        raise ValueError("bagging captured facility receipt missing")
     week_value = (
         str(order.get("stored_week_value") or "").strip()
         or str(order.get("week_value") or "").strip()
@@ -1822,7 +1833,8 @@ def build_order_lines_for_outputs(
     order_lines = _clear_stale_menu_qty_from_monthly_entry(order_lines)
     order_lines = _apply_menu_rules(order_lines, facility_id, rules=sources["rules"])
     order_lines = _apply_menu_master_defaults(order_lines, facility_id, sources=sources)
-    order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
+    order_lines = (daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
+                   if include_daily_overrides else daily_output_override_service.restore_original_lines(order_lines))
     order_lines = _apply_bagging_exceptions(order_lines, facility_config)
     order_lines = _apply_condiment_lines(order_lines)
     order_lines = _apply_garnish_parent_categories(order_lines)
