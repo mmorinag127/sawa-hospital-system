@@ -668,19 +668,23 @@ def persist_evidence_run(
                 or not isinstance(captured_lineage, dict)
                 or not isinstance(captured_proof, dict)):
             raise ValueError("original_template_capture_missing_or_mismatched")
-        template_version = lineage.read_projection(session, normalized_template_version_id, lock=True)
-        if template_version is None:
-            raise ValueError("original_template_projection_missing")
-        lineage.verify_projection(template_version, captured_lineage)
-        lineage.validate_source_proof(captured_proof, captured_lineage["authored_version"])
-        physical_projection = {column.key: getattr(template_version, column.key)
-                               for column in FacilityTemplateVersion.__table__.columns}
-        if (captured_lineage["facility_id"] != order.facility_code
-                or captured_projection.get("id") != normalized_template_version_id
-                or not snapshots_equal((original.get("configured_input") or {}).get("facility"), captured_lineage["authored_version"]["facility"])
-                or not snapshots_equal(physical_projection, captured_projection)
-                or not snapshots_equal(template_version.validation_json["creation_source_proof"], captured_proof)):
-            raise ValueError("original_template_projection_changed")
+        if "initial_saved_import" in original:
+            from src.services.initial_saved_import_service import validate_candidate_template_source
+            validate_candidate_template_source(session, order.id, original, normalized_template_version_id)
+        else:
+            template_version = lineage.read_projection(session, normalized_template_version_id, lock=True)
+            if template_version is None:
+                raise ValueError("original_template_projection_missing")
+            lineage.verify_projection(template_version, captured_lineage)
+            lineage.validate_source_proof(captured_proof, captured_lineage["authored_version"])
+            physical_projection = {column.key: getattr(template_version, column.key)
+                                   for column in FacilityTemplateVersion.__table__.columns}
+            if (captured_lineage["facility_id"] != order.facility_code
+                    or captured_projection.get("id") != normalized_template_version_id
+                    or not snapshots_equal((original.get("configured_input") or {}).get("facility"), captured_lineage["authored_version"]["facility"])
+                    or not snapshots_equal(physical_projection, captured_projection)
+                    or not snapshots_equal(template_version.validation_json["creation_source_proof"], captured_proof)):
+                raise ValueError("original_template_projection_changed")
         run = OrderOcrEvidenceRun(
             id=evidence_id,
             order_id=record["order_id"],

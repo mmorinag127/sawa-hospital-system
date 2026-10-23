@@ -29,6 +29,13 @@ class ParallelCI(unittest.TestCase):
             self.assertEqual(step["if"], f"matrix.suite == '{suite}'")
             self.assertEqual(step["working-directory"], "backend")
             command = step["run"][step["run"].index("python -m pytest"):]
+            if suite == "saved-source":
+                for filename in ("test_initial_saved_facility_read.py",
+                                 "test_initial_saved_ocr_candidate_read.py",
+                                 "test_initial_saved_candidate_provenance.py"):
+                    addition = f"  tests/unit/{filename} \\\n"
+                    self.assertEqual(command.count(addition), 1)
+                    command = command.replace(addition, "", 1)
             self.assertEqual(hashlib.sha256(command.encode()).hexdigest(), digest)
             self.assertIn("mkdir -p .logs", step["run"])
 

@@ -214,6 +214,9 @@ jobs:
             tests/unit/test_order_menu_date_lookup_parity.py \
             tests/unit/test_initial_saved_source_service.py \
             tests/unit/test_initial_saved_import_service.py \
+            tests/unit/test_initial_saved_facility_read.py \
+            tests/unit/test_initial_saved_ocr_candidate_read.py \
+            tests/unit/test_initial_saved_candidate_provenance.py \
             tests/unit/test_output_read_import_policy.py \
             tests/unit/test_saved_bag_read_parity.py \
             tests/unit/test_prepare_stg_saved_import.py \
