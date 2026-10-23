@@ -416,34 +416,11 @@ def test_resolve_current_week_selection_keeps_explicit_crossmonth_range(monkeypa
     assert selection["blocker_code"] is None
 
 
-def test_resolve_order_candidates_uses_position_fallback_when_cells_cover_quantity_columns(monkeypatch) -> None:
+def test_resolve_order_candidates_refuses_position_inference_when_cells_cover_quantity_columns(monkeypatch) -> None:
     rows = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
     ]
-
-    monkeypatch.setattr(
-        candidate_resolution_service.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
-            "fax_template_id": "fax_layout_floor_2f3f_v1",
-            "fax_template": {
-                "template_id": "fax_layout_floor_2f3f_v1",
-                "main_ocr_row_fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_2f",
-                    "qty.regular_3f",
-                    "qty.soft_2f",
-                    "qty.soft_3f",
-                    "qty.mixer_2f",
-                    "qty.mixer_3f",
-                    "remarks",
-                ],
-            },
-        },
-    )
 
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-POSITION-FALLBACK-1",
@@ -465,16 +442,18 @@ def test_resolve_order_candidates_uses_position_fallback_when_cells_cover_quanti
         },
     )
 
+    # No positional/template inference from plausible or ambiguous OCR cells.
     template = resolved["resolutions"]["template"]
     column_mapping = resolved["resolutions"]["column_mapping"]
-    assert template["resolved_value"] == "fax_layout_floor_2f3f_v1"
-    assert template["blocked"] is False
-    assert column_mapping["resolved_value"] is not None
-    assert column_mapping["decision_source"] == "position_fallback"
-    assert column_mapping["requires_user_choice"] is False
+    assert template["resolved_value"] is None
+    assert template["blocked"] is True
+    assert "template_resolution_missing" in template["blocked_reasons"]
+    assert column_mapping["resolved_value"] is None
+    assert column_mapping["decision_source"] == "ocr_evidence"
+    assert column_mapping["candidates"] == []
 
 
-def test_resolve_order_candidates_uses_position_fallback_for_noisy_regular_forbidden_headers(
+def test_resolve_order_candidates_refuses_position_inference_for_noisy_regular_forbidden_headers(
     monkeypatch,
 ) -> None:
     rows = [
@@ -483,28 +462,6 @@ def test_resolve_order_candidates_uses_position_fallback_for_noisy_regular_forbi
         ["3/22", "\"", "VF", "Menu A", "23", "", "", "", "", "", ""],
         ["", "", "48", "Menu B", "27", "", "", "", "", "", ""],
     ]
-
-    monkeypatch.setattr(
-        candidate_resolution_service.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
-            "fax_template_id": "fax_layout_regular_forbidden_v1",
-            "fax_template": {
-                "template_id": "fax_layout_regular_forbidden_v1",
-                "main_ocr_row_fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_x",
-                    "qty.no_meat_x",
-                    "qty.no_fish_x",
-                    "qty.change_1_x",
-                    "qty.change_2_x",
-                    "remarks",
-                ],
-            },
-        },
-    )
 
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-POSITION-FALLBACK-REGULAR-FORBIDDEN-NOISY",
@@ -526,17 +483,15 @@ def test_resolve_order_candidates_uses_position_fallback_for_noisy_regular_forbi
         },
     )
 
+    # No positional/template inference from plausible or ambiguous OCR cells.
     template = resolved["resolutions"]["template"]
     column_mapping = resolved["resolutions"]["column_mapping"]
-    assert template["resolved_value"] == "fax_layout_regular_forbidden_v1"
-    assert template["blocked"] is False
-    assert column_mapping["decision_source"] == "position_fallback"
-    assert column_mapping["requires_user_choice"] is False
-    assert (
-        column_mapping["resolved_value"]
-        == "4:qty.regular_x|6:qty.no_meat_x|7:qty.no_fish_x|8:qty.change_1_x|9:qty.change_2_x"
-    )
-    assert resolved["critical_choices"] == []
+    assert template["resolved_value"] is None
+    assert template["blocked"] is True
+    assert "template_resolution_missing" in template["blocked_reasons"]
+    assert column_mapping["resolved_value"] is None
+    assert column_mapping["decision_source"] == "ocr_evidence"
+    assert column_mapping["candidates"] == []
 
 
 def test_resolve_order_candidates_does_not_override_existing_template_resolution_with_position_fallback(
@@ -602,7 +557,7 @@ def test_resolve_order_candidates_does_not_override_existing_template_resolution
     assert not str(column_mapping.get("resolved_value") or "").strip()
 
 
-def test_resolve_order_candidates_requires_choice_for_ambiguous_position_fallback(monkeypatch) -> None:
+def test_resolve_order_candidates_refuses_ambiguous_position_inference(monkeypatch) -> None:
     rows_a = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
@@ -611,29 +566,6 @@ def test_resolve_order_candidates_requires_choice_for_ambiguous_position_fallbac
         ["日付", "区分", "メニュー", "補助", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "", "5", "4", "3", "2", "1", "1", ""],
     ]
-
-    monkeypatch.setattr(
-        candidate_resolution_service.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
-            "fax_template_id": "fax_layout_floor_2f3f_v1",
-            "fax_template": {
-                "template_id": "fax_layout_floor_2f3f_v1",
-                "main_ocr_row_fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_2f",
-                    "qty.regular_3f",
-                    "qty.soft_2f",
-                    "qty.soft_3f",
-                    "qty.mixer_2f",
-                    "qty.mixer_3f",
-                    "remarks",
-                ],
-            },
-        },
-    )
 
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-POSITION-FALLBACK-AMBIGUOUS",
@@ -663,58 +595,23 @@ def test_resolve_order_candidates_requires_choice_for_ambiguous_position_fallbac
         },
     )
 
+    # No positional/template inference from plausible or ambiguous OCR cells.
+    template = resolved["resolutions"]["template"]
     column_mapping = resolved["resolutions"]["column_mapping"]
-    assert column_mapping["decision_source"] == "position_fallback"
-    assert column_mapping["requires_user_choice"] is True
+    assert template["resolved_value"] is None
+    assert template["blocked"] is True
+    assert "template_resolution_missing" in template["blocked_reasons"]
     assert column_mapping["resolved_value"] is None
-    assert "column_mapping_choice_required" in column_mapping["blocked_reasons"]
+    assert column_mapping["decision_source"] == "ocr_evidence"
+    assert column_mapping["candidates"] == []
 
 
-def test_resolve_order_candidates_maps_fac00004_with_aux_and_total_columns(monkeypatch) -> None:
+def test_resolve_order_candidates_does_not_infer_fac00004_aux_and_total_mapping(monkeypatch) -> None:
     rows = [
         ["日付", "区分", "", "献立", "合計", "#☆", "通所", "職員", "平森", "肉蒸", "魚禁", "揚物禁", "変更1", "備考欄"],
         ["3/22\n(日)", "材", "副菜", "厚揚げとさつま芋の煮物", "", "72", "", "", "", "", "", "", ""],
         ["", "香", "主A", "鶏じゃが", "67", "66", "", "", "", "", "", "", "", "鶏魚1"],
     ]
-
-    monkeypatch.setattr(
-        candidate_resolution_service.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
-            "fax_template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-            "fax_template": {
-                "template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-                "columns": [
-                    {"index": 0, "role": "date", "header": "日付"},
-                    {"index": 1, "role": "daypart", "header": "区分"},
-                    {"index": 2, "role": "aux", "header": "副区分"},
-                    {"index": 3, "role": "menu_name", "header": "献立"},
-                    {"index": 4, "role": "aux", "header": "合計"},
-                    {"index": 5, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
-                    {"index": 6, "role": "quantity", "header": "通所", "diet_type": "daycare", "area_id": "X"},
-                    {"index": 7, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
-                    {"index": 8, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
-                    {"index": 9, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
-                    {"index": 10, "role": "quantity", "header": "揚げ物禁", "diet_type": "no_fried", "area_id": "X"},
-                    {"index": 11, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
-                    {"index": 12, "role": "note", "header": "備考欄"},
-                ],
-                "main_ocr_row_fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_x",
-                    "qty.daycare_x",
-                    "qty.staff_x",
-                    "qty.no_meat_x",
-                    "qty.no_fish_x",
-                    "qty.no_fried_x",
-                    "qty.change_1_x",
-                    "remarks",
-                ],
-            },
-        },
-    )
 
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-FAC00004-AUX-COLS",
@@ -736,13 +633,15 @@ def test_resolve_order_candidates_maps_fac00004_with_aux_and_total_columns(monke
         },
     )
 
+    # No positional/template inference from plausible or ambiguous OCR cells.
+    template = resolved["resolutions"]["template"]
     column_mapping = resolved["resolutions"]["column_mapping"]
-    assert column_mapping["decision_source"] == "position_fallback"
-    assert column_mapping["resolved_value"] == (
-        "5:qty.regular_x|6:qty.daycare_x|7:qty.staff_x|8:qty.no_meat_x|"
-        "9:qty.no_fish_x|10:qty.no_fried_x|11:qty.change_1_x"
-    )
-    assert column_mapping["requires_user_choice"] is False
+    assert template["resolved_value"] is None
+    assert template["blocked"] is True
+    assert "template_resolution_missing" in template["blocked_reasons"]
+    assert column_mapping["resolved_value"] is None
+    assert column_mapping["decision_source"] == "ocr_evidence"
+    assert column_mapping["candidates"] == []
 
 
 def test_resolve_order_candidates_blocks_when_only_aux_numeric_columns_exist_before_template_quantities(monkeypatch) -> None:
@@ -815,47 +714,12 @@ def test_resolve_order_candidates_blocks_when_only_aux_numeric_columns_exist_bef
     assert column_mapping.get("resolved_value") in (None, "")
 
 
-def test_resolve_order_candidates_maps_fac00014_without_aux_column(monkeypatch) -> None:
+def test_resolve_order_candidates_does_not_infer_fac00014_mapping_without_aux(monkeypatch) -> None:
     rows = [
         ["日付", "区分", "献立", "常食", "職員", "禁食", "", "", "", "備考欄"],
         ["", "", "", "", "", "肉禁", "魚禁", "ゴマアレルギー", "変更1", ""],
         ["3/22(日)", "昼", "厚揚げとさつま芋の煮物", "105", "2", "", "", "", "", ""],
     ]
-
-    monkeypatch.setattr(
-        candidate_resolution_service.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
-            "fax_template_id": "fax_layout_regular_staff_daycare_v1",
-            "fax_template": {
-                "template_id": "fax_layout_regular_staff_daycare_v1",
-                "columns": [
-                    {"index": 0, "role": "date", "header": "日付"},
-                    {"index": 1, "role": "daypart", "header": "区分"},
-                    {"index": 2, "role": "menu_name", "header": "献立"},
-                    {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
-                    {"index": 4, "role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
-                    {"index": 5, "role": "quantity", "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
-                    {"index": 6, "role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
-                    {"index": 7, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
-                    {"index": 8, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
-                    {"index": 9, "role": "note", "header": "備考欄"},
-                ],
-                "main_ocr_row_fields": [
-                    "date_mmdd",
-                    "daypart",
-                    "menu",
-                    "qty.regular_x",
-                    "qty.staff_x",
-                    "qty.no_meat_x",
-                    "qty.no_fish_x",
-                    "qty.sesame_allergy_x",
-                    "qty.change_1_x",
-                    "remarks",
-                ],
-            },
-        },
-    )
 
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-FAC00014-AUX-COL",
@@ -877,16 +741,18 @@ def test_resolve_order_candidates_maps_fac00014_without_aux_column(monkeypatch) 
         },
     )
 
+    # No positional/template inference from plausible or ambiguous OCR cells.
+    template = resolved["resolutions"]["template"]
     column_mapping = resolved["resolutions"]["column_mapping"]
-    assert column_mapping["decision_source"] == "position_fallback"
-    assert column_mapping["resolved_value"] == (
-        "3:qty.regular_x|4:qty.staff_x|5:qty.no_meat_x|6:qty.no_fish_x|"
-        "7:qty.sesame_allergy_x|8:qty.change_1_x"
-    )
+    assert template["resolved_value"] is None
+    assert template["blocked"] is True
+    assert "template_resolution_missing" in template["blocked_reasons"]
+    assert column_mapping["resolved_value"] is None
+    assert column_mapping["decision_source"] == "ocr_evidence"
+    assert column_mapping["candidates"] == []
 
 
-def test_resolve_order_candidates_collapses_equivalent_templates_for_fac00014() -> None:
-    _reset_facilities_from_master()
+def test_resolve_order_candidates_does_not_infer_fac00014_template_from_facility() -> None:
     resolved = candidate_resolution_service.resolve_order_candidates(
         order_id="ORD-FAC00014-EQUIV-TEMPLATE",
         facility_code="FAC00014",
@@ -904,10 +770,10 @@ def test_resolve_order_candidates_collapses_equivalent_templates_for_fac00014() 
     )
 
     template = resolved["resolutions"]["template"]
-    assert template["resolved_value"] == "fax_layout_regular_staff_daycare_v1"
+    assert template["resolved_value"] is None
     assert template["requires_user_choice"] is False
-    assert template["blocked"] is False
-    assert template["blocked_reasons"] == []
+    assert template["blocked"] is True
+    assert template["blocked_reasons"] == ["template_resolution_missing"]
 
 
 def test_resolve_order_candidates_skips_position_fallback_when_facility_conflicts_with_evidence(monkeypatch) -> None:
@@ -1002,7 +868,7 @@ def test_build_column_mapping_resolution_requires_choice_for_stale_position_fall
     assert "column_mapping_choice_required" in resolution["blocked_reasons"]
 
 
-def test_build_column_mapping_resolution_preserves_partial_position_fallback_metadata() -> None:
+def test_build_column_mapping_resolution_refuses_partial_position_fallback_but_keeps_diagnostics() -> None:
     resolution = candidate_resolution_service.build_column_mapping_resolution(
         {
             "column_mapping_resolution": {
@@ -1045,7 +911,10 @@ def test_build_column_mapping_resolution_preserves_partial_position_fallback_met
     )
 
     assert resolution["decision_source"] == "position_fallback"
-    assert resolution["resolved_value"] == "5:qty.soft_2f|6:qty.regular_2f"
+    assert resolution["resolved_value"] is None
+    assert resolution["blocked"] is True
+    assert resolution["requires_user_choice"] is True
+    assert "position_fallback_removed" in resolution["blocked_reasons"]
     assert resolution["partial_quantity_mapping"] is True
     assert resolution["mapped_quantity_fields"] == ["qty.soft_2f", "qty.regular_2f"]
     assert resolution["expected_quantity_fields"] == [

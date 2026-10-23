@@ -59,3 +59,21 @@ post-deploy check is not included in the pre-deploy receipt or marked successful
 by creating that receipt.
 The native sibling harness is absent from approved develop and is inventory
 only, not a release prerequisite. No whole-suite receipt is claimed.
+
+Backend tests use the pre-provisioned `python3` selected by `PATH`, directly
+running all of `backend/tests` with this checkout's `backend` and
+`backend/tests/unit` on `PYTHONPATH`. Provision the runtime and install its
+dependencies in a separate preparation step; the test command never recreates
+a venv or installs packages. Missing dependencies are failures, not skips.
+Before running, explicitly set `DB_URI` to an owned, isolated local test database.
+Do not select an external/shared database or rely on an implicit database default.
+The command requires the supplied setting and does not choose a database for you.
+
+The assistant command runs the complete packaged assistant suite once, including
+the baseline migration checks previously run separately. Set
+`SAWA_AGENT_TEST_POSTGRES_DSN` to an explicitly owned disposable PostgreSQL
+database whose name starts with `agent_trial`. Its persistence fixture replaces
+the `sawa_agent_trial` schema, so never supply a shared or business database.
+The command enables `SAWA_AGENT_NATIVE_TESTS=1`; missing native dependencies or
+an unavailable local database are not a complete release verification.
+Node contract files and Playwright workers run one at a time on the local PC.

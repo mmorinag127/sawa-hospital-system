@@ -39,15 +39,16 @@ def test_totals_dated_confirmed_order_query_uses_exists_not_distinct_for_postgre
 
 
 def test_totals_prefers_line_daypart_over_snapshot_daypart(totals_inputs):
-    totals_inputs.clear_all()
-    month_id = f"2026-03-totals-{uuid4().hex[:8]}"
+    inputs = totals_inputs
+    totals_inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\n豆腐の煮物\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "豆腐の煮物")
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "朝食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
     order = totals_inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -55,9 +56,9 @@ def test_totals_prefers_line_daypart_over_snapshot_daypart(totals_inputs):
             pdf_uri="file://dummy-totals-daypart.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00003",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -69,7 +70,7 @@ def test_totals_prefers_line_daypart_over_snapshot_daypart(totals_inputs):
             }
         ],
     )
-    totals_inputs.set_status(order["id"], "確定")
+    totals_inputs.assert_confirmed(order["id"])
     with session_scope() as session:
         session.add(
             OrderMenuSnapshot(
@@ -98,8 +99,9 @@ def test_totals_prefers_line_daypart_over_snapshot_daypart(totals_inputs):
     assert row["daypart"] == "昼"
 
 
-def test_totals_prefers_monthly_menu_entry_category_over_menu_master():
-    order_service.clear_all()
+def test_totals_prefers_monthly_menu_entry_category_over_menu_master(totals_inputs):
+    inputs = totals_inputs
+    inputs.assert_fresh()
     month_id = "2099-03"
     menu_name = f"豆腐の煮物-{uuid4().hex[:6]}"
     menu_csv = f"menu\n{menu_name}\n".encode("utf-8")
@@ -120,18 +122,20 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master():
                 name=menu_name,
                 category="副菜",
                 slot_index=2,
+                diet_type="regular",
                 facility_override=None,
             )
         )
-    order = order_service.create_order_from_ingest(
+    order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-totals-entry-category-001",
             pdf_uri="file://dummy-totals-entry-category.pdf",
             received_at=datetime(2099, 3, 24, 9, 0, 0),
             facility_hint="FAC00003",
-            week_hint=month_id,
+            week_hint="2099-03@2099-03-24~2099-03-24",
         ),
-        lines=[
+        recipe={"qty_per_serving": 70, "unit_type": "g", "category": "主菜"},
+        physical_category="副菜", physical_slot=2, lines=[
             {
                 "date": "2099-03-24",
                 "daypart": "昼",
@@ -143,7 +147,7 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master():
             }
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    inputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/totals?date=2099-03-24")
@@ -154,9 +158,9 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master():
 
 
 def test_totals_merges_regular_equivalent_diets(totals_inputs):
-    order_service = totals_inputs
-    order_service.clear_all()
-    month_id = f"2026-03-totals-regular-bucket-{uuid4().hex[:8]}"
+    inputs = totals_inputs
+    inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -165,15 +169,15 @@ def test_totals_merges_regular_equivalent_diets(totals_inputs):
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-totals-regular-bucket-001",
             pdf_uri="file://dummy-totals-regular-bucket.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00004",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -221,7 +225,7 @@ def test_totals_merges_regular_equivalent_diets(totals_inputs):
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    inputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/totals?date=2026-03-24")
@@ -234,9 +238,9 @@ def test_totals_merges_regular_equivalent_diets(totals_inputs):
 
 
 def test_totals_can_include_order_refs_for_debug(totals_inputs):
-    order_service = totals_inputs
-    order_service.clear_all()
-    month_id = f"2026-03-totals-order-refs-{uuid4().hex[:8]}"
+    inputs = totals_inputs
+    inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -245,15 +249,15 @@ def test_totals_can_include_order_refs_for_debug(totals_inputs):
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order_a = order_service.create_order_from_ingest(
+    order_a = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-order-refs-a-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-order-refs-a.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00004",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -274,15 +278,15 @@ def test_totals_can_include_order_refs_for_debug(totals_inputs):
             },
         ],
     )
-    order_b = order_service.create_order_from_ingest(
+    order_b = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-order-refs-b-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-order-refs-b.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00005",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -303,8 +307,8 @@ def test_totals_can_include_order_refs_for_debug(totals_inputs):
             },
         ],
     )
-    order_service.set_status(order_a["id"], "確定")
-    order_service.set_status(order_b["id"], "確定")
+    inputs.assert_confirmed(order_a["id"])
+    inputs.assert_confirmed(order_b["id"])
 
     client = TestClient(app)
     res = client.get("/totals?date=2026-03-24&include_order_refs=true")
@@ -362,8 +366,9 @@ def test_totals_can_include_order_refs_for_debug(totals_inputs):
     assert all("facility_name" in item for item in refs)
 
 
-def test_totals_splits_main_garnish_menu_and_keeps_facility_refs():
-    order_service.clear_all()
+def test_totals_splits_main_garnish_menu_and_keeps_facility_refs(totals_inputs):
+    inputs = totals_inputs
+    inputs.assert_fresh()
     month_id = "2026-03"
     menu_csv = "menu\n鶏唐揚げ 添)ブロッコリー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
@@ -373,15 +378,16 @@ def test_totals_splits_main_garnish_menu_and_keeps_facility_refs():
         menu_item["id"],
         {"qty_per_serving": 2, "unit_type": "個", "daypart": "夕食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-garnish-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-garnish.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00001",
-            week_hint=month_id,
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        accessory_masters={"ブロッコリー": {"qty_per_serving": 30, "unit_type": "g"}},
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "夕",
@@ -393,7 +399,7 @@ def test_totals_splits_main_garnish_menu_and_keeps_facility_refs():
             }
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    inputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/totals?date=2026-03-24&include_order_refs=true")
@@ -413,10 +419,10 @@ def test_totals_splits_main_garnish_menu_and_keeps_facility_refs():
     ] == [("FAC00001", "regular", 31.0)]
 
 
-def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft():
-    order_service.clear_all()
-    _reset_facilities_from_master()
-    month_id = f"2026-03-totals-confirm-draft-{uuid4().hex[:8]}"
+def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft(totals_inputs):
+    inputs = totals_inputs
+    inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -425,15 +431,17 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft():
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-confirm-draft-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-confirm-draft.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00014",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        declared_quantity_pairs=[("regular", "X"), ("staff", "X"), ("no_meat", "X"),
+            ("no_fish", "X"), ("sesame_allergy", "X"), ("change_1", "X")],
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -445,7 +453,7 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft():
             }
         ],
     )
-    saved = order_service.persist_sheet_draft(
+    saved = inputs.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
             "order_id": order["id"],
@@ -472,7 +480,7 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft():
     )
     assert saved is not None
 
-    confirmed = order_service.confirm_order(order["id"])
+    confirmed = inputs.confirm_order(order["id"])
     assert confirmed is not None
 
     client = TestClient(app)
@@ -493,9 +501,10 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft():
     }
 
 
-def test_totals_merges_forbidden_diets():
-    order_service.clear_all()
-    month_id = f"2026-03-totals-forbidden-bucket-{uuid4().hex[:8]}"
+def test_totals_merges_forbidden_diets(totals_inputs):
+    inputs = totals_inputs
+    inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\n豆腐の煮物\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "豆腐の煮物")
@@ -504,15 +513,15 @@ def test_totals_merges_forbidden_diets():
         menu_item["id"],
         {"qty_per_serving": 40, "unit_type": "g", "daypart": "昼食", "category": "副菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-totals-forbidden-bucket-001",
             pdf_uri="file://dummy-totals-forbidden-bucket.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00014",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -551,7 +560,7 @@ def test_totals_merges_forbidden_diets():
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    inputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/totals?date=2026-03-24")
@@ -563,10 +572,10 @@ def test_totals_merges_forbidden_diets():
     assert not any(item.get("diet_type") in {"no_meat", "no_fish", "forbidden_other", "no_fried"} for item in rows)
 
 
-def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_column_facility():
-    order_service.clear_all()
-    _reset_facilities_from_master()
-    month_id = f"2026-03-totals-confirm-materialization-{uuid4().hex[:8]}"
+def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_column_facility(totals_inputs):
+    inputs = totals_inputs
+    inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -575,15 +584,17 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-confirm-materialization-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-confirm-materialization.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00014",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        declared_quantity_pairs=[("regular", "X"), ("staff", "X"), ("no_meat", "X"),
+            ("no_fish", "X"), ("sesame_allergy", "X"), ("change_1", "X")],
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -596,7 +607,7 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
         ],
     )
 
-    saved, error = order_service.save_ocr_sheet_exact(
+    saved, error = inputs.save_ocr_sheet_exact(
         order["id"],
         header=["日付", "区分", "メニュー", "常食", "職員", "肉禁", "魚禁", "ゴマアレルギー", "変更1", "備考欄"],
         rows=[["03/24", "昼", "ホイコーロー", "102", "2", "2", "1", "", "", ""]],
@@ -618,7 +629,7 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
 
     assert error is None
     assert saved is not None
-    confirmed = order_service.confirm_order(order["id"])
+    confirmed = inputs.confirm_order(order["id"])
     assert confirmed is not None
 
     client = TestClient(app)
@@ -640,9 +651,9 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
 
 
 def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(totals_inputs):
-    order_service = totals_inputs
-    order_service.clear_all()
-    month_id = f"2026-03-totals-confirm-materialization-{uuid4().hex[:8]}"
+    inputs = totals_inputs
+    inputs.assert_fresh()
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -652,17 +663,19 @@ def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(t
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
 
-    order_a = order_service.create_order_from_ingest(
+    order_a = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-confirm-materialization-a-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-confirm-materialization-a.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00004",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[],
+        declared_quantity_pairs=[("regular", "X"), ("daycare", "X"), ("staff", "X"), ("no_meat", "X"), ("no_fish", "X"), ("no_fried", "X"), ("change_1", "X")],
+        physical_slot=0, lines=[{"date": "2026-03-24", "daypart": "昼", "menu_name": "ホイコーロー",
+            "diet_type": "regular", "area_id": "X", "bag_type": "standard", "quantity_original": None}],
     )
-    saved_a, error_a = order_service.save_ocr_sheet_exact(
+    saved_a, error_a = inputs.save_ocr_sheet_exact(
         order_a["id"],
         header=["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
         rows=[["03/24", "昼", "ホイコーロー", "65", "45", "", "2", "", "", "", ""]],
@@ -684,19 +697,21 @@ def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(t
     )
     assert error_a is None
     assert saved_a is not None
-    assert order_service.confirm_order(order_a["id"]) is not None
+    assert inputs.confirm_order(order_a["id"]) is not None
 
-    order_b = order_service.create_order_from_ingest(
+    order_b = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id=f"msg-totals-confirm-materialization-b-{uuid4().hex[:8]}",
             pdf_uri="file://dummy-totals-confirm-materialization-b.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00014",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[],
+        declared_quantity_pairs=[("regular", "X"), ("staff", "X"), ("no_meat", "X"), ("no_fish", "X"), ("sesame_allergy", "X"), ("change_1", "X")],
+        physical_slot=0, lines=[{"date": "2026-03-24", "daypart": "昼", "menu_name": "ホイコーロー",
+            "diet_type": "regular", "area_id": "X", "bag_type": "standard", "quantity_original": None}],
     )
-    saved_b, error_b = order_service.save_ocr_sheet_exact(
+    saved_b, error_b = inputs.save_ocr_sheet_exact(
         order_b["id"],
         header=["日付", "区分", "メニュー", "常食", "職員", "肉禁", "魚禁", "ゴマアレルギー", "変更1", "備考欄"],
         rows=[["03/24", "昼", "ホイコーロー", "102", "2", "2", "1", "", "", ""]],
@@ -717,7 +732,7 @@ def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(t
     )
     assert error_b is None
     assert saved_b is not None
-    assert order_service.confirm_order(order_b["id"]) is not None
+    assert inputs.confirm_order(order_b["id"]) is not None
 
     client = TestClient(app)
     res = client.get("/totals?date=2026-03-24&include_order_refs=true")

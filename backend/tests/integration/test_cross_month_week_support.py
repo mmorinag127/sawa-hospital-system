@@ -1,12 +1,47 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from uuid import uuid4
+import pytest
+from src.db import session_scope
+from src.models.menu import MonthlyMenu, MonthlyMenuEntry
+from tests.helpers.owned_order import owned_registration
+from tests.helpers.owned_output import owned_outputs
 
 from src.services import candidate_resolution_service, order_service, output_builder  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 
 
-def test_resolve_sheet_week_id_prefers_explicit_cross_month_range_from_observed_dates() -> None:
+def _template(fields):
+    columns = []
+    for index, field in enumerate(fields):
+        column = {"index": index, "source_index": index, "name": field}
+        if field.startswith("qty."):
+            diet, area = field[4:].rsplit("_", 1)
+            column.update(role="quantity", diet_type=diet, area_id=area.upper())
+        else:
+            column["role"] = {"date_mmdd": "date", "daypart": "daypart",
+                              "menu": "menu_name", "remarks": "note"}[field]
+        columns.append(column)
+    return {"columns": columns}
+
+
+def _physical_entries(entries):
+    with session_scope() as session:
+        for row in entries:
+            day = date.fromisoformat(row["menu_date"])
+            month = day.strftime("%Y-%m")
+            if session.get(MonthlyMenu, month) is None:
+                session.add(MonthlyMenu(id=month, month_start=day.replace(day=1)))
+                session.flush()
+            session.add(MonthlyMenuEntry(id=uuid4().hex, monthly_menu_id=month,
+                menu_date=day, name=row["name"], daypart=row["daypart"],
+                diet_type="regular", slot_index=row["slot_index"],
+                category=row.get("category")))
+
+
+
+def test_resolve_sheet_week_id_requires_explicit_choice_despite_cross_month_observed_dates() -> None:
     received_at = datetime(2026, 4, 30, 9, 0, 0)
     payload = {
         "table_raw": """
@@ -31,7 +66,12 @@ def test_resolve_sheet_week_id_prefers_explicit_cross_month_range_from_observed_
         week_hints=[],
     )
 
-    assert resolved == "2026-04@2026-04-29~2026-05-05"
+    assert resolved is None  # Observed OCR dates cannot authorize a period.
+    selected = order_service._resolve_sheet_week_id(
+        current_week_id="2026-04@2026-04-29~2026-05-05",
+        received_at=received_at, order_lines=[], ocr_payload=payload,
+        facility_id="FAC00001", week_hints=[])
+    assert selected == "2026-04@2026-04-29~2026-05-05"
 
 
 def test_system_managed_week_resolution_keeps_explicit_selected_week() -> None:
@@ -45,48 +85,26 @@ def test_system_managed_week_resolution_keeps_explicit_selected_week() -> None:
     assert resolved == explicit_week
 
 
-def test_collect_sheet_dates_from_payload_reads_page_markdown_uri_blocks(monkeypatch) -> None:
-    markdown_by_uri = {
-        "gs://bucket/page-1.md": """
-|日付|区分|献立|常|
-|-|-|-|-|
-|4/29|朝|A|10|
-|4/30|朝|B|10|
-""".strip(),
-        "gs://bucket/page-2.md": """
-|日付|区分|献立|常|
-|-|-|-|-|
-|5/1|朝|C|10|
-|5/2|朝|D|10|
-""".strip(),
-    }
-
-    monkeypatch.setattr(
-        order_service,
-        "load_bytes_from_uri",
-        lambda uri: markdown_by_uri[str(uri)].encode("utf-8"),
-    )
-
-    dates = order_service._collect_sheet_dates_from_payload(  # noqa: SLF001
-        {
-            "pages": [
-                {"page_index": 1, "markdown_uri": "gs://bucket/page-1.md"},
-                {"page_index": 2, "markdown_uri": "gs://bucket/page-2.md"},
-            ]
-        },
-        datetime(2026, 4, 30, 9, 0, 0),
-    )
-
+def test_collect_sheet_dates_requires_explicit_period_and_actual_rows_not_page_uris() -> None:
+    template = _template(["date_mmdd", "daypart", "menu", "qty.regular_x"])
+    received = datetime(2026, 4, 30, 9)
+    period = "2026-04@2026-04-29~2026-05-02"
+    pages = {"pages": [{"page_index": 1, "markdown_uri": "gs://bucket/page-1.md"},
+                       {"page_index": 2, "markdown_uri": "gs://bucket/page-2.md"}]}
+    assert order_service._collect_sheet_dates_from_payload(
+        pages, received, template, explicit_week=period) == []
+    rows = [["4/29", "朝", "A", "10"], ["4/30", "朝", "B", "10"],
+            ["5/1", "朝", "C", "10"], ["5/2", "朝", "D", "10"]]
+    with pytest.raises(ValueError, match="week_hint_required"):
+        order_service._collect_sheet_dates_from_payload({"table_rows": rows}, received, template)
+    dates = order_service._collect_sheet_dates_from_payload(
+        {"table_rows": rows}, received, template, explicit_week=period)
     assert [item.isoformat() for item in dates] == [
-        "2026-04-29",
-        "2026-04-30",
-        "2026-05-01",
-        "2026-05-02",
-    ]
+        "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-02"]
 
 
-def test_build_position_menu_entries_merges_adjacent_month_payloads(monkeypatch) -> None:
-    def _fake_get_menu_for_facility(month_id: str, _facility_id: str | None):
+def test_build_position_menu_entries_merges_adjacent_month_payloads(isolated_formal_schema) -> None:
+    def _authored_menu_for_month(month_id: str, _facility_id: str | None):
         if month_id == "2026-04":
             return {
                 "entries": [
@@ -103,7 +121,8 @@ def test_build_position_menu_entries_merges_adjacent_month_payloads(monkeypatch)
             }
         return None
 
-    monkeypatch.setattr(order_service.menu_service, "get_menu_for_facility", _fake_get_menu_for_facility)
+    _physical_entries(_authored_menu_for_month("2026-04", None)["entries"])
+    _physical_entries(_authored_menu_for_month("2026-05", None)["entries"])
 
     entries = order_service._build_position_menu_entries_safe(  # noqa: SLF001
         "2026-04@2026-04-29~2026-05-02",
@@ -119,7 +138,7 @@ def test_build_position_menu_entries_merges_adjacent_month_payloads(monkeypatch)
     ]
 
 
-def test_build_position_menu_entries_keeps_single_event_lunch_fourth_slot(monkeypatch) -> None:
+def test_build_position_menu_entries_keeps_single_event_lunch_fourth_slot(isolated_formal_schema) -> None:
     entries_payload = []
     order_index = 0
     for day in range(20, 27):
@@ -147,12 +166,7 @@ def test_build_position_menu_entries_keeps_single_event_lunch_fourth_slot(monkey
         }
     )
 
-    monkeypatch.setattr(order_service, "_sheet_week_month_ids", lambda _week_id: ["2026-09"])
-    monkeypatch.setattr(
-        order_service,
-        "_load_menu_payloads_for_week",
-        lambda *_args, **_kwargs: [("2026-09", {"entries": entries_payload})],
-    )
+    _physical_entries(entries_payload)
 
     entries = order_service._build_position_menu_entries(  # noqa: SLF001
         "2026-09@2026-09-20~2026-09-26",
@@ -169,8 +183,8 @@ def test_build_position_menu_entries_keeps_single_event_lunch_fourth_slot(monkey
     assert event_lunch[-1]["menu_name"] == "9月21日昼4品目"
 
 
-def test_build_sheet_menu_entries_rescues_missing_cross_month_dates_from_ocr_payload(monkeypatch) -> None:
-    def _fake_get_menu_for_facility(month_id: str, _facility_id: str | None):
+def test_build_sheet_menu_entries_does_not_rescue_missing_cross_month_dates_from_ocr_payload(isolated_formal_schema) -> None:
+    def _authored_menu_for_month(month_id: str, _facility_id: str | None):
         if month_id == "2026-04":
             return {
                 "entries": [
@@ -182,46 +196,8 @@ def test_build_sheet_menu_entries_rescues_missing_cross_month_dates_from_ocr_pay
             return {"entries": []}
         return None
 
-    monkeypatch.setattr(order_service.menu_service, "get_menu_for_facility", _fake_get_menu_for_facility)
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_from_ocr_payload",
-        lambda **_kwargs: [
-            {
-                "menu_name": "A",
-                "menu_date": datetime(2026, 4, 29).date(),
-                "daypart_key": "朝",
-                "slot_index": 0,
-                "order": 0,
-                "source_order": 0,
-            },
-            {
-                "menu_name": "B",
-                "menu_date": datetime(2026, 4, 30).date(),
-                "daypart_key": "朝",
-                "slot_index": 0,
-                "order": 1,
-                "source_order": 1,
-            },
-            {
-                "menu_name": "C",
-                "menu_date": datetime(2026, 5, 1).date(),
-                "daypart_key": "朝",
-                "slot_index": 0,
-                "order": 2,
-                "source_order": 2,
-            },
-            {
-                "menu_name": "D",
-                "menu_date": datetime(2026, 5, 2).date(),
-                "daypart_key": "朝",
-                "slot_index": 0,
-                "order": 3,
-                "source_order": 3,
-            },
-        ],
-    )
-
+    _physical_entries(_authored_menu_for_month("2026-04", None)["entries"])
+    _physical_entries(_authored_menu_for_month("2026-05", None)["entries"])
     template = {
         "columns": [
             {"field": "date_mmdd", "header": "日付"},
@@ -251,13 +227,10 @@ def test_build_sheet_menu_entries_rescues_missing_cross_month_dates_from_ocr_pay
     )
 
     assert source == "weekly_menu"
-    assert [entry["menu_name"] for entry in entries] == ["A", "B", "C", "D"]
-    assert [entry["menu_date"].isoformat() for entry in entries] == [
-        "2026-04-29",
-        "2026-04-30",
-        "2026-05-01",
-        "2026-05-02",
-    ]
+    assert [entry["menu_name"] for entry in entries] == ["A", "B"]
+    assert [entry["menu_date"].isoformat() for entry in entries] == ["2026-04-29", "2026-04-30"]
+    # May OCR rows are diagnostic only; no missing canonical entries are invented.
+    assert all(entry["menu_date"].month == 4 for entry in entries)
 
 
 def test_apply_payload_quantities_numeric_only_prefers_identity_over_row_index_for_page2_rows() -> None:
@@ -273,7 +246,8 @@ def test_apply_payload_quantities_numeric_only_prefers_identity_over_row_index_f
         "qty.change_1_x",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)  # noqa: SLF001
+    template = _template(fields)
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)  # noqa: SLF001
     rows = [
         {
             "values": ["04/29", "朝", "A", "", "", "", "", "", "", ""],
@@ -308,6 +282,7 @@ def test_apply_payload_quantities_numeric_only_prefers_identity_over_row_index_f
         enable_daypart_consensus=False,
         explicit_quantity_pairs=[(3, 3), (4, 4), (5, 5)],
         overlay_structural_fields_from_sheet_rows=True,
+        template=template,
     )
 
     assert stats["exact"] >= 3
@@ -345,16 +320,15 @@ def test_candidate_resolution_preserves_explicit_current_week_range() -> None:
     assert resolution["blocked"] is False
 
 
-def test_set_week_preserves_short_explicit_exception_range_exact() -> None:
+def test_set_week_preserves_short_explicit_exception_range_exact(owned_registration) -> None:
     order_service.clear_all()
-    order = order_service.create_order_from_ingest(
-        IngestEmailPayload(
+    order = owned_registration(
+        **dict(
             message_id="msg-auto-week-coerce-001",
-            pdf_uri="gs://bucket/auto-week-coerce.pdf",
             received_at=datetime(2026, 4, 14, 7, 0, 0),
-            facility_hint="FAC00007",
-            week_hint="2026-04@2026-04-26~2026-05-02",
-            source_kind="manual_upload",
+            facility_id="FAC00007",
+            effective_date="2026-04-26",
+            week="2026-04@2026-04-26~2026-05-02",
         ),
         lines=[],
     )
@@ -368,16 +342,15 @@ def test_set_week_preserves_short_explicit_exception_range_exact() -> None:
     assert refreshed.get("persisted_week_value") == "2026-05@2026-05-01~2026-05-02"
 
 
-def test_set_week_preserves_short_explicit_range_for_split_page_orders() -> None:
+def test_set_week_preserves_short_explicit_range_for_split_page_orders(owned_registration) -> None:
     order_service.clear_all()
-    order = order_service.create_order_from_ingest(
-        IngestEmailPayload(
+    order = owned_registration(
+        **dict(
             message_id="upload:sha256:split-case:split:group-abc:1of2",
-            pdf_uri="gs://bucket/split-auto-week.pdf",
             received_at=datetime(2026, 4, 14, 7, 0, 0),
-            facility_hint="FAC00007",
-            week_hint="2026-05@2026-05-01~2026-05-02",
-            source_kind="manual_upload",
+            facility_id="FAC00007",
+            effective_date="2026-05-01",
+            week="2026-05@2026-05-01~2026-05-02",
         ),
         lines=[],
     )
@@ -391,37 +364,21 @@ def test_set_week_preserves_short_explicit_range_for_split_page_orders() -> None
     assert refreshed.get("persisted_week_value") == "2026-05@2026-05-01~2026-05-02"
 
 
-def test_output_builder_applies_menu_entry_override_from_second_month(monkeypatch) -> None:
-    def _fake_get_menu_entries_for_facility(month_id: str, _facility_id: str | None):
-        if month_id == "2026-04":
-            return [{"name": "A", "menu_date": "2026-04-29", "daypart": "朝", "category": "main"}]
-        if month_id == "2026-05":
-            return [{"name": "B", "menu_date": "2026-05-01", "daypart": "昼", "category": "side"}]
-        return []
-
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: None)
-    monkeypatch.setattr(order_service.menu_service, "get_menu_entries_for_facility", _fake_get_menu_entries_for_facility)
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-
-    lines = output_builder.build_order_lines_for_outputs(
-        {
-            "id": "ORD-CROSS",
-            "facility": "FAC00001",
-            "week_value": "2026-04@2026-04-29~2026-05-02",
-            "lines": [
-                {
-                    "date": "2026-05-01",
-                    "daypart": "朝",
-                    "menu_name": "B",
-                    "diet_type": "regular",
-                    "area_id": "X",
-                    "quantity_original": 1,
-                    "quantity_corrected": 1,
-                }
-            ],
-        }
-    )
-
+def test_cross_month_output_keeps_accepted_second_month_identity_after_menu_edit(owned_outputs):
+    payload = IngestEmailPayload(message_id="owned-cross-month-output",
+        pdf_uri="component:authored", received_at=datetime(2026, 4, 30),
+        facility_hint="FAC00001", week_hint="2026-04@2026-04-29~2026-05-02")
+    order = owned_outputs.create_order_from_ingest(payload, lines=[{
+        "date": "2026-05-01", "daypart": "朝", "menu_name": "B",
+        "diet_type": "regular", "area_id": "X", "bag_type": "standard",
+        "quantity_original": 1}],
+        recipe={"qty_per_serving": 1, "unit_type": "g", "category": "side"}, physical_slot=0)
+    with session_scope() as session:
+        entry = session.query(MonthlyMenuEntry).filter_by(name="B",
+            menu_date=date(2026, 5, 1), facility_override="FAC00001").one()
+        entry.daypart = "昼"
+    lines = output_builder.build_order_lines_for_outputs(order)
     assert len(lines) == 1
-    assert lines[0]["daypart"] == "昼"
+    assert lines[0]["daypart"] == "朝"
     assert lines[0]["menu_category"] == "side"
+    assert str(lines[0]["date"]) == "2026-05-01"

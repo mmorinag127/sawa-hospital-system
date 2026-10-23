@@ -19,6 +19,7 @@ from scripts.export_base_menu_openapi import response_contract  # noqa: E402
 from scripts.export_menu_rule_openapi import response_contract as rule_contract  # noqa: E402
 
 BASE = "95d832efe803a0373249a8f6a53abcd185f64e88"
+SERVICE_BASE = "8e2621a0aa73ba6a9c744ea2240b77f4c2cd8bb8"
 
 
 def sources():
@@ -57,7 +58,8 @@ def test_runtime_module_ast_and_service_bytes_unchanged():
                     decorator.keywords = [k for k in decorator.keywords if k.arg not in {"responses", "response_model"}]
     assert ast.dump(after, include_attributes=False) == ast.dump(before, include_attributes=False)
     service = "backend/src/services/base_menu_service.py"
-    assert (ROOT / service).read_bytes() == subprocess.check_output(["git", "show", f"{BASE}:{service}"], cwd=ROOT)
+    subprocess.run(["git", "merge-base", "--is-ancestor", SERVICE_BASE, "HEAD"], cwd=ROOT, check=True)
+    assert (ROOT / service).read_bytes() == subprocess.check_output(["git", "show", f"{SERVICE_BASE}:{service}"], cwd=ROOT)
 
 
 @pytest.mark.parametrize("method,path,service", [

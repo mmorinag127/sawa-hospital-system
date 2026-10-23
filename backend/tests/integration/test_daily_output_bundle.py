@@ -1,4 +1,5 @@
 import csv
+from tests.helpers.owned_order import owned_registration  # noqa: F401
 import pathlib
 import sys
 import zipfile
@@ -211,75 +212,26 @@ def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, mon
     assert pathlib.Path(outputs["aggregate"]).exists()
 
 
-def test_prepare_output_context_derives_invoice_columns_when_template_has_no_quantity_overlap(monkeypatch):
-    monkeypatch.setattr(
-        output_builder,
-        "get_order_by_id",
-        lambda _order_id: {
-            "id": "ORD-FUREAI",
-            "facility": "FAC00004",
-            "week": "2026-05",
-            "lines": [
-                {
-                    "date": TARGET_DATE,
-                    "daypart": "昼",
-                    "menu_name": "献立A",
-                    "diet_type": "regular",
-                    "area_id": "X",
-                    "quantity_original": 5,
-                }
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        output_builder.config_service,
-        "get_facility_config",
-        lambda _facility_id: {
-            "facility_name": "介護老人保健施設ふれあいの丘",
-            "fax_template": {
-                "columns": [
-                    {"role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X"},
-                    {"role": "quantity", "header": "通所", "diet_type": "daycare", "area_id": "X"},
-                    {"role": "quantity", "header": "職員", "diet_type": "staff", "area_id": "X"},
-                    {"role": "quantity", "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
-                ]
-            },
-            "invoice_template": {
-                "columns": [
-                    {"name": "日付", "source": "date"},
-                    {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
-                    {"name": "ミキサー2F", "source": "quantity", "diet_type": "mixer", "area_id": "2F"},
-                ],
-                "include_menu_name": False,
-            },
-        },
-    )
-    monkeypatch.setattr(output_builder.config_service, "load_ingest_policy", lambda: {"quantity_rules": {"zero_as_empty": True}})
-    monkeypatch.setattr(output_builder, "_build_ocr_menu_meta", lambda *_args, **_kwargs: {})
+def test_captured_invoice_refuses_missing_registration_without_deriving_columns():
+    from copy import deepcopy
+    configured = {"facility_name": "Authored invoice component",
+        "fax_template": {"columns": [
+            {"role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"role": "quantity", "diet_type": "daycare", "area_id": "X"},
+            {"role": "quantity", "diet_type": "staff", "area_id": "X"},
+            {"role": "quantity", "diet_type": "no_fish", "area_id": "X"}]},
+        "invoice_template": {"columns": [
+            {"name": "日付", "source": "date"},
+            {"name": "常食2F", "source": "quantity", "diet_type": "regular", "area_id": "2F"},
+            {"name": "ミキサー2F", "source": "quantity", "diet_type": "mixer", "area_id": "2F"}],
+            "include_menu_name": False}}
+    before = deepcopy(configured)
+    with pytest.raises(ValueError, match="^accepted_invoice_template_required$"):
+        output_builder._resolve_captured_invoice_template(configured)
+    assert configured == before
+    assert [column["name"] for column in configured["invoice_template"]["columns"]] == [
+        "日付", "常食2F", "ミキサー2F"]
 
-    ctx = output_builder._prepare_output_context("ORD-FUREAI", include_bags=False, include_ocr_menu_meta=False)
-    columns = ctx["invoice_template"]["columns"]
-
-    assert [column.get("header") for column in columns] == [
-        "日付",
-        "区分",
-        "献立区分",
-        "メニュー名",
-        "常食",
-        "通所",
-        "職員",
-        "魚禁",
-        "備考欄",
-    ]
-    rows = output_builder._build_delivery_rows(
-        ctx["order_for_outputs"],
-        ctx["invoice_template"],
-        ctx["quantity_rules"],
-        ctx["facility_config"],
-        {},
-        allow_ocr_menu_meta=False,
-    )
-    assert rows[0]["qty.regular_x"] == 5
 
 
 def test_build_daily_output_bundle_labels_groups_orders_per_facility(tmp_path, monkeypatch):
@@ -397,65 +349,16 @@ def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path
     assert list(csv.DictReader(yamato_csv.splitlines())) == [{"メニュー": "献立C"}]
 
 
-def test_daily_label_csv_zero_quantity_rows_keep_facility_diet_suffix(tmp_path, monkeypatch):
+def test_daily_label_csv_zero_quantity_rows_keep_facility_diet_suffix(tmp_path, monkeypatch, isolated_formal_schema):
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "list_orders_by_line_date",
-        lambda target_date, status=None: [{"id": "ORD-IKEBUKURO", "facility": "FAC00005"}],
-    )
-    facility_config = {
-        "facility_name": "池袋病院内事業所 傑合同会社",
-        "fax_template_override": {
-            "columns": [
-                {"role": "quantity", "diet_type": "soft", "area_id": "X"},
-                {"role": "quantity", "diet_type": "regular_bag", "area_id": "X"},
-            ],
-        },
-    }
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda facility_code: facility_config)
-    monkeypatch.setattr(
-        output_builder,
-        "_prepare_output_context",
-        lambda order_id, **kwargs: {
-            "bags": [],
-            "label_profile": {},
-            "facility_config": facility_config,
-            "order_lines": [
-                {
-                    "date": TARGET_DATE,
-                    "daypart": "昼",
-                    "menu_name": "カレイの照焼き",
-                    "menu_category": "主菜",
-                    "diet_type": "soft",
-                    "area_id": "X",
-                    "quantity_original": 0,
-                    "menu_unit_type": "g",
-                    "menu_qty_per_serving": 100,
-                    "menu_temp_type": "温菜",
-                },
-                {
-                    "date": TARGET_DATE,
-                    "daypart": "昼",
-                    "menu_name": "カレイの照焼き",
-                    "menu_category": "主菜",
-                    "diet_type": "regular_bag",
-                    "area_id": "X",
-                    "quantity_original": 0,
-                    "menu_unit_type": "g",
-                    "menu_qty_per_serving": 100,
-                    "menu_temp_type": "温菜",
-                },
-            ],
-            "order_for_outputs": {"id": order_id, "facility": "FAC00005", "lines": []},
-            "delivery_source_for_outputs": {"id": order_id, "facility": "FAC00005", "lines": []},
-            "invoice_template": {"columns": [], "include_menu_name": True},
-            "quantity_rules": {"zero_as_empty": True},
-        },
-    )
-
+    accepted_bagging_order(monkeypatch, tmp_path, [
+        {"date": TARGET_DATE.isoformat(), "daypart": "昼", "menu_name": "カレイの照焼き",
+         "diet_type": diet, "area_id": "X", "quantity_original": 0, "bag_type": "standard"}
+        for diet in ("soft", "regular_bag")
+    ], facility_id="FAC00005", menu_category="主菜", menu_qty_per_serving=100,
+        menu_unit_type="g", confirm=True)
     bundle_path, summary = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="labels_csv")
-
     assert summary["success_orders"] == 1
     with zipfile.ZipFile(bundle_path) as archive:
         [csv_name] = archive.namelist()
@@ -463,6 +366,7 @@ def test_daily_label_csv_zero_quantity_rows_keep_facility_diet_suffix(tmp_path, 
     assert {row["メニュー"] for row in rows} == {"主菜（軟菜）", "主菜（袋分け）"}
     assert {row["内容量"] for row in rows} == {"0g"}
     assert {row[""] for row in rows} == {"0人前"}
+
 
 
 def test_build_label_csv_for_order_filters_target_date(tmp_path, monkeypatch):
@@ -2671,19 +2575,14 @@ def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
         raise AssertionError("templated delivery embedding should be blocked")
 
 
-def test_list_orders_by_line_date_returns_latest_upload_first():
+def test_list_orders_by_line_date_returns_latest_upload_first(owned_registration):
     order_service.clear_all()
     target = dt_date(2026, 6, 7)
 
     def create_order(message_id: str, received_at: datetime, facility_id: str) -> dict:
-        return order_service.create_order_from_ingest(
-            IngestEmailPayload(
-                message_id=message_id,
-                pdf_uri=f"file://{message_id}.pdf",
-                received_at=received_at,
-                facility_hint=facility_id,
-                week_hint="2026-06",
-            ),
+        return owned_registration(
+            message_id=message_id, facility_id=facility_id, received_at=received_at,
+            week="2026-06@2026-06-07~2026-06-07", effective_date="2026-06-07",
             lines=[
                 {
                     "date": target.isoformat(),
@@ -2691,6 +2590,7 @@ def test_list_orders_by_line_date_returns_latest_upload_first():
                     "menu_name": "Menu",
                     "diet_type": "regular",
                     "area_id": "2F",
+                    "bag_type": "standard",
                     "quantity_original": 1,
                 }
             ],

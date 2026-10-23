@@ -7,18 +7,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import order_service, output_builder  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
-
-
-def _seed_order(message_id: str) -> dict:
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy-change-override.pdf",
-        received_at=datetime(2026, 4, 19, 9, 0, 0),
-        facility_hint="FAC00001",
-        week_hint=None,
-    )
-    return order_service.create_order_from_ingest(payload, lines=[])
+from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+from tests.integration.test_cross_month_week_support import _template
 
 
 def _fac00001_fields() -> list[str]:
@@ -60,6 +50,8 @@ def test_materialization_lines_prioritize_change2_then_change1_over_regular():
             ["04/19", "夕", "Menu C", "36", "", "", "", "", "", ""],
         ],
         received_at=datetime(2026, 4, 19, 9, 0, 0),
+        existing_week_code="2026-04@2026-04-19~2026-04-19",
+        date_policy={}, template=_template(_fac00001_fields()),
     )
 
     assert [(line["menu_name"], line["diet_type"], line["quantity_original"]) for line in lines] == [
@@ -76,6 +68,8 @@ def test_materialization_lines_keep_forbidden_columns_separate():
             ["04/19", "昼", "Menu A", "31", "", "2", "4", "33", "", ""],
         ],
         received_at=datetime(2026, 4, 19, 9, 0, 0),
+        existing_week_code="2026-04@2026-04-19~2026-04-19",
+        date_policy={}, template=_template(_fac00001_fields()),
     )
 
     assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
@@ -92,6 +86,8 @@ def test_materialization_lines_exclude_placeholder_quantity_columns():
             ["04/19", "昼", "Menu A", "31", "12", "2", "", "", "", ""],
         ],
         received_at=datetime(2026, 4, 19, 9, 0, 0),
+        existing_week_code="2026-04@2026-04-19~2026-04-19",
+        date_policy={}, template=_template(_fac00001_fields()),
     )
 
     assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
@@ -100,87 +96,30 @@ def test_materialization_lines_exclude_placeholder_quantity_columns():
     ]
 
 
-def test_apply_latest_draft_materializes_effective_regular_from_change_columns():
-    order_service.clear_all()
-    seeded = _seed_order("msg-change-override-apply-001")
-    order = order_service.get_order_by_id(seeded["id"])
-    assert order is not None
-    saved, error = order_service.save_ocr_sheet_exact(
-        order["id"],
-        header=_fac00001_header(),
-        rows=[
-            ["04/19", "昼", "Menu A", "31", "", "", "", "33", "", ""],
-            ["04/19", "夕", "Menu B", "32", "", "", "", "", "34", ""],
-        ],
-        fields=_fac00001_fields(),
-        row_ids=["row-1", "row-2"],
-        ui_mode="sheet",
-    )
-    assert error is None
-    assert saved is not None
-
-    applied, apply_error = order_service.apply_latest_draft(
-        order["id"],
-        draft_record=saved["draft"],
-    )
-
-    assert apply_error is None
+def test_current_workflow_materializes_effective_regular_from_change_columns(monkeypatch, tmp_path, isolated_formal_schema):
+    lines = []
+    for menu, daypart, regular, change, quantity in (
+        ("Menu A", "昼", 31, "change_1", 33),
+        ("Menu B", "夕", 32, "change_2", 34),
+    ):
+        for diet, value in (("regular", regular), (change, quantity)):
+            lines.append({"date": "2026-04-19", "daypart": daypart, "menu_name": menu,
+                "diet_type": diet, "area_id": "X", "bag_type": "standard",
+                "quantity_original": value})
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True)
+    applied = order_service.get_order_by_id(order["id"])
     assert applied is not None
-    assert [
-        (line["menu_name"], line["diet_type"], line["quantity_original"])
-        for line in applied["lines"]
-    ] == [
-        ("Menu A", "regular", 33),
-        ("Menu B", "regular", 34),
-    ]
+    assert [(line["menu_name"], line["diet_type"], line["quantity_original"])
+            for line in applied["lines"]] == [
+        ("Menu A", "regular", 33), ("Menu B", "regular", 34)]
 
 
-def test_output_builder_collapses_legacy_change_override_lines():
-    lines = output_builder.build_order_lines_for_outputs(
-        {
-            "id": "ORD-change-output-001",
-            "facility": "FAC00001",
-            "week": None,
-            "week_value": None,
-            "lines": [
-                {
-                    "date": "2026-04-19",
-                    "daypart": "昼",
-                    "menu_name": "Menu A",
-                    "diet_type": "regular",
-                    "area_id": "X",
-                    "bag_type": None,
-                    "quantity_original": 31,
-                    "quantity_corrected": None,
-                    "change_note": None,
-                },
-                {
-                    "date": "2026-04-19",
-                    "daypart": "昼",
-                    "menu_name": "Menu A",
-                    "diet_type": "change_1",
-                    "area_id": "X",
-                    "bag_type": None,
-                    "quantity_original": 33,
-                    "quantity_corrected": None,
-                    "change_note": None,
-                },
-                {
-                    "date": "2026-04-19",
-                    "daypart": "昼",
-                    "menu_name": "Menu A",
-                    "diet_type": "no_meat",
-                    "area_id": "X",
-                    "bag_type": None,
-                    "quantity_original": 2,
-                    "quantity_corrected": None,
-                    "change_note": None,
-                },
-            ],
-        }
-    )
-
+def test_output_builder_collapses_owned_change_override_lines(monkeypatch, tmp_path, isolated_formal_schema):
+    authored = [{"date": "2026-04-19", "daypart": "昼", "menu_name": "Menu A",
+                 "diet_type": diet, "area_id": "X", "bag_type": "standard",
+                 "quantity_original": value}
+                for diet, value in (("regular", 31), ("change_1", 33), ("no_meat", 2))]
+    order = accepted_bagging_order(monkeypatch, tmp_path, authored, confirm=True)
+    lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(order["id"]))
     assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
-        ("regular", 33),
-        ("no_meat", 2),
-    ]
+        ("regular", 33), ("no_meat", 2)]

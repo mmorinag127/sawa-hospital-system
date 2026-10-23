@@ -152,6 +152,11 @@ def test_real_single_bulk_and_delete_restore_original_bag_quantities(paired, bul
     response = client.post(ROOT + ("/upsert-bulk" if bulk else "/upsert"), json=body(editor(client), bulk=bulk))
     assert response.status_code == 200, response.text
     assert set(response.json()["affected_order_ids"]) == {first.order_id, second.order_id}
+    projected = client.get("/orders/daily-bags", params={"date": DAY.isoformat()})
+    assert projected.status_code == 200, projected.text
+    projected_diet = projected.json()["groups"][0]["diet_groups"][0]
+    assert projected_diet["total_quantity"] == 14
+    assert projected_diet["total_amounts"] == {"g": 2800}
     for fixture in (first, second):
         assert sum(qty for name, qty in bags(fixture, fixture.order_id) if name == "選択献立0") == 7
         assert sorted(qty for name, qty in bags(fixture, fixture.order_id) if name == "選択献立0") == [2, 5]
