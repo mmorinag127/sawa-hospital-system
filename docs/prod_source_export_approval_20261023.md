@@ -1,0 +1,11 @@
+# Approved production settings export hotfix — 2026-10-23
+
+The user explicitly approved both the minimal refresh IAM plan and adding a fixed-file read-only settings export API to Hospital production through GitHub Actions. The review shown to the user specified the currently running production source SHA, with no develop-wide production release and no business DB/PDF/config changes.
+
+This single release branch therefore starts at the verified current production SHA `7ae61ee1033776e2c413a621a2013c4c93002df4`, deployed by production run `36837045449` to image digest `6c4bc8df1ca25b7eb0793a4b28aa89622cfc98356f1479247d5ed407e935a2f7`. This is the explicitly approved source override for this API-only hotfix, not a general change to the normal develop-based release policy.
+
+Allowed source changes are the new read-only API, its router integration and read-only startup validation, its tests, the separate narrowly scoped reusable production workflow and its explicit opt-in dispatch input, its verification script, and this record. The original business implementation and configuration files remain byte-identical to that production commit. Startup repairs and facility-name synchronization are replaced by read-only checks so a mismatch fails the new revision instead of changing production data. The no-traffic verification image disables recovery through its image ENV, so candidate startup cannot reset/requeue production jobs. The final normal API image retains the original uploaded-PDF recovery loop and the original Cloud Run environment.
+
+Deployment still requires owner `workflow_dispatch`, this exact `release/prod-*` branch, `DEPLOY_PRODUCTION`, the production environment, and the existing production-only OIDC identity. Only worker-prod is updated. Frontend, producer, IAM, prod DB bootstrap, schema migration, data repair, and local deployment are excluded. Production effective settings are read before and after deployment and compared exactly; only proof hashes/counts are uploaded as verification artifacts.
+
+The export API accepts only the exact staging coordinator Google identity and an exported PostgreSQL snapshot ID. It reads fixed configured facility/ingest JSON files and the matching read-only DB snapshot. It does not accept arbitrary paths, write files, modify DB rows, or expose database credentials.
