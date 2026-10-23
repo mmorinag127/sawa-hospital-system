@@ -398,7 +398,7 @@ def build_snapshot(job, config, progress):
                         raise RefreshError("refresh_storage_setting_source_mismatch")
                     settings[key] = destination_bucket.name
                 else:
-                    settings[key] = copier.copy(setting, required=True) if list(_references(setting)) else setting
+                    settings[key] = copier.copy(setting, required=True)
             for reference in sorted(references):
                 copier.copy(reference)
             value["components"][name] = {"database": target, "verified": True,

@@ -482,3 +482,18 @@ def test_registry_transport_missing_vs_denied_never_selects_test(storage, monkey
         REAL_READ_REGISTRY()
     with data.dataset_context('test'):
         assert data.current_dataset() == 'test'
+
+
+@pytest.mark.parametrize('setting', ['https://unconfigured.invalid/master.json', 'unresolved-setting'])
+def test_required_setting_must_resolve_to_verified_original_before_publication(control, storage, build_environment, monkeypatch, setting):
+    config, job, _ = build_environment
+    original = engine.runtime_source
+    def runtime(name, settings_keys=()):
+        uri, environment, revision = original(name, settings_keys)
+        if name == 'order-prod': environment['FACILITY_MASTER_URI'] = setting
+        return uri, environment, revision
+    monkeypatch.setattr(engine, 'runtime_source', runtime)
+    with pytest.raises(service.RefreshError, match='original_object_source_unresolved'):
+        engine.build_snapshot(job, config, lambda *args: None)
+    assert control['value']['active'] == OLD
+    assert not any('/manifests/' in key for _, key in storage.values)
