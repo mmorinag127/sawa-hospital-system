@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -211,6 +212,36 @@ def _collect_local_receipts(value, receipts):
             _collect_local_receipts(item, receipts)
 
 
+def _copy_raw_rows(connection, schema, table, path):
+    """Stream exact row JSON without one database round trip per row."""
+    try:
+        with path.open('wb') as output, connection.cursor() as cursor:
+            statement = sql.SQL('COPY (SELECT row_to_json(t)::text FROM {} t) TO STDOUT WITH (FORMAT binary)').format(sql.Identifier(schema, table))
+            cursor.copy_expert(statement.as_string(connection), output)
+        with path.open('rb') as source:
+            def read_exact(length):
+                value = source.read(length)
+                if len(value) != length:
+                    raise RefreshError('refresh_database_copy_stream_invalid')
+                return value
+            if read_exact(11) != b'PGCOPY\n\xff\r\n\x00' or read_exact(8) != b'\x00' * 8:
+                raise RefreshError('refresh_database_copy_stream_invalid')
+            while True:
+                fields = struct.unpack('!h', read_exact(2))[0]
+                if fields == -1:
+                    if source.read(1):
+                        raise RefreshError('refresh_database_copy_stream_invalid')
+                    break
+                if fields != 1:
+                    raise RefreshError('refresh_database_copy_stream_invalid')
+                length = struct.unpack('!i', read_exact(4))[0]
+                if length < 0:
+                    raise RefreshError('refresh_database_copy_stream_invalid')
+                yield read_exact(length).decode(psycopg2.extensions.encodings[connection.encoding])
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def fingerprints(connection, directory, local_receipts=None):
     """Full raw rows sorted on disk: bounded memory even for large OCR JSON."""
     result, references = {}, set()
@@ -223,13 +254,8 @@ def fingerprints(connection, directory, local_receipts=None):
     for index, (schema, table) in enumerate(tables):
         raw_path = directory / (str(index) + ".rows")
         count = 0
-        with raw_path.open("w", encoding="utf-8", newline="\n") as output, connection.cursor(name="copy_raw_rows") as cursor:
-            cursor.execute(sql.SQL("SELECT row_to_json(t)::text FROM {} t").format(sql.Identifier(schema, table)))
-            while True:
-                batch = cursor.fetchmany(1)
-                if not batch:
-                    break
-                row = batch[0][0]
+        with raw_path.open("w", encoding="utf-8", newline="\n") as output:
+            for row in _copy_raw_rows(connection, schema, table, directory / (str(index) + '.copy')):
                 output.write(row + "\n")
                 decoded = json.loads(row)
                 references.update(_references(decoded))

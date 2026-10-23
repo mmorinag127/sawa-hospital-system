@@ -108,7 +108,13 @@ def source_configuration():
 
 def status():
     _require_staging()
-    registry, _ = datasets.read_registry()
+    registry, generation = datasets.read_registry()
+    job = registry.get('refresh')
+    if (job and job['phase'] not in {'queued', 'succeeded', 'failed'}
+            and job.get('lease_until') and datetime.fromisoformat(job['lease_until']) <= now()):
+        job.update(phase='failed', error='refresh_execution_timed_out',
+                   updated_at=now().isoformat(), completed_at=now().isoformat())
+        write_registry(registry, generation)
     try:
         config, digest = source_configuration()
         configured, reason = True, None
