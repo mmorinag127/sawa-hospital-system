@@ -14,7 +14,7 @@ env:
   NODE_OPTIONS: --use-openssl-ca
   PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
   GOOGLE_OAUTH_CLIENT_ID: 167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com
-  BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend@sha256:6849b09bde677227dc29771b7c9b1c0e69a853969f07e8f5f8ac46461e764312
+  BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend@sha256:42e9e7536384881ecd0bde2d075573f963a36f2d86a78e5b812603e1dfe815a0
 
 jobs:
   source-gate:
@@ -91,11 +91,13 @@ jobs:
           docker build --build-arg "BASE_IMAGE=$base_image" --label "sawa.git_sha=$GITHUB_SHA" \
             --label "sawa.export_source_base=7ae61ee1033776e2c413a621a2013c4c93002df4" -t "$image" "$deploy_dir"
           docker push "$image"
+          image="$(docker inspect --format='{{index .RepoDigests 0}}' "$image")"
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          candidate_image="${image}-readonly-candidate"
+          candidate_image="${REGION}-docker.pkg.dev/${PROJECT_ID}/backend/backend:prod-source-export-${GITHUB_SHA}-readonly-candidate"
           printf 'FROM %s\nENV UPLOADED_PDF_RECOVERY_ENABLED=0\n' "$image" > "$RUNNER_TEMP/Dockerfile.source-candidate"
           docker build -f "$RUNNER_TEMP/Dockerfile.source-candidate" -t "$candidate_image" "$RUNNER_TEMP"
           docker push "$candidate_image"
+          candidate_image="$(docker inspect --format='{{index .RepoDigests 0}}' "$candidate_image")"
           echo "candidate_image=$candidate_image" >> "$GITHUB_OUTPUT"
 
   production-approval:
@@ -175,13 +177,23 @@ jobs:
         env:
           DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
         run: python scripts/prod_source_export_preflight.py preflight verification/source-proof.json
+      - name: Restore the known healthy original recovery configuration
+        env:
+          DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+        run: |
+          python scripts/prod_source_export_preflight.py restore-original
+          python scripts/prod_source_export_preflight.py verify verification/source-proof.json
+      - name: Assign exact revisions for this run
+        run: |
+          echo "CANDIDATE_REVISION=worker-prod-se${GITHUB_RUN_ID}c${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          echo "NORMAL_REVISION=worker-prod-se${GITHUB_RUN_ID}n${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
       - name: Create the API candidate with no business traffic
         env:
           IMAGE: ${{ needs.build-backend.outputs.candidate_image }}
         run: |
           set -euo pipefail
           gcloud run deploy worker-prod --project="$PROJECT_ID" --region="$REGION" \
-            --image="$IMAGE" --no-traffic --tag=staging-source-api --quiet
+            --image="$IMAGE" --revision-suffix="${CANDIDATE_REVISION#worker-prod-}" --no-traffic --tag=staging-source-api --quiet
           gcloud run services describe worker-prod --project="$PROJECT_ID" --region="$REGION" \
             --format='json(status.traffic)' > verification/runtime.json
           python scripts/prod_source_export_preflight.py candidate verification/runtime.json
@@ -202,20 +214,31 @@ jobs:
         env:
           COORDINATOR_PROBE_ID_TOKEN: ${{ steps.coordinator-auth.outputs.id_token }}
         run: python scripts/prod_source_export_preflight.py probe verification/coordinator-proof.json
-      - name: Roll out the approved API with the original recovery configuration
-        if: success()
+      - name: Prepare and verify the exact normal revision before routing
         env:
           IMAGE: ${{ needs.build-backend.outputs.image }}
+          EXACT_IMAGE: ${{ needs.build-backend.outputs.image }}
+          DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
         run: |
           set -euo pipefail
-          gcloud run deploy worker-prod --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" --quiet
-          revision="$(gcloud run services describe worker-prod --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
-          gcloud run services update-traffic worker-prod --project="$PROJECT_ID" --region="$REGION" --to-revisions="${revision}=100" --quiet
-          echo 'CANDIDATE_URL=' >> "$GITHUB_ENV"
-      - name: Verify canonical production origin
+          gcloud run deploy worker-prod --project="$PROJECT_ID" --region="$REGION" --image="$IMAGE" \
+            --revision-suffix="${NORMAL_REVISION#worker-prod-}" --no-traffic --tag=staging-source-normal --quiet
+          export EXACT_REVISION="$NORMAL_REVISION"
+          python scripts/prod_source_export_preflight.py exact-revision
+          export CANDIDATE_URL="$(gcloud run services describe worker-prod --project="$PROJECT_ID" --region="$REGION" --format=json | python -c 'import json,sys; print(next(r["url"] for r in json.load(sys.stdin)["status"]["traffic"] if r.get("tag")=="staging-source-normal"))')"
+          python scripts/prod_source_export_preflight.py verify verification/source-proof.json
+          gcloud run services update-traffic worker-prod --project="$PROJECT_ID" --region="$REGION" --to-revisions="${NORMAL_REVISION}=100" --quiet
+          export REQUIRE_SERVING=true
+          python scripts/prod_source_export_preflight.py exact-revision
+          export CANDIDATE_URL=
+          python scripts/prod_source_export_preflight.py verify verification/source-proof.json
+      - name: Restore original normal production on any rollout failure
+        if: failure()
         env:
           DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
-        run: python scripts/prod_source_export_preflight.py verify verification/source-proof.json
+        run: |
+          python scripts/prod_source_export_preflight.py restore-original
+          CANDIDATE_URL= python scripts/prod_source_export_preflight.py verify verification/source-proof.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

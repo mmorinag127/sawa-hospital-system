@@ -9,6 +9,9 @@ import requests
 
 BASE = '7ae61ee1033776e2c413a621a2013c4c93002df4'
 IMAGE = 'asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend@sha256:6c4bc8df1ca25b7eb0793a4b28aa89622cfc98356f1479247d5ed407e935a2f7'
+ORIGINAL_REVISION = 'worker-prod-00590-d2l'
+REPAIR_REVISION = 'worker-prod-00701-tuh'
+REPAIR_IMAGE = 'asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend@sha256:f7e87a1cc2ebf59d40df4aecb9814ee8ec37705fef74be71f279e766c76afd01'
 ALLOWED = {'.github/workflows/deploy-prod.yml', '.github/workflows/deploy-prod-source-export.yml', 'backend/src/main.py', 'backend/src/api/staging_source_settings.py',
            'backend/tests/unit/test_staging_source_settings.py', 'backend/src/services/staging_source_boot_readonly.py', 'scripts/prod_source_export_preflight.py',
            'docs/prod_source_export_approval_20261023.md'}
@@ -35,11 +38,12 @@ def live_service():
 def preflight(output):
     require_actions()
     live=live_service();traffic=[r for r in live['status']['traffic'] if r.get('percent',0)>0]
-    if len(traffic)!=1 or traffic[0]['percent']!=100 or traffic[0]['revisionName']!='worker-prod-00590-d2l':
+    if len(traffic)!=1 or traffic[0]['percent']!=100 or traffic[0]['revisionName'] not in {ORIGINAL_REVISION, REPAIR_REVISION}:
         raise RuntimeError('Serving production source changed')
     revision=json.loads(subprocess.check_output(['gcloud','run','revisions','describe',traffic[0]['revisionName'],
         '--project=sawahospitalsystem','--region=asia-northeast2','--format=json'],text=True))
-    if revision['status']['imageDigest']!=IMAGE:
+    expected_image = IMAGE if traffic[0]['revisionName']==ORIGINAL_REVISION else REPAIR_IMAGE
+    if revision['status']['imageDigest']!=expected_image:
         raise RuntimeError('Serving production image changed')
     environment=revision['spec']['containers'][0].get('env',[])
     if any(item['name']=='UPLOADED_PDF_RECOVERY_ENABLED' for item in environment):
@@ -53,7 +57,7 @@ def preflight(output):
     if {k:v for k,v in actual.items() if k!='facilities'} != {k:v for k,v in candidate.items() if k!='facilities'}:
         raise RuntimeError('Production runtime configuration differs from immutable build source')
     # Full content stays only in this ephemeral runner; upload hashes/counts only.
-    result={'base_sha':BASE,'before_revision':traffic[0]['revisionName'],'before_image':IMAGE,
+    result={'base_sha':BASE,'before_revision':traffic[0]['revisionName'],'before_image':expected_image,
         'effective_master_sha256':hashlib.sha256(json.dumps(actual,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest(),
         'facility_count':len(actual['facilities']),'immutable_globals_match':True,
         'ingest_blob_sha256':hashlib.sha256(Path('backend/src/data/ingest_policy.template.json').read_bytes()).hexdigest()}
@@ -95,8 +99,41 @@ def verify(output):
     Path(output).write_text(json.dumps(before,indent=2)+'\n')
 
 
+def revision_image(name):
+    value=json.loads(subprocess.check_output(['gcloud','run','revisions','describe',name,
+        '--project=sawahospitalsystem','--region=asia-northeast2','--format=json'],text=True))
+    if not any(c.get('type')=='Ready' and c.get('status')=='True' for c in value['status'].get('conditions',[])):
+        raise RuntimeError('Exact revision is not ready')
+    return value['status']['imageDigest']
+
+
+def restore_original():
+    require_actions()
+    traffic=[r for r in live_service()['status']['traffic'] if r.get('percent',0)>0]
+    allowed={ORIGINAL_REVISION,REPAIR_REVISION,os.getenv('NORMAL_REVISION'),os.getenv('CANDIDATE_REVISION')}
+    if any(r['revisionName'] not in allowed for r in traffic):
+        raise RuntimeError('Unrelated production traffic prevents automatic rollback')
+    if revision_image(ORIGINAL_REVISION)!=IMAGE:
+        raise RuntimeError('Original production revision image changed')
+    subprocess.run(['gcloud','run','services','update-traffic','worker-prod','--project=sawahospitalsystem',
+        '--region=asia-northeast2','--to-revisions='+ORIGINAL_REVISION+'=100','--quiet'],check=True)
+
+
+def exact_revision():
+    require_actions()
+    name=os.environ['EXACT_REVISION']; expected=os.environ['EXACT_IMAGE']
+    if revision_image(name)!=expected:
+        raise RuntimeError('Exact deployed revision image differs from built digest')
+    if os.getenv('REQUIRE_SERVING')=='true':
+        traffic=[r for r in live_service()['status']['traffic'] if r.get('percent',0)>0]
+        if len(traffic)!=1 or traffic[0]['revisionName']!=name or traffic[0]['percent']!=100:
+            raise RuntimeError('Canonical traffic does not serve exact normal revision')
+
+
 if __name__=='__main__':
-    if sys.argv[1]=='preflight':preflight(sys.argv[2])
+    if sys.argv[1]=='restore-original':restore_original()
+    elif sys.argv[1]=='exact-revision':exact_revision()
+    elif sys.argv[1]=='preflight':preflight(sys.argv[2])
     elif sys.argv[1]=='verify':verify(sys.argv[2])
     elif sys.argv[1]=='probe':probe(sys.argv[2])
     elif sys.argv[1]=='source-gate':require_actions()

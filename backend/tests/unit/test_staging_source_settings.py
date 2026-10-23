@@ -104,3 +104,39 @@ def test_native_export_uses_exact_source_snapshot_and_never_rewrites_current_row
     with database.connect() as connection:
         assert connection.execute(select(Facility.name).where(Facility.id=='synthetic-export')).scalar_one()=='concurrent current name'
     database.dispose()
+
+
+def _rollout_script():
+    import importlib.util
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('export_rollout',Path(__file__).resolve().parents[3]/'scripts/prod_source_export_preflight.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
+
+def test_rollout_requires_exact_ready_digest_and_exact_serving_revision(monkeypatch):
+    rollout=_rollout_script()
+    monkeypatch.setattr(rollout,'require_actions',lambda:None)
+    monkeypatch.setenv('EXACT_REVISION','worker-prod-normal')
+    monkeypatch.setenv('EXACT_IMAGE','image@sha256:normal')
+    monkeypatch.setenv('REQUIRE_SERVING','true')
+    monkeypatch.setattr(rollout,'revision_image',lambda name:'image@sha256:normal')
+    monkeypatch.setattr(rollout,'live_service',lambda:{'status':{'traffic':[{'revisionName':'worker-prod-candidate','percent':100}]}})
+    with pytest.raises(RuntimeError,match='exact normal revision'):rollout.exact_revision()
+    monkeypatch.setattr(rollout,'live_service',lambda:{'status':{'traffic':[{'revisionName':'worker-prod-normal','percent':100}]}})
+    rollout.exact_revision()
+    monkeypatch.setattr(rollout,'revision_image',lambda name:'image@sha256:candidate')
+    with pytest.raises(RuntimeError,match='built digest'):rollout.exact_revision()
+
+
+def test_rollout_rollback_preserves_unrelated_revision(monkeypatch):
+    rollout=_rollout_script();calls=[]
+    monkeypatch.setattr(rollout,'require_actions',lambda:None)
+    monkeypatch.setattr(rollout,'revision_image',lambda name:rollout.IMAGE)
+    monkeypatch.setattr(rollout.subprocess,'run',lambda *a,**k:calls.append(a))
+    monkeypatch.setattr(rollout,'live_service',lambda:{'status':{'traffic':[{'revisionName':'external-new-revision','percent':100}]}})
+    with pytest.raises(RuntimeError,match='Unrelated'):rollout.restore_original()
+    assert calls==[]
+    monkeypatch.setattr(rollout,'live_service',lambda:{'status':{'traffic':[{'revisionName':rollout.REPAIR_REVISION,'percent':100}]}})
+    rollout.restore_original()
+    assert '--to-revisions='+rollout.ORIGINAL_REVISION+'=100' in calls[0][0]
