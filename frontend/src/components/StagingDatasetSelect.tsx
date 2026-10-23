@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DATASET_KEY, DATASET_GENERATION, documentDatasetMatches } from "../services/stagingDataset";
 
 type Choice = { id: string; label: string; available: boolean; snapshot_at?: string };
-type Refresh = { configured: boolean; blocked_reason?: string; job?: { id: string; phase: string; component?: string; error?: string; missing_at_source?: Record<string, number> } | null };
+type Refresh = { configured: boolean; blocked_reason?: string; refresh_components?: string[]; retained_components?: string[]; job?: { id: string; phase: string; component?: string; error?: string; missing_at_source?: Record<string, number> } | null };
 type State = { enabled: boolean; selected?: string; options?: Choice[]; error?: string | null };
 
 function headers(): Record<string, string> {
@@ -155,6 +155,8 @@ export default function StagingDatasetSelect() {
     <details>
       <summary>本番コピーを更新</summary>
       <p>本番のDB・PDF・設定から新しいコピーを作成します。既存テストDBと以前のコピーは保持します。</p>
+      {refresh?.configured && refresh.refresh_components?.length ? <p>更新：{refresh.refresh_components.map(name => (({ order: "病院注文", shift: "シフト", "school-lunch": "学校給食" } as Record<string, string>)[name] || name)).join("・")}</p> : null}
+      {refresh?.configured && refresh.retained_components?.length ? <p>既存コピーを保持：{refresh.retained_components.map(name => (({ order: "病院注文", shift: "シフト", "school-lunch": "学校給食" } as Record<string, string>)[name] || name)).join("・")}</p> : null}
       {refresh && !refresh.configured ? <p role="status">本番の同期元が未設定です。DB・PDF・設定の接続設定後に更新できます。</p> : null}
       <button type="button" disabled={!refresh?.configured || refreshBusy || (!!refreshPhase && !["queued", "succeeded", "failed"].includes(refreshPhase))}
         onClick={() => void startRefresh()}>{refreshBusy ? "更新を開始中…" : refreshPhase === "queued" ? "更新を再送" : "本番データからコピーを更新"}</button>

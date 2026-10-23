@@ -244,7 +244,7 @@ jobs:
           PYTHONPATH: backend
         run: |
           set -euo pipefail
-          DB_URI="sqlite:///$RUNNER_TEMP/copy-refresh-contract.sqlite" python -m pytest backend/tests/unit/test_staging_copy_refresh.py backend/tests/unit/test_staging_runtime_settings.py -q
+          DB_URI="sqlite:///$RUNNER_TEMP/copy-refresh-contract.sqlite" python -m pytest backend/tests/unit/test_staging_copy_refresh.py backend/tests/unit/test_staging_runtime_settings.py backend/tests/unit/test_staging_retained_component.py backend/tests/unit/test_staging_source_probe.py backend/tests/unit/test_staging_prod_settings_transport.py -q
           python scripts/test_staging_copy_refresh_native.py
           DB_URI="sqlite:///$RUNNER_TEMP/copy-refresh-producer.sqlite" PYTHONPATH=ocr_pipeline:backend python -m unittest discover -s ocr_pipeline/tests -p test_main.py -v
       - name: Verify OCR review-resolution root regression

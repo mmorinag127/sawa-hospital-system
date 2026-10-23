@@ -57,14 +57,30 @@ def source_configuration():
         if config.get("schema") != 1 or set(config.get("components", {})) != {"order", "shift", "school-lunch"}:
             raise ValueError()
         for name, entry in config["components"].items():
+            if entry.get("mode") == "retain":
+                if set(entry) != {"mode", "snapshot", "destination_bucket"}:
+                    raise ValueError()
+                retained = datasets.retained_snapshot(entry["snapshot"])
+                if datasets._staging_uri(retained["uri"]).netloc != entry["destination_bucket"]:
+                    raise ValueError()
+                continue
             required = {"source_service", "destination_service", "settings_keys", "expected_migration_heads", "source_buckets", "local_objects", "destination_bucket"}
             if name == "order":
                 required.add("producer_service")
-            if (set(entry) != required or not isinstance(entry["expected_migration_heads"], list)
+            if (not required <= set(entry) or set(entry) - required - {"source_migration_heads", "settings_mode"} or not isinstance(entry["expected_migration_heads"], list)
                     or not entry["expected_migration_heads"] or not isinstance(entry["source_buckets"], list)
                     or not entry["source_buckets"]
                     or any(not isinstance(head, str) or not re.fullmatch(r"[A-Za-z0-9_]+", head) for head in entry["expected_migration_heads"])):
                 raise ValueError()
+            if "settings_mode" in entry and (name != "order" or entry["settings_mode"] != "runtime_export"
+                    or entry["source_service"] != "projects/sawahospitalsystem/locations/asia-northeast2/services/worker-prod"):
+                raise ValueError()
+            if "source_migration_heads" in entry:
+                heads = entry["source_migration_heads"]
+                if (not isinstance(heads, list) or (not heads and name != "order")
+                        or any(not isinstance(head, str) or not re.fullmatch(r"[A-Za-z0-9_]+", head) for head in heads)
+                        or name not in {"order", "shift"}):
+                    raise ValueError()
             service_roles = [("source_service", "prod"), ("destination_service", "stg")]
             if name == "order":
                 service_roles.append(("producer_service", "prod"))
@@ -83,6 +99,8 @@ def source_configuration():
             if (not isinstance(entry["local_objects"], dict)
                     or any(not datasets.local_source_reference(reference) for reference in entry["local_objects"])):
                 raise ValueError()
+        if all(entry.get("mode") == "retain" for entry in config["components"].values()):
+            raise ValueError()
         return config, hashlib.sha256(raw).hexdigest()
     except (AttributeError, KeyError, ValueError, TypeError):
         raise RefreshError("production_source_configuration_invalid") from None
@@ -92,13 +110,15 @@ def status():
     _require_staging()
     registry, _ = datasets.read_registry()
     try:
-        _, digest = source_configuration()
+        config, digest = source_configuration()
         configured, reason = True, None
     except RefreshError as exc:
-        configured, reason, digest = False, str(exc), None
+        configured, reason, digest, config = False, str(exc), None, {"components": {}}
     return {"configured": configured, "blocked_reason": reason,
             "source_configuration_sha256": digest, "active_dataset": registry["active"],
-            "job": registry.get("refresh")}
+            "job": registry.get("refresh"),
+            "refresh_components": [name for name, entry in config["components"].items() if entry.get("mode") != "retain"],
+            "retained_components": [name for name, entry in config["components"].items() if entry.get("mode") == "retain"]}
 
 
 def request_refresh(request_id):

@@ -636,3 +636,22 @@ def test_literal_empty_business_env_is_preserved_and_is_not_a_secret_reference(m
     environment, _ = engine.runtime_environment(service_name, data.RUNTIME_BACKEND_KEYS)
     assert environment['GEMINI_OCR_MODEL'] == ''
     assert 'OPENAI_OCR_MODEL' not in environment
+
+
+def test_partial_refresh_never_clones_or_copies_school_business_objects(control, storage, build_environment, monkeypatch):
+    config, job, targets = build_environment
+    parent = {**control['value']['snapshots'][OLD], 'id': OLD, 'runtime_settings_provenance': 'legacy_stg_runtime'}
+    monkeypatch.setenv('SAWA_STG_REPLAY_MANIFEST_SHA256', parent['sha256'])
+    config['components']['school-lunch'] = {'mode': 'retain', 'snapshot': parent, 'destination_bucket': 'fixture-school-stg'}
+    initial = deepcopy(data._read_manifest(parent['uri'], parent['sha256'])['components']['school-lunch'])
+    published = engine.build_snapshot(job, config, lambda *args: None)
+    value = data._read_manifest(published['uri'], published['sha256'])
+    assert len(targets) == 2
+    assert {item[0] for item in targets} == {'fixture:region:order-prod', 'fixture:region:shift-prod'}
+    assert value['components']['school-lunch'] == initial
+    assert value['retained_components']['school-lunch'] == parent
+    assert not any(bucket == 'fixture-school-stg' and '/objects/' in key for bucket, key in storage.values)
+    assert control['value']['active'] == OLD
+    service.checkpoint(job, 'succeeded', published=published)
+    assert control['value']['active'] == job['dataset']
+    assert control['value']['snapshots'][OLD]['sha256'] == parent['sha256']
