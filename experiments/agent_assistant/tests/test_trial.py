@@ -279,7 +279,10 @@ def test_stop_reaps_local_writes_even_when_provider_stop_unknown(tmp_path):
     store, sandbox, tools, run = prepared(tmp_path)
     store.update(run["id"], session_id="sesn-unknown")
     calls = []
-    async def local_stop(ident): calls.append(ident)
+    async def local_stop(ident, *, expected_generation=None):
+        assert expected_generation == store.get(ident)["generation"]
+        calls.append(ident)
+        return True
     sandbox.stop = local_stop
     class Sessions:
         async def retrieve(self, _): raise httpx.ConnectError("synthetic network failure")
