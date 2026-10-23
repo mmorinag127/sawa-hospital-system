@@ -80,9 +80,40 @@ def _table_tokens(sql):
     return [tokens[:opening], columns, sorted(constraints), tokens[closing + 1:]]
 
 
+def _restored_text_array_casts(expression):
+    """pg_dump may distribute a text[] cast over varchar literal elements."""
+    literal = r"'(?:''|[^'])*'"
+    element = literal + r"::character varying::text"
+    pattern = re.compile(r"ARRAY\[(" + element + r"(?:, " + element + r")*)\]")
+
+    def array(match):
+        values = re.sub("(" + literal + r")::character varying::text",
+                        lambda item: item.group(1) + "::character varying", match.group(1))
+        return "ARRAY[" + values + "]::text[]"
+
+    # Do not interpret ARRAY-looking text inside SQL literals or quoted names.
+    tokens = re.finditer(literal + r'|"(?:""|[^"])*"|[A-Za-z_][A-Za-z_0-9]*|.', expression, re.S)
+    replacements = []
+    for token in tokens:
+        if token.group() == "ARRAY":
+            match = pattern.match(expression, token.start())
+            if match:
+                replacements.append((match.start(), match.end(), array(match)))
+    for start, end, value in reversed(replacements):
+        expression = expression[:start] + value + expression[end:]
+    return expression
+
+
 def _comparison_catalog(catalog):
     result = json.loads(json.dumps(catalog))
     for shape in result["tables"].values():
+        for constraint in shape.get("checks", []):
+            if isinstance(constraint, dict) and isinstance(constraint.get("sqltext"), str):
+                constraint["sqltext"] = _restored_text_array_casts(constraint["sqltext"])
+        for constraint in shape.get("native_constraints", []):
+            if (isinstance(constraint, list) and len(constraint) == 9
+                    and constraint[1] == "c" and isinstance(constraint[-1], str)):
+                constraint[-1] = _restored_text_array_casts(constraint[-1])
         for index in shape.get("indexes", []):
             options = index.get("dialect_options", {})
             if "include_columns" in index and "postgresql_include" in options:

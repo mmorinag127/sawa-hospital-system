@@ -1,3 +1,5 @@
+
+from src.staging_data import school_runtime_setting as _runtime_setting
 """Gemini inference of cooking processes for ONE menu, never floor geometry."""
 import json
 import os
@@ -241,13 +243,13 @@ def build_prompt(name, instructions, material_instructions, plan, examples):
 
 
 def generate(prompt, *, schema=None):
-    model = os.getenv('PROCESS_GEMINI_MODEL', '').strip()
+    model = _runtime_setting('PROCESS_GEMINI_MODEL', '').strip()
     api_key = os.getenv('GEMINI_API_KEY', '').strip() or os.getenv('GOOGLE_API_KEY', '').strip()
     if not model or not api_key:
         raise HTTPException(503, '工程推測のGemini設定がありません。PROCESS_GEMINI_MODEL と GEMINI_API_KEY（またはGOOGLE_API_KEY）を設定してください。手動編集・保存は利用できます。')
     if not re.fullmatch(r'gemini-[A-Za-z0-9._-]+', model):
         raise HTTPException(503, '工程推測のGemini設定が不正です')
-    base = os.getenv('GEMINI_API_BASE', 'https://generativelanguage.googleapis.com/v1beta').rstrip('/')
+    base = _runtime_setting('GEMINI_API_BASE', 'https://generativelanguage.googleapis.com/v1beta').rstrip('/')
     url = f'{base}/models/{urllib.parse.quote(model, safe="")}:generateContent'
     try:
         response = requests.post(url, headers={

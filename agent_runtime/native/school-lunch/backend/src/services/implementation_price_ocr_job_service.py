@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from src.staging_data import school_runtime_setting as _runtime_setting
+
+
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -250,8 +253,8 @@ def create_ocr_job(*, facility_id: int, document_type: str, filename: str, pdf_b
     job_id = uuid4().hex
     storage = implementation_price_storage.get_write_storage()
     stored_pdf_ref = storage.save_pdf(job_id=job_id, filename=filename, pdf_bytes=pdf_bytes)
-    effective_dpi = int(os.getenv("IMPLEMENTATION_PRICE_OCR_DPI", "200")) if dpi is None else dpi
-    effective_device = (os.getenv("IMPLEMENTATION_PRICE_OCR_DEVICE", "cpu").strip() or "cpu") if device is None else device
+    effective_dpi = int(_runtime_setting("IMPLEMENTATION_PRICE_OCR_DPI", "200")) if dpi is None else dpi
+    effective_device = (_runtime_setting("IMPLEMENTATION_PRICE_OCR_DEVICE", "cpu").strip() or "cpu") if device is None else device
     source = {"schema": 1, "pdf_reference": stored_pdf_ref, "pdf_sha256": sha256(pdf_bytes).hexdigest(),
               "storage_version": implementation_price_storage.storage_identity(stored_pdf_ref),
               "document_type": normalized_type, "filename": str(filename or "").strip(),
@@ -318,6 +321,15 @@ def retry_failed_ocr_job(job_id: str, *, facility_id: int) -> dict[str, Any]:
         execution.source_contract(job)
         if job.status == JOB_STATUS_SUCCEEDED:
             raise OcrJobConflictError("succeeded jobs cannot be retried")
+        if job.status == JOB_STATUS_QUEUED and not job.dispatch_error_message:
+            saved = delivery_service.intent(job)
+            if (saved["state"] == "pending" and saved["mode"] == mode
+                    and saved.get("input_digest") == job.input_digest
+                    and saved.get("business_attempt_id") == job.business_attempt_id
+                    and saved["expected_attempt_count"] == job.attempt_count):
+                # Resume the committed transport, without a new business attempt
+                # or generation. Dispatch still verifies the exact provider task.
+                return serialize_job(job)
         if job.status == JOB_STATUS_QUEUED and job.dispatch_error_message:
             delivery_service.new_intent(job, mode=mode)
             job.dispatch_error_message = None
