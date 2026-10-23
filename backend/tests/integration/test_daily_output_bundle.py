@@ -134,6 +134,64 @@ def _make_context(order_id: str, facility_code: str, facility_name: str, menu_na
     }
 
 
+def _declared_reference_groups(groups):
+    """Pure workbook component: explicit physical column semantics, no OCR proof."""
+    from copy import deepcopy
+    groups = deepcopy(groups)
+    columns = [
+        {"name": label, "header": label, "source": "quantity", "diet_type": diet,
+         "area_id": "2F", "column_index": index}
+        for index, (label, diet) in enumerate([
+            ("常食", "regular"), ("職員", "staff"), ("肉禁", "no_meat"),
+            ("魚禁", "no_fish"), ("その他", "change_1")], 5)]
+    for group in groups.values():
+        group["invoice_template"] = {"columns": deepcopy(columns)}
+        for context in group["contexts"]:
+            context["ocr_menu_meta"] = None
+    return groups
+
+
+def _authored_weekday_reference(tmp_path, monkeypatch):
+    """Explicit placeholder tests weekday rewriting, not a cached formula guess."""
+    book = load_workbook(output_builder.DAILY_DELIVERY_REFERENCE_TEMPLATE)
+    book.worksheets[0]["A17"] = "(月)"
+    path = tmp_path / "authored-weekday-reference.xlsx"
+    book.save(path)
+    monkeypatch.setattr(output_builder, "DAILY_DELIVERY_REFERENCE_TEMPLATE", path)
+
+
+def _owned_delivery_rows(monkeypatch, tmp_path, order, template, quantity_rules,
+                         facility_config, _old_menu_meta, *, allow_ocr_menu_meta, declared_slots):
+    """Real owned component; explicit monthly slots replace legacy row guessing."""
+    from src.db import session_scope
+    from src.models.menu import MonthlyMenuEntry, MonthlyMenuItem
+    from src.services import menu_service
+    from tests.helpers.newnarrowbaggingfixture import selected_bagging_order, accepted_bagging_order
+    assert allow_ocr_menu_meta is False
+    lines = [{**line, "date": str(line["date"]), "bag_type": "standard"}
+             for line in order["lines"]]
+    assert set(declared_slots) == {line["menu_name"] for line in lines}
+    options = dict(facility_id=order["facility"], menu_qty_per_serving=1, menu_unit_type="g",
+        menu_category="主菜", daily_label_comparable_diet_types=["regular"],
+        physical_slot_indexes={name: spec[1] for name, spec in declared_slots.items()})
+    original = selected_bagging_order(monkeypatch, tmp_path, lines, prepare_only=True, **options)
+    with session_scope() as session:
+        entries = session.query(MonthlyMenuEntry).filter_by(facility_override=order["facility"]).all()
+        assert {entry.name for entry in entries} == set(declared_slots)
+        for entry in entries:
+            entry.category = declared_slots[entry.name][0]
+        items = [(item.monthly_menu_id, item.id, item.name) for item in
+                 session.query(MonthlyMenuItem).filter_by(facility_override=order["facility"]).all()]
+    for month, item_id, name in items:
+        assert menu_service.update_item(month, item_id, {"category": declared_slots[name][0]}) is True
+    accepted = accepted_bagging_order(monkeypatch, tmp_path, lines,
+        prepared_sources=True, prepared_original=original, **options)
+    context = output_builder._prepare_output_context_for_bundle(accepted["id"],
+        include_bags=False, include_ocr_menu_meta=True, include_expanded_copy=False, require_invoice=False)
+    return output_builder._build_delivery_rows(context["order_for_outputs"], template,
+        quantity_rules, context["facility_config"], context["ocr_menu_meta"], allow_ocr_menu_meta=True)
+
+
 def test_write_delivery_note_blocks_when_template_uri_missing(tmp_path):
     with pytest.raises(ValueError, match="delivery_template_uri_required"):
         output_builder._write_delivery_note(
@@ -170,7 +228,7 @@ def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, mon
             {"name": "献立", "source": "menu_display", "column_index": 3},
             {"name": "常食common", "source": "quantity", "diet_type": "regular",
              "area_id": "common", "column_index": 4},
-        ]})
+        ]}, daily_label_comparable_diet_types=["regular"])
     with db.session_scope() as session:
         artifact = session.execute(select(OrderBaggingResult).where(
             OrderBaggingResult.order_id == registered["id"])).scalar_one()
@@ -181,8 +239,12 @@ def test_build_outputs_download_path_does_not_write_canonical_rows(tmp_path, mon
         upload = session.execute(select(UploadedPdf)).scalar_one()
         with fitz.open(upload.storage_uri) as pdf:
             text = "".join(page.get_text() for page in pdf)
+        # PDF extraction can insert spacing between positioned glyphs. Preserve
+        # every declared character independently of that extraction whitespace.
         for value in ("2026-03-22", "朝", "献立A", "regular / common / 2", upload.facility_hint):
-            assert value in text
+            assert "".join(value.split()) in "".join(text.split())
+        with fitz.open(upload.storage_uri) as pdf:
+            assert all(any(channel < 250 for channel in page.get_pixmap().samples) for page in pdf)
 
     def snapshot():
         with db.session_scope() as session:
@@ -351,13 +413,22 @@ def test_build_daily_output_bundle_label_csv_groups_orders_per_facility(tmp_path
 
 def test_daily_label_csv_zero_quantity_rows_keep_facility_diet_suffix(tmp_path, monkeypatch, isolated_formal_schema):
     from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+    from src.db import session_scope
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.services import order_workflow_v2_service as workflow
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
-    accepted_bagging_order(monkeypatch, tmp_path, [
+    registered = accepted_bagging_order(monkeypatch, tmp_path, [
         {"date": TARGET_DATE.isoformat(), "daypart": "昼", "menu_name": "カレイの照焼き",
          "diet_type": diet, "area_id": "X", "quantity_original": 0, "bag_type": "standard"}
         for diet in ("soft", "regular_bag")
     ], facility_id="FAC00005", menu_category="主菜", menu_qty_per_serving=100,
-        menu_unit_type="g", confirm=True)
+        menu_unit_type="g", daily_label_comparable_diet_types=["soft", "regular_bag"], confirm=True)
+    current, error = workflow.get_workflow_readonly(registered["id"])
+    assert error is None
+    with session_scope() as session:
+        sheet = session.get(OrderSheetDraft, current["saved_sheet_id"]).draft_sheet_json
+        assert sheet["fields"][-2:] == ["qty.soft_x", "qty.regular_bag_x"]
+        assert sheet["rows"][0][-2:] == [0, 0]
     bundle_path, summary = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="labels_csv")
     assert summary["success_orders"] == 1
     with zipfile.ZipFile(bundle_path) as archive:
@@ -473,7 +544,8 @@ def _selected_output(monkeypatch, tmp_path, engine, *, quantity=4, day=TARGET_DA
                   "diet_type": "regular", "area_id": "X", "bag_type": "standard",
                   "quantity_original": quantity}]
     registered, sheet = selected_bagging_order(
-        monkeypatch, tmp_path, lines, **{"facility_id": "FAC001", **authored})
+        monkeypatch, tmp_path, lines, **{"facility_id": "FAC001",
+            "daily_label_comparable_diet_types": ["regular"], **authored})
     return SimpleNamespace(id=registered["id"], root=tmp_path, engine=engine, sheet=sheet,
                            protected=tuple(p for p in tmp_path.rglob("*")
                                            if p.is_file() and "sqlite" not in p.name),
@@ -691,14 +763,15 @@ def test_nonwriting_materialization_rebuilds_blank_weekly_menu_from_canonical_bo
     assert f.sheet["rows"] == [["2026-05-10", "昼", "献立A", 12]]
     with _output_readonly(f):
         selected, error = workflow.build_sheet_from_selected_ocr(f.id)
-    # This external OCR component does not fabricate Hakodate image receipts.
-    assert selected is None and error == "hakodate_selected_evidence_lineage_missing"
+    assert error is None and selected is not None
+    assert selected["sheet"]["rows"] == [["05/10", "昼", "献立A", "12"]]
     with _output_readonly(f), session_scope() as session:
         state = session.get(OrderWorkflowState, f.id)
         evidence = session.get(OrderOcrEvidenceRun, state.evidence_run_id)
         assert evidence.order_id == f.id
-        assert evidence.payload_json["table_rows"] == [["05/10", "昼", "献立A", "12"]]
-        assert evidence.payload_json["input_sha256"] == sha256((tmp_path / "original.pdf").read_bytes()).hexdigest()
+        original_receipt = evidence.payload_json["hakodate_repair_source_receipt"]["selected_pdf_receipt"]
+        assert original_receipt["sha256"] == sha256(pathlib.Path(original_receipt["storage_uri"]).read_bytes()).hexdigest()
+        assert evidence.payload_json["hakodate_canonical_pipeline"]["artifact_packet"]
     sheet = deepcopy(f.sheet)
     sheet["fields"][0] = "date_mmdd"
     sheet["rows"] = [["05/10", "昼", "献立A", 4]]
@@ -772,26 +845,28 @@ def test_workflow_v2_lines_blocks_apply_ready_materializer_error_with_persisted_
     _assert_unaccepted_output(f, order_service.get_order_by_id(f.id))
 
 
-def test_workflow_v2_lines_blocks_mismatched_bagging_lineage_with_persisted_draft(monkeypatch):
-    order = {"id": "ORD-CANONICAL", "facility": "FAC001", "lines": [{"quantity_original": 4}]}
-    workflow = _persisted_workflow("apply_ready")
-    workflow.secondary_actions_json = {
-        "workflow_v2": {"bagging_result": {"source_saved_sheet_id": "ODS-OLDER"}}
-    }
-    _workflow_v2_session(monkeypatch, workflow=workflow, draft=_saved_draft())
-
-    def enrich(_session, meta, *, expected_order_id):
-        assert expected_order_id == "ORD-CANONICAL"
-        return meta
-
-    monkeypatch.setattr(
-        output_builder.order_output_artifact_service,
-        "enrich_workflow_meta_with_artifacts",
-        enrich,
-    )
-
-    with pytest.raises(ValueError, match="source does not match saved sheet"):
-        output_builder._workflow_v2_lines_for_outputs(order, order["lines"])  # noqa: SLF001
+def test_workflow_v2_lines_blocks_mismatched_bagging_lineage_with_persisted_draft(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
+    from src.db import session_scope
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_workflow_state import OrderWorkflowState
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, quantity=4)
+    _save_output(f, f.sheet)
+    _bag_output(f)
+    order = order_service.get_order_by_id(f.id)
+    with _output_readonly(f):
+        original_candidate = deepcopy(output_builder._accepted_output_candidate(order))
+    older_saved_id = f.saved_id
+    _save_output(f, f.sheet)
+    assert f.saved_id != older_saved_id
+    with _output_readonly(f), session_scope() as session:
+        with pytest.raises(ValueError, match="output original saved sheet identity mismatch"):
+            output_builder._validate_accepted_read_receipt(session, f.id,
+                session.get(OrderWorkflowState, f.id), session.get(OrderSheetDraft, f.saved_id),
+                original_candidate)
+        with pytest.raises(ValueError, match="saved-sheet acceptance receipt missing"):
+            output_builder._workflow_v2_lines_for_outputs(order, order["lines"])
+    assert f.sheet["rows"][0][-1] == 4
 
 
 def test_workflow_v2_lines_blocks_draft_order_mismatch_with_persisted_workflow(monkeypatch):
@@ -853,16 +928,18 @@ def test_workflow_v2_lines_blocks_persisted_workflow_without_draft_regardless_of
         output_builder._workflow_v2_lines_for_outputs(order, order["lines"])  # noqa: SLF001
 
 
-def test_totals_blocks_persisted_workflow_without_draft_when_payload_omits_workflow_state(monkeypatch):
-    order = SimpleNamespace(id="ORD-TOTALS")
-    order_payload = {"id": "ORD-TOTALS", "facility": "FAC001", "lines": [{"quantity_original": 4}]}
-    _workflow_v2_session(monkeypatch, workflow=_persisted_workflow("confirmed", draft_id=None), draft=None)
-    monkeypatch.setattr(total_service, "_iter_confirmed_orders", lambda *_args: [order])
-    monkeypatch.setattr(total_service, "serialize_order", lambda _order: order_payload)
-    monkeypatch.setattr(total_service.config_service, "load_ingest_policy", lambda: {"quantity_rules": {}})
-
-    with pytest.raises(ValueError, match="accepted saved sheet missing"):
-        total_service.build_totals(TARGET_DATE, TARGET_DATE)
+def test_totals_blocks_persisted_workflow_without_draft_when_payload_omits_workflow_state(monkeypatch, tmp_path, isolated_formal_schema):
+    from src.db import session_scope
+    from src.models.order import Order, OrderLine
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, quantity=4)
+    # Intentional inconsistent status, never a fake acceptance/confirmation receipt.
+    with session_scope() as session:
+        session.get(Order, f.id).status = "確定"
+        session.add(OrderLine(id="daily-unaccepted-line", line_id="daily-unaccepted-line", order_id=f.id,
+            date=TARGET_DATE, daypart="朝", menu_name="current", diet_type="regular",
+            area_id="X", bag_type="standard", quantity_original=4))
+    with _output_readonly(f), pytest.raises(ValueError, match="accepted saved sheet missing"):
+        total_service.build_totals(None, None)
 
 
 def test_workflow_v2_lines_blocks_missing_workflow_when_saved_sheet_is_required(monkeypatch):
@@ -877,18 +954,13 @@ def test_workflow_v2_lines_blocks_missing_workflow_when_saved_sheet_is_required(
         )
 
 
-def test_build_order_lines_for_outputs_requires_saved_sheet_for_output_review_state(monkeypatch):
-    order = {
-        "id": "ORD-REQUIRED",
-        "facility": "FAC001",
-        "lines": [{"menu_name": "old", "quantity_original": 4}],
-        "workflow_state": {"state": "output_review"},
-    }
-    _workflow_v2_session(monkeypatch, workflow=None, draft=None)
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility: {})
-
-    with pytest.raises(ValueError, match="accepted saved sheet missing"):
+def test_build_order_lines_for_outputs_requires_saved_sheet_for_output_review_state(monkeypatch, tmp_path, isolated_formal_schema):
+    f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema, quantity=4)
+    order = order_service.get_order_by_id(f.id)
+    order["workflow_state"] = {"state": "output_review"}
+    with _output_readonly(f), pytest.raises(ValueError, match="accepted saved sheet missing"):
         output_builder.build_order_lines_for_outputs(order, include_expanded_copy=False)
+    assert f.sheet["rows"][0][-1] == 4
 
 
 def test_workflow_v2_lines_blocks_lookup_failure_instead_of_assuming_raw_lines_are_canonical(monkeypatch):
@@ -1243,7 +1315,7 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
     assert workbook.sheetnames == ["ラベル_そよかぜ", "納品書_そよかぜ"]
 
 
-def test_weekly_weight_collect_rows_counts_diabetes_as_regular_and_excludes_forbidden(monkeypatch):
+def test_weekly_weight_collect_rows_preserves_raw_diabetes_and_matches_current_production_buckets(monkeypatch, tmp_path, isolated_formal_schema):
     target_date = dt_date(2026, 5, 12)
     source_lines = [
         {
@@ -1318,33 +1390,39 @@ def test_weekly_weight_collect_rows_counts_diabetes_as_regular_and_excludes_forb
         },
     ]
 
-    class RaisingSession:
-        def __enter__(self):
-            raise RuntimeError("force fallback")
+    from copy import deepcopy
+    from src.db import session_scope
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.services import order_workflow_v2_service as workflow
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(output_builder, "session_scope", lambda: RaisingSession())
-    monkeypatch.setattr(
-        output_builder.order_service,
-        "list_orders_by_line_date",
-        lambda current_date, status=None: [{"id": "ORD-WEIGHT"}] if current_date == target_date else [],
-    )
-    monkeypatch.setattr(
-        output_builder,
-        "_prepare_output_context_for_bundle",
-        lambda *args, **kwargs: {"order_lines": source_lines},
-    )
-    monkeypatch.setattr(output_builder.menu_service, "get_menu_entries_for_facility", lambda *args: [])
-
-    rows = output_builder._weekly_weight_collect_rows(target_date)  # noqa: SLF001
+    original = deepcopy(source_lines)
+    lines = [{**line, "date": target_date.isoformat(),
+        "diet_type": output_builder._normalize_delivery_diet_key(line["diet_type"]),
+        "area_id": "X", "bag_type": "standard",
+        "quantity_original": line["quantity_corrected"]} for line in source_lines]
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True,
+        menu_category="主Ａ", menu_qty_per_serving=100, menu_unit_type="g",
+        daily_label_comparable_diet_types=["regular", "daycare", "staff", "diabetes", "soft", "mixer"],
+        physical_slot_indexes={"麻婆茄子": 0})
+    current, error = workflow.get_workflow_readonly(order["id"])
+    assert error is None
+    with session_scope() as session:
+        saved = deepcopy(session.get(OrderSheetDraft, current["saved_sheet_id"]).draft_sheet_json)
+    quantities = dict(zip(saved["fields"][3:], saved["rows"][0][3:], strict=True))
+    assert quantities["qty.diabetes_x"] == 5
+    assert quantities["qty.no_meat_x"] == 6
+    assert source_lines == original
+    assert source_lines[3]["diet_type"] == "糖尿" and source_lines[3]["quantity_corrected"] == 5
+    rows = output_builder._weekly_weight_collect_rows(target_date)
     payload = rows[(target_date, "昼", "主Ａ")]
-
-    assert payload["regular_quantity"] == 445
-    assert payload["regular_amounts"] == {"g": 44500.0}
+    # Verified production SHA 9c16aa07 uses these same weekly aggregation buckets.
+    assert payload["regular_quantity"] == 440
+    assert payload["regular_amounts"] == {"g": 44000.0}
     assert payload["soft_mixer_quantity"] == 49
     assert payload["soft_mixer_amounts"] == {"g": 4900.0}
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, current["saved_sheet_id"]).draft_sheet_json == saved
 
 
 def test_weekly_weight_workbook_uses_reference_layout_and_calculated_values(tmp_path, monkeypatch):
@@ -1542,18 +1620,24 @@ def test_build_daily_output_bundle_raises_when_no_rows_for_target_date(tmp_path,
         raise AssertionError("ValueError was not raised")
 
 
-def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path):
+def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path, monkeypatch):
+    _authored_weekday_reference(tmp_path, monkeypatch)
     grouped_outputs = {
         "FAC00013": {
             "facility_code": "FAC00013",
             "facility_name": "いこいの森",
             "invoice_template": {},
-            "contexts": [],
+            "contexts": [{"order_for_outputs": {"id": "authored-evening-labels", "facility": "FAC00013",
+                "lines": [{"date": dt_date(2026, 5, 10), "daypart": "夕", "menu_name": menu,
+                    "menu_category": category, "diet_type": "regular", "area_id": "2F", "quantity_original": 0}
+                    for menu, category in [("煮込みハンバーグ", "主"), ("ジャーマンポテト", "副①"),
+                                           ("ほうれん草の和え物", "副②")]]},
+                "quantity_rules": {"zero_as_empty": False}, "facility_config": {"facility_name": "いこいの森"}}],
         }
     }
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 10),
-        grouped_outputs=grouped_outputs,
+        grouped_outputs=_declared_reference_groups(grouped_outputs),
     )
     output_path = tmp_path / "delivery.xlsx"
     workbook.save(output_path)
@@ -1562,22 +1646,23 @@ def test_reference_daily_delivery_materializes_static_formula_labels(tmp_path):
     ws = saved["いこいの森"]
 
     assert ws["A17"].value == "(日)"
-    assert ws["D17"].value == "煮込みハンバーグ"
-    assert ws["D18"].value == "ジャーマンポテト"
-    assert ws["D19"].value == "ほうれん草の和え物"
+    assert ws["D17"].value == "主 煮込みハンバーグ"
+    assert ws["D18"].value == "副① ジャーマンポテト"
+    assert ws["D19"].value == "副② ほうれん草の和え物"
 
 
-def test_reference_daily_delivery_rewrites_static_menu_cells_for_target_date(tmp_path):
+def test_reference_daily_delivery_rewrites_static_menu_cells_for_target_date(tmp_path, monkeypatch):
+    _authored_weekday_reference(tmp_path, monkeypatch)
     grouped_outputs = {
-        "FAC00007": {
-            "facility_code": "FAC00007",
-            "facility_name": "アイテラス",
+        "AUTHORED-YAMASHIRO": {
+            "facility_code": "AUTHORED-YAMASHIRO",
+            "facility_name": "山城",
             "invoice_template": {},
             "contexts": [
                 {
                     "order_for_outputs": {
                         "id": "ORD-menu-static",
-                        "facility": "FAC00007",
+                        "facility": "AUTHORED-YAMASHIRO",
                         "lines": [
                             {
                                 "date": dt_date(2026, 5, 26),
@@ -1598,7 +1683,7 @@ def test_reference_daily_delivery_rewrites_static_menu_cells_for_target_date(tmp
     }
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 26),
-        grouped_outputs=grouped_outputs,
+        grouped_outputs=_declared_reference_groups(grouped_outputs),
     )
     output_path = tmp_path / "delivery.xlsx"
     workbook.save(output_path)
@@ -1635,8 +1720,8 @@ def test_menu_master_defaults_fill_missing_temperature(monkeypatch):
 
 def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     grouped_outputs = {
-        "FAC00012": {
-            "facility_code": "FAC00012",
+        "AUTHORED-FUREAI": {
+            "facility_code": "AUTHORED-FUREAI",
             "facility_name": "ふれあいの丘",
             "invoice_template": {},
             "contexts": [],
@@ -1644,7 +1729,7 @@ def test_reference_daily_delivery_preserves_table_borders(tmp_path):
     }
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 10),
-        grouped_outputs=grouped_outputs,
+        grouped_outputs=_declared_reference_groups(grouped_outputs),
     )
     output_path = tmp_path / "delivery.xlsx"
     output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
@@ -1712,7 +1797,7 @@ def test_reference_daily_delivery_writing_values_does_not_change_template_border
 
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=TARGET_DATE,
-        grouped_outputs={
+        grouped_outputs=_declared_reference_groups({
             "FAC00009": {
                 "facility_code": "FAC00009",
                 "facility_name": "グループホームそよかぜ",
@@ -1739,7 +1824,7 @@ def test_reference_daily_delivery_writing_values_does_not_change_template_border
                     }
                 ],
             }
-        },
+        }),
     )
     output_path = tmp_path / "delivery.xlsx"
     workbook.save(output_path)
@@ -1790,8 +1875,8 @@ def test_delivery_slot_assignment_does_not_cross_daypart_when_template_section_i
 
 def test_reference_daily_delivery_writes_excel_readable_workbook(tmp_path):
     grouped_outputs = {
-        "FAC00012": {
-            "facility_code": "FAC00012",
+        "AUTHORED-FUREAI": {
+            "facility_code": "AUTHORED-FUREAI",
             "facility_name": "ふれあいの丘",
             "invoice_template": {},
             "contexts": [],
@@ -1799,7 +1884,7 @@ def test_reference_daily_delivery_writes_excel_readable_workbook(tmp_path):
     }
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 10),
-        grouped_outputs=grouped_outputs,
+        grouped_outputs=_declared_reference_groups(grouped_outputs),
     )
     output_path = tmp_path / "delivery.xlsx"
     output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
@@ -1856,6 +1941,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 40,
                 "menu_temp_type": "温菜",
                 "quantity": 9,
+                "daily_label_comparable_diet_types": ["soft"],
                 "area_name": "２階",
             },
             {
@@ -1870,6 +1956,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 100,
                 "menu_temp_type": "温菜",
                 "quantity": 9,
+                "daily_label_comparable_diet_types": ["soft"],
                 "area_name": "２階",
             },
             {
@@ -1884,6 +1971,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 100,
                 "menu_temp_type": "温菜",
                 "quantity": 6,
+                "daily_label_comparable_diet_types": ["soft"],
                 "area_name": "３階",
             },
             {
@@ -1898,6 +1986,7 @@ def test_daily_label_jp_sorts_floor_rows_by_menu_before_floor():
                 "menu_qty_per_serving": 40,
                 "menu_temp_type": "温菜",
                 "quantity": 6,
+                "daily_label_comparable_diet_types": ["soft"],
                 "area_name": "３階",
             },
         ],
@@ -1939,8 +2028,9 @@ def test_daily_label_jp_excludes_forbidden_diets():
     assert rows == []
 
 
-def test_delivery_rows_use_reference_slot_labels_and_order_for_html():
-    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+def test_delivery_rows_use_reference_slot_labels_and_order_for_html(monkeypatch, tmp_path, isolated_formal_schema):
+    rows = _owned_delivery_rows(  # Explicit dated authored slots, never row-order inference.
+        monkeypatch, tmp_path,
         {
             "id": "ORD-slots",
             "facility": "FAC00009",
@@ -2005,6 +2095,7 @@ def test_delivery_rows_use_reference_slot_labels_and_order_for_html():
         {"facility_name": "グループホームそよかぜ"},
         {},
         allow_ocr_menu_meta=False,
+        declared_slots={"豚肉と白菜のすき煮": ("主Ａ", 0), "さつま芋の天ぷら": ("副①", 1), "煮込みハンバーグ": ("主", 0), "ジャーマンポテト": ("副①", 1), "ほうれん草の和え物": ("副②", 2)},
     )
 
     assert [(row["daypart"], row["menu_category"], row["menu_name"]) for row in rows] == [
@@ -2016,8 +2107,9 @@ def test_delivery_rows_use_reference_slot_labels_and_order_for_html():
     ]
 
 
-def test_delivery_rows_use_four_lunch_reference_slots_for_event_food():
-    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+def test_delivery_rows_use_four_lunch_reference_slots_for_event_food(monkeypatch, tmp_path, isolated_formal_schema):
+    rows = _owned_delivery_rows(  # Explicit dated authored slots, never row-order inference.
+        monkeypatch, tmp_path,
         {
             "id": "ORD-20260921-event-lunch",
             "facility": "FAC00009",
@@ -2073,6 +2165,7 @@ def test_delivery_rows_use_four_lunch_reference_slots_for_event_food():
         {"facility_name": "グループホームそよかぜ"},
         {},
         allow_ocr_menu_meta=False,
+        declared_slots={"行事食主菜": ("主Ａ", 0), "行事食副菜一": ("副①", 1), "行事食副菜二": ("副②", 2), "行事食副菜三": ("副③", 3)},
     )
 
     assert [(row["menu_category"], row["menu_name"]) for row in rows] == [
@@ -2083,7 +2176,7 @@ def test_delivery_rows_use_four_lunch_reference_slots_for_event_food():
     ]
 
 
-def test_delivery_rows_use_reference_slots_when_source_categories_are_raw():
+def test_delivery_rows_use_reference_slots_when_source_categories_are_raw(monkeypatch, tmp_path, isolated_formal_schema):
     lines = []
     for index, (daypart, category, menu_name) in enumerate(
         [
@@ -2109,7 +2202,8 @@ def test_delivery_rows_use_reference_slots_when_source_categories_are_raw():
             }
         )
 
-    rows = output_builder._build_delivery_rows(  # noqa: SLF001
+    rows = _owned_delivery_rows(  # Explicit dated authored slots, never row-order inference.
+        monkeypatch, tmp_path,
         {"id": "ORD-raw-slots", "facility": "FAC00008", "lines": lines},
         {
             "columns": [
@@ -2124,6 +2218,7 @@ def test_delivery_rows_use_reference_slots_when_source_categories_are_raw():
         {"facility_name": "佐古"},
         {},
         allow_ocr_menu_meta=False,
+        declared_slots={"厚揚げと竹輪の煮物": ("副①", 0), "ほうれん草のお浸し": ("副②", 1), "ポークチャップ": ("主Ａ", 0), "マカロニソテー": ("副①", 1), "胡瓜のサラダ": ("副②", 2), "オムレツのカニ玉風": ("主", 0), "さつま芋の煮物": ("副①", 1), "三色ナムル": ("副②", 2)},
     )
 
     assert [(row["daypart"], row["menu_category"], row["menu_name"]) for row in rows] == [
@@ -2262,10 +2357,15 @@ def test_delivery_rows_put_hidden_sauce_and_manual_note_in_remarks(monkeypatch):
     assert rows[0]["note"] == "青魚1、添え10、ソース10"
 
 
-def test_authored_delivery_template_uses_display_menu_name():
+def test_authored_delivery_template_uses_display_menu_name(tmp_path):
+    physical = tmp_path / "authored-menu-display.xlsx"
+    book = Workbook()
+    book.active.append(["メニュー名", "常食"])
+    book.save(physical)
     template = output_builder._resolve_captured_invoice_template(
         {
             "invoice_template": {
+                "template_uri": physical.as_uri(),
                 "include_menu_name": True,
                 "columns": [
                         {"name": "メニュー名", "source": "menu_display"},
@@ -2328,39 +2428,27 @@ def test_daily_label_regular_bag_keeps_bag_split_suffix():
     assert "主菜（袋分け）" in categories
 
 
-def test_label_bags_apply_monthly_bag_max_before_splitting(monkeypatch):
-    order = {
-        "id": "ORD-bag-max",
-        "facility": "FAC00003",
-        "stored_week_value": "2026-06 (06/21-06/27)",
-        "lines": [
-            {
-                "date": TARGET_DATE,
-                "daypart": "昼",
-                "menu_name": "サワラの幽庵焼き",
-                "menu_category": "主菜",
-                "diet_type": "regular",
-                "area_id": "X",
-                "quantity_original": 25,
-            }
-        ],
-    }
-    monkeypatch.setattr(
-        output_builder,
-        "_collect_cached_menu_items_for_week",
-        lambda week_value, facility_id: [
-            {
-                "name": "サワラの幽庵焼き",
-                "unit_type": "切",
-                "qty_per_serving": 1,
-                "bag_max_qty": 9,
-                "bag_max_unit": "切",
-            }
-        ],
-    )
-
-    bags = output_builder.build_bag_rows_for_outputs(order, facility_config={"facility_name": "春日苑"})
-
+def test_label_bags_apply_monthly_bag_max_before_splitting(monkeypatch, tmp_path, isolated_formal_schema):
+    from src.db import session_scope
+    from src.models.menu import MonthlyMenuItem
+    from src.services import menu_service
+    from tests.helpers.newnarrowbaggingfixture import selected_bagging_order, accepted_bagging_order
+    lines = [{"date": TARGET_DATE.isoformat(), "daypart": "昼", "menu_name": "サワラの幽庵焼き",
+        "menu_category": "主菜", "diet_type": "regular", "area_id": "X",
+        "quantity_original": 25, "bag_type": "standard"}]
+    options = dict(facility_id="FAC00003", menu_qty_per_serving=1, menu_unit_type="切",
+                   menu_category="主菜", daily_label_comparable_diet_types=["regular"],
+                   physical_slot_indexes={"サワラの幽庵焼き": 0})
+    original = selected_bagging_order(monkeypatch, tmp_path, lines, prepare_only=True, **options)
+    with session_scope() as session:
+        item = session.query(MonthlyMenuItem).filter_by(
+            monthly_menu_id="2026-03", name="サワラの幽庵焼き", facility_override="FAC00003",
+            diet_type="regular").one()
+        item_id = item.id
+    assert menu_service.update_item("2026-03", item_id, {"bag_max_qty": 9, "bag_max_unit": "切"}) is True
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines,
+        prepared_sources=True, prepared_original=original, confirm=True, **options)
+    bags = output_builder.build_bag_rows_for_outputs(order)
     assert [bag["quantity"] for bag in bags] == [9, 9, 7]
     assert all(bag["menu_bag_max_qty"] == 9 for bag in bags)
 
@@ -2368,7 +2456,10 @@ def test_label_bags_apply_monthly_bag_max_before_splitting(monkeypatch):
 def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 10),
-        grouped_outputs={},
+        grouped_outputs=_declared_reference_groups({
+            "AUTHORED-YAMASHIRO": {"facility_code": "AUTHORED-YAMASHIRO", "facility_name": "山城", "contexts": []},
+            "FAC00005": {"facility_code": "FAC00005", "facility_name": "池袋病院", "contexts": []},
+        }),
     )
     output_path = tmp_path / "delivery.xlsx"
     output_builder._save_reference_daily_delivery_workbook_preserving_template_package(  # noqa: SLF001
@@ -2576,8 +2667,24 @@ def test_daily_bundle_blocks_embedding_templated_delivery_workbook(tmp_path):
 
 
 def test_list_orders_by_line_date_returns_latest_upload_first(owned_registration):
-    order_service.clear_all()
+    from src.db import session_scope
+    from src.models.menu import MenuMaster, MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
+    from src.services import menu_service
     target = dt_date(2026, 6, 7)
+    # Explicit authored recipe/physical menu before either formal registration.
+    with session_scope() as session:
+        session.add(MonthlyMenu(id="2026-06", month_start=dt_date(2026, 6, 1)))
+        session.add(MenuMaster(id="daily-list-menu", name="Menu", normalized_name=menu_service._normalize_menu_name("Menu"),
+            qty_per_serving=40, unit_type="g", category="主"))
+        session.flush()
+        for facility in ("FAC00008", "FAC00009"):
+            session.add(MonthlyMenuEntry(id="daily-list-entry-" + facility,
+                monthly_menu_id="2026-06", menu_date=target, daypart="朝", name="Menu",
+                diet_type="regular", category="主", slot_index=0, facility_override=facility))
+            session.add(MonthlyMenuItem(id="daily-list-item-" + facility,
+                monthly_menu_id="2026-06", menu_master_id="daily-list-menu", name="Menu",
+                diet_type="regular", daypart="朝", category="主", facility_override=facility,
+                qty_per_serving=40, unit_type="g", master_resolution_mode="manual"))
 
     def create_order(message_id: str, received_at: datetime, facility_id: str) -> dict:
         return owned_registration(
