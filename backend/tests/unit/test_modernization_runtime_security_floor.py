@@ -143,12 +143,16 @@ def test_explicit_image_and_ocr_source_pins_remain_unchanged(path, baseline):
         assert requirement.marker is None
 
 
-@pytest.mark.parametrize("path", [BACKEND / "requirements.txt", ROOT / "ocr_pipeline" / "requirements.txt"])
+@pytest.mark.parametrize("path", [
+    BACKEND / "requirements.txt", BACKEND / "constraints-yomitoku-cpu.txt",
+    ROOT / "ocr_pipeline" / "requirements.txt", ROOT / "ocr_pipeline" / "constraints-yomitoku-cpu.txt",
+    ROOT / "agent_runtime/native/school-lunch/worker/requirements.txt",
+])
 @pytest.mark.parametrize("system,machine,suffix", [("Linux", "x86_64", "+cpu"), ("Darwin", "arm64", "")])
-def test_explicit_model_platform_source_pins_remain_unchanged(path, system, machine, suffix):
+def test_patched_model_platform_source_pins_are_aligned(path, system, machine, suffix):
     environment = {**default_environment(), "platform_system": system, "platform_machine": machine}
     parsed = requirements(path)
-    for name, pinned in (("torch", "2.6.0"), ("torchvision", "0.21.0")):
+    for name, pinned in (("torch", "2.13.0"), ("torchvision", "0.28.0")):
         variants = named(parsed, name)
         assert len(variants) == 2
         active = one([item for item in variants if item.marker is not None and item.marker.evaluate(environment)])
