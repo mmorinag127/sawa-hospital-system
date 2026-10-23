@@ -312,7 +312,10 @@ def test_stop_during_api_boot_cancels_start_before_remote_spend(tmp_path):
     async def boot(_):
         started.set()
         await asyncio.Event().wait()
-    async def stop(ident): stopped.append(ident)
+    async def stop(ident, *, expected_generation=None):
+        stopped.append(ident)
+        assert expected_generation == run['generation'] + 1
+        return True
     sandbox.start, sandbox.stop = boot, stop
     managed = Managed(store, sandbox, tools, build_mcp(tools), {}, client=SimpleNamespace(beta=SimpleNamespace(sessions=object())))
     async def scenario():

@@ -26,7 +26,7 @@ class Native:
     def local_jobs(self, run): return []
     def prepare(self, run): self.path(run['id'])
     async def start(self, run): pass
-    async def stop(self, ident): pass
+    async def stop(self, ident, *, expected_generation=None): return True
     async def request(self, run, domain, method, path, **kwargs):
         if path=='/outputs/validate-received':
             body=kwargs['body'];wf=self.data['/orders/'+body['order_id']+'/workflow-v2']
