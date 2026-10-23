@@ -159,7 +159,9 @@ def test_real_repeated_save_keeps_latest_revision_despite_old_state_json(selecte
             state = session.get(OrderCurrentState, order_id)
             assert state.draft_id is None
             assert state.state_json["current_sheet_revision_id"] == first
-            assert session.get(OrderSheetDraft, first) is None
+            historical = session.get(OrderSheetDraft, first)
+            assert historical.draft_sheet_json == sheet
+            assert historical.base_evidence_run_id == evidence["id"]
             assert session.get(OrderOcrEvidenceRun, evidence["id"]).payload_json == evidence["payload_json"]
         stale_payload = deepcopy(context)
         before_payload = deepcopy(stale_payload)

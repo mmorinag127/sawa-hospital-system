@@ -9,6 +9,8 @@ import json
 import pytest
 
 from src.services import draft_sheet_service, order_service, order_current_state_service
+from src.db import session_scope
+from src.models.menu import MonthlyMenuItem
 from tests.contract.auth_support import registered_hospital_operator
 from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase, _line
 
@@ -45,8 +47,14 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
                 columns=columns, menu_entries=[{
                     "id": f"{menu_date.isoformat()}-breakfast-menu-a", "monthly_menu_id": menu_date.strftime("%Y-%m"),
                     "menu_date": menu_date, "daypart": "朝", "name": "Menu A",
-                    "slot_index": 0, "diet_type": "regular",
+                    "slot_index": 0, "diet_type": "regular", "category": "副菜",
                 }])
+            # Explicit synthetic recipe for diagnostics; not inferred from OCR quantities.
+            with session_scope() as session:
+                session.add(MonthlyMenuItem(id="authored-sheet-menu-a",
+                    monthly_menu_id=menu_date.strftime("%Y-%m"), name="Menu A",
+                    daypart="breakfast", diet_type="regular", category="副菜",
+                    qty_per_serving=1, unit_type="g", master_resolution_mode="manual"))
             cases.append(case)
             if produce:
                 case.selected_sheet = case.produce(cell_values=str(quantity) if cell_values is None else cell_values)["sheet"]

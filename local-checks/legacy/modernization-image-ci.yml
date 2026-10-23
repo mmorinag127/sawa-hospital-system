@@ -68,7 +68,7 @@ jobs:
           # No application server, auth, database, ports or container network.
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --entrypoint node "$image" \
-            -e 'const p=JSON.parse(require("fs").readFileSync("/app/node_modules/@sawa/ui/package.json","utf8")); if(process.platform!=="linux" || process.versions.node.split(".")[0]!=="20" || p.name!=="@sawa/ui") process.exit(1); console.log(JSON.stringify({platform:process.platform,node:process.version,dependency:p.name,version:p.version}));' \
+            -e 'const p=JSON.parse(require("fs").readFileSync("/app/node_modules/@sawa/ui/package.json","utf8")); if(process.platform!=="linux" || process.versions.node.split(".")[0]!=="24" || p.name!=="@sawa/ui") process.exit(1); console.log(JSON.stringify({platform:process.platform,node:process.version,dependency:p.name,version:p.version}));' \
             > "$evidence/container-dependency.json"
           container="$(docker create --network none "$image")"
           trap 'code=$?; docker rm "$container" >/dev/null 2>&1 || true; printf "%s\n" "$code" > "$evidence/exit-code.txt"; docker image inspect "$image" > "$evidence/image-inspect.json" 2> "$evidence/image-inspect-error.txt" || true; exit "$code"' EXIT

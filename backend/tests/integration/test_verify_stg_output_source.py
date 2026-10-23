@@ -1,4 +1,4 @@
-"""Pure safety tests for the Actions-only, GET-only output-source verifier."""
+"""Pure safety tests for the local, GET-only output-source verifier."""
 
 import json
 import os
@@ -59,8 +59,7 @@ def test_output_non_timeout_transport_failure_not_misclassified(monkeypatch):
 
 SHA = "a" * 40
 CONTEXT = {
-    "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/develop",
-    "GITHUB_REF_NAME": "develop", "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": SHA,
+    "EXPECTED_SOURCE_SHA": SHA, "LOCAL_STG_RUN_ID": "a" * 32,
     "PROJECT_ID": "sawahospitalsystem", "REGION": "asia-northeast2", "WEB_SERVICE": "web-stg",
     "WORKER_SERVICE": "worker-stg", "WEB_URL": verifier.WEB, "WORKER_URL": verifier.WORKER,
     "LIVE_SERVICE_ACCOUNT": verifier.SA_EMAIL, "GOOGLE_OAUTH_CLIENT_ID": "123-stg.apps.googleusercontent.com",
@@ -69,8 +68,16 @@ CONTEXT = {
 }
 
 
-@pytest.mark.parametrize("change", [{"OUTPUT_SOURCE_VERIFY_ORDER_ID": ""}, {"OUTPUT_SOURCE_VERIFY_ORDER_ID": "bad"}, {"OUTPUT_SOURCE_VERIFY_DATE": ""}, {"GITHUB_EVENT_NAME": "push"}])
-def test_context_requires_explicit_dispatch_order_and_develop(change):
+@pytest.mark.parametrize("change", [
+    {"OUTPUT_SOURCE_VERIFY_ORDER_ID": ""}, {"OUTPUT_SOURCE_VERIFY_ORDER_ID": "bad"},
+    {"OUTPUT_SOURCE_VERIFY_DATE": ""}, {"GITHUB_ACTIONS": "true"},
+    {"CI": "true"},
+    {"EXPECTED_SOURCE_SHA": SHA[:12]}, {"EXPECTED_SOURCE_SHA": "b" * 40},
+    {"LOCAL_STG_RUN_ID": ""}, {"LOCAL_STG_RUN_ID": "0" * 32},
+    {"PROD_GOOGLE_OAUTH_CLIENT_ID": ""},
+    {"GOOGLE_OAUTH_CLIENT_ID": CONTEXT["PROD_GOOGLE_OAUTH_CLIENT_ID"]},
+])
+def test_context_requires_local_full_source_and_explicit_order_and_date(change):
     with pytest.raises(verifier.Blocked):
         verifier.require_context({**CONTEXT, **change}, SHA)
 
@@ -145,6 +152,7 @@ def test_entrypoint_resolves_repo_packages_without_cwd_or_pythonpath_and_stops_b
     output = tmp_path / "output-source-live"
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     env.pop("GITHUB_ACTIONS", None)
+    env.pop("EXPECTED_SOURCE_SHA", None)
     completed = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "verify_stg_output_source.py"), "--output", str(output)],
         cwd=tmp_path,
@@ -157,7 +165,7 @@ def test_entrypoint_resolves_repo_packages_without_cwd_or_pythonpath_and_stops_b
     result = json.loads((output / "result.json").read_text())
     manifest = json.loads((output / "manifest.json").read_text())
     assert result["status"] == "not-verified"
-    assert result["code"] == "context-invalid-GITHUB_ACTIONS"
+    assert result["code"] == "checkout-source-SHA-mismatch"
     assert "sourceSHA" not in result
     assert manifest["status"] == "not-verified"
     assert [item["name"] for item in manifest["files"]] == ["result.json"]

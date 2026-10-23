@@ -55,3 +55,25 @@ def test_existing_destination_is_not_overwritten(tmp_path):
     with pytest.raises(RuntimeError, match="new per-case path"):
         helper.sqlite_engine_from_template(template, destination)
     assert destination.read_bytes() == b"existing"
+
+
+@pytest.mark.parametrize("case_value", [41, 73])
+def test_shared_formal_fixture_keeps_each_case_independent(isolated_formal_schema, request, case_value):
+    from src.maintenance.formal_migration_schema import require_formal_head
+
+    engine = isolated_formal_schema
+    template = None
+    if engine.dialect.name == "sqlite":
+        template = request.getfixturevalue("isolated_formal_sqlite_template")
+        digest = helper.file_digest(template)
+        assert Path(engine.url.database) != template
+    assert not sa.inspect(engine).has_table("fixture_ownership_probe")
+    with engine.begin() as connection:
+        require_formal_head(connection)
+        if engine.dialect.name == "sqlite":
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        connection.exec_driver_sql("CREATE TABLE fixture_ownership_probe (id INTEGER PRIMARY KEY)")
+        connection.execute(sa.text("INSERT INTO fixture_ownership_probe VALUES (:value)"), {"value": case_value})
+        assert connection.exec_driver_sql("SELECT id FROM fixture_ownership_probe").scalar_one() == case_value
+    if template is not None:
+        assert helper.file_digest(template) == digest

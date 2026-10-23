@@ -1,10 +1,9 @@
 # Hospital Local Test Migration
 
-Integration base: `c504c11cb49fcc6372f7fd11798e9cbfbd43ac56`.
-Inspected remote develop: `1097e55ff2668d909674e30c2446b585f814b938`.
-The two additional commits are `f8c2d201` and merge `1097e55f`; they change
-copy-refresh implementation/tests, not workflows. Their implementation has not
-been copied into this worktree; the parent integrates onto the latest develop.
+Latest diagnostic source: `f50d8118fcccec8a674428beb167191f4b3a78da`.
+That source is integrated into develop. Its diagnostic batch failed; no signed
+receipt or successful staging acceptance is claimed. The current 28-command
+definition and failure-class repairs still need a clean integrated-source run.
 
 The seven removed test workflows are preserved as original blobs under
 `local-checks/legacy/`. The native sibling workflow is retained only as an
@@ -18,7 +17,7 @@ contracts, not an executable GitHub workflow.
 
 ## Command Mapping
 
-Each regular backend pytest file is collected by `task backend_test` once.
+Each regular backend pytest file is collected by the backend command once.
 Frontend `test:config` already includes root `tests/*.test.cjs`, including dataset,
 shell-controls and API-session contracts; those are not run again individually.
 Frontend lint, config, inspection-demand-read, typecheck and E2E each run once.
@@ -36,20 +35,21 @@ prerequisite for deploying that same source. Pre-deploy receipts cover only
 | ci.yml | backend: Verify portal login and server session | `backend-tests` |
 | ci.yml | backend: Verify staging copy refresh lifecycle and native PostgreSQL isolation | `backend-tests` |
 | verify-staging-data.yml | verify: Run isolated dataset regressions | `backend-tests` |
-| ci.yml | frontend: Frontend lint | `frontend-tests` |
-| ci.yml | frontend: Frontend route contract tests | `frontend-tests` |
-| ci.yml | frontend: Frontend typecheck | `frontend-tests` |
-| verify-staging-data.yml | verify: Run isolated dataset regressions | `frontend-tests` |
-| ci.yml | backend: Check backend undefined names | `backend-lint-audit` |
-| ci.yml | backend: Backend dependency audit | `backend-lint-audit` |
+| ci.yml | frontend: Frontend lint | `frontend-lint` |
+| ci.yml | frontend: Frontend route contract tests | `frontend-config` |
+| ci.yml | frontend: Frontend typecheck | `frontend-types` |
+| verify-staging-data.yml | verify: Run isolated dataset regressions | `frontend-e2e` |
+| ci.yml | backend: Check backend undefined names | `backend-lint` |
+| ci.yml | backend: Backend dependency audit | `backend-audit` |
 | ci.yml | frontend: Frontend dependency audit | `frontend-audit` |
-| ci.yml | infra: Infra workflow guard tests | `workflow-security-contracts` |
-| ci.yml | infra: Verify TLS trust and workflow guards | `workflow-security-contracts` |
-| ci.yml | backend: Verify parallel CI coverage and required gate | `workflow-security-contracts` |
-| ci.yml | backend: Verify serving and frozen image dependency alignment | `workflow-security-contracts` |
+| ci.yml | infra: Infra workflow guard tests | `secret-iam-contracts` |
+| ci.yml | infra: Verify TLS trust and workflow guards | `tls-trust-contracts` |
+| ci.yml | infra: Verify TLS trust and workflow guards | `tls-workflow-contracts` |
+| ci.yml | backend: Verify parallel CI coverage and required gate | `backend-partition-contracts` |
+| ci.yml | backend: Verify serving and frozen image dependency alignment | `runtime-cv-contracts` |
 | ci.yml | backend: Verify per-test selection safety | `impact-contracts` |
 | ci.yml | frontend: Verify Node test selection safety | `impact-contracts` |
-| ci.yml | backend: Verify packaged hospital baseline migration | `packaged-baseline` |
+| ci.yml | backend: Verify packaged hospital baseline migration | `agent-assistant-tests` |
 | ci.yml | backend: Verify staging copy refresh lifecycle and native PostgreSQL isolation | `copy-refresh-owned-postgres` |
 | modernization-image-ci.yml | frontend-image: Build actual frontend image and verify vendored dependency | `modernization-image-proof` |
 | modernization-pg-output.yml | pg-output-boundary: Formal Alembic migration | `modernization-pg-output` |
@@ -58,30 +58,34 @@ prerequisite for deploying that same source. Pre-deploy receipts cover only
 | modernization-pg-output.yml | formal-pg-chain: Existing formal migration module (all cases) | `modernization-pg-output` |
 | modernization-pg-output.yml | formal-pg-chain: Stop only owned PG16 | `modernization-pg-output` |
 | live-schema-adoption-test.yml | live-schema-adoption: Generate fresh PostgreSQL 0035 contract and run adoption tests | `live-schema-adoption` |
-| verify-stg-ocr-ui.yml | verify: Validate existing staging OCR artifact provenance | `stg-ocr-ui-readonly` |
-| verify-stg-ocr-ui.yml | verify: Verify current web before and after existing read-only UI checks | `stg-ocr-ui-readonly` |
 | modernization-readonly-pg.yml | readonly-boundary: Existing selected module, all SQLite and PostgreSQL cases | `hospital-readonly-pg` |
 | modernization-readonly-pg.yml | readonly-boundary: Existing selected module, all SQLite and PostgreSQL cases | `hospital-c1-pg` |
 | modernization-readonly-pg.yml | readonly-boundary: Existing selected module, all SQLite and PostgreSQL cases | `hospital-c1-guard-pg` |
 | modernization-readonly-pg.yml | readonly-boundary: Existing selected module, all SQLite and PostgreSQL cases | `hospital-menu-identity-pg` |
+| verify-stg-ocr-ui.yml | verify: Validate existing staging OCR artifact provenance | `stg-ocr-ui-readonly` |
+| verify-stg-ocr-ui.yml | verify: Verify current web before and after existing read-only UI checks | `stg-ocr-ui-readonly` |
 
-`Verify staging copy refresh lifecycle and native PostgreSQL isolation` is split:
-its ordinary pytest files are included in `backend-tests`; its explicitly owned
-PG16 fixture and OCR-producer unittest run once in `copy-refresh-owned-postgres`.
-The schema-adoption and formal-chain commands preserve generated-contract checks,
-all explicit cases, evidence and owned PG shutdown. The image command preserves
-source preparation, Docker context comparisons, container dependency checks and
-vendor byte parity. Live OCR UI keeps provenance and both before/after source checks.
+The 28 pre-deploy command groups are independent. Frontend lint,
+config, read-only browser inspection, types and E2E cannot mask one another.
+Backend lint/audit, each security contract and the producer suite also have
+separate exit/log records. All groups run sequentially; ordinary failures are
+collected, but a source change aborts the batch without a success receipt.
+
+Schema/adoption and formal-chain commands preserve generated contracts, all
+cases, evidence and owned PG shutdown. Image proof preserves Docker context
+comparisons, runtime checks, vendor byte parity and TLS. Local OCR UI remains
+post-deploy with provenance and before/after serving-source checks.
 
 ## Local Prerequisites
 
 Dependency installation is preparation, not a test command or successful receipt.
-Use local Linux for Linux-only fixtures and native image checks. Install the
+Use Linux containers for image checks and native PostgreSQL16 tools for PG checks. Install the
 current checkout's backend dev/locked dependencies, PyYAML, ruff, pip-audit,
-pytest-testmon, frontend lockfile dependencies, Playwright/WebKit, Docker and PG16.
-The retired CI's CPU tensor preparation required `torch==2.10.0+cpu`,
-`huggingface-hub==0.36.2` and `safetensors==0.7.0`; provision these before the
-corresponding OCR contracts. No install step is counted as a domain test.
+pytest-testmon==2.2.0, frontend lockfile dependencies, Playwright/WebKit, Docker and PG16.
+Use the serving/frozen lockfiles for OCR runtime dependencies, not the retired
+CI's different tensor pin. The f50d8118 audit reports vulnerabilities in torch
+2.6.0; updating it requires result parity and is not waived by this migration.
+No install step is counted as a domain test.
 The archived native sibling is not part of this checkout's executable test set.
 
 `TEST_BOOTSTRAP_DB_URI` must identify an explicitly owned local bootstrap test DB.
@@ -104,5 +108,5 @@ startup failure, nonzero pytest, stale socket and unsuccessful cleanup.
 
 Local migration/security regression is separate from full PG/domain/image/live-UI
 execution. No complete manifest run or signed deploy receipt was produced.
-The worktree remains intentionally uncommitted; the parent reviews and integrates
-before running a clean exact-source signed full test entry.
+The parent reviews and integrates all known repairs before running the next
+clean exact-source signed full test entry. A failed diagnostic is never a receipt.

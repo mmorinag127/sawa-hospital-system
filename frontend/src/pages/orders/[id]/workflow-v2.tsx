@@ -897,6 +897,7 @@ const describeWorkflowBlocker = (code: string) => {
   const labels: Record<string, string> = {
     menu_amount_unresolved: "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。",
     selected_pdf_document_required: "注文に紐づくFAX PDFを確認してください。",
+    ocr_result_saved_history_conflict: "このOCR結果に紐づく保存済みシートの履歴があるため、削除できません。現在選択中のOCRと保存内容は保持しています。",
     selected_pdf_input_mismatch: "選択したFAX PDFが注文の参照元と一致していません。",
     selected_pdf_digest_required: "FAX PDFの照合情報が不足しているため、処理を停止しています。",
     selected_pdf_generation_required: "FAX PDFの保存版を特定できないため、処理を停止しています。",

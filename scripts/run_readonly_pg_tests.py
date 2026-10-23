@@ -11,7 +11,7 @@ import sys
 import traceback
 from urllib.parse import urlencode
 
-PG_BIN = Path('/usr/lib/postgresql/16/bin')
+PG_BIN = Path(os.environ.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
 MODULE = 'backend/tests/integration/test_menu_readonly_boundary.py'
 MODULES = {
     'readonly': [MODULE],

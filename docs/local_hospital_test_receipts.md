@@ -8,7 +8,7 @@ Set `DB_URI` to an owned disposable database and set these explicit agent inputs
 
 - `SAWA_AGENT_TEST_POSTGRES_DSN`: owned PostgreSQL database named `agent_trial*`.
 - `SAWA_AGENT_GATEWAY_PYTHON`: prepared gateway interpreter using the gateway lock
-  and SQL/Alembic test-support dependencies.
+  and SQL/Alembic/openpyxl==3.1.5 test-support dependencies.
 - `SAWA_AGENT_NATIVE_SHIFT_PYTHON`: prepared interpreter for the packaged shift API.
 - `SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON`: prepared interpreter for the packaged
   school-lunch API and worker requirements.

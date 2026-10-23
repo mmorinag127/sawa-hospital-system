@@ -162,13 +162,20 @@ def workflow_command(func):
             conflict_error = exc.error
         except StaleDataError:
             conflict_error = WORKFLOW_REVISION_CONFLICT
+        except CanonicalStoreError as exc:
+            return None, exc.detail["error"]
         finally:
             _expected_workflow_revision.reset(token)
             _workflow_command_identity.reset(command_token)
         if conflict_error:
             if kwargs.get("write_session") is not None:
                 return None, conflict_error
-            current, _ = get_workflow_readonly(order_id)
+            try:
+                current, _ = get_workflow_readonly(order_id)
+            except CanonicalStoreError:
+                # The rejected command keeps its conflict even if the current
+                # source cannot be read; no stale workflow becomes executable.
+                current = None
             return current or {}, conflict_error
         payload, error = result
         if error:
@@ -3134,13 +3141,14 @@ def _delete_materialized_downstream_rows_for_order(session: Any, order_id: str) 
     session.flush()
 
 
-def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+def _delete_downstream_after_ocr_change(session: Any, order_id: str, *, preserve_saved: bool = False) -> None:
     _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     order_output_artifact_service.delete_artifacts_for_order(session, order_id)
     session.flush()
-    session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
+    if not preserve_saved:
+        session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
 def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id: str) -> int:
@@ -3310,7 +3318,7 @@ def select_ocr_result(
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
             session.flush()
-            _delete_downstream_after_ocr_change(session, order.id)
+            _delete_downstream_after_ocr_change(session, order.id, preserve_saved=True)
         workflow.template_version_id = evidence_template_version_id or workflow_template_version_id or None
         workflow.evidence_run_id = normalized_ocr_result_id
         workflow.draft_id = None
@@ -3346,6 +3354,11 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
         workflow = _get_or_create_workflow(session, order.id)
+        if workflow.evidence_run_id != normalized_ocr_result_id and session.query(OrderSheetDraft.id).filter(
+            OrderSheetDraft.order_id == order.id,
+            OrderSheetDraft.base_evidence_run_id == normalized_ocr_result_id,
+        ).first() is not None:
+            return None, "ocr_result_saved_history_conflict"
         if workflow.evidence_run_id == normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
@@ -3873,7 +3886,6 @@ def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     order_output_artifact_service.delete_artifacts_for_order(session, order_id)
     session.flush()
-    session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
 def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:

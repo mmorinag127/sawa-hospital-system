@@ -6,73 +6,42 @@ const yaml = require('js-yaml');
 
 const root = path.resolve(__dirname, '../../..');
 const workflow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/deploy-stg.yml'), 'utf8'));
-const optIn = "github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true";
+const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 
-test('data-writing C1 verification is dispatch opt-in after successful web deploy, with fresh existing WIF', () => {
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.verify_menu_master_ui, {
-    description: "Create, verify and strictly clean up this run's own staging menu master",
-    required: false, type: 'boolean', default: false,
-  });
-  const job = workflow.jobs['deploy-frontend'];
-  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read', 'id-token': 'write' });
-  const steps = job.steps, deploy = steps.findIndex(s => s.name === 'Deploy web-stg');
-  const extra = steps.slice(deploy + 1, deploy + 8);
-  assert.equal(extra.length, 7);
-  for (const step of extra.slice(0, -1)) assert.equal(step.if, optIn);
-  assert.match(extra[3].run, /playwright install --with-deps webkit/);
-  assert.match(extra[3].run, /uv sync --project backend --extra dev --frozen/);
-  assert.equal(extra[4].id, 'auth-menu-master-live');
-  assert.equal(extra[4].uses, 'google-github-actions/auth@v3');
-  assert.deepEqual(extra[4].with, {
-    project_id: '${{ env.PROJECT_ID }}',
-    workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}',
-    service_account: '${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}',
-    token_format: 'id_token', id_token_audience: '${{ env.GOOGLE_OAUTH_CLIENT_ID }}', id_token_include_email: true,
-  });
-  assert.deepEqual(extra[5].env, { C1_LIVE_VERIFY: 'true',
-    LIVE_SERVICE_ACCOUNT: '${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}',
-    LIVE_ID_TOKEN: '${{ steps.auth-menu-master-live.outputs.id_token }}',
-  });
-  assert.equal(extra[5].run, 'uv run --project backend --extra dev --frozen python scripts/verify_stg_menu_master_ui.py');
-  assert.equal(extra[6].if, 'always() && ' + optIn);
-  assert.equal(extra[6].with.path, 'tmp/menu-master-live/');
-  assert.equal(extra[6].with['if-no-files-found'], 'error');
+test('deployment excludes hosted menu/output browser checks and remains manual', () => {
+  assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
+  const inputs = workflow.on.workflow_dispatch.inputs;
+  for (const key of ['verify_menu_master_ui', 'verify_output_source_order_id', 'verify_output_source_date']) {
+    assert.equal(inputs[key], undefined);
+  }
+  const steps = Object.values(workflow.jobs).flatMap(job => job.steps || []);
+  for (const step of steps) {
+    assert.doesNotMatch(step.run || '', /verify_stg_menu_master_ui|verify_stg_output_source|playwright install/);
+    assert.ok(!['auth-menu-master-live', 'auth-output-source-live'].includes(step.id));
+  }
 });
 
-test('read-only output-source verification is explicit-order dispatch opt-in after the unchanged menu UI steps', () => {
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.verify_output_source_order_id, {
-    description: "Optional existing staging order ID for read-only canonical output-source verification",
-    required: false, type: 'string', default: '',
-  });
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.verify_output_source_date, {
-    description: "Required ISO date within the selected order's saved-sheet workflow week",
-    required: false, type: 'string', default: '',
-  });
-  const steps = workflow.jobs['deploy-frontend'].steps;
-  const pairGate = steps.find(step => step.name === 'Validate output-source verification input pair');
-  assert.equal(pairGate.if, "github.event_name == 'workflow_dispatch'");
-  assert.deepEqual(pairGate.env, {
-    OUTPUT_SOURCE_VERIFY_ORDER_ID: '${{ inputs.verify_output_source_order_id }}',
-    OUTPUT_SOURCE_VERIFY_DATE: '${{ inputs.verify_output_source_date }}',
-  });
-  assert.match(pairGate.run, /bool\(order\) != bool\(date\)/);
-  assert.doesNotMatch(pairGate.run, /inputs\.verify_output_source/);
-  const start = steps.findIndex(s => s.name === 'Initialize opted-in output-source evidence');
-  const extra = steps.slice(start, start + 7);
-  const optIn = "github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''";
-  assert.equal(extra.length, 7);
-  for (const step of extra.slice(0, -1)) assert.equal(step.if, optIn);
-  assert.match(extra[3].run, /playwright install --with-deps webkit/);
-  assert.equal(extra[4].id, 'auth-output-source-live');
-  assert.deepEqual(extra[4].with, {
-    project_id: '${{ env.PROJECT_ID }}',
-    workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}',
-    service_account: '${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}',
-    token_format: 'id_token', id_token_audience: '${{ env.GOOGLE_OAUTH_CLIENT_ID }}', id_token_include_email: true,
-  });
-  assert.equal(extra[5].run, 'uv run --project backend --extra dev --frozen python scripts/verify_stg_output_source.py');
-  assert.equal(extra[5].env.OUTPUT_SOURCE_VERIFY_DATE, '${{ inputs.verify_output_source_date }}');
-  assert.equal(extra[6].if, 'always() && ' + optIn);
+test('local live checks keep exact source, staging identity and owned cleanup', () => {
+  const context = read('scripts/local_stg_verification_context.py');
+  assert.match(context, /not env.get\("GITHUB_ACTIONS"\) and not env.get\("CI"\)/);
+  for (const key of ['EXPECTED_SOURCE_SHA', 'LOCAL_STG_RUN_ID', 'GOOGLE_OAUTH_CLIENT_ID', 'PROD_GOOGLE_OAUTH_CLIENT_ID']) {
+    assert.ok(context.includes(key));
+  }
+  assert.match(context, /source == head/);
+  const menu = read('scripts/verify_stg_menu_master_ui.py');
+  const output = read('scripts/verify_stg_output_source.py');
+  for (const source of [menu, output]) {
+    assert.ok(source.includes('require_local_source(env, head, require)'));
+    assert.ok(source.includes('check_token('));
+    assert.ok(source.includes('deployed_sources('));
+    assert.doesNotMatch(source, /GITHUB_RUN_ID|GITHUB_RUN_ATTEMPT|GITHUB_SHA/);
+  }
+  assert.ok(menu.includes('cleanup_owned(engine, initial, ledger, proof)'));
+  assert.ok(menu.includes('cleanup-filtered-absence-failed'));
+  assert.ok(menu.includes('existing-ledger-refuse-reuse'));
+  assert.ok(output.includes('OUTPUT_SOURCE_VERIFY_ORDER_ID'));
+  assert.ok(output.includes('OUTPUT_SOURCE_VERIFY_DATE'));
+  assert.ok(output.includes('GET-path-rejected'));
 });
 
 test('both staging image builds bind metadata to the full source SHA, not a tag guess', () => {

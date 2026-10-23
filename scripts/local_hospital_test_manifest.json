@@ -5,8 +5,16 @@
       "name": "stg-ocr-ui-readonly",
       "command": "python3 scripts/run_local_stg_ocr_ui_check.py",
       "legacy_steps": [
-        {"workflow": "verify-stg-ocr-ui.yml", "job": "verify", "step": "Validate existing staging OCR artifact provenance"},
-        {"workflow": "verify-stg-ocr-ui.yml", "job": "verify", "step": "Verify current web before and after existing read-only UI checks"}
+        {
+          "workflow": "verify-stg-ocr-ui.yml",
+          "job": "verify",
+          "step": "Validate existing staging OCR artifact provenance"
+        },
+        {
+          "workflow": "verify-stg-ocr-ui.yml",
+          "job": "verify",
+          "step": "Verify current web before and after existing read-only UI checks"
+        }
       ]
     }
   ],
@@ -48,24 +56,47 @@
       ]
     },
     {
-      "name": "frontend-tests",
-      "command": "cd frontend && npm run lint && npm run test:config && node --test tests/inspection-demand-read.test.mjs && ./node_modules/.bin/tsc --noEmit && npm run test:e2e",
+      "name": "frontend-lint",
+      "command": "cd frontend && npm run lint",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "frontend",
           "step": "Frontend lint"
-        },
+        }
+      ]
+    },
+    {
+      "name": "frontend-config",
+      "command": "cd frontend && npm run test:config",
+      "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "frontend",
           "step": "Frontend route contract tests"
-        },
+        }
+      ]
+    },
+    {
+      "name": "frontend-inspection-read",
+      "command": "cd frontend && node --test tests/inspection-demand-read.test.mjs",
+      "legacy_steps": []
+    },
+    {
+      "name": "frontend-types",
+      "command": "cd frontend && ./node_modules/.bin/tsc --noEmit",
+      "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "frontend",
           "step": "Frontend typecheck"
-        },
+        }
+      ]
+    },
+    {
+      "name": "frontend-e2e",
+      "command": "cd frontend && npm run test:e2e",
+      "legacy_steps": [
         {
           "workflow": "verify-staging-data.yml",
           "job": "verify",
@@ -74,14 +105,20 @@
       ]
     },
     {
-      "name": "backend-lint-audit",
-      "command": "cd backend && python3 -m ruff check --no-cache --select F821 src && python3 -m pip_audit --local --skip-editable",
+      "name": "backend-lint",
+      "command": "cd backend && python3 -m ruff check --no-cache --select F821 src",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "backend",
           "step": "Check backend undefined names"
-        },
+        }
+      ]
+    },
+    {
+      "name": "backend-audit",
+      "command": "cd backend && python3 -m pip_audit --local --skip-editable",
+      "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "backend",
@@ -101,30 +138,69 @@
       ]
     },
     {
-      "name": "workflow-security-contracts",
-      "command": "python3 -m unittest infra/terraform/tests/test_secret_manager_iam_migration.py -v && python3 scripts/test_tls_trust.py -v && python3 scripts/test_tls_workflows.py -v && python3 infra/terraform/tests/test_ci_backend_parallel.py -v && python3 scripts/test_runtime_cv_dependency_alignment.py -v && python3 scripts/test_modernization_image_ci.py -v && python3 scripts/test_local_hospital_test_runner.py",
+      "name": "secret-iam-contracts",
+      "command": "python3 -m unittest infra/terraform/tests/test_secret_manager_iam_migration.py -v",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "infra",
           "step": "Infra workflow guard tests"
-        },
+        }
+      ]
+    },
+    {
+      "name": "tls-trust-contracts",
+      "command": "python3 scripts/test_tls_trust.py -v",
+      "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "infra",
           "step": "Verify TLS trust and workflow guards"
-        },
+        }
+      ]
+    },
+    {
+      "name": "tls-workflow-contracts",
+      "command": "python3 scripts/test_tls_workflows.py -v",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "infra",
+          "step": "Verify TLS trust and workflow guards"
+        }
+      ]
+    },
+    {
+      "name": "backend-partition-contracts",
+      "command": "python3 infra/terraform/tests/test_ci_backend_parallel.py -v",
+      "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "backend",
           "step": "Verify parallel CI coverage and required gate"
-        },
+        }
+      ]
+    },
+    {
+      "name": "runtime-cv-contracts",
+      "command": "python3 scripts/test_runtime_cv_dependency_alignment.py -v",
+      "legacy_steps": [
         {
           "workflow": "ci.yml",
           "job": "backend",
           "step": "Verify serving and frozen image dependency alignment"
         }
       ]
+    },
+    {
+      "name": "image-source-contracts",
+      "command": "python3 scripts/test_modernization_image_ci.py -v",
+      "legacy_steps": []
+    },
+    {
+      "name": "local-receipt-contracts",
+      "command": "python3 scripts/test_local_hospital_test_runner.py",
+      "legacy_steps": []
     },
     {
       "name": "impact-contracts",
@@ -155,7 +231,7 @@
     },
     {
       "name": "copy-refresh-owned-postgres",
-      "command": "python3 scripts/test_staging_copy_refresh_native.py && DB_URI=\"sqlite:///$SAWA_LOCAL_EVIDENCE_DIR/producer.sqlite\" PYTHONPATH=ocr_pipeline:backend python3 -m unittest discover -s ocr_pipeline/tests -p test_main.py -v",
+      "command": "python3 scripts/test_staging_copy_refresh_native.py",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -163,6 +239,11 @@
           "step": "Verify staging copy refresh lifecycle and native PostgreSQL isolation"
         }
       ]
+    },
+    {
+      "name": "producer-tests",
+      "command": "DB_URI=\"sqlite:///$SAWA_LOCAL_EVIDENCE_DIR/producer.sqlite\" PYTHONPATH=ocr_pipeline:backend python3 -m unittest discover -s ocr_pipeline/tests -p test_main.py -v",
+      "legacy_steps": []
     },
     {
       "name": "modernization-image-proof",

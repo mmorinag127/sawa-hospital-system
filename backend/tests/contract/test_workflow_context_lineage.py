@@ -139,8 +139,8 @@ def test_context_materializes_exact_dated_selection_once_and_reuses_it(context_s
     assert response.status_code == 200, response.text
     initial_read_count = len(reads)
     result = response.json()
-    # Creation, context selection and command publication each persist a version.
-    assert result["revision"] == 3
+    # Bootstrap starts at one; context publication advances CAS once.
+    assert result["revision"] == 2
     with session_scope() as session:
         projection = session.query(FacilityTemplateVersion).one()
         receipt = lineage.verify_projection(projection)
@@ -157,8 +157,8 @@ def test_context_materializes_exact_dated_selection_once_and_reuses_it(context_s
     repeated = _request(f, day=day, template=template, revision=result["revision"])
     assert repeated.status_code == 200, repeated.text
     record_property("revision_sequence", json.dumps([result["revision"], repeated.json()["revision"]]))
-    # Existing downstream invalidation flush and command finalization each advance CAS.
-    assert repeated.json()["revision"] == result["revision"] + 2
+    # Repeating an unconsumed selection publishes one command revision.
+    assert repeated.json()["revision"] == result["revision"] + 1
     assert initial_read_count == 1
     assert len(reads) == 2
     assert _snapshot(f.engine)["facility_template_versions"] == first_projection

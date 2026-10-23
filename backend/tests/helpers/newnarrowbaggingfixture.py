@@ -40,7 +40,7 @@ def authored_tabular_invoice(root, *, quantity_columns):
             "include_menu_name": True, "columns": columns}
 
 
-def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, facility_name=None, menu_temp_type=None, area_names=None, prepare_only=False, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, prepared_original=None):
+def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, facility_name=None, menu_temp_type=None, area_names=None, prepare_only=False, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, prepared_original=None, prepared_menu_sources=False):
     """Prepare sources once, then consume them without changing canonical inputs."""
     assert prepared_original is None or (prepared_sources and not prepare_only), "prepared original requires predeclared sources"
     for key in ("RAW_BUCKET", "OCR_OUTPUT_BUCKET", "K_SERVICE", "FACILITY_MASTER_URI"):
@@ -172,7 +172,7 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         assert date.fromisoformat(line["date"]) == day
         groups.setdefault((line["daypart"], line["menu_name"]), []).append(line)
     with session_scope() as session:
-        if not prepared_sources:
+        if not prepared_sources and not prepared_menu_sources:
             if session.get(MonthlyMenu, day.strftime("%Y-%m")) is None:
                 session.add(MonthlyMenu(id=day.strftime("%Y-%m"), month_start=day.replace(day=1)))
                 session.flush()
@@ -262,7 +262,7 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     return registered, sheet
 
 
-def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", menu_temp_type=None, output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, area_names=None, facility_name=None, prepared_original=None):
+def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", menu_temp_type=None, output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, area_names=None, facility_name=None, prepared_original=None, prepared_menu_sources=False):
     registered, sheet = selected_bagging_order(
         monkeypatch, tmp_path, lines, invoice_template=invoice_template,
         menu_category=menu_category, omit_invoice=omit_invoice,
@@ -272,6 +272,7 @@ def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
         daily_label_comparable_diet_types=daily_label_comparable_diet_types,
         facility_id=facility_id, prepared_sources=prepared_sources, message_id=message_id, week_start=week_start,
         prepared_original=prepared_original,
+        prepared_menu_sources=prepared_menu_sources,
         area_names=area_names, facility_name=facility_name,
         declared_quantity_pairs=declared_quantity_pairs, physical_menu_category=physical_menu_category,
         physical_slot_indexes=physical_slot_indexes, week_end=week_end, label_profile=label_profile,

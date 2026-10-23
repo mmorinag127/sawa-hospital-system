@@ -61,12 +61,11 @@ def test_materialization_lines_prioritize_change2_then_change1_over_regular():
     ]
 
 
-def test_materialization_lines_keep_forbidden_columns_separate():
+def test_materialization_lines_exclude_forbidden_without_changing_source_cells():
+    rows = [["04/19", "昼", "Menu A", "31", "", "2", "4", "33", "", ""]]
     lines = order_service._build_materialization_lines_from_sheet_rows(
         fields=_fac00001_fields(),
-        rows_payload=[
-            ["04/19", "昼", "Menu A", "31", "", "2", "4", "33", "", ""],
-        ],
+        rows_payload=rows,
         received_at=datetime(2026, 4, 19, 9, 0, 0),
         existing_week_code="2026-04@2026-04-19~2026-04-19",
         date_policy={}, template=_template(_fac00001_fields()),
@@ -74,17 +73,15 @@ def test_materialization_lines_keep_forbidden_columns_separate():
 
     assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
         ("regular", 33),
-        ("no_meat", 2),
-        ("no_fish", 4),
     ]
+    assert rows == [["04/19", "昼", "Menu A", "31", "", "2", "4", "33", "", ""]]
 
 
 def test_materialization_lines_exclude_placeholder_quantity_columns():
+    rows = [["04/19", "昼", "Menu A", "31", "12", "2", "", "", "", ""]]
     lines = order_service._build_materialization_lines_from_sheet_rows(
         fields=_fac00001_fields(),
-        rows_payload=[
-            ["04/19", "昼", "Menu A", "31", "12", "2", "", "", "", ""],
-        ],
+        rows_payload=rows,
         received_at=datetime(2026, 4, 19, 9, 0, 0),
         existing_week_code="2026-04@2026-04-19~2026-04-19",
         date_policy={}, template=_template(_fac00001_fields()),
@@ -92,8 +89,8 @@ def test_materialization_lines_exclude_placeholder_quantity_columns():
 
     assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
         ("regular", 31),
-        ("no_meat", 2),
     ]
+    assert rows == [["04/19", "昼", "Menu A", "31", "12", "2", "", "", "", ""]]
 
 
 def test_current_workflow_materializes_effective_regular_from_change_columns(monkeypatch, tmp_path, isolated_formal_schema):
@@ -122,4 +119,7 @@ def test_output_builder_collapses_owned_change_override_lines(monkeypatch, tmp_p
     order = accepted_bagging_order(monkeypatch, tmp_path, authored, confirm=True)
     lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(order["id"]))
     assert [(line["diet_type"], line["quantity_original"]) for line in lines] == [
-        ("regular", 33), ("no_meat", 2)]
+        ("regular", 33)]
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+    assert error is None
+    assert sheet["rows"][0][sheet["fields"].index("qty.no_meat_x")] == "2"

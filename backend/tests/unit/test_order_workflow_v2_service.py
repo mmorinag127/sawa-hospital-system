@@ -2106,7 +2106,7 @@ def test_selecting_ocr_result_blocks_template_version_mismatch(authored_april_co
     assert database_snapshot() == before
 
 
-def test_selecting_ocr_result_clears_downstream_sheet(authored_april_context) -> None:
+def test_selecting_ocr_result_clears_active_sheet_but_retains_history(authored_april_context) -> None:
     order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -2137,7 +2137,14 @@ def test_selecting_ocr_result_clears_downstream_sheet(authored_april_context) ->
     assert switched["selected_ocr_result_id"] == evidence_id_2
     assert switched["saved_sheet_id"] is None
     with session_scope() as session:
-        assert session.get(OrderSheetDraft, first_saved_sheet_id) is None
+        historical = session.get(OrderSheetDraft, first_saved_sheet_id)
+        assert historical.base_evidence_run_id == evidence_id_1
+        assert historical.draft_sheet_json == {"rows": [{"menu": "A", "qty": "1"}]}
+    before = database_snapshot()
+    removed, error = order_workflow_v2_service.delete_ocr_result(
+        order_id, evidence_id_1, expected_revision=switched["revision"])
+    assert removed is None and error == "ocr_result_saved_history_conflict"
+    assert database_snapshot() == before
 
 
 def test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1_context(authored_april_context) -> None:

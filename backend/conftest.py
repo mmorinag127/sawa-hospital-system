@@ -67,16 +67,29 @@ def admin_auth_headers() -> dict[str, str]:
     )
 
 
+@pytest.fixture(scope="session")
+def isolated_formal_sqlite_template(tmp_path_factory):
+    from tests.integration.sqlite_fixture_template import migrated_sqlite_template
+    return migrated_sqlite_template(tmp_path_factory,
+        alembic_ini=Path(__file__).resolve().parent / "alembic.ini",
+        name="isolated-formal-schema")
+
+
 @pytest.fixture
 def isolated_formal_schema(tmp_path, monkeypatch, request):
     """Own every row/schema per case; never clear another test's retained history."""
     admin = isolated = None
     created = False
     database = None
+    template = template_digest = None
     uri = os.environ.get("C2_ISOLATED_PG_URI")
     try:
         if uri is None:
             url = sa.URL.create("sqlite", database=str(tmp_path / "isolated-formal.sqlite3"))
+            from tests.integration.sqlite_fixture_template import file_digest, sqlite_engine_from_template
+            template = request.getfixturevalue("isolated_formal_sqlite_template")
+            template_digest = file_digest(template)
+            isolated = sqlite_engine_from_template(template, Path(url.database))
         else:
             if not uri.strip() or uri != uri.strip():
                 raise RuntimeError("C2_ISOLATED_PG_URI must be explicit and nonblank")
@@ -107,16 +120,18 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
                 connection.exec_driver_sql('CREATE DATABASE "' + database + '"')
                 created = True
             url = url.set(database=database)
-        isolated = sa.create_engine(url)
+        if isolated is None:
+            isolated = sa.create_engine(url)
         for name in ("DATABASE_URL", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER"):
             monkeypatch.delenv(name, raising=False)
         target = url.render_as_string(hide_password=False)
         monkeypatch.setenv("DB_URI", target)
         monkeypatch.setenv("ALEMBIC_DB_URI", target)
-        config = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
-        with isolated.connect() as connection:
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
+        if uri is not None:
+            config = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
+            with isolated.connect() as connection:
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
         from src.maintenance.formal_migration_schema import require_formal_head
         with isolated.connect() as connection:
             require_formal_head(connection)
@@ -144,6 +159,8 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
     finally:
         if isolated is not None:
             isolated.dispose()
+        if template is not None:
+            assert file_digest(template) == template_digest, "formal SQLite template was modified"
         if admin is not None:
             try:
                 if created:

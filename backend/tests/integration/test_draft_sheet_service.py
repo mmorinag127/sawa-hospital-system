@@ -835,7 +835,8 @@ def test_owned_rerun_keeps_saved_quantities_and_requires_explicit_candidate_adop
         assert retained.draft_sheet_json == saved_sheet
         assert retained.base_evidence_run_id == saved["base_evidence_run_id"]
         lines = session.query(OrderLine).filter_by(order_id=case.id).all()
-        assert len(lines) == 1 and lines[0].quantity_original == 3
+        # A saved sheet is not a bagging materialization; reruns cannot create one.
+        assert lines == []
     case.command("POST", f"ocr-results/{rerun['id']}/select")
     source = case.get("workflow-v2/sheet-source")
     assert source["selected_ocr_result_id"] == rerun["id"]
@@ -881,7 +882,10 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
         assert state.confirmed_snapshot_id is None
         assert state.state == "ocr_failed" and state.blockers_json == [error]
         assert state.revision == receipt["workflow_revision"] + 1
-        assert session.query(OrderLine).filter(OrderLine.order_id == case.id).all() == []
+        retained = session.query(OrderLine).filter(OrderLine.order_id == case.id).one()
+        assert (retained.date, retained.daypart, retained.menu_name, retained.diet_type,
+                retained.area_id, retained.quantity_original) == (
+            date(2026, 3, 22), "朝", "Menu A", "regular", "2F", 3)
 
     # Real authenticated commands may acquire CAS locks, but cannot adopt or mutate state.
     revision = case.revision()

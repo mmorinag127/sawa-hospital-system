@@ -112,8 +112,6 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assertOidcContract(stgWorkflow, [
     { jobName: "deploy-backend", id: "auth-backend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
     { jobName: "deploy-frontend", id: "auth-frontend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
-    { jobName: "deploy-frontend", id: "auth-menu-master-live", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
-    { jobName: "deploy-frontend", id: "auth-output-source-live", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
   ]);
   assertOidcContract(prodWorkflow, [
     { jobName: "prod-db-bootstrap-gate", id: "auth-db", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },

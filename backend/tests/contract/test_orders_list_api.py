@@ -163,6 +163,14 @@ def test_hakodate_overlay_preview_endpoint_uses_canonical_service(monkeypatch) -
 
 
 def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
+    # Component boundary: receipt validation has its own owned-source contracts.
+    uploaded = {"message_id": "msg-list-001"}
+    monkeypatch.setattr(orders_api.uploaded_pdf_service, "get_uploaded_pdf_by_message_id",
+                        lambda message_id: uploaded if message_id == uploaded["message_id"] else None)
+    def selected_input(value):
+        assert value is uploaded
+        return {"facility_hint": "FAC00001", "week_hint": "2026-03@2026-03-22~2026-03-28"}
+    monkeypatch.setattr(orders_api.uploaded_pdf_service, "build_ingest_payload", selected_input)
     monkeypatch.setattr(
         orders_api.order_service,
         "list_orders",
@@ -301,7 +309,7 @@ def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypat
     assert "candidate_resolution" not in row
 
 
-def test_list_orders_without_ocr_uses_uploaded_pdf_week_hint_when_order_week_missing(monkeypatch) -> None:
+def test_list_orders_without_ocr_refuses_filename_week_without_owned_selection(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
         "list_orders",
@@ -345,5 +353,8 @@ def test_list_orders_without_ocr_uses_uploaded_pdf_week_hint_when_order_week_mis
     rows = res.json()["orders"]
     assert len(rows) == 1
     week_resolution = rows[0]["candidate_resolution"]["resolutions"]["week"]
-    assert week_resolution["resolved_value"] == "2026-04@2026-04-05~2026-04-11"
-    assert week_resolution["requires_user_choice"] is False
+    assert week_resolution["resolved_value"] is None
+    assert week_resolution["requires_user_choice"] is True
+    assert week_resolution["blocked"] is True
+    assert week_resolution["blocked_reasons"]
+    assert week_resolution["candidates"] == []

@@ -33,7 +33,7 @@ def test_condiment_bags_are_merged_across_diet_and_area(isolated_formal_schema, 
             "line_id": "1",
             "date": "2025-01-06",
             "daypart": "朝",
-            "menu_name": "ソース",
+            "menu_name": "主料理",
             "diet_type": "regular",
             "area_id": "2F",
             "bag_type": "condiment",
@@ -43,14 +43,16 @@ def test_condiment_bags_are_merged_across_diet_and_area(isolated_formal_schema, 
             "line_id": "2",
             "date": "2025-01-06",
             "daypart": "朝",
-            "menu_name": "ソース",
+            "menu_name": "主料理",
             "diet_type": "soft",
             "area_id": "3F",
             "bag_type": "condiment",
             "quantity_original": 4,
         },
     ]
-    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True)
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True,
+        daily_label_comparable_diet_types=["soft"],
+        accessory_masters={"ソース": {"qty_per_serving": 1, "unit_type": "count"}})
     with session_scope() as session:
         original = output_builder._capture_output_adoption(order["id"], session)
         rebuilt = rebuild_bags(order["id"], write_session=session, original_adoption=original)
@@ -107,7 +109,8 @@ def test_get_bag_summary_rebuilds_stale_materialized_bags(isolated_formal_schema
             "quantity_original": 3,
         },
     ]
-    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True)
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True,
+        daily_label_comparable_diet_types=["mixer"])
 
     with session_scope() as session:
         session.add(
