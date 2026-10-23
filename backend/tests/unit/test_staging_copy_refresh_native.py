@@ -51,10 +51,10 @@ def test_real_snapshot_preserves_raw_values_extra_schema_sequence_and_test_and_p
         with psycopg2.connect(**{**parsed, "dbname": database}) as conn:
             conn.set_session(readonly=True)
             before[database] = engine.fingerprints(conn, tmp_path)[0]
-    tables, refs, local_receipts = engine.clone_database(source, destination, "sawa_replay_native", tmp_path, ["refresh_fixture_head"])
+    tables, refs, local_receipts = engine.clone_database(source, destination, "sawa_replay_abc123", tmp_path, ["refresh_fixture_head"])
     assert "auxiliary.preserved" in tables and "public.quantities" in tables
     assert refs == {"gs://fixture-prod/original.pdf?generation=3"}
-    with psycopg2.connect(**{**parsed, "dbname": "sawa_replay_native"}) as conn, conn.cursor() as cursor:
+    with psycopg2.connect(**{**parsed, "dbname": "sawa_replay_abc123"}) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT value FROM quantity_view ORDER BY value COLLATE \"C\"")
         assert cursor.fetchall() == [("",), ("--",)]
         cursor.execute("INSERT INTO quantities(value) VALUES('operator-edit') RETURNING id")
@@ -65,6 +65,6 @@ def test_real_snapshot_preserves_raw_values_extra_schema_sequence_and_test_and_p
             assert engine.fingerprints(conn, tmp_path)[0] == before[database]
     # Existing copy target and the Test database can never be overwritten.
     with pytest.raises(RefreshError, match="already_exists"):
-        engine.clone_database(source, destination, "sawa_replay_native", tmp_path, ["refresh_fixture_head"])
+        engine.clone_database(source, destination, "sawa_replay_abc123", tmp_path, ["refresh_fixture_head"])
     with pytest.raises(RefreshError, match="not_isolated"):
         engine.clone_database(source, destination, "refresh_test", tmp_path, ["refresh_fixture_head"])
