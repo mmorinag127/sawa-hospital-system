@@ -3,6 +3,9 @@ from copy import deepcopy
 from datetime import timedelta
 import json
 import uuid
+import struct
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +16,37 @@ from src.services import staging_copy_refresh_engine as engine
 OLD = "replay-original"
 RID = "a" * 32
 DIGEST = "b" * 64
+
+
+@pytest.mark.parametrize('rows', [[], ['{}'], ['{"raw":"Ⅲ\\n\\t\\\\","empty":""}', '{"raw":null}']])
+def test_copy_stream_keeps_exact_json_bytes(rows, monkeypatch, tmp_path):
+    payload = b'PGCOPY\n\xff\r\n\x00' + b'\x00' * 8
+    for row in rows:
+        raw = row.encode('utf-8')
+        payload += struct.pack('!hi', 1, len(raw)) + raw
+    payload += struct.pack('!h', -1)
+    monkeypatch.setattr(engine.sql.Composed, 'as_string', lambda self, connection: 'COPY fixture')
+    cursor = SimpleNamespace(copy_expert=lambda statement, output: output.write(payload))
+    connection = SimpleNamespace(cursor=lambda: nullcontext(cursor), encoding='UTF8')
+    assert list(engine._copy_raw_rows(connection, 'public', 'fixture', tmp_path / 'stream.copy')) == rows
+
+
+@pytest.mark.parametrize('payload', [
+    b'', b'not-a-copy-stream',
+    b'PGCOPY\n\xff\r\n\x00' + struct.pack('!ii', 1, 0),
+    b'PGCOPY\n\xff\r\n\x00' + b'\x00' * 8 + struct.pack('!h', 2),
+    b'PGCOPY\n\xff\r\n\x00' + b'\x00' * 8 + struct.pack('!hi', 1, -1),
+    b'PGCOPY\n\xff\r\n\x00' + b'\x00' * 8 + struct.pack('!hi', 1, 10) + b'{}',
+    b'PGCOPY\n\xff\r\n\x00' + b'\x00' * 8 + struct.pack('!h', -1) + b'extra',
+])
+def test_invalid_copy_stream_blocks_and_removes_temporary_stream(payload, monkeypatch, tmp_path):
+    monkeypatch.setattr(engine.sql.Composed, 'as_string', lambda self, connection: 'COPY fixture')
+    cursor = SimpleNamespace(copy_expert=lambda statement, output: output.write(payload))
+    connection = SimpleNamespace(cursor=lambda: nullcontext(cursor), encoding='UTF8')
+    target = tmp_path / 'stream.copy'
+    with pytest.raises(service.RefreshError, match='copy_stream_invalid'):
+        list(engine._copy_raw_rows(connection, 'public', 'fixture', target))
+    assert not target.exists()
 
 
 @pytest.fixture
@@ -54,6 +88,32 @@ def test_same_request_is_idempotent_and_other_request_cannot_replace_active_copy
     with pytest.raises(service.RefreshError, match="already_running"):
         service.request_refresh("d" * 32)
     assert control["value"]["refresh"]["id"] == RID
+
+
+def test_expired_execution_fails_without_publishing_and_allows_new_ui_refresh(control):
+    service.request_refresh(RID)
+    claimed = service.claim(RID, 1)
+    control['value']['refresh']['lease_until'] = (service.now() - timedelta(seconds=1)).isoformat()
+    result = service.status()
+    assert result['job']['phase'] == 'failed'
+    assert result['job']['error'] == 'refresh_execution_timed_out'
+    assert control['value']['active'] == OLD
+    assert list(control['value']['snapshots']) == [OLD]
+    with pytest.raises(service.RefreshError, match='execution_fenced'):
+        service.checkpoint(claimed, 'succeeded', published=publication(claimed))
+    assert service.claim(RID, 1) is None
+    assert service.request_refresh('d' * 32)['phase'] == 'queued'
+
+
+def test_status_preserves_queued_and_live_execution(control):
+    service.request_refresh(RID)
+    generation = control['generation']
+    assert service.status()['job']['phase'] == 'queued'
+    assert control['generation'] == generation
+    service.claim(RID, 1)
+    generation = control['generation']
+    assert service.status()['job']['phase'] == 'starting'
+    assert control['generation'] == generation
 
 
 def test_dispatch_failure_retains_queued_intent_for_same_id_retry(control, monkeypatch):

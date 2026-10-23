@@ -1,6 +1,8 @@
 """Real pg_dump/restore proof on a run-owned native PostgreSQL cluster only."""
 from contextlib import contextmanager
 import os
+import hashlib
+import json
 from pathlib import Path
 
 import psycopg2
@@ -9,6 +11,30 @@ from psycopg2 import sql
 
 from src.services import staging_copy_refresh_engine as engine
 from src.services.staging_copy_refresh_service import RefreshError
+
+
+def test_binary_copy_matches_exact_raw_rows_and_hash_without_row_fetches(tmp_path):
+    uri = os.environ.get('STAGING_REFRESH_NATIVE_URI')
+    if not uri:
+        pytest.skip('owned native test cluster required')
+    with psycopg2.connect(uri) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE TEMP TABLE "copy values" (id integer, value text, details jsonb)')
+            values = [(index, '\t\r\n\\Ⅲ--' if index % 2 else '', json.dumps({'raw': None, 'payload': '文字' * (100000 if index == 0 else 1), 'uri': 'gs://fixture-prod/a.pdf?generation=7'})) for index in range(513)]
+            cursor.executemany('INSERT INTO "copy values" VALUES (%s,%s,%s)', values)
+            cursor.execute('SELECT row_to_json(t)::text FROM pg_temp."copy values" t')
+            expected = [row[0] for row in cursor.fetchall()]
+        connection.commit()
+        connection.set_session(readonly=True, isolation_level='REPEATABLE READ')
+        rows = list(engine._copy_raw_rows(connection, 'pg_temp', 'copy values', tmp_path / 'stream.copy'))
+        assert rows == expected
+        digest = lambda raw: hashlib.sha256(b''.join(sorted((row.encode('utf-8') + b'\n' for row in raw)))).hexdigest()
+        assert digest(rows) == digest(expected)
+        assert not (tmp_path / 'stream.copy').exists()
+        with connection.cursor() as cursor:
+            cursor.execute('SHOW transaction_read_only')
+            assert cursor.fetchone() == ('on',)
+        connection.rollback()
 
 
 @pytest.fixture
