@@ -42,13 +42,20 @@ def test_explicit_owned_output_directory_without_service_import(tmp_path):
     assert not owned.exists()
 
 
-def test_original_source_unchanged_except_directory_definition():
-    before = subprocess.check_output(["git", "show", f"{BASE}:{SOURCE}"], cwd=ROOT, text=True)
-    after = (ROOT / SOURCE).read_text()
-    original = 'OUTPUT_DIR = Path("/tmp/shipping-outputs")'
-    replacement = 'OUTPUT_DIR = Path(os.getenv("SHIPPING_OUTPUT_DIR", "/tmp/shipping-outputs"))'
-    assert before.count(original) == 1
-    assert after == before.replace(original, replacement)
+def test_shipping_business_rows_remain_unchanged_when_template_source_is_snapshot_aware():
+    before = ast.parse(subprocess.check_output(["git", "show", f"{BASE}:{SOURCE}"], cwd=ROOT, text=True))
+    after = ast.parse((ROOT / SOURCE).read_text())
+    original = {node.name: node for node in before.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    current = {node.name: node for node in after.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    assert original.keys() == current.keys()
+    for name in original:
+        if name != "build_shipping_excel":
+            assert ast.dump(original[name]) == ast.dump(current[name]), name
+    def business_tail(function):
+        index = next(i for i, node in enumerate(function.body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "workbook" for target in node.targets))
+        return [ast.dump(node) for node in function.body[index + 1:]]
+    assert business_tail(original["build_shipping_excel"]) == business_tail(current["build_shipping_excel"])
 
 
 def test_generated_artifact_filename_expressions_keep_original_names(tmp_path):

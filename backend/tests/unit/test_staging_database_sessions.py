@@ -14,6 +14,7 @@ def test_session_factory_control_auth_and_direct_engine_share_the_selected_targe
     monkeypatch.setattr(db, "_replay_engine", lambda _uri: engines["replay-case"])
     monkeypatch.setattr(datasets, "database_uri", lambda uri, _feature: uri)
     monkeypatch.setattr(datasets, "manifest", lambda: {"id": "replay-case"})
+    monkeypatch.setattr(datasets, "manifest_for", lambda identity: _selected_fixture(datasets.manifest(), identity))
     monkeypatch.setenv("K_SERVICE", "worker-stg")
     monkeypatch.delenv("APP_ENV", raising=False)
     with datasets.dataset_context("replay-case"):
@@ -28,3 +29,9 @@ def test_session_factory_control_auth_and_direct_engine_share_the_selected_targe
         assert session.execute(text("SELECT value FROM selection_probe")).scalar_one() == "test"
     for engine in engines.values():
         engine.dispose()
+
+
+def _selected_fixture(value, identity):
+    if value["id"] != identity:
+        raise datasets.DatasetUnavailable("staging_dataset_snapshot_unavailable")
+    return value

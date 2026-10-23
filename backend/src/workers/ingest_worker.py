@@ -1,3 +1,5 @@
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import json
 import os
 import threading
@@ -75,7 +77,7 @@ _UPLOADED_PDF_INFLIGHT: set[str] = set()
 
 
 def _wait_for_pipeline_output_on_ingest() -> bool:
-    raw = str(os.getenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
+    raw = str(_runtime_setting("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
     if raw:
         return raw not in {"0", "false", "no", "off"}
     return False
@@ -375,7 +377,7 @@ def _submit_uploaded_pdf_job(uploaded_pdf_id: str) -> bool:
 
 
 def _auto_llm_reparse_enabled() -> bool:
-    raw = str(os.getenv("OCR_AUTO_LLM_REPARSE_ON_INGEST", "1") or "").strip().lower()
+    raw = str(_runtime_setting("OCR_AUTO_LLM_REPARSE_ON_INGEST", "1") or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import mimetypes
-import os
 from pathlib import Path
 import re
 
@@ -41,7 +42,7 @@ def _validate_file(data: bytes, filename: str) -> None:
     suffix = Path(filename).suffix.lower()
     if suffix not in _ALLOWED_EXTENSIONS:
         raise ValueError("menu file must be .xlsx, .xlsm, or .csv")
-    max_mb = int(os.getenv("MENU_UPLOAD_MAX_MB", "20") or 20)
+    max_mb = int(_runtime_setting("MENU_UPLOAD_MAX_MB", "20") or 20)
     if len(data) > max_mb * 1024 * 1024:
         raise ValueError(f"menu file exceeds {max_mb}MB limit")
 

@@ -1,8 +1,9 @@
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from dataclasses import dataclass
 from copy import deepcopy
 from typing import Any, List, Optional
 from io import BytesIO
-import os
 import re
 import uuid
 
@@ -36,7 +37,7 @@ def _get_main_provider(template: dict) -> str:
     forced_provider = template.get("_force_main_ocr_provider")
     if forced_provider:
         return str(forced_provider).lower()
-    env_provider = os.getenv("OCR_MAIN_PROVIDER")
+    env_provider = _runtime_setting("OCR_MAIN_PROVIDER")
     if env_provider:
         return env_provider.lower()
     provider = template.get("main_ocr_provider")
@@ -462,7 +463,7 @@ def _overlay_merge_enabled(payload: object) -> bool:
         return True
     if policy in {"audit_only", "disabled", "off", "none"}:
         return False
-    return str(os.getenv("OCR_ENABLE_ROI_OVERLAY_MERGE", "false")).strip().lower() == "true"
+    return str(_runtime_setting("OCR_ENABLE_ROI_OVERLAY_MERGE", "false")).strip().lower() == "true"
 
 
 def _merge_overlay_rows(

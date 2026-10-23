@@ -4,6 +4,7 @@ from src.staging_data import local_directory
 
 import json
 import os
+from src.staging_data import order_runtime_setting as _runtime_setting
 import zipfile
 from datetime import date, datetime
 from decimal import Decimal
@@ -66,7 +67,7 @@ _ADMIN_LOG_MODELS: list[tuple[str, Any]] = [
 
 
 def _read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
+    raw = _runtime_setting(name)
     if raw is None:
         return default
     try:
@@ -76,7 +77,7 @@ def _read_float_env(name: str, default: float) -> float:
 
 
 def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
+    raw = _runtime_setting(name)
     if raw is None:
         return default
     try:

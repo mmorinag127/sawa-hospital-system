@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 import json
@@ -1076,7 +1078,7 @@ def _gemini_json_request(
     image_png_base64: str | None = None,
     response_schema: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    resolved_model = _normalize_text(model) or os.getenv("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro"
+    resolved_model = _normalize_text(model) or _runtime_setting("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro"
     try:
         api_key = gemini_ocr_service._get_api_key()  # noqa: SLF001
     except RuntimeError as exc:
@@ -1120,7 +1122,7 @@ def _gemini_json_request(
             model=resolved_model,
             api_key=api_key,
             body=body,
-            timeout=float(os.getenv("WORKFLOW_V2_LLM_TIMEOUT_SECONDS", "120")),
+            timeout=float(_runtime_setting("WORKFLOW_V2_LLM_TIMEOUT_SECONDS", "120")),
         )
         text = gemini_ocr_service._extract_response_text(raw)  # noqa: SLF001
         parsed = _extract_workflow_llm_json_payload(text, array_key=array_key)
@@ -1265,11 +1267,11 @@ def propose_auto_sheet_edits(
             "Do not invent menu rows or structural cells. Use row_index and col_index from the input."
         )
         try:
-            chunk_size = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "1")), 4))
+            chunk_size = max(1, min(int(_runtime_setting("WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE", "1")), 4))
         except ValueError:
             chunk_size = 1
         try:
-            max_workers = max(1, min(int(os.getenv("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "6")), 6))
+            max_workers = max(1, min(int(_runtime_setting("WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS", "6")), 6))
         except ValueError:
             max_workers = 6
         suspect_targets = _suspect_target_cells_from_presence(sheet)
@@ -1384,7 +1386,7 @@ def propose_auto_sheet_edits(
         first_error = next((item.get("error") for item in chunk_meta if item.get("error")), None)
         llm_meta = {
             "status": llm_status,
-            "model": model or os.getenv("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro",
+            "model": model or _runtime_setting("WORKFLOW_V2_LLM_MODEL", "").strip() or "gemini-2.5-pro",
             "chunks": chunk_meta,
             "failed_chunks": failed_chunks,
             "total_chunks": len(target_chunks),
@@ -1794,7 +1796,7 @@ def build_sheet_anomaly_report(
     should_use_llm = (
         bool(use_llm)
         if use_llm is not None
-        else os.getenv("WORKFLOW_V2_LLM_ANOMALY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+        else _runtime_setting("WORKFLOW_V2_LLM_ANOMALY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
     )
     llm_payload: dict[str, Any] | None = None
     llm_meta: dict[str, Any] = {"status": "disabled"}

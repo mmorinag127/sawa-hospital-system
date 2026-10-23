@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import os
+from src.staging_data import order_runtime_setting as _runtime_setting
 from typing import Any
 
 def _read_float_env(name: str, default: float) -> float:
-    raw = str(os.environ.get(name, "") or "").strip()
+    raw = str(_runtime_setting(name, "") or "").strip()
     if not raw:
         return float(default)
     try:

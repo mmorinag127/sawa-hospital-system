@@ -30,6 +30,8 @@ from app.template_resolution import build_template_resolution
 from app.yomitoku_runner import ocr_image_text, ocr_image_words, prewarm_analyzer, run_yomitoku
 from app.storage_uri import decorate_gcs_uri, format_gcs_uri, parse_gcs_uri, staging_output_prefix, validate_generation, validate_source_query
 from app import figure_markup
+from app import staging_data as _dataset_settings
+from app.staging_data import producer_runtime_setting as _runtime_setting
 
 
 class MandatoryOcrStageFailed(RuntimeError):
@@ -286,6 +288,42 @@ gcs = storage.Client(project=PROJECT_ID or None)
 
 _PREWARM_STARTED = False
 _PREWARM_LOCK = threading.Lock()
+
+
+_PRODUCER_OPTIONS = {
+    'YOMITOKU_DEVICE': lambda: _runtime_setting('OCR_YOMITOKU_DEVICE', 'cpu').strip(),
+    'YOMITOKU_DPI': lambda: int(_runtime_setting('OCR_YOMITOKU_DPI', '200')),
+    'YOMITOKU_VIS': lambda: _runtime_setting('OCR_YOMITOKU_VIS', 'true').lower() == 'true',
+    'YOMITOKU_VIS_PDF': lambda: _runtime_setting('OCR_YOMITOKU_VIS_PDF', 'false').lower() == 'true',
+    'YOMITOKU_IGNORE_LINE_BREAK': lambda: _runtime_setting('OCR_YOMITOKU_IGNORE_LINE_BREAK', 'false').lower() == 'true',
+    'YOMITOKU_NO_FIGURE': lambda: _runtime_setting('OCR_YOMITOKU_NO_FIGURE', 'false').lower() == 'true',
+    'YOMITOKU_FIGURE_WIDTH': lambda: int(_runtime_setting('OCR_YOMITOKU_FIGURE_WIDTH', '200')),
+    'OCR_PIPELINE_MODE': lambda: _runtime_setting('OCR_PIPELINE_MODE', 'structured_v2').strip().lower(),
+    'OCR_ENABLE_TEMPLATE_MATCH': lambda: _runtime_setting('OCR_ENABLE_TEMPLATE_MATCH', 'true').lower() == 'true',
+    'OCR_TEMPLATE_MATCH_DPI': lambda: int(_runtime_setting('OCR_TEMPLATE_MATCH_DPI', '300')),
+    'OCR_ENABLE_TEMPLATE_ROI': lambda: _runtime_setting('OCR_ENABLE_TEMPLATE_ROI', 'true').lower() == 'true',
+    'OCR_ENABLE_PAGE_CORRECTION': lambda: _runtime_setting('OCR_ENABLE_PAGE_CORRECTION', 'true').lower() == 'true',
+    'OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS': lambda: _runtime_setting('OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS', 'true').lower() == 'true',
+    'OCR_QUANTITY_SUBGRID_MAX_PASSES': lambda: int(_runtime_setting('OCR_QUANTITY_SUBGRID_MAX_PASSES', '1')),
+    'OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE': lambda: _runtime_setting('OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE', 'skip').strip().lower(),
+}
+
+def _producer_option(name):
+    if _dataset_settings.current_dataset() == "test" or _dataset_settings.manifest().get("runtime_settings_provenance") == "legacy_stg_runtime":
+        return globals()[name]
+    return _PRODUCER_OPTIONS[name]()
+
+
+def _producer_dataset(blob, name):
+    selected = (blob.metadata or {}).get("staging_dataset")
+    match = re.match(r"input/stg-replay/(replay-[a-z0-9][a-z0-9-]{0,47})/", name)
+    if match:
+        if selected != match.group(1):
+            raise ValueError("producer_dataset_input_mismatch")
+        return selected
+    if name.startswith("input/stg-replay/") or selected not in {None, "test"}:
+        raise ValueError("producer_dataset_input_mismatch")
+    return "test"
 
 
 def _normalize_prefix(prefix: str) -> str:
@@ -630,7 +668,7 @@ def _start_analyzer_prewarm() -> None:
 
     def _runner() -> None:
         try:
-            prewarm_analyzer(device=YOMITOKU_DEVICE, visualize=YOMITOKU_VIS)
+            prewarm_analyzer(device=_producer_option('YOMITOKU_DEVICE'), visualize=_producer_option('YOMITOKU_VIS'))
             app.logger.info("OCR pipeline analyzer prewarm completed")
         except Exception as exc:  # noqa: BLE001
             app.logger.warning("OCR pipeline analyzer prewarm failed error=%s", str(exc))
@@ -851,9 +889,9 @@ def _run_template_classification(
     if requested_template_ids is not None and requested_template_ids != [] and requested_template_ids != [requested_template_id]:
         raise ValueError("captured_template_selection_required")
     candidate_template_ids = [requested_template_id]
-    if not OCR_ENABLE_TEMPLATE_MATCH:
+    if not _producer_option('OCR_ENABLE_TEMPLATE_MATCH'):
         return None, None
-    png_bytes = render_pdf_to_png_bytes(pdf_bytes, dpi=OCR_TEMPLATE_MATCH_DPI)
+    png_bytes = render_pdf_to_png_bytes(pdf_bytes, dpi=_producer_option('OCR_TEMPLATE_MATCH_DPI'))
     img_match_bgr, img_ocr_bgr, img_alt_bgr = build_images_for_match_and_ocr(png_bytes)
     preferred_id = str(requested_template_id).strip()
     preferred_match_id, preferred_warped_match, preferred_warped_ocr, preferred_warped_alt, preferred_diagnostics = choose_template_and_warp(
@@ -898,7 +936,7 @@ def _run_template_roi_extraction(
     *,
     template_context: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if not OCR_ENABLE_TEMPLATE_ROI or not isinstance(template_context, dict):
+    if not _producer_option('OCR_ENABLE_TEMPLATE_ROI') or not isinstance(template_context, dict):
         return None
     tpl_cfg = template_context.get("template")
     warped_ocr_bgr = template_context.get("warped_ocr_bgr")
@@ -906,7 +944,7 @@ def _run_template_roi_extraction(
         return None
     ocr_words = None
     if _template_roi_needs_ocr_words(tpl_cfg):
-        ocr_words = ocr_image_words(warped_ocr_bgr, device=YOMITOKU_DEVICE)
+        ocr_words = ocr_image_words(warped_ocr_bgr, device=_producer_option('YOMITOKU_DEVICE'))
     rois = crop_rois(
         warped_ocr_bgr,
         tpl_cfg,
@@ -914,10 +952,10 @@ def _run_template_roi_extraction(
         ocr_words=ocr_words,
     )
     post = tpl_cfg.get("postprocess") if isinstance(tpl_cfg.get("postprocess"), dict) else {}
-    qty_ocr_engine = str(post.get("qty_ocr_engine") or os.environ.get("OCR_QTY_OCR_ENGINE", "yomitoku")).strip().lower()
+    qty_ocr_engine = str(post.get("qty_ocr_engine") or _runtime_setting("OCR_QTY_OCR_ENGINE", "yomitoku")).strip().lower()
     text_ocr_engine = str(
         post.get("text_ocr_engine")
-        or os.environ.get("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE)
+        or _runtime_setting("OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE", _producer_option('OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE'))
         or ""
     ).strip().lower()
     if qty_ocr_engine == "tesseract_digits" or text_ocr_engine == "tesseract_digits":
@@ -928,7 +966,7 @@ def _run_template_roi_extraction(
     def _ocr_fn(image_bgr, _prompt: str, _max_tokens: int) -> str:
         if _max_tokens > 32 and text_ocr_engine in {"skip", "none", "disabled", "off"}:
             return ""
-        return ocr_image_text(image_bgr, device=YOMITOKU_DEVICE)
+        return ocr_image_text(image_bgr, device=_producer_option('YOMITOKU_DEVICE'))
 
     roi_result = postprocess_and_retry(
         rois=rois,
@@ -964,6 +1002,7 @@ def handler():
     job_id = f"{bucket}:{name}:{generation}"
     try:
         blob, pdf_bytes = _download_generation_input(bucket, name, generation)
+        selected_dataset = _producer_dataset(blob, name)
         terminal_source = _original_pipeline_source(bucket, name, generation, blob=blob, data=pdf_bytes)
         output_name = _owned_output_name(output_prefix, terminal_source)
         terminal_source["output_reference"] = format_gcs_uri(bucket, output_name)
@@ -1016,7 +1055,11 @@ def handler():
 
     start_time = time.time()
     owner_token = _OUTPUT_OWNER.set((terminal_source, job_ref))
+    dataset_scope = _dataset_settings.dataset_context(selected_dataset)
+    dataset_entered = False
     try:
+        dataset_scope.__enter__()
+        dataset_entered = True
         _update_job_stage(job_ref, "download")
         _write_output_partial(
             bucket=bucket,
@@ -1060,7 +1103,7 @@ def handler():
         template_context = None
         roi_extraction = None
         page_correction_summary = {
-            "enabled": OCR_ENABLE_PAGE_CORRECTION,
+            "enabled": _producer_option('OCR_ENABLE_PAGE_CORRECTION'),
             "applied": False,
             "document_rotation_deg": 0,
             "applied_page_count": 0,
@@ -1077,9 +1120,9 @@ def handler():
         }
         classification_warnings: list[str] = []
         canonical_stages = {
-            "classification": "required" if OCR_ENABLE_TEMPLATE_MATCH else "disabled",
-            "roi": "required" if OCR_ENABLE_TEMPLATE_ROI else "disabled",
-            "correction": "required" if OCR_ENABLE_PAGE_CORRECTION else "disabled",
+            "classification": "required" if _producer_option('OCR_ENABLE_TEMPLATE_MATCH') else "disabled",
+            "roi": "required" if _producer_option('OCR_ENABLE_TEMPLATE_ROI') else "disabled",
+            "correction": "required" if _producer_option('OCR_ENABLE_PAGE_CORRECTION') else "disabled",
         }
         try:
             classification, template_context = _run_template_classification(
@@ -1099,13 +1142,13 @@ def handler():
                 classification_warnings.append("template_match_mismatch")
             if template_id and not matched_template_id:
                 raise MandatoryOcrStageFailed("template_match_unresolved")
-        if OCR_ENABLE_TEMPLATE_MATCH:
+        if _producer_option('OCR_ENABLE_TEMPLATE_MATCH'):
             if not isinstance(template_context, dict):
                 raise MandatoryOcrStageFailed("template_match_unresolved")
             canonical_stages["classification"] = "passed"
-        if OCR_ENABLE_TEMPLATE_ROI and not isinstance(template_context, dict):
+        if _producer_option('OCR_ENABLE_TEMPLATE_ROI') and not isinstance(template_context, dict):
             raise MandatoryOcrStageFailed("roi_template_context_missing")
-        if OCR_ENABLE_TEMPLATE_ROI and isinstance(template_context, dict):
+        if _producer_option('OCR_ENABLE_TEMPLATE_ROI') and isinstance(template_context, dict):
             try:
                 roi_extraction = _run_template_roi_extraction(template_context=template_context)
                 if not isinstance(roi_extraction, dict):
@@ -1116,11 +1159,11 @@ def handler():
 
         yomitoku_pdf_bytes = pdf_bytes
         yomitoku_page_images = None
-        if OCR_ENABLE_PAGE_CORRECTION:
+        if _producer_option('OCR_ENABLE_PAGE_CORRECTION'):
             try:
                 yomitoku_pdf_bytes, page_correction_summary, yomitoku_page_images = correct_pdf_for_yomitoku(
                     pdf_bytes=pdf_bytes,
-                    dpi=YOMITOKU_DPI,
+                    dpi=_producer_option('YOMITOKU_DPI'),
                     db=db,
                     preferred_template_id=resolved_template_id,
                     preferred_template_ids=template_ids,
@@ -1151,12 +1194,12 @@ def handler():
         _verify_selected_pdf_input(blob, pdf_bytes)
         page_results, ocr_pdf, layout_pdf = run_yomitoku(
             pdf_bytes=yomitoku_pdf_bytes,
-            dpi=YOMITOKU_DPI,
-            device=YOMITOKU_DEVICE,
-            visualize=YOMITOKU_VIS,
-            ignore_line_break=YOMITOKU_IGNORE_LINE_BREAK,
-            no_figure=YOMITOKU_NO_FIGURE,
-            figure_width=YOMITOKU_FIGURE_WIDTH,
+            dpi=_producer_option('YOMITOKU_DPI'),
+            device=_producer_option('YOMITOKU_DEVICE'),
+            visualize=_producer_option('YOMITOKU_VIS'),
+            ignore_line_break=_producer_option('YOMITOKU_IGNORE_LINE_BREAK'),
+            no_figure=_producer_option('YOMITOKU_NO_FIGURE'),
+            figure_width=_producer_option('YOMITOKU_FIGURE_WIDTH'),
             figure_dir=YOMITOKU_FIGURE_DIR,
             page_images=yomitoku_page_images,
         )
@@ -1260,24 +1303,24 @@ def handler():
                 }
             )
 
-        if OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS and structured_tables:
+        if _producer_option('OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS') and structured_tables:
             try:
                 _verify_selected_pdf_input(blob, pdf_bytes)
                 quantity_source_pages = yomitoku_page_images or render_pdf_to_page_images(
                     yomitoku_pdf_bytes,
-                    YOMITOKU_DPI,
+                    _producer_option('YOMITOKU_DPI'),
                 )
                 subgrid_pass_artifacts = build_quantity_subgrid_second_passes(
                     page_results=page_results,
                     page_images=quantity_source_pages,
-                    dpi=YOMITOKU_DPI,
-                    device=YOMITOKU_DEVICE,
-                    visualize=YOMITOKU_VIS,
-                    ignore_line_break=YOMITOKU_IGNORE_LINE_BREAK,
-                    no_figure=YOMITOKU_NO_FIGURE,
-                    figure_width=YOMITOKU_FIGURE_WIDTH,
+                    dpi=_producer_option('YOMITOKU_DPI'),
+                    device=_producer_option('YOMITOKU_DEVICE'),
+                    visualize=_producer_option('YOMITOKU_VIS'),
+                    ignore_line_break=_producer_option('YOMITOKU_IGNORE_LINE_BREAK'),
+                    no_figure=_producer_option('YOMITOKU_NO_FIGURE'),
+                    figure_width=_producer_option('YOMITOKU_FIGURE_WIDTH'),
                     figure_dir=YOMITOKU_FIGURE_DIR,
-                    max_passes=OCR_QUANTITY_SUBGRID_MAX_PASSES,
+                    max_passes=_producer_option('OCR_QUANTITY_SUBGRID_MAX_PASSES'),
                 )
                 for subgrid_pass in subgrid_pass_artifacts:
                     prefix = (
@@ -1349,7 +1392,7 @@ def handler():
         combined = {}
         if corrected_pdf_uri:
             combined["corrected_pdf"] = corrected_pdf_uri
-        if YOMITOKU_VIS and YOMITOKU_VIS_PDF:
+        if _producer_option('YOMITOKU_VIS') and _producer_option('YOMITOKU_VIS_PDF'):
             if ocr_pdf:
                 combined["ocr_pdf"] = _upload_bytes(
                     bucket,
@@ -1368,10 +1411,10 @@ def handler():
         elapsed = round(time.time() - start_time, 2)
         metrics = {
             "page_count": len(page_results),
-            "dpi": YOMITOKU_DPI,
-            "device": YOMITOKU_DEVICE,
-            "visualize": YOMITOKU_VIS,
-            "visualize_pdf": YOMITOKU_VIS_PDF and YOMITOKU_VIS,
+            "dpi": _producer_option('YOMITOKU_DPI'),
+            "device": _producer_option('YOMITOKU_DEVICE'),
+            "visualize": _producer_option('YOMITOKU_VIS'),
+            "visualize_pdf": _producer_option('YOMITOKU_VIS_PDF') and _producer_option('YOMITOKU_VIS'),
             "overlay_count": overlay_count,
             "figure_count": figure_count,
             "table_count": len(structured_tables),
@@ -1430,19 +1473,19 @@ def handler():
             ),
             "elapsed_sec": elapsed,
         }
-        if OCR_PIPELINE_MODE == "structured_v2" and not structured_tables:
+        if _producer_option('OCR_PIPELINE_MODE') == "structured_v2" and not structured_tables:
             warnings.append("structured_tables_missing")
-        if OCR_ENABLE_TEMPLATE_ROI and isinstance(template_context, dict) and not isinstance(roi_extraction, dict):
+        if _producer_option('OCR_ENABLE_TEMPLATE_ROI') and isinstance(template_context, dict) and not isinstance(roi_extraction, dict):
             warnings.append("roi_extraction_missing")
 
         table_raw = "\n\n---\n\n".join(markdown_pages)
         output_payload = {
-            "version": "2" if OCR_PIPELINE_MODE == "structured_v2" else "1",
+            "version": "2" if _producer_option('OCR_PIPELINE_MODE') == "structured_v2" else "1",
             "job_id": job_id,
             "status": "done",
             "stage": "done",
             "engine": "yomitoku",
-            "pipeline_mode": OCR_PIPELINE_MODE,
+            "pipeline_mode": _producer_option('OCR_PIPELINE_MODE'),
             "template_id": resolved_template_id,
             "facility_id": facility_id,
             "input_reference": input_reference,
@@ -1504,6 +1547,8 @@ def handler():
         app.logger.exception("OCR pipeline failed job=%s", safe_job_id)
         return jsonify(_terminal_ack(failed_payload)), 200
     finally:
+        if dataset_entered:
+            dataset_scope.__exit__(None, None, None)
         _OUTPUT_OWNER.reset(owner_token)
         with _ACTIVE_PRODUCER_LOCK:
             _ACTIVE_PRODUCER_JOBS.discard(job_id)

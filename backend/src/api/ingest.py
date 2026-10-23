@@ -1,8 +1,9 @@
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import asyncio
 from datetime import datetime
 from typing import Any
 
-import os
 
 from fastapi import APIRouter, HTTPException, status, Depends, File, Form, UploadFile, Request
 import time
@@ -107,7 +108,7 @@ def _normalize_upload_files(
         files.extend(file for file in pdf_files if file is not None)
     if not files:
         raise HTTPException(status_code=400, detail="at least one pdf_file is required")
-    max_files = max(1, int(os.getenv("MANUAL_UPLOAD_MAX_FILES", "10") or 10))
+    max_files = max(1, int(_runtime_setting("MANUAL_UPLOAD_MAX_FILES", "10") or 10))
     if len(files) > max_files:
         raise HTTPException(status_code=413, detail=f"too many files; max is {max_files}")
     return files
@@ -121,8 +122,8 @@ def _enforce_upload_content_length(request: Request) -> None:
         content_length = int(raw_length)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid content-length") from None
-    max_mb = int(os.getenv("MANUAL_UPLOAD_MAX_MB", "20") or 20)
-    max_files = max(1, int(os.getenv("MANUAL_UPLOAD_MAX_FILES", "10") or 10))
+    max_mb = int(_runtime_setting("MANUAL_UPLOAD_MAX_MB", "20") or 20)
+    max_files = max(1, int(_runtime_setting("MANUAL_UPLOAD_MAX_FILES", "10") or 10))
     # Multipart overhead is small but non-zero, so allow a narrow envelope over
     # the per-PDF limit while still rejecting oversized bodies before parsing.
     max_bytes = (max_mb * max_files * 1024 * 1024) + (max_files * 1024 * 1024)

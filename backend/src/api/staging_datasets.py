@@ -35,9 +35,7 @@ def choices(request: Request, response: Response):
     selected = request.cookies.get(datasets.COOKIE, "test")
     options = [{"id": "test", "label": "テスト用", "available": True}]
     try:
-        snapshot = datasets.manifest()
-        options.append({"id": snapshot["id"], "label": "本番再現用", "available": True,
-                        "snapshot_at": snapshot["snapshot_at"]})
+        options.extend(datasets.snapshot_choices())
         error = None if selected in {item["id"] for item in options} else "選択したコピーは利用できません。テスト用を選び直してください。"
     except datasets.DatasetUnavailable:
         options.append({"id": "unavailable", "label": "本番再現用（準備未完了）", "available": False})
@@ -60,3 +58,32 @@ def select_dataset(body: Selection, response: Response):
                         httponly=True, samesite="strict")
     response.headers["Cache-Control"] = "no-store"
     return {"selected": body.dataset}
+
+
+class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+
+
+@router.get("/staging-datasets/refresh")
+def refresh_status(response: Response):
+    if not datasets.staging_runtime():
+        raise HTTPException(404, "Not found")
+    from src.services import staging_copy_refresh_service as refresh
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return refresh.status()
+    except (refresh.RefreshError, datasets.DatasetUnavailable) as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+@router.post("/staging-datasets/refresh", status_code=202)
+def start_refresh(body: RefreshRequest, response: Response):
+    if not datasets.staging_runtime():
+        raise HTTPException(404, "Not found")
+    from src.services import staging_copy_refresh_service as refresh
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return refresh.request_refresh(body.request_id)
+    except (refresh.RefreshError, datasets.DatasetUnavailable) as exc:
+        raise HTTPException(409, str(exc)) from None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import os
 from contextlib import nullcontext
 from datetime import datetime, timedelta
@@ -37,14 +39,14 @@ def _lease_seconds() -> int:
         configured = max(int(raw), 60)
     except ValueError:
         configured = 1800
-    wait_raw = str(os.getenv("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
+    wait_raw = str(_runtime_setting("OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST", "") or "").strip().lower()
     if wait_raw in {"0", "false", "no", "off"}:
         return configured
     if not wait_raw:
         pipeline_url = str(os.getenv("OCR_PIPELINE_URL", "") or "").strip()
         if not pipeline_url:
             return configured
-    timeout_raw = str(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600") or "").strip()
+    timeout_raw = str(_runtime_setting("OCR_PIPELINE_TIMEOUT_SECONDS", "600") or "").strip()
     grace_raw = str(os.getenv("UPLOADED_PDF_LEASE_GRACE_SECONDS", "120") or "").strip()
     try:
         timeout_seconds = max(int(timeout_raw), 60)

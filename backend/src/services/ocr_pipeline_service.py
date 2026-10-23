@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from typing import Any
 from datetime import datetime
 import json
@@ -115,7 +117,7 @@ class OCRPipelineTriggerFailedError(RuntimeError):
 
 def _get_pipeline_semaphore() -> threading.BoundedSemaphore | None:
     global _PIPELINE_SEMAPHORE, _PIPELINE_MAX
-    raw = os.getenv("OCR_PIPELINE_MAX_INFLIGHT", "2")
+    raw = _runtime_setting("OCR_PIPELINE_MAX_INFLIGHT", "2")
     try:
         max_inflight = int(raw)
     except ValueError:
@@ -137,7 +139,7 @@ def _inflight_delta(delta: int) -> int:
 
 
 def get_pipeline_runtime_status() -> dict[str, Any]:
-    raw = os.getenv("OCR_PIPELINE_MAX_INFLIGHT", "2")
+    raw = _runtime_setting("OCR_PIPELINE_MAX_INFLIGHT", "2")
     try:
         max_inflight = int(raw)
     except ValueError:
@@ -147,8 +149,8 @@ def get_pipeline_runtime_status() -> dict[str, Any]:
         "inflight": _PIPELINE_INFLIGHT,
         "request_timeout_seconds": _get_request_timeout(wait_for_output=True),
         "trigger_timeout_seconds": _get_request_timeout(wait_for_output=False),
-        "timeout_seconds": int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600")),
-        "poll_interval_seconds": float(os.getenv("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0")),
+        "timeout_seconds": int(_runtime_setting("OCR_PIPELINE_TIMEOUT_SECONDS", "600")),
+        "poll_interval_seconds": float(_runtime_setting("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0")),
     }
 
 
@@ -217,7 +219,7 @@ def _get_request_timeout(*, wait_for_output: bool) -> float:
 
 
 def _get_output_read_timeout() -> float:
-    raw = os.getenv("OCR_PIPELINE_OUTPUT_READ_TIMEOUT_SECONDS", "15")
+    raw = _runtime_setting("OCR_PIPELINE_OUTPUT_READ_TIMEOUT_SECONDS", "15")
     try:
         timeout = float(raw)
     except ValueError:
@@ -400,7 +402,7 @@ def run_ocr_pipeline(
     semaphore = _get_pipeline_semaphore()
     acquired = False
     if semaphore:
-        acquire_timeout = float(os.getenv("OCR_PIPELINE_ACQUIRE_TIMEOUT_SECONDS", "600"))
+        acquire_timeout = float(_runtime_setting("OCR_PIPELINE_ACQUIRE_TIMEOUT_SECONDS", "600"))
         logger.info("OCR pipeline acquire slot timeout=%ss", acquire_timeout)
         acquired = semaphore.acquire(timeout=acquire_timeout)
         if not acquired:
@@ -528,7 +530,7 @@ def run_ocr_pipeline(
         output_name = _owned_pipeline_output_name(output_prefix, original_source)
         output_reference = format_gcs_uri(bucket, output_name)
         input_reference = format_gcs_uri(bucket, input_name)
-        timeout_seconds = int(os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
+        timeout_seconds = int(_runtime_setting("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
 
         from src.services.ocr_job_service import record_own_pipeline_delivery
 
@@ -601,7 +603,7 @@ def run_ocr_pipeline(
             if trigger_error_message:
                 response["trigger_error"] = trigger_error_message
             return response
-        poll_interval = float(os.getenv("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0"))
+        poll_interval = float(_runtime_setting("OCR_PIPELINE_POLL_INTERVAL_SECONDS", "2.0"))
         logger.info(
             "OCR pipeline wait output bucket=%s name=%s timeout=%ss interval=%ss",
             bucket,

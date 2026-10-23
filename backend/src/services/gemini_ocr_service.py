@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import base64
 from copy import deepcopy
 import json
@@ -71,12 +73,12 @@ def _resolve_timeout_seconds(template: dict[str, Any]) -> float:
         return float(configured)
     if _full_table_mode(template):
         return float(
-            os.getenv(
+            _runtime_setting(
                 "GEMINI_OCR_FULL_TABLE_TIMEOUT_SECONDS",
-                os.getenv("GEMINI_OCR_TIMEOUT_SECONDS", "240"),
+                _runtime_setting("GEMINI_OCR_TIMEOUT_SECONDS", "240"),
             )
         )
-    return float(os.getenv("GEMINI_OCR_TIMEOUT_SECONDS", "90"))
+    return float(_runtime_setting("GEMINI_OCR_TIMEOUT_SECONDS", "90"))
 
 
 def _as_bool(value: object, *, default: bool = False) -> bool:
@@ -107,7 +109,7 @@ def _get_api_key() -> str:
 def _get_model(template: dict) -> str:
     model = (
         str(template.get("gemini_ocr_model") or "").strip()
-        or os.getenv("GEMINI_OCR_MODEL", "").strip()
+        or _runtime_setting("GEMINI_OCR_MODEL", "").strip()
         or "gemini-2.5-flash"
     )
     return model
@@ -121,7 +123,7 @@ def _model_requires_thinking_mode(model: str) -> bool:
 def _resolve_thinking_budget(template: dict[str, Any], model: str) -> int | None:
     configured = template.get("gemini_ocr_thinking_budget")
     if configured is None:
-        env_value = os.getenv("GEMINI_OCR_THINKING_BUDGET", "").strip()
+        env_value = _runtime_setting("GEMINI_OCR_THINKING_BUDGET", "").strip()
         configured = env_value or None
     if configured is not None:
         return _safe_int(configured, 0)
@@ -446,7 +448,7 @@ def _recover_truncated_payload(raw: str) -> dict[str, Any] | None:
 
 
 def _api_url(model: str, api_key: str) -> str:
-    base = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    base = _runtime_setting("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
     encoded_model = urllib.parse.quote(model, safe="")
     encoded_key = urllib.parse.quote(api_key, safe="")
     return f"{base}/models/{encoded_model}:generateContent?key={encoded_key}"
@@ -602,16 +604,16 @@ def run_gemini_ocr(
     page = max(int(template.get("page", 1)) - 1, 0) + 1
     resolution = int(template.get("gemini_ocr_resolution") or template.get("main_ocr_resolution") or 300)
     timeout = _resolve_timeout_seconds(template)
-    max_tokens = int(template.get("gemini_ocr_max_tokens") or os.getenv("GEMINI_OCR_MAX_TOKENS", "12000"))
+    max_tokens = int(template.get("gemini_ocr_max_tokens") or _runtime_setting("GEMINI_OCR_MAX_TOKENS", "12000"))
     retry_on_truncation = _as_bool(
         template.get("gemini_ocr_retry_on_truncation")
         if template.get("gemini_ocr_retry_on_truncation") is not None
-        else os.getenv("GEMINI_OCR_RETRY_ON_TRUNCATION"),
+        else _runtime_setting("GEMINI_OCR_RETRY_ON_TRUNCATION"),
         default=True,
     )
     retry_max_tokens = _safe_int(
         template.get("gemini_ocr_retry_max_tokens")
-        or os.getenv("GEMINI_OCR_RETRY_MAX_TOKENS", "24000"),
+        or _runtime_setting("GEMINI_OCR_RETRY_MAX_TOKENS", "24000"),
         24000,
     )
     if retry_max_tokens < max_tokens:

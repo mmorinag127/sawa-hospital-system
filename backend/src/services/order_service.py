@@ -1,3 +1,5 @@
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from typing import Any, Optional
 from contextvars import ContextVar, copy_context
 from contextlib import contextmanager, nullcontext
@@ -2411,7 +2413,7 @@ def _parse_strict_numeric_cell(value: object) -> float | None:
 
 def _read_sheet_quantity_max_abs() -> float:
     try:
-        max_abs = float(os.getenv("OCR_SHEET_MAX_QTY", "999"))
+        max_abs = float(_runtime_setting("OCR_SHEET_MAX_QTY", "999"))
     except Exception:
         max_abs = 999.0
     if max_abs <= 0:
@@ -2848,7 +2850,7 @@ def _rows_look_like_quantity_only(
 
 
 def _read_reparse_float_env(name: str, default: float, *, min_value: float | None = None) -> float:
-    raw = str(os.getenv(name, str(default))).strip()
+    raw = str(_runtime_setting(name, str(default))).strip()
     try:
         value = float(raw)
     except Exception:
@@ -2859,7 +2861,7 @@ def _read_reparse_float_env(name: str, default: float, *, min_value: float | Non
 
 
 def _read_reparse_int_env(name: str, default: int, *, min_value: int | None = None) -> int:
-    raw = str(os.getenv(name, str(default))).strip()
+    raw = str(_runtime_setting(name, str(default))).strip()
     try:
         value = int(raw)
     except Exception:
@@ -2870,7 +2872,7 @@ def _read_reparse_int_env(name: str, default: int, *, min_value: int | None = No
 
 
 def _read_reparse_bool_env(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    raw = str(_runtime_setting(name, "1" if default else "0")).strip().lower()
     if raw in {"1", "true", "yes", "on"}:
         return True
     if raw in {"0", "false", "no", "off"}:
@@ -2884,7 +2886,7 @@ def _read_reparse_stage_timeout_seconds(processing_stage: str) -> float:
     default_timeout = float(min(max(stale_budget, 60), 600))
     if normalized_stage:
         specific_name = f"OCR_REPARSE_{normalized_stage.upper()}_TIMEOUT_SECONDS"
-        specific_value = os.getenv(specific_name)
+        specific_value = _runtime_setting(specific_name)
         if specific_value is not None:
             try:
                 parsed = float(str(specific_value).strip())
@@ -2985,7 +2987,7 @@ def _run_reparse_with_heartbeat(
 
 def _resolve_reparse_soft_warning_codes() -> set[str]:
     raw = str(
-        os.getenv(
+        _runtime_setting(
             "OCR_REPARSE_SOFT_WARNING_CODES",
             "sheet_column_anomaly",
         )
@@ -3312,7 +3314,7 @@ def _evaluate_quantity_only_rows_quality(
         detail["quality_issue"] = "row_overfill"
         return "sheet_row_overfill", detail
 
-    if str(os.getenv("OCR_REPARSE_ENABLE_COLUMN_ANOMALY_GATE", "1")).strip().lower() in {"0", "false", "no", "off"}:
+    if str(_runtime_setting("OCR_REPARSE_ENABLE_COLUMN_ANOMALY_GATE", "1")).strip().lower() in {"0", "false", "no", "off"}:
         return None, detail
 
     quantity_columns = _template_quantity_columns(template)
@@ -8486,11 +8488,11 @@ def _daily_audit_run_gemini(*, findings: list[dict[str, Any]], target_date: date
             "status": "skipped",
             "items": [],
         }
-    model = str(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MODEL") or "gemini-2.5-flash").strip()
-    timeout = _daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 120.0
+    model = str(_runtime_setting("DAILY_OUTPUT_AUDIT_GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    timeout = _daily_audit_float(_runtime_setting("DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS")) or 120.0
     clipped_findings = findings[:16]
-    max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS")) or 1024)
-    retry_max_tokens = int(_daily_audit_float(os.getenv("DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS")) or 2048)
+    max_tokens = int(_daily_audit_float(_runtime_setting("DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS")) or 1024)
+    retry_max_tokens = int(_daily_audit_float(_runtime_setting("DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS")) or 2048)
     if retry_max_tokens < max_tokens:
         retry_max_tokens = max_tokens
     system_prompt = (
@@ -14665,13 +14667,13 @@ def _load_pipeline_output_with_retry(
         return None
     if wait_seconds_override is None:
         try:
-            wait_seconds = float(os.getenv("OCR_REPARSE_OUTPUT_WAIT_SECONDS", "90"))
+            wait_seconds = float(_runtime_setting("OCR_REPARSE_OUTPUT_WAIT_SECONDS", "90"))
         except ValueError:
             wait_seconds = 15.0
     else:
         wait_seconds = float(wait_seconds_override)
     try:
-        poll_seconds = float(os.getenv("OCR_REPARSE_OUTPUT_POLL_SECONDS", "1.5"))
+        poll_seconds = float(_runtime_setting("OCR_REPARSE_OUTPUT_POLL_SECONDS", "1.5"))
     except ValueError:
         poll_seconds = 1.5
     deadline = time.monotonic() + max(wait_seconds, 0.0)
@@ -18026,8 +18028,8 @@ def _build_reparse_request_metadata(
 
 def _read_reparse_output_recovery_grace_seconds() -> float:
     raw = (
-        os.getenv("OCR_REPARSE_OUTPUT_RECOVERY_GRACE_SECONDS")
-        or os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS")
+        _runtime_setting("OCR_REPARSE_OUTPUT_RECOVERY_GRACE_SECONDS")
+        or _runtime_setting("OCR_PIPELINE_TIMEOUT_SECONDS")
         or "600"
     )
     try:
@@ -18988,7 +18990,7 @@ def review_ocr_table_with_llm(
     resolved_provider = _normalize_reparse_provider(provider)
     effective_provider = (
         resolved_provider
-        or str(template.get("main_ocr_provider") or os.getenv("OCR_MAIN_PROVIDER") or "gemini").strip().lower()
+        or str(template.get("main_ocr_provider") or _runtime_setting("OCR_MAIN_PROVIDER") or "gemini").strip().lower()
     )
     if effective_provider not in {"openai", "gemini"}:
         effective_provider = "gemini"
@@ -25352,7 +25354,7 @@ def _resolve_explicit_reparse_inference_provider(
 
     configured = str(
         template.get("main_ocr_provider")
-        or os.getenv("OCR_MAIN_PROVIDER")
+        or _runtime_setting("OCR_MAIN_PROVIDER")
         or ""
     ).strip().lower()
     if configured in {"openai", "gemini"}:
@@ -26554,13 +26556,13 @@ def _resolve_provider_model_name(
     if normalized_provider == "gemini":
         return (
             str(template.get("gemini_ocr_model") or "").strip()
-            or os.getenv("GEMINI_OCR_MODEL", "").strip()
+            or _runtime_setting("GEMINI_OCR_MODEL", "").strip()
             or "gemini-2.5-flash"
         )
     if normalized_provider == "openai":
         return (
             str(template.get("openai_ocr_model") or "").strip()
-            or os.getenv("OPENAI_OCR_MODEL", "").strip()
+            or _runtime_setting("OPENAI_OCR_MODEL", "").strip()
             or "gpt-4.1-mini"
         )
     return ""
@@ -26680,7 +26682,7 @@ def _should_use_gemini_pro_repair_pass(
     if quality_error not in {"sheet_row_coverage_low", "sheet_row_overfill", "sheet_column_anomaly"}:
         return False, ""
     enabled = str(
-        os.getenv("OCR_REPARSE_ENABLE_GEMINI_PRO_ON_QUALITY_FAIL", "1")
+        _runtime_setting("OCR_REPARSE_ENABLE_GEMINI_PRO_ON_QUALITY_FAIL", "1")
     ).strip().lower() not in {"0", "false", "no", "off"}
     if not enabled:
         return False, ""
@@ -26691,7 +26693,7 @@ def _should_use_gemini_pro_repair_pass(
 
     repair_model = (
         str(template.get("gemini_ocr_repair_model") or "").strip()
-        or os.getenv("OCR_REPARSE_GEMINI_REPAIR_MODEL", "").strip()
+        or _runtime_setting("OCR_REPARSE_GEMINI_REPAIR_MODEL", "").strip()
         or "gemini-2.5-pro"
     )
     if repair_model.lower() == first_pass_model.lower():
@@ -27021,7 +27023,7 @@ def _resolve_llm_audit_provider(
 
     configured = (
         str(template.get("llm_audit_provider") or "").strip().lower()
-        or str(os.getenv("OCR_REPARSE_AUDIT_PROVIDER", "alternate")).strip().lower()
+        or str(_runtime_setting("OCR_REPARSE_AUDIT_PROVIDER", "alternate")).strip().lower()
     )
     if configured in {"", "same", "alternate", "other", "cross", "opposite"}:
         return _alternate(normalized_primary)
@@ -27052,7 +27054,7 @@ def _resolve_gemini_audit_model(
 ) -> str:
     configured = str(
         template.get("gemini_ocr_audit_model")
-        or os.getenv("OCR_REPARSE_GEMINI_AUDIT_MODEL", "")
+        or _runtime_setting("OCR_REPARSE_GEMINI_AUDIT_MODEL", "")
     ).strip()
     if configured:
         candidate = configured
@@ -27064,7 +27066,7 @@ def _resolve_gemini_audit_model(
             candidate = "gemini-2.5-flash"
         else:
             candidate = (
-                str(os.getenv("GEMINI_OCR_MODEL", "")).strip()
+                str(_runtime_setting("GEMINI_OCR_MODEL", "")).strip()
                 or "gemini-2.5-flash"
             )
     if (
@@ -27255,7 +27257,7 @@ def _run_llm_reparse_audit(
         audit_template["openai_ocr_user_prompt"] = user_prompt
         model_override = str(
             audit_template.get("openai_ocr_audit_model")
-            or os.getenv("OCR_REPARSE_OPENAI_AUDIT_MODEL", "")
+            or _runtime_setting("OCR_REPARSE_OPENAI_AUDIT_MODEL", "")
         ).strip()
         if model_override:
             audit_template["openai_ocr_model"] = model_override
@@ -27281,7 +27283,7 @@ def _run_llm_reparse_audit(
     blocking_codes = {
         _normalize_audit_issue_code(token)
         for token in str(
-            os.getenv(
+            _runtime_setting(
                 "OCR_REPARSE_LLM_AUDIT_BLOCKING_CODES",
                 (
                     "row_count_shortfall,week_scope_mismatch,date_anchor_drift,"
@@ -27311,7 +27313,7 @@ def _run_llm_reparse_audit(
     blocking_severity = {
         str(token).strip().lower()
         for token in str(
-            os.getenv("OCR_REPARSE_LLM_AUDIT_BLOCKING_SEVERITY", "critical,high")
+            _runtime_setting("OCR_REPARSE_LLM_AUDIT_BLOCKING_SEVERITY", "critical,high")
         ).split(",")
         if str(token).strip()
     }
@@ -28294,7 +28296,7 @@ def _reparse_order_with_attempt(
             template_to_use["gemini_ocr_model"] = ocr_model.strip()
     main_provider = str(
         inference_provider
-        or os.getenv("OCR_MAIN_PROVIDER")
+        or _runtime_setting("OCR_MAIN_PROVIDER")
         or template_to_use.get("main_ocr_provider")
         or "pipeline"
     ).lower()
@@ -28538,7 +28540,7 @@ def _reparse_order_with_attempt(
             if llm_assist:
                 try:
                     llm_wait_seconds = float(
-                        os.getenv("OCR_REPARSE_LLM_FIRST_PASS_WAIT_SECONDS", os.getenv("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
+                        _runtime_setting("OCR_REPARSE_LLM_FIRST_PASS_WAIT_SECONDS", _runtime_setting("OCR_PIPELINE_TIMEOUT_SECONDS", "600"))
                     )
                 except ValueError:
                     llm_wait_seconds = 600.0
@@ -28986,7 +28988,7 @@ def _reparse_order_with_attempt(
             reparse_quality_detail = quality_detail
 
             repair_enabled = str(
-                os.getenv("OCR_REPARSE_ENABLE_REPAIR_PASS", "1")
+                _runtime_setting("OCR_REPARSE_ENABLE_REPAIR_PASS", "1")
             ).strip().lower() not in {"0", "false", "no", "off"}
             if repair_enabled and reparse_quality_error in {"sheet_row_coverage_low", "sheet_row_overfill", "sheet_column_anomaly"}:
                 repair_template = dict(template_to_use)

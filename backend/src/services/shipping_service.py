@@ -11,6 +11,8 @@ from loguru import logger
 from openpyxl import load_workbook
 
 from src.services import config_service
+from src import staging_data as datasets
+from src.services.storage_service import load_bytes_from_uri
 from src.services.sagawa_tracking_service import (
     TrackingStatus,
     lookup_tracking_statuses,
@@ -227,9 +229,17 @@ def _resolve_template_sheet(workbook, ship_date: date | None):
 
 
 def build_shipping_excel(records: list[ShippingRecord]) -> Path:
-    if not SHIPPING_TEMPLATE_PATH.exists():
-        raise FileNotFoundError(f"shipping template missing: {SHIPPING_TEMPLATE_PATH}")
-    workbook = load_workbook(SHIPPING_TEMPLATE_PATH)
+    if datasets.current_dataset() != "test" and datasets.manifest().get("runtime_settings_provenance") != "legacy_stg_runtime":
+        original = datasets.order_runtime_setting("SHIPPING_TEMPLATE_PATH")
+        if original is None:
+            source = DATA_DIR / "shipping_template.xlsx"
+        else:
+            source = BytesIO(load_bytes_from_uri(original))
+    else:
+        source = SHIPPING_TEMPLATE_PATH
+    if isinstance(source, Path) and not source.exists():
+        raise FileNotFoundError(f"shipping template missing: {source}")
+    workbook = load_workbook(source)
     ship_date = next((r.ship_date for r in records if r.ship_date), None)
     ws = _resolve_template_sheet(workbook, ship_date)
 

@@ -1,10 +1,11 @@
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 """Durable automatic LLM continuation of one accepted first-pass result."""
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime
 from uuid import uuid4
-import os
 import json
 from hashlib import sha256
 
@@ -238,7 +239,7 @@ def accept(session, job, execution_input, evidence, receipt, order):
     boundary = deepcopy(execution_input)
     boundary.update(job_id="OCR-" + identity, job_order_id=order.id,
         execution_id=uuid4().hex, ingest_successor_id=identity)
-    provider = str(os.getenv("OCR_AUTO_LLM_REPARSE_PROVIDER", "") or "").strip().lower() or None
+    provider = str(_runtime_setting("OCR_AUTO_LLM_REPARSE_PROVIDER", "") or "").strip().lower() or None
     request = {"ocr_prompt": None, "prompt_preset": None, "ocr_provider": provider,
                "ocr_model": None, "llm_assist": True}
     saved = session.get(OrderOcrEvidenceRun, evidence["id"])

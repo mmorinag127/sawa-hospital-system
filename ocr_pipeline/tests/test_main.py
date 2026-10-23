@@ -1,4 +1,5 @@
 import importlib
+import json
 import logging
 import pathlib
 import sys
@@ -105,6 +106,33 @@ pipeline_main = importlib.import_module("app.main")
 
 
 class MainArtifactTests(unittest.TestCase):
+    def test_producer_options_use_the_pinned_copy_and_restore_test_globals(self):
+        data = pipeline_main._dataset_settings
+        value = {"id": "replay-runtime", "runtime_settings_provenance": "production_environment", "components": {"order": {"producer_runtime_settings": {key: None for key in data.RUNTIME_PRODUCER_KEYS}}}}
+        value["components"]["order"]["producer_runtime_settings"].update({"OCR_YOMITOKU_DPI": "450", "OCR_ENABLE_TEMPLATE_MATCH": "false", "OCR_PAGE_CORRECTION_MAX_SKEW_DEG": "6.5", "OCR_TEMPLATE_MIN_CONFIDENCE": "0.82"})
+        with mock.patch.dict("os.environ", {"K_SERVICE": "ocr-pipeline-stg", "APP_ENV": "stg"}), mock.patch.object(data, "manifest", return_value=value), mock.patch.object(data, "manifest_for", return_value=value):
+            previous = pipeline_main._producer_option("YOMITOKU_DPI")
+            with data.dataset_context(value["id"]):
+                self.assertEqual(pipeline_main._producer_option("YOMITOKU_DPI"), 450)
+                self.assertFalse(pipeline_main._producer_option("OCR_ENABLE_TEMPLATE_MATCH"))
+                def actual_module(name):
+                    spec = importlib.util.spec_from_file_location("app.runtime_test_" + name, ROOT / "app" / (name + ".py"))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    return module
+                page_correction = actual_module("page_correction")
+                template_resolution = actual_module("template_resolution")
+                self.assertEqual(page_correction._read_float_env("OCR_PAGE_CORRECTION_MAX_SKEW_DEG", 8.0), 6.5)
+                self.assertEqual(template_resolution._read_float_env("OCR_TEMPLATE_MIN_CONFIDENCE", 0.6), 0.82)
+            self.assertEqual(pipeline_main._producer_option("YOMITOKU_DPI"), previous)
+
+    def test_copy_input_never_uses_test_options_when_dataset_metadata_is_missing_or_foreign(self):
+        for metadata in ({}, {"staging_dataset": "test"}, {"staging_dataset": "replay-other"}):
+            with self.assertRaisesRegex(ValueError, "producer_dataset_input_mismatch"):
+                pipeline_main._producer_dataset(types.SimpleNamespace(metadata=metadata), "input/stg-replay/replay-own/own.pdf")
+        self.assertEqual(pipeline_main._producer_dataset(types.SimpleNamespace(metadata={"staging_dataset": "replay-own"}), "input/stg-replay/replay-own/own.pdf"), "replay-own")
+        self.assertEqual(pipeline_main._producer_dataset(types.SimpleNamespace(metadata={}), "input/own.pdf"), "test")
+
     def _captured_terminal_source(self, stores):
         original = pipeline_main._original_pipeline_source("own-bucket", stores.name, "19")
         stores.output = pipeline_main._owned_output_name("output/", original)

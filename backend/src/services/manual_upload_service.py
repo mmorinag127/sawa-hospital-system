@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
@@ -58,7 +60,7 @@ def _sanitize_filename(name: str) -> str:
 def _validate_pdf_bytes(data: bytes) -> None:
     if not data:
         raise ValueError("pdf_file is empty")
-    max_mb = int(os.getenv("MANUAL_UPLOAD_MAX_MB", "20") or 20)
+    max_mb = int(_runtime_setting("MANUAL_UPLOAD_MAX_MB", "20") or 20)
     max_bytes = max_mb * 1024 * 1024
     if len(data) > max_bytes:
         raise ValueError(f"pdf_file exceeds {max_mb}MB limit")
