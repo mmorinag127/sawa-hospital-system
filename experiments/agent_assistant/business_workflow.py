@@ -284,10 +284,10 @@ class BusinessWorkflow:
             self.checkpoint(ident, phase='completed')
             try:
                 if not self.store.get(ident)['session_id'] and not any(event['kind'] in ('gemini_dispatch', 'agent.custom_tool_use') for event in self.store.events(ident)):
-                    self.store.update(ident, reserved=0)
+                    self.store.release_unstarted_model(ident, run['generation'])
                     self.store.event(ident, 'business_no_model_usage', {'reason': 'モデル接続を開始せず正規APIだけで業務完了'})
                 else:
-                    await self.providers.refresh_usage(ident, release=True)
+                    await self.providers.refresh_usage(ident, release=True, terminal_generation=run['generation'])
             except Exception:
                 self.store.event(ident, 'business_accounting_pending', {'message': '業務は完了。モデル料金の照合は管理画面で継続します。'})
             return False
@@ -342,7 +342,7 @@ class BusinessWorkflow:
                 if not self.tools.faxes.items(ident):
                     await self.call(run, 'complete_fax_work', {}, 'business:empty-faxes')
                     self.checkpoint(ident, phase='completed')
-                    self.store.update(ident, reserved=0)
+                    self.store.release_unstarted_model(ident, run['generation'])
                     return False
             if CONTRACTS[run['task_id']].prepare != 'agent':
                 result = await self.prepare_selected(run)

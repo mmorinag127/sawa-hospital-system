@@ -76,7 +76,7 @@ class Recovery:
             await manager.sandbox.start(run)
             current = self.store.get(ident)
             if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
-                await manager.sandbox.stop(ident)
+                await manager.sandbox.stop(ident, expected_generation=run['generation'])
                 raise Conflict('再開前に依頼が停止または変更されました')
             with self.store.tx() as db:
                 for row in safe_waits:

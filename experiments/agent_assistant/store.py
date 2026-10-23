@@ -181,7 +181,9 @@ class Store:
         with self.read() as db:
             return [self.decode(row) for row in db.execute("SELECT * FROM runs WHERE owner=? ORDER BY created DESC LIMIT 100", (owner,))]
 
-    def update(self, ident, *, expected_generation=None, **values):
+    def update(self, ident, *, expected_generation=None, expected_stop_generation=None, **values):
+        if expected_generation is not None and expected_stop_generation is not None:
+            raise ValueError('generation guards are mutually exclusive')
         allowed = {"status", "session_id", "usage", "spent", "reserved", "task_inputs"}
         if set(values) - allowed:
             raise ValueError("unknown ledger fields")
@@ -189,15 +191,25 @@ class Store:
             if field in values: values[field] = json.dumps(values[field], ensure_ascii=False)
         values["updated"] = now()
         with self.tx() as db:
+            if expected_stop_generation is not None:
+                current = db.execute('SELECT generation,status FROM runs WHERE id=?', (ident,)).fetchone()
+                if current['generation'] != expected_stop_generation or current['status'] not in ('stopping', 'stop_pending', 'rollback_stop_pending'):
+                    raise Conflict('停止対象の世代が変更されています')
             if expected_generation is not None:
                 current = db.execute('SELECT generation,status FROM runs WHERE id=?', (ident,)).fetchone()
                 if current['generation'] != expected_generation or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
                     raise Conflict('依頼の状態が変更されています。遅延した処理は実行しません')
             db.execute("UPDATE runs SET " + ",".join(k+"=?" for k in values) + " WHERE id=?", (*values.values(), ident))
 
-    def fence(self, ident):
+    def fence(self, ident, *, expected_generation=None):
         with self.tx() as db:
-            db.execute("UPDATE runs SET generation=generation+1,status='stopping',updated=? WHERE id=?", (now(), ident))
+            previous = db.execute('SELECT * FROM runs WHERE id=?', (ident,)).fetchone()
+            if expected_generation is not None:
+                row = db.execute("UPDATE runs SET generation=generation+1,status='stopping',updated=? WHERE id=? AND generation=? AND status NOT IN ('completed','stopping','stopped','rolled_back','stop_pending','rollback_stop_pending') RETURNING generation",
+                                 (now(), ident, expected_generation)).fetchone()
+            else:
+                row = db.execute("UPDATE runs SET generation=generation+1,status='stopping',updated=? WHERE id=? RETURNING generation", (now(), ident)).fetchone()
+            return (self.decode(previous), row['generation']) if row else None
 
     def event(self, ident, kind, payload, provider_id=None):
         with self.tx() as db:
@@ -236,17 +248,37 @@ class Store:
             db.execute("UPDATE commands SET status='done',result=? WHERE run_id=? AND id=?",
                        (json.dumps(result, ensure_ascii=False), ident, command_id))
 
-    def usage(self, ident, usage, terminal=False, *, terminal_statuses=None):
+    def usage(self, ident, usage, terminal=False, *, terminal_statuses=None, terminal_generation=None, terminal_session=None):
         cost = usage.get("list_cost")
         if not isinstance(cost, dict) or cost.get("currency") != "USD" or not str(cost.get("amount", "")).isdigit():
             raise Conflict("接続先から料金を取得できません。予算予約を維持します")
         spent = int(cost["amount"])
         with self.tx() as db:
-            row = db.execute("SELECT spent,cap,reserved,status FROM runs WHERE id=?", (ident,)).fetchone()
+            row = db.execute("SELECT spent,cap,reserved,status,generation,session_id FROM runs WHERE id=?", (ident,)).fetchone()
             spent = max(row[0], spent)
             terminal = terminal and (terminal_statuses is None or row['status'] in terminal_statuses)
+            terminal = terminal and (terminal_generation is None or row['generation'] == terminal_generation)
+            terminal = terminal and (terminal_session is None or row['session_id'] == terminal_session)
             db.execute("UPDATE runs SET spent=?,reserved=?,usage=?,updated=? WHERE id=?",
                        (spent, 0 if terminal else min(row[2], max(0, row[1]-spent)), json.dumps(usage), now(), ident))
+
+    def release_unstarted_model(self, ident, generation):
+        with self.tx() as db:
+            run = db.execute('SELECT generation,status,session_id FROM runs WHERE id=?', (ident,)).fetchone()
+            dispatched = db.execute("SELECT 1 FROM events WHERE run_id=? AND kind IN ('gemini_dispatch','agent.custom_tool_use','late_session_created') LIMIT 1", (ident,)).fetchone()
+            if run['generation'] != generation or run['status'] != 'completed' or run['session_id'] or dispatched:
+                raise Conflict('モデル未使用の業務完了を確認できないため予約額を保持します')
+            db.execute('UPDATE runs SET reserved=0,updated=? WHERE id=?', (now(), ident))
+
+    def finish_rollback(self, ident, generation, result):
+        with self.tx() as db:
+            run = db.execute('SELECT generation,status FROM runs WHERE id=?', (ident,)).fetchone()
+            if run['generation'] != generation or run['status'] not in ('stopped', 'stop_pending', 'rollback_stop_pending'):
+                raise Conflict('復元結果の保存対象が変更されています')
+            status = 'rolled_back' if run['status'] == 'stopped' else 'rollback_stop_pending'
+            db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                       (ident, 'rollback', json.dumps(result, ensure_ascii=False), now()))
+            db.execute('UPDATE runs SET status=?,updated=? WHERE id=?', (status, now(), ident))
 
     def recover(self):
         # A crashed gateway cannot assume a remote session stopped or refund its reservation.

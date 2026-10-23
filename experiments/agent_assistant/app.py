@@ -299,8 +299,11 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                     return store.get(run["id"], owner)
                 raise
             except Exception as exc:
+                current = store.get(run['id'])
+                if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                    return current
                 store.event(run["id"], "error", {"message": LABELS[run["provider"]]+"の開始に失敗しました。保存済み内容は保持しています。", "class": type(exc).__name__})
-                await managed.stop(run["id"])
+                await managed.stop(run["id"], expected_generation=run['generation'])
         return store.get(run["id"], owner)
 
     @app.get("/runs/{ident}")
@@ -392,8 +395,11 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             except asyncio.CancelledError:
                 if store.get(ident)["status"] not in ("stopping","stopped","rolled_back","stop_pending","rollback_stop_pending"): raise
             except Exception:
+                current = store.get(ident)
+                if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                    return current
                 store.event(ident,"error",{"message":"開始結果を照合してください。自動再送は行いません。"})
-                await managed.stop(ident)
+                await managed.stop(ident, expected_generation=run['generation'])
                 return store.get(ident,owner)
             return store.get(ident,owner)
         await managed.reply(ident, payload.message, payload.question_id, payload.option)
@@ -438,11 +444,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             return store.get(ident, owner)
         await managed.stop(ident)
         async with tools.lock(ident):
-            result = await sandbox.restore(store.get(ident, owner))
-            store.event(ident, "rollback", result)
-            # Keep remote-stop uncertainty visible even though local restoration succeeded.
-            remote_pending = store.get(ident)["status"] == "stop_pending"
-            store.update(ident, status="rollback_stop_pending" if remote_pending else "rolled_back")
+            stopped = store.get(ident, owner)
+            result = await sandbox.restore(stopped)
+            store.finish_rollback(ident, stopped['generation'], result)
         return store.get(ident, owner)
 
     @app.post("/runs/{ident}/refresh-usage")

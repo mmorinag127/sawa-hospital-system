@@ -36,10 +36,10 @@ class Providers(Managed):
         from .recovery import Recovery
         return await Recovery(self).resume(ident)
 
-    async def stop(self, ident):
-        if self.for_run(ident): return await self.gemini.stop(ident)
-        return await super().stop(ident)
+    async def stop(self, ident, *, expected_generation=None):
+        if self.for_run(ident): return await self.gemini.stop(ident, expected_generation=expected_generation)
+        return await super().stop(ident, expected_generation=expected_generation)
 
-    async def refresh_usage(self, ident, release=False):
-        if self.for_run(ident): return await self.gemini.refresh_usage(ident, release)
-        return await super().refresh_usage(ident, release)
+    async def refresh_usage(self, ident, release=False, *, terminal_generation=None):
+        if self.for_run(ident): return await self.gemini.refresh_usage(ident, release, terminal_generation=terminal_generation)
+        return await super().refresh_usage(ident, release, terminal_generation=terminal_generation)

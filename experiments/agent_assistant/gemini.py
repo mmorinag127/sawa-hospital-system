@@ -141,7 +141,9 @@ class Gemini(Managed):
             if e['kind'] == 'gemini_rejected': responses.add(e['payload']['dispatch'])
         return dispatches - responses
 
-    async def refresh_usage(self, ident, release=False):
+    async def refresh_usage(self, ident, release=False, *, terminal_generation=None):
+        if terminal_generation is None:
+            terminal_generation = self.store.get(ident)['generation']
         ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_response'))
         if not ids: raise Conflict('Geminiの実行結果が未確定です。予約額を保持します')
         for interaction_id in ids:
@@ -151,10 +153,10 @@ class Gemini(Managed):
             self.record_usage(ident, value)
         if release:
             if self.unsettled(ident): raise Conflict('Geminiの送信結果が未確定です。再送せず予約額を保持します')
-            self.store.usage(ident, self.store.get(ident)['usage'], terminal=True)
+            self.store.usage(ident, self.store.get(ident)['usage'], terminal=True, terminal_generation=terminal_generation)
         return value
 
-    async def dispatch_receipt(self, ident, dispatch, body):
+    async def dispatch_receipt(self, ident, dispatch, body, generation):
         try:
             value = await self.request('POST', body=body)
         except RequestRejected:
@@ -164,7 +166,10 @@ class Gemini(Managed):
         if not isinstance(interaction_id, str) or not interaction_id:
             raise Conflict('Geminiの実行IDがありません')
         self.store.event(ident, 'gemini_response', {'id': interaction_id, 'dispatch': dispatch})
-        self.store.update(ident, session_id=interaction_id)
+        try:
+            self.store.update(ident, expected_generation=generation, session_id=interaction_id)
+        except Conflict:
+            self.store.event(ident, 'late_gemini_response', {'id': interaction_id, 'dispatch': dispatch, 'generation': generation})
         return value
 
     async def consume_gemini(self, ident, generation, state, inputs):
@@ -195,8 +200,8 @@ class Gemini(Managed):
                         state['results'].append({'type': 'function_result', 'call_id': call['id'], 'name': call['name'], 'result': function_result(blocks)})
                         state['index'] += 1; self.checkpoint(ident, state)
                         if self.store.get(ident)['status'] == 'completed':
-                            await self.sandbox.stop(ident)
-                            await self.refresh_usage(ident, release=True)
+                            native_stopped = await self.sandbox.stop(ident, expected_generation=generation)
+                            await self.refresh_usage(ident, release=native_stopped is True, terminal_generation=generation)
                             return
                     inputs = state['results']
                 run = self.current(ident, generation)
@@ -204,7 +209,7 @@ class Gemini(Managed):
                     self.store.update(ident, expected_generation=generation, status='budget_reached')
                     from .business_contracts import owned
                     if not owned(run):
-                        await self.sandbox.stop(ident)
+                        await self.sandbox.stop(ident, expected_generation=generation)
                     return
                 pin = self.pin(ident)
                 from .business_contracts import model_definitions
@@ -213,14 +218,18 @@ class Gemini(Managed):
                     'tools': [{'type': 'function', 'name': d['name'], 'description': d['description'], 'parameters': d['input_schema']} for d in model_definitions(self.tools, run)]}
                 if run['session_id']: body['previous_interaction_id'] = run['session_id']
                 dispatch = uuid4().hex
-                self.store.event(ident, 'gemini_dispatch', {'id': dispatch})
-                receipt = asyncio.create_task(self.dispatch_receipt(ident, dispatch, body))
+                self.store.event(ident, 'gemini_dispatch', {'id': dispatch, 'generation': generation})
+                receipt = asyncio.create_task(self.dispatch_receipt(ident, dispatch, body, generation))
                 try:
                     value = await asyncio.shield(receipt)
                 except asyncio.CancelledError:
                     # Stop fences business writes first. Keep the bounded HTTP
                     # response alive so its ID can still be cancelled/accounted.
-                    await asyncio.gather(receipt, return_exceptions=True)
+                    from .sandbox import settle_process_task
+                    try:
+                        await settle_process_task(receipt)
+                    except Exception:
+                        pass
                     raise
                 interaction_id = value['id']
                 self.current(ident, generation)
@@ -257,19 +266,23 @@ class Gemini(Managed):
                 if getattr(self.tools, 'business', None):
                     self.tools.business.kick(ident)
                 return
-            await self.stop(ident)
+            await self.stop(ident, expected_generation=generation)
 
-    async def _stop(self, ident, caller=None):
-        previous = self.store.get(ident)
-        if previous['status'] in ('stopped', 'rolled_back'): return
+    async def _stop(self, ident, caller=None, expected_generation=None):
+        if self.store.get(ident)['status'] in ('stopped', 'rolled_back'): return
+        fenced = self.store.fence(ident, expected_generation=expected_generation)
+        if fenced is None:
+            return
+        previous, generation = fenced
         restored = previous['status'] == 'rollback_stop_pending'
-        self.store.fence(ident)
+        dispatches = {e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_dispatch'}
         for task in (self.starting.get(ident), self.tasks.get(ident)):
             if task and not task.done() and task not in (asyncio.current_task(), caller):
                 task.cancel(); await asyncio.gather(task, return_exceptions=True)
+        ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident)
+                                if e['kind'] == 'gemini_response' and e['payload']['dispatch'] in dispatches))
         pending_status = 'rollback_stop_pending' if restored else 'stop_pending'
-        native_stopped = await self.stop_native(ident, pending_status)
-        ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_response'))
+        native_stopped = await self.stop_native(ident, pending_status, generation)
         try:
             for interaction_id in ids:
                 path = '/' + quote(interaction_id, safe='')
@@ -284,10 +297,10 @@ class Gemini(Managed):
                         await asyncio.sleep(.25)
                     else: raise Conflict('Geminiの停止確認待ちです')
             if self.unsettled(ident): raise Conflict('Geminiの送信結果が未確定です')
-            if ids: await self.refresh_usage(ident, release=native_stopped)
-            elif native_stopped: self.store.update(ident, reserved=0)
+            if ids: await self.refresh_usage(ident, release=native_stopped, terminal_generation=generation)
+            elif native_stopped: self.store.update(ident, expected_stop_generation=generation, reserved=0)
         except Exception:
-            self.store.update(ident, status='rollback_stop_pending' if restored else 'stop_pending')
+            self.store.update(ident, expected_stop_generation=generation, status=pending_status)
             self.store.event(ident, 'notice', {'message': '業務書込みは停止しました。Gemini側の停止・料金確認は未完了で、予約額を保持しています。'})
             return
-        self.store.update(ident, status=('rolled_back' if restored else 'stopped') if native_stopped else pending_status)
+        self.store.update(ident, expected_stop_generation=generation, status=('rolled_back' if restored else 'stopped') if native_stopped else pending_status)

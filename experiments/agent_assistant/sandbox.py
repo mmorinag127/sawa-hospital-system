@@ -229,6 +229,17 @@ class Sandbox:
 
     async def start(self, run):
         self.require_active_run(run)
+        async with self.lock:
+            self.require_active_run(run)
+            processes = [process for key, process in self.children.items() if key[0] == run["id"]]
+            known = {process.pid for process in processes}
+            orphaned = any(json.loads(marker.read_text())["pid"] not in known
+                           for marker in self.path(run["id"]).glob("*.process.json"))
+            if orphaned or any(process.returncode is not None for process in processes):
+                _, cancelled = await settle_process_task(asyncio.create_task(self._stop(run["id"])))
+                if cancelled is not None:
+                    raise cancelled
+            self.require_active_run(run)
         for domain in run["domains"]:
             self.require_active_run(run)
             key = (run["id"], domain)
@@ -328,17 +339,22 @@ class Sandbox:
                     await asyncio.sleep(.1)
                 raise Conflict(f"{domain} のAPI起動が時間切れです")
         except BaseException:
-            await self.stop(run["id"])
+            await self.stop(run["id"], expected_generation=run.get("generation"))
             raise
 
-    async def stop(self, run_id):
-        _, cancelled = await settle_process_task(asyncio.create_task(self._locked_stop(run_id)))
+    async def stop(self, run_id, *, expected_generation=None):
+        stopped, cancelled = await settle_process_task(asyncio.create_task(self._locked_stop(run_id, expected_generation)))
         if cancelled is not None:
             raise cancelled
+        return stopped
 
-    async def _locked_stop(self, run_id):
+    async def _locked_stop(self, run_id, expected_generation=None):
         async with self.lock:
+            if expected_generation is not None and self.run_store is not None:
+                if self.run_store.get(run_id)["generation"] != expected_generation:
+                    return False
             await self._stop(run_id)
+            return True
 
     async def _stop(self, run_id):
         # After a gateway restart, identify our own children by PID, creation time
@@ -347,7 +363,8 @@ class Sandbox:
         for marker in self.path(run_id).glob("*.process.json"):
             try:
                 info = json.loads(marker.read_text())
-                if any(p.pid == info["pid"] for p in self.children.values()):
+                if any(key[0] == run_id and process.pid == info["pid"]
+                       for key, process in self.children.items()):
                     continue
                 try:
                     process = psutil.Process(info["pid"])
@@ -389,7 +406,23 @@ class Sandbox:
                 shutil.rmtree(cache)
 
     async def restore(self, run):
-        await self.stop(run["id"])
+        result, cancelled = await settle_process_task(asyncio.create_task(self._restore(run)))
+        if cancelled is not None:
+            raise cancelled
+        return result
+
+    async def _restore(self, run):
+        async with self.lock:
+            if self.run_store is not None:
+                current = self.run_store.get(run['id'])
+                if current['generation'] != run['generation'] or current['status'] not in ('stopped', 'stop_pending', 'rollback_stop_pending'):
+                    raise Conflict('復元対象の依頼が変更されています')
+            await self._stop(run['id'])
+            if self.run_store is not None and self.run_store.get(run['id'])['generation'] != run['generation']:
+                raise Conflict('停止中に復元対象の依頼が変更されています')
+            return self.restore_files(run)
+
+    def restore_files(self, run):
         directory = self.path(run["id"])
         if not (directory / "before").is_dir():
             raise Conflict("復元元がありません。元に戻したとは扱いません")
