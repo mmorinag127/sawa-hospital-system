@@ -28,7 +28,7 @@ Cloud Runの実100% traffic revisionを固定し、そこに設定されたDB接
 
 本番のJSONマスター・設定は上記envの正規GCS URIで公開してください。正規GCS上ですでに存在しない履歴原本は `missing_at_source` として記録し、欠損状態を維持します。必須設定・ローカル原本の明示対応・アクセス権・generation・SHA256を確認できない場合は推測・古いseed・既存Testへの置換は行わず、更新失敗として現在のコピーを保持します。保存先bucket設定はstg側の隔離bucketへ変換します。
 
-本番開設時には、受付API実行ID (`web-exec-stg`) に中央registry 1オブジェクトの作成・更新が必要です。現在は同期元未設定のため受付は書込前に停止します。この権限を未設定のまま本番同期を有効化しません。
+受付APIは `web-stg` の既存API proxyから `worker-stg` へ転送され、既存 `worker-exec-stg` の中央bucket権限でregistryを作成・更新します。frontend実行IDにregistry書込を追加する必要はありません。病院の同期元・同期先serviceはDBと業務設定を持つ `worker-prod` / `worker-stg` を指定します。
 
 既存worker実行ID (`worker-exec-stg`) に本番service/revisionと3つのstg service/revisionの参照、必要な既存secretの参照、本番DB接続・SELECT、本番原本bucket読取、stg側の新DB作成・復元、3つのstg隔離bucketの新規 `stg-replay/replay-*` prefixへの書込・検証読取の権限が必要です。これらの本番開設時権限は現在の共有registry GETとは別で、未設定時は同期を完了扱いにしません。本番DBのmajorと一致するPostgreSQL client（15/16/17/18）を使い、復元先が古いmajorなら公開せず停止します。この実装はIAM grant・SA key・本番service deployを行いません。権限不足は更新失敗として表示されます。
 
