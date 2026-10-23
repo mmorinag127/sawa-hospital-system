@@ -268,17 +268,24 @@ class Gemini(Managed):
                 return
             await self.stop(ident, expected_generation=generation)
 
-    async def _stop(self, ident, caller=None, expected_generation=None):
+    async def _stop(self, ident, caller=None, expected_generation=None, *, fenced=None):
         if self.store.get(ident)['status'] in ('stopped', 'rolled_back'): return
-        fenced = self.store.fence(ident, expected_generation=expected_generation)
+        if fenced is None:
+            fenced = self.store.fence(ident, expected_generation=expected_generation)
         if fenced is None:
             return
         previous, generation = fenced
+        if self.store.get(ident)['generation'] != generation:
+            return
         restored = previous['status'] == 'rollback_stop_pending'
         dispatches = {e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_dispatch'}
         for task in (self.starting.get(ident), self.tasks.get(ident)):
+            if self.store.get(ident)['generation'] != generation:
+                return
             if task and not task.done() and task not in (asyncio.current_task(), caller):
                 task.cancel(); await asyncio.gather(task, return_exceptions=True)
+        if self.store.get(ident)['generation'] != generation:
+            return
         ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident)
                                 if e['kind'] == 'gemini_response' and e['payload']['dispatch'] in dispatches))
         pending_status = 'rollback_stop_pending' if restored else 'stop_pending'
@@ -301,6 +308,7 @@ class Gemini(Managed):
             elif native_stopped: self.store.update(ident, expected_stop_generation=generation, reserved=0)
         except Exception:
             self.store.update(ident, expected_stop_generation=generation, status=pending_status)
-            self.store.event(ident, 'notice', {'message': '業務書込みは停止しました。Gemini側の停止・料金確認は未完了で、予約額を保持しています。'})
+            local_status = '業務書込みは停止しました。' if native_stopped else '業務APIの停止は未確認です。'
+            self.store.event(ident, 'notice', {'message': local_status + 'Gemini側の停止・料金確認は未完了で、予約額を保持しています。'})
             return
         self.store.update(ident, expected_stop_generation=generation, status=('rolled_back' if restored else 'stopped') if native_stopped else pending_status)

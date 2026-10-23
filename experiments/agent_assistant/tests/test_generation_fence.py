@@ -301,7 +301,8 @@ def test_claude_old_stop_only_stops_its_captured_session(tmp_path):
 
 @pytest.mark.parametrize('provider', [Managed, Gemini])
 @pytest.mark.parametrize('outcome', [False, None, 'exception'])
-def test_unconfirmed_native_stop_still_stops_remote_and_retains_reservation(tmp_path, provider, outcome):
+@pytest.mark.parametrize('remote_unknown', [False, True])
+def test_unconfirmed_native_stop_still_stops_remote_and_retains_reservation(tmp_path, provider, outcome, remote_unknown):
     async def scenario():
         store, native, tools, run = setup(tmp_path, 'shift_next_month', [])
         store.update(run['id'], session_id='old-session')
@@ -317,6 +318,8 @@ def test_unconfirmed_native_stop_still_stops_remote_and_retains_reservation(tmp_
             retrieved = []
             class Sessions:
                 async def retrieve(self, ident):
+                    if remote_unknown:
+                        raise OSError('synthetic remote stop unknown')
                     retrieved.append(ident)
                     return SimpleNamespace(status='running' if len(retrieved) == 1 else 'idle',
                                            usage=Event(list_cost={'amount': '17', 'currency': 'USD'}))
@@ -332,6 +335,8 @@ def test_unconfirmed_native_stop_still_stops_remote_and_retains_reservation(tmp_
             store.event(run['id'], 'gemini_dispatch', {'id': 'dispatch'})
             store.event(run['id'], 'gemini_response', {'id': 'old-session', 'dispatch': 'dispatch'})
             async def request(method, path='', body=None):
+                if remote_unknown:
+                    raise OSError('synthetic remote stop unknown')
                 if path.endswith('/cancel'):
                     stopped.append('old-session')
                     return {}
@@ -340,10 +345,13 @@ def test_unconfirmed_native_stop_still_stops_remote_and_retains_reservation(tmp_
             manager.request = request
         await manager.stop(run['id'])
         current = store.get(run['id'])
-        assert stopped == ['old-session']
+        assert stopped == ([] if remote_unknown else ['old-session'])
         assert current['status'] == 'stop_pending'
         assert current['reserved'] > 0
         assert current['reserved'] == run['reserved'] - current['spent']
+        notices = [event['payload']['message'] for event in store.events(run['id']) if event['kind'] == 'notice']
+        assert any('未確定' in message or '未確認' in message for message in notices)
+        assert not any('業務書込みは停止しました' in message for message in notices)
     asyncio.run(scenario())
 
 
