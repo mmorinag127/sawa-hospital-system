@@ -31,7 +31,7 @@ def _cloud_session():
     return AuthorizedSession(credentials)
 
 
-def runtime_source(service, settings_keys=()):
+def runtime_environment(service, settings_keys=()):
     """Pin the actual serving revision; credentials exist only in this process."""
     session = _cloud_session()
     response = session.get("https://run.googleapis.com/v2/" + service, timeout=30)
@@ -43,7 +43,9 @@ def runtime_source(service, settings_keys=()):
         raise RefreshError("refresh_runtime_revision_ambiguous")
     revision = traffic[0]["revision"]
     if "/" not in revision:
-        revision = service.rsplit("/services/", 1)[0] + "/revisions/" + revision
+        revision = service + "/revisions/" + revision
+    if not revision.startswith(service + "/revisions/") or not re.fullmatch(r"[a-z0-9-]+", revision.rsplit("/", 1)[-1]):
+        raise RefreshError("refresh_runtime_revision_ambiguous")
     response = session.get("https://run.googleapis.com/v2/" + revision, timeout=30)
     if response.status_code != 200:
         raise RefreshError("refresh_runtime_revision_unavailable")
@@ -55,9 +57,11 @@ def runtime_source(service, settings_keys=()):
         key = item["name"]
         if key in environment:
             raise RefreshError("refresh_runtime_setting_duplicate")
-        if "value" in item:
-            environment[key] = item["value"]
-        elif key in {"DB_URI", "DATABASE_URL", "DB_PASSWORD"} | set(settings_keys):
+        if "valueSource" not in item:
+            environment[key] = item.get("value", "")
+        elif key in settings_keys and key not in {"DB_URI", "DATABASE_URL", "DB_PASSWORD", "DB_HOST", "DB_NAME", "DB_USER"}:
+            raise RefreshError("refresh_business_setting_secret_reference_forbidden")
+        elif key in {"DB_URI", "DATABASE_URL", "DB_PASSWORD", "DB_HOST", "DB_NAME", "DB_USER"}:
             reference = item.get("valueSource", {}).get("secretKeyRef", {})
             secret, version = reference.get("secret"), reference.get("version")
             if not secret or not version:
@@ -69,6 +73,11 @@ def runtime_source(service, settings_keys=()):
             if reply.status_code != 200:
                 raise RefreshError("refresh_runtime_secret_unavailable")
             environment[key] = base64.b64decode(reply.json()["payload"]["data"]).decode()
+    return environment, revision
+
+
+def runtime_source(service, settings_keys=()):
+    environment, revision = runtime_environment(service, settings_keys)
     uris = [make_url(environment[key]) for key in ("DB_URI", "DATABASE_URL") if environment.get(key)]
     if any(key in environment for key in ("DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD")):
         from sqlalchemy.engine import URL
@@ -187,7 +196,7 @@ def _collect_local_receipts(value, receipts):
         if isinstance(reference, str) and isinstance(version, dict) and version.get("mode") == "local":
             required = {"mode", "device", "inode", "size", "mtime_ns"}
             if (set(version) != required or not re.fullmatch(r"[0-9a-f]{64}", str(digest))
-                    or any(not isinstance(version[key], int) or version[key] < 0 for key in required - {"mode"})):
+                    or any(type(version[key]) is not int or version[key] < 0 for key in required - {"mode"})):
                 raise RefreshError("refresh_saved_local_source_proof_invalid")
             receipt = {"storage_version": version, "pdf_sha256": digest}
             if reference in receipts and receipts[reference] != receipt:
@@ -304,7 +313,25 @@ class ObjectCopier:
             if required:
                 raise RefreshError("refresh_required_setting_missing_at_source")
             return None
-        source_uri = self.aliases.get(original, original)
+        if original in self.aliases and not datasets.local_source_reference(original):
+            raise RefreshError("refresh_alias_original_not_local")
+        alias = self.aliases.get(original, original)
+        configured_receipt = None
+        if isinstance(alias, dict):
+            if set(alias) != {"uri", "source_identity", "sha256"}:
+                raise RefreshError("refresh_local_source_receipt_invalid")
+            identity = alias["source_identity"]
+            required_identity = {"mode", "device", "inode", "size", "mtime_ns"}
+            if (not isinstance(identity, dict) or set(identity) != required_identity or identity.get("mode") != "local"
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(alias["sha256"]))
+                    or any(type(identity[key]) is not int or identity[key] < 0 for key in required_identity - {"mode"})):
+                raise RefreshError("refresh_local_source_receipt_invalid")
+            configured_receipt = {"storage_version": identity, "pdf_sha256": alias["sha256"]}
+            source_uri = alias["uri"]
+        else:
+            source_uri = alias
+        if not isinstance(source_uri, str):
+            raise RefreshError("refresh_original_object_source_unresolved")
         parsed = urlsplit(source_uri)
         if parsed.scheme != "gs" or parsed.netloc not in self.allowed or parsed.fragment:
             raise RefreshError("refresh_original_object_source_unresolved")
@@ -312,6 +339,8 @@ class ObjectCopier:
         if set(query) - {"generation"} or len(query.get("generation", [])) > 1:
             raise RefreshError("refresh_object_generation_invalid")
         generation = (query.get("generation") or [None])[0]
+        if original in self.aliases and generation is None:
+            raise RefreshError("refresh_local_source_generation_required")
         if generation is not None and not re.fullmatch(r"[1-9][0-9]*", generation):
             raise RefreshError("refresh_object_generation_invalid")
         blob = self.client.bucket(parsed.netloc).blob(unquote(parsed.path.lstrip("/")), generation=int(generation) if generation else None)
@@ -329,7 +358,12 @@ class ObjectCopier:
         local_proof = None
         if original.startswith(("/", "file://")):
             receipt = self.local_receipts.get(original)
-            if not receipt or receipt["pdf_sha256"] != digest or receipt["storage_version"]["size"] != len(content):
+            if receipt and configured_receipt and receipt != configured_receipt:
+                raise RefreshError("refresh_local_original_proof_mismatch")
+            receipt = receipt or configured_receipt
+            if not receipt:
+                raise RefreshError("refresh_local_original_proof_mismatch")
+            if receipt["pdf_sha256"] != digest or receipt["storage_version"]["size"] != len(content):
                 raise RefreshError("refresh_local_original_proof_mismatch")
             local_proof = dict(receipt["storage_version"])
         physical = self.bucket.blob(self.prefix + "/objects/" + hashlib.sha256(original.encode()).hexdigest())
@@ -362,15 +396,26 @@ def build_snapshot(job, config, progress):
     from google.cloud import storage
     client = storage.Client()
     control = urlsplit(datasets.refresh_control_uri())
-    bucket = client.bucket(control.netloc)
-    value = {"schema": 1, "id": job["dataset"], "state": "ready", "snapshot_at": datetime.now(timezone.utc).isoformat(), "components": {}}
+    value = {"schema": 1, "id": job["dataset"], "state": "ready", "snapshot_at": datetime.now(timezone.utc).isoformat(), "runtime_settings_provenance": "production_environment", "components": {}}
     # A fresh attempt has distinct DBs/files; a late worker cannot touch a successor.
     target = "sawa_replay_" + job["id"][:24] + "_" + job["attempt"][:8]
     with tempfile.TemporaryDirectory(prefix="sawa-copy-refresh-") as temporary:
         for name in ("order", "shift", "school-lunch"):
             progress("copying_database", name)
             entry = config["components"][name]
-            source_uri, source_environment, source_revision = runtime_source(entry["source_service"], entry["settings_keys"])
+            source_uri, source_environment, source_revision = runtime_source(entry["source_service"], set(entry["settings_keys"]) | (set(datasets.RUNTIME_BACKEND_KEYS) if name == "order" else datasets.RUNTIME_SETTING_KEYS[name]))
+            runtime_keys = set(datasets.RUNTIME_BACKEND_KEYS) if name == "order" else set(datasets.RUNTIME_SETTING_KEYS[name])
+            runtime_settings = {key: source_environment.get(key) for key in runtime_keys}
+            producer_revision = None
+            producer_runtime_settings = {}
+            if name == "order":
+                producer_environment, producer_revision = runtime_environment(entry["producer_service"], datasets.RUNTIME_PRODUCER_KEYS)
+                producer_runtime_settings = {key: producer_environment.get(key) for key in datasets.RUNTIME_PRODUCER_KEYS}
+            for key in ("GEMINI_API_BASE", "OPENAI_API_BASE"):
+                if runtime_settings.get(key):
+                    endpoint = urlsplit(runtime_settings[key])
+                    if endpoint.scheme not in {"https", "http"} or not endpoint.netloc or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+                        raise RefreshError("refresh_business_endpoint_contains_credentials_or_invalid")
             destination_uri, destination_environment, _ = runtime_source(entry["destination_service"])
             source = _database(source_uri, "prod")
             destination = _database(destination_uri, "stg")
@@ -401,7 +446,12 @@ def build_snapshot(job, config, progress):
                     settings[key] = copier.copy(setting, required=True)
             for reference in sorted(references):
                 copier.copy(reference)
+            if name == "order" and runtime_settings.get("SHIPPING_TEMPLATE_PATH"):
+                copier.copy(runtime_settings["SHIPPING_TEMPLATE_PATH"], required=True)
+            for reference in sorted(entry["local_objects"]):
+                copier.copy(reference, required=True)
             value["components"][name] = {"database": target, "verified": True,
+                "runtime_settings": runtime_settings, "producer_runtime_settings": producer_runtime_settings, "producer_revision": producer_revision,
                 "table_digests": {table: proof["sha256"] for table, proof in tables.items()},
                 "settings": settings, "objects": copier.objects,
                 "table_counts": {table: proof["rows"] for table, proof in tables.items()},

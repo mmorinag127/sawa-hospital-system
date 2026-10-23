@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import os
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import json
 from hashlib import sha256
 from src.services.storage_uri import parse_gcs_uri
@@ -333,7 +334,7 @@ def is_order_reparse_job(job: dict[str, Any] | None, order_id: str) -> bool:
 
 
 def get_stale_minutes() -> int:
-    raw = str(os.getenv("OCR_JOB_STALE_MINUTES", "30") or "").strip()
+    raw = str(_runtime_setting("OCR_JOB_STALE_MINUTES", "30") or "").strip()
     try:
         return int(raw)
     except ValueError:
@@ -341,7 +342,7 @@ def get_stale_minutes() -> int:
 
 
 def get_auto_recovery_interval_seconds() -> int:
-    raw = str(os.getenv("OCR_JOB_AUTO_RECOVERY_INTERVAL_SECONDS", "120") or "").strip()
+    raw = str(_runtime_setting("OCR_JOB_AUTO_RECOVERY_INTERVAL_SECONDS", "120") or "").strip()
     try:
         return max(int(raw), 5)
     except ValueError:
@@ -349,7 +350,7 @@ def get_auto_recovery_interval_seconds() -> int:
 
 
 def get_auto_recovery_max_attempts() -> int:
-    raw = str(os.getenv("OCR_JOB_AUTO_RECOVERY_MAX_ATTEMPTS", "3") or "").strip()
+    raw = str(_runtime_setting("OCR_JOB_AUTO_RECOVERY_MAX_ATTEMPTS", "3") or "").strip()
     try:
         return max(int(raw), 0)
     except ValueError:

@@ -15,12 +15,13 @@ stg共通ヘッダーの「本番コピーを更新」から「本番データ�
 | 項目 | 値 |
 |---|---|
 | source_service | 正規本番deployで確定した `projects/実project/locations/実region/services/実service-prod` |
+| producer_service | 病院だけ必須。正規 `ocr-pipeline-prod` serviceの完全名（DB接続を推測せず、実serving revisionのOCR設定を別に取得） |
 | destination_service | 対応する既存stg serviceの完全名（末尾 `-stg`） |
 | destination_bucket | 対象stg serviceの現在のmanifest URIと同じbucket |
-| settings_keys | 本番serviceのenvから取得する業務設定名の配列。病院は `FACILITY_MASTER_URI`, `INGEST_POLICY_URI`, `OCR_PIPELINE_STATE_URI` が必須。シフトは `GCS_BUCKET_NAME`。学校のDB外設定がなければ空配列 |
+| settings_keys | 本番serviceのenvから取得する外部JSON設定・保存先名の配列。病院は `FACILITY_MASTER_URI`, `INGEST_POLICY_URI`, `OCR_PIPELINE_STATE_URI` が必須。シフトは `GCS_BUCKET_NAME`。学校は空配列（下記の業務環境設定はこの配列と別に自動取得） |
 | expected_migration_heads | 参照するstg版の正式migration headの配列。本番schemaと不一致なら公開せず停止 |
 | source_buckets | 本番原本・設定の実bucket名の配列。stg bucketは禁止 |
-| local_objects | 本番DB内のローカル原本参照がある場合の、正本ローカル参照→正規GCS原本URIの明示的な対応。なければ空object |
+| local_objects | 本番DB内のローカル原本参照がある場合の、正本ローカル参照→正規GCS原本の明示対応。DBにlocal source receiptがあればURI文字列、なければ `{uri, source_identity, sha256}`（uriはgeneration固定、source_identityは元ファイルのmode/device/inode/size/mtime_ns）。全featureで元receiptとのsize/SHA一致必須。なければ空object |
 
 Cloud Runの実100% traffic revisionを固定し、そこに設定されたDB接続と業務設定を取得します。Secret Manager参照のDB値も既存参照先から取得し、値はメモリ内だけで使います。sourceのCloud SQL instanceは `-prod`、destinationは `-stg` が必須で、既存Test DB名や既存COPY DBへのrestoreは禁止です。
 
@@ -31,6 +32,14 @@ Cloud Runの実100% traffic revisionを固定し、そこに設定されたDB接
 受付APIは `web-stg` の既存API proxyから `worker-stg` へ転送され、既存 `worker-exec-stg` の中央bucket権限でregistryを作成・更新します。frontend実行IDにregistry書込を追加する必要はありません。病院の同期元・同期先serviceはDBと業務設定を持つ `worker-prod` / `worker-stg` を指定します。
 
 既存worker実行ID (`worker-exec-stg`) に本番service/revisionと3つのstg service/revisionの参照、必要な既存secretの参照、本番DB接続・SELECT、本番原本bucket読取、stg側の新DB作成・復元、3つのstg隔離bucketの新規 `stg-replay/replay-*` prefixへの書込・検証読取の権限が必要です。これらの本番開設時権限は現在の共有registry GETとは別で、未設定時は同期を完了扱いにしません。本番DBのmajorと一致するPostgreSQL client（15/16/17/18）を使い、復元先が古いmajorなら公開せず停止します。この実装はIAM grant・SA key・本番service deployを行いません。権限不足は更新失敗として表示されます。
+
+## DB外の業務環境設定
+
+新COPYにはbackend用 `runtime_settings`、producer用 `producer_runtime_settings` と `runtime_settings_provenance: production_environment` を保持します。病院のprovider/model/トークン数/数量判定・ROI・監査・業務制限等はbackendの実revisionから、Yomitoku DPI/device/テンプレート照合/補正等はproducerの実revisionから取得します。学校は `IMPLEMENTATION_PRICE_OCR_DPI`, `IMPLEMENTATION_PRICE_OCR_DEVICE`, `PROCESS_GEMINI_MODEL`, `GEMINI_API_BASE` を固定します。シフトの業務ルールはDBに含まれます。対象の明示whitelistは共通 `staging_data.py` の `RUNTIME_SETTING_KEYS` です。
+
+COPY処理はこの辞書だけを参照します。文字列は正本の値、`null` は本番envが未設定であることを表し、その場合だけ既存コードの同じcallsite既定値を使います。stg/Testのenv値による補完はしません。業務設定がSecret Manager参照の場合は公開を停止し、参照値を設定manifestへ保存しません。API key・DB password・認証・transport・物理保存先は複製せず既存stgを維持します。接続先baseに埋込credentialやqueryがあれば公開を止めます。明示された送り状テンプレート原本は他原本と同様にコピー・SHA検証して利用します。
+
+初期COPYは過去にstgのenvで稼働していたため、正規初期manifest IDとSHAに限定した `legacy_stg_runtime` provenanceを中央registryへ明記し、その既存挙動を維持します。初期コピーのstg設定を本番設定取得済みと表現しません。新しい本番COPYでこの互換経路を使うことはできず、辞書不足や偽legacy指定は停止します。
 
 ## 状態API
 

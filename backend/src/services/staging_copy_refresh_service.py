@@ -58,12 +58,17 @@ def source_configuration():
             raise ValueError()
         for name, entry in config["components"].items():
             required = {"source_service", "destination_service", "settings_keys", "expected_migration_heads", "source_buckets", "local_objects", "destination_bucket"}
+            if name == "order":
+                required.add("producer_service")
             if (set(entry) != required or not isinstance(entry["expected_migration_heads"], list)
                     or not entry["expected_migration_heads"] or not isinstance(entry["source_buckets"], list)
                     or not entry["source_buckets"]
                     or any(not isinstance(head, str) or not re.fullmatch(r"[A-Za-z0-9_]+", head) for head in entry["expected_migration_heads"])):
                 raise ValueError()
-            for key, suffix in (("source_service", "prod"), ("destination_service", "stg")):
+            service_roles = [("source_service", "prod"), ("destination_service", "stg")]
+            if name == "order":
+                service_roles.append(("producer_service", "prod"))
+            for key, suffix in service_roles:
                 if not re.fullmatch(r"projects/[a-z0-9-]+/locations/[a-z0-9-]+/services/[a-z0-9-]+-" + suffix, str(entry[key])):
                     raise ValueError()
             if (not isinstance(entry["settings_keys"], list)
@@ -75,7 +80,8 @@ def source_configuration():
                 raise ValueError()
             if not datasets._staging_bucket(entry["destination_bucket"]):
                 raise ValueError()
-            if not isinstance(entry["local_objects"], dict):
+            if (not isinstance(entry["local_objects"], dict)
+                    or any(not datasets.local_source_reference(reference) for reference in entry["local_objects"])):
                 raise ValueError()
         return config, hashlib.sha256(raw).hexdigest()
     except (AttributeError, KeyError, ValueError, TypeError):
@@ -206,6 +212,9 @@ def execute(request_id, delivery_generation):
             raise RefreshError("refresh_source_configuration_changed")
         from src.services.staging_copy_refresh_engine import build_snapshot
         published = build_snapshot(job, config, lambda phase, component=None: checkpoint(job, phase, component))
+        _, current_digest = source_configuration()
+        if current_digest != job["source_configuration_sha256"]:
+            raise RefreshError("refresh_source_configuration_changed")
         checkpoint(job, "succeeded", published=published)
     except Exception as exc:
         # Never persist exception strings, SQL, credentials, or signed URLs.

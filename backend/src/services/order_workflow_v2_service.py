@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import base64
 import copy
 import hashlib
 import json
 import math
-import os
 import tempfile
 from time import perf_counter
 from contextvars import ContextVar
@@ -3840,11 +3841,11 @@ def _render_order_fax_page_for_ai(document_uri: str, *, selected_pdf_receipt: di
     if not document_uri:
         return None, {"status": "missing_document_uri"}
     try:
-        dpi = max(96, min(int(os.getenv("WORKFLOW_V2_AI_FAX_DPI", "140")), 220))
+        dpi = max(96, min(int(_runtime_setting("WORKFLOW_V2_AI_FAX_DPI", "140")), 220))
     except ValueError:
         dpi = 140
     try:
-        max_pixels = max(1_000_000, int(os.getenv("WORKFLOW_V2_AI_FAX_MAX_PIXELS", "4500000")))
+        max_pixels = max(1_000_000, int(_runtime_setting("WORKFLOW_V2_AI_FAX_MAX_PIXELS", "4500000")))
     except ValueError:
         max_pixels = 4_500_000
     try:

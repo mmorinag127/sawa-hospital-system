@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+from src.staging_data import order_runtime_setting as _runtime_setting
 import threading
 import time
 from contextlib import contextmanager
@@ -23,7 +23,7 @@ _LOCAL_SEMAPHORE_SLOTS: int | None = None
 
 
 def _read_int_env(name: str, default: int, *, minimum: int = 1) -> int:
-    raw = str(os.getenv(name, str(default)) or "").strip()
+    raw = str(_runtime_setting(name, str(default)) or "").strip()
     try:
         value = int(raw)
     except ValueError:
@@ -32,7 +32,7 @@ def _read_int_env(name: str, default: int, *, minimum: int = 1) -> int:
 
 
 def _read_float_env(name: str, default: float, *, minimum: float = 0.1) -> float:
-    raw = str(os.getenv(name, str(default)) or "").strip()
+    raw = str(_runtime_setting(name, str(default)) or "").strip()
     try:
         value = float(raw)
     except ValueError:

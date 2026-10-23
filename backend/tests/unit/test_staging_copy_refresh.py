@@ -147,7 +147,7 @@ def test_production_runtime_cannot_enable_status_submit_or_worker(control, monke
 
 
 def test_captured_request_keeps_old_manifest_after_another_generation_is_activated(control, monkeypatch):
-    manifests = {OLD: {"id": OLD, "components": {}}, "replay-new": {"id": "replay-new", "components": {}}}
+    manifests = {identity: {"id": identity, "components": {feature: {"runtime_settings": {key: None for key in keys}, **({"producer_runtime_settings": {key: None for key in data.RUNTIME_PRODUCER_KEYS}} if feature == "order" else {})} for feature, keys in data.RUNTIME_SETTING_KEYS.items()}, "runtime_settings_provenance": "production_environment"} for identity in (OLD, "replay-new")}
     monkeypatch.setattr(data, "_read_manifest", lambda uri, digest: manifests["replay-new" if "replay-new/" in uri else OLD])
     with data.dataset_context(OLD):
         control["value"]["active"] = "replay-new"
@@ -190,7 +190,7 @@ class MemoryBlob:
     def reload(self, **kwargs):
         from google.api_core.exceptions import NotFound
         value=self.owner.values.get((self.bucket.name,self.name))
-        if value is None: raise NotFound('synthetic missing object')
+        if value is None or (self.generation is not None and self.generation != value[0]): raise NotFound('synthetic missing generation')
         self.generation=value[0]
     def download_as_bytes(self, if_generation_match=None, **kwargs):
         from google.api_core.exceptions import PreconditionFailed,NotFound
@@ -260,7 +260,7 @@ def build_environment(control,storage,monkeypatch):
     data._read_manifest.cache_clear()
     config={'schema':1,'components':{}}
     for name,bucket in [('order','fixture-stg-raw'),('shift','fixture-shift-stg'),('school-lunch','fixture-school-stg')]:
-        config['components'][name]={'source_service':name+'-prod','destination_service':name+'-stg','source_buckets':['fixture-prod'],'destination_bucket':bucket,'settings_keys':['FACILITY_MASTER_URI','INGEST_POLICY_URI','OCR_PIPELINE_STATE_URI'] if name=='order' else ['GCS_BUCKET_NAME'] if name=='shift' else [],'expected_migration_heads':['head'],'local_objects':{}}
+        config['components'][name]={'source_service':name+'-prod','destination_service':name+'-stg','source_buckets':['fixture-prod'],'destination_bucket':bucket,'settings_keys':['FACILITY_MASTER_URI','INGEST_POLICY_URI','OCR_PIPELINE_STATE_URI'] if name=='order' else ['GCS_BUCKET_NAME'] if name=='shift' else [],'expected_migration_heads':['head'],'local_objects':{},**({'producer_service':'producer-prod'} if name=='order' else {})}
     def runtime(name, settings_keys=()):
         feature=name.rsplit('-',1)[0];entry=config['components'][feature]
         role='prod' if name.endswith('-prod') else 'stg'
@@ -268,6 +268,7 @@ def build_environment(control,storage,monkeypatch):
         env['SAWA_STG_REPLAY_MANIFEST_URI']='gs://'+entry['destination_bucket']+'/stg-replay/'+OLD+'/manifest.json'
         return 'postgresql://u:p@/business?host=/cloudsql/fixture:region:'+feature+'-'+role,env,'revision-pinned'
     monkeypatch.setattr(engine,'runtime_source',runtime)
+    monkeypatch.setattr(engine,'runtime_environment',lambda *args: ({}, 'producer-revision-pinned'))
     targets=[]
     def clone(source,destination,target,directory,heads):
         targets.append((source['instance'],destination['database'],target))
@@ -315,6 +316,7 @@ def test_source_configuration_rejects_untrusted_or_incomplete_sources(storage,mo
     entry={'source_service':'projects/fixture/locations/region/services/source-prod','destination_service':'projects/fixture/locations/region/services/destination-stg','settings_keys':[],'expected_migration_heads':['head'],'source_buckets':['fixture-prod'],'local_objects':{},'destination_bucket':'fixture-stg-raw'}
     config={'schema':1,'components':{name:deepcopy(entry) for name in ('order','shift','school-lunch')}}
     for name,component in config['components'].items():component['settings_keys']=sorted(service.SETTING_KEYS[name])
+    config['components']['order']['producer_service']='projects/fixture/locations/region/services/producer-prod'
     chosen=config['components']['order']
     if mutation=='source-stg':chosen['source_service']=chosen['source_service'].replace('-prod','-stg')
     elif mutation=='destination-prod':chosen['destination_service']=chosen['destination_service'].replace('-stg','-prod')
@@ -374,10 +376,15 @@ def test_local_saved_storage_receipt_is_kept_and_alias_bytes_must_match(storage)
     receipts={};engine._collect_local_receipts({'source_contract':original},receipts)
     assert receipts=={reference:receipt}
     storage.put('fixture-prod','original.pdf',content)
-    copier=engine.ObjectCopier(storage,storage.bucket('fixture-stg-raw'),'stg-replay/replay-case/order',['fixture-prod'],{reference:'gs://fixture-prod/original.pdf'},receipts)
+    uri = 'gs://fixture-prod/original.pdf?generation=' + str(storage.values[('fixture-prod', 'original.pdf')][0])
+    unpinned = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), 'stg-replay/replay-unpinned/order', ['fixture-prod'], {reference: 'gs://fixture-prod/original.pdf'}, receipts)
+    with pytest.raises(service.RefreshError, match='local_source_generation_required'):
+        unpinned.copy(reference)
+    assert not unpinned.objects
+    copier=engine.ObjectCopier(storage,storage.bucket('fixture-stg-raw'),'stg-replay/replay-case/order',['fixture-prod'],{reference:uri},receipts)
     copier.copy(reference)
     assert copier.objects[reference]['source_identity']==receipt['storage_version']
-    wrong=engine.ObjectCopier(storage,storage.bucket('fixture-stg-raw'),'stg-replay/replay-neighbor/order',['fixture-prod'],{reference:'gs://fixture-prod/original.pdf'}, {})
+    wrong=engine.ObjectCopier(storage,storage.bucket('fixture-stg-raw'),'stg-replay/replay-neighbor/order',['fixture-prod'],{reference:uri}, {})
     with pytest.raises(service.RefreshError,match='proof_mismatch'):wrong.copy(reference)
     assert not wrong.objects
 
@@ -396,6 +403,7 @@ def test_valid_source_configuration_and_credentials_setting_rejected(storage, mo
              'settings_keys': [], 'expected_migration_heads': ['head'], 'source_buckets': ['fixture-prod'],
              'local_objects': {}, 'destination_bucket': 'fixture-stg-raw'}
     config = {'schema': 1, 'components': {name: {**deepcopy(entry), 'settings_keys': sorted(keys)} for name, keys in service.SETTING_KEYS.items()}}
+    config['components']['order']['producer_service']='projects/fixture/locations/region/services/producer-prod'
     monkeypatch.setattr(service, '_blob', lambda name: storage.bucket('fixture-stg-raw').blob(name))
     storage.put('fixture-stg-raw', 'sources.json', json.dumps(config).encode())
     assert REAL_SOURCE_CONFIGURATION()[0] == config
@@ -417,10 +425,11 @@ def test_runtime_source_rejects_ambiguous_serving_revision(monkeypatch, traffic)
         engine.runtime_source('projects/fixture/locations/region/services/source-prod')
 
 
-def test_runtime_source_pins_revision_resolves_only_needed_secret_and_rejects_duplicate_db(monkeypatch):
+@pytest.mark.parametrize("full_revision", [False, True])
+def test_runtime_source_pins_revision_resolves_only_needed_secret_and_rejects_duplicate_db(monkeypatch, full_revision):
     import base64
     service_name = 'projects/fixture/locations/region/services/source-prod'
-    revision = 'projects/fixture/locations/region/revisions/source-prod-00001'
+    revision = service_name + '/revisions/source-prod-00001'
     uri = 'postgresql+psycopg2://owner:synthetic@/source?host=/cloudsql/fixture:region:db-prod'
     environment = [{'name': 'DB_URI', 'valueSource': {'secretKeyRef': {'secret': 'database', 'version': '1'}}},
                    {'name': 'OPERATOR_PASSWORD', 'valueSource': {'secretKeyRef': {'secret': 'unrelated', 'version': 'latest'}}}]
@@ -432,7 +441,7 @@ def test_runtime_source_pins_revision_resolves_only_needed_secret_and_rejects_du
     class Session:
         def get(self, url, **kwargs):
             calls.append(url)
-            if url.endswith('/' + service_name): return Reply({'trafficStatuses': [{'revision': revision, 'percent': 100}]})
+            if url.endswith('/' + service_name): return Reply({'trafficStatuses': [{'revision': revision if full_revision else revision.rsplit('/', 1)[-1], 'percent': 100}]})
             if url.endswith('/' + revision): return Reply({'containers': [{'env': environment}]})
             assert url.endswith('/secrets/database/versions/1:access')
             return Reply({'payload': {'data': base64.b64encode(uri.encode()).decode()}})
@@ -497,3 +506,133 @@ def test_required_setting_must_resolve_to_verified_original_before_publication(c
         engine.build_snapshot(job, config, lambda *args: None)
     assert control['value']['active'] == OLD
     assert not any('/manifests/' in key for _, key in storage.values)
+
+
+
+def test_runtime_settings_capture_backend_producer_school_and_exclude_secrets(control, storage, build_environment, monkeypatch):
+    config, job, _ = build_environment
+    original = engine.runtime_source
+    def runtime(name, settings_keys=()):
+        uri, environment, revision = original(name, settings_keys)
+        environment.update({'OCR_TEMPLATE_MIN_CONFIDENCE': '0.7', 'GEMINI_OCR_MODEL': 'gemini-source', 'GEMINI_API_KEY': 'never-copy-synthetic-key',
+                            'PROCESS_GEMINI_MODEL': 'gemini-school-source', 'IMPLEMENTATION_PRICE_OCR_DPI': '400'})
+        return uri, environment, revision
+    monkeypatch.setattr(engine, 'runtime_source', runtime)
+    monkeypatch.setattr(engine, 'runtime_environment', lambda *args: ({'OCR_YOMITOKU_DPI': '500', 'OCR_TEMPLATE_MIN_CONFIDENCE': '0.8'}, 'producer-exact-revision'))
+    published = engine.build_snapshot(job, config, lambda *args: None)
+    value = data._read_manifest(published['uri'], published['sha256'])
+    order = value['components']['order']
+    assert order['runtime_settings']['GEMINI_OCR_MODEL'] == 'gemini-source'
+    assert order['producer_runtime_settings']['OCR_YOMITOKU_DPI'] == '500'
+    assert order['runtime_settings']['OPENAI_OCR_MODEL'] is None
+    assert order['runtime_settings']['OCR_TEMPLATE_MIN_CONFIDENCE'] == '0.7'
+    assert order['producer_runtime_settings']['OCR_TEMPLATE_MIN_CONFIDENCE'] == '0.8'
+    assert order['producer_revision'] == 'producer-exact-revision'
+    assert value['components']['school-lunch']['runtime_settings']['IMPLEMENTATION_PRICE_OCR_DPI'] == '400'
+    assert 'GEMINI_API_KEY' not in json.dumps(value)
+    assert 'never-copy-synthetic-key' not in json.dumps(value)
+
+
+def test_business_endpoint_with_embedded_credentials_stops_before_copy_or_publication(control, storage, build_environment, monkeypatch):
+    config, job, targets = build_environment
+    original = engine.runtime_source
+    def runtime(name, settings_keys=()):
+        uri, environment, revision = original(name, settings_keys)
+        if name == 'order-prod': environment['GEMINI_API_BASE'] = 'https://private:credential@example.invalid/v1?key=secret'
+        return uri, environment, revision
+    monkeypatch.setattr(engine, 'runtime_source', runtime)
+    with pytest.raises(service.RefreshError, match='endpoint_contains_credentials'):
+        engine.build_snapshot(job, config, lambda *args: None)
+    assert not targets and control['value']['active'] == OLD
+
+
+
+def test_business_secret_reference_is_never_resolved_or_published(monkeypatch):
+    service_name = 'projects/fixture/locations/region/services/source-prod'
+    revision = service_name + '/revisions/source-prod-00001'
+    calls = []
+    class Reply:
+        status_code = 200
+        def __init__(self, data): self.data = data
+        def json(self): return self.data
+    class Session:
+        def get(self, url, **kwargs):
+            calls.append(url)
+            if url.endswith('/' + service_name): return Reply({'trafficStatuses': [{'revision': revision, 'percent': 100}]})
+            assert url.endswith('/' + revision)
+            return Reply({'containers': [{'env': [{'name': 'GEMINI_OCR_MODEL', 'valueSource': {'secretKeyRef': {'secret': 'never-access-this-secret', 'version': '1'}}}]}]})
+    monkeypatch.setattr(engine, '_cloud_session', Session)
+    with pytest.raises(service.RefreshError, match='business_setting_secret_reference_forbidden'):
+        engine.runtime_environment(service_name, data.RUNTIME_BACKEND_KEYS)
+    assert len(calls) == 2 and not any('secretmanager' in call for call in calls)
+
+
+
+def test_local_original_requires_exact_receipt_for_every_feature_and_cannot_use_another_alias(storage):
+    import hashlib
+    reference = 'file:///production/templates/shipping.xlsx'
+    content = b'authoritative-template-original'
+    storage.put('fixture-prod', 'shipping.xlsx', content)
+    generation = storage.values[('fixture-prod', 'shipping.xlsx')][0]
+    source_uri = 'gs://fixture-prod/shipping.xlsx?generation=' + str(generation)
+    identity = {'mode': 'local', 'device': 1, 'inode': 2, 'size': len(content), 'mtime_ns': 3}
+    proof = {'uri': source_uri, 'source_identity': identity, 'sha256': hashlib.sha256(content).hexdigest()}
+    for feature in ('order', 'shift', 'school-lunch'):
+        prefix = 'stg-replay/replay-case/' + feature
+        missing = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), prefix, ['fixture-prod'], {reference: source_uri})
+        with pytest.raises(service.RefreshError, match='local_original_proof_mismatch'):
+            missing.copy(reference)
+        valid = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), prefix, ['fixture-prod'], {reference: proof})
+        valid.copy(reference)
+        assert valid.objects[reference]['source_identity'] == identity
+    wrong = {**proof, 'sha256': 'a' * 64}
+    copier = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), 'stg-replay/replay-wrong/order', ['fixture-prod'], {reference: wrong})
+    with pytest.raises(service.RefreshError, match='local_original_proof_mismatch'):
+        copier.copy(reference)
+
+
+
+def test_alias_map_cannot_replace_a_gcs_original_with_another_file(storage):
+    original = 'gs://fixture-prod/original.pdf'
+    copier = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), 'stg-replay/replay-case/order', ['fixture-prod'], {original: 'gs://fixture-prod/another.pdf'})
+    with pytest.raises(service.RefreshError, match='alias_original_not_local'):
+        copier.copy(original)
+
+
+
+def test_missing_pinned_generation_never_copies_the_latest_generation(storage):
+    storage.put('fixture-prod', 'original.pdf', b'newer source bytes')
+    reference = 'gs://fixture-prod/original.pdf?generation=1'
+    copier = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), 'stg-replay/replay-case/order', ['fixture-prod'], {})
+    assert copier.copy(reference) is None
+    assert reference in copier.missing_at_source and not copier.objects
+    assert not any('/objects/' in key for _, key in storage.values)
+
+
+
+def test_source_configuration_changed_during_copy_cannot_publish(control, monkeypatch):
+    service.request_refresh(RID)
+    def build(job, config, progress):
+        monkeypatch.setattr(service, 'source_configuration', lambda: ({'components': {}}, 'd' * 64))
+        return publication(job)
+    monkeypatch.setattr(engine, 'build_snapshot', build)
+    assert service.execute(RID, 1)['succeeded'] is False
+    assert control['value']['active'] == OLD
+    assert control['value']['refresh']['error'] == 'refresh_source_configuration_changed'
+
+
+def test_literal_empty_business_env_is_preserved_and_is_not_a_secret_reference(monkeypatch):
+    service_name = 'projects/fixture/locations/region/services/source-prod'
+    class Reply:
+        status_code = 200
+        def __init__(self, value): self.value = value
+        def json(self): return self.value
+    class Session:
+        def get(self, url, **kwargs):
+            if url.endswith('/' + service_name): return Reply({'trafficStatuses': [{'revision': 'source-prod-00001', 'percent': 100}]})
+            assert url.endswith('/' + service_name + '/revisions/source-prod-00001')
+            return Reply({'containers': [{'env': [{'name': 'GEMINI_OCR_MODEL'}]}]})
+    monkeypatch.setattr(engine, '_cloud_session', Session)
+    environment, _ = engine.runtime_environment(service_name, data.RUNTIME_BACKEND_KEYS)
+    assert environment['GEMINI_OCR_MODEL'] == ''
+    assert 'OPENAI_OCR_MODEL' not in environment

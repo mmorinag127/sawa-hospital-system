@@ -1,4 +1,5 @@
-import os
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import re
 from datetime import date, datetime
 from typing import Any, Optional
@@ -513,7 +514,7 @@ def parse_order_lines(
     rows_are_body_only = bool(quantity_rules.get("rows_are_body_only", False))
     max_quantity_abs_raw = quantity_rules.get("max_quantity_abs")
     if max_quantity_abs_raw is None and strict_numeric_quantity_cell:
-        max_quantity_abs_raw = os.getenv("OCR_SHEET_MAX_QTY", "999")
+        max_quantity_abs_raw = _runtime_setting("OCR_SHEET_MAX_QTY", "999")
     try:
         max_quantity_abs = (
             float(max_quantity_abs_raw)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from dataclasses import asdict, dataclass
 from copy import deepcopy
 from datetime import date, datetime
 import hashlib
 from io import BytesIO
 import json
-import os
 import re
 import unicodedata
 from typing import Any
@@ -111,7 +112,7 @@ def resolve_quantity_assignment_strategy(template: dict[str, Any] | None = None)
         if configured != "legacy" or "quantity_assignment_strategy" in template:
             return configured
     return normalize_quantity_assignment_strategy(
-        os.getenv("OCR_QUANTITY_ASSIGNMENT_STRATEGY", "legacy")
+        _runtime_setting("OCR_QUANTITY_ASSIGNMENT_STRATEGY", "legacy")
     )
 
 

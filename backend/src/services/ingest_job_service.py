@@ -1,10 +1,11 @@
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 from datetime import datetime, timedelta
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from hashlib import sha256
 import json
-import os
 from typing import Any
 from uuid import uuid4
 
@@ -437,12 +438,12 @@ def get_ingest_payload(job_id: str) -> dict[str, Any] | None:
 
 
 def _stale_threshold() -> datetime:
-    minutes = int(os.getenv("INGEST_JOB_STALE_MINUTES", "30"))
+    minutes = int(_runtime_setting("INGEST_JOB_STALE_MINUTES", "30"))
     return datetime.utcnow() - timedelta(minutes=minutes)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    raw = str(os.getenv(name, str(default)) or "").strip()
+    raw = str(_runtime_setting(name, str(default)) or "").strip()
     try:
         value = int(raw)
     except ValueError:
@@ -830,7 +831,7 @@ def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str, Any]
 
 def reset_stale_processing(minutes: int | None = None, limit: int = 100) -> list[str]:
     if minutes is None:
-        minutes = int(os.getenv("INGEST_JOB_STALE_MINUTES", "30"))
+        minutes = int(_runtime_setting("INGEST_JOB_STALE_MINUTES", "30"))
     stale_before = datetime.utcnow() - timedelta(minutes=minutes)
     now = datetime.utcnow()
     with session_scope() as session:
@@ -947,7 +948,7 @@ def summarize_backlog_metrics() -> dict[str, Any]:
     ingest_summary = summarize_ingest_jobs()
     uploaded_pdf_summary = summarize_uploaded_pdfs()
     now = datetime.utcnow()
-    recent_since = now - timedelta(hours=int(os.getenv("OCR_BACKLOG_RECENT_HOURS", "24")))
+    recent_since = now - timedelta(hours=int(_runtime_setting("OCR_BACKLOG_RECENT_HOURS", "24")))
     with session_scope() as session:
         rows = session.execute(
             select(OcrJob.status, func.count(OcrJob.id)).group_by(OcrJob.status)
@@ -1057,7 +1058,7 @@ def summarize_backlog_metrics() -> dict[str, Any]:
             ),
             "recent_backlog_skipped_count": recent_backlog_skipped_count,
             "recent_failed_count": recent_failed_count,
-            "recent_window_hours": int(os.getenv("OCR_BACKLOG_RECENT_HOURS", "24")),
+            "recent_window_hours": int(_runtime_setting("OCR_BACKLOG_RECENT_HOURS", "24")),
             "stale_count": len(stale_jobs),
             "stale_oldest_seconds": stale_oldest_seconds,
         },

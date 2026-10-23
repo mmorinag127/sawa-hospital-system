@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
-import os
+from src.staging_data import order_runtime_setting as _runtime_setting
 from typing import Any
 
 from sqlalchemy import select
@@ -12,7 +12,7 @@ from src.models.ocr_job import OcrJob
 
 
 def _read_int_env(name: str, default: int, *, min_value: int = 1, max_value: int = 100000) -> int:
-    raw = os.getenv(name)
+    raw = _runtime_setting(name)
     if raw is None:
         return default
     try:
@@ -23,7 +23,7 @@ def _read_int_env(name: str, default: int, *, min_value: int = 1, max_value: int
 
 
 def _read_float_env(name: str, default: float, *, min_value: float = 0.0, max_value: float = 1.0) -> float:
-    raw = os.getenv(name)
+    raw = _runtime_setting(name)
     if raw is None:
         return default
     try:

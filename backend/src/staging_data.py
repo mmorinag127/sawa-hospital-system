@@ -11,13 +11,183 @@ import json
 import os
 from pathlib import Path
 import re
-from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 COOKIE = "sawa_stg_dataset"
 HEADER = "X-Sawa-Dataset"
 _selected = ContextVar("sawa_stg_dataset", default="test")
 _pinned_manifest = ContextVar("sawa_stg_manifest", default=None)
 _IDENTITY = re.compile(r"replay-[a-z0-9][a-z0-9-]{0,47}")
+
+
+
+# Only non-secret inputs that affect business results; storage/auth/transport stay stg.
+RUNTIME_BACKEND_KEYS = (
+    'DAILY_OUTPUT_AUDIT_GEMINI_MAX_TOKENS',
+    'DAILY_OUTPUT_AUDIT_GEMINI_MODEL',
+    'DAILY_OUTPUT_AUDIT_GEMINI_RETRY_MAX_TOKENS',
+    'DAILY_OUTPUT_AUDIT_GEMINI_TIMEOUT_SECONDS',
+    'DB_EXPORT_MAX_ROWS_PER_TABLE',
+    'DB_QUOTA_ALERT_RATIO',
+    'DB_QUOTA_CRITICAL_RATIO',
+    'DB_QUOTA_LIMIT_BYTES',
+    'DB_QUOTA_LIMIT_ROWS',
+    'GEMINI_API_BASE',
+    'GEMINI_OCR_FULL_TABLE_TIMEOUT_SECONDS',
+    'GEMINI_OCR_MAX_TOKENS',
+    'GEMINI_OCR_MODEL',
+    'GEMINI_OCR_RETRY_MAX_TOKENS',
+    'GEMINI_OCR_RETRY_ON_TRUNCATION',
+    'GEMINI_OCR_THINKING_BUDGET',
+    'GEMINI_OCR_TIMEOUT_SECONDS',
+    'INGEST_JOB_AUTO_RECOVERY_MAX_ATTEMPTS',
+    'INGEST_JOB_AUTO_RECOVERY_WINDOW_HOURS',
+    'INGEST_JOB_STALE_MINUTES',
+    'MANUAL_UPLOAD_MAX_FILES',
+    'MANUAL_UPLOAD_MAX_MB',
+    'MENU_UPLOAD_MAX_MB',
+    'OCR_AUTO_LLM_REPARSE_ON_INGEST',
+    'OCR_AUTO_LLM_REPARSE_PROVIDER',
+    'OCR_BACKLOG_RECENT_HOURS',
+    'OCR_ENABLE_ROI_OVERLAY_MERGE',
+    'OCR_JOB_AUTO_RECOVERY_INTERVAL_SECONDS',
+    'OCR_JOB_AUTO_RECOVERY_MAX_ATTEMPTS',
+    'OCR_JOB_STALE_MINUTES',
+    'OCR_LLM_REVIEW_OVERWRITE_MIN_CONFIDENCE',
+    'OCR_MAIN_PROVIDER',
+    'OCR_PIPELINE_ACQUIRE_TIMEOUT_SECONDS',
+    'OCR_PIPELINE_MAX_INFLIGHT',
+    'OCR_PIPELINE_OUTPUT_READ_TIMEOUT_SECONDS',
+    'OCR_PIPELINE_POLL_INTERVAL_SECONDS',
+    'OCR_PIPELINE_TIMEOUT_SECONDS',
+    'OCR_PIPELINE_WAIT_FOR_OUTPUT_ON_INGEST',
+    'OCR_QUANTITY_ASSIGNMENT_STRATEGY',
+    'OCR_REPARSE_AUDIT_PROVIDER',
+    'OCR_REPARSE_COLUMN_MIRROR_MIN_DISTINCT_PAIRS',
+    'OCR_REPARSE_COLUMN_MIRROR_MIN_EQUAL_RATIO',
+    'OCR_REPARSE_COLUMN_MIRROR_MIN_NONZERO_OVERLAP',
+    'OCR_REPARSE_COLUMN_MIRROR_MIN_OVERLAP',
+    'OCR_REPARSE_COLUMN_NONEMPTY_MAX_RATIO',
+    'OCR_REPARSE_COLUMN_NONEMPTY_MIN_RATIO',
+    'OCR_REPARSE_COLUMN_RATIO_MIN_REFERENCE_COUNT',
+    'OCR_REPARSE_COLUMN_UNEXPECTED_NONEMPTY_ABS',
+    'OCR_REPARSE_COLUMN_UNEXPECTED_NONEMPTY_RATIO',
+    'OCR_REPARSE_COST_ENFORCE_HARD_LIMIT',
+    'OCR_REPARSE_COST_GEMINI_FLASH_INPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_GEMINI_FLASH_OUTPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_GEMINI_PRO_INPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_GEMINI_PRO_OUTPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_HARD_LIMIT_USD',
+    'OCR_REPARSE_COST_INPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_OPENAI_INPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_OPENAI_OUTPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_OUTPUT_USD_PER_1M',
+    'OCR_REPARSE_COST_SOFT_LIMIT_USD',
+    'OCR_REPARSE_ENABLE_COLUMN_ANOMALY_GATE',
+    'OCR_REPARSE_ENABLE_COLUMN_MIRROR_GATE',
+    'OCR_REPARSE_ENABLE_COLUMN_UNEXPECTED_NONEMPTY_GATE',
+    'OCR_REPARSE_ENABLE_GEMINI_PRO_ON_QUALITY_FAIL',
+    'OCR_REPARSE_ENABLE_LLM_AUDIT_GATE',
+    'OCR_REPARSE_ENABLE_PIPELINE_QUANTITY_MERGE',
+    'OCR_REPARSE_ENABLE_REPAIR_PASS',
+    'OCR_REPARSE_ENABLE_SOFT_WARNINGS',
+    'OCR_REPARSE_GEMINI_AUDIT_MODEL',
+    'OCR_REPARSE_GEMINI_REPAIR_MODEL',
+    'OCR_REPARSE_HEARTBEAT_SECONDS',
+    'OCR_REPARSE_INFERENCE_TIMEOUT_SECONDS',
+    'OCR_REPARSE_LINE_COUNT_GUARD_MIN_BEFORE',
+    'OCR_REPARSE_LINE_COUNT_MAX_DROP_ABS',
+    'OCR_REPARSE_LINE_COUNT_MIN_RATIO',
+    'OCR_REPARSE_LLM_AUDIT_BLOCKING_CODES',
+    'OCR_REPARSE_LLM_AUDIT_BLOCKING_SEVERITY',
+    'OCR_REPARSE_LLM_AUDIT_FAIL_CLOSED',
+    'OCR_REPARSE_LLM_AUDIT_MIN_CONFIDENCE',
+    'OCR_REPARSE_LLM_AUDIT_TIMEOUT_SECONDS',
+    'OCR_REPARSE_LLM_FIRST_PASS_WAIT_SECONDS',
+    'OCR_REPARSE_MAX_EXTRA_ROWS',
+    'OCR_REPARSE_MAX_MISSING_TAIL_ROWS',
+    'OCR_REPARSE_MAX_QTY',
+    'OCR_REPARSE_OCR_PIPELINE_TIMEOUT_SECONDS',
+    'OCR_REPARSE_OPENAI_AUDIT_MODEL',
+    'OCR_REPARSE_OUTPUT_POLL_SECONDS',
+    'OCR_REPARSE_OUTPUT_RECOVERY_GRACE_SECONDS',
+    'OCR_REPARSE_OUTPUT_WAIT_SECONDS',
+    'OCR_REPARSE_PARTIAL_ANCHOR_MAX_ROWS',
+    'OCR_REPARSE_PARTIAL_ANCHOR_MIN_GAP_ROWS',
+    'OCR_REPARSE_QUALITY_LOOKBACK_HOURS',
+    'OCR_REPARSE_QUALITY_MAX_EMPTY_RATE',
+    'OCR_REPARSE_QUALITY_MAX_TRUNCATED_RATE',
+    'OCR_REPARSE_QUALITY_MAX_VALIDATION_FAILURE_RATE',
+    'OCR_REPARSE_QUALITY_MIN_SAMPLES',
+    'OCR_REPARSE_QUALITY_MIN_SUCCESS_RATE',
+    'OCR_REPARSE_QUALITY_SAMPLE_LIMIT',
+    'OCR_REPARSE_REQUIRE_MANUAL_REVIEW_FOR_STRUCTURAL_PROJECTION',
+    'OCR_REPARSE_ROW_COVERAGE_MIN_RATIO',
+    'OCR_REPARSE_SOFT_WARNING_CODES',
+    'OCR_REPARSE_SOURCE_ROW_SPAN_MIN_DENSITY',
+    'OCR_REPARSE_STAGE_TIMEOUT_SECONDS',
+    'OCR_REPARSE_STRUCTURAL_PROJECTION_REVIEW_MIN_CELLS',
+    'OCR_REPARSE_STRUCTURAL_PROJECTION_REVIEW_MIN_ROWS',
+    'OCR_REPARSE_WEAK_ANCHOR_MAX_DATES',
+    'OCR_REPARSE_WEAK_ANCHOR_MIN_GAP_ROWS',
+    'OCR_REPARSE_WEAK_ANCHOR_OBSERVED_DELTA_ROWS',
+    'OCR_SHEET_MAX_QTY',
+    'OCR_TEMPLATE_MIN_CONFIDENCE',
+    'OPENAI_API_BASE',
+    'OPENAI_OCR_FULL_TABLE_TIMEOUT_SECONDS',
+    'OPENAI_OCR_MAX_TOKENS',
+    'OPENAI_OCR_MODEL',
+    'OPENAI_OCR_RETRY_MAX_TOKENS',
+    'OPENAI_OCR_RETRY_ON_TRUNCATION',
+    'OPENAI_OCR_TIMEOUT_SECONDS',
+    'SHIPPING_DB_QUOTA_LIMIT_BYTES',
+    'SHIPPING_LOG_QUOTA_LIMIT_ROWS',
+    'SHIPPING_QUOTA_ALERT_RATIO',
+    'SHIPPING_QUOTA_CRITICAL_RATIO',
+    'SHIPPING_REFRESH_SCHEDULE_MINUTE',
+    'SHIPPING_TEMPLATE_PATH',
+    'WORKFLOW_V2_AI_FAX_DPI',
+    'WORKFLOW_V2_AI_FAX_MAX_PIXELS',
+    'WORKFLOW_V2_AUTO_EDIT_MAX_WORKERS',
+    'WORKFLOW_V2_AUTO_EDIT_TARGET_CHUNK_SIZE',
+    'WORKFLOW_V2_LLM_ANOMALY_ENABLED',
+    'WORKFLOW_V2_LLM_MODEL',
+    'WORKFLOW_V2_LLM_TIMEOUT_SECONDS',
+    'WORKFLOW_V2_OCR_MAX_CONCURRENT',
+    'WORKFLOW_V2_OCR_SLOT_POLL_SECONDS',
+    'WORKFLOW_V2_OCR_SLOT_TIMEOUT_SECONDS',
+)
+RUNTIME_PRODUCER_KEYS = (
+    'OCR_ENABLE_PAGE_CORRECTION',
+    'OCR_ENABLE_PAGE_CORRECTION_DESKEW',
+    'OCR_ENABLE_PAGE_CORRECTION_PERSPECTIVE',
+    'OCR_ENABLE_PAGE_CORRECTION_POSITION_NORMALIZE',
+    'OCR_ENABLE_PAGE_CORRECTION_TEMPLATE_WARP',
+    'OCR_ENABLE_QUANTITY_SUBGRID_SECOND_PASS',
+    'OCR_ENABLE_TEMPLATE_MATCH',
+    'OCR_ENABLE_TEMPLATE_ROI',
+    'OCR_PAGE_CORRECTION_MAX_SKEW_DEG',
+    'OCR_PAGE_CORRECTION_MIN_ABS_SKEW_DEG',
+    'OCR_PAGE_CORRECTION_MIN_PERSPECTIVE_RATIO_DELTA',
+    'OCR_PAGE_CORRECTION_MIN_SKEW_LINES',
+    'OCR_PIPELINE_MODE',
+    'OCR_QTY_OCR_ENGINE',
+    'OCR_QUANTITY_SUBGRID_MAX_PASSES',
+    'OCR_TEMPLATE_MATCH_DPI',
+    'OCR_TEMPLATE_MIN_CONFIDENCE',
+    'OCR_TEMPLATE_ROI_TEXT_OCR_ENGINE',
+    'OCR_YOMITOKU_DEVICE',
+    'OCR_YOMITOKU_DPI',
+    'OCR_YOMITOKU_FIGURE_WIDTH',
+    'OCR_YOMITOKU_IGNORE_LINE_BREAK',
+    'OCR_YOMITOKU_NO_FIGURE',
+    'OCR_YOMITOKU_VIS',
+    'OCR_YOMITOKU_VIS_PDF',
+)
+RUNTIME_SETTING_KEYS = {"order": frozenset(RUNTIME_BACKEND_KEYS), "shift": frozenset(), "school-lunch": frozenset(('GEMINI_API_BASE', 'IMPLEMENTATION_PRICE_OCR_DEVICE', 'IMPLEMENTATION_PRICE_OCR_DPI', 'PROCESS_GEMINI_MODEL'))}
+
+def runtime_setting_allowed(name, feature):
+    return name in RUNTIME_SETTING_KEYS[feature]
 
 
 class DatasetUnavailable(ValueError):
@@ -52,6 +222,19 @@ def dataset_context(identity):
 
 def _staging_bucket(name):
     return re.search(r"(?:^|-)stg(?:-|$)", name) is not None
+
+
+def local_source_reference(reference):
+    if not isinstance(reference, str):
+        return False
+    parsed = urlsplit(reference)
+    if reference.startswith("/"):
+        path = reference
+    elif parsed.scheme == "file" and not parsed.netloc and not parsed.query and not parsed.fragment:
+        path = unquote(parsed.path)
+    else:
+        return False
+    return path.startswith("/") and not any(part in {".", ".."} for part in path.split("/"))
 
 
 def _staging_uri(uri):
@@ -154,6 +337,7 @@ def initial_registry():
         "uri": os.environ["SAWA_STG_REPLAY_MANIFEST_URI"],
         "sha256": os.environ["SAWA_STG_REPLAY_MANIFEST_SHA256"],
         "snapshot_at": original["snapshot_at"],
+        "runtime_settings_provenance": "legacy_stg_runtime",
     }}, "refresh": None}
 
 
@@ -177,7 +361,24 @@ def _runtime_manifest(entry):
     # Only registry.json requires shared read access; data/credentials never do.
     bucket = _staging_uri(os.environ["SAWA_STG_REPLAY_MANIFEST_URI"]).netloc
     source = _staging_uri(entry["uri"])
-    return _read_manifest("gs://" + bucket + source.path, entry["sha256"])
+    value = _read_manifest("gs://" + bucket + source.path, entry["sha256"])
+    legacy = (entry.get("runtime_settings_provenance") == "legacy_stg_runtime"
+              and value["id"] == legacy_manifest()["id"]
+              and entry["sha256"] == os.environ["SAWA_STG_REPLAY_MANIFEST_SHA256"])
+    if legacy:
+        return {**value, "runtime_settings_provenance": "legacy_stg_runtime"}
+    if value.get("runtime_settings_provenance") != "production_environment":
+        raise DatasetUnavailable("staging_dataset_runtime_settings_provenance_required")
+    for feature, component in value["components"].items():
+        settings = component.get("runtime_settings")
+        if (not isinstance(settings, dict) or not RUNTIME_SETTING_KEYS[feature] <= set(settings)
+                or any(not runtime_setting_allowed(key, feature) or (item is not None and not isinstance(item, str)) for key, item in settings.items())):
+            raise DatasetUnavailable("staging_dataset_runtime_settings_incomplete:" + feature)
+    settings = value["components"]["order"].get("producer_runtime_settings")
+    if (not isinstance(settings, dict) or set(settings) != set(RUNTIME_PRODUCER_KEYS)
+            or any(item is not None and not isinstance(item, str) for item in settings.values())):
+        raise DatasetUnavailable("staging_dataset_runtime_settings_incomplete:producer")
+    return value
 
 
 def manifest_for(identity):
@@ -231,6 +432,38 @@ def database_uri(base, feature):
     if database == url.database:
         raise DatasetUnavailable("staging_dataset_database_not_isolated")
     return url.set(database=database).render_as_string(hide_password=False)
+
+
+def runtime_setting(name, default=None, *, feature, producer=False):
+    if current_dataset() == "test":
+        return os.getenv(name, default)
+    if not (name in RUNTIME_PRODUCER_KEYS if producer else runtime_setting_allowed(name, feature)):
+        raise DatasetUnavailable("staging_dataset_runtime_setting_not_allowed:" + name)
+    value = manifest()
+    if value.get("runtime_settings_provenance") == "legacy_stg_runtime":
+        return os.getenv(name, default)
+    settings = component(feature).get("producer_runtime_settings" if producer else "runtime_settings")
+    if not isinstance(settings, dict):
+        raise DatasetUnavailable("staging_dataset_runtime_settings_required:" + feature)
+    if name not in settings:
+        raise DatasetUnavailable("staging_dataset_runtime_setting_required:" + name)
+    # Explicit null records source env absence. Never consult Test's env here.
+    item = settings.get(name)
+    if item is not None and not isinstance(item, str):
+        raise DatasetUnavailable("staging_dataset_runtime_setting_invalid:" + name)
+    return default if item is None else item
+
+
+def order_runtime_setting(name, default=None):
+    return runtime_setting(name, default, feature="order")
+
+
+def producer_runtime_setting(name, default=None):
+    return runtime_setting(name, default, feature="order", producer=True)
+
+
+def school_runtime_setting(name, default=None):
+    return runtime_setting(name, default, feature="school-lunch")
 
 
 def data_setting(name, default=None, *, feature):

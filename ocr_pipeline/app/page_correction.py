@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-import os
+from app.staging_data import producer_runtime_setting as _runtime_setting
 from typing import Any, Iterable
 
 import cv2
@@ -36,14 +36,14 @@ def _empty_correction_summary(*, enabled: bool) -> dict[str, Any]:
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
-    value = str(os.environ.get(name, "") or "").strip().lower()
+    value = str(_runtime_setting(name, "") or "").strip().lower()
     if not value:
         return default
     return value in {"1", "true", "yes", "on"}
 
 
 def _read_float_env(name: str, default: float) -> float:
-    raw = str(os.environ.get(name, "") or "").strip()
+    raw = str(_runtime_setting(name, "") or "").strip()
     if not raw:
         return float(default)
     try:
@@ -53,7 +53,7 @@ def _read_float_env(name: str, default: float) -> float:
 
 
 def _read_int_env(name: str, default: int) -> int:
-    raw = str(os.environ.get(name, "") or "").strip()
+    raw = str(_runtime_setting(name, "") or "").strip()
     if not raw:
         return int(default)
     try:

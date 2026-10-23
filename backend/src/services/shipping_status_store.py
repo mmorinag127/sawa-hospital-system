@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from src.staging_data import local_directory
 
 import csv
 import json
-import os
+from src.staging_data import order_runtime_setting as _runtime_setting
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -250,7 +251,7 @@ def _is_not_shipped(item: Mapping[str, Any] | None) -> bool:
 
 
 def _read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
+    raw = _runtime_setting(name)
     if raw is None:
         return default
     try:
@@ -260,7 +261,7 @@ def _read_float_env(name: str, default: float) -> float:
 
 
 def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
+    raw = _runtime_setting(name)
     if raw is None:
         return default
     try:

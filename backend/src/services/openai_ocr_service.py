@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.staging_data import order_runtime_setting as _runtime_setting
+
 import base64
 from copy import deepcopy
 import json
@@ -88,12 +90,12 @@ def _resolve_timeout_seconds(template: dict[str, Any]) -> float:
         return float(configured)
     if _full_table_mode(template):
         return float(
-            os.getenv(
+            _runtime_setting(
                 "OPENAI_OCR_FULL_TABLE_TIMEOUT_SECONDS",
-                os.getenv("OPENAI_OCR_TIMEOUT_SECONDS", "240"),
+                _runtime_setting("OPENAI_OCR_TIMEOUT_SECONDS", "240"),
             )
         )
-    return float(os.getenv("OPENAI_OCR_TIMEOUT_SECONDS", "90"))
+    return float(_runtime_setting("OPENAI_OCR_TIMEOUT_SECONDS", "90"))
 
 
 def _get_api_key() -> str:
@@ -104,14 +106,14 @@ def _get_api_key() -> str:
 
 
 def _api_url() -> str:
-    base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+    base = _runtime_setting("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
     return f"{base}/chat/completions"
 
 
 def _get_model(template: dict) -> str:
     model = (
         str(template.get("openai_ocr_model") or "").strip()
-        or os.getenv("OPENAI_OCR_MODEL", "").strip()
+        or _runtime_setting("OPENAI_OCR_MODEL", "").strip()
         or "gpt-4.1-mini"
     )
     return model
@@ -452,16 +454,16 @@ def run_openai_ocr(
     page = max(int(template.get("page", 1)) - 1, 0) + 1
     resolution = int(template.get("openai_ocr_resolution") or template.get("main_ocr_resolution") or 300)
     timeout = _resolve_timeout_seconds(template)
-    max_tokens = int(template.get("openai_ocr_max_tokens") or os.getenv("OPENAI_OCR_MAX_TOKENS", "6000"))
+    max_tokens = int(template.get("openai_ocr_max_tokens") or _runtime_setting("OPENAI_OCR_MAX_TOKENS", "6000"))
     retry_on_truncation = _as_bool(
         template.get("openai_ocr_retry_on_truncation")
         if template.get("openai_ocr_retry_on_truncation") is not None
-        else os.getenv("OPENAI_OCR_RETRY_ON_TRUNCATION"),
+        else _runtime_setting("OPENAI_OCR_RETRY_ON_TRUNCATION"),
         default=True,
     )
     retry_max_tokens = _safe_int(
         template.get("openai_ocr_retry_max_tokens")
-        or os.getenv("OPENAI_OCR_RETRY_MAX_TOKENS", "12000"),
+        or _runtime_setting("OPENAI_OCR_RETRY_MAX_TOKENS", "12000"),
         12000,
     )
     if retry_max_tokens < max_tokens:
