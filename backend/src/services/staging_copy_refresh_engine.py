@@ -31,8 +31,10 @@ def _cloud_session():
     return AuthorizedSession(credentials)
 
 
-def runtime_environment(service, settings_keys=()):
+def runtime_environment(service, settings_keys=(), *, credential_keys=frozenset()):
     """Pin the actual serving revision; credentials exist only in this process."""
+    if credential_keys and (credential_keys != {"SAWA_API_SERVICE_TOKEN"} or not service.endswith("/services/shift-api-stg")):
+        raise RefreshError("refresh_runtime_credential_scope_invalid")
     session = _cloud_session()
     response = session.get("https://run.googleapis.com/v2/" + service, timeout=30)
     if response.status_code != 200:
@@ -61,7 +63,7 @@ def runtime_environment(service, settings_keys=()):
             environment[key] = item.get("value", "")
         elif key in settings_keys and key not in {"DB_URI", "DATABASE_URL", "DB_PASSWORD", "DB_HOST", "DB_NAME", "DB_USER"}:
             raise RefreshError("refresh_business_setting_secret_reference_forbidden")
-        elif key in {"DB_URI", "DATABASE_URL", "DB_PASSWORD", "DB_HOST", "DB_NAME", "DB_USER"}:
+        elif key in {"DB_URI", "DATABASE_URL", "DB_PASSWORD", "DB_HOST", "DB_NAME", "DB_USER"} | credential_keys:
             reference = item.get("valueSource", {}).get("secretKeyRef", {})
             secret, version = reference.get("secret"), reference.get("version")
             if not secret or not version:
@@ -247,15 +249,21 @@ def fingerprints(connection, directory, local_receipts=None):
 
 def _heads(connection):
     with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass('public.alembic_version')")
+        if cursor.fetchone() == (None,):
+            return []
         cursor.execute("SELECT version_num FROM alembic_version ORDER BY version_num")
         return [row[0] for row in cursor.fetchall()]
 
 
-def clone_database(source, destination, target, directory, expected_heads):
+def clone_database(source, destination, target, directory, expected_heads, *, source_heads=None, upgrade=None, receipt=None, snapshot_callback=None):
     if not re.fullmatch(r"sawa_replay_[a-f0-9_]{1,40}", target) or target == destination["database"]:
         raise RefreshError("refresh_destination_not_isolated")
     if source["instance"].split(":")[0] != destination["instance"].split(":")[0]:
         raise RefreshError("refresh_database_project_mismatch")
+    original_heads = sorted(expected_heads if source_heads is None else source_heads)
+    if original_heads != sorted(expected_heads) and upgrade is None:
+        raise RefreshError("refresh_copy_upgrade_required")
     dump = directory / "snapshot.dump"
     with _proxy(source) as source_port, closing(_connect(source, source_port)) as original:
         with original.cursor() as cursor:
@@ -266,7 +274,9 @@ def clone_database(source, destination, target, directory, expected_heads):
             exported_snapshot = cursor.fetchone()[0]
         local_receipts = {}
         before, references = fingerprints(original, directory, local_receipts)
-        if _heads(original) != sorted(expected_heads):
+        if snapshot_callback is not None:
+            snapshot_callback(exported_snapshot)
+        if _heads(original) != original_heads:
             raise RefreshError("refresh_source_schema_incompatible")
         major = original.server_version // 10000
         dump_tool, restore_tool = _pg_tool("pg_dump", major), _pg_tool("pg_restore", major)
@@ -290,11 +300,40 @@ def clone_database(source, destination, target, directory, expected_heads):
              config=destination, port=destination_port)
         with closing(_connect(destination, destination_port, database=target)) as copied:
             after, _ = fingerprints(copied, directory)
-            if before != after or _heads(copied) != sorted(expected_heads):
+            if before != after or _heads(copied) != original_heads:
                 raise RefreshError("refresh_database_verification_failed")
             copied.rollback()
+        if original_heads != sorted(expected_heads):
+            from sqlalchemy import create_engine
+            from sqlalchemy.engine import URL
+            from src import staging_copy_schema as preservation
+            verification = create_engine(URL.create('postgresql+psycopg2', username=destination['user'],
+                password=destination['password'], host='127.0.0.1', port=destination_port, database=target), hide_parameters=True)
+            try:
+                with verification.connect().execution_options(postgresql_readonly=True) as connection:
+                    original_columns, preserved = preservation.preserve_before(connection, before)
+                proof = upgrade(destination, destination_port, target, before, original_heads, expected_heads)
+                if (not isinstance(proof, dict) or proof.get("existing_values_preserved") is not True
+                        or proof.get('preserved_tables') != preserved):
+                    raise RefreshError("refresh_copy_upgrade_unverified")
+                # Independently verify the remote migration's receipt from the copied DB itself.
+                with verification.connect().execution_options(postgresql_readonly=True) as connection:
+                    preservation.require_preserved(connection, original_columns, preserved)
+            finally:
+                verification.dispose()
+            with closing(_connect(destination, destination_port, database=target)) as copied:
+                after, _ = fingerprints(copied, directory)
+                if _heads(copied) != sorted(expected_heads):
+                    raise RefreshError("refresh_copy_upgrade_head_mismatch")
+                copied.rollback()
+            if receipt is not None:
+                receipt.update(proof, source_tables=before, source_heads=original_heads, target_heads=sorted(expected_heads))
+            before = after
     dump.unlink()
     return before, references, local_receipts
+
+
+from src.services.staging_prod_settings_transport import export_runtime_settings
 
 
 class ObjectCopier:
@@ -305,6 +344,28 @@ class ObjectCopier:
         self.objects = {}
         self.missing_at_source = set()
         self.local_receipts = local_receipts or {}
+
+    def copy_exported_setting(self, key, exported):
+        import base64
+        receipt = exported["settings"][key]
+        content = base64.b64decode(receipt["content_base64"], validate=True)
+        logical = "production-settings://" + exported["revision"] + "/" + key
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != receipt["sha256"]:
+            raise RefreshError("refresh_production_settings_export_mismatch")
+        physical = self.bucket.blob(self.prefix + "/objects/" + hashlib.sha256(logical.encode()).hexdigest())
+        physical.upload_from_string(content, if_generation_match=0, timeout=120)
+        generation = int(physical.generation)
+        actual = physical.download_as_bytes(if_generation_match=generation, timeout=120)
+        if hashlib.sha256(actual).hexdigest() != digest:
+            raise RefreshError("refresh_object_verification_failed")
+        entry = {"uri": "gs://" + self.bucket.name + "/" + physical.name, "generation": str(generation), "sha256": digest,
+            "source_export": {"revision": exported["revision"], "setting": key, "path": receipt["path"],
+                              "raw_file_sha256": receipt["raw_file_sha256"], "database_snapshot": exported["database_snapshot"]}}
+        self.objects[logical] = self.objects[entry["uri"]] = entry
+        for reference in _references(json.loads(content)):
+            self.copy(reference)
+        return entry["uri"]
 
     def copy(self, original, *, required=False):
         if original in self.objects:
@@ -401,8 +462,16 @@ def build_snapshot(job, config, progress):
     target = "sawa_replay_" + job["id"][:24] + "_" + job["attempt"][:8]
     with tempfile.TemporaryDirectory(prefix="sawa-copy-refresh-") as temporary:
         for name in ("order", "shift", "school-lunch"):
-            progress("copying_database", name)
             entry = config["components"][name]
+            if entry.get("mode") == "retain":
+                retained = datasets.retained_snapshot(entry["snapshot"])
+                parent = datasets._runtime_manifest(retained)
+                if parent["id"] != retained["id"] or parent["snapshot_at"] != retained["snapshot_at"]:
+                    raise RefreshError("refresh_retained_snapshot_mismatch")
+                value["components"][name] = parent["components"][name]
+                value.setdefault("retained_components", {})[name] = parent.get("retained_components", {}).get(name, retained)
+                continue
+            progress("copying_database", name)
             source_uri, source_environment, source_revision = runtime_source(entry["source_service"], set(entry["settings_keys"]) | (set(datasets.RUNTIME_BACKEND_KEYS) if name == "order" else datasets.RUNTIME_SETTING_KEYS[name]))
             runtime_keys = set(datasets.RUNTIME_BACKEND_KEYS) if name == "order" else set(datasets.RUNTIME_SETTING_KEYS[name])
             runtime_settings = {key: source_environment.get(key) for key in runtime_keys}
@@ -424,12 +493,25 @@ def build_snapshot(job, config, progress):
                 raise RefreshError("refresh_destination_runtime_bucket_mismatch")
             directory = Path(temporary) / name
             directory.mkdir(mode=0o700)
-            tables, references, local_receipts = clone_database(source, destination, target, directory, entry["expected_migration_heads"])
+            migration = {}
+            exported_settings = {}
+            clone_options = {}
+            if "source_migration_heads" in entry:
+                from src.services.staging_copy_migration import upgrade_hospital, upgrade_shift
+                clone_options = {"source_heads": entry["source_migration_heads"], "receipt": migration,
+                    "upgrade": upgrade_hospital if name == "order" else
+                        lambda *args: upgrade_shift(entry["destination_service"], job, *args)}
+            if entry.get("settings_mode") == "runtime_export":
+                clone_options["snapshot_callback"] = lambda snapshot: exported_settings.update(export_runtime_settings(source_revision, snapshot))
+            tables, references, local_receipts = clone_database(source, destination, target, directory, entry["expected_migration_heads"], **clone_options)
             progress("copying_files_and_settings", name)
-            if any(key not in source_environment for key in entry["settings_keys"]):
-                raise RefreshError("refresh_runtime_setting_missing")
-            settings_source = {key: source_environment[key] for key in entry["settings_keys"]}
-            if not isinstance(settings_source, dict) or any(not isinstance(v, str) or not v for v in settings_source.values()):
+            if entry.get("settings_mode") == "runtime_export":
+                settings_source = exported_settings["settings"]
+            else:
+                if any(key not in source_environment for key in entry["settings_keys"]):
+                    raise RefreshError("refresh_runtime_setting_missing")
+                settings_source = {key: source_environment[key] for key in entry["settings_keys"]}
+            if not isinstance(settings_source, dict) or (not exported_settings and any(not isinstance(v, str) or not v for v in settings_source.values())):
                 raise RefreshError("refresh_settings_source_invalid")
             if name == "order" and not {"FACILITY_MASTER_URI", "INGEST_POLICY_URI", "OCR_PIPELINE_STATE_URI"} <= set(settings_source):
                 raise RefreshError("refresh_order_settings_incomplete")
@@ -438,7 +520,9 @@ def build_snapshot(job, config, progress):
                                   entry["source_buckets"], entry["local_objects"], local_receipts)
             settings = {}
             for key, setting in settings_source.items():
-                if key == "GCS_BUCKET_NAME":
+                if exported_settings and key in {"FACILITY_MASTER_URI", "INGEST_POLICY_URI"} and isinstance(setting, dict):
+                    settings[key] = copier.copy_exported_setting(key, exported_settings)
+                elif key == "GCS_BUCKET_NAME":
                     if setting not in entry["source_buckets"]:
                         raise RefreshError("refresh_storage_setting_source_mismatch")
                     settings[key] = destination_bucket.name
@@ -455,6 +539,7 @@ def build_snapshot(job, config, progress):
                 "table_digests": {table: proof["sha256"] for table, proof in tables.items()},
                 "settings": settings, "objects": copier.objects,
                 "table_counts": {table: proof["rows"] for table, proof in tables.items()},
+                "migration": migration,
                 "source_instance": source["instance"], "source_database": source["database"],
                 "source_configuration_sha256": job["source_configuration_sha256"], "source_revision": source_revision,
                 "missing_at_source": sorted(copier.missing_at_source)}
@@ -475,4 +560,4 @@ def build_snapshot(job, config, progress):
         published[destination] = {"uri": uri, "sha256": digest, "snapshot_at": value["snapshot_at"]}
     # Control service commits active + terminal state together, after every replica exists.
     return {"id": job["dataset"], **published[control.netloc],
-            "missing_at_source": {name: len(component["missing_at_source"]) for name, component in value["components"].items()}}
+            "missing_at_source": {name: len(component["missing_at_source"]) for name, component in value["components"].items() if name not in value.get("retained_components", {})}}

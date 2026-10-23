@@ -199,8 +199,13 @@ def staging_runtime():
     return service.endswith("-stg") and os.environ.get("APP_ENV", "") not in {"prod", "production"}
 
 
-def current_dataset():
-    return _selected.get()
+def current_dataset(*, feature=None):
+    identity = _selected.get()
+    if feature is not None and identity != "test":
+        retained = manifest().get("retained_components", {}).get(feature)
+        if retained is not None:
+            return retained["id"]
+    return identity
 
 
 @contextmanager
@@ -255,6 +260,20 @@ def _unique_object(pairs):
     return result
 
 
+def retained_snapshot(entry):
+    required = {"id", "uri", "sha256", "snapshot_at"}
+    if (not isinstance(entry, dict) or not required <= set(entry)
+            or set(entry) - required - {"runtime_settings_provenance"}
+            or not _IDENTITY.fullmatch(str(entry.get("id", "")))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", "")))
+            or not entry.get("snapshot_at")
+            or ("runtime_settings_provenance" in entry and entry["runtime_settings_provenance"] != "legacy_stg_runtime")):
+        raise DatasetUnavailable("staging_dataset_retained_snapshot_invalid")
+    if not _staging_uri(entry["uri"]).path.startswith("/stg-replay/" + entry["id"] + "/"):
+        raise DatasetUnavailable("staging_dataset_retained_snapshot_invalid")
+    return entry
+
+
 @lru_cache(maxsize=4)
 def _read_manifest(uri, digest):
     parsed = _staging_uri(uri)
@@ -269,7 +288,13 @@ def _read_manifest(uri, digest):
             or value.get("state") != "ready" or not value.get("snapshot_at")
             or set(value.get("components", {})) != {"order", "shift", "school-lunch"}):
         raise DatasetUnavailable("staging_dataset_manifest_incomplete")
+    retained = value.get("retained_components", {})
+    if not isinstance(retained, dict) or set(retained) - set(value["components"]):
+        raise DatasetUnavailable("staging_dataset_retained_snapshot_invalid")
     for name, component in value["components"].items():
+        object_identity = retained_snapshot(retained[name])["id"] if name in retained else value["id"]
+        if name in retained and object_identity == value["id"]:
+            raise DatasetUnavailable("staging_dataset_retained_snapshot_invalid")
         if (not re.fullmatch(r"sawa_replay_[a-z0-9_]{1,40}", str(component.get("database", "")))
                 or not isinstance(component.get("settings"), dict)
                 or not isinstance(component.get("objects"), dict)
@@ -279,7 +304,7 @@ def _read_manifest(uri, digest):
             raise DatasetUnavailable("staging_dataset_component_incomplete:" + name)
         for item in component["objects"].values():
             physical = _staging_uri(item["uri"])
-            if not physical.path.startswith("/stg-replay/" + value["id"] + "/"):
+            if not physical.path.startswith("/stg-replay/" + object_identity + "/"):
                 raise DatasetUnavailable("staging_dataset_object_snapshot_mismatch")
             if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
                 raise DatasetUnavailable("staging_dataset_object_digest_required")
@@ -356,29 +381,45 @@ def validate_registry(value):
             raise DatasetUnavailable("staging_dataset_registry_identity_mismatch")
 
 
-def _runtime_manifest(entry):
+def _runtime_manifest(entry, _seen=frozenset()):
     # Publisher mirrors the exact same immutable bytes to each existing stg bucket.
     # Only registry.json requires shared read access; data/credentials never do.
     bucket = _staging_uri(os.environ["SAWA_STG_REPLAY_MANIFEST_URI"]).netloc
     source = _staging_uri(entry["uri"])
+    key = (source.path, entry["sha256"])
+    if key in _seen:
+        raise DatasetUnavailable("staging_dataset_retained_snapshot_cycle")
+    seen = _seen | {key}
     value = _read_manifest("gs://" + bucket + source.path, entry["sha256"])
     legacy = (entry.get("runtime_settings_provenance") == "legacy_stg_runtime"
               and value["id"] == legacy_manifest()["id"]
               and entry["sha256"] == os.environ["SAWA_STG_REPLAY_MANIFEST_SHA256"])
     if legacy:
-        return {**value, "runtime_settings_provenance": "legacy_stg_runtime"}
+        return {**value, "runtime_settings_provenance": "legacy_stg_runtime",
+                "_component_runtime_provenance": {name: "legacy_stg_runtime" for name in value["components"]}}
     if value.get("runtime_settings_provenance") != "production_environment":
         raise DatasetUnavailable("staging_dataset_runtime_settings_provenance_required")
+    provenance = {}
     for feature, component in value["components"].items():
+        retained = value.get("retained_components", {}).get(feature)
+        if retained is not None:
+            retained_snapshot(retained)
+            parent = _runtime_manifest(retained, seen)
+            if (parent["id"] != retained["id"] or parent["snapshot_at"] != retained["snapshot_at"]
+                    or component != parent["components"][feature]):
+                raise DatasetUnavailable("staging_dataset_retained_component_changed:" + feature)
+            provenance[feature] = parent["_component_runtime_provenance"][feature]
+            continue
+        provenance[feature] = "production_environment"
         settings = component.get("runtime_settings")
         if (not isinstance(settings, dict) or not RUNTIME_SETTING_KEYS[feature] <= set(settings)
                 or any(not runtime_setting_allowed(key, feature) or (item is not None and not isinstance(item, str)) for key, item in settings.items())):
             raise DatasetUnavailable("staging_dataset_runtime_settings_incomplete:" + feature)
     settings = value["components"]["order"].get("producer_runtime_settings")
-    if (not isinstance(settings, dict) or set(settings) != set(RUNTIME_PRODUCER_KEYS)
-            or any(item is not None and not isinstance(item, str) for item in settings.values())):
+    if ("order" not in value.get("retained_components", {}) and (not isinstance(settings, dict) or set(settings) != set(RUNTIME_PRODUCER_KEYS)
+            or any(item is not None and not isinstance(item, str) for item in settings.values()))):
         raise DatasetUnavailable("staging_dataset_runtime_settings_incomplete:producer")
-    return value
+    return {**value, "_component_runtime_provenance": provenance}
 
 
 def manifest_for(identity):
@@ -440,7 +481,7 @@ def runtime_setting(name, default=None, *, feature, producer=False):
     if not (name in RUNTIME_PRODUCER_KEYS if producer else runtime_setting_allowed(name, feature)):
         raise DatasetUnavailable("staging_dataset_runtime_setting_not_allowed:" + name)
     value = manifest()
-    if value.get("runtime_settings_provenance") == "legacy_stg_runtime":
+    if value.get("_component_runtime_provenance", {}).get(feature, value.get("runtime_settings_provenance")) == "legacy_stg_runtime":
         return os.getenv(name, default)
     settings = component(feature).get("producer_runtime_settings" if producer else "runtime_settings")
     if not isinstance(settings, dict):
@@ -478,16 +519,16 @@ def data_setting(name, default=None, *, feature):
     return value
 
 
-def storage_prefix():
-    return "stg-replay/" + current_dataset() + "/"
+def storage_prefix(*, feature=None):
+    return "stg-replay/" + current_dataset(feature=feature) + "/"
 
 
-def write_object(bucket, name):
+def write_object(bucket, name, *, feature=None):
     if current_dataset() == "test":
         return bucket, name
     if not _staging_bucket(bucket) or not name or name.startswith("/") or ".." in name.split("/"):
         raise DatasetUnavailable("staging_dataset_write_target_invalid")
-    prefix = storage_prefix()
+    prefix = storage_prefix(feature=feature)
     if name.startswith("stg-replay/") and not name.startswith(prefix):
         raise DatasetUnavailable("staging_dataset_cross_snapshot_write")
     return bucket, name if name.startswith(prefix) else prefix + name
@@ -511,13 +552,14 @@ def read_object(uri, *, feature, generation=None):
     if item is not None:
         _staging_uri(item["uri"])
         return item["uri"], item["generation"], item["sha256"]
-    prefixes = (storage_prefix(), "input/" + storage_prefix(), "output/" + storage_prefix())
+    prefix = storage_prefix(feature=feature)
+    prefixes = (prefix, "input/" + prefix, "output/" + prefix)
     if (parsed.scheme == "gs" and _staging_bucket(parsed.netloc)
             and unquote(parsed.path).lstrip("/").startswith(prefixes)):
         return uri, original_generation, None
     if parsed.scheme in {"", "file"}:
         path = Path(unquote(parsed.path) if parsed.scheme else uri)
-        if path.is_absolute() and "/stg-replay/" + current_dataset() + "/" in str(path.resolve()):
+        if path.is_absolute() and "/stg-replay/" + current_dataset(feature=feature) + "/" in str(path.resolve()):
             return uri, original_generation, None
     raise DatasetUnavailable("staging_dataset_original_copy_missing")
 
@@ -528,16 +570,16 @@ def verify_copy(content, digest):
     return content
 
 
-def local_directory(base):
+def local_directory(base, *, feature=None):
     path = Path(base)
     if current_dataset() != "test":
-        path = path / "stg-replay" / current_dataset()
+        path = path / "stg-replay" / current_dataset(feature=feature)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def delivery_headers():
-    return {HEADER: current_dataset()} if current_dataset() != "test" else {}
+def delivery_headers(*, feature=None):
+    return {HEADER: current_dataset(feature=feature)} if current_dataset() != "test" else {}
 
 
 def delivery_dataset_matches(headers, identity):
@@ -545,8 +587,8 @@ def delivery_dataset_matches(headers, identity):
     return values == [identity] if identity is not None else not values
 
 
-def delivery_namespace():
-    return current_dataset() + "-" if current_dataset() != "test" else ""
+def delivery_namespace(*, feature=None):
+    return current_dataset(feature=feature) + "-" if current_dataset() != "test" else ""
 
 
 class DatasetMiddleware:
