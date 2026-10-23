@@ -135,8 +135,8 @@ def test_rollout_rollback_preserves_unrelated_revision(monkeypatch):
     monkeypatch.setattr(rollout,'revision_image',lambda name:rollout.IMAGE)
     monkeypatch.setattr(rollout.subprocess,'run',lambda *a,**k:calls.append(a))
     monkeypatch.setattr(rollout,'live_service',lambda:{'status':{'traffic':[{'revisionName':'external-new-revision','percent':100}]}})
-    with pytest.raises(RuntimeError,match='Unrelated'):rollout.restore_original()
+    with pytest.raises(RuntimeError,match='Unrelated'):rollout.restore_normal()
     assert calls==[]
     monkeypatch.setattr(rollout,'live_service',lambda:{'status':{'traffic':[{'revisionName':rollout.REPAIR_REVISION,'percent':100}]}})
-    rollout.restore_original()
-    assert '--to-revisions='+rollout.ORIGINAL_REVISION+'=100' in calls[0][0]
+    rollout.restore_normal()
+    assert '--to-revisions='+rollout.NORMAL_BASE_REVISION+'=100' in calls[0][0]

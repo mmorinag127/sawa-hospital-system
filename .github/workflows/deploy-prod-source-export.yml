@@ -177,11 +177,11 @@ jobs:
         env:
           DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
         run: python scripts/prod_source_export_preflight.py preflight verification/source-proof.json
-      - name: Restore the known healthy original recovery configuration
+      - name: Restore the reviewed normal recovery configuration
         env:
           DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
         run: |
-          python scripts/prod_source_export_preflight.py restore-original
+          python scripts/prod_source_export_preflight.py restore-normal
           python scripts/prod_source_export_preflight.py verify verification/source-proof.json
       - name: Assign exact revisions for this run
         run: |
@@ -232,12 +232,12 @@ jobs:
           python scripts/prod_source_export_preflight.py exact-revision
           export CANDIDATE_URL=
           python scripts/prod_source_export_preflight.py verify verification/source-proof.json
-      - name: Restore original normal production on any rollout failure
+      - name: Restore reviewed normal production on any rollout failure
         if: failure()
         env:
           DEPLOY_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
         run: |
-          python scripts/prod_source_export_preflight.py restore-original
+          python scripts/prod_source_export_preflight.py restore-normal
           CANDIDATE_URL= python scripts/prod_source_export_preflight.py verify verification/source-proof.json
       - uses: actions/upload-artifact@v4
         if: always()
