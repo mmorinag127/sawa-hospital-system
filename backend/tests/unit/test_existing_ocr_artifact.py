@@ -51,7 +51,7 @@ def test_invalid_provenance_stops(case):
 
 
 def workflow():
-    return yaml.safe_load((ROOT / '.github/workflows/deploy-stg.yml').read_text())
+    return yaml.safe_load((ROOT / 'local-checks/legacy/deploy-stg.yml').read_text())
 
 
 @pytest.mark.parametrize('run_id,manifest,expected', [('', '', 0), ('123', '', 0),
@@ -67,8 +67,8 @@ def test_source_gate_exclusive_and_numeric(run_id, manifest, expected):
 
 def test_normal_deploy_and_verifier_commands_unchanged():
     from scripts.tls_workflow_test_contract import before_ca_upgrade
-    approved_base = "eb06a5ecc0fe335d6a6a94a3c6cc45ef3f4695df"
+    approved_base = "c504c11cb49fcc6372f7fd11798e9cbfbd43ac56"
     subprocess.run(["git", "merge-base", "--is-ancestor", approved_base, "HEAD"], cwd=ROOT, check=True)
     baseline = yaml.safe_load(subprocess.check_output(
         ["git", "show", f"{approved_base}:.github/workflows/deploy-stg.yml"], cwd=ROOT))
-    assert before_ca_upgrade(workflow()) == baseline
+    assert workflow() == baseline

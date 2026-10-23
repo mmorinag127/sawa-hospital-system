@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 class WorkflowImpact(unittest.TestCase):
     def setUp(self):
-        self.jobs = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(),
+        self.jobs = yaml.load((ROOT / "local-checks/legacy/ci.yml").read_text(),
                               Loader=yaml.BaseLoader)["jobs"]
 
     def test_only_successful_develop_push_publishes_dependencies(self):

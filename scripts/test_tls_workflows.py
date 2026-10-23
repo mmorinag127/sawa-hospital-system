@@ -38,17 +38,19 @@ class TLSWorkflowTests(unittest.TestCase):
                     if step.get("uses", "").startswith("astral-sh/setup-uv@"):
                         self.assertEqual(step["with"]["version"], "0.13.4")
 
-    def test_built_images_are_checked_before_push(self):
-        checked = 0
-        for file in ("deploy-stg.yml", "deploy-prod.yml"):
-            for job in yaml.safe_load((ROOT / ".github/workflows" / file).read_text())["jobs"].values():
-                for step in job.get("steps", []):
-                    run = step.get("run", "")
-                    if 'docker push "$image"' in run:
-                        self.assertIn("/tmp/verify_tls_trust.", run)
-                        self.assertLess(run.index("/tmp/verify_tls_trust."), run.index('docker push "$image"'))
-                        checked += 1
-        self.assertEqual(checked, 8)
+    def test_images_are_checked_locally_and_signed_receipt_precedes_deploy(self):
+        for file in ("deploy-dev.yml", "deploy-stg.yml", "deploy-prod.yml"):
+            workflow = yaml.safe_load((ROOT / ".github/workflows" / file).read_text())
+            job = workflow['jobs'].get('source-gate', workflow['jobs'].get('deploy-dev'))
+            gate = next(s for s in job['steps'] if 'local_hospital_test_runner.py --validate' in s.get('run', ''))
+            self.assertEqual(gate['env']['SAWA_LOCAL_TEST_PUBLIC_KEY'], '${{ vars.SAWA_LOCAL_TEST_PUBLIC_KEY }}')
+            self.assertNotIn('docker run ', (ROOT / '.github/workflows' / file).read_text())
+        runtime = (ROOT / 'scripts/run_local_image_tls.py').read_text()
+        self.assertIn('verify_tls_trust.py', runtime)
+        self.assertIn('sawa.git_sha', runtime)
+        self.assertIn('reject_hosted_runner()', runtime)
+        frontend = (ROOT / 'scripts/run_local_frontend_image_proof.py').read_text()
+        self.assertIn('verify_tls_trust.mjs', frontend)
 
     def test_all_agent_venvs_are_checked_after_installation(self):
         dockerfile = (ROOT / "agent_runtime/Dockerfile").read_text()

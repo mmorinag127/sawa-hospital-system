@@ -1,0 +1,269 @@
+{
+  "version": 1,
+  "post_deploy_commands": [
+    {
+      "name": "stg-ocr-ui-readonly",
+      "command": "python3 scripts/run_local_stg_ocr_ui_check.py",
+      "legacy_steps": [
+        {"workflow": "verify-stg-ocr-ui.yml", "job": "verify", "step": "Validate existing staging OCR artifact provenance"},
+        {"workflow": "verify-stg-ocr-ui.yml", "job": "verify", "step": "Verify current web before and after existing read-only UI checks"}
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "name": "backend-tests",
+      "command": "task backend_test",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Run backend tests (US1-4)"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify initial saved-source preservation"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify OCR review-resolution root regression"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify portal login and server session"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify staging copy refresh lifecycle and native PostgreSQL isolation"
+        },
+        {
+          "workflow": "verify-staging-data.yml",
+          "job": "verify",
+          "step": "Run isolated dataset regressions"
+        }
+      ]
+    },
+    {
+      "name": "frontend-tests",
+      "command": "cd frontend && npm run lint && npm run test:config && node --test tests/inspection-demand-read.test.mjs && ./node_modules/.bin/tsc --noEmit && npm run test:e2e",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "frontend",
+          "step": "Frontend lint"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "frontend",
+          "step": "Frontend route contract tests"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "frontend",
+          "step": "Frontend typecheck"
+        },
+        {
+          "workflow": "verify-staging-data.yml",
+          "job": "verify",
+          "step": "Run isolated dataset regressions"
+        }
+      ]
+    },
+    {
+      "name": "backend-lint-audit",
+      "command": "cd backend && python3 -m ruff check --no-cache --select F821 src && python3 -m pip_audit --local --skip-editable",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Check backend undefined names"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Backend dependency audit"
+        }
+      ]
+    },
+    {
+      "name": "frontend-audit",
+      "command": "cd frontend && npm audit --omit=dev",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "frontend",
+          "step": "Frontend dependency audit"
+        }
+      ]
+    },
+    {
+      "name": "workflow-security-contracts",
+      "command": "python3 -m unittest infra/terraform/tests/test_secret_manager_iam_migration.py -v && python3 scripts/test_tls_trust.py -v && python3 scripts/test_tls_workflows.py -v && python3 infra/terraform/tests/test_ci_backend_parallel.py -v && python3 scripts/test_runtime_cv_dependency_alignment.py -v && python3 scripts/test_modernization_image_ci.py -v && python3 scripts/test_local_hospital_test_runner.py",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "infra",
+          "step": "Infra workflow guard tests"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "infra",
+          "step": "Verify TLS trust and workflow guards"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify parallel CI coverage and required gate"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify serving and frozen image dependency alignment"
+        }
+      ]
+    },
+    {
+      "name": "impact-contracts",
+      "command": "python3 -m unittest discover -s infra/ci/tests -p 'test_*impact.py' -v",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify per-test selection safety"
+        },
+        {
+          "workflow": "ci.yml",
+          "job": "frontend",
+          "step": "Verify Node test selection safety"
+        }
+      ]
+    },
+    {
+      "name": "packaged-baseline",
+      "command": "PYTHONPATH=\"$PWD:$PWD/backend\" python3 -m pytest experiments/agent_assistant/tests/test_prepare_packaged.py -q",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify packaged hospital baseline migration"
+        }
+      ]
+    },
+    {
+      "name": "copy-refresh-owned-postgres",
+      "command": "python3 scripts/test_staging_copy_refresh_native.py && DB_URI=\"sqlite:///$SAWA_LOCAL_EVIDENCE_DIR/producer.sqlite\" PYTHONPATH=ocr_pipeline:backend python3 -m unittest discover -s ocr_pipeline/tests -p test_main.py -v",
+      "legacy_steps": [
+        {
+          "workflow": "ci.yml",
+          "job": "backend",
+          "step": "Verify staging copy refresh lifecycle and native PostgreSQL isolation"
+        }
+      ]
+    },
+    {
+      "name": "modernization-image-proof",
+      "command": "python3 scripts/run_local_frontend_image_proof.py",
+      "legacy_steps": [
+        {
+          "workflow": "modernization-image-ci.yml",
+          "job": "frontend-image",
+          "step": "Build actual frontend image and verify vendored dependency"
+        }
+      ]
+    },
+    {
+      "name": "modernization-pg-output",
+      "command": "python3 scripts/run_local_pg_output_boundary.py",
+      "legacy_steps": [
+        {
+          "workflow": "modernization-pg-output.yml",
+          "job": "pg-output-boundary",
+          "step": "Formal Alembic migration"
+        },
+        {
+          "workflow": "modernization-pg-output.yml",
+          "job": "pg-output-boundary",
+          "step": "Real PG transaction boundaries"
+        },
+        {
+          "workflow": "modernization-pg-output.yml",
+          "job": "formal-pg-chain",
+          "step": "Start exclusively owned Unix socket PG16"
+        },
+        {
+          "workflow": "modernization-pg-output.yml",
+          "job": "formal-pg-chain",
+          "step": "Existing formal migration module (all cases)"
+        },
+        {
+          "workflow": "modernization-pg-output.yml",
+          "job": "formal-pg-chain",
+          "step": "Stop only owned PG16"
+        }
+      ]
+    },
+    {
+      "name": "live-schema-adoption",
+      "command": "python3 scripts/run_local_live_schema_adoption.py",
+      "legacy_steps": [
+        {
+          "workflow": "live-schema-adoption-test.yml",
+          "job": "live-schema-adoption",
+          "step": "Generate fresh PostgreSQL 0035 contract and run adoption tests"
+        }
+      ]
+    },
+    {
+      "name": "hospital-readonly-pg",
+      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite readonly",
+      "legacy_steps": [
+        {
+          "workflow": "modernization-readonly-pg.yml",
+          "job": "readonly-boundary",
+          "step": "Existing selected module, all SQLite and PostgreSQL cases"
+        }
+      ]
+    },
+    {
+      "name": "hospital-c1-pg",
+      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite c1",
+      "legacy_steps": [
+        {
+          "workflow": "modernization-readonly-pg.yml",
+          "job": "readonly-boundary",
+          "step": "Existing selected module, all SQLite and PostgreSQL cases"
+        }
+      ]
+    },
+    {
+      "name": "hospital-c1-guard-pg",
+      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite c1-guards",
+      "legacy_steps": [
+        {
+          "workflow": "modernization-readonly-pg.yml",
+          "job": "readonly-boundary",
+          "step": "Existing selected module, all SQLite and PostgreSQL cases"
+        }
+      ]
+    },
+    {
+      "name": "hospital-menu-identity-pg",
+      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite menu-identity",
+      "legacy_steps": [
+        {
+          "workflow": "modernization-readonly-pg.yml",
+          "job": "readonly-boundary",
+          "step": "Existing selected module, all SQLite and PostgreSQL cases"
+        }
+      ]
+    },
+    {
+      "name": "local-image-tls",
+      "command": "python3 scripts/run_local_image_tls.py"
+    }
+  ]
+}

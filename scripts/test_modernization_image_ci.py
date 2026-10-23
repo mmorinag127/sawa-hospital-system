@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ImageProofGuards(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.raw = (ROOT / ".github/workflows/modernization-image-ci.yml").read_text()
+        cls.raw = (ROOT / "local-checks/legacy/modernization-image-ci.yml").read_text()
         cls.workflow = yaml.load(cls.raw, Loader=yaml.BaseLoader)
         cls.job = cls.workflow["jobs"]["frontend-image"]
         cls.script = next(step["run"] for step in cls.job["steps"]

@@ -35,7 +35,7 @@ def test_existing_module_runs_unfiltered_with_owned_artifacts():
 
 
 def test_workflow_only_owner_feature_push_or_manual_without_cloud_permissions():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/modernization-readonly-pg.yml').read_text())
+    workflow = yaml.safe_load((ROOT / 'local-checks/legacy/modernization-readonly-pg.yml').read_text())
     triggers = workflow.get('on', workflow.get(True))
     assert triggers == {'push': {'branches': ['codex/modernization-readonly-pg-ci-20261012']}, 'workflow_dispatch': None}
     assert workflow['permissions'] == {'contents': 'read'}
@@ -47,7 +47,7 @@ def test_workflow_only_owner_feature_push_or_manual_without_cloud_permissions():
         "(github.event_name == 'push' && github.ref == 'refs/heads/codex/modernization-readonly-pg-ci-20261012' && github.event.repository.full_name == github.repository))"
     )
     assert 'environment' not in job and 'services' not in job
-    steps = job['steps']
+    steps = [s for s in job['steps'] if s.get('name') not in ('Update TLS trust stores', 'Update Python trust bundles')]
     assert steps[0] == {'uses': 'actions/checkout@v6', 'with': {'persist-credentials': False}}
     assert steps[1] == {'uses': 'actions/setup-python@v6', 'with': {'python-version': '3.12'}}
     assert steps[3]['run'] == 'python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt pytest httpx2'

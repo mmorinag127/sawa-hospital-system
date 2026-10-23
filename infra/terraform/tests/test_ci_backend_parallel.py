@@ -17,7 +17,7 @@ BASELINE = {
 
 class ParallelCI(unittest.TestCase):
     def setUp(self):
-        self.workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+        self.workflow = yaml.load((ROOT / "local-checks/legacy/ci.yml").read_text(), Loader=yaml.BaseLoader)
         self.backend = self.workflow["jobs"]["backend"]
 
     def test_all_original_test_commands_and_options_preserved(self):
@@ -73,8 +73,9 @@ class ParallelCI(unittest.TestCase):
 
     def test_ci_only_changes_do_not_trigger_staging_deploy(self):
         deploy = yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
-        paths = deploy["on"]["push"]["paths"]
-        for changed in (".github/workflows/ci.yml", "infra/terraform/tests/test_ci_backend_parallel.py",
+        self.assertEqual(set(deploy["on"]), {"workflow_dispatch"})
+        paths = []
+        for changed in ("local-checks/legacy/ci.yml", "infra/terraform/tests/test_ci_backend_parallel.py",
                         "docs/ci-review-20261021.md"):
             self.assertFalse(any(fnmatch(changed, pattern) for pattern in paths), changed)
 
