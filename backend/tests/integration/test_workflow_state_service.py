@@ -105,10 +105,75 @@ def _legacy_unowned_evidence_payload(
     return payload
 
 
-def _persist_evidence(order_id: str, **kwargs) -> dict:
-    evidence = order_service.persist_ocr_evidence_run(order_id, _legacy_unowned_evidence_payload(**kwargs))
-    assert isinstance(evidence, dict)
-    return evidence
+def _owned_declared_cells(history_case, *, facility, period, rows, quantity_columns):
+    """Authored component, not a live FAX: explicit menu identities and typed cells."""
+    from src.services import hakodate_assignment_service
+
+    start = date.fromisoformat(period.split("@")[1].split("~")[0])
+    fields = ["date_mmdd", "daypart", "menu"] + [item[0] for item in quantity_columns]
+    columns = [{"index": i, "source_index": i, "name": field, "header": header, "role": role}
+        for i, (field, header, role) in enumerate([
+            ("date_mmdd", "日付", "date"), ("daypart", "区分", "daypart"),
+            ("menu", "メニュー", "menu_name")])]
+    for index, (field, label, diet, area) in enumerate(quantity_columns, 3):
+        columns.append({"index": index, "source_index": index, "name": field, "header": label,
+                        "role": "quantity", "diet_type": diet, "area_id": area})
+    declared, entries = {}, []
+    for index, row in enumerate(rows):
+        assert len(row) == len(fields)
+        day = date.fromisoformat(start.strftime("%Y-") + row[0].replace("/", "-"))
+        assert day >= start
+        identity = (day.isoformat(), order_service._normalize_daypart_key(row[1]),
+                    hakodate_assignment_service._normalize_slot_text(row[2]))
+        assert identity not in declared
+        declared[identity] = row
+        entries.append({"id": f"workflow-authored-{index}", "monthly_menu_id": day.strftime("%Y-%m"),
+            "menu_date": day, "daypart": row[1], "name": row[2], "slot_index": 0, "diet_type": "regular"})
+    case = history_case(facility=facility, period=period, week=period,
+        received=datetime.combine(start, datetime.min.time()).replace(hour=9),
+        columns=columns, menu_entries=entries, lines=[])
+
+    def recognize(region):
+        values = set()
+        for target in region["logical_targets"]:
+            identity = (str(target["date"]), order_service._normalize_daypart_key(target["daypart"]),
+                        hakodate_assignment_service._normalize_slot_text(target["menu_name"]))
+            assert identity in declared
+            assert target["field"] in fields
+            values.add(declared[identity][fields.index(target["field"])])
+        assert len(values) == 1, "merged physical targets require identical authored values"
+        return values.pop()
+
+    source = case.produce(cell_values=recognize)["sheet"]
+    assert source["fields"] == fields
+    assert source["rows"] == rows
+    return case, source
+
+
+def _assert_unowned_input_cannot_replace_selected(case, original, expected_sheet):
+    """Exercise the actual write fence with the original unowned input, not HTTP 410."""
+    from copy import deepcopy
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    before_input = deepcopy(original)
+    evidence = order_service.get_ocr_evidence_run(case.evidence)
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        with pytest.raises(ValueError, match="^original_template_capture_missing_or_mismatched$"):
+            order_service.persist_ocr_evidence_run(case.id, original)
+    assert original == before_input
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        for key in ("fields", "rows"):
+            assert current[key] == expected_sheet[key]
+        assert order_service.get_ocr_evidence_run(case.evidence) == evidence
+        payload, error = order_service.get_ocr_output(case.id, persist_cache=False)
+        assert error is None
+        assert payload["hakodate_ocr_evidence_records"] == evidence["payload_json"]["hakodate_ocr_evidence_records"]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
 
 
 def _semantic_initial_draft(
@@ -726,16 +791,14 @@ def test_explicit_owned_columns_work_without_legacy_grid_or_position_fallback(hi
             assert session.get(OrderOcrCache, case.id).payload == stale
 
 
-def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_high_risk_numeric_issues(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-position-fallback-high-risk", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
+def test_owned_low_score_and_nonnumeric_cells_remain_editable_without_position_guessing(history_case, monkeypatch):
+    from tests.helpers.native_selection import select_authored_native_result
+
     rows = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
     ]
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_resolution": None,
             "quantity_subgrid_passes": [],
             "table_box": None,
@@ -752,44 +815,49 @@ def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_
                     "cells": _structured_cells(rows),
                 }
             ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+        })
+    typed_rows = [["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1"]]
+    quantities = [
+        ("qty.regular_2f", "常食2F", "regular", "2F"), ("qty.regular_3f", "常食3F", "regular", "3F"),
+        ("qty.soft_2f", "軟菜2F", "soft", "2F"), ("qty.soft_3f", "軟菜3F", "soft", "3F"),
+        ("qty.mixer_2f", "ミキサー2F", "mixer", "2F"), ("qty.mixer_3f", "ミキサー3F", "mixer", "3F")]
+    case, source = _owned_declared_cells(history_case, facility="FAC00001", period=PERIOD,
+        rows=typed_rows, quantity_columns=quantities)
+    case.save(source)
+    _assert_unowned_input_cannot_replace_selected(case, original, source)
+    columns = json.loads(case.source.read_text())["facilities"][0]["fax_template"]["columns"]
+    for literal in ("?", "", "5"):
+        declared = [["03/22", "朝", "献立A", literal, "4", "3", "2", "1", "1"]]
+        evidence = select_authored_native_result(monkeypatch, order_id=case.id,
+            table_rows=declared, columns=columns, unlisted_cells="",
+            artifact_root=case.root / "low-score-native", recognizer_score=0.09)
+        case.evidence = evidence["id"]
+        projected = case.get("workflow-v2/sheet-source")
+        assert projected["selected_ocr_result_id"] == evidence["id"]
+        assert projected["sheet"]["rows"] == declared
+        records = evidence["payload_json"]["hakodate_ocr_evidence_records"]
+        assert any(record["engine_metadata"]["recognizer_score"] == 0.09 for record in records)
+        assert literal in [record["raw_text"] for record in records]
+        case.save(projected["sheet"])
+        with case.readonly():
+            assert order_service.get_current_sheet_context(case.id)["rows"] == declared
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] != "position_fallback"
+        assert "numeric_trust_low" not in state["apply_gate"]["blockers"]
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
-    assert isinstance(workflow, dict)
-    assert workflow["state"] in {"review_required", "semantic_shell_only", "draft_blocked"}
-    assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
+def test_owned_partial_schema_is_blocked_without_guessing_missing_quantity_columns(history_case):
+    from copy import deepcopy
+    from src.services import order_workflow_v2_service as workflow
 
-
-def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(monkeypatch, authored_layout_registration):
-    config_service.reload_configs()
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration,
-        message_id="msg-workflow-state-position-fallback-partial",
-        facility_id="FAC00005",
-        week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22",
-    )
     rows = [
         ["日付", "", "区 分", "", "献立", "軟菜", "* # は", "熱食 【 軟菜 】", "", "変更1", "変更2", "備考欄"],
         ["", "", "", "", "", "", "", "茶室", "魚袋", "", "", ""],
         ["", "3/22\n(日)", "体", "学歴\nEND", "Menu A", "57", "2", "", "", "", "", ""],
         ["", "", "", "▼¥", "Menu B", "58", "4", "", "", "", "", ""],
     ]
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_resolution": None,
             "quantity_subgrid_passes": [],
             "table_box": None,
@@ -805,37 +873,33 @@ def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(mo
                     "cells": _structured_cells(rows),
                 }
             ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+        })
+    # Independent authored current-format input: these identities are declarations,
+    # not a reinterpretation of the noisy legacy daypart/header strings above.
+    expected = [["03/22", "朝", "Menu A", "57", "2"], ["03/22", "昼", "Menu B", "58", "4"]]
+    case, source = _owned_declared_cells(history_case, facility="FAC00005", period=PERIOD,
+        rows=expected, quantity_columns=[("qty.soft_x", "軟菜", "soft", "X"),
+                                       ("qty.change_1_x", "変更1", "change_1", "X")])
+    case.save(source)
+    _assert_unowned_input_cannot_replace_selected(case, original, source)
+    incomplete = deepcopy(source)
+    for key in ("fields", "header"):
+        incomplete[key] = incomplete[key][:-1]
+    incomplete["rows"] = [row[:-1] for row in source["rows"]]
+    case.save(incomplete)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["apply_gate"]["can_apply"] is False
+        assert "quantity_template_field_missing" in state["apply_gate"]["blockers"]
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [row[:-1] for row in expected]
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        result, error = workflow.run_bagging(case.id, expected_revision=revision)
+        assert result is None and error == "quantity_template_field_missing"
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
-    assert isinstance(workflow, dict)
-    assert workflow["state"] in {"review_required", "semantic_shell_only", "draft_blocked"}
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["partial_quantity_mapping"] is False
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
-
-
-def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch, authored_layout_registration):
-    config_service.reload_configs()
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration,
-        message_id="msg-workflow-state-structural-projection-001",
-        facility_id="FAC00005",
-        week="2026-04@2026-04-05~2026-04-11", effective_date="2026-04-05",
-    )
+def test_malformed_unowned_rows_cannot_replace_owned_editable_cells_or_saved_five(authored_sheet_case):
+    from src.services.storage_service import load_selected_pdf_bytes
     rows = [
         ["", "日付", "区 分", "", "献立", "##", "44日", "禁食【軟菜】", "", "備考欄"],
         ["", "", "", "", "", "", "", "肉禁", "魚禁", ""],
@@ -844,9 +908,7 @@ def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch,
         ["", "", "口", "VT", "9", "58", "2", "", "", ""],
         ["", "", "", "OK", "<", "58", "2", "", "", ""],
     ]
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_id": "fax_layout_soft_packaging_forbidden_v1",
             "template_resolution": None,
             "quantity_subgrid_passes": [],
@@ -860,37 +922,46 @@ def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch,
                     "cells": _structured_cells(rows),
                 }
             ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-04",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+        })
+    case = authored_sheet_case(quantity=5, include_remarks=False,
+        menu_date=date(2026, 4, 5), period="2026-04@2026-04-05~2026-04-11", facility="FAC00005", area="X")
+    source = case.selected_sheet
+    saved = save_draft(case, source)
+    _assert_unowned_input_cannot_replace_selected(case, original, source)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["rows"] == [["04/05", "朝", "Menu A", "5"]]
+        assert current["draft_id"] == saved["id"]
+        assert current["source"] != "ocr_table"
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+    selected = order_service.get_ocr_evidence_run(case.evidence)
+    receipt = selected["payload_json"]["hakodate_repair_source_receipt"]["selected_pdf_receipt"]
+    assert receipt["storage_uri"] == str(case.pdf)
+    unavailable = case.root / "deliberately-unavailable-original.pdf"
+    assert not unavailable.exists()
+    revision = case.revision()
+    case.pdf.rename(unavailable)
+    try:
+        with unchanged_after_refusal(case, revision):
+            with pytest.raises(ValueError, match="^selected_pdf_verification_failed$"):
+                load_selected_pdf_bytes(receipt["storage_uri"], receipt)
+    finally:
+        unavailable.rename(case.pdf)
+    with case.readonly():
+        assert order_service.get_ocr_evidence_run(case.evidence) == selected
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["04/05", "朝", "Menu A", "5"]]
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "semantic_shell_only"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
+def test_foreign_facility_candidates_and_changed_source_receipt_cannot_replace_owned_cells(history_case):
+    from copy import deepcopy
+    from src.services import canonical_ocr_artifact_service, candidate_resolution_service
 
-
-def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_conflicts_with_evidence(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-position-fallback-facility-conflict", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     rows = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
     ]
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_resolution": None,
             "quantity_subgrid_passes": [],
             "table_box": None,
@@ -910,29 +981,33 @@ def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_con
                     "cells": _structured_cells(rows),
                 }
             ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+        })
+    case, source = _owned_declared_cells(history_case, facility="FAC00001", period=PERIOD,
+        rows=[["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1"]],
+        quantity_columns=[
+            ("qty.regular_2f", "常食2F", "regular", "2F"), ("qty.regular_3f", "常食3F", "regular", "3F"),
+            ("qty.soft_2f", "軟菜2F", "soft", "2F"), ("qty.soft_3f", "軟菜3F", "soft", "3F"),
+            ("qty.mixer_2f", "ミキサー2F", "mixer", "2F"), ("qty.mixer_3f", "ミキサー3F", "mixer", "3F")])
+    case.save(source)
+    _assert_unowned_input_cannot_replace_selected(case, original, source)
+    selected = order_service.get_ocr_evidence_run(case.evidence)
+    for foreign in ("FAC99999", "FAC88888"):
+        damaged = deepcopy(selected["payload_json"])
+        # Negative validator argument only, never a persisted/selected receipt.
+        from hashlib import sha256
+        damaged["hakodate_repair_source_receipt"]["configured_input_digest"] = sha256(foreign.encode()).hexdigest()
+        with case.readonly():
+            with pytest.raises(ValueError, match="^canonical_artifact_source_changed$"):
+                canonical_ocr_artifact_service.validate_payload(damaged)
+            resolution = candidate_resolution_service.build_facility_resolution(current_facility=case.facility, payload=original)
+            assert resolution["resolved_value"] == "FAC00001"
+            assert {item["value"] for item in resolution["candidates"]} >= {"FAC99999", "FAC88888", "FAC00001"}
+            assert order_service.get_current_sheet_context(case.id)["rows"] == source["rows"]
+            assert order_service.get_ocr_evidence_run(case.evidence) == selected
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
-    assert isinstance(workflow, dict)
-    assert workflow["state"] != "apply_ready"
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"].get("decision_source") != "position_fallback"
-
-
-def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fallback(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-position-fallback-stale-ambiguous", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
+def test_stale_ambiguous_position_candidates_cannot_override_owned_columns_or_selected_five(authored_sheet_case):
+    from src.services import candidate_resolution_service
     rows_a = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
@@ -941,9 +1016,7 @@ def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fal
         ["日付", "区分", "メニュー", "補助", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "", "5", "4", "3", "2", "1", "1", ""],
     ]
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_resolution": {
                 "resolved_template_id": "fax_layout_floor_2f3f_v1",
                 "confidence": 0.99,
@@ -994,29 +1067,21 @@ def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fal
                     "cells": _structured_cells(rows_b),
                 },
             ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] != "apply_ready"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "position_fallback"
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["requires_user_choice"] is True
-    assert "column_mapping_choice_required" in (
-        workflow["candidate_resolution"]["resolutions"]["column_mapping"]["blocked_reasons"] or []
-    )
+        })
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, case.selected_sheet)
+    _assert_unowned_input_cannot_replace_selected(case, original, case.selected_sheet)
+    with case.readonly():
+        resolution = candidate_resolution_service.build_column_mapping_resolution(original)
+        assert resolution["resolved_value"] is None
+        assert resolution["requires_user_choice"] is True
+        assert "position_fallback_removed" in resolution["blocked_reasons"]
+        assert "column_mapping_choice_required" in resolution["blocked_reasons"]
+        assert len(resolution["candidates"]) == 2
+        assert order_service.get_current_sheet_context(case.id)["draft_id"] == saved["id"]
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] != "position_fallback"
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
 
 
 def _owned_fac2_twenty_three_twenty_seven(history_case, *, schema_fault=False):
@@ -1873,52 +1938,33 @@ def test_owned_failed_rerun_retains_selected_saved_five(monkeypatch, authored_sh
     assert get_ocr_job(case.job) == before_job
 
 
-def test_refresh_workflow_state_does_not_treat_llm_reparse_as_rerun_state(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-llm-reparse-running", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
-    _persist_evidence(order["id"])
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        edited_by="tester",
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "get_ocr_job",
-        lambda _job_id: {
-            "id": f"OCR-{order['id']}",
-            "status": "running",
-            "metrics": {"processing_stage": "llm_reparse", "request_mode": "llm_reparse"},
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "describe_job_state",
-        lambda _job: {"status": "running", "job_id": f"OCR-{order['id']}"},
-    )
+def test_unowned_llm_reparse_job_cannot_become_current_rerun_or_replace_formally_saved_five(authored_sheet_case):
+    from src.models.ocr_job import OcrJob
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] != "rerun_in_progress"
-    assert workflow["primary_action"] in {"apply_draft", "edit_draft"}
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, case.selected_sheet)
+    original = _legacy_unowned_evidence_payload()
+    _assert_unowned_input_cannot_replace_selected(case, original, case.selected_sheet)
+    selected = order_service.get_ocr_evidence_run(case.evidence)
+    terminal_job = get_ocr_job(case.job)
+    job_id = "OCR-unowned-llm-reparse-diagnostic"
+    _, created = create_job(job_id, str(case.pdf), status="running", order_id=case.id)
+    assert created
+    with session_scope() as session:
+        job = session.get(OcrJob, job_id)
+        # This is deliberately an unowned legacy diagnostic, never a terminal receipt.
+        job.metrics = {"processing_stage": "llm_reparse", "request_mode": "llm_reparse"}
+        assert job.workflow_attempt_id is None
+    diagnostic = get_ocr_job(job_id)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] != "rerun_in_progress"
+        assert state["primary_action"] == "apply_draft"
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_ocr_evidence_run(case.evidence) == selected
+        assert get_ocr_job(case.job) == terminal_job
+        assert get_ocr_job(job_id) == diagnostic
 
 
 def test_legacy_column_choice_cannot_override_authored_canonical_columns(authored_sheet_case):
@@ -2122,16 +2168,11 @@ def test_formal_regular_twenty_one_and_mixer_three_are_not_inferred_from_unowned
         assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/22", "朝", "Menu A", "5", ""]]
 
 
-def test_refresh_workflow_state_clears_stale_low_trust_review_when_current_sheet_is_semantic_ready(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration,
-        message_id="msg-workflow-state-current-sheet-ready",
-        facility_id="FAC00015",
-        week="2026-04@2026-04-26~2026-04-30", effective_date="2026-04-26",
-    )
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+def test_owned_semantic_twenty_six_and_manual_five_are_not_blocked_by_stale_low_trust_diagnostics(authored_sheet_case):
+    case = authored_sheet_case(quantity=26, include_remarks=True, area="X",
+        cell_values=lambda region: "" if region["logical_targets"][0]["field"] == "remarks" else "26",
+        facility="FAC00015", menu_date=date(2026, 4, 26), period="2026-04@2026-04-26~2026-04-30")
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "facility_id": "FAC00015",
             "template_id": "fax_layout_regular_forbidden_v1",
             "template_resolution": {
@@ -2143,56 +2184,29 @@ def test_refresh_workflow_state_clears_stale_low_trust_review_when_current_sheet
             },
             "cell_issues": [{"issue_code": "merged_numeric_cell"}],
             "failed_cells": [{"row_index": 0, "column_index": 3}],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-04",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 40,
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "order_id": order["id"],
-            "source": "weekly_menu+payload_row",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "rows": [["04/26", "朝", "Menu A", "26", ""]],
-            "row_ids": ["row-1"],
-            "warnings": [],
-            "blockers": [],
-            "has_persisted_draft": False,
-            "clean_saved_draft": False,
-            "has_semantic_fields": True,
-            "resolved_week_id": "2026-04@2026-04-26~2026-04-30",
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "evidence_ready"
-    assert workflow["primary_action"] == "open_draft"
-    warnings = workflow["apply_gate"]["warnings"] or []
-    assert "quantity_review_required" not in warnings
-    assert "numeric_trust_low" not in warnings
+        })
+    expected = [["04/26", "朝", "Menu A", "26", ""]]
+    assert case.selected_sheet["rows"] == expected
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "evidence_ready"
+        assert state["primary_action"] == "open_draft"
+    _assert_unowned_input_cannot_replace_selected(case, original, case.selected_sheet)
+    sheet = {**case.selected_sheet, "rows": [["04/26", "朝", "Menu A", "5", "operator"]]}
+    saved = save_draft(case, sheet)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert "quantity_review_required" not in state["apply_gate"]["warnings"]
+        assert "numeric_trust_low" not in state["apply_gate"]["warnings"]
+        assert order_service.get_current_sheet_context(case.id)["rows"] == sheet["rows"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
 
 
-def test_refresh_workflow_state_keeps_low_trust_review_when_current_sheet_still_requests_ocr_review(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration,
-        message_id="msg-workflow-state-current-sheet-review",
-        facility_id="FAC00015",
-        week="2026-04@2026-04-26~2026-04-30", effective_date="2026-04-26",
-    )
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+def test_real_saved_review_warning_is_visible_without_blocking_quantity_edit_or_ocr_adoption(authored_sheet_case):
+    case = authored_sheet_case(quantity=26, include_remarks=False, area="X",
+        facility="FAC00015", menu_date=date(2026, 4, 26), period="2026-04@2026-04-26~2026-04-30")
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "facility_id": "FAC00015",
             "template_id": "fax_layout_regular_forbidden_v1",
             "template_resolution": {
@@ -2204,44 +2218,28 @@ def test_refresh_workflow_state_keeps_low_trust_review_when_current_sheet_still_
             },
             "cell_issues": [{"issue_code": "merged_numeric_cell"}],
             "failed_cells": [{"row_index": 0, "column_index": 3}],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-04",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 40,
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "order_id": order["id"],
-            "source": "weekly_menu+payload_row",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "rows": [["04/26", "朝", "Menu A", "26", ""]],
-            "row_ids": ["row-1"],
-            "warnings": ["sheet_ocr_review_required"],
-            "blockers": [],
-            "has_persisted_draft": False,
-            "clean_saved_draft": False,
-            "has_semantic_fields": True,
-            "resolved_week_id": "2026-04@2026-04-26~2026-04-30",
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "review_required"
-    assert workflow["primary_action"] == "review_critical_cells"
-    warnings = workflow["apply_gate"]["warnings"] or []
-    assert "quantity_review_required" in warnings
-    assert "numeric_trust_low" in warnings
+        })
+    _assert_unowned_input_cannot_replace_selected(case, original, case.selected_sheet)
+    sheet = {**case.selected_sheet, "warnings": ["sheet_ocr_review_required"]}
+    saved = save_draft(case, sheet)
+    selected = order_service.get_ocr_evidence_run(case.evidence)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["rows"] == [["04/26", "朝", "Menu A", "26"]]
+        assert "sheet_ocr_review_required" in current["warnings"]
+        assert "ocr_review_required" in state["apply_gate"]["confirm_warnings"]
+        assert "numeric_trust_low" not in state["apply_gate"]["blockers"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_ocr_evidence_run(case.evidence) == selected
+    # A formal operator save clears this explicit review warning; no metadata SQL.
+    corrected = {**case.selected_sheet, "rows": [["04/26", "朝", "Menu A", "5"]], "warnings": []}
+    saved = save_draft(case, corrected)
+    with case.readonly():
+        assert order_service.get_current_sheet_context(case.id)["rows"] == corrected["rows"]
+        assert "ocr_review_required" not in workflow_state_service.project_workflow_state(case.id)["apply_gate"]["confirm_warnings"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
 
 
 def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(authored_sheet_case):
@@ -2276,67 +2274,68 @@ def test_project_workflow_state_blocks_when_monthly_menu_object_is_missing(autho
     _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(authored_sheet_case)
 
 
-def test_refresh_workflow_state_uses_saved_draft_sheet_blockers(authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-draft-blockers", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
-    _persist_evidence(order["id"])
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "row_ids": ["draft-row-1"],
-            "ui_mode": "sheet",
-        },
-        blockers=[],
-        warnings=["sheet_weekly_menu_missing"],
-    )
-    assert saved is not None
+def test_formal_saved_five_preserves_weekly_warning_but_missing_physical_menu_blocks_output(authored_sheet_case):
+    from src.models.menu import MonthlyMenu
+    from src.services import order_workflow_v2_service as workflow
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    apply_gate = workflow["apply_gate"]
-    assert "monthly_menu_object_missing" not in (apply_gate.get("apply_blockers") or [])
-    assert "monthly_menu_object_missing" not in (apply_gate.get("confirm_blockers") or [])
-    assert "monthly_menu_object_missing" in (apply_gate.get("warnings") or [])
-    assert apply_gate["can_apply"] is True
-    assert apply_gate["can_confirm"] is False
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    sheet = {**case.selected_sheet, "row_ids": ["draft-row-1"], "warnings": ["sheet_weekly_menu_missing"]}
+    saved = save_draft(case, sheet)
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenu).delete()
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert "sheet_weekly_menu_missing" in current["warnings"]
+        assert "monthly_menu_object_missing" in current["menu_diagnostics"]["order_codes"]
+        assert "current_sheet_source_unavailable" in state["apply_gate"]["blockers"]
+        assert state["apply_gate"]["can_apply"] is False
+        assert state["apply_gate"]["can_confirm"] is False
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        result, error = workflow.run_bagging(case.id, expected_revision=revision)
+        assert result is None and error == "current_sheet_source_unavailable"
 
 
-def test_refresh_workflow_state_keeps_semantic_initial_draft_when_weekly_menu_warning_remains(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-semantic-initial", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
-    _persist_evidence(order["id"])
+def test_actual_initial_blank_semantic_sheet_is_editable_but_missing_menu_has_no_guessed_shell(authored_sheet_case):
+    from src.models.menu import MonthlyMenu
+    from src.services import order_workflow_v2_service as workflow
 
-    monkeypatch.setattr(
-        order_service,
-        "get_latest_sheet_draft",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: {
-            "order_id": _order_id,
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", ""]],
-            "row_ids": ["semantic-1"],
-            "warnings": ["sheet_weekly_menu_missing", "quantity_review_required"],
-            "base_evidence_run_id": "OEVtest",
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["draft_id"] is None
-    assert workflow["state"] == "review_required"
-    assert "monthly_menu_object_missing" not in (workflow["apply_gate"]["blockers"] or [])
-    assert "monthly_menu_object_missing" in (workflow["apply_gate"]["warnings"] or [])
+    case = authored_sheet_case(quantity=5, cell_values="", include_remarks=False)
+    original = _legacy_unowned_evidence_payload()
+    assert case.selected_sheet["rows"] == [["03/22", "朝", "Menu A", ""]]
+    assert draft_sheet_service.get_selected_sheet_draft(case.id) is None
+    _assert_unowned_input_cannot_replace_selected(case, original, case.selected_sheet)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert current["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", ""]]
+        assert state["draft_id"] is None
+        assert "numeric_trust_low" not in state["apply_gate"]["blockers"]
+    # The old fake build_initial_sheet_draft supplied Menu A after losing its
+    # authoritative menu. The current boundary must not fabricate that shell.
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenu).delete()
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert current["rows"] == []
+        assert current["draft_payload"] is None
+        assert "monthly_menu_object_missing" in current["menu_diagnostics"]["order_codes"]
+        assert state["apply_gate"]["can_apply"] is False
+        assert state["apply_gate"]["can_confirm"] is False
+        assert "monthly_menu_object_missing" in state["apply_gate"]["blockers"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) is None
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        result, error = workflow.run_bagging(case.id, expected_revision=revision)
+        assert result is None and error == "saved_sheet_required"
 
 
 def test_project_workflow_state_blocks_on_menu_entries_missing_without_monthly_menu_object_missing(authored_sheet_case):
@@ -2462,12 +2461,11 @@ def test_project_workflow_state_uses_canonical_order_week_over_stale_current_she
         f.client.close()
 
 
-def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_blockers(monkeypatch, authored_layout_registration):
-    order_service.clear_all()
-    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-clean-draft-override", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+def test_formal_clean_saved_five_outranks_unowned_layout_diagnostics_and_stale_save_is_refused(authored_sheet_case):
+    from copy import deepcopy
+
+    case = authored_sheet_case(quantity=5, area="X")
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_resolution": {
                 "resolved_template_id": None,
                 "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
@@ -2479,47 +2477,32 @@ def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_bloc
             "table_box": None,
             "grid_column_edges": [],
             "grid_row_edges": [],
-        },
-    )
-    order_service.set_status(order["id"], "確定")
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "draft_sheet",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "header": ["日付", "区分", "メニュー", "常食", "備考"],
-            "rows": [["03/22", "朝", "Menu A", "5", ""]],
-            "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[],
-    )
-    assert saved is not None
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["primary_action"] == "apply_draft"
-    assert workflow["apply_gate"]["can_apply"] is True
-
-
-    assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
-    assert "template_unresolved" not in (workflow["apply_gate"]["blockers"] or [])
-    assert "numeric_trust_low" not in (workflow["apply_gate"]["warnings"] or [])
-    assert "draft_newer_than_lines" in (workflow["apply_gate"]["warnings"] or [])
+        })
+    sheet = deepcopy(case.selected_sheet)
+    sheet.update(source="draft_sheet", rows=[["03/22", "朝", "Menu A", "5", ""]], row_ids=["row-1"])
+    saved = save_draft(case, sheet)
+    _assert_unowned_input_cannot_replace_selected(case, original, sheet)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert state["apply_gate"]["can_apply"] is True
+        assert "semantic_shell_only" not in state["apply_gate"]["blockers"]
+        assert "template_unresolved" not in state["apply_gate"]["blockers"]
+        assert "numeric_trust_low" not in state["apply_gate"]["warnings"]
+        assert "draft_newer_than_lines" in state["apply_gate"]["warnings"]
+    stale = case.revision()
+    latest = save_draft(case, sheet)
+    assert latest["id"] != saved["id"]
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        response = case.client.put(f"/orders/{case.id}/workflow-v2/sheet",
+            headers={**case.actor.headers, "If-Match": f'"{stale}"'},
+            json={"sheet": {**sheet, "rows": [["03/22", "朝", "Menu A", "9", "stale"]]}, "edited_by": "stale-actor"})
+        assert response.status_code == 409, response.text
+    with case.readonly():
+        assert order_service.get_current_sheet_context(case.id)["rows"] == sheet["rows"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == latest
 
 
 def test_refresh_workflow_state_uses_persisted_draft_without_exact_revision(authored_sheet_case):
