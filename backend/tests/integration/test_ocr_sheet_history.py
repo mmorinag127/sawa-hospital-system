@@ -44,6 +44,13 @@ def _seed_daypart_source_menu():
                  for row in DAYPART_SOURCE_ROWS])
 
 
+def _save_formal_sheet(*, order_id, sheet, edited_by):
+    current, error = order_workflow_v2_service.get_workflow_readonly(order_id)
+    assert error is None and current is not None
+    return order_workflow_v2_service.save_sheet(order_id=order_id, sheet=sheet,
+        edited_by=edited_by, expected_revision=current["revision"])
+
+
 @pytest.fixture
 def history_registration(owned_registration, authored_layout_registration):
     """The historical component's declared layout, not today's live facility."""
@@ -806,7 +813,7 @@ def test_selected_formal_manual_rows_are_not_pruned_or_reconstructed_on_draft_re
             row[fields.index("qty.regular_2f")] = "17"
         elif menu == "Manual Extra":
             row[fields.index("qty.regular_2f")], row[fields.index("remarks")] = "4", "manual"
-    saved, error = order_workflow_v2_service.save_sheet(
+    saved, error = _save_formal_sheet(
         order_id=order["id"], sheet=sheet, edited_by="authored-component-operator")
     assert error is None and saved is not None
     selected = order_service.get_latest_sheet_draft(order["id"])
@@ -1126,7 +1133,7 @@ def test_export_ocr_sheet_label_prefers_exact_saved_sheet_revision(selected_hist
     rows = [["01/08", "昼", "Menu A", "12", "", "", "", "", "", "gold-label"]]
     row_ids = ["row-exact-export-1"]
 
-    saved, error = order_workflow_v2_service.save_sheet(order_id=order["id"],
+    saved, error = _save_formal_sheet(order_id=order["id"],
         sheet={"fields": fields, "header": header, "rows": rows, "row_ids": row_ids},
         edited_by="authored-component-operator")
     assert error is None and saved is not None
@@ -1225,7 +1232,7 @@ def test_get_ocr_output_keeps_owned_raw_artifacts_separate_from_edited_table(sel
         assert cache.payload.get("table_raw") == raw_table
         assert cache.payload["_edited_ocr"]["latest"]["rows"] == rows
     operator_sheet = {**current, "rows": rows, "row_ids": row_ids}
-    published, error = order_workflow_v2_service.save_sheet(order_id=order["id"],
+    published, error = _save_formal_sheet(order_id=order["id"],
         sheet=operator_sheet, edited_by="authored-component-operator")
     assert error is None and published is not None
     visible, error = order_service.get_ocr_sheet(order["id"])
@@ -2024,7 +2031,7 @@ def test_export_saved_label_cannot_rebase_header_through_removed_legacy_template
     saved, error = order_service.save_ocr_sheet_exact(order["id"], header=current["header"],
         rows=[saved_row], ui_mode="sheet", fields=current["fields"], row_ids=[current["row_ids"][0]])
     assert error is None and saved is not None
-    selected, error = order_workflow_v2_service.save_sheet(order_id=order["id"],
+    selected, error = _save_formal_sheet(order_id=order["id"],
         sheet={**current, "rows": [saved_row], "row_ids": [current["row_ids"][0]]},
         edited_by="authored-component-operator")
     assert error is None and selected is not None
@@ -3625,7 +3632,7 @@ def test_apply_ocr_table_saves_revision_and_output_uses_edited(selected_history_
     assert output.get("ocr_source") != "edited"
     assert output.get("edited_table") is None
     assert order_service._load_order_ocr_cache(order["id"])["_edited_ocr"]["latest"]["row_ids"] == row_ids
-    saved, error = order_workflow_v2_service.save_sheet(order_id=order["id"],
+    saved, error = _save_formal_sheet(order_id=order["id"],
         sheet={"fields": fields, "header": header, "rows": rows, "row_ids": row_ids},
         edited_by="authored-component-operator")
     assert error is None and saved is not None
@@ -3651,7 +3658,7 @@ def test_formal_save_preserves_explicit_period_without_using_legacy_materializat
     row = next(row for row in sheet["rows"] if row[fields.index("menu")] == "Menu A")
     row[fields.index("qty.regular_2f")] = "3"
     row[fields.index("remarks")] = "manual"
-    saved, error = order_workflow_v2_service.save_sheet(order_id=order["id"], sheet=sheet,
+    saved, error = _save_formal_sheet(order_id=order["id"], sheet=sheet,
         edited_by="authored-component-operator")
     assert error is None and saved is not None
     assert order_service.get_order_by_id(order["id"])["persisted_week_value"] == original_week
@@ -6096,7 +6103,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
     )
     assert error_1 is None
     assert updated_1 is not None
-    selected_1, selected_error_1 = order_workflow_v2_service.save_sheet(order_id=order["id"],
+    selected_1, selected_error_1 = _save_formal_sheet(order_id=order["id"],
         sheet={"fields": fields, "header": header,
                "rows": [["11/15", "昼", "昼メニュー", "11", "", "", "", "", "", "apply-1"]],
                "row_ids": ["row-repeat-1"], "source": "edited_sheet_exact"},
@@ -6128,7 +6135,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
     )
     assert error_2 is None
     assert updated_2 is not None
-    selected_2, selected_error_2 = order_workflow_v2_service.save_sheet(order_id=order["id"],
+    selected_2, selected_error_2 = _save_formal_sheet(order_id=order["id"],
         sheet={"fields": fields, "header": header,
                "rows": [["11/15", "昼", "昼メニュー", "3", "", "", "", "", "", "apply-2"]],
                "row_ids": ["row-repeat-2"], "source": "edited_sheet_exact"},

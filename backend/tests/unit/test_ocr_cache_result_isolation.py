@@ -23,7 +23,10 @@ def owned_cache_case(isolated_formal_schema, tmp_path, monkeypatch):
             fields=sheet["fields"], header=sheet["header"], rows=sheet["rows"],
             row_ids=sheet["row_ids"], ui_mode="sheet")
         assert error is None and archived is not None, error
-        saved, error = workflow.save_sheet(order_id=case.id, sheet=sheet, edited_by=actor.user_id)
+        current, error = workflow.get_workflow_readonly(case.id)
+        assert error is None and current is not None
+        saved, error = workflow.save_sheet(order_id=case.id, sheet=sheet,
+            edited_by=actor.user_id, expected_revision=current["revision"])
         assert error is None and saved is not None, error
         case.operator_sheet = deepcopy(sheet)
         yield case
