@@ -39,7 +39,17 @@ def load_bytes_from_uri(uri: str, *, generation: str | None = None, verification
             raise ValueError(f"storage_uri_env_required:{name}")
         return value
 
-    uri = _ENV_REF_PATTERN.sub(_replace_env_ref, uri)
+    # Production copies bind authored variable references to immutable copied objects.
+    # Expanding them with TEST's environment would select a different source bucket.
+    production_copy_reference = False
+    if _ENV_REF_PATTERN.search(uri) and datasets.current_dataset() != 'test':
+        selected = datasets.manifest()
+        provenance = selected.get('_component_runtime_provenance', {}).get('order', selected.get('runtime_settings_provenance'))
+        if provenance not in {'production_environment', 'legacy_stg_runtime'}:
+            raise datasets.DatasetUnavailable('staging_dataset_runtime_settings_provenance_required')
+        production_copy_reference = provenance == 'production_environment'
+    if not production_copy_reference:
+        uri = _ENV_REF_PATTERN.sub(_replace_env_ref, uri)
     uri, generation, copy_digest = datasets.read_object(uri, feature="order", generation=generation)
     parsed = urlparse(uri)
     if parsed.scheme in ("", "file"):
