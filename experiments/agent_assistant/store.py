@@ -236,14 +236,15 @@ class Store:
             db.execute("UPDATE commands SET status='done',result=? WHERE run_id=? AND id=?",
                        (json.dumps(result, ensure_ascii=False), ident, command_id))
 
-    def usage(self, ident, usage, terminal=False):
+    def usage(self, ident, usage, terminal=False, *, terminal_statuses=None):
         cost = usage.get("list_cost")
         if not isinstance(cost, dict) or cost.get("currency") != "USD" or not str(cost.get("amount", "")).isdigit():
             raise Conflict("接続先から料金を取得できません。予算予約を維持します")
         spent = int(cost["amount"])
         with self.tx() as db:
-            row = db.execute("SELECT spent,cap,reserved FROM runs WHERE id=?", (ident,)).fetchone()
+            row = db.execute("SELECT spent,cap,reserved,status FROM runs WHERE id=?", (ident,)).fetchone()
             spent = max(row[0], spent)
+            terminal = terminal and (terminal_statuses is None or row['status'] in terminal_statuses)
             db.execute("UPDATE runs SET spent=?,reserved=?,usage=?,updated=? WHERE id=?",
                        (spent, 0 if terminal else min(row[2], max(0, row[1]-spent)), json.dumps(usage), now(), ident))
 

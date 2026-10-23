@@ -251,6 +251,9 @@ class BusinessWorkflow:
             state = self.checkpoint(ident, phase=state.get('resume_phase', 'checking'))
         if self.tools.authorization_validator:
             await self.tools.authorization_validator(run)
+        current = self.store.get(ident)
+        if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
+            return False
         self.require_copy(run)
         from .native_recovery import reconcile
         with self.store.read() as db:

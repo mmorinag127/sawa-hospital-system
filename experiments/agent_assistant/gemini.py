@@ -259,15 +259,16 @@ class Gemini(Managed):
                 return
             await self.stop(ident)
 
-    async def stop(self, ident):
+    async def _stop(self, ident, caller=None):
         previous = self.store.get(ident)
         if previous['status'] in ('stopped', 'rolled_back'): return
         restored = previous['status'] == 'rollback_stop_pending'
         self.store.fence(ident)
         for task in (self.starting.get(ident), self.tasks.get(ident)):
-            if task and not task.done() and task is not asyncio.current_task():
+            if task and not task.done() and task not in (asyncio.current_task(), caller):
                 task.cancel(); await asyncio.gather(task, return_exceptions=True)
-        await self.sandbox.stop(ident)
+        pending_status = 'rollback_stop_pending' if restored else 'stop_pending'
+        native_stopped = await self.stop_native(ident, pending_status)
         ids = list(dict.fromkeys(e['payload']['id'] for e in self.store.events(ident) if e['kind'] == 'gemini_response'))
         try:
             for interaction_id in ids:
@@ -283,10 +284,10 @@ class Gemini(Managed):
                         await asyncio.sleep(.25)
                     else: raise Conflict('Geminiの停止確認待ちです')
             if self.unsettled(ident): raise Conflict('Geminiの送信結果が未確定です')
-            if ids: await self.refresh_usage(ident, release=True)
-            else: self.store.update(ident, reserved=0)
+            if ids: await self.refresh_usage(ident, release=native_stopped)
+            elif native_stopped: self.store.update(ident, reserved=0)
         except Exception:
             self.store.update(ident, status='rollback_stop_pending' if restored else 'stop_pending')
             self.store.event(ident, 'notice', {'message': '業務書込みは停止しました。Gemini側の停止・料金確認は未完了で、予約額を保持しています。'})
             return
-        self.store.update(ident, status='rolled_back' if restored else 'stopped')
+        self.store.update(ident, status=('rolled_back' if restored else 'stopped') if native_stopped else pending_status)

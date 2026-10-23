@@ -84,7 +84,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     if getattr(store, "new_ledger", False) and config.get("initial_provider"):
         store.provider(config["initial_provider"])
     store.recover()
-    sandbox = Sandbox(root, config.get("domains", {}), durable_store=store if config.get("durability") == "cloud-sql" else None)
+    sandbox = Sandbox(root, config.get("domains", {}), durable_store=store if config.get("durability") == "cloud-sql" else None, run_store=store)
     if config.get("portal_auth_url") and "hospital" in sandbox.configs:
         hospital = sandbox.configs["hospital"]
         hospital["env"] = {**hospital.get("env", {}), "AUTH_PROVIDER": "portal", "PORTAL_AUTH_ME_URL": config["portal_auth_url"]}
@@ -299,15 +299,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                     return store.get(run["id"], owner)
                 raise
             except Exception as exc:
-                await sandbox.stop(run["id"])
-                current = store.get(run['id'])
-                if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
-                    return current
-                if current["status"] == "preparing":
-                    store.update(run["id"], expected_generation=run['generation'], status="failed", reserved=0)
-                else:
-                    store.update(run["id"], expected_generation=run['generation'], status="reconciliation_required")
-                store.event(run["id"], "error", {"message": LABELS[run["provider"]]+"開始の結果が未確定です。自動再送と予算返却を停止しています。", "class": type(exc).__name__})
+                store.event(run["id"], "error", {"message": LABELS[run["provider"]]+"の開始に失敗しました。保存済み内容は保持しています。", "class": type(exc).__name__})
+                await managed.stop(run["id"])
         return store.get(run["id"], owner)
 
     @app.get("/runs/{ident}")
@@ -399,10 +392,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             except asyncio.CancelledError:
                 if store.get(ident)["status"] not in ("stopping","stopped","rolled_back","stop_pending","rollback_stop_pending"): raise
             except Exception:
-                await sandbox.stop(ident)
-                store.update(ident,expected_generation=run['generation'],status="reconciliation_required")
                 store.event(ident,"error",{"message":"開始結果を照合してください。自動再送は行いません。"})
-                raise
+                await managed.stop(ident)
+                return store.get(ident,owner)
             return store.get(ident,owner)
         await managed.reply(ident, payload.message, payload.question_id, payload.option)
         return store.get(ident, owner)

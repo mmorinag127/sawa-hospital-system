@@ -77,7 +77,8 @@ class Managed:
                 settled = await self.stop_session(run['id'], session.id)
                 current = self.store.get(run['id'])
                 if current['session_id'] == session.id and current['status'] in ('stopped', 'rolled_back', 'stopping', 'stop_pending', 'rollback_stop_pending'):
-                    self.store.usage(run['id'], settled.usage.model_dump(mode='json'), terminal=True)
+                    self.store.usage(run['id'], settled.usage.model_dump(mode='json'), terminal=True,
+                                     terminal_statuses=('stopped', 'rolled_back'))
             except Exception:
                 self.store.event(run['id'], 'late_session_stop_pending', {'session_id': session.id})
             raise
@@ -183,7 +184,6 @@ class Managed:
                 if getattr(self.tools, 'business', None):
                     self.tools.business.kick(run_id)
                 return
-            await self.sandbox.stop(run_id)
             # Stop billing work too; dropping a stream alone does not stop Claude.
             await self.stop(run_id)
 
@@ -214,6 +214,22 @@ class Managed:
         raise Conflict('provider_stop_pending')
 
     async def stop(self, run_id):
+        from .sandbox import settle_process_task
+        caller = asyncio.current_task()
+        _, cancelled = await settle_process_task(asyncio.create_task(self._stop(run_id, caller)))
+        if cancelled is not None:
+            raise cancelled
+
+    async def stop_native(self, run_id, pending_status):
+        try:
+            await self.sandbox.stop(run_id)
+            return True
+        except Exception:
+            self.store.update(run_id, status=pending_status)
+            self.store.event(run_id, 'notice', {'message': '業務APIの停止が未確定です。保存済み内容と予算予約を保持して再確認します。'})
+            return False
+
+    async def _stop(self, run_id, caller=None):
         previous = self.store.get(run_id)
         if previous["status"] in ("stopped", "rolled_back"):
             return
@@ -222,14 +238,14 @@ class Managed:
         self.store.fence(run_id)  # Reject late local writes before waiting on the provider.
         run = self.store.get(run_id)
         starting = self.starting.get(run_id)
-        if starting and not starting.done() and starting is not asyncio.current_task():
+        if starting and not starting.done() and starting not in (asyncio.current_task(), caller):
             starting.cancel()
             await asyncio.gather(starting, return_exceptions=True)
         task = self.tasks.get(run_id)
-        if task and not task.done() and task is not asyncio.current_task():
+        if task and not task.done() and task not in (asyncio.current_task(), caller):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self.sandbox.stop(run_id)
+        native_stopped = await self.stop_native(run_id, pending_status)
         if not run["session_id"] and previous["status"] in ("dispatching", "reconciliation_required", "stop_pending", "rollback_stop_pending"):
             try:
                 matches = []
@@ -244,7 +260,7 @@ class Managed:
         if run["session_id"]:
             try:
                 session = await self.stop_session(run_id, run['session_id'])
-                self.store.usage(run_id, session.usage.model_dump(mode='json'), terminal=True)
+                self.store.usage(run_id, session.usage.model_dump(mode='json'), terminal=native_stopped)
             except Exception:
                 self.store.update(run_id, status=pending_status)
                 self.store.event(run_id, "notice", {"message": "業務書込みは停止しました。Claude側の停止・料金確認は未完了で、予算予約を保持しています。"})
@@ -254,7 +270,11 @@ class Managed:
             if previous["status"] not in ("failed", "preparing") and not (previous.get("task_id")=="lunch_import" and previous["status"]=="waiting_input"):
                 self.store.update(run_id, status=pending_status)
                 return
-            self.store.update(run_id, reserved=0)
+            if native_stopped:
+                self.store.update(run_id, reserved=0)
+        if not native_stopped:
+            self.store.update(run_id, status=pending_status)
+            return
         self.store.update(run_id, status="rolled_back" if restored else "stopped")
 
     async def reply(self, run_id, message, question_id=None, option=None):
@@ -293,7 +313,7 @@ class Managed:
                 except Conflict:
                     pass
                 if not owned(run):
-                    await self.sandbox.stop(run_id)
+                    await self.stop(run_id)
                 raise
             current = self.store.get(run_id)
             if current["generation"] != run["generation"] or current["status"] != "running":

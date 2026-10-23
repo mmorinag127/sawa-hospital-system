@@ -34,11 +34,70 @@ def copy_tree(source, target):
     shutil.copytree(source, target)
 
 
+async def settle_process_task(task):
+    """Keep ownership cleanup alive through repeated caller cancellation."""
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    return task.result(), cancelled
+
+
+def require_process_group_owner(pid, run_id, created=None):
+    try:
+        process = psutil.Process(pid)
+        command = process.cmdline()
+        if (created is not None and process.create_time() != created
+                or run_id not in command
+                or str(Path(__file__).with_name("domain_host.py")) not in command
+                or os.getpgid(pid) != pid):
+            raise Conflict("試用APIのプロセス所有権を確認できません")
+    except psutil.NoSuchProcess:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return False
+        raise Conflict("残存プロセスグループの所有権を確認できません")
+    return True
+
+
+async def terminate_process_group(pid, wait, owner):
+    waiting = asyncio.create_task(wait())
+    try:
+        for action in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                if owner():
+                    os.killpg(pid, action)
+            except ProcessLookupError:
+                pass
+            deadline = asyncio.get_running_loop().time() + 8
+            while True:
+                try:
+                    os.killpg(pid, 0)
+                    exists = True
+                except ProcessLookupError:
+                    exists = False
+                if not exists and waiting.done():
+                    await waiting
+                    return
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(.05)
+        raise Conflict("試用APIのプロセスグループの終了を確認できません")
+    finally:
+        if not waiting.done():
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+
 class Sandbox:
-    def __init__(self, root, configs, *, durable_store=None):
+    def __init__(self, root, configs, *, durable_store=None, run_store=None):
         self.root = Path(root).resolve()
         self.configs = configs
         self.durable_store = durable_store
+        self.run_store = run_store if run_store is not None else durable_store
         self.children = {}
         self.tokens = {}
         self.urls = {}
@@ -160,8 +219,18 @@ class Sandbox:
             env["OCR_PIPELINE_OUTPUT_PREFIX"] = f"agent-trial/{run['id']}/output/"
         return env
 
+    def require_active_run(self, run):
+        if self.run_store is None or run.get("purpose") == "target_lookup":
+            return
+        current = self.run_store.get(run["id"])
+        if current["generation"] != run["generation"] or current["status"] in (
+                "completed", "stopping", "stopped", "rolled_back", "stop_pending", "rollback_stop_pending"):
+            raise Conflict("依頼は停止または変更されました")
+
     async def start(self, run):
+        self.require_active_run(run)
         for domain in run["domains"]:
+            self.require_active_run(run)
             key = (run["id"], domain)
             if key in self.children and self.children[key].returncode is None:
                 continue
@@ -203,20 +272,52 @@ class Sandbox:
         if domain == "school-lunch-worker":
             env.update(IMPLEMENTATION_PRICE_OCR_WORKER_URL=f"http://127.0.0.1:{port}",
                        IMPLEMENTATION_PRICE_OCR_WORKER_TIMEOUT_SECONDS="1800")
-        log = open(self.path(run["id"]) / f"{domain}.log", "ab")
-        self.logs[key] = log
-        self.children[key] = await asyncio.create_subprocess_exec(
-            python, str(Path(__file__).with_name("domain_host.py")), str(port), run["id"],
-            cwd=data, env=env, stdout=log, stderr=log, start_new_session=True)
-        proc = self.children[key]
-        (self.path(run["id"]) / f"{domain}.process.json").write_text(json.dumps({"pid": proc.pid, "created": psutil.Process(proc.pid).create_time()}))
-        token = env["SAWA_TRIAL_TOKEN"]
-        self.tokens[key] = token
-        self.urls[key] = f"http://127.0.0.1:{port}"
+        # Stop must not finish between process creation and ownership registration.
+        # Health polling stays outside the lock so stop never waits for readiness.
+        async with self.lock:
+            self.require_active_run(run)
+            if key in self.children and self.children[key].returncode is None:
+                return
+            log = open(self.path(run["id"]) / f"{domain}.log", "ab")
+            cancelled = None
+            try:
+                creation = asyncio.create_task(asyncio.create_subprocess_exec(
+                    python, str(Path(__file__).with_name("domain_host.py")), str(port), run["id"],
+                    cwd=data, env=env, stdout=log, stderr=log, start_new_session=True))
+                proc, cancelled = await settle_process_task(creation)
+            except BaseException:
+                log.close()
+                raise
+            self.logs[key] = log
+            self.children[key] = proc
+            marker = self.path(run["id"]) / f"{domain}.process.json"
+            temporary = marker.with_name(f"{domain}.{proc.pid}.process.tmp")
+            created = None
+            try:
+                token = env["SAWA_TRIAL_TOKEN"]
+                self.tokens[key] = token
+                self.urls[key] = f"http://127.0.0.1:{port}"
+                created = psutil.Process(proc.pid).create_time()
+                temporary.write_text(json.dumps({"pid": proc.pid, "created": created}))
+                os.replace(temporary, marker)
+            except BaseException:
+                owner = lambda: require_process_group_owner(proc.pid, run["id"], created)
+                await settle_process_task(asyncio.create_task(terminate_process_group(proc.pid, proc.wait, owner)))
+                self.children.pop(key, None)
+                self.logs.pop(key, None)
+                self.tokens.pop(key, None)
+                self.urls.pop(key, None)
+                log.close()
+                temporary.unlink(missing_ok=True)
+                raise
+            if cancelled is not None:
+                await settle_process_task(asyncio.create_task(self._stop(run["id"])))
+                raise cancelled
         try:
             async with httpx.AsyncClient(timeout=1, trust_env=False) as client:
                 for _ in range(600):
-                    if self.children[key].returncode is not None:
+                    self.require_active_run(run)
+                    if proc.returncode is not None:
                         raise Conflict(f"{domain} のAPIが起動できません。試用ログを確認してください")
                     try:
                         response = await client.get(self.urls[key]+"/__trial_identity", headers={"X-Trial-Token": token})
@@ -231,46 +332,50 @@ class Sandbox:
             raise
 
     async def stop(self, run_id):
+        _, cancelled = await settle_process_task(asyncio.create_task(self._locked_stop(run_id)))
+        if cancelled is not None:
+            raise cancelled
+
+    async def _locked_stop(self, run_id):
         async with self.lock:
             await self._stop(run_id)
 
     async def _stop(self, run_id):
         # After a gateway restart, identify our own children by PID, creation time
         # and exact launch marker. Never kill another task's reused PID.
+        failures = []
         for marker in self.path(run_id).glob("*.process.json"):
-            info = json.loads(marker.read_text())
-            if any(p.pid == info["pid"] for p in self.children.values()):
-                continue
             try:
-                process = psutil.Process(info["pid"])
-                if process.create_time() != info["created"] or run_id not in process.cmdline() or str(Path(__file__).with_name("domain_host.py")) not in process.cmdline():
-                    raise Conflict("試用APIのプロセス所有権を確認できません。復元を停止しました")
-                os.killpg(process.pid, signal.SIGTERM)
+                info = json.loads(marker.read_text())
+                if any(p.pid == info["pid"] for p in self.children.values()):
+                    continue
                 try:
-                    await asyncio.to_thread(process.wait, 8)
-                except psutil.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    await asyncio.to_thread(process.wait, 8)
-            except psutil.NoSuchProcess:
-                try:
-                    os.killpg(info["pid"], 0)
-                except ProcessLookupError:
-                    pass
-                else:
-                    raise Conflict("試用APIの子プロセスが残っています。復元を停止しました")
-            marker.unlink()
+                    process = psutil.Process(info["pid"])
+                    await terminate_process_group(process.pid, lambda: asyncio.to_thread(process.wait, 16),
+                        lambda: require_process_group_owner(process.pid, run_id, info["created"]))
+                except psutil.NoSuchProcess:
+                    try:
+                        os.killpg(info["pid"], 0)
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        raise Conflict("試用APIの子プロセスが残っています。復元を停止しました")
+                marker.unlink()
+            except Exception as exc:
+                failures.append(exc)
         keys = [key for key in self.children if key[0] == run_id]
-        for key in keys:
+        async def terminate_owned(key):
             process = self.children[key]
-            if process.returncode is None:
-                os.killpg(process.pid, signal.SIGTERM)
+            info = json.loads((self.path(run_id) / f"{key[1]}.process.json").read_text())
+            if info["pid"] != process.pid:
+                raise Conflict("試用APIのプロセス所有権が一致しません")
+            await terminate_process_group(process.pid, process.wait,
+                lambda: require_process_group_owner(process.pid, run_id, info["created"]))
+        outcomes = await asyncio.gather(*(terminate_owned(key) for key in keys), return_exceptions=True)
+        failures.extend(outcome for outcome in outcomes if isinstance(outcome, BaseException))
+        if failures:
+            raise failures[0]
         for key in keys:
-            process = self.children[key]
-            try:
-                await asyncio.wait_for(process.wait(), 8)
-            except asyncio.TimeoutError:
-                os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
             self.children.pop(key)
             self.urls.pop(key, None)
             self.tokens.pop(key, None)
