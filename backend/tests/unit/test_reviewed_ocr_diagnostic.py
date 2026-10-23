@@ -553,7 +553,7 @@ def test_offline_original_mode_runs_four_real_guards_and_default_keeps_faults(
 
 
 def test_workflow_run_blocks_have_bash_syntax():
-    workflow = yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / "local-checks/legacy/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
     for step in workflow["jobs"]["diagnose-reviewed-ocr"]["steps"]:
         if "run" in step:
             result = subprocess.run(["bash", "-n"], input=step["run"], text=True, capture_output=True)
@@ -561,7 +561,7 @@ def test_workflow_run_blocks_have_bash_syntax():
 
 
 def test_dedicated_workflow_is_manual_owner_staging_nondeploy_and_summary_only():
-    raw = (ROOT / ".github/workflows/deploy-stg.yml").read_text()
+    raw = (ROOT / "local-checks/legacy/deploy-stg.yml").read_text()
     workflow = yaml.load(raw, Loader=yaml.BaseLoader)
     text = raw.split("  diagnose-reviewed-ocr:\n", 1)[1].split("\n  diagnose-contact-replay:", 1)[0]
     assert not (ROOT / ".github/workflows/diagnose-reviewed-ocr.yml").exists()
@@ -615,7 +615,7 @@ def test_real_guard_delegation_and_separate_offline_process_are_not_replaced():
 
 
 def test_diagnostic_is_selected_in_existing_saved_source_ci_command():
-    workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / "local-checks/legacy/ci.yml").read_text(), Loader=yaml.BaseLoader)
     steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
     selected = next(step for step in steps if step.get("name") == "Verify initial saved-source preservation")
     assert selected["working-directory"] == "backend"
@@ -694,7 +694,7 @@ def test_same_value_first_error_and_exception_cannot_hide_later_error_or_wrapper
 
 
 def staging_workflow():
-    return yaml.load((ROOT / ".github/workflows/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
+    return yaml.load((ROOT / "local-checks/legacy/deploy-stg.yml").read_text(), Loader=yaml.BaseLoader)
 
 
 def dispatch_environment():

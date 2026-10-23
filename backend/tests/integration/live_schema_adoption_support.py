@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def _owned_postgres_settings():
-    if os.environ.get("GITHUB_ACTIONS") != "true":
-        raise RuntimeError("owned PostgreSQL is restricted to GitHub Actions")
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+        raise RuntimeError("owned PostgreSQL requires local execution")
     pg_bin_value = os.environ.get("OWNED_POSTGRES_PG_BIN")
     tmpdir_value = os.environ.get("OWNED_POSTGRES_TMPDIR")
     if not pg_bin_value or not tmpdir_value:

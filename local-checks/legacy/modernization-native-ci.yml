@@ -1,0 +1,55 @@
+name: Hospital Linux native dependency parity (non-deploy)
+
+on:
+  push:
+    branches: [codex/modernization-native-ci-20261013]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-parity:
+    if: >-
+      github.actor == github.repository_owner &&
+      github.ref == 'refs/heads/codex/modernization-native-ci-20261013'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install the single explicit authored-input font
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/native-font-setup.log") 2>&1
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y fonts-noto-cjk
+          dpkg-query -W fonts-noto-cjk
+      - name: Compare isolated Linux runtimes without deploying
+        run: >-
+          python scripts/native_dependency_ci.py
+          --source "$GITHUB_WORKSPACE"
+          --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Verify owned evidence before upload
+        id: evidence
+        if: always()
+        run: >-
+          python -B scripts/native_dependency_ci.py
+          --source "$GITHUB_WORKSPACE"
+          --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+          --verify-evidence
+      - name: Preserve failures, input pages and native evidence
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-native-proof-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/sawa-native-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
