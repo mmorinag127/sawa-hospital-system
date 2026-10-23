@@ -337,13 +337,14 @@ from src.services.staging_prod_settings_transport import export_runtime_settings
 
 
 class ObjectCopier:
-    def __init__(self, client, bucket, prefix, source_buckets, aliases, local_receipts=None):
+    def __init__(self, client, bucket, prefix, source_buckets, aliases, local_receipts=None, *, source_environment=None):
         self.client, self.bucket, self.prefix = client, bucket, prefix
         self.allowed = set(source_buckets)
         self.aliases = aliases
         self.objects = {}
         self.missing_at_source = set()
         self.local_receipts = local_receipts or {}
+        self.source_environment = source_environment or {}
 
     def copy_exported_setting(self, key, exported):
         import base64
@@ -393,6 +394,13 @@ class ObjectCopier:
             source_uri = alias
         if not isinstance(source_uri, str):
             raise RefreshError("refresh_original_object_source_unresolved")
+        def source_bucket(match):
+            key = match.group(1)
+            value = self.source_environment.get(key)
+            if key != 'TEMPLATE_BUCKET' or value not in self.allowed:
+                raise RefreshError('refresh_source_uri_environment_unresolved')
+            return value
+        source_uri = re.sub(r'\$\{([A-Z0-9_]+)\}', source_bucket, source_uri)
         parsed = urlsplit(source_uri)
         if parsed.scheme != "gs" or parsed.netloc not in self.allowed or parsed.fragment:
             raise RefreshError("refresh_original_object_source_unresolved")
@@ -517,7 +525,8 @@ def build_snapshot(job, config, progress):
                 raise RefreshError("refresh_order_settings_incomplete")
             destination_bucket = client.bucket(entry["destination_bucket"])
             copier = ObjectCopier(client, destination_bucket, "stg-replay/" + job["dataset"] + "/" + job["attempt"] + "/" + name,
-                                  entry["source_buckets"], entry["local_objects"], local_receipts)
+                                  entry["source_buckets"], entry["local_objects"], local_receipts,
+                                  source_environment={'TEMPLATE_BUCKET': source_environment.get('TEMPLATE_BUCKET')})
             settings = {}
             for key, setting in settings_source.items():
                 if exported_settings and key in {"FACILITY_MASTER_URI", "INGEST_POLICY_URI"} and isinstance(setting, dict):

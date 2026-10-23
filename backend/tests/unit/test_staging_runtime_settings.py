@@ -113,3 +113,31 @@ def test_execution_slot_limits_and_producer_setting_do_not_mix(monkeypatch):
         assert data.order_runtime_setting('OCR_TEMPLATE_MIN_CONFIDENCE') == '0.7'
         assert data.producer_runtime_setting('OCR_TEMPLATE_MIN_CONFIDENCE') == '0.8'
     assert (slots._max_slots(), slots._poll_seconds(), slots._timeout_seconds()) == (2, 3, 60)
+
+
+@pytest.mark.parametrize('provenance,expected', [
+    ('production_environment', 'gs://${TEMPLATE_BUCKET}/template.xlsx'),
+    ('legacy_stg_runtime', 'gs://test-bucket/template.xlsx')])
+def test_template_storage_uses_immutable_production_binding_and_keeps_legacy_environment(monkeypatch, tmp_path, provenance, expected):
+    from src.services import storage_service as storage
+    monkeypatch.setenv('TEMPLATE_BUCKET', 'test-bucket')
+    monkeypatch.setattr(data, 'current_dataset', lambda: 'replay-selected')
+    monkeypatch.setattr(data, 'manifest', lambda: {'runtime_settings_provenance': provenance})
+    path = tmp_path / 'template.xlsx'; path.write_bytes(b'exact source bytes')
+    requested = []
+    def resolve(uri, **kwargs):
+        requested.append(uri)
+        return str(path), None, None
+    monkeypatch.setattr(data, 'read_object', resolve)
+    assert storage.load_bytes_from_uri('gs://${TEMPLATE_BUCKET}/template.xlsx') == b'exact source bytes'
+    assert requested == [expected]
+
+
+def test_template_variable_without_provenance_never_uses_test_environment(monkeypatch):
+    from src.services import storage_service as storage
+    monkeypatch.setenv('TEMPLATE_BUCKET', 'test-bucket')
+    monkeypatch.setattr(data, 'current_dataset', lambda: 'replay-selected')
+    monkeypatch.setattr(data, 'manifest', lambda: {})
+    monkeypatch.setattr(data, 'read_object', lambda *a, **k: pytest.fail('unproven URI resolved'))
+    with pytest.raises(data.DatasetUnavailable, match='provenance_required'):
+        storage.load_bytes_from_uri('gs://${TEMPLATE_BUCKET}/template.xlsx')

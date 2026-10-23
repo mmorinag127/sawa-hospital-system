@@ -655,3 +655,19 @@ def test_partial_refresh_never_clones_or_copies_school_business_objects(control,
     service.checkpoint(job, 'succeeded', published=published)
     assert control['value']['active'] == job['dataset']
     assert control['value']['snapshots'][OLD]['sha256'] == parent['sha256']
+
+
+def test_authored_template_variable_uses_only_explicit_production_bucket(storage, monkeypatch):
+    monkeypatch.setenv('TEMPLATE_BUCKET', 'fixture-test-bucket')
+    storage.put('fixture-prod', 'template.xlsx', b'original production template')
+    reference = 'gs://${TEMPLATE_BUCKET}/template.xlsx'
+    copier = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), 'stg-replay/replay-case/order',
+        ['fixture-prod'], {}, source_environment={'TEMPLATE_BUCKET': 'fixture-prod'})
+    copied = copier.copy(reference)
+    assert copier.objects[reference]['uri'] == copied
+    assert copier.objects['gs://fixture-prod/template.xlsx']['uri'] == copied
+    blocked = engine.ObjectCopier(storage, storage.bucket('fixture-stg-raw'), 'stg-replay/replay-blocked/order', ['fixture-prod'], {})
+    with pytest.raises(service.RefreshError, match='environment_unresolved'):
+        blocked.copy(reference)
+    with pytest.raises(service.RefreshError, match='environment_unresolved'):
+        copier.copy('gs://${DB_PASSWORD}/template.xlsx')
