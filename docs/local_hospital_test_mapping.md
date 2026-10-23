@@ -2,7 +2,7 @@
 
 Latest diagnostic source: `f50d8118fcccec8a674428beb167191f4b3a78da`.
 That source is integrated into develop. Its diagnostic batch failed; no signed
-receipt or successful staging acceptance is claimed. The current 28-command
+receipt or successful staging acceptance is claimed. The current 30-command
 definition and failure-class repairs still need a clean integrated-source run.
 
 The seven removed test workflows are preserved as original blobs under
@@ -22,6 +22,10 @@ Frontend `test:config` already includes root `tests/*.test.cjs`, including datas
 shell-controls and API-session contracts; those are not run again individually.
 Frontend lint, config, inspection-demand-read, typecheck and E2E each run once.
 Dedicated PG, image and live-UI commands retain their distinct checks.
+`runtime-image-audits` additionally inventories and audits six actual isolated
+image environments: backend, producer and agent hospital/gateway/shift/school.
+`runtime-audit-contracts` verifies source refusal and unsuccessful-audit behavior.
+Neither command installs an auditor into, or starts the application in, an image.
 The live-UI command is recorded under `post_deploy_commands` and run locally
 after deployment. It checks the actual deployed source; it cannot be a
 prerequisite for deploying that same source. Pre-deploy receipts cover only

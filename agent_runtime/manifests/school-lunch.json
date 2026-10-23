@@ -1,8 +1,8 @@
 {
-  "source_revision": "33b30f85703967083cf68b3537f485e605570a25",
+  "source_revision": "d0f29ec7cef8a455604ee2a8134c63ce8f0de747",
   "working_diff_sha256": "33213bdb71baf6153f8da378bd901dde15844cefb7c5947acd3354aa35df33d4",
   "files": {
-    "backend/Dockerfile": "031e6526fc9df589259894d9d2849823abd34850dd2594402616bdc0fd7ffdbd",
+    "backend/Dockerfile": "8b9d090bc7e8f78b619cb45948ff7234f4cce794c1a6b7ef5f38a89673e89557",
     "backend/alembic.ini": "a19975a026a14db3e2df558cf079c07a6725f2aa66d9ad94c460115c09c40925",
     "backend/conftest.py": "65266a48dcd50c7acfd52e6c4f964813aef12cff38d2ed90bd1c8e3ac414125e",
     "backend/migrations/env.py": "f898a678fc960312011b080b25939c69166e9dad538d136d773841bd243d8ddd",
@@ -37,7 +37,7 @@
     "backend/migrations/versions/0028_ocr_source_execution.py": "6afc7e03991da0931b59c432559e2d66dd10dd75e46ac509a61e8427924204e8",
     "backend/migrations/versions/0029_process_patterns.py": "0b01de0f058c133b149f5979ec1346fa7b1a90994e2cdc8bf9731b7656bcc9fb",
     "backend/migrations/versions/0030_shared_menus.py": "877573fc75f3a494503c7136facf77097015fe6ed9ecd6435bf30952bd00d825",
-    "backend/requirements.txt": "b984c3f36f9bb2291a293ee545eddd9786b1e37b70dd0e73d83214d35d3bf9d7",
+    "backend/requirements.txt": "8f0515506758bd2f64ac16dad501e07054ec4206cc6702d3aa1de0c53457cad5",
     "backend/src/api/__init__.py": "87ac2145ab9e98a7b78a3ab0e52dd62324fb4ebe25af6c2fc277d94ee5ea3d9d",
     "backend/src/api/auth.py": "c31546a00c405bfafe2eb8b968a8333c7b4677acb373dcb57a2ca74ad8b58465",
     "backend/src/api/auth_config.py": "a4a98485660936073c666094047f482f7adc7f4217a7c99627899942d47e912a",
@@ -174,9 +174,9 @@
     "ocr_pipeline/app/__init__.py": "239d83c6689305933995844468a70102d155047d75da5fe8ac8197008c7d23ff",
     "ocr_pipeline/app/pdf_render.py": "9f547faf6bc21af4466014959928839fb945f637eaa01fbfaa477c22179a84dc",
     "ocr_pipeline/app/yomitoku_runner.py": "006fdffece260585b68c46cdfbf4c7864360d9540c19498502cd800bb6da1cfc",
-    "worker/Dockerfile": "7094afb591d1ed8df5f6e88936bccfd58c5bba96d0ec03ca116ed1d31de0d882",
+    "worker/Dockerfile": "9adfc251163ee6c4b64e71e3879445a9351ccd1c6160c04e7a6e2b760f56a7e4",
     "worker/requirements-test.txt": "0ab1665b03138b9696c78d616295dcfe6a7a6bb9bba3ffee130d8d884c23b91d",
-    "worker/requirements.txt": "fc62a921815a1aad833ec538c638020d88decb72c0734bd2bdfc843652138998",
+    "worker/requirements.txt": "061957b167122596b4653ae6ca4c41d11e9ef7eb448a5ec78c0242fcdcb7d214",
     "worker/scripts/prewarm_yomitoku_models.py": "4d5867ae5ed72469fdfa77838d26f84224539eb4393f905e33e269a967e13998",
     "worker/service/__init__.py": "f7c2bef8d21b43d78c690fb9d54cb26ef47e6bdbeb8d68a886dae59ac079e290",
     "worker/service/main.py": "799dcae2ff7911edd723fec689948189b0375bcc107428224bb97bc486706cd4",
@@ -196,8 +196,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "9ad04a60a7038ad3c751d944f86749dda912ee1e",
-  "upstream_delta_sha256": "d5a529bbfc7811eeac1825743a0d39388ada28f4a51ccf585a4245090816b562",
+  "upstream_base_revision": "33b30f85703967083cf68b3537f485e605570a25",
+  "upstream_delta_sha256": "bddb012049a7b63621ce451fe119b341b42ebc9ff790137f39c0086793614bc8",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",

@@ -203,6 +203,11 @@
       "legacy_steps": []
     },
     {
+      "name": "runtime-audit-contracts",
+      "command": "python3 scripts/test_local_runtime_audits.py",
+      "legacy_steps": []
+    },
+    {
       "name": "impact-contracts",
       "command": "python3 -m unittest discover -s infra/ci/tests -p 'test_*impact.py' -v",
       "legacy_steps": [
@@ -341,6 +346,11 @@
           "step": "Existing selected module, all SQLite and PostgreSQL cases"
         }
       ]
+    },
+    {
+      "name": "runtime-image-audits",
+      "command": "python3 scripts/run_local_runtime_audits.py",
+      "legacy_steps": []
     },
     {
       "name": "local-image-tls",

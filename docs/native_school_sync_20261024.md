@@ -89,7 +89,7 @@ There was no conflict resolution, extension deletion or blind replacement.
 
 The parent reviewed the merge report and runtime delta, then ran the utility's
 separate --seal operation with the same repository, target and report. Exit 0.
-The manifest now records actual source_revision
+At this initial synchronization checkpoint, the manifest recorded source_revision
 33b30f85703967083cf68b3537f485e605570a25, the prior upstream base, the delta
 digest and regenerated file/extension hashes. This records source provenance,
 not successful application or packaged runtime verification. No source_revision
@@ -106,3 +106,12 @@ completion and does not prove audit/OCR/quantity parity.
 
 Writer stops after this static checkpoint. Other worktrees and the previously
 frozen source are not manually edited.
+
+## Security inventory follow-up
+
+The subsequent actual source target is d0f29ec7cef8a455604ee2a8134c63ce8f0de747.
+The four-file Pillow/image bootstrap delta was merged and sealed without
+conflicts using /private/tmp/sawa-native-school-security-followup-20261024.json.
+The current manifest describes that target, not the initial33b30f8 checkpoint.
+Current inventory status is in runtime_dependency_inventory_20261024.md;
+the earlier merge evidence does not claim patched runtime acceptance.

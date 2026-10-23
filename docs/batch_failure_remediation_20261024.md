@@ -47,12 +47,19 @@ regressions. Old tests expecting those values in aggregation are migrated while
 checking that the unchanged original values remain in saved sheets. This is a
 source comparison, not a claim of live same-input OCR/output parity.
 
+## Source integration follow-up
+
+The daily output, native stop and saved-history corrections were integrated in
+f5a08888's ancestry. The additional actual-runtime dependency inventory and
+native source synchronization are recorded in runtime_dependency_inventory_20261024.md.
+These source integrations are not successful full-batch or live acceptance.
+
 ## Still required
 
-- Integrate the frozen daily output fixture migration from the isolated worker;
-  its 21-case mapping is in daily_output_batch_remediation_20261024.md.
-- Review all frozen diffs before commit/integration; keep unrelated AGENTS edits.
-- Resolve the torch audit findings without hiding advisories or assuming OCR parity.
+- Complete staged review of all additional dependency/native corrections;
+  keep unrelated AGENTS edits out of commits.
+- Verify all patched actual image environments without hiding advisories or
+  equating a same-contact recognition comparison with complete OCR parity.
 - Run the complete integrated-source batch serially, including all backend cases,
   PostgreSQL, actual images, native workflows, frontend types and browser tests.
 - Only successful same-source evidence permits minimal manual staging deployment.
