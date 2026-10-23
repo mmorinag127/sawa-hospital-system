@@ -24,7 +24,7 @@ def month_bounds(value):
 def rows(data):
     if isinstance(data, list):
         return data
-    for key in ('items','staff','constraints','orders'):
+    for key in ('items','staff','constraints','orders','facilities'):
         if isinstance(data, dict) and isinstance(data.get(key), list):
             return data[key]
     raise Conflict('対象一覧のAPI応答を確認できません')
@@ -97,8 +97,9 @@ class TaskFlow:
 
     async def options(self, task_id, inputs, owner, authorization):
         spec = TASKS[task_id]
-        if spec.get('month'):
-            month_bounds(inputs.get('month'))
+        inputs = dict(inputs)
+        if inputs.get('month'):
+            month_bounds(inputs['month'])
         if inputs.get('facility_id') is not None and (type(inputs['facility_id']) is not int or inputs['facility_id']<=0): raise ValueError('学校を一覧から選択してください')
         if spec.get('date') and inputs.get('service_date') is not None:
             if not isinstance(inputs.get('service_date'),str): raise ValueError('対象日を選択してください')
@@ -109,23 +110,73 @@ class TaskFlow:
         if set(inputs) - {'month','facility_id','absence_date','service_date'}:
             raise ValueError('指定されていない入力項目です')
         if task_id == 'shift_absence':
-            if not isinstance(inputs.get('absence_date'),str): raise ValueError('欠勤日を選択してください')
+            from .selection_proposals import business_today
+            inputs['absence_date'] = inputs.get('absence_date') or business_today().isoformat()
             absent = date.fromisoformat(inputs['absence_date'])
 
         run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup')
         self.tools.authorizations[run['id']] = authorization
         try:
-            self.tools.sandbox.prepare(run)
+            preparation = asyncio.create_task(asyncio.to_thread(self.tools.sandbox.prepare, run))
+            try:
+                await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                await preparation
+                raise
             await self.tools.sandbox.start(run)
-            choices, schools, layouts = [], [], []
-            kind = spec['target_kind']
-            if kind == 'order':
+            choices, schools, layouts, work_days = [], [], [], []
+            kind = spec.get('target_kind')
+            from .selection_proposals import adjacent_month, business_today, month_label, rank_months, school_months, school_output_counts, batches, absence_days
+            current = business_today().strftime('%Y-%m')
+            month_choices, available_runs = [], []
+            if spec['domain'] == 'shift':
+                if kind in ('candidate', 'confirmed_candidate'):
+                    available_runs = rows(await self.read(run, 'shift_get_runs'))
+                    eligible = [item for item in available_runs if kind != 'confirmed_candidate' or item.get('confirmed')]
+                    months = [item['target_month'] for item in eligible if item.get('target_month')]
+                    counts = {month: sum(item.get('target_month') == month for item in eligible) for month in months}
+                    month_choices = [{'month': month, 'label': month_label(month), 'reason': f'保存済み勤務表 {counts[month]}件'} for month in rank_months(months, current)]
+                elif task_id == 'shift_absence':
+                    period_matches = []
+                    for month in (adjacent_month(absent.strftime('%Y-%m'), -1), absent.strftime('%Y-%m'), adjacent_month(absent.strftime('%Y-%m'), 1)):
+                        period = await self.read(run, 'shift_get_period', {'query': {'month': month}})
+                        if period['start_date'] <= inputs['absence_date'] < period['end_date_exclusive']:
+                            period_matches.append(period)
+                    if len(period_matches) != 1:
+                        raise Conflict('欠勤日に対応する勤務期間を一意に確認できません')
+                    inputs['month'] = period_matches[0]['target_month']
+                else:
+                    source = rows(await self.read(run, 'shift_get_constraints'))
+                    counts = {}
+                    candidate_months = {current, adjacent_month(current,1)}
+                    for item in source:
+                        day = date.fromisoformat(item['work_date'])
+                        candidate_months.update(adjacent_month(day.strftime('%Y-%m'), offset) for offset in (-1,0,1))
+                    for month in candidate_months:
+                        period = await self.read(run, 'shift_get_period', {'query':{'month':month}})
+                        count = sum(period['start_date']<=item['work_date']<period['end_date_exclusive'] for item in source)
+                        if count:
+                            counts[month] = count
+                    preferred = adjacent_month(current, 1) if task_id == 'shift_next_month' else current
+                    month_choices = [{'month': month, 'label': month_label(month), 'reason': f'登録済み希望休・勤務条件 {counts[month]}件' if month in counts else '翌月の勤務案を作成します' if month == adjacent_month(current, 1) else 'この月の登録済み条件で作成します'} for month in rank_months([preferred, current, adjacent_month(current, 1), *counts], preferred)]
+                if task_id != 'shift_absence' and not inputs.get('month') and month_choices:
+                    inputs['month'] = month_choices[0]['month']
+            if task_id == 'hospital_pending_faxes':
+                pending = rows(await self.read(run, 'hospital_pending_faxes'))
+                choices = [dict(key=str(item['id']), label=' ／ '.join(str(item[key]) for key in ('name','facility','week') if item.get(key)), data=item) for item in pending]
+            elif kind == 'order':
+                facility_source = await self.read(run, 'hospital_list_facilities')
+                if facility_source.get('source') != 'canonical_json':
+                    raise Conflict('正本の施設一覧を確認できません')
+                facility_names = {item['id']:item['name'] for item in rows(facility_source)}
                 query = {'limit':1000,'status':'確定','include_archived':False}
                 seen = set()
                 while True:
                     page = await self.read(run,'hospital_list_orders',{'query':query})
                     for item in rows(page):
-                        choices.append(dict(key=str(item['id']), label=f"{item.get('facility_name', item.get('facility_code',''))} ／ {item.get('week_start',item.get('week_code',''))} ／ {item['id']}", data=item))
+                        if item.get('facility') not in facility_names or not item.get('week_label') or not item.get('week_value'):
+                            raise Conflict('確定済み注文の正本施設・対象週を確認できません')
+                        choices.append(dict(key=str(item['id']), label=f"{facility_names[item['facility']]} ／ {item['week_label']} ／ 受付 {item.get('received_at') or '日時の記録なし'}", data=item, week=item['week_value']))
                     if not page.get('has_more'):
                         break
                     cursor = page.get('next_cursor')
@@ -142,20 +193,43 @@ class TaskFlow:
                     if not period['start_date']<=inputs['absence_date']<period['end_date_exclusive']: raise ValueError('欠勤日は設定された勤務期間内で選択してください')
                 choices = [dict(key=str(x['id']), label=x['name'], data=x) for x in staff] if kind == 'staff' else [dict(key=inputs['month'],label=inputs['month']+' の勤務計画',data={'month':inputs['month']})]
             elif kind in ('candidate','confirmed_candidate'):
-                for item in rows(await self.read(run,'shift_get_runs')):
-                    if item.get('target_month') != inputs['month']:
+                for item in available_runs:
+                    if item.get('target_month') != inputs.get('month'):
                         continue
                     detail = await self.read(run,'shift_get_run',{'ids':{'run_id':item['id']}})
                     if kind=='candidate' and not detail.get('candidates') and detail.get('status') in ('failed','error'):
-                        choices.append(dict(key=f"{item['id']}:failed",label=f"{inputs['month']} ／ 案 {item['id']} の作成失敗・不足理由",data={'run_id':item['id'],'candidate_id':None}))
+                        choices.append(dict(key=f"{item['id']}:failed",label=f"{month_label(inputs['month'])} ／ 作成できなかった勤務案・不足理由",data={'run_id':item['id'],'candidate_id':None}))
                     for candidate in detail.get('candidates',[]):
                         if kind == 'confirmed_candidate' and (not detail.get('confirmed') or candidate['id'] != detail.get('selected_candidate_id')):
                             continue
-                        choices.append(dict(key=f"{item['id']}:{candidate['id']}",label=f"{inputs['month']} ／ 案 {item['id']}-{candidate['id']} ／ {candidate.get('strategy','')}",data={'run_id':item['id'],'candidate_id':candidate['id']}))
+                        choices.append(dict(key=f"{item['id']}:{candidate['id']}",label=f"{month_label(inputs['month'])} ／ {'確定済み' if detail.get('confirmed') else '勤務案'} ／ {detail.get('confirmed_at') or detail.get('created_at') or '作成日時の記録なし'} ／ 候補{len([x for x in choices if x['data']['run_id']==item['id']])+1}",data={'run_id':item['id'],'candidate_id':candidate['id']}))
             else:
                 schools = rows(await self.read(run,'lunch_get_schools'))
+                if inputs.get('facility_id') is not None and inputs['facility_id'] not in {school['id'] for school in schools}:
+                    raise Conflict('一覧にある学校を選択してください')
+                if spec.get('month'):
+                    counts = school_months(self.tools.sandbox.path(run['id']) / 'data' / 'school-lunch' / 'database.sqlite3', inputs.get('facility_id'))
+                    outputs = school_output_counts(self.tools.sandbox.path(run['id']) / 'data' / 'school-lunch' / 'database.sqlite3', inputs.get('facility_id'))
+                    months = {month for school, month in counts}
+                    if task_id == 'lunch_import':
+                        months.update((current, adjacent_month(current, 1)))
+                    month_choices = [{'month': month, 'label': month_label(month), 'reason': f"登録済み献立 {sum(count for (school, value), count in counts.items() if value == month)}件・作業工程表 {outputs.get(month, {}).get('作業工程表', 0)}日分・動線図 {outputs.get(month, {}).get('動線図', 0)}日分。最新の入力と保存済み帳票を処理時に照合します" if any(value == month for school, value in counts) else '取り込む原本の対象月を確認してください'} for month in rank_months(months, current)]
+                    if not inputs.get('month') and month_choices:
+                        inputs['month'] = month_choices[0]['month']
+                if task_id == 'lunch_daily_bundle' and inputs.get('facility_id'):
+                    if inputs['facility_id'] not in {school['id'] for school in schools}:
+                        raise Conflict('一覧にある学校を選択してください')
+                    from .work_day_proposals import propose
+                    work_days = propose(self.tools.sandbox.path(run['id']) / 'data' / 'school-lunch' / 'database.sqlite3', inputs['facility_id'])
                 if kind == 'school':
                     choices = [dict(key=str(x['id']),label=x['name'],data=x) for x in schools]
+                elif task_id == 'lunch_daily_bundle' and inputs.get('facility_id') and not inputs.get('service_date'):
+                    menus = []
+                    for month in sorted({item['service_date'][:7] for item in work_days}):
+                        menus.extend(rows(await self.read(run, 'lunch_get_menus', {'query': {'facility_id': inputs['facility_id'], 'month': month}})))
+                    choices = [dict(key=str(x['id']), label=f"{x['service_date']} ／ {x['name']}", data=x) for x in menus]
+                    layouts = rows(await self.read(run, 'lunch_get_layouts', {'query': {'facility_id': inputs['facility_id']}}))
+                    layouts = [{'id':x['id'],'name':x['name'],'version':x['version']} for x in layouts]
                 elif inputs.get('facility_id') and inputs.get('month'):
                     if str(inputs['facility_id']) not in {str(x['id']) for x in schools}:
                         raise Conflict('一覧にある学校を選択してください')
@@ -166,7 +240,9 @@ class TaskFlow:
                     layouts = rows(await self.read(run,'lunch_get_layouts',{'query':{'facility_id':query['facility_id']}}))
                     layouts = [{'id':x['id'],'name':x['name'],'version':x['version']} for x in layouts]
             ident = uuid4().hex
-            payload = {'inputs':inputs,'choices':choices,'schools':schools,'layouts':layouts}
+            payload = {'inputs':inputs,'choices':choices,'schools':schools,'layouts':layouts,'work_days':work_days,
+                       'month_choices':month_choices,'batches':batches(choices, task_id),
+                       'absence_days':absence_days() if task_id == 'shift_absence' else []}
             with self.store.tx() as db:
                 db.execute('INSERT INTO selections VALUES(?,?,?,?)',(ident,owner,task_id,json.dumps(payload,ensure_ascii=False)))
             return {'selection_id':ident, **payload}
@@ -187,13 +263,20 @@ class TaskFlow:
         if len(selected) != len(keys):
             raise Conflict('対象一覧にない値は選択できません')
         kind = TASKS[task_id]['target_kind']
-        if kind in ('month','school') and len(selected) != 1:
+        if kind in ('month','school','staff') and len(selected) != 1:
             raise ValueError('作業対象は一つ選択してください')
         inputs = dict(payload['inputs'])
+        if TASKS[task_id].get('month'):
+            month_bounds(inputs.get('month'))
         if kind == 'school':
             inputs['facility_id'] = selected[0]['data']['id']
         if kind == 'menu':
             dates={x['data']['service_date'] for x in selected}
+            if TASKS[task_id].get('date'):
+                if len(dates) != 1:
+                    raise Conflict('提案された作業日を一つ選択してください')
+                inputs['service_date'] = next(iter(dates))
+                inputs['month'] = inputs['service_date'][:7]
             if {x['key'] for x in payload['choices'] if x['data']['service_date'] in dates} != set(keys):
                 raise Conflict('対象日の献立をすべて選択してください')
             layout = next((x for x in payload['layouts'] if x['id'] == layout_id),None)
@@ -263,6 +346,9 @@ class TaskFlow:
             return
         spec = TASKS[run['task_id']]
         op = OPERATIONS[name]
+        from .shift_questions import authorized
+        if authorized(self.tools, run, name, args):
+            return
         if 'price' in name and op.domain=='school-lunch' and run['task_id']!='lunch_daily_bundle':
             raise Conflict('実施価格は日次の一括作成で扱います')
         if op.domain != spec['domain']:
@@ -552,6 +638,9 @@ class TaskFlow:
         wanted = {'operation':name,'parameters':{'ids':args.ids,'query':args.query,'body':args.body,'source_id':args.source_id}}
         if not review or review['state']!='approved' or wanted not in review['actions']:
             raise Conflict('確定の承認記録を照合できません')
+        if digest(wanted) in review['applied']:
+            await self.recheck(run, review)
+            return
         if name=='shift_confirm' and (receipt.get('confirmed') is not True or str(receipt.get('solve_run_id'))!=str(args.ids['run_id'])):
             raise Conflict('勤務案の確定結果を照合できません')
         review['applied'].append(digest(wanted))

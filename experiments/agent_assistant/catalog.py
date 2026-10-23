@@ -86,6 +86,7 @@ for name, method, path in [
     ("confirm", "POST", "/planning/solve-runs/{run_id}/confirm"),
 ]:
     add("shift", name, method, path, "既存シフトAPIで"+name+"を実行する。版と候補のpreconditionをそのまま渡す。勤務案はOR-Toolsで生成し手書きしない。")
+add("shift", "save_settings", "PUT", "/optimization-settings", "利用者が確認した勤務条件の変更だけを、取得済み設定版に対して保存する。")
 add("shift", "export", "GET", "/solve-runs/{run_id}/export", "明示した候補のシフト帳票を取得する。")
 
 prefix = "/api/school-lunch"

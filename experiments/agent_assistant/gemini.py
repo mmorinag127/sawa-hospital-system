@@ -91,11 +91,9 @@ class Gemini(Managed):
     async def _start(self, run):
         self.pin(run['id'])
         await self.sandbox.start(run)
-        if self.store.get(run['id'])['generation'] != run['generation']: raise Conflict('依頼は停止されました')
-        self.store.update(run['id'], status='running')
-        text = TASKS[run['task_id']]['instruction'] if run.get('task_id') in TASKS else run['instruction']
-        text += '\n利用者の選択：' + json.dumps(run.get('task_inputs', {}), ensure_ascii=False)
-        text += '\n添付原本：' + json.dumps([e['payload'] for e in self.store.events(run['id']) if e['kind'] == 'source'], ensure_ascii=False)
+        self.store.update(run['id'], expected_generation=run['generation'], status='running')
+        from .business_contracts import preparation_instruction
+        text = preparation_instruction(self.tools, run)
         await self.follow(run['id'], {'type': 'user.message', 'content': [{'type': 'text', 'text': text}]})
 
     async def follow(self, ident, event):
@@ -179,11 +177,19 @@ class Gemini(Managed):
                         call = state['calls'][state['index']]
                         command = command_identity(state['interaction'], call['id'])
                         result = await call_local(self.mcp, self.tools, ident, generation, call['name'], call['arguments'], command)
+                        current = self.store.get(ident)
+                        if current['generation'] != generation or current['status'] in ('stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                            return
                         if result.get('waiting_input') or result.get('needs_operator_confirmation'):
+                            self.store.update(ident, expected_generation=generation, status='waiting_input')
                             record_question_receipt(self.store, ident, call['name'], result)
-                            self.store.update(ident, status='waiting_input')
                             state['pending'] = command; self.checkpoint(ident, state)
                             self.store.event(ident, 'operator_wait', {'command_id': command, 'result': result})
+                            return
+                        business = getattr(self.tools, 'business', None)
+                        if business and await business.pause_model(ident, command, result):
+                            state['pending'] = command
+                            self.checkpoint(ident, state)
                             return
                         blocks = result.get('_content') or [{'type': 'text', 'text': json.dumps(result, ensure_ascii=False)}]
                         state['results'].append({'type': 'function_result', 'call_id': call['id'], 'name': call['name'], 'result': function_result(blocks)})
@@ -195,11 +201,16 @@ class Gemini(Managed):
                     inputs = state['results']
                 run = self.current(ident, generation)
                 if run['spent'] >= run['cap']:
-                    self.store.update(ident, status='budget_reached'); await self.sandbox.stop(ident); return
+                    self.store.update(ident, expected_generation=generation, status='budget_reached')
+                    from .business_contracts import owned
+                    if not owned(run):
+                        await self.sandbox.stop(ident)
+                    return
                 pin = self.pin(ident)
+                from .business_contracts import model_definitions
                 body = {'model': pin['model'], 'input': inputs, 'system_instruction': SYSTEM,
                     'store': True, 'background': False, 'generation_config': {'max_output_tokens': pin['max_output_tokens']},
-                    'tools': [{'type': 'function', 'name': d['name'], 'description': d['description'], 'parameters': d['input_schema']} for d in self.tools.definitions(run['domains'])]}
+                    'tools': [{'type': 'function', 'name': d['name'], 'description': d['description'], 'parameters': d['input_schema']} for d in model_definitions(self.tools, run)]}
                 if run['session_id']: body['previous_interaction_id'] = run['session_id']
                 dispatch = uuid4().hex
                 self.store.event(ident, 'gemini_dispatch', {'id': dispatch})
@@ -226,7 +237,8 @@ class Gemini(Managed):
                     if step['type'] == 'function_call': calls.append(step)
                     elif step['type'] == 'model_output': self.store.event(ident, 'agent.message', {'content': step.get('content', [])})
                 if not calls:
-                    self.store.update(ident, status='waiting_input')
+                    self.store.update(ident, expected_generation=generation, status='waiting_input')
+                    self.store.event(ident, 'business_model_idle', {'session_id': interaction_id, 'generation': generation})
                     self.store.event(ident, 'notice', {'message': '応答が終了しました。業務完了証跡がないため完了扱いにしていません。'})
                     return
                 if len({c['id'] for c in calls}) != len(calls): raise Conflict('Geminiのツール呼出しIDが重複しています')
@@ -235,9 +247,17 @@ class Gemini(Managed):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            current = self.store.get(ident)
+            if current['generation'] != generation or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                return
             self.store.event(ident, 'error', {'message': '接続またはツール処理に失敗しました。再送せず結果照合が必要です。', 'class': type(exc).__name__})
+            from .business_contracts import owned
+            if owned(self.store.get(ident)):
+                self.store.update(ident, expected_generation=generation, status='reconciliation_required')
+                if getattr(self.tools, 'business', None):
+                    self.tools.business.kick(ident)
+                return
             await self.stop(ident)
-            if self.store.get(ident)['status'] == 'stopped': self.store.update(ident, status='reconciliation_required')
 
     async def stop(self, ident):
         previous = self.store.get(ident)

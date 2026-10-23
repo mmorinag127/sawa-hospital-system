@@ -200,19 +200,29 @@ class LunchQuestions:
                 index, group = next((i,g) for i,g in enumerate(work['groups']) if 'equipment' not in g)
                 equipment = step.get('equipment') or {}; kind = equipment.get('type')
                 candidates = [x for x in template['equipment'] if x.get('type') and (not kind or x['type'] == kind)]
-                choices = [{'value': x, 'label': x['name'] if sum(c['name'] == x['name'] for c in candidates) == 1 else f"{x['name']}（ID:{x['id']}）"} for x in candidates]
+                choices = [{'value': x, 'label': x['name']} for x in candidates]
                 picture = await self.drawing(run, item['menu_id'], selected)
                 if picture['template_version'] != template['template_version']:
                     raise Conflict('候補設備と原本図面の版が一致しません')
                 geometry = {e['id']: e for e in picture['equipment']}
                 if any(c['value']['id'] not in geometry or geometry[c['value']['id']]['name'] != c['value']['name'] for c in choices):
                     raise Conflict('候補設備と原本の箇所を一意に対応付けられません')
+                for choice in choices:
+                    if sum(other['name'] == choice['value']['name'] for other in candidates) > 1:
+                        ordered = sorted([other for other in candidates if other['name']==choice['value']['name']], key=lambda other: (geometry[other['id']]['bounds'][1], geometry[other['id']]['bounds'][0]))
+                        number = next(index+1 for index, other in enumerate(ordered) if other['id']==choice['value']['id'])
+                        choice['label'] += f'（図面の上から{number}か所目・同じ高さは左から）'
                 state.setdefault('drawings', {})[str(item['menu_id'])] = picture
-                ingredient = '・'.join(names[mid] if sum(m['name']==names[mid] for m in document['ingredients'])==1 else names[mid]+'（ID:'+mid+'）' for mid in group['ingredient_ids']); suffix = 'どの釜を使いましたか？' if kind == '回転釜' else 'どこで作業しましたか？'
+                ingredient = '・'.join(names[mid] if sum(m['name']==names[mid] for m in document['ingredients'])==1 else names[mid]+'（原本の同名食材'+str([m['id'] for m in document['ingredients'] if m['name']==names[mid]].index(mid)+1)+'番目）' for mid in group['ingredient_ids']); suffix = 'どの釜を使いましたか？' if kind == '回転釜' else 'どこで作業しましたか？'
                 return self.question(run, state, command_id, item, step['id'], 'equipment', f"「{item['name']}」の {ingredient}\n{step['operation']} は、{suffix}", choices, picture, index)
             actual = execution.question(item)
             if actual:
                 key, field, text, choices = actual
+                if not choices and field == 'assignees':
+                    known = sorted({name for document_item in state['documents'] for source_step in document_item['document']['steps'] for name in (source_step.get('execution') or {}).get('assignees', [])})
+                    choices = [{'value': [name], 'label': name} for name in known]
+                    if choices:
+                        text += ' 原本・登録工程にある担当者を選ぶこともできます。'
                 return self.question(run, state, command_id, item, key, 'execution.'+field, text, choices)
         self.save(run, state)
         return {'ok': True, 'complete': True, 'process_saves': [self.payload(state, item) for item in state['documents'] if not item['saved']]}

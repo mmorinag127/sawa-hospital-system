@@ -26,6 +26,8 @@ def prepared(tmp_path, domains=("hospital",)):
         base.mkdir()
         (base / "trial-manifest.json").write_text(json.dumps({"purpose": "sawa-agent-isolated-trial"}))
         with sqlite3.connect(base / "database.sqlite3") as db:
+            if name == 'school-lunch':
+                db.executescript('CREATE TABLE school_lunch_menu_executions(id INTEGER,facility_id INTEGER,service_date TEXT,name TEXT); CREATE TABLE school_lunch_daily_work_schedules(facility_id INTEGER,service_date TEXT); CREATE TABLE school_lunch_route_diagrams(facility_id INTEGER,service_date TEXT);')
             db.execute("CREATE TABLE quantities(id TEXT PRIMARY KEY, value INTEGER)")
             db.execute("INSERT INTO quantities VALUES('original',7)")
         (base / "original.pdf").write_bytes(b"synthetic source bytes, not an OCR test")

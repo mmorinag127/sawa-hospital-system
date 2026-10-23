@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 import json
+import sqlite3
 
 import pytest
 from experiments.agent_assistant.tests.test_selected_tasks import lunch, record, get, lunch_evidence, QUERY
@@ -22,6 +23,18 @@ def setup(tmp_path):
     for name,body,ids in [('lunch_infer_process',{}, {'menu_id':101}),('lunch_create_schedule',{'service_date':'2026-11-02'},{}),('lunch_generate_route',{'service_date':'2026-11-02'},{}),('lunch_save_price_source',payload,{})]:
         record(tools,run,name,{'draft_id':'a'*32} if 'price' in name else {'ok':True},{'ids':ids,'query':QUERY,'body':body})
     install(native)
+    def prepare_lookup(run):
+        directory = native.path(run['id']) / 'data' / 'school-lunch'
+        directory.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(directory / 'database.sqlite3') as db:
+            db.executescript('''
+            CREATE TABLE school_lunch_menu_executions(id INTEGER,facility_id INTEGER,service_date TEXT,name TEXT);
+            CREATE TABLE school_lunch_daily_work_schedules(facility_id INTEGER,service_date TEXT);
+            CREATE TABLE school_lunch_route_diagrams(facility_id INTEGER,service_date TEXT);
+            CREATE TABLE implementation_price_drafts(facility_id INTEGER,implementation_date TEXT);
+            ''')
+            db.executemany('INSERT INTO school_lunch_menu_executions VALUES(?,?,?,?)', [(item['id'], item['facility']['id'], item['service_date'], item['name']) for item in native.data['/api/school-lunch/menu-executions']])
+    native.prepare = prepare_lookup
     return store,native,tools,run
 
 
@@ -109,4 +122,20 @@ def test_registered_schools_can_be_chosen_before_date_and_do_not_depend_on_it(tm
         assert [x['key'] for x in day['choices']]==['101']
         assert changed['choices']==[]
         assert changed['inputs']['facility_id']==1
+    asyncio.run(scenario())
+
+
+def test_proposed_work_day_selects_all_its_menus_without_a_calendar_input(tmp_path):
+    async def scenario():
+        _, native, tools, _ = setup(tmp_path)
+        native.data['/api/school-lunch/menu-executions'].append(dict(native.data['/api/school-lunch/menu-executions'][0], id=102, name='もう一品'))
+        selection = await tools.flow.options('lunch_daily_bundle', {'facility_id': 1}, 'operator', '')
+        assert selection['work_days'][0]['service_date'] == '2026-11-02'
+        assert selection['work_days'][0]['menu_count'] == 2
+        context = tools.flow.selection('lunch_daily_bundle', 'operator', selection['selection_id'], ['101', '102'])
+        assert context['inputs']['service_date'] == '2026-11-02'
+        assert context['inputs']['month'] == '2026-11'
+        assert len(context['targets']) == 2
+        with pytest.raises(Conflict, match='すべて'):
+            tools.flow.selection('lunch_daily_bundle', 'operator', selection['selection_id'], ['101'])
     asyncio.run(scenario())

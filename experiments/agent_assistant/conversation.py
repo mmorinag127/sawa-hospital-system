@@ -11,7 +11,7 @@ def question_result(raw, command_id):
     return {"waiting_input": True, "question": raw["question"], "options": options, "command_id": command_id}
 
 
-def conversation(events):
+def conversation(events, fax_labels=None):
     messages = []
     for event in events:
         kind, payload = event["kind"], event["payload"]
@@ -25,12 +25,14 @@ def conversation(events):
             text = payload.get("summary") or payload.get("message")
             if text: messages.append({"id": str(event["id"]), "role": "assistant", "text": text})
         elif kind in ("task_review", "fax_review") and payload.get("summary"):
-            prefix = "FAX " + str(payload["fax_id"]) + "：" if kind=="fax_review" else ""
+            prefix = (fax_labels.get(str(payload['fax_id']), '対象のFAX') if fax_labels is not None else 'FAX ' + str(payload['fax_id'])) + '：' if kind == 'fax_review' else ''
             messages.append({"id":str(event["id"]),"role":"assistant","text":prefix+payload["summary"]})
         elif kind in ("task_decision", "fax_decision"):
             text = "この内容で進めてください。" if payload['approve'] else "訂正をお願いします。"
             if payload.get('message'): text += "\n"+payload['message']
-            if kind=="fax_decision": text="FAX "+str(payload['fax_id'])+"："+text
+            if kind == 'fax_decision':
+                label = fax_labels.get(str(payload['fax_id']), '対象のFAX') if fax_labels is not None else 'FAX ' + str(payload['fax_id'])
+                text = label + '：' + text
             messages.append({"id":str(event["id"]),"role":"user","text":text})
         elif kind == "operator_reply":
             messages.append({"id": str(event["id"]), "role": "user", "text": payload["message"]})

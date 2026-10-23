@@ -7,6 +7,7 @@ import hashlib
 
 from .store import Conflict
 from .task_flow import rows
+from .shift_questions import ShiftQuestions
 
 
 class OperatorWait(Exception):
@@ -22,7 +23,7 @@ class WorkflowCompletion:
         run = self.tools.store.get(ident)
         if run['generation'] != generation or run['status'] != 'running':
             raise Conflict('依頼は停止または変更されました')
-        allowed = ('shift_next_month', 'shift_wishes', 'shift_absence') if domain == 'shift' else ('hospital_pending_faxes',)
+        allowed = ('shift_next_month', 'shift_wishes', 'shift_absence') if domain == 'shift' else ('hospital_pending_faxes', 'hospital_review_faxes')
         if run.get('task_id') not in allowed:
             raise Conflict('選択した業務専用の操作です')
         return run
@@ -42,6 +43,14 @@ class WorkflowCompletion:
         if result.get('waiting_input') or result.get('needs_operator_confirmation'):
             raise OperatorWait(result)
         if not result.get('ok'):
+            if name == 'shift_solve' and result.get('status') in (400,409,422):
+                import json
+                try:
+                    detail = json.loads(result.get('detail','{}')).get('detail', {})
+                except (TypeError, ValueError):
+                    detail = {}
+                if isinstance(detail, dict) and isinstance(detail.get('preflight'), dict):
+                    raise OperatorWait(await ShiftQuestions(self.tools).infeasible(run, command, detail))
             raise Conflict(name + ': ' + str(result))
         return result
 
@@ -77,18 +86,22 @@ class WorkflowCompletion:
             existing = [item for item in rows(source) if item['staff_id'] == staff_id and item['work_date'] == day]
             if existing:
                 if len(existing) != 1 or existing[0]['status'] != 'unavailable' or existing[0]['strength'] != 'hard':
-                    raise Conflict('欠勤日の既存条件があります。変更内容を利用者に確認してください')
+                    return await ShiftQuestions(self.tools).conflict(run, command, existing, source)
             else:
                 await self.call(run, command, 'absence', 'shift_save_constraint', {'body': {
                     'staff_id': staff_id, 'work_date': day, 'status': 'unavailable', 'strength': 'hard',
                     'weight': 10, 'reason': '利用者が選択した職員・日付の急な欠勤',
                     'collection_revision': source['collection_revision']}, 'reason': '利用者指定の欠勤だけ登録し、他の条件を保持'})
-        await self.call(run, command, 'preflight', 'shift_preflight', {'body': {'target_month': month}, 'reason': '選択月の登録済み条件を正規APIで検査'})
+        preflight = await self.call(run, command, 'preflight', 'shift_preflight', {'body': {'target_month': month}, 'reason': '選択月の登録済み条件を正規APIで検査'})
+        if preflight['data'].get('blocking'):
+            return await ShiftQuestions(self.tools).infeasible(run, command, preflight['data'])
         result = await self.call(run, command, 'solve', 'shift_solve', {'body': {'target_month': month, 'strategy': 'balanced', 'candidate_count': 1}, 'reason': '選択月・登録済み希望休と勤務条件を保持して勤務案を作成'})
         sid = result['data']['solve_run_id']
         result = await self.call(run, command, 'wait', 'wait_for_native_job', raw={'operation':'shift_get_run','parameters': {'ids': {'run_id': sid}}})
+        if result['data'].get('status') == 'failed':
+            return await ShiftQuestions(self.tools).infeasible(run, command, result['data'])
         if result['data'].get('status') != 'succeeded' or not result['data'].get('selected_candidate_id'):
-            raise Conflict('勤務案を作成できません。正規の検査結果を確認してください')
+            raise Conflict('勤務案の実行結果を確認できません')
         cid = result['data']['selected_candidate_id']
         evidence, candidate = await self.shift_evidence(run, command + ':review', sid, cid)
         return await self.call(run, command, 'approval', 'request_task_approval', raw={

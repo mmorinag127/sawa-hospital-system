@@ -6,6 +6,11 @@ from urllib.parse import quote
 from .store import Conflict, billing_month
 from .gemini import command_identity
 from .conversation import record_question_receipt
+from .catalog import OPERATIONS
+
+
+class RecoveryPending(Conflict):
+    """Remote state is known, but is still settling; history may be read again."""
 
 
 class Recovery:
@@ -34,7 +39,9 @@ class Recovery:
                 pending = list(db.execute("SELECT id,request FROM commands WHERE run_id=? AND status!='done'", (ident,)))
             safe_waits = [row for row in pending if json.loads(row['request']).get('name') in
                           ('wait_for_task_decision', 'wait_for_native_job')]
-            if len(pending) != len(safe_waits):
+            safe_reads = [row for row in pending if
+                          (operation := OPERATIONS.get(json.loads(row['request']).get('name'))) and operation.method == 'GET']
+            if len(pending) != len(safe_waits) + len(safe_reads):
                 raise Conflict('実行結果が未確定の命令があります。業務更新を再送せず履歴を保持します')
             directory = manager.sandbox.path(ident)
             if manager.sandbox.durable_store is not None:
@@ -53,8 +60,17 @@ class Recovery:
                 raise Conflict('照合した利用料金が実行上限に達しています。処理を再開しません')
             if plan['waiting']:
                 name, result = plan['question']
+                from .business_contracts import owned
+                replies = [event['payload'] for event in self.store.events(ident) if event['kind'] == 'operator_reply' and event['payload'].get('question_id') == result.get('command_id')]
+                if owned(run) and replies:
+                    # Provider history proves this tool call remains unanswered.
+                    # Reuse the already accepted business answer, never ask again.
+                    self.store.update(ident, expected_generation=run['generation'], status='running')
+                    self.store.event(ident, 'business_answer_recovery', {'question_id': result['command_id']})
+                    await manager.follow(ident, {'type': 'user.custom_tool_result', 'custom_tool_use_id': result['command_id'], 'content': [{'type': 'text', 'text': json.dumps({'previous_result': result, 'operator_reply': replies[-1]['message']}, ensure_ascii=False)}]})
+                    return self.store.get(ident)
                 record_question_receipt(self.store, ident, name, result)
-                self.store.update(ident, status='waiting_input')
+                self.store.update(ident, expected_generation=run['generation'], status='waiting_input')
                 self.store.event(ident, 'recovery', {'status': 'waiting_input', 'generation': run['generation']})
                 return self.store.get(ident)
             await manager.sandbox.start(run)
@@ -65,7 +81,9 @@ class Recovery:
             with self.store.tx() as db:
                 for row in safe_waits:
                     db.execute("UPDATE commands SET status='recoverable_wait' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
-            self.store.update(ident, status='running')
+                for row in safe_reads:
+                    db.execute("UPDATE commands SET status='recoverable_read' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
+            self.store.update(ident, expected_generation=run['generation'], status='running')
             self.store.event(ident, 'recovery', {'status': 'running', 'generation': run['generation']})
             if run['provider'] == 'gemini':
                 manager.checkpoint(ident, plan['state'])
@@ -76,6 +94,11 @@ class Recovery:
 
     def waiting(self, ident, command):
         events = self.store.events(ident)
+        from .business_contracts import owned
+        if owned(self.store.get(ident)) and any(event['kind'] == 'operator_reply' and event['payload'].get('question_id') == command for event in events):
+            # The caller has proved this exact call is still unanswered remotely.
+            # Its local answer may have been saved after the waiting event.
+            return any(event['kind'] == 'operator_wait' and event['payload']['command_id'] == command for event in events)
         last_reply = max((e['id'] for e in events if e['kind'] == 'operator_reply'), default=0)
         return any(e['id'] > last_reply and e['kind'] == 'operator_wait' and
                    e['payload']['command_id'] == command for e in events)
@@ -107,8 +130,10 @@ class Recovery:
         value = await manager.request('GET', '/' + quote(run['session_id'], safe=''))
         if value.get('id') != run['session_id']:
             raise Conflict('接続先の実行IDが一致しません')
+        if value.get('status') in ('in_progress', 'queued'):
+            raise RecoveryPending('接続先の処理を照合中です')
         if value.get('status') not in ('requires_action', 'completed'):
-            raise Conflict('接続先の処理が完了していません。結果確定後に照合してください')
+            raise Conflict('接続先の結果を確定できません。保存済み内容を管理者が確認します')
         manager.record_usage(ident, value)
         calls = [s for s in value.get('steps', []) if s.get('type') == 'function_call']
         if not calls:
@@ -140,9 +165,11 @@ class Recovery:
         if getattr(session, 'id', None) != run['session_id']:
             raise Conflict('ClaudeのセッションIDが一致しません')
         if session.status != 'idle':
-            raise Conflict('Claudeの処理が停止待ちです。結果確定後に照合してください')
+            if session.status == 'terminated':
+                raise Conflict('Claudeの実行は終了しています。保存済み内容を管理者が確認します')
+            raise RecoveryPending('Claudeの処理を照合中です')
         if session.usage is None:
-            raise Conflict('Claudeの利用料金が未確定です。予約額を保持します')
+            raise RecoveryPending('Claudeの利用料金が未確定です。予約額を保持します')
         self.store.usage(run['id'], session.usage.model_dump(mode='json'))
         history = [e async for e in api.events.list(run['session_id'], order='asc')]
         values = [e.model_dump(mode='json') for e in history]

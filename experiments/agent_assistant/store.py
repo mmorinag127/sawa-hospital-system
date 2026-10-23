@@ -57,6 +57,7 @@ class Store:
             if "provider" not in {row[1] for row in db.execute("PRAGMA table_info(settings)")}:
                 db.execute("ALTER TABLE settings ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'")
             db.execute("CREATE TABLE IF NOT EXISTS selections(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL,payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS target_lookups(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL,inputs TEXT NOT NULL,state TEXT NOT NULL,payload TEXT)")
             db.execute("CREATE TABLE IF NOT EXISTS task_reviews(run_id TEXT PRIMARY KEY,payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS fax_batches(run_id TEXT PRIMARY KEY)")
             db.execute("""CREATE TABLE IF NOT EXISTS fax_items(
@@ -180,7 +181,7 @@ class Store:
         with self.read() as db:
             return [self.decode(row) for row in db.execute("SELECT * FROM runs WHERE owner=? ORDER BY created DESC LIMIT 100", (owner,))]
 
-    def update(self, ident, **values):
+    def update(self, ident, *, expected_generation=None, **values):
         allowed = {"status", "session_id", "usage", "spent", "reserved", "task_inputs"}
         if set(values) - allowed:
             raise ValueError("unknown ledger fields")
@@ -188,6 +189,10 @@ class Store:
             if field in values: values[field] = json.dumps(values[field], ensure_ascii=False)
         values["updated"] = now()
         with self.tx() as db:
+            if expected_generation is not None:
+                current = db.execute('SELECT generation,status FROM runs WHERE id=?', (ident,)).fetchone()
+                if current['generation'] != expected_generation or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                    raise Conflict('依頼の状態が変更されています。遅延した処理は実行しません')
             db.execute("UPDATE runs SET " + ",".join(k+"=?" for k in values) + " WHERE id=?", (*values.values(), ident))
 
     def fence(self, ident):
@@ -214,6 +219,12 @@ class Store:
                 if row['status'] == 'recoverable_wait' and request.get('name') in ('wait_for_task_decision', 'wait_for_native_job'):
                     db.execute("UPDATE commands SET status='executing' WHERE run_id=? AND id=?", (ident, command_id))
                     return None
+                if row['status'] == 'recoverable_read':
+                    from .catalog import OPERATIONS
+                    operation = OPERATIONS.get(request.get('name'))
+                    if operation and operation.method == 'GET':
+                        db.execute("UPDATE commands SET status='executing' WHERE run_id=? AND id=?", (ident, command_id))
+                        return None
                 if row["status"] != "done":
                     raise Conflict("前の命令の結果が未確定です。再送せず履歴を確認してください")
                 return json.loads(row["result"])
@@ -239,4 +250,7 @@ class Store:
     def recover(self):
         # A crashed gateway cannot assume a remote session stopped or refund its reservation.
         with self.tx() as db:
-            db.execute("UPDATE runs SET status='reconciliation_required' WHERE status IN ('preparing','dispatching','running','stopping','restoring')")
+            for row in db.execute("SELECT id,generation FROM runs WHERE status IN ('preparing','dispatching','running','stopping','restoring')").fetchall():
+                db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                           (row['id'], 'gateway_recovery_fence', json.dumps({'previous_generation': row['generation'], 'generation': row['generation'] + 1}), now()))
+            db.execute("UPDATE runs SET generation=generation+1,status=CASE WHEN status='stopping' THEN 'stop_pending' ELSE 'reconciliation_required' END,updated=? WHERE status IN ('preparing','dispatching','running','stopping','restoring')", (now(),))

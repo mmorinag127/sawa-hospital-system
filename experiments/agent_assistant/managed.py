@@ -55,8 +55,9 @@ class Managed:
     async def _start(self, run):
         session_api = self.api()
         await self.sandbox.start(run)
-        definitions = [{"type": "custom", **definition} for definition in self.tools.definitions(run["domains"])]
-        self.store.update(run["id"], status="dispatching")
+        from .business_contracts import model_definitions
+        definitions = [{"type": "custom", **definition} for definition in model_definitions(self.tools, run)]
+        self.store.update(run["id"], expected_generation=run['generation'], status="dispatching")
         # Never give the model bash, filesystem, web, other MCPs or another account's tools.
         session = await session_api.create(
             agent={"type": "agent_with_overrides", "id": os.environ["CLAUDE_AGENT_ID"],
@@ -64,8 +65,24 @@ class Managed:
             environment_id=os.environ["CLAUDE_ENVIRONMENT_ID"],
             budget={"type": "limit", "max_list_cost": {"amount": str(run["cap"]), "currency": "USD"}},
             metadata={"sawa_run_id": run["id"]}, title="SAWA試用: "+run["instruction"][:80])
-        self.store.update(run["id"], session_id=session.id, status="running")
-        await self.follow(run["id"], {"type": "user.message", "content": [{"type": "text", "text": (TASKS[run["task_id"]]["instruction"]+"\n利用者の選択："+json.dumps(run.get("task_inputs",{}),ensure_ascii=False)+"\n添付原本："+json.dumps([e["payload"] for e in self.store.events(run["id"]) if e["kind"]=="source"],ensure_ascii=False)) if run.get("task_id") in TASKS else run["instruction"]}]})
+        try:
+            self.store.update(run["id"], expected_generation=run['generation'], session_id=session.id, status="running")
+        except Conflict:
+            self.store.event(run['id'], 'late_session_created', {'session_id': session.id, 'generation': run['generation']})
+            with self.store.tx() as db:
+                current = db.execute('SELECT session_id FROM runs WHERE id=?', (run['id'],)).fetchone()
+                if current['session_id'] is None:
+                    db.execute('UPDATE runs SET session_id=? WHERE id=?', (session.id, run['id']))
+            try:
+                settled = await self.stop_session(run['id'], session.id)
+                current = self.store.get(run['id'])
+                if current['session_id'] == session.id and current['status'] in ('stopped', 'rolled_back', 'stopping', 'stop_pending', 'rollback_stop_pending'):
+                    self.store.usage(run['id'], settled.usage.model_dump(mode='json'), terminal=True)
+            except Exception:
+                self.store.event(run['id'], 'late_session_stop_pending', {'session_id': session.id})
+            raise
+        from .business_contracts import preparation_instruction
+        await self.follow(run["id"], {"type": "user.message", "content": [{"type": "text", "text": preparation_instruction(self.tools, run)}]})
 
     async def follow(self, run_id, event):
         old = self.tasks.get(run_id)
@@ -110,12 +127,18 @@ class Managed:
                     if kind == "agent.custom_tool_use":
                         # Recorded-but-not-executed events can be recovered using their command receipt.
                         result = await call_local(self.mcp, self.tools, run_id, generation, event["name"], event["input"], event_id)
+                        current = self.store.get(run_id)
+                        if current['generation'] != generation or current['status'] in ('stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                            return
                         if result.get("waiting_input") or result.get("needs_operator_confirmation"):
+                            self.store.update(run_id, expected_generation=generation, status='waiting_input')
                             record_question_receipt(self.store, run_id, event['name'], result)
-                            self.store.update(run_id, status='waiting_input')
                             # Keep the provider's custom call pending until the human answers.
                             # Sending its result now would resume model work before that answer.
                             self.store.event(run_id, "operator_wait", {"command_id": event_id, "result": result})
+                            break
+                        business = getattr(self.tools, 'business', None)
+                        if business and await business.pause_model(run_id, event_id, result):
                             break
                         blocks = result.get("_content") or [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
                         await api.events.send(run["session_id"], events=[{"type": "user.custom_tool_result", "custom_tool_use_id": event_id, "content": blocks}])
@@ -128,11 +151,14 @@ class Managed:
                             continue
                         current = self.store.get(run_id)
                         if reason == "budget_reached":
-                            self.store.update(run_id, status="budget_reached")
-                            await self.sandbox.stop(run_id)
+                            self.store.update(run_id, expected_generation=generation, status="budget_reached")
+                            from .business_contracts import owned
+                            if not owned(current):
+                                await self.sandbox.stop(run_id)
                         elif current["status"] == "running":
-                            self.store.update(run_id, status="waiting_input")
+                            self.store.update(run_id, expected_generation=generation, status="waiting_input")
                             self.store.event(run_id, "notice", {"message": "応答が終了しました。業務完了証跡がないため完了扱いにしていません。"})
+                            self.store.event(run_id, 'business_model_idle', {'session_id': run['session_id'], 'generation': generation})
                         completed = self.store.get(run_id)["status"] == "completed"
                         if completed:
                             await api.archive(run["session_id"])
@@ -146,14 +172,20 @@ class Managed:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            current = self.store.get(run_id)
+            if current['generation'] != generation or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                return
             # Never persist provider exception bodies, which may contain headers or credentials.
             self.store.event(run_id, "error", {"message": "接続またはツール処理に失敗しました。再送せず結果照合が必要です。", "class": type(exc).__name__})
-            self.store.update(run_id, status="reconciliation_required")
+            self.store.update(run_id, expected_generation=generation, status="reconciliation_required")
+            from .business_contracts import owned
+            if owned(self.store.get(run_id)):
+                if getattr(self.tools, 'business', None):
+                    self.tools.business.kick(run_id)
+                return
             await self.sandbox.stop(run_id)
             # Stop billing work too; dropping a stream alone does not stop Claude.
             await self.stop(run_id)
-            if self.store.get(run_id)["status"] == "stopped":
-                self.store.update(run_id, status="reconciliation_required")
 
     async def refresh_usage(self, run_id, release=False):
         run = self.store.get(run_id)
@@ -165,6 +197,21 @@ class Managed:
         usage = session.usage.model_dump(mode="json") if session.usage is not None else {}
         self.store.usage(run_id, usage, terminal=release)
         return session
+
+    async def stop_session(self, run_id, session_id):
+        session = await self.api().retrieve(session_id)
+        if session.status not in ('idle', 'terminated'):
+            await self.api().events.send(session_id, events=[{'type': 'user.interrupt'}])
+        for _ in range(20):
+            session = await self.api().retrieve(session_id)
+            if session.status in ('idle', 'terminated'):
+                if session.status == 'idle':
+                    await self.api().archive(session_id)
+                usage = session.usage.model_dump(mode='json') if session.usage is not None else {}
+                self.store.usage(run_id, usage)
+                return session
+            await asyncio.sleep(.25)
+        raise Conflict('provider_stop_pending')
 
     async def stop(self, run_id):
         previous = self.store.get(run_id)
@@ -196,19 +243,8 @@ class Managed:
                 pass
         if run["session_id"]:
             try:
-                session = await self.api().retrieve(run["session_id"])
-                if session.status not in ("idle", "terminated"):
-                    await self.api().events.send(run["session_id"], events=[{"type": "user.interrupt"}])
-                for _ in range(20):
-                    session = await self.api().retrieve(run["session_id"])
-                    if session.status in ("idle", "terminated"):
-                        if session.status == "idle":
-                            await self.api().archive(run["session_id"])
-                        await self.refresh_usage(run_id, release=True)
-                        break
-                    await asyncio.sleep(.25)
-                else:
-                    raise Conflict("provider_stop_pending")
+                session = await self.stop_session(run_id, run['session_id'])
+                self.store.usage(run_id, session.usage.model_dump(mode='json'), terminal=True)
             except Exception:
                 self.store.update(run_id, status=pending_status)
                 self.store.event(run_id, "notice", {"message": "業務書込みは停止しました。Claude側の停止・料金確認は未完了で、予算予約を保持しています。"})
@@ -236,7 +272,7 @@ class Managed:
             await self.sandbox.start(run)
             if self.store.get(run_id)["generation"] != run["generation"] or self.store.get(run_id)["status"] != "waiting_input":
                 raise Conflict("依頼は停止または変更されました。回答を再開しません")
-            self.store.update(run_id, status="running")
+            self.store.update(run_id, expected_generation=run['generation'], status="running")
             events = self.store.events(run_id)
             last_reply = max((event["id"] for event in events if event["kind"] == "operator_reply"), default=0)
             questions = [event for event in events if event["id"] > last_reply and event["kind"] == "operator_wait"]
@@ -245,15 +281,23 @@ class Managed:
                 content = [{"type": "text", "text": json.dumps({"previous_result": questions[-1]["payload"]["result"], "operator_reply": message}, ensure_ascii=False)}]
             event = ({"type": "user.custom_tool_result", "custom_tool_use_id": questions[-1]["payload"]["command_id"], "content": content}
                      if questions else {"type": "user.message", "content": content})
+            from .business_contracts import owned
+            if owned(run):
+                self.tools.flow.questions.accept_reply(run, process_selection)
+                self.store.event(run_id, 'operator_reply', {'message': message, 'question_id': question_id, 'option': option})
             try:
                 await self.follow(run_id, event)
             except BaseException:
-                if self.store.get(run_id)["generation"] == run["generation"]:
-                    self.store.update(run_id, status="reconciliation_required")
-                await self.sandbox.stop(run_id)
+                try:
+                    self.store.update(run_id, expected_generation=run['generation'], status="reconciliation_required")
+                except Conflict:
+                    pass
+                if not owned(run):
+                    await self.sandbox.stop(run_id)
                 raise
             current = self.store.get(run_id)
             if current["generation"] != run["generation"] or current["status"] != "running":
                 raise Conflict("依頼は停止または変更されました。回答を採用しません")
-            self.tools.flow.questions.accept_reply(run, process_selection)
-            self.store.event(run_id, "operator_reply", {"message": message, "question_id": question_id, "option": option})
+            if not owned(run):
+                self.tools.flow.questions.accept_reply(run, process_selection)
+                self.store.event(run_id, "operator_reply", {"message": message, "question_id": question_id, "option": option})

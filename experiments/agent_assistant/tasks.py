@@ -101,10 +101,11 @@ readyの各FAXはprepare_fax_reviewにfax_idだけ渡す。返されたoriginal.
 0件でもcomplete_fax_workで現在の0件を再取得・照合する。モデルの文章だけでは完了にしない。'''
 
 def public_tasks():
+    from .business_contracts import CONTRACTS
     hidden = {'instruction','writes','terminal','exports','report','hidden'}
     from datetime import datetime
     from zoneinfo import ZoneInfo
     today=datetime.now(ZoneInfo("Asia/Tokyo"))
     current=today.strftime("%Y-%m")
     following=f"{today.year+(today.month==12):04}-{today.month%12+1:02}"
-    return [{**{key:value for key,value in entry.items() if key not in hidden},"description":TASK_DESCRIPTIONS.get(entry["id"],entry["description"]),"default_month":following if entry["id"]=="shift_next_month" else current} for entry in TASKS.values() if not entry.get("hidden")]
+    return [{**{key:value for key,value in entry.items() if key not in hidden},"requires_agent":CONTRACTS[entry['id']].prepare=='agent',"description":TASK_DESCRIPTIONS.get(entry["id"],entry["description"]),"default_month":following if entry["id"]=="shift_next_month" else current} for entry in TASKS.values() if not entry.get("hidden")]

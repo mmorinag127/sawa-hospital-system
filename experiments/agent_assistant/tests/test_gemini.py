@@ -124,7 +124,7 @@ def test_explicit_request_rejection_does_not_leave_an_unknown_dispatch(tmp_path,
         await agent.start(run);await agent.tasks[run['id']]
         assert len(calls)==1 and not agent.unsettled(run['id'])
         assert store.get(run['id'])['reserved']==0
-        assert store.get(run['id'])['status']=='reconciliation_required'
+        assert store.get(run['id'])['status']=='stopped'
         await agent.client.aclose()
     asyncio.run(scenario())
 

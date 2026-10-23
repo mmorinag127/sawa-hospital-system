@@ -54,10 +54,10 @@ def install(native):
 
 async def reply(tools, run, result, selection):
     current = tools.store.get(run['id'])
-    check_answer(tools.store.events(run['id']), selection, result['command_id'], selection if result.get('options') else None)
+    check_answer(tools.store.events(run['id']), selection, result['command_id'], selection if selection in result.get('options',[]) else None)
     selected = await tools.flow.questions.validate_reply(current, selection, result['command_id'])
     tools.flow.questions.accept_reply(current, selected)
-    tools.store.event(run['id'], 'operator_reply', {'message': selection, 'question_id': result['command_id'], 'option': selection})
+    tools.store.event(run['id'], 'operator_reply', {'message': selection, 'question_id': result['command_id'], 'option': selection if selection in result.get('options',[]) else None})
     tools.store.update(run['id'], status='running')
 
 

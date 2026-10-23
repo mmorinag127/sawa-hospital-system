@@ -47,6 +47,10 @@ class TargetRequest(BaseModel):
     inputs: dict = Field(default_factory=dict)
 
 
+class TargetLookupRequest(TargetRequest):
+    request_key: str = Field(min_length=8, max_length=128, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
 class FaxDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     review_id: str
@@ -87,6 +91,11 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     tools = Tools(store, sandbox)
     mcp = build_mcp(tools)
     managed = Providers(store, sandbox, tools, mcp, config, client=managed_client, gemini_client=gemini_client)
+    from .business_workflow import BusinessWorkflow
+    from .business_contracts import CONTRACTS, owned
+    business = BusinessWorkflow(store, tools, managed)
+    from .target_lookups import TargetLookups
+    lookups = TargetLookups(store, tools)
     secret = os.environ.get("SAWA_TRIAL_WEB_TOKEN") or secrets.token_urlsafe(32)
     owner = os.environ.get("SAWA_TRIAL_OPERATOR_ACCOUNT") or "local-trial-operator"
     controls = {}
@@ -119,6 +128,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     async def lifespan(app):
         async with mcp.session_manager.run():
             yield
+        await business.close()
+        await lookups.close()
         for task in managed.tasks.values():
             task.cancel()
         await asyncio.gather(*managed.tasks.values(), return_exceptions=True)
@@ -132,6 +143,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     app = FastAPI(title="SAWA 業務アシスタント試用", lifespan=lifespan)
     app.state.store, app.state.sandbox, app.state.tools = store, sandbox, tools
     app.state.managed, app.state.token = managed, secret
+    app.state.business = business
 
     @app.middleware("http")
     async def local_auth(request, call_next):
@@ -154,7 +166,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 return JSONResponse({"detail": "Run required"}, status_code=403)
             request.state.trial_binding = (ident, run["generation"])
         response = await call_next(request)
-        if sandbox.durable_store is not None and request.method not in ("GET", "HEAD", "OPTIONS"):
+        if sandbox.durable_store is not None and request.method not in ("GET", "HEAD", "OPTIONS") and '/target-lookups' not in request.url.path:
             for run in store.listing(owner):
                 store.persist_files(run["id"])
         return response
@@ -194,10 +206,29 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
 
     @app.post("/tasks/{task_id}/targets")
     async def task_targets(task_id: str, payload: TargetRequest, request: Request):
-        if task_id not in TASKS or task_id=="hospital_pending_faxes":
+        if task_id not in TASKS:
             raise ValueError("対象選択を行う作業項目を指定してください")
         await authorize(request.headers.get("authorization", ""), [TASKS[task_id]["domain"]])
         return await tools.flow.options(task_id, payload.inputs, owner, request.headers.get("authorization", ""))
+
+    @app.post('/tasks/{task_id}/target-lookups', status_code=202)
+    async def start_target_lookup(task_id: str, payload: TargetLookupRequest, request: Request):
+        if task_id not in CONTRACTS:
+            raise ValueError('対象選択を行う作業を選択してください')
+        authorization = request.headers.get('authorization', '')
+        await authorize(authorization, [TASKS[task_id]['domain']])
+        return lookups.create(payload.request_key, owner, task_id, payload.inputs, authorization)
+
+    @app.get('/target-lookups/{ident}')
+    async def target_lookup(ident: str, request: Request):
+        authorization = request.headers.get('authorization', '')
+        # The lookup row is owner-bound. Revalidate its exact domain on every poll.
+        with store.read() as db:
+            row = db.execute('SELECT task_id FROM target_lookups WHERE id=? AND owner=?', (ident, owner)).fetchone()
+        if not row:
+            raise KeyError(ident)
+        await authorize(authorization, [TASKS[row['task_id']]['domain']])
+        return lookups.get(ident, owner, authorization)
 
     @app.get("/budget")
     def budget():
@@ -215,15 +246,21 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return store.budget()
 
     @app.get("/runs")
-    def runs():
-        return store.listing(owner)
+    async def runs(request: Request):
+        listing = store.listing(owner)
+        for run in listing:
+            if owned(run):
+                business.kick(run['id'], request.headers.get('authorization', ''))
+        return [{**run, 'business': business.projection(run, tools.flow.review(run['id']), tools.faxes.items(run['id']) if tools.faxes.active(run) else [])} for run in listing]
 
     @app.post("/runs", status_code=201)
     async def create_run(payload: NewRun, request: Request):
         injected = gemini_client if store.provider() == 'gemini' else managed_client
-        if managed.missing() and injected is None:
-            raise Conflict(LABELS[store.provider()] + "の接続が未設定です。管理者が接続設定を確認してください")
         task = TASKS.get(payload.task_id) if payload.task_id else None
+        if payload.task_id and payload.task_id not in CONTRACTS:
+            raise ValueError('画面に表示されている業務を選択してください')
+        if managed.missing() and injected is None and (not task or CONTRACTS[payload.task_id].prepare == 'agent'):
+            raise Conflict("この業務の接続設定は管理者が確認しています。選択した内容は変更していません")
         if payload.task_id and (not task or payload.instruction or payload.domains):
             raise ValueError("定型業務は作業項目だけを指定してください")
         domains = [task["domain"]] if task else payload.domains
@@ -239,16 +276,21 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run, fresh = store.create(owner, payload.request_key, instruction, domains, payload.cap_cents if payload.cap_cents is not None else config.get("run_cap_cents", 100), task_id=payload.task_id, task_inputs=task_inputs, provider=store.provider())
         if fresh:
             tools.authorizations[run["id"]] = request.headers.get("authorization", "")
+            if task:
+                business.initialize(run)
             try:
                 sandbox.prepare(run)
             except Exception as exc:
-                store.update(run["id"], status="failed", reserved=0)
+                store.update(run["id"], expected_generation=run['generation'], status="failed", reserved=0)
                 store.event(run["id"], "error", {"message": str(exc) if isinstance(exc, Conflict) else "試用データの準備に失敗しました"})
                 return store.get(run["id"], owner)
             if payload.task_id == "lunch_import":
-                store.update(run["id"], status="waiting_input")
+                store.update(run["id"], expected_generation=run['generation'], status="waiting_input")
                 store.event(run["id"], "notice", {"message":"選択した学校・対象月と一致する原本を添付してください。添付が終わるまでエージェントは開始しません。"})
                 return store.get(run["id"],owner)
+            if task:
+                business.kick(run['id'])
+                return store.get(run['id'], owner)
             # Remote create/send must not be retried after an unknown outcome.
             try:
                 await managed.start(run)
@@ -258,15 +300,25 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 raise
             except Exception as exc:
                 await sandbox.stop(run["id"])
-                if store.get(run["id"])["status"] == "preparing":
-                    store.update(run["id"], status="failed", reserved=0)
+                current = store.get(run['id'])
+                if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
+                    return current
+                if current["status"] == "preparing":
+                    store.update(run["id"], expected_generation=run['generation'], status="failed", reserved=0)
                 else:
-                    store.update(run["id"], status="reconciliation_required")
+                    store.update(run["id"], expected_generation=run['generation'], status="reconciliation_required")
                 store.event(run["id"], "error", {"message": LABELS[run["provider"]]+"開始の結果が未確定です。自動再送と予算返却を停止しています。", "class": type(exc).__name__})
         return store.get(run["id"], owner)
 
     @app.get("/runs/{ident}")
-    def run_detail(ident: str):
+    async def run_detail(ident: str, request: Request):
+        run = store.get(ident, owner)
+        if not owned(run) and run.get('task_id') in CONTRACTS and run['status'] in ('running', 'waiting_input', 'reconciliation_required'):
+            await authorize(request.headers.get('authorization', ''), run['domains'])
+            business.adopt(run)
+            run = store.get(ident, owner)
+        if owned(run):
+            business.kick(ident, request.headers.get('authorization', ''))
         with store.snapshot():
             run = store.get(ident, owner)
             with store.read() as db:
@@ -278,7 +330,10 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             reference = next((event['payload'] for event in events if event['kind']=='shift_reference'),None)
             shift_review = build_shift_review(review,reference) if review and (run.get('task_id') or '').startswith('shift_') else None
             lunch_review = build_lunch_review(review,run.get('task_inputs',{}).get('process_questions')) if run.get('task_id')=='lunch_daily_bundle' else None
-            return {**run, "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if run["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(run), "task_review": review, "fax_items": tools.faxes.items(ident) if tools.faxes.active(run) and run["status"] not in ("rolled_back", "rollback_stop_pending") else []}
+            faxes = tools.faxes.items(ident) if tools.faxes.active(run) and run["status"] not in ("rolled_back", "rollback_stop_pending") else []
+            business_events = [event for event in events if event['kind'] in ('operator_reply', 'task_decision', 'fax_decision', 'task_review', 'fax_review') or event['kind'] == 'tool_result' and event['payload'].get('result', {}).get('waiting_input')]
+            fax_labels = {str(item['fax_id']): item['snapshot'].get('name') or '対象のFAX' for item in faxes}
+            return {**run, 'business': business.projection(run, review, faxes), 'business_messages': conversation(business_events, fax_labels) if owned(run) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if run["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(run), "task_review": review, "fax_items": faxes}
 
     @app.post("/runs/{ident}/faxes/{fax_id}/decision")
     async def decide_fax(ident: str, fax_id: str, payload: FaxDecision, request: Request):
@@ -286,7 +341,15 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get("authorization", ""), run["domains"])
         tools.authorizations[ident] = request.headers.get("authorization", "")
         async with tools.lock(ident):
-            return await tools.faxes.decide(store.get(ident, owner), fax_id, payload.review_id, payload.approve, payload.message)
+            item = next((item for item in tools.faxes.items(ident) if item['fax_id'] == fax_id), None)
+            decision = {'review_id': payload.review_id, 'approve': payload.approve, 'message': payload.message}
+            if owned(run) and item and item.get('decision') and all(item['decision'].get(key) == value for key, value in decision.items()):
+                result = {'ok': True, 'replayed': True}
+            else:
+                result = await tools.faxes.decide(store.get(ident, owner), fax_id, payload.review_id, payload.approve, payload.message)
+        if owned(run):
+            business.decision_ready(ident, payload.approve)
+        return result
 
     @app.post("/runs/{ident}/decision")
     async def task_decision(ident: str, payload: FaxDecision, request: Request):
@@ -294,12 +357,35 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get("authorization", ""),run["domains"])
         tools.authorizations[ident]=request.headers.get("authorization", "")
         async with tools.lock(ident):
-            return await tools.flow.decide(store.get(ident,owner),payload.review_id,payload.approve,payload.message)
+            review = tools.flow.review(ident)
+            if review and review['id'] == payload.review_id and review.get('decision') == {'approve': payload.approve, 'message': payload.message}:
+                result = {'ok': True, 'replayed': True}
+            else:
+                result = await tools.flow.decide(store.get(ident,owner),payload.review_id,payload.approve,payload.message)
+        if owned(run):
+            business.decision_ready(ident, payload.approve)
+        return result
 
     @app.post("/runs/{ident}/reply")
     async def reply(ident: str, payload: Reply, request: Request):
         run=store.get(ident, owner)
         tools.authorizations[ident] = request.headers.get("authorization", "")
+        await authorize(request.headers.get('authorization', ''), run['domains'])
+        if owned(run):
+            replies = [event['payload'] for event in store.events(ident) if event['kind'] == 'operator_reply']
+            if payload.question_id and any(item.get('question_id') == payload.question_id and item.get('message') == payload.message and item.get('option') == payload.option for item in replies):
+                return store.get(ident, owner)
+            if business.shift_questions.answer(run, payload.message, payload.question_id, payload.option) or business.answer_layout(run, payload.message, payload.question_id, payload.option):
+                return store.get(ident, owner)
+            if run['task_id'] == 'lunch_import' and business.state(ident)['phase'] == 'source':
+                if not any(event['kind'] == 'source' for event in store.events(ident)):
+                    raise Conflict('選択した学校・月と一致する原本を添付してください')
+                business.source_ready(run)
+                return store.get(ident, owner)
+            await managed.reply(ident, payload.message, payload.question_id, payload.option)
+            business.checkpoint(ident, phase='analysing')
+            business.kick(ident)
+            return store.get(ident, owner)
         if run.get("task_id")=="lunch_import" and not run["session_id"]:
             await authorize(request.headers.get("authorization", ""),run["domains"])
             if run["status"] != "waiting_input" or not any(e["kind"]=="source" for e in store.events(ident)):
@@ -307,14 +393,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             async with control_lock(ident):
                 if store.get(ident)["status"] != "waiting_input" or store.get(ident)["session_id"]:
                     raise Conflict("既に開始済み、または停止されています")
-                store.update(ident,status="preparing")
+                store.update(ident,expected_generation=run['generation'],status="preparing")
             try:
                 await managed.start(store.get(ident))
             except asyncio.CancelledError:
                 if store.get(ident)["status"] not in ("stopping","stopped","rolled_back","stop_pending","rollback_stop_pending"): raise
             except Exception:
                 await sandbox.stop(ident)
-                store.update(ident,status="reconciliation_required")
+                store.update(ident,expected_generation=run['generation'],status="reconciliation_required")
                 store.event(ident,"error",{"message":"開始結果を照合してください。自動再送は行いません。"})
                 raise
             return store.get(ident,owner)
@@ -328,6 +414,16 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         async with control_lock(ident):
             tools.authorizations[ident] = request.headers.get('authorization', '')
             return await managed.resume(ident)
+
+    @app.post('/runs/{ident}/reconcile-business')
+    async def reconcile_business(ident: str, request: Request):
+        run = store.get(ident, owner)
+        await authorize(request.headers.get('authorization', ''), run['domains'])
+        if not owned(run):
+            raise Conflict('共通業務進行を利用している依頼ではありません')
+        business.checkpoint(ident, attempts=0, next_attempt=0)
+        business.kick(ident, request.headers.get('authorization', ''))
+        return store.get(ident, owner)
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):

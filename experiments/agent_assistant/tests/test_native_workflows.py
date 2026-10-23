@@ -53,6 +53,24 @@ def setup(root,domain,url):
     return store,sandbox,tools
 
 
+def test_real_registered_day_suggestions_do_not_need_calendar_input(tmp_path):
+    with portal() as url:
+        store, sandbox, tools = setup(tmp_path, 'school-lunch', url)
+        async def scenario():
+            selection = await tools.flow.options('lunch_daily_bundle', {'facility_id': 1}, 'native-operator', 'Bearer synthetic-native-operator')
+            assert selection['work_days']
+            proposal = selection['work_days'][0]
+            targets = [item for item in selection['choices'] if item['data']['service_date'] == proposal['service_date']]
+            assert len(targets) == proposal['menu_count']
+            assert sorted(item['data']['name'] for item in targets) == sorted(proposal['menu_names'])
+            context = tools.flow.selection('lunch_daily_bundle', 'native-operator', selection['selection_id'], [item['key'] for item in targets])
+            assert context['inputs']['service_date'] == proposal['service_date']
+            assert context['inputs']['month'] == proposal['service_date'][:7]
+            assert all(item['data']['facility']['id'] == 1 for item in context['targets'])
+            assert not sandbox.children
+        asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('domain',['shift','school-lunch'])
 def test_packaged_api_auth_and_extensions_with_latest_contracts(tmp_path,domain):
     with portal() as url:
@@ -247,4 +265,78 @@ def test_real_lunch_questions_save_approval_restart_and_three_official_outputs(t
                 assert len(store.get(ident)['task_inputs']['process_questions']['documents'][0]['answers'])==3
             finally:
                 await sandbox.stop(ident);await client.aclose()
+        asyncio.run(scenario())
+
+
+def test_real_shift_business_condition_question_parse_confirm_resolve_and_output(tmp_path,monkeypatch):
+    """Actual packaged rule parser/apply/solver/export; synthetic owned DB and no model."""
+    from experiments.agent_assistant.business_workflow import BusinessWorkflow
+    from experiments.agent_assistant.conversation import pending_question
+    from experiments.agent_assistant.tests.test_business_workflow import NoModel
+    monkeypatch.setenv('SAWA_TRIAL_OPERATOR_ACCOUNT','native-operator')
+    with portal() as url:
+        store,sandbox,tools=setup(tmp_path,'shift',url)
+        async def scenario():
+            selection=await tools.flow.options('shift_next_month',{'month':'2026-08'},'native-operator','Bearer synthetic-native-operator')
+            context=tools.flow.selection('shift_next_month','native-operator',selection['selection_id'],['2026-08'])
+            run,_=store.create('native-operator','native-shift-question','synthetic',['shift'],100,task_id='shift_next_month',task_inputs=context)
+            sandbox.prepare(run);tools.authorizations[run['id']]='Bearer synthetic-native-operator'
+            engine=BusinessWorkflow(store,tools,NoModel());engine.kick=lambda *a,**kw:None
+            engine.initialize(run);store.update(run['id'],status='running');run=store.get(run['id'])
+            try:
+                await sandbox.start(run)
+                await engine.shift_questions.ask(run,'native-description','変更したい勤務条件を教えてください。',[],kind='text')
+                question=pending_question(store.events(run['id']))
+                assert engine.shift_questions.answer(store.get(run['id']),'休日数を2日にする',question['question_id'],None)
+                assert await engine.advance(run['id']) is False
+                question=pending_question(store.events(run['id']))
+                assert '2日' in question['text'] and 'この変更を反映して作り直す' in question['options']
+                assert not any(entry['request']['name']=='shift_apply_rules' for entry in tools.flow.commands(run['id']))
+                assert engine.shift_questions.answer(store.get(run['id']),'この変更を反映して作り直す',question['question_id'],'この変更を反映して作り直す')
+                assert await engine.advance(run['id']) is True
+                assert (await tools.flow.read(store.get(run['id']),'shift_get_settings'))['monthly_holiday_exact_days']==2
+                assert await engine.advance(run['id']) is False
+                # The owned fixture has max_consecutive_work_days=6: two days
+                # off in August cannot satisfy it. Ask again, never fake a plan.
+                assert tools.flow.review(run['id']) is None
+                question=pending_question(store.events(run['id']))
+                assert question and '変更したい勤務条件を伝える' in question['options']
+                assert store.get(run['id'])['status']=='waiting_input'
+                assert engine.shift_questions.answer(store.get(run['id']),'変更したい勤務条件を伝える',question['question_id'],'変更したい勤務条件を伝える')
+                assert await engine.advance(run['id']) is False
+                question=pending_question(store.events(run['id']))
+                assert engine.shift_questions.answer(store.get(run['id']),'休日数を9日にする',question['question_id'],None)
+                assert await engine.advance(run['id']) is False
+                question=pending_question(store.events(run['id']))
+                assert '9日' in question['text']
+                assert engine.shift_questions.answer(store.get(run['id']),'この変更を反映して作り直す',question['question_id'],'この変更を反映して作り直す')
+                assert await engine.advance(run['id']) is True
+                assert (await tools.flow.read(store.get(run['id']),'shift_get_settings'))['monthly_holiday_exact_days']==9
+                assert await engine.advance(run['id']) is False
+                # Four staff and exactly three required each day imply 31 total
+                # off-days: a uniform exact count cannot fit this fixture. The
+                # user explicitly removes that rule; no solver rule is weakened
+                # automatically and no fabricated schedule is accepted.
+                assert tools.flow.review(run['id']) is None
+                question=pending_question(store.events(run['id']))
+                assert '休日数を全員同じにする指定を外す' in question['options']
+                assert engine.shift_questions.answer(store.get(run['id']),'休日数を全員同じにする指定を外す',question['question_id'],'休日数を全員同じにする指定を外す')
+                assert await engine.advance(run['id']) is False
+                question=pending_question(store.events(run['id']))
+                assert engine.shift_questions.answer(store.get(run['id']),'この変更を反映して作り直す',question['question_id'],'この変更を反映して作り直す')
+                assert await engine.advance(run['id']) is True
+                settings=await tools.flow.read(store.get(run['id']),'shift_get_settings')
+                assert settings['monthly_holiday_exact_days'] is None
+                assert settings['max_consecutive_work_days']==6
+                assert await engine.advance(run['id']) is False
+                review=tools.flow.review(run['id']);assert review and review['state']=='awaiting_approval'
+                await tools.flow.decide(store.get(run['id']),review['id'],True,'合成試験の確認')
+                assert await engine.advance(run['id']) is False
+                assert store.get(run['id'])['status']=='completed'
+                assert not engine.providers.started
+                with store.read() as db:
+                    artifacts=db.execute('SELECT path FROM artifacts WHERE run_id=?',(run['id'],)).fetchall()
+                assert artifacts and all(Path(item['path']).is_file() for item in artifacts)
+            finally:
+                await engine.close();await sandbox.stop(run['id'])
         asyncio.run(scenario())

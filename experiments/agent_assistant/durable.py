@@ -7,6 +7,7 @@ A replacement instance fences its predecessor and requires explicit recovery.
 """
 from contextlib import contextmanager, closing
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import zlib
@@ -220,7 +221,10 @@ class PostgresStore(Store):
     def recover(self):
         with self.tx() as db:
             # A model or native job may still be settling. Preserve costs/reservations.
-            db.execute("UPDATE runs SET generation=generation+1,status=CASE WHEN status IN ('stop_pending','rollback_stop_pending') THEN status ELSE 'reconciliation_required' END,updated=? WHERE status NOT IN ('rolled_back','completed','stopped','failed','budget_reached')",(now(),))
+            for row in db.execute("SELECT id,generation FROM runs WHERE status NOT IN ('rolled_back','completed','stopped','failed','budget_reached')").fetchall():
+                db.execute("INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)",
+                           (row['id'], 'gateway_recovery_fence', json.dumps({'previous_generation': row['generation'], 'generation': row['generation'] + 1}), now()))
+            db.execute("UPDATE runs SET generation=generation+1,status=CASE WHEN status='stopping' THEN 'stop_pending' WHEN status IN ('stop_pending','rollback_stop_pending') THEN status ELSE 'reconciliation_required' END,updated=? WHERE status NOT IN ('rolled_back','completed','stopped','failed','budget_reached')",(now(),))
 
 
 def cloud_store(root):

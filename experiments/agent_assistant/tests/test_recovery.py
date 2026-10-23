@@ -54,6 +54,37 @@ def test_restart_restores_same_question_without_model_post_or_native_write(tmp_p
     asyncio.run(scenario())
 
 
+def test_saved_business_answer_is_resumed_after_history_proves_no_remote_answer(tmp_path, monkeypatch):
+    args = {'question': '登録内容で作成しますか？', 'options': ['登録内容で進める']}
+    response = interaction('turn', [('question', 'ask_operator', args)])
+    recovery, agent, store, _, _, run, requests = setup(tmp_path, monkeypatch, response)
+    context = {'business_workflow': {'version': 1, 'phase': 'checking'}}
+    with store.tx() as db:
+        import json
+        db.execute("UPDATE runs SET task_id='shift_next_month',task_inputs=? WHERE id=?", (json.dumps(context), run['id']))
+    command = command_identity('turn', 'question')
+    store.command(run['id'], command, {'name': 'ask_operator', 'arguments': args})
+    result = {'waiting_input': True, 'question': args['question'], 'options': args['options'], 'command_id': command}
+    store.finish_command(run['id'], command, result)
+    store.event(run['id'], 'operator_wait', {'command_id': command, 'result': result})
+    store.event(run['id'], 'operator_reply', {'question_id': command, 'message': '登録内容で進める', 'option': '登録内容で進める'})
+    agent.checkpoint(run['id'], {'interaction': 'turn', 'calls': response['steps'], 'results': [], 'index': 0, 'pending': command})
+    sent = []
+    async def follow(ident, event):
+        sent.append(event)
+    agent.follow = follow
+    async def scenario():
+        recovered = await recovery.resume(run['id'])
+        assert recovered['status'] == 'running'
+        assert requests == ['GET']
+        assert len(sent) == 1 and sent[0]['custom_tool_use_id'] == command
+        assert '登録内容で進める' in sent[0]['content'][0]['text']
+        assert len([event for event in store.events(run['id']) if event['kind'] == 'operator_reply']) == 1
+        assert pending_question(store.events(run['id'])) is None
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('failure', ['unknown_dispatch', 'unfinished_mutation', 'stopped', 'missing_copy', 'authorization'])
 def test_restart_never_replays_unknown_mutations_or_bypasses_stop(tmp_path, monkeypatch, failure):
     recovery, agent, store, sandbox, tools, run, requests = setup(tmp_path, monkeypatch, interaction('turn'))

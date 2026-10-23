@@ -101,6 +101,15 @@ class Tools:
                 self.sandbox.durable_store.persist_files(run_id)
 
     async def _execute(self, run_id, generation, name, raw, command_id):
+        from .business_contracts import require_server
+        require_server(self.store.get(run_id), name)
+        from .business_contracts import owned
+        operation = OPERATIONS.get(name)
+        if owned(self.store.get(run_id)) and operation and operation.method != 'GET':
+            with self.store.read() as db:
+                pending = [json.loads(row['request']) for row in db.execute("SELECT request FROM commands WHERE run_id=? AND status NOT IN ('done','recoverable_wait')", (run_id,))]
+            if any(OPERATIONS.get(item['name']) and OPERATIONS[item['name']].method != 'GET' for item in pending):
+                raise Conflict('保存結果を照合中です。未確定の業務更新は再実行しません')
         if name in ('prepare_shift_review','complete_shift_work','prepare_fax_review','complete_fax_work'):
             from .workflow_completion import WorkflowCompletion, OperatorWait
             workflow = WorkflowCompletion(self)
@@ -165,7 +174,7 @@ class Tools:
                     except Conflict as exc:
                         if self.store.get(run_id)["generation"] != generation:
                             raise Conflict("依頼は停止されました")
-                        self.store.update(run_id, status="waiting_input")
+                        self.store.update(run_id, expected_generation=generation, status="waiting_input")
                         result = {"ok": False, "needs_operator_confirmation": True, "question": str(exc), "command_id": command_id}
                         self.store.finish_command(run_id, command_id, result)
                         self.store.event(run_id, "tool_result", {"tool": name, "result": result})
@@ -178,12 +187,17 @@ class Tools:
                     from .tool_projection import read
                     result = read(self,run,raw)
                 elif name == "ask_operator":
+                    from .business_contracts import owned
+                    if owned(run):
+                        text = json.dumps(raw, ensure_ascii=False)
+                        if re.search(r'(?:[a-z]+_(?:id|revision|version)|If-Match|APIキー|接続設定|停止を再確認|照合して再開|予算上限|（ID:)', text, re.IGNORECASE):
+                            raise ValueError('内部操作・ID・版・接続設定を利用者へ質問できません。原本や登録済みデータから必要な業務情報だけを質問してください')
                     result = question_result(raw, command_id)
-                    self.store.update(run_id, status="waiting_input")
+                    self.store.update(run_id, expected_generation=generation, status="waiting_input")
                 elif name == "ask_lunch_process_question":
                     if set(raw) - {"restart"} or ("restart" in raw and type(raw["restart"]) is not bool): raise ValueError("再質問指定が不正です")
                     result = await self.flow.questions.ask(run, command_id, raw.get("restart", False))
-                    if result.get("waiting_input"): self.store.update(run_id, status="waiting_input")
+                    if result.get("waiting_input"): self.store.update(run_id, expected_generation=generation, status="waiting_input")
                 elif name == "read_artifact_page":
                     result = self.read_page(run_id, raw)
                 elif name == "describe_operation":
@@ -216,7 +230,7 @@ class Tools:
                     checks = await self.verify_hospital_outputs(run, raw.get("artifact_ids", []))
                     result = self.finish(run_id, raw, command_id, hospital_checks=checks, expected_generation=generation)
                 else:
-                    result = await self.native(run, name, Arguments.model_validate(raw.get("parameters", {})))
+                    result = await self.native(run, name, Arguments.model_validate(raw.get("parameters", {})), command_id=command_id)
                 if name=='lunch_save_price_source' and run.get('task_id')=='lunch_daily_bundle' and result.get('ok'):
                     draft_id=result.get('data',{}).get('draft_id')
                     if not isinstance(draft_id,str) or not draft_id: raise Conflict('保存した実施価格のIDを照合できません')
@@ -281,7 +295,7 @@ class Tools:
                     try: await self.authorization_validator(run)
                     except Conflict as exc:
                         if self.store.get(run_id)["generation"] != generation: raise Conflict("依頼は停止されました")
-                        self.store.update(run_id,status="waiting_input")
+                        self.store.update(run_id,expected_generation=generation,status="waiting_input")
                         result={"ok":False,"needs_operator_confirmation":True,"question":str(exc),"command_id":command_id}
                         self.store.finish_command(run_id,command_id,result)
                         return result
@@ -330,7 +344,7 @@ class Tools:
                     except Conflict as exc:
                         if self.store.get(run_id)["generation"] != generation:
                             raise Conflict("依頼は停止されました")
-                        self.store.update(run_id, status="waiting_input")
+                        self.store.update(run_id, expected_generation=generation, status="waiting_input")
                         result = {"ok": False, "needs_operator_confirmation": True, "question": str(exc), "command_id": command_id}
                         self.store.finish_command(run_id, command_id, result)
                         return result
@@ -409,7 +423,7 @@ class Tools:
         return {"ok": True, "operation": args["operation"], "path": operation.path, "wrapper_parameters": wrapper,
                 "method": operation.method, "schema": schema, "components": {"schemas": components}}
 
-    async def native(self, run, name, args):
+    async def native(self, run, name, args, *, command_id=None):
         op = OPERATIONS.get(name)
         if op is None or op.domain not in run["domains"]:
             raise ValueError("許可されていない業務操作です")
@@ -459,15 +473,39 @@ class Tools:
             authorization=self.authorizations.get(run["id"]), files=files,
             **({"revision": args.expected_revision} if op.versioned else {}))
         if not response.is_success:
+            from .business_contracts import owned
+            if owned(run):
+                if response.status_code >= 500 and op.method != 'GET':
+                    # The server might have committed before sending this response.
+                    # Keep the command pending so no model or retry can repeat it.
+                    raise RuntimeError('業務更新の応答が未確定です')
+                return {'ok': False, 'status': response.status_code, 'detail': response.text[:12000],
+                        'input_validation_failed': response.status_code in (400, 422),
+                        'next_step': '登録済みの内容と入力形式を確認する。業務上の不足だけを具体的な選択肢で質問する。接続・権限・競合の復旧操作を利用者に求めない。'}
             known_price_format_error=(name=='lunch_get_price_result' and response.status_code==400
                 and 'must not define both tax-included and tax-excluded prices' in response.text)
             if response.status_code == 422 or known_price_format_error:
                 return {"ok":False,"status":response.status_code,"detail":response.text[:12000],
                         "input_validation_failed":True,"next_step":"describe_operationで現行の入力形式を確認する。利用者の選択・確認済み回答だけで修正し、不足する業務情報はask_operatorで質問する。競合や正本を変更して回避しない。"}
-            self.store.update(run["id"], status="waiting_input")
+            self.store.update(run["id"], expected_generation=run['generation'], status="waiting_input")
             return {"ok": False, "status": response.status_code, "detail": response.text[:12000],
                     "needs_operator_confirmation": True,
                     "question": "業務APIが処理を拒否しました。履歴の理由を確認し、対象・入力・設定の修正内容を回答してください。競合を自動上書きしません。"}
+        from .business_contracts import owned
+        if owned(run) and op.method != "GET" and command_id:
+            with self.store.read() as db:
+                request=db.execute('SELECT request FROM commands WHERE run_id=? AND id=?',(run['id'],command_id)).fetchone()
+            if not request or 'application/json' not in response.headers.get('content-type',''):
+                raise Conflict('業務更新の保存結果を照合できません')
+            # CloudStore commits the working-copy snapshot and ledger together.
+            # Keep the response before any projection/recheck that could disconnect.
+            self.store.event(run['id'],'native_response_receipt',{'command_id':command_id,'generation':run['generation'],
+                'name':name,'request_sha256':hashlib.sha256(request['request'].encode()).hexdigest(),
+                'parameters':args.model_dump(mode='json'),'status':response.status_code,'data':response.json()})
+        return await self.native_result(run,name,args,response)
+
+    async def native_result(self,run,name,args,response):
+        op=OPERATIONS[name]
         if op.method != "GET":
             await self.flow.after(run, name, args, response.json() if "application/json" in response.headers.get("content-type", "") else {})
             await self.faxes.after_write(run, name, args, response.json() if "application/json" in response.headers.get("content-type", "") else {})
@@ -612,7 +650,7 @@ class Tools:
         if required:
             self.store.event(run_id, "hospital_output_validation", {"artifacts": hospital_checks})
         self.store.event(run_id, "completion_evidence", args)
-        self.store.update(run_id, status="completed")
+        self.store.update(run_id, expected_generation=run['generation'], status="completed")
         return {"ok": True, "summary": args["summary"], "scope": "isolated_trial_only"}
 
     @staticmethod
