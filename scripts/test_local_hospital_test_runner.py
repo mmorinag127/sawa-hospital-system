@@ -18,6 +18,23 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class ReceiptContractTest(unittest.TestCase):
+    def test_agent_preflight_requires_each_owned_environment_without_starting_tests(self):
+        commands = {item['name']: item['command'] for item in json.loads(RUNNER.MANIFEST.read_text())['commands']}
+        command = commands['agent-assistant-tests']
+        required = ('SAWA_AGENT_TEST_POSTGRES_DSN', 'SAWA_AGENT_GATEWAY_PYTHON',
+                    'SAWA_AGENT_NATIVE_SHIFT_PYTHON', 'SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON')
+        prepared = {name: 'synthetic-owned-prepared-value' for name in required}
+        prefix, execution = command.split(' && ', 1)
+        self.assertIn('"$SAWA_AGENT_GATEWAY_PYTHON" -m pytest experiments/agent_assistant/tests', execution)
+        self.assertIn('SAWA_AGENT_NATIVE_TESTS=1', execution)
+        self.assertNotIn('packaged-baseline', commands)
+        for missing in (*required, None):
+            environment = {key: value for key, value in prepared.items() if key != missing}
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', prefix],
+                                    env=environment, capture_output=True)
+            with self.subTest(missing=missing):
+                self.assertEqual(result.returncode == 0, missing is None)
+
     @classmethod
     def setUpClass(cls):
         cls.key_directory = tempfile.TemporaryDirectory(prefix='hospital-test-key-')

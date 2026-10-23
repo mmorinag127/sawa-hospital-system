@@ -2,6 +2,22 @@
 
 Run sequentially on the exact clean commit that will be deployed:
 
+Prepare dependencies once before starting the runner. Keep the hospital backend
+environment and the gateway lock separate; they do not share a FastAPI pin.
+Set `DB_URI` to an owned disposable database and set these explicit agent inputs:
+
+- `SAWA_AGENT_TEST_POSTGRES_DSN`: owned PostgreSQL database named `agent_trial*`.
+- `SAWA_AGENT_GATEWAY_PYTHON`: prepared gateway interpreter using the gateway lock
+  and SQL/Alembic test-support dependencies.
+- `SAWA_AGENT_NATIVE_SHIFT_PYTHON`: prepared interpreter for the packaged shift API.
+- `SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON`: prepared interpreter for the packaged
+  school-lunch API and worker requirements.
+
+The manifest enables native subprocess tests and includes all agent tests,
+including packaged baseline migration. Missing PostgreSQL/native preparation is
+not a successful skipped verification. Commands run serially and do not rebuild
+or reinstall their environments for each test invocation.
+
 ```sh
 python3 scripts/local_hospital_test_runner.py --output /tmp/sawa-hospital-receipt
 ```

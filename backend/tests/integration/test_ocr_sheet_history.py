@@ -13,7 +13,7 @@ sys.path.append(str(ROOT))
 from src.db import session_scope  # noqa: E402
 from src.models.menu import MonthlyMenu, MonthlyMenuEntry  # noqa: E402
 from src.models.facility import Facility, FacilityConfig  # noqa: E402
-from src.models.order import Order  # noqa: E402
+from src.models.order import Order, OrderLine  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.services import order_service  # noqa: E402
 from src.services import config_service  # noqa: E402
@@ -24,8 +24,100 @@ from src.services import fax_extractor  # noqa: E402
 from src.services.ocr_job_service import create_job, update_job  # noqa: E402
 from src.services.fax_extractor import FaxExtractedData, rows_from_markdown  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+from tests.helpers.owned_order import authored_layout_registration, owned_registration  # noqa: E402,F401
+from tests.helpers.ingest_original import authored_pipeline_provider, process_uploaded_original  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
+
+DAYPART_SOURCE_ROWS = (
+    ("12/15", "朝", "Menu A", "4", "", "", "", "", "", ""),
+    ("12/15", "昼", "Menu B", "5", "", "", "", "", "", ""),
+    ("12/16", "朝", "Menu C", "6", "", "", "", "", "", ""),
+    ("12/16", "昼", "Menu D", "7", "", "", "", "", "", ""),
+    ("12/17", "朝", "Menu E", "8", "", "", "", "", "", ""),
+)
+
+
+@pytest.fixture
+def history_registration(owned_registration, authored_layout_registration):
+    """The historical component's declared layout, not today's live facility."""
+    columns = [
+        {'index': 0, 'source_index': 0, 'role': 'date', 'name': 'date_mmdd', 'header': '日付'},
+        {'index': 1, 'source_index': 1, 'role': 'daypart', 'name': 'daypart', 'header': '区分'},
+        {'index': 2, 'source_index': 2, 'role': 'menu_name', 'name': 'menu', 'header': 'メニュー'},
+    ]
+    headers = {'regular': '常食', 'soft': '軟菜', 'mixer': 'ミキサー'}
+    for diet in ('regular', 'soft', 'mixer'):
+        for area in ('2F', '3F'):
+            index = len(columns)
+            columns.append({'index': index, 'source_index': index, 'role': 'quantity',
+                'name': f'qty.{diet}_{area.lower()}', 'header': headers[diet] + area,
+                'diet_type': diet, 'area_id': area})
+    columns.append({'index': 9, 'source_index': 9, 'role': 'note', 'name': 'remarks', 'header': '備考'})
+    facility = {'facility_id': 'FAC00001', 'facility_name': 'Authored history component',
+        'areas': [{'area_id': area, 'name': area} for area in ('2F', '3F')],
+        'fax_template_id': 'authored-history-columns',
+        'fax_template': {'template_id': 'authored-history-columns', 'columns': columns}}
+
+    def register(**inputs):
+        if inputs['facility_id'] == 'FAC00001':
+            return owned_registration(**inputs, facility_config=facility)
+        assert inputs['facility_id'] == 'FAC00005', 'explicit component layout required'
+        return authored_layout_registration(**inputs)
+    return register
+
+
+@pytest.fixture
+def selected_history_order(history_registration, monkeypatch):
+    """Real producer/terminal receipt/selection, with only external OCR doubled."""
+    from src.services import uploaded_pdf_service, order_workflow_v2_service as workflow
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services.sheet_week_service import parse_sheet_week_value
+
+    def register(ocr_rows=None, **inputs):
+        order = history_registration(**inputs)
+        _, start, end = parse_sheet_week_value(inputs['week'])
+        current, error = workflow.get_workflow_readonly(order['id'])
+        assert error is None
+        _, error = workflow.confirm_context(order_id=order['id'], facility_id=inputs['facility_id'],
+            week_start=start.isoformat(), week_end=end.isoformat(), expected_revision=current['revision'])
+        assert error is None
+        facility = next(item for item in read_snapshot().master['facilities']
+                        if item['facility_id'] == inputs['facility_id'])
+        columns = sorted(facility['fax_template']['columns'], key=lambda column: column['source_index'])
+        groups = {}
+        for line in inputs['lines'] or []:
+            groups.setdefault((line['date'], line['daypart'], line['menu_name']), []).append(line)
+        rows = [] if ocr_rows is None else [list(row) for row in ocr_rows]
+        for (day, daypart, menu), lines in groups.items():
+            quantities = {(line['diet_type'], line['area_id']): line['quantity_original'] for line in lines}
+            assert len(quantities) == len(lines), 'duplicate authored quantity identity'
+            row = [''] * (max(column['source_index'] for column in columns) + 1)
+            for column in columns:
+                role = column['role']
+                value = {'date': date.fromisoformat(day).strftime('%m/%d'), 'daypart': daypart,
+                         'menu_name': menu}.get(role, '')
+                if role == 'quantity':
+                    value = quantities.get((column['diet_type'], column.get('area_id')), '')
+                row[column['source_index']] = '' if value is None else str(value)
+            if ocr_rows is None:
+                rows.append(row)
+        assert rows, 'selected output cases require explicit authored rows'
+        assert all(len(row) == max(column['source_index'] for column in columns) + 1 for row in rows)
+        authored_pipeline_provider(monkeypatch, table_rows=rows)
+        uploaded = uploaded_pdf_service.get_uploaded_pdf_by_message_id(inputs['message_id'])
+        assert uploaded is not None
+        delivered = process_uploaded_original(uploaded['id'])
+        assert delivered['result'] == 'business_done'
+        candidates, error = workflow.list_ocr_results(order['id'])
+        assert error is None and len(candidates['results']) == 1
+        current, error = workflow.get_workflow_readonly(order['id'])
+        assert error is None
+        _, error = workflow.select_ocr_result(order['id'], candidates['results'][0]['ocr_result_id'],
+                                             expected_revision=current['revision'])
+        assert error is None
+        return order_service.get_order_by_id(order['id'])
+    return register
 
 
 def _seed_monthly_menu_2026_01() -> None:
@@ -92,15 +184,8 @@ def _seed_monthly_menu_custom_entries(
             )
 
 
-def _seed_order(*, message_id: str):
+def _seed_order(history_registration, *, message_id: str):
     _seed_monthly_menu_2026_01()
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 1, 8, 9, 0, 0),
-        facility_hint="FAC00001",
-        week_hint=None,
-    )
     lines = [
         {
             "date": "2026-01-08",
@@ -130,43 +215,41 @@ def _seed_order(*, message_id: str):
             "quantity_original": 3,
         },
     ]
-    return order_service.create_order_from_ingest(payload, lines=lines)
+    return history_registration(message_id=message_id, facility_id="FAC00001",
+        received_at=datetime(2026, 1, 8, 9), week="2026-01@2026-01-08~2026-01-14",
+        effective_date="2026-01-08", lines=lines)
 
 
-def _seed_custom_order(*, message_id: str, received_at: datetime, lines: list[dict[str, object]]):
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=received_at,
-        facility_hint="FAC00001",
-        week_hint=None,
-    )
-    return order_service.create_order_from_ingest(payload, lines=lines)
+def _seed_custom_order(history_registration, *, message_id: str, received_at: datetime,
+                       week: str, effective_date: str, lines: list[dict[str, object]]):
+    return history_registration(message_id=message_id, facility_id="FAC00001",
+        received_at=received_at, week=week, effective_date=effective_date, lines=lines)
+
+
+def _register_scoped_order(history_registration, payload, *, lines, week, ocr_rows=None):
+    """Authored component input, not evidence of recognition or live intake."""
+    from src.services.sheet_week_service import parse_sheet_week_value
+    _, start, end = parse_sheet_week_value(week)
+    assert start is not None and end is not None
+    extra = {} if ocr_rows is None else {'ocr_rows': ocr_rows}
+    return history_registration(message_id=payload.message_id,
+        facility_id=payload.facility_hint, received_at=payload.received_at,
+        week=week, effective_date=start.isoformat(), lines=lines, **extra)
 
 
 def _seed_order_without_facility(*, message_id: str):
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 2, 13, 9, 0, 0),
-        facility_hint=None,
-        week_hint=None,
-    )
-    lines = [
-        {
-            "date": "2026-02-15",
-            "daypart": "朝",
-            "menu_name": "Menu B",
-            "diet_type": "regular",
-            "area_id": "2F",
-            "bag_type": "standard",
-            "quantity_original": 4,
-        }
-    ]
-    return order_service.create_order_from_ingest(payload, lines=lines)
+    # Deliberately unresolved legacy state, not a successful intake registration.
+    ident = "ORD-" + message_id
+    with session_scope() as session:
+        order = Order(id=ident, message_id=message_id, document_uri="component://unresolved-original",
+                      received_at=datetime(2026, 2, 13, 9), facility_code=None, week_code=None)
+        order.lines.append(OrderLine(id=ident + "-line", date=date(2026, 2, 15), daypart="朝",
+            menu_name="Menu B", diet_type="regular", area_id="2F", bag_type="standard", quantity_original=4))
+        session.add(order)
+    return order_service.get_order_by_id(ident)
 
 
-def test_get_ocr_sheet_prefers_identity_when_source_row_indexes_are_shifted():
+def test_get_ocr_sheet_prefers_identity_when_source_row_indexes_are_shifted(history_registration):
     order_service.clear_all()
     received_at = datetime(2099, 4, 15, 9, 0, 0)
     _seed_monthly_menu_custom_entries(
@@ -177,9 +260,11 @@ def test_get_ocr_sheet_prefers_identity_when_source_row_indexes_are_shifted():
             (date(2099, 4, 15), "昼", "Menu B", 1),
         ],
     )
-    order = _seed_custom_order(
+    order = _seed_custom_order(history_registration,
         message_id="msg-sheet-source-row-shift-001",
         received_at=received_at,
+        week="2099-04@2099-04-15~2099-04-21",
+        effective_date="2099-04-15",
         lines=[
             {
                 "date": "2099-04-15",
@@ -217,7 +302,7 @@ def test_get_ocr_sheet_prefers_identity_when_source_row_indexes_are_shifted():
     assert rows_by_menu["Menu B"][qty_idx] == ""
 
 
-def test_get_ocr_sheet_blocks_position_index_quantity_projection_without_menu_identity(monkeypatch):
+def test_get_ocr_sheet_blocks_position_index_quantity_projection_without_menu_identity(history_registration, monkeypatch):
     order_service.clear_all()
     received_at = datetime(2099, 4, 15, 9, 0, 0)
     _seed_monthly_menu_custom_entries(
@@ -228,9 +313,11 @@ def test_get_ocr_sheet_blocks_position_index_quantity_projection_without_menu_id
             (date(2099, 4, 15), "昼", "Menu B", 1),
         ],
     )
-    order = _seed_custom_order(
+    order = _seed_custom_order(history_registration,
         message_id="msg-sheet-no-position-fallback-001",
         received_at=received_at,
+        week="2099-04@2099-04-15~2099-04-21",
+        effective_date="2099-04-15",
         lines=[],
     )
 
@@ -284,7 +371,7 @@ def test_get_ocr_sheet_blocks_position_index_quantity_projection_without_menu_id
     assert rows_by_menu["Menu B"][qty_idx] == ""
 
 
-def test_get_ocr_sheet_keeps_facility_template_schema_when_payload_template_conflicts():
+def test_get_ocr_sheet_keeps_facility_template_schema_when_payload_template_conflicts(owned_registration):
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
         month_id="2099-04",
@@ -311,15 +398,22 @@ def test_get_ocr_sheet_keeps_facility_template_schema_when_payload_template_conf
         },
     )
 
-    payload = IngestEmailPayload(
+    order = owned_registration(
         message_id="msg-facility-schema-payload-template-conflict-001",
-        pdf_uri="file://dummy.pdf",
         received_at=datetime(2099, 4, 5, 9, 0, 0),
-        facility_hint=facility["id"],
-        week_hint=None,
-    )
-    order = order_service.create_order_from_ingest(
-        payload,
+        facility_id=facility["id"],
+        week="2099-04@2099-04-05~2099-04-11", effective_date="2099-04-05",
+        facility_config={"facility_id": facility["id"], "facility_name": "Projection Facility",
+            "areas": [], "fax_template_id": "authored-projection-layout",
+            "fax_template": {"template_id": "authored-projection-layout", "columns_authoritative": True,
+                "columns": [
+                    {"index": 0, "source_index": 0, "role": "date", "name": "date_mmdd", "header": "日付", "format": "MM/DD"},
+                    {"index": 1, "source_index": 1, "role": "daypart", "name": "daypart", "header": "区分"},
+                    {"index": 2, "source_index": 2, "role": "aux", "name": "aux.col_2", "header": "補助"},
+                    {"index": 3, "source_index": 3, "role": "menu_name", "name": "menu", "header": "メニュー"},
+                    {"index": 4, "source_index": 4, "role": "quantity", "name": "qty.regular_x", "header": "常食特別", "diet_type": "regular", "area_id": "X"},
+                    {"index": 5, "source_index": 5, "role": "note", "name": "remarks", "header": "備考"},
+                ]}},
         lines=[
             {
                 "date": "2099-04-05",
@@ -486,9 +580,9 @@ def test_legacy_set_facility_refusal_does_not_mutate_clean_saved_sheet_header_wh
         row_id="row-facility-header-stable-1")
 
 
-def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_saved_draft(monkeypatch):
+def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_saved_draft(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-clean-draft-override-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-clean-draft-override-001")
     order_service.persist_ocr_evidence_run(
         order["id"],
         {
@@ -532,7 +626,7 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
         draft_state="draft_ready",
         blockers=[],
         warnings=[],
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert persisted is not None
     monkeypatch.setattr(order_service, "_maybe_refresh_semantic_sheet_draft", lambda _order_id, draft: draft)
 
@@ -550,9 +644,9 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
     assert sheet["can_confirm"] is True
 
 
-def test_get_latest_sheet_draft_refresh_prunes_unmatched_stale_rows(monkeypatch):
+def test_get_latest_sheet_draft_refresh_prunes_unmatched_stale_rows(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-refresh-prune-stale-rows-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-refresh-prune-stale-rows-001")
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -568,7 +662,7 @@ def test_get_latest_sheet_draft_refresh_prunes_unmatched_stale_rows(monkeypatch)
         draft_state="draft_ready",
         blockers=["sheet_canonical_mismatch"],
         warnings=["sheet_ocr_review_required"],
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert persisted is not None
 
     monkeypatch.setattr(
@@ -604,9 +698,9 @@ def test_get_latest_sheet_draft_refresh_prunes_unmatched_stale_rows(monkeypatch)
     assert any(row[0] == "01/01" for row in sheet["rows"])
 
 
-def test_get_latest_sheet_draft_refresh_preserves_manual_unmatched_rows_for_clean_draft(monkeypatch):
+def test_get_latest_sheet_draft_refresh_preserves_manual_unmatched_rows_for_clean_draft(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-refresh-preserve-manual-rows-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-refresh-preserve-manual-rows-001")
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -623,7 +717,7 @@ def test_get_latest_sheet_draft_refresh_preserves_manual_unmatched_rows_for_clea
         draft_state="draft_ready",
         blockers=[],
         warnings=[],
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert persisted is not None
 
     monkeypatch.setattr(
@@ -658,9 +752,9 @@ def test_get_latest_sheet_draft_refresh_preserves_manual_unmatched_rows_for_clea
     assert sheet["warnings"] == ["stale-current-warning-should-drop"]
 
 
-def test_get_latest_sheet_draft_refresh_keeps_fresh_quantities_when_stale_current_rows_are_blank(monkeypatch):
+def test_get_latest_sheet_draft_refresh_keeps_fresh_quantities_when_stale_current_rows_are_blank(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-refresh-blank-current-qty-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-refresh-blank-current-qty-001")
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -676,7 +770,7 @@ def test_get_latest_sheet_draft_refresh_keeps_fresh_quantities_when_stale_curren
         draft_state="auto_apply_blocked",
         blockers=["sheet_quantity_column_unmapped"],
         warnings=["sheet_ocr_review_required"],
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert persisted is not None
 
     monkeypatch.setattr(
@@ -728,9 +822,9 @@ def test_merge_current_draft_quantity_values_into_semantic_sheet_does_not_blank_
     assert merged["rows"] == [["03/22", "昼", "Menu A", "23", "", ""]]
 
 
-def test_get_latest_sheet_draft_refresh_rewrites_stale_blockers_even_when_rows_are_unchanged(monkeypatch):
+def test_get_latest_sheet_draft_refresh_rewrites_stale_blockers_even_when_rows_are_unchanged(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-refresh-clear-stale-blockers-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-refresh-clear-stale-blockers-001")
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -744,7 +838,7 @@ def test_get_latest_sheet_draft_refresh_rewrites_stale_blockers_even_when_rows_a
         draft_state="auto_apply_blocked",
         blockers=["sheet_canonical_mismatch"],
         warnings=[],
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert persisted is not None
 
     monkeypatch.setattr(
@@ -819,9 +913,9 @@ def test_should_prefer_source_row_candidate_when_duplicate_rows_are_clean():
     )
 
 
-def test_get_ocr_sheet_exposes_roi_review_issues():
+def test_get_ocr_sheet_exposes_roi_review_issues(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-roi-review-001")
+    order = _seed_order(history_registration, message_id="msg-sheet-roi-review-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -869,9 +963,9 @@ def test_get_ocr_sheet_exposes_roi_review_issues():
     assert row[fields.index("menu")] == "Menu A"
 
 
-def test_export_ocr_sheet_label_writes_current_sheet_json(tmp_path):
+def test_export_ocr_sheet_label_writes_current_sheet_json(history_registration, tmp_path):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-export-sheet-label-001")
+    order = _seed_order(history_registration, message_id="msg-export-sheet-label-001")
 
     current_sheet, current_error = order_service.get_ocr_sheet(order["id"])
 
@@ -898,9 +992,9 @@ def test_export_ocr_sheet_label_writes_current_sheet_json(tmp_path):
     assert exported["output_path"] == str(export_path)
 
 
-def test_save_ocr_sheet_exact_persists_revision_without_reparsing_lines():
+def test_save_ocr_sheet_exact_persists_revision_without_reparsing_lines(selected_history_order):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-exact-save-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-exact-save-001")
 
     fields = [
         "date_mmdd",
@@ -954,9 +1048,9 @@ def test_save_ocr_sheet_exact_persists_revision_without_reparsing_lines():
     assert edited_table.get("rows") == rows
 
 
-def test_export_ocr_sheet_label_prefers_exact_saved_sheet_revision(tmp_path):
+def test_export_ocr_sheet_label_prefers_exact_saved_sheet_revision(selected_history_order, tmp_path):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-export-sheet-label-exact-001")
+    order = _seed_order(selected_history_order, message_id="msg-export-sheet-label-exact-001")
 
     fields = [
         "date_mmdd",
@@ -996,9 +1090,9 @@ def test_export_ocr_sheet_label_prefers_exact_saved_sheet_revision(tmp_path):
     assert exported is not None
 
 
-def test_get_ocr_output_falls_back_to_message_job_first_pass_payload_when_reparse_job_is_unusable(monkeypatch):
+def test_get_ocr_output_falls_back_to_message_job_first_pass_payload_when_reparse_job_is_unusable(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-first-pass-fallback-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-first-pass-fallback-001")
     create_job(f"OCR-{order['id']}", input_reference="gs://order/reparse.json", status="failed")
     create_job(f"OCR-{order['message_id']}", input_reference="gs://message/first-pass.json", status="done")
 
@@ -1029,9 +1123,9 @@ def test_get_ocr_output_falls_back_to_message_job_first_pass_payload_when_repars
         assert cache.payload.get("table_raw") == first_pass_payload["table_raw"]
 
 
-def test_get_ocr_output_keeps_first_pass_table_raw_separate_from_edited_table():
+def test_get_ocr_output_keeps_first_pass_table_raw_separate_from_edited_table(selected_history_order):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-raw-vs-edited-separation-001")
+    order = _seed_order(selected_history_order, message_id="msg-ocr-raw-vs-edited-separation-001")
     raw_table = "|日付|区分|メニュー|常食2F|常食3F|軟菜2F|\n|---|---|---|---|---|---|\n|01/08|昼|Menu A|2|1|3|"
     order_service._save_order_ocr_cache(
         order["id"],
@@ -1088,9 +1182,9 @@ def test_get_ocr_output_keeps_first_pass_table_raw_separate_from_edited_table():
         assert cache.payload.get("table_raw") == raw_table
 
 
-def test_get_ocr_output_without_legacy_edits_blocks_polluted_table_raw_without_raw_snapshot():
+def test_get_ocr_output_without_legacy_edits_blocks_polluted_table_raw_without_raw_snapshot(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-no-legacy-polluted-table-raw-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-no-legacy-polluted-table-raw-001")
     fields = [
         "date_mmdd",
         "daypart",
@@ -1151,9 +1245,9 @@ def test_get_ocr_output_without_legacy_edits_blocks_polluted_table_raw_without_r
     assert str(output.get("ocr_source") or "").strip().lower() != "edited"
 
 
-def test_get_ocr_pages_falls_back_to_message_job_pages_when_reparse_job_has_no_page_artifacts(monkeypatch):
+def test_get_ocr_pages_falls_back_to_message_job_pages_when_reparse_job_has_no_page_artifacts(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-fallback-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-fallback-001")
     create_job(f"OCR-{order['id']}", input_reference="gs://order/reparse.json", status="failed")
     create_job(f"OCR-{order['message_id']}", input_reference="gs://message/first-pass.json", status="done")
 
@@ -1186,9 +1280,9 @@ def test_get_ocr_pages_falls_back_to_message_job_pages_when_reparse_job_has_no_p
         assert len(cache.payload["pages"]) == 1
 
 
-def test_get_ocr_pages_requires_recovery_when_overlay_missing(monkeypatch):
+def test_get_ocr_pages_requires_recovery_when_overlay_missing(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-synthetic-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-synthetic-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -1205,9 +1299,9 @@ def test_get_ocr_pages_requires_recovery_when_overlay_missing(monkeypatch):
     assert error == "ocr_evidence_recovery_required"
 
 
-def test_get_ocr_pages_synthesizes_grid_from_template_expected_columns_without_pdf_detection(monkeypatch):
+def test_get_ocr_pages_synthesizes_grid_from_template_expected_columns_without_pdf_detection(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-template-grid-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-template-grid-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -1252,9 +1346,9 @@ def test_get_ocr_pages_synthesizes_grid_from_template_expected_columns_without_p
     assert pages["grid_row_edges"] is None
 
 
-def test_get_ocr_pages_defers_expensive_grid_detection_in_request_path(monkeypatch):
+def test_get_ocr_pages_defers_expensive_grid_detection_in_request_path(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-overlay-grid-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-overlay-grid-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -1294,9 +1388,9 @@ def test_get_ocr_pages_defers_expensive_grid_detection_in_request_path(monkeypat
     assert pages["grid_detection_deferred_reason"] == "missing_template_grid_metadata:table_box,grid_column_edges,grid_row_edges"
 
 
-def test_get_ocr_pages_preview_only_uses_structured_tables_without_loading_markdown(monkeypatch):
+def test_get_ocr_pages_preview_only_uses_structured_tables_without_loading_markdown(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-preview-only-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-preview-only-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -1366,9 +1460,9 @@ def test_get_ocr_pages_preview_only_uses_structured_tables_without_loading_markd
     ]
 
 
-def test_get_ocr_pages_does_not_run_heavy_cache_side_effects(monkeypatch):
+def test_get_ocr_pages_does_not_run_heavy_cache_side_effects(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-light-read-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-light-read-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -1669,9 +1763,9 @@ def test_hakodate_overlay_preview_blocks_when_render_artifact_missing(monkeypatc
     assert "hakodate_overlay_artifact_missing" in preview["blockers"]
 
 
-def test_save_order_ocr_cache_preserves_hakodate_artifacts_when_light_read_payload_lacks_them():
+def test_save_order_ocr_cache_preserves_hakodate_artifacts_when_light_read_payload_lacks_them(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-cache-preserve-hakodate-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-cache-preserve-hakodate-001")
     target_cell = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -1719,9 +1813,9 @@ def test_save_order_ocr_cache_preserves_hakodate_artifacts_when_light_read_paylo
     ]
 
 
-def test_build_hakodate_assignment_repairs_missing_artifacts_and_persists_them(monkeypatch):
+def test_assignment_repair_rejects_artifacts_without_source_proof_before_cache_write(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-hakodate-assignment-repair-001")
+    order = _seed_order(selected_history_order, message_id="msg-hakodate-assignment-repair-001")
     target_cell = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -1760,7 +1854,9 @@ def test_build_hakodate_assignment_repairs_missing_artifacts_and_persists_them(m
         lambda **_kwargs: {"baseline_source": "test", "rows": []},
     )
 
-    def _fake_augment(*, order_id, payload, template, force_hakodate=False):
+    attempts = []
+    def _fake_augment(*, order_id, payload, template, force_hakodate=False, **ownership):
+        attempts.append(ownership)
         assert order_id == order["id"]
         assert template["template_id"] == "template-hakodate"
         assert force_hakodate is False
@@ -1771,23 +1867,21 @@ def test_build_hakodate_assignment_repairs_missing_artifacts_and_persists_them(m
 
     monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", _fake_augment)
 
-    assignment, error = order_service.build_order_hakodate_assignment(order["id"])
+    before = order_service._load_order_ocr_cache(order["id"])
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    assignment, error = order_service.build_order_hakodate_assignment(order["id"],
+        synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
     cached = order_service._load_order_ocr_cache(order["id"])
 
-    assert error is None
-    assert assignment is not None
-    assert assignment["target_cells"] == [target_cell]
-    assert assignment["evidence_records"] == [evidence_record]
-    assert cached is not None
-    assert order_service._extract_hakodate_target_cells_from_payload(cached) == [target_cell]
-    assert order_service._extract_hakodate_ocr_evidence_records_from_payload(cached, order_id=order["id"]) == [
-        evidence_record
-    ]
+    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
+    assert cached == before
 
 
-def test_build_hakodate_assignment_explicit_strategy_forces_repair_when_template_strategy_legacy(monkeypatch):
+def test_explicit_assignment_repair_rejects_legacy_partial_artifacts(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-hakodate-explicit-strategy-repair-001")
+    order = _seed_order(selected_history_order, message_id="msg-hakodate-explicit-strategy-repair-001")
     target_cell = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -1825,7 +1919,9 @@ def test_build_hakodate_assignment_explicit_strategy_forces_repair_when_template
         lambda **_kwargs: {"baseline_source": "test", "rows": []},
     )
 
-    def _fake_augment(*, order_id, payload, template, force_hakodate=False):
+    attempts = []
+    def _fake_augment(*, order_id, payload, template, force_hakodate=False, **ownership):
+        attempts.append(ownership)
         assert order_id == order["id"]
         assert template["template_id"] == "template-legacy"
         assert force_hakodate is True
@@ -1836,17 +1932,20 @@ def test_build_hakodate_assignment_explicit_strategy_forces_repair_when_template
 
     monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", _fake_augment)
 
-    assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate")
+    before = order_service._load_order_ocr_cache(order["id"])
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate",
+        synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
 
-    assert error is None
-    assert assignment is not None
-    assert assignment["target_cells"] == [target_cell]
-    assert assignment["evidence_records"] == [evidence_record]
+    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
+    assert order_service._load_order_ocr_cache(order['id']) == before
 
 
-def test_build_hakodate_assignment_explicit_strategy_regenerates_stale_artifacts(monkeypatch):
+def test_explicit_assignment_repair_cannot_publish_unowned_replacements(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-hakodate-explicit-regenerates-stale-001")
+    order = _seed_order(selected_history_order, message_id="msg-hakodate-explicit-regenerates-stale-001")
     stale_target = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -1901,7 +2000,9 @@ def test_build_hakodate_assignment_explicit_strategy_regenerates_stale_artifacts
         lambda **_kwargs: {"baseline_source": "test", "rows": []},
     )
 
-    def _fake_augment(*, order_id, payload, template, force_hakodate=False):
+    attempts = []
+    def _fake_augment(*, order_id, payload, template, force_hakodate=False, **ownership):
+        attempts.append(ownership)
         assert order_id == order["id"]
         assert force_hakodate is True
         repaired = dict(payload)
@@ -1911,17 +2012,20 @@ def test_build_hakodate_assignment_explicit_strategy_regenerates_stale_artifacts
 
     monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", _fake_augment)
 
-    assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate")
+    before = order_service._load_order_ocr_cache(order["id"])
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate",
+        synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
 
-    assert error is None
-    assert assignment is not None
-    assert assignment["evidence_records"] == [fresh_evidence]
-    assert stale_evidence not in assignment["evidence_records"]
+    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
+    assert order_service._load_order_ocr_cache(order['id']) == before
 
 
-def test_ensure_hakodate_evidence_draft_current_uses_cache_artifacts_when_evidence_run_missing(monkeypatch):
+def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-hakodate-cache-draft-current-001")
+    order = _seed_order(selected_history_order, message_id="msg-hakodate-cache-draft-current-001")
     target_cell = {
         "target_cell_id": "D3",
         "sheet_cell": "D3",
@@ -1961,17 +2065,19 @@ def test_ensure_hakodate_evidence_draft_current_uses_cache_artifacts_when_eviden
         lambda _order_id, **_kwargs: ({"projected_sheet": projected_sheet}, None),
     )
 
-    draft, error = order_service.ensure_hakodate_evidence_draft_current(order["id"])
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    before = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False)
+    draft, error = order_service.ensure_hakodate_evidence_draft_current(order["id"],
+        synchronous_write_input=captured)
 
-    assert error is None
-    assert draft is not None
-    assert draft["draft_sheet_json"]["source"] == "hakodate_ocr_evidence_sheet"
-    assert draft["draft_sheet_json"]["rows"][0][2] == "2"
+    assert draft is None and error == "hakodate_ocr_evidence_missing"
+    assert order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False) == before
 
 
-def test_get_ocr_pages_repairs_missing_hakodate_artifacts_for_hakodate_preview(monkeypatch):
+def test_get_ocr_pages_repairs_missing_hakodate_artifacts_for_hakodate_preview(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-repair-on-hakodate-preview-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-repair-on-hakodate-preview-001")
     target_cell = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -2017,9 +2123,9 @@ def test_get_ocr_pages_repairs_missing_hakodate_artifacts_for_hakodate_preview(m
     assert pages["hakodate_assignment"]["metrics"]["evidence_count"] == 1
 
 
-def test_get_ocr_pages_returns_hakodate_overlay_without_legacy_pages(monkeypatch):
+def test_get_ocr_pages_returns_hakodate_overlay_without_legacy_pages(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-hakodate-overlay-only-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-hakodate-overlay-only-001")
     target_cell = {
         "target_cell_id": "H13",
         "sheet_cell": "H13",
@@ -2087,9 +2193,9 @@ def test_get_ocr_pages_returns_hakodate_overlay_without_legacy_pages(monkeypatch
     assert pages["hakodate_overlay_status"] == "ready"
 
 
-def test_get_ocr_pages_returns_pages_even_when_grid_metadata_cannot_be_recovered(monkeypatch):
+def test_get_ocr_pages_returns_pages_even_when_grid_metadata_cannot_be_recovered(history_registration, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-no-grid-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-no-grid-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -2130,9 +2236,9 @@ def test_get_ocr_pages_returns_pages_even_when_grid_metadata_cannot_be_recovered
     assert pages["grid_detection_status"] == "deferred"
 
 
-def test_save_order_ocr_cache_preserves_page_artifacts_when_new_payload_is_partial():
+def test_save_order_ocr_cache_preserves_page_artifacts_when_new_payload_is_partial(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-pages-cache-preserve-001")
+    order = _seed_order(history_registration, message_id="msg-ocr-pages-cache-preserve-001")
 
     order_service._save_order_ocr_cache(
         order["id"],
@@ -2170,9 +2276,9 @@ def test_save_order_ocr_cache_preserves_page_artifacts_when_new_payload_is_parti
     assert cached["engine"] == "yomitoku"
 
 
-def test_export_ocr_sheet_label_rebases_exact_saved_sheet_on_updated_template_header(tmp_path):
+def test_export_ocr_sheet_label_rebases_exact_saved_sheet_on_updated_template_header(selected_history_order, tmp_path):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-export-sheet-label-rebase-001")
+    order = _seed_order(selected_history_order, message_id="msg-export-sheet-label-rebase-001")
     previous_config = config_service.get_facility_config(order["facility"]) or {}
 
     try:
@@ -2236,9 +2342,9 @@ def test_export_ocr_sheet_label_rebases_exact_saved_sheet_on_updated_template_he
         assert facility_service.update_config(order["facility"], previous_config)
 
 
-def test_get_ocr_sheet_exposes_generic_cell_issues():
+def test_get_ocr_sheet_exposes_generic_cell_issues(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-generic-review-001")
+    order = _seed_order(history_registration, message_id="msg-sheet-generic-review-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -2361,9 +2467,9 @@ def _seed_monthly_menu_boundary_2026_01_02() -> None:
         )
 
 
-def test_get_ocr_sheet_from_order_lines():
+def test_get_ocr_sheet_from_order_lines(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-001")
+    order = _seed_order(history_registration, message_id="msg-sheet-001")
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
@@ -2395,7 +2501,7 @@ def test_get_ocr_sheet_from_order_lines():
     assert first_row[soft_2f_idx] == "3"
 
 
-def test_get_ocr_sheet_weekly_menu_daypart_order_is_morning_first():
+def test_get_ocr_sheet_weekly_menu_daypart_order_is_morning_first(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -2416,7 +2522,7 @@ def test_get_ocr_sheet_weekly_menu_daypart_order_is_morning_first():
             "quantity_original": 1,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
@@ -2442,7 +2548,7 @@ def test_get_ocr_sheet_weekly_menu_daypart_order_is_morning_first():
     ]
 
 
-def test_get_ocr_sheet_weekly_menu_prefers_persisted_order_lines_over_payload():
+def test_get_ocr_sheet_weekly_menu_prefers_persisted_order_lines_over_payload(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -2473,7 +2579,7 @@ def test_get_ocr_sheet_weekly_menu_prefers_persisted_order_lines_over_payload():
             "quantity_original": 5,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -2955,7 +3061,7 @@ def test_sanitize_reparse_line_quantities_keeps_valid_large_counts(monkeypatch):
     assert stats["lines_dropped"] == 1
 
 
-def test_get_ocr_sheet_blocks_when_monthly_menu_object_is_missing():
+def test_get_ocr_sheet_blocks_when_monthly_menu_object_is_missing(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -2978,7 +3084,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_object_is_missing():
             "quantity_original": 7,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -2998,7 +3104,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_object_is_missing():
     assert "menu_entries_missing" in (sheet.get("warnings") or [])
 
 
-def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_when_monthly_menu_is_missing():
+def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_when_monthly_menu_is_missing(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3010,7 +3116,7 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_when_monthly
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3045,7 +3151,7 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_when_monthly
     assert context["warnings"] == ["menu_entries_missing"]
 
 
-def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_dayparts_exist():
+def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_dayparts_exist(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3105,7 +3211,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_daypa
             "quantity_original": 5,
         },
     ]
-    order_service.create_order_from_ingest(base_payload, lines=historical_lines)
+    _register_scoped_order(history_registration, base_payload, lines=historical_lines, week='2099-12@2099-12-15~2099-12-21')
 
     payload = IngestEmailPayload(
         message_id="msg-sheet-history-daypart-source-002",
@@ -3114,7 +3220,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_daypa
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3138,7 +3244,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_daypa
     assert "menu_entries_missing" in (sheet.get("warnings") or [])
 
 
-def test_build_recoverable_ocr_sheet_payload_stays_blocked_and_stable_when_menu_entries_missing():
+def test_build_recoverable_ocr_sheet_payload_stays_blocked_and_stable_when_menu_entries_missing(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3151,7 +3257,7 @@ def test_build_recoverable_ocr_sheet_payload_stays_blocked_and_stable_when_menu_
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3187,7 +3293,7 @@ def test_build_recoverable_ocr_sheet_payload_stays_blocked_and_stable_when_menu_
     assert len(first["rows"]) == len(second["rows"]) == 0
 
 
-def test_build_recoverable_ocr_sheet_payload_prefers_saved_draft_menu_diagnostics_for_menu_blockers():
+def test_build_recoverable_ocr_sheet_payload_prefers_saved_draft_menu_diagnostics_for_menu_blockers(history_registration):
     order_service.clear_all()
     payload = IngestEmailPayload(
         message_id="msg-sheet-history-saved-draft-menu-diagnostics-001",
@@ -3196,7 +3302,7 @@ def test_build_recoverable_ocr_sheet_payload_prefers_saved_draft_menu_diagnostic
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-12@2099-12-15~2099-12-21')
     order_service.draft_sheet_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -3239,7 +3345,7 @@ def test_build_recoverable_ocr_sheet_payload_prefers_saved_draft_menu_diagnostic
     assert (recovered.get("menu_diagnostics") or {}).get("order_codes") == ["monthly_menu_object_missing"]
 
 
-def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_dayparts_match_by_date_order():
+def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_dayparts_match_by_date_order(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3290,7 +3396,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_daypa
             "quantity_original": 4,
         },
     ]
-    order_service.create_order_from_ingest(base_payload, lines=historical_lines)
+    _register_scoped_order(history_registration, base_payload, lines=historical_lines, week='2099-12@2099-12-15~2099-12-21')
 
     payload = IngestEmailPayload(
         message_id="msg-sheet-history-daypart-order-fallback-002",
@@ -3299,7 +3405,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_daypa
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3322,7 +3428,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_historical_daypa
     assert "menu_entries_missing" in (sheet.get("warnings") or [])
 
 
-def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_week_scoped():
+def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_week_scoped(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3364,7 +3470,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_
             "quantity_original": 3,
         },
     ]
-    order_service.create_order_from_ingest(base_payload, lines=historical_lines)
+    _register_scoped_order(history_registration, base_payload, lines=historical_lines, week='2099-12@2099-12-15~2099-12-17')
 
     payload = IngestEmailPayload(
         message_id="msg-sheet-history-daypart-week-scope-002",
@@ -3373,7 +3479,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_
         facility_hint="FAC00001",
         week_hint="2099-12@2099-12-15~2099-12-17",
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-12@2099-12-15~2099-12-17')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3411,7 +3517,7 @@ def test_prefer_week_scoped_ocr_entries_falls_back_to_original_rows_when_clip_wo
     assert [item["menu_name"] for item in scoped] == ["Offweek 1", "Offweek 2"]
 
 
-def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_semantically_ordered():
+def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_semantically_ordered(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3462,7 +3568,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_
             "quantity_original": 4,
         },
     ]
-    order_service.create_order_from_ingest(base_payload, lines=historical_lines)
+    _register_scoped_order(history_registration, base_payload, lines=historical_lines, week='2099-12@2099-12-15~2099-12-17')
 
     payload = IngestEmailPayload(
         message_id="msg-sheet-history-daypart-week-order-002",
@@ -3471,7 +3577,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_
         facility_hint="FAC00001",
         week_hint="2099-12@2099-12-15~2099-12-17",
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-12@2099-12-15~2099-12-17')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3494,7 +3600,7 @@ def test_get_ocr_sheet_blocks_when_monthly_menu_missing_even_if_ocr_rows_can_be_
     assert "monthly_menu_object_missing" in (sheet.get("warnings") or [])
 
 
-def test_get_ocr_sheet_blocks_broken_structured_daypart_ocr_when_weekly_shell_is_missing():
+def test_get_ocr_sheet_blocks_broken_structured_daypart_ocr_when_weekly_shell_is_missing(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3507,7 +3613,7 @@ def test_get_ocr_sheet_blocks_broken_structured_daypart_ocr_when_weekly_shell_is
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3557,7 +3663,7 @@ def test_get_ocr_sheet_blocks_broken_structured_daypart_ocr_when_weekly_shell_is
     assert "menu_entries_missing" in (sheet.get("warnings") or [])
 
 
-def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_saved_draft():
+def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_saved_draft(selected_history_order):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3569,7 +3675,8 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_s
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(selected_history_order, payload, lines=None,
+        week='2099-12@2099-12-15~2099-12-21', ocr_rows=DAYPART_SOURCE_ROWS)
     saved = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -3589,7 +3696,7 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_s
         blockers=[],
         warnings=[],
         edited_by="test",
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
 
     assert saved is not None
 
@@ -3614,7 +3721,7 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_s
     ]
 
 
-def test_get_ocr_sheet_saved_draft_path_does_not_surface_invalid_daypart_tokens():
+def test_get_ocr_sheet_saved_draft_path_does_not_surface_invalid_daypart_tokens(selected_history_order):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3626,7 +3733,8 @@ def test_get_ocr_sheet_saved_draft_path_does_not_surface_invalid_daypart_tokens(
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(selected_history_order, payload, lines=None,
+        week='2099-12@2099-12-15~2099-12-21', ocr_rows=DAYPART_SOURCE_ROWS)
     saved = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -3646,7 +3754,7 @@ def test_get_ocr_sheet_saved_draft_path_does_not_surface_invalid_daypart_tokens(
         blockers=[],
         warnings=[],
         edited_by="test",
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
 
     assert saved is not None
 
@@ -3664,9 +3772,9 @@ def test_get_ocr_sheet_saved_draft_path_does_not_surface_invalid_daypart_tokens(
     )
 
 
-def test_get_latest_sheet_draft_rebases_clean_saved_draft_to_weekly_shell(monkeypatch):
+def test_get_latest_sheet_draft_rebases_clean_saved_draft_to_weekly_shell(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-weekly-shell-rebase-clean-draft-001")
+    order = _seed_order(selected_history_order, message_id="msg-weekly-shell-rebase-clean-draft-001")
 
     saved = order_service.persist_sheet_draft(
         order_id=order["id"],
@@ -3686,7 +3794,7 @@ def test_get_latest_sheet_draft_rebases_clean_saved_draft_to_weekly_shell(monkey
         blockers=[],
         warnings=[],
         edited_by="test",
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert saved is not None
 
     monkeypatch.setattr(
@@ -3725,7 +3833,7 @@ def test_get_latest_sheet_draft_rebases_clean_saved_draft_to_weekly_shell(monkey
 
 
 
-def test_save_reparse_candidate_as_draft_canonicalizes_invalid_daypart_tokens():
+def test_unowned_reparse_candidate_is_refused_without_losing_daypart_sanitizer_coverage(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2026-04"))
@@ -3737,40 +3845,32 @@ def test_save_reparse_candidate_as_draft_canonicalizes_invalid_daypart_tokens():
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2026-04@2026-04-05~2026-04-11')
 
-    order_service._save_reparse_candidate_as_draft(
-        order_id=order["id"],
-        template={
-            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-        },
-        rows=[
-            ["04/05", '"', "Menu A", "4"],
-            ["04/05", "61", "Menu B", "5"],
-            ["04/06", "&", "Menu C", "6"],
-            ["04/06", "€", "Menu D", "7"],
-            ["04/07", "品", "Menu E", "8"],
-        ],
-        before_digest="before",
-        review_state="auto_apply_blocked",
-        review_blockers=["quantity_review_required"],
-        review_warnings=[],
-    )
-
-    latest = order_service.get_latest_sheet_draft(
-        order["id"],
-        backfill_from_revision=False,
-        upgrade_generic_from_sheet=False,
-    )
-
-    assert latest is not None
-    draft_payload = latest["draft_sheet_json"]
-    assert latest["latest_patch_candidate_id"] == "reparse-candidate"
-    daypart_idx = draft_payload["fields"].index("daypart")
-    assert [row[daypart_idx] for row in draft_payload["rows"][:5]] == ["朝", "昼", "朝", "昼", "朝"]
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    rows = [
+        ["04/05", '"', "Menu A", "4"],
+        ["04/05", "61", "Menu B", "5"],
+        ["04/06", "&", "Menu C", "6"],
+        ["04/06", "€", "Menu D", "7"],
+        ["04/07", "品", "Menu E", "8"],
+    ]
+    before = _snapshot(get_engine())
+    with pytest.raises(ValueError, match="^reparse_pipeline_result_missing$"):
+        order_service._save_reparse_candidate_as_draft(order_id=order["id"],
+            template={"main_ocr_row_fields": fields}, rows=rows, before_digest="before",
+            review_state="auto_apply_blocked", review_blockers=["quantity_review_required"],
+            review_warnings=[])
+    assert _snapshot(get_engine()) == before
+    sanitized = order_service._sanitize_semantic_sheet_rows(rows_payload=rows, fields=fields)
+    assert [row[1] for row in sanitized] == ["朝", "昼", "朝", "昼", "朝"]
+    assert [row[3] for row in sanitized] == ["4", "5", "6", "7", "8"]
+    assert [row[2] for row in sanitized] == ["Menu A", "Menu B", "Menu C", "Menu D", "Menu E"]
 
 
-def test_get_current_sheet_context_ignores_reparse_candidate_draft_for_current_surface():
+def test_get_current_sheet_context_ignores_reparse_candidate_draft_for_current_surface(selected_history_order):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3782,7 +3882,9 @@ def test_get_current_sheet_context_ignores_reparse_candidate_draft_for_current_s
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(selected_history_order, payload, lines=[], week='2099-12@2099-12-15~2099-12-21',
+        ocr_rows=[["12/15", "朝", "Menu A", "4", "", "", "", "", "", ""],
+                  ["12/15", "昼", "Menu B", "5", "", "", "", "", "", ""]])
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3806,7 +3908,7 @@ def test_get_current_sheet_context_ignores_reparse_candidate_draft_for_current_s
         blockers=["sheet_llm_audit_failed"],
         warnings=[],
         edited_by="reparse-reject-candidate",
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert saved is not None
 
     context = order_service.get_current_sheet_context(
@@ -3824,7 +3926,7 @@ def test_get_current_sheet_context_ignores_reparse_candidate_draft_for_current_s
     assert "Wrong Menu" not in [cell for row in (context["rows"] or []) for cell in row]
 
 
-def test_get_ocr_sheet_does_not_rehydrate_revision_into_current_surface(monkeypatch):
+def test_get_ocr_sheet_does_not_rehydrate_revision_into_current_surface(history_registration, monkeypatch):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -3836,7 +3938,7 @@ def test_get_ocr_sheet_does_not_rehydrate_revision_into_current_surface(monkeypa
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-12@2099-12-15~2099-12-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -3871,9 +3973,9 @@ def test_get_ocr_sheet_does_not_rehydrate_revision_into_current_surface(monkeypa
     assert calls["count"] == 0
 
 
-def test_apply_ocr_table_saves_revision_and_output_uses_edited():
+def test_apply_ocr_table_saves_revision_and_output_uses_edited(selected_history_order):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-002")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-002")
 
     fields = [
         "date_mmdd",
@@ -3923,9 +4025,9 @@ def test_apply_ocr_table_saves_revision_and_output_uses_edited():
     assert edited_table.get("row_ids") == row_ids
 
 
-def test_apply_ocr_table_preserves_explicit_selected_week_over_stale_materialization_candidate(monkeypatch):
+def test_apply_ocr_table_preserves_explicit_selected_week_over_stale_materialization_candidate(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-explicit-week-preserve-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-explicit-week-preserve-001")
     assert order_service.set_week(order["id"], "2026-05@2026-05-01~2026-05-02") is True
     refreshed_before = order_service.get_order_by_id(order["id"])
     assert refreshed_before is not None
@@ -4155,7 +4257,7 @@ def test_build_position_menu_entries_from_ocr_payload_does_not_duplicate_blank_m
     ]
 
 
-def test_get_ocr_sheet_rejects_broken_ocr_shell_when_no_weekly_source_exists(monkeypatch):
+def test_get_ocr_sheet_rejects_broken_ocr_shell_when_no_weekly_source_exists(history_registration, monkeypatch):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-04"))
@@ -4167,7 +4269,7 @@ def test_get_ocr_sheet_rejects_broken_ocr_shell_when_no_weekly_source_exists(mon
         facility_hint="FAC00005",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2099-04@2099-04-08~2099-04-14')
 
     ocr_payload = {
         "table_rows": [
@@ -4495,7 +4597,7 @@ def test_collect_missing_weekly_menu_dates_detects_intermediate_gap():
     assert missing == [date(2099, 12, 27)]
 
 
-def test_get_ocr_sheet_returns_warning_when_quantity_column_unmapped():
+def test_get_ocr_sheet_returns_warning_when_quantity_column_unmapped(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -4516,7 +4618,7 @@ def test_get_ocr_sheet_returns_warning_when_quantity_column_unmapped():
             "quantity_original": 5,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
 
     original_get = config_service.get_facility_config
 
@@ -4562,7 +4664,7 @@ def test_get_ocr_sheet_returns_warning_when_quantity_column_unmapped():
         config_service.get_facility_config = original_get
 
 
-def test_get_ocr_sheet_returns_warning_when_area_is_missing_for_split_quantity_columns():
+def test_get_ocr_sheet_returns_warning_when_area_is_missing_for_split_quantity_columns(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -4583,7 +4685,7 @@ def test_get_ocr_sheet_returns_warning_when_area_is_missing_for_split_quantity_c
             "quantity_original": 8,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
 
     original_get = config_service.get_facility_config
 
@@ -4618,7 +4720,7 @@ def test_get_ocr_sheet_returns_warning_when_area_is_missing_for_split_quantity_c
         config_service.get_facility_config = original_get
 
 
-def test_get_ocr_sheet_weekly_menu_falls_back_to_payload_numeric_when_order_lines_unmapped():
+def test_get_ocr_sheet_weekly_menu_falls_back_to_payload_numeric_when_order_lines_unmapped(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -4639,7 +4741,7 @@ def test_get_ocr_sheet_weekly_menu_falls_back_to_payload_numeric_when_order_line
             "quantity_original": 12,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -4694,7 +4796,7 @@ def test_get_ocr_sheet_weekly_menu_falls_back_to_payload_numeric_when_order_line
         config_service.get_facility_config = original_get
 
 
-def test_get_ocr_sheet_weekly_menu_prefers_payload_when_order_lines_have_stale_quantity_family():
+def test_get_ocr_sheet_weekly_menu_prefers_payload_when_order_lines_have_stale_quantity_family(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -4769,7 +4871,7 @@ def test_get_ocr_sheet_weekly_menu_prefers_payload_when_order_lines_have_stale_q
             "quantity_original": 9,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -4829,7 +4931,7 @@ def test_get_ocr_sheet_weekly_menu_prefers_payload_when_order_lines_have_stale_q
         config_service.get_facility_config = original_get
 
 
-def test_get_ocr_sheet_prefers_identity_over_payload_row_index_tie_without_menu_signal(monkeypatch):
+def test_get_ocr_sheet_prefers_identity_over_payload_row_index_tie_without_menu_signal(history_registration, monkeypatch):
     order_service.clear_all()
     payload = IngestEmailPayload(
         message_id="msg-sheet-payload-rowindex-tie-001",
@@ -4838,7 +4940,7 @@ def test_get_ocr_sheet_prefers_identity_over_payload_row_index_tie_without_menu_
         facility_hint="FAC00001",
         week_hint="2026-01",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2026-01@2026-01-08~2026-01-14')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -4909,7 +5011,7 @@ def test_get_ocr_sheet_prefers_identity_over_payload_row_index_tie_without_menu_
     assert actual["Menu B"] == "6"
 
 
-def test_get_ocr_sheet_prefers_ocr_payload_lines_over_raw_payload_rows(monkeypatch):
+def test_get_ocr_sheet_prefers_ocr_payload_lines_over_raw_payload_rows(history_registration, monkeypatch):
     order_service.clear_all()
     payload = IngestEmailPayload(
         message_id="msg-sheet-ocr-lines-over-payload-rows-001",
@@ -4918,7 +5020,7 @@ def test_get_ocr_sheet_prefers_ocr_payload_lines_over_raw_payload_rows(monkeypat
         facility_hint="FAC00001",
         week_hint="2026-01",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2026-01@2026-01-08~2026-01-14')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -4992,7 +5094,7 @@ def test_get_ocr_sheet_prefers_ocr_payload_lines_over_raw_payload_rows(monkeypat
     assert trace_rows[1][qty_idx] == "ocr_payload"
 
 
-def test_get_ocr_sheet_weekly_menu_shell_uses_first_pass_rows_for_raw_block_projection(monkeypatch):
+def test_get_ocr_sheet_weekly_menu_shell_uses_first_pass_rows_for_raw_block_projection(history_registration, monkeypatch):
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
         month_id="2026-04",
@@ -5012,7 +5114,7 @@ def test_get_ocr_sheet_weekly_menu_shell_uses_first_pass_rows_for_raw_block_proj
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2026-04@2026-04-29~2026-05-05')
 
     def _fake_get_ocr_output_without_legacy_edits(_order_id, persist_cache=False):
         return ({"status": "success", "tables": []}, None)
@@ -5106,7 +5208,7 @@ def test_get_ocr_sheet_weekly_menu_shell_uses_first_pass_rows_for_raw_block_proj
     assert "sheet_quantity_column_unmapped" not in (sheet.get("warnings") or [])
 
 
-def test_get_ocr_sheet_weekly_menu_shell_blocks_unresolved_first_pass_groups(monkeypatch):
+def test_get_ocr_sheet_weekly_menu_shell_blocks_unresolved_first_pass_groups(history_registration, monkeypatch):
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
         month_id="2026-04",
@@ -5123,7 +5225,7 @@ def test_get_ocr_sheet_weekly_menu_shell_blocks_unresolved_first_pass_groups(mon
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2026-04@2026-04-29~2026-05-05')
 
     def _fake_get_ocr_output_without_legacy_edits(_order_id, persist_cache=False):
         return ({"status": "success", "tables": []}, None)
@@ -5203,7 +5305,7 @@ def test_get_ocr_sheet_weekly_menu_shell_blocks_unresolved_first_pass_groups(mon
     assert "sheet_quantity_column_unmapped" in (sheet.get("warnings") or [])
 
 
-def test_get_ocr_sheet_preserves_authoritative_current_sheet_gate_when_blocked(monkeypatch):
+def test_get_ocr_sheet_preserves_authoritative_current_sheet_gate_when_blocked(selected_history_order, monkeypatch):
     order_service.clear_all()
     payload = IngestEmailPayload(
         message_id="msg-sheet-authoritative-gate-001",
@@ -5212,7 +5314,8 @@ def test_get_ocr_sheet_preserves_authoritative_current_sheet_gate_when_blocked(m
         facility_hint="FAC00001",
         week_hint="2026-01",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(selected_history_order, payload, lines=[], week='2026-01@2026-01-08~2026-01-14',
+        ocr_rows=[["01/08", "昼", "Menu A", "", "", "", "", "", "", ""]])
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -5242,7 +5345,7 @@ def test_get_ocr_sheet_preserves_authoritative_current_sheet_gate_when_blocked(m
             "sheet_quantity_column_unmapped",
             "sheet_ocr_review_required",
         ],
-    )
+     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
     assert persisted is not None
 
     authoritative_workflow = {
@@ -5526,7 +5629,7 @@ def test_build_position_menu_entries_from_ocr_payload_replaces_invalid_daypart_t
     ]
 
 
-def test_get_ocr_sheet_weekly_shell_path_does_not_surface_invalid_daypart_tokens():
+def test_get_ocr_sheet_weekly_shell_path_does_not_surface_invalid_daypart_tokens(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
         month_id="2026-04",
@@ -5548,7 +5651,7 @@ def test_get_ocr_sheet_weekly_shell_path_does_not_surface_invalid_daypart_tokens
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2026-04@2026-04-05~2026-04-11')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -5653,7 +5756,7 @@ def test_apply_ocr_table_without_facility_returns_error():
     assert error == "facility_missing"
 
 
-def test_get_ocr_sheet_without_order_lines_keeps_weekly_menu_dates():
+def test_get_ocr_sheet_without_order_lines_keeps_weekly_menu_dates(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -5692,7 +5795,7 @@ def test_get_ocr_sheet_without_order_lines_keeps_weekly_menu_dates():
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-12@2099-12-26~2100-01-01')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -5712,7 +5815,7 @@ def test_get_ocr_sheet_without_order_lines_keeps_weekly_menu_dates():
     assert "12/27" in dates
 
 
-def test_get_ocr_sheet_respects_explicit_selected_week_range():
+def test_get_ocr_sheet_respects_explicit_selected_week_range(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -5759,7 +5862,7 @@ def test_get_ocr_sheet_respects_explicit_selected_week_range():
         facility_hint="FAC00001",
         week_hint="2099-12",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-12@2099-12-26~2100-01-01')
     assert order_service.set_week(order["id"], "2099-12@2099-12-26~2099-12-27") is True
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
@@ -5770,7 +5873,7 @@ def test_get_ocr_sheet_respects_explicit_selected_week_range():
     assert dates == ["12/26", "12/27"]
 
 
-def test_get_ocr_sheet_without_order_lines_filters_weekly_menu_by_payload_dates():
+def test_get_ocr_sheet_without_order_lines_filters_weekly_menu_by_payload_dates(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-02"))
@@ -5825,7 +5928,7 @@ def test_get_ocr_sheet_without_order_lines_filters_weekly_menu_by_payload_dates(
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-02@2099-02-08~2099-02-10')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -5847,7 +5950,7 @@ def test_get_ocr_sheet_without_order_lines_filters_weekly_menu_by_payload_dates(
     assert dates == {"02/08", "02/09", "02/10"}
 
 
-def test_get_ocr_sheet_without_date_anchors_scopes_by_payload_row_count():
+def test_get_ocr_sheet_without_date_anchors_preserves_explicit_range_despite_payload_row_count(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-03"))
@@ -5879,7 +5982,7 @@ def test_get_ocr_sheet_without_date_anchors_scopes_by_payload_row_count():
         facility_hint="FAC00001",
         week_hint=None,
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-03@2099-03-01~2099-03-28')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -5906,7 +6009,7 @@ def test_get_ocr_sheet_without_date_anchors_scopes_by_payload_row_count():
     assert "03/20" in set(dates)
 
 
-def test_get_ocr_sheet_weekly_menu_ignores_payload_dates_for_row_selection():
+def test_get_ocr_sheet_weekly_menu_ignores_payload_dates_for_row_selection(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -5957,7 +6060,7 @@ def test_get_ocr_sheet_weekly_menu_ignores_payload_dates_for_row_selection():
             "quantity_original": 7,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-12@2099-12-26~2100-01-01')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -5975,7 +6078,7 @@ def test_get_ocr_sheet_weekly_menu_ignores_payload_dates_for_row_selection():
     assert dates == {"12/26", "12/27"}
 
 
-def test_get_ocr_sheet_keeps_late_week_dates_even_when_order_lines_stop_early():
+def test_get_ocr_sheet_keeps_late_week_dates_even_when_order_lines_stop_early(history_registration):
     config_service.reload_configs()
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
@@ -6008,7 +6111,7 @@ def test_get_ocr_sheet_keeps_late_week_dates_even_when_order_lines_stop_early():
         week_hint="2026-04",
     )
     lines = []
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2026-04@2026-04-10~2026-04-16')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6164,7 +6267,7 @@ def test_apply_payload_quantities_numeric_only_aligns_weekly_shell_for_late_week
     assert rows_by_identity[("04/11", "三色ナムル")][bag_idx] == "2"
 
 
-def test_get_ocr_sheet_includes_intermediate_weekly_menu_dates_when_line_dates_sparse():
+def test_get_ocr_sheet_includes_intermediate_weekly_menu_dates_when_line_dates_sparse(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -6232,7 +6335,7 @@ def test_get_ocr_sheet_includes_intermediate_weekly_menu_dates_when_line_dates_s
             "quantity_original": 9,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-12@2099-12-26~2100-01-01')
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
@@ -6244,9 +6347,9 @@ def test_get_ocr_sheet_includes_intermediate_weekly_menu_dates_when_line_dates_s
     assert "12/28" in dates
 
 
-def test_get_ocr_sheet_returns_error_when_template_fields_invalid():
+def test_get_ocr_sheet_returns_error_when_template_fields_invalid(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-invalid-template-001")
+    order = _seed_order(history_registration, message_id="msg-sheet-invalid-template-001")
     original_get = config_service.get_facility_config
 
     def _mock_get(facility_id: str):
@@ -6508,7 +6611,7 @@ def test_hakodate_projection_does_not_fallback_to_worksheet_position_without_tru
     assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
 
 
-def test_get_ocr_sheet_weekly_menu_blocks_payload_off_month_noise_when_order_lines_exist():
+def test_get_ocr_sheet_weekly_menu_blocks_payload_off_month_noise_when_order_lines_exist(history_registration):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(MonthlyMenuEntry).where(MonthlyMenuEntry.monthly_menu_id == "2099-12"))
@@ -6567,7 +6670,7 @@ def test_get_ocr_sheet_weekly_menu_blocks_payload_off_month_noise_when_order_lin
             "quantity_original": 8,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-12@2099-12-26~2100-01-01')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6611,7 +6714,7 @@ def test_get_ocr_sheet_weekly_menu_blocks_payload_off_month_noise_when_order_lin
     assert menu_b[qty_idx] == "8"
 
 
-def test_get_ocr_sheet_weekly_menu_reflects_update_lines_over_stale_payload():
+def test_get_ocr_sheet_weekly_menu_reflects_update_lines_over_stale_payload(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -6633,7 +6736,7 @@ def test_get_ocr_sheet_weekly_menu_reflects_update_lines_over_stale_payload():
             "quantity_original": 6,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=initial_lines)
+    order = _register_scoped_order(history_registration, payload, lines=initial_lines, week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6678,7 +6781,7 @@ def test_get_ocr_sheet_weekly_menu_reflects_update_lines_over_stale_payload():
     assert breakfast[qty_idx] == "20"
 
 
-def test_get_ocr_sheet_weekly_menu_is_consistent_across_orders_with_same_lines():
+def test_get_ocr_sheet_weekly_menu_is_consistent_across_orders_with_same_lines(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     base_payload = IngestEmailPayload(
@@ -6710,7 +6813,7 @@ def test_get_ocr_sheet_weekly_menu_is_consistent_across_orders_with_same_lines()
             "quantity_original": 5,
         },
     ]
-    order_a = order_service.create_order_from_ingest(base_payload, lines=lines)
+    order_a = _register_scoped_order(history_registration, base_payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
     payload_b = IngestEmailPayload(
         message_id="msg-sheet-consistency-002",
         pdf_uri="file://dummy.pdf",
@@ -6718,7 +6821,7 @@ def test_get_ocr_sheet_weekly_menu_is_consistent_across_orders_with_same_lines()
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order_b = order_service.create_order_from_ingest(payload_b, lines=lines)
+    order_b = _register_scoped_order(history_registration, payload_b, lines=lines, week='2099-11@2099-11-15~2099-11-21')
     with session_scope() as session:
         raw = session.get(Order, order_b["id"])
         assert raw is not None
@@ -6794,7 +6897,7 @@ def test_resolve_sheet_week_month_boundary_prefers_order_line_month_and_is_order
     assert resolved_b == "2026-02"
 
 
-def test_get_ocr_sheet_weekly_menu_prefers_order_lines_for_qty_x_and_split_templates():
+def test_get_ocr_sheet_weekly_menu_prefers_order_lines_for_qty_x_and_split_templates(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -6816,7 +6919,7 @@ def test_get_ocr_sheet_weekly_menu_prefers_order_lines_for_qty_x_and_split_templ
             "quantity_original": 20,
         }
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = _register_scoped_order(history_registration, payload, lines=lines, week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6896,7 +6999,7 @@ def test_get_ocr_sheet_weekly_menu_prefers_order_lines_for_qty_x_and_split_templ
         config_service.get_facility_config = original_get
 
 
-def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_updates():
+def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_updates(selected_history_order):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -6906,7 +7009,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(
+    order = _register_scoped_order(selected_history_order,
         payload,
         lines=[
             {
@@ -6920,7 +7023,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
                 "quantity_original": 6,
             }
         ],
-    )
+     week='2099-11@2099-11-15~2099-11-21')
     fields = [
         "date_mmdd",
         "daypart",
@@ -7011,7 +7114,7 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
     assert lunch[qty_idx] == "3"
 
 
-def test_get_ocr_sheet_does_not_mutate_order_ocr_cache_timestamp():
+def test_get_ocr_sheet_does_not_mutate_order_ocr_cache_timestamp(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7021,7 +7124,7 @@ def test_get_ocr_sheet_does_not_mutate_order_ocr_cache_timestamp():
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(
+    order = _register_scoped_order(history_registration,
         payload,
         lines=[
             {
@@ -7035,7 +7138,7 @@ def test_get_ocr_sheet_does_not_mutate_order_ocr_cache_timestamp():
                 "quantity_original": 7,
             }
         ],
-    )
+     week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7060,7 +7163,7 @@ def test_get_ocr_sheet_does_not_mutate_order_ocr_cache_timestamp():
     assert updated_after == updated_before
 
 
-def test_get_ocr_sheet_weekly_menu_numeric_rescue_ignores_loose_note_and_unstructured_values():
+def test_get_ocr_sheet_weekly_menu_numeric_rescue_ignores_loose_note_and_unstructured_values(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7070,7 +7173,7 @@ def test_get_ocr_sheet_weekly_menu_numeric_rescue_ignores_loose_note_and_unstruc
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7110,7 +7213,7 @@ def test_get_ocr_sheet_weekly_menu_numeric_rescue_ignores_loose_note_and_unstruc
     assert lunch[qty_idx] == ""
 
 
-def test_get_ocr_sheet_weekly_menu_preserves_zero_from_order_lines():
+def test_get_ocr_sheet_weekly_menu_preserves_zero_from_order_lines(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7120,7 +7223,7 @@ def test_get_ocr_sheet_weekly_menu_preserves_zero_from_order_lines():
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(
+    order = _register_scoped_order(history_registration,
         payload,
         lines=[
             {
@@ -7134,7 +7237,7 @@ def test_get_ocr_sheet_weekly_menu_preserves_zero_from_order_lines():
                 "quantity_original": 0,
             }
         ],
-    )
+     week='2099-11@2099-11-15~2099-11-21')
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
@@ -7154,7 +7257,7 @@ def test_get_ocr_sheet_weekly_menu_preserves_zero_from_order_lines():
     assert lunch[qty_idx] == "0"
 
 
-def test_get_ocr_sheet_weekly_menu_payload_rescue_preserves_zero():
+def test_get_ocr_sheet_weekly_menu_payload_rescue_preserves_zero(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7164,7 +7267,7 @@ def test_get_ocr_sheet_weekly_menu_payload_rescue_preserves_zero():
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7192,7 +7295,7 @@ def test_get_ocr_sheet_weekly_menu_payload_rescue_preserves_zero():
     assert breakfast[qty_idx] == "0"
 
 
-def test_get_ocr_sheet_suppresses_failed_projected_order_lines_and_uses_payload():
+def test_get_ocr_sheet_suppresses_failed_projected_order_lines_and_uses_payload(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7202,7 +7305,7 @@ def test_get_ocr_sheet_suppresses_failed_projected_order_lines_and_uses_payload(
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(
+    order = _register_scoped_order(history_registration,
         payload,
         lines=[
             {
@@ -7216,7 +7319,7 @@ def test_get_ocr_sheet_suppresses_failed_projected_order_lines_and_uses_payload(
                 "quantity_original": 30,
             }
         ],
-    )
+     week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7263,7 +7366,7 @@ def test_get_ocr_sheet_suppresses_failed_projected_order_lines_and_uses_payload(
     assert trace_rows[target_idx][qty_idx] == "ocr_payload"
 
 
-def test_get_ocr_sheet_suppresses_failed_projected_order_lines_using_job_metrics_fallback():
+def test_get_ocr_sheet_suppresses_failed_projected_order_lines_using_job_metrics_fallback(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7273,7 +7376,7 @@ def test_get_ocr_sheet_suppresses_failed_projected_order_lines_using_job_metrics
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(
+    order = _register_scoped_order(history_registration,
         payload,
         lines=[
             {
@@ -7287,7 +7390,7 @@ def test_get_ocr_sheet_suppresses_failed_projected_order_lines_using_job_metrics
                 "quantity_original": 30,
             }
         ],
-    )
+     week='2099-11@2099-11-15~2099-11-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7332,7 +7435,7 @@ def test_get_ocr_sheet_suppresses_failed_projected_order_lines_using_job_metrics
     assert breakfast[qty_idx] == "7"
 
 
-def test_get_ocr_sheet_ocr_table_numeric_rescue_ignores_loose_note_and_unstructured_values():
+def test_get_ocr_sheet_ocr_table_numeric_rescue_ignores_loose_note_and_unstructured_values(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
         month_id="2099-10",
@@ -7349,7 +7452,7 @@ def test_get_ocr_sheet_ocr_table_numeric_rescue_ignores_loose_note_and_unstructu
         facility_hint="FAC00001",
         week_hint="2099-10",
     )
-    order = order_service.create_order_from_ingest(payload, lines=[])
+    order = _register_scoped_order(history_registration, payload, lines=[], week='2099-10@2099-10-15~2099-10-21')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7389,7 +7492,7 @@ def test_get_ocr_sheet_ocr_table_numeric_rescue_ignores_loose_note_and_unstructu
     assert lunch[qty_idx] == ""
 
 
-def test_get_ocr_sheet_includes_cell_trace_for_quantity_sources():
+def test_get_ocr_sheet_includes_cell_trace_for_quantity_sources(history_registration):
     order_service.clear_all()
     _seed_monthly_menu_daypart_order_2099_11()
     payload = IngestEmailPayload(
@@ -7399,7 +7502,7 @@ def test_get_ocr_sheet_includes_cell_trace_for_quantity_sources():
         facility_hint="FAC00001",
         week_hint="2099-11",
     )
-    order = order_service.create_order_from_ingest(
+    order = _register_scoped_order(history_registration,
         payload,
         lines=[
             {
@@ -7413,7 +7516,7 @@ def test_get_ocr_sheet_includes_cell_trace_for_quantity_sources():
                 "quantity_original": 20,
             }
         ],
-    )
+     week='2099-11@2099-11-15~2099-11-21')
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
@@ -7439,9 +7542,9 @@ def test_get_ocr_sheet_includes_cell_trace_for_quantity_sources():
     assert trace_rows[target_idx][qty_idx] == "order_lines"
 
 
-def test_get_ocr_sheet_exposes_yomitoku_review_issues():
+def test_get_ocr_sheet_exposes_yomitoku_review_issues(history_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-yomitoku-review-001")
+    order = _seed_order(history_registration, message_id="msg-sheet-yomitoku-review-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7486,9 +7589,9 @@ def test_get_ocr_sheet_exposes_yomitoku_review_issues():
     assert issues[0]["source"] == "yomitoku_structured"
 
 
-def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_draft_as_baseline(monkeypatch):
+def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_draft_as_baseline(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-llm-review-loop-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-loop-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7681,9 +7784,9 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     assert '"qty.regular_2f": "5"' in captured_prompts[1]["user"]
 
 
-def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_baseline(monkeypatch):
+def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_baseline(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-llm-review-reject-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-reject-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7800,9 +7903,9 @@ def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_ba
     assert len(history["revisions"]) == 1
 
 
-def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(monkeypatch):
+def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(selected_history_order, monkeypatch):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-sheet-llm-review-corrected-001")
+    order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-corrected-001")
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -7921,7 +8024,7 @@ def test_review_ocr_table_with_llm_uses_corrected_pdf_variant_when_available(mon
     assert sheet["rows"][0][3] == "5"
 
 
-def test_get_ocr_sheet_uses_weekly_shell_and_facility_schema_when_template_columns_drift():
+def test_get_ocr_sheet_uses_weekly_shell_and_facility_schema_when_template_columns_drift(history_registration):
     config_service.reload_configs()
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
@@ -7941,7 +8044,7 @@ def test_get_ocr_sheet_uses_weekly_shell_and_facility_schema_when_template_colum
         facility_hint="FAC00005",
         week_hint="2026-04",
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2026-04@2026-04-05~2026-04-11')
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -8009,7 +8112,7 @@ def test_get_ocr_sheet_uses_weekly_shell_and_facility_schema_when_template_colum
     assert "sheet_structural_projection_corrupted" not in list(sheet.get("warnings") or [])
 
 
-def test_get_ocr_sheet_uses_monthly_menu_entries_even_when_parent_menu_row_is_missing():
+def test_get_ocr_sheet_uses_monthly_menu_entries_even_when_parent_menu_row_is_missing(history_registration):
     config_service.reload_configs()
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
@@ -8031,7 +8134,7 @@ def test_get_ocr_sheet_uses_monthly_menu_entries_even_when_parent_menu_row_is_mi
         facility_hint="FAC00005",
         week_hint="2026-04",
     )
-    order = order_service.create_order_from_ingest(payload, lines=None)
+    order = _register_scoped_order(history_registration, payload, lines=None, week='2026-04@2026-04-05~2026-04-11')
     order_service._save_order_ocr_cache(
         order["id"],
         {

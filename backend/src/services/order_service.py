@@ -24752,6 +24752,12 @@ def build_order_hakodate_assignment(
             _payload_has_hakodate_target_cells(repaired_payload)
             and _payload_has_hakodate_evidence_records(repaired_payload, order_id=order_id)
         ):
+            try:
+                receipt = (synchronous_write_input or {}).get("selected_pdf_receipt") or processing_start_pdf_receipt()
+                _validate_hakodate_owned_artifacts(repaired_payload,
+                    _hakodate_owned_source(captured_config, receipt, synchronous_write_input))
+            except ValueError as exc:
+                return None, str(exc)
             payload = repaired_payload
             repaired_own_result = True
             if persist_artifact_repair:
@@ -24770,9 +24776,9 @@ def build_order_hakodate_assignment(
         else:
             return None, "hakodate_artifact_repair_failed"
 
-    if synchronous_write_input is not None or job_owned:
+    if (synchronous_write_input is not None or job_owned) and not repaired_own_result:
         try:
-            if synchronous_write_input is not None and not repaired_own_result:
+            if synchronous_write_input is not None:
                 _validate_selected_hakodate_artifacts(selected_evidence, synchronous_write_input)
             else:
                 receipt = (synchronous_write_input or {}).get("selected_pdf_receipt") or processing_start_pdf_receipt()
