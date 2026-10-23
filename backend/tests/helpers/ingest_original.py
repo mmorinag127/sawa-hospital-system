@@ -60,7 +60,7 @@ def process_uploaded_original(uploaded_pdf_id):
     return delivery.process(delivery_id, generation)
 
 
-def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="lunch"):
+def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="lunch", seed_menu=True, original_name="original.pdf", facility_config=None, seed_month=True):
     """Explicit component JSON/menu/PDF inputs, never operator scenario proof."""
     from src.models.facility import Facility
 
@@ -74,11 +74,23 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
             {"index": 3, "source_index": 3, "role": "quantity", "name": "qty.regular_2f", "diet_type": "regular", "area_id": "2F"},
         ]},
     }
+    if facility_config is not None:
+        assert facility_config["facility_id"] == facility_id
+        assert "areas" in facility_config and isinstance(facility_config["fax_template"], dict)
+        facility = deepcopy(facility_config)
     master = tmp_path / "authored-facilities.json"
-    master.write_text(json.dumps({"facilities": [{**facility, "versions": [{
-        "version_id": "authored-original", "valid_from": menu_date.isoformat(),
-        "valid_to": None, "facility": deepcopy(facility),
-    }]}]}))
+    source = json.loads(master.read_text()) if master.exists() else {"facilities": []}
+    if facility_config is not None:
+        existing = [item for item in source["facilities"] if item["facility_id"] == facility_id]
+        if existing:
+            assert len(existing) == 1
+            assert {key: value for key, value in existing[0].items() if key != "versions"} == facility
+    if not any(item["facility_id"] == facility_id for item in source["facilities"]):
+        source["facilities"].append({**facility, "versions": [{
+            "version_id": "authored-original", "valid_from": menu_date.isoformat(),
+            "valid_to": None, "facility": deepcopy(facility),
+        }]})
+        master.write_text(json.dumps(source))
     policy = tmp_path / "authored-policy.json"
     policy.write_text(json.dumps({"ocr_retry_limit": 1, "quantity_rules": {}, "backlog_policy": {"skip_ocr_for_stale": False}}))
     monkeypatch.setenv("FACILITY_MASTER_PATH", str(master))
@@ -89,16 +101,26 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
             session.add(Facility(id=facility["facility_id"], name=facility["facility_name"]))
             session.flush()
         else:
-            assert parent.name == facility["facility_name"]
+            configured = next(item for item in source["facilities"] if item["facility_id"] == facility_id)
+            assert parent.name == configured["facility_name"]
         month = menu_date.strftime("%Y-%m")
-        session.add(MonthlyMenu(id=month, month_start=menu_date.replace(day=1)))
-        session.add(MonthlyMenuEntry(id="authored-physical-row", monthly_menu_id=month,
-            menu_date=menu_date, daypart=daypart, name="Menu A", slot_index=0,
-            facility_override=facility_id, diet_type="regular"))
+        assert seed_month or not seed_menu, "physical rows require their explicit monthly parent"
+        if seed_month and session.get(MonthlyMenu, month) is None:
+            session.add(MonthlyMenu(id=month, month_start=menu_date.replace(day=1)))
+        if seed_menu:
+            entry = session.get(MonthlyMenuEntry, "authored-physical-row")
+            if entry is None:
+                session.add(MonthlyMenuEntry(id="authored-physical-row", monthly_menu_id=month,
+                    menu_date=menu_date, daypart=daypart, name="Menu A", slot_index=0,
+                    facility_override=facility_id, diet_type="regular"))
+            else:
+                assert (entry.monthly_menu_id, entry.menu_date, entry.daypart, entry.name,
+                        entry.slot_index, entry.facility_override, entry.diet_type) == (
+                    month, menu_date, daypart, "Menu A", 0, facility_id, "regular"), "existing authored menu row differs from explicit inputs"
     with fitz.open() as pdf:
         pdf.new_page()
         data = pdf.tobytes()
-    path = tmp_path / "original.pdf"
+    path = tmp_path / original_name
     path.write_bytes(data)
     return str(path), sha256(data).hexdigest()
 

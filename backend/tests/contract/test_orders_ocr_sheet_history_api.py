@@ -179,23 +179,41 @@ class HistoryCase:
 
     def queue(self):
         import fitz
-        self.confirm()
-        self.pdf = self.root / "owned-component.pdf"
-        with fitz.open() as document:
-            document.new_page().insert_text((40, 40), f"{self.facility} / {self.period} / component input only")
-            body = document.tobytes()
-        self.pdf.write_bytes(body)
-        self.protected += (self.pdf,)
-        with session_scope() as session:
-            order = session.get(Order, self.id)
-            document = OrderDocument(id="history-document", storage_uri=str(self.pdf), source_email_id=order.message_id)
-            session.add(document)
-            session.flush()
-            order.current_document_id, order.document_uri = document.id, str(self.pdf)
-            session.add(UploadedPdf(id="history-pdf", message_id=order.message_id, storage_uri=str(self.pdf),
-                original_filename=self.pdf.name, content_sha256=sha256(body).hexdigest(), received_at=order.received_at))
-            session.flush()
-            order_service._record_current_order_version(session, order, document)
+        if not hasattr(self, "pdf"):
+            self.confirm()
+            self.pdf = self.root / "owned-component.pdf"
+            with fitz.open() as document:
+                document.new_page().insert_text((40, 40), f"{self.facility} / {self.period} / component input only")
+                body = document.tobytes()
+            self.pdf.write_bytes(body)
+            self.protected += (self.pdf,)
+            with session_scope() as session:
+                order = session.get(Order, self.id)
+                document = OrderDocument(id="history-document", storage_uri=str(self.pdf), source_email_id=order.message_id)
+                session.add(document)
+                session.flush()
+                order.current_document_id, order.document_uri = document.id, str(self.pdf)
+                session.add(UploadedPdf(id="history-pdf", message_id=order.message_id, storage_uri=str(self.pdf),
+                    original_filename=self.pdf.name, content_sha256=sha256(body).hexdigest(), received_at=order.received_at))
+                session.flush()
+                order_service._record_current_order_version(session, order, document)
+        else:
+            with session_scope() as session:
+                order = session.get(Order, self.id)
+                document = session.get(OrderDocument, order.current_document_id)
+                uploaded = session.get(UploadedPdf, "history-pdf")
+                state = session.get(OrderWorkflowState, self.id)
+                context = state.secondary_actions_json["workflow_v2"]
+                start, end = self.period.split("@", 1)[1].split("~")
+                assert (context["week_start"], context["week_end"]) == (start, end)
+                assert order.facility_code == context["facility_id"] == self.facility
+                assert order.week_code == context["week_code"] == self.period
+                assert context["template_id"] == TEMPLATE
+                assert state.template_version_id == order.template_version_id == context["template_version_id"]
+                assert document.id == "history-document"
+                assert document.storage_uri == order.document_uri == str(self.pdf)
+                assert uploaded.storage_uri == str(self.pdf)
+                assert uploaded.content_sha256 == sha256(self.pdf.read_bytes()).hexdigest()
         for key, value in {"PROJECT_ID": "history-component", "LOCATION": "asia-northeast2", "QUEUE": "history-component",
             "TARGET_URL": "https://reserved.invalid", "SERVICE_ACCOUNT_EMAIL": "worker@history-component.iam.gserviceaccount.com",
             "AUDIENCE": "https://reserved.invalid", "DISPATCH_DEADLINE_SECONDS": "300"}.items():
@@ -231,8 +249,11 @@ class HistoryCase:
             regions = [{**deepcopy(r), "bbox": [i * 20, 0, i * 20 + 10, 10]}
                        for i, r in enumerate(item["original_target_semantics"])]
             calls.append(regions)
-            values = {r["sheet_cell"]: cell_values[r["sheet_cell"]] if isinstance(cell_values, dict) else cell_values
-                      for r in regions}
+            if callable(cell_values):
+                values = {r["sheet_cell"]: cell_values(deepcopy(r)) for r in regions}
+            else:
+                values = {r["sheet_cell"]: cell_values[r["sheet_cell"]] if isinstance(cell_values, dict) else cell_values
+                          for r in regions}
             if isinstance(cell_values, dict):
                 assert set(values) == set(cell_values)
             records = [{**r, "ocr_text": values[r["sheet_cell"]], "recognizer_score": 1.0,

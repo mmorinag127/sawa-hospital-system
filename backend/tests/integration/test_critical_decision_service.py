@@ -5,10 +5,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import critical_decision_service, order_service  # noqa: E402
+from src.db import session_scope
+from src.models.order import Order
 
 
-def test_sync_pending_decisions_adds_and_prunes_entries() -> None:
-    order_service.clear_all()
+def test_sync_pending_decisions_adds_and_prunes_entries(isolated_formal_schema) -> None:
+    # Explicit existing order state; decision persistence is not OCR proof.
+    with session_scope() as session:
+        session.add(Order(id="ORD-CRIT-1", message_id="critical-component-1"))
 
     first = critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-1",
@@ -50,8 +54,10 @@ def test_sync_pending_decisions_adds_and_prunes_entries() -> None:
     assert len((facility.get("candidate_set_json") or {}).get("candidates") or []) == 2
 
 
-def test_choose_decision_marks_value_and_preserves_latest_entry() -> None:
-    order_service.clear_all()
+def test_choose_decision_marks_value_and_preserves_latest_entry(isolated_formal_schema) -> None:
+    # Explicit existing order state; decision persistence is not OCR proof.
+    with session_scope() as session:
+        session.add(Order(id="ORD-CRIT-2", message_id="critical-component-2"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-2",
@@ -85,8 +91,10 @@ def test_choose_decision_marks_value_and_preserves_latest_entry() -> None:
     assert listed[0]["selected_value"] == "FAC00002"
 
 
-def test_sync_pending_decisions_preserves_selected_value_when_refreshing_candidates() -> None:
-    order_service.clear_all()
+def test_sync_pending_decisions_preserves_selected_value_when_refreshing_candidates(isolated_formal_schema) -> None:
+    # Explicit existing order state; decision persistence is not OCR proof.
+    with session_scope() as session:
+        session.add(Order(id="ORD-CRIT-3", message_id="critical-component-3"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-3",
@@ -121,8 +129,10 @@ def test_sync_pending_decisions_preserves_selected_value_when_refreshing_candida
     assert len((refreshed[0].get("candidate_set_json") or {}).get("candidates") or []) == 2
 
 
-def test_sync_pending_decisions_preserves_structured_choice_metadata() -> None:
-    order_service.clear_all()
+def test_sync_pending_decisions_preserves_structured_choice_metadata(isolated_formal_schema) -> None:
+    # Explicit existing order state; decision persistence is not OCR proof.
+    with session_scope() as session:
+        session.add(Order(id="ORD-CRIT-4", message_id="critical-component-4"))
 
     synced = critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-4",
@@ -149,8 +159,10 @@ def test_sync_pending_decisions_preserves_structured_choice_metadata() -> None:
     assert candidate_set["evidence_ref"] == {"page": 1, "row_index": 7, "column_index": 4}
 
 
-def test_sync_pending_decisions_invalidates_selected_value_when_evidence_lineage_changes() -> None:
-    order_service.clear_all()
+def test_sync_pending_decisions_invalidates_selected_value_when_evidence_lineage_changes(isolated_formal_schema) -> None:
+    # Explicit existing order state; decision persistence is not OCR proof.
+    with session_scope() as session:
+        session.add(Order(id="ORD-CRIT-5", message_id="critical-component-5"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-5",
@@ -194,8 +206,10 @@ def test_sync_pending_decisions_invalidates_selected_value_when_evidence_lineage
     assert refreshed[0]["selected_value"] is None
 
 
-def test_choose_decision_returns_none_when_evidence_lineage_is_stale() -> None:
-    order_service.clear_all()
+def test_choose_decision_returns_none_when_evidence_lineage_is_stale(isolated_formal_schema) -> None:
+    # Explicit existing order state; decision persistence is not OCR proof.
+    with session_scope() as session:
+        session.add(Order(id="ORD-CRIT-6", message_id="critical-component-6"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-6",

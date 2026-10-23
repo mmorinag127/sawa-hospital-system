@@ -355,8 +355,6 @@ def apply_overrides_to_lines(lines: list[dict[str, Any]], facility_id: str | Non
             .all()
         )
         serialized_rows = [_serialize_override(row) for row in rows]
-    if not serialized_rows:
-        return lines
     override_map = {
         (
             str(row.get("output_date") or ""),

@@ -1,6 +1,7 @@
 import sys
 import pathlib
 import json
+import pytest
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -19,15 +20,19 @@ from src.models.output import Bag  # noqa: E402
 from src.services import config_service, menu_service, order_service, output_builder  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job, update_job  # noqa: E402
 from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+from tests.helpers.owned_order import owned_registration  # noqa: E402
+from tests.helpers.owned_output import owned_outputs  # noqa: E402
+from tests.contract.test_orders_draft_review_api import _refuse
+from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: F401
 
 
-def _create_seed_order(message_id: str) -> dict:
+def _create_seed_order(owned_registration, message_id: str) -> dict:
     payload = IngestEmailPayload(
         message_id=message_id,
         pdf_uri="file://dummy.pdf",
         received_at=datetime(2026, 2, 15, 9, 0, 0),
         facility_hint="FAC00001",
-        week_hint="2026-02",
+        week_hint="2026-02@2026-02-15~2026-02-21",
     )
     lines = [
         {
@@ -40,16 +45,18 @@ def _create_seed_order(message_id: str) -> dict:
             "quantity_original": 5,
         }
     ]
-    return order_service.create_order_from_ingest(payload, lines=lines)
+    return owned_registration(message_id=payload.message_id, facility_id=payload.facility_hint,
+        received_at=payload.received_at, week=payload.week_hint,
+        effective_date=lines[0]["date"], lines=lines)
 
 
-def _create_seed_order_for_facility(message_id: str, facility_id: str) -> dict:
+def _create_seed_order_for_facility(owned_registration, message_id: str, facility_id: str) -> dict:
     payload = IngestEmailPayload(
         message_id=message_id,
         pdf_uri="file://dummy.pdf",
         received_at=datetime(2026, 2, 15, 9, 0, 0),
         facility_hint=facility_id,
-        week_hint="2026-02",
+        week_hint="2026-02@2026-02-15~2026-02-21",
     )
     lines = [
         {
@@ -62,58 +69,50 @@ def _create_seed_order_for_facility(message_id: str, facility_id: str) -> dict:
             "quantity_original": 5,
         }
     ]
-    return order_service.create_order_from_ingest(payload, lines=lines)
+    return owned_registration(message_id=payload.message_id, facility_id=payload.facility_hint,
+        received_at=payload.received_at, week=payload.week_hint,
+        effective_date=lines[0]["date"], lines=lines)
 
 
-def test_get_order_prefers_cached_success_over_non_reparse_running_status(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-001")
-    job_id = f"OCR-{order['message_id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-
-    def _fake_cached_payload(_order_id: str):
-        return {
-            "status": "success",
-            "rows": [["dummy"]],
-            "metrics": {"provider": "old"},
-        }
-
-    monkeypatch.setattr(order_service, "get_cached_ocr_payload", _fake_cached_payload)
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload.get("ocr_status") == "success"
+def test_owned_running_job_is_not_completed_by_unowned_cache_success(history_case):
+    from datetime import date
+    period = "2026-02@2026-02-15~2026-02-21"
+    f = history_case(week=period, period=period, received=datetime(2026, 2, 15, 9),
+        lines=[{"date": "2026-02-15", "daypart": "朝", "menu_name": "Menu A",
+                "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 5}],
+        menu_entries=[{"id": "status-feb-15", "monthly_menu_id": "2026-02",
+            "menu_date": date(2026, 2, 15), "daypart": "朝", "name": "Menu A",
+            "slot_index": 0, "diet_type": "regular"}])
+    f.queue()
+    with f.execution():
+        progress = order_service._update_reparse_job_progress(f.job,
+            status="running", processing_stage="ocr_pipeline")
+    assert progress is not None and progress["status"] == "running"
+    cached_input = {"status": "success", "rows": [["dummy"]], "metrics": {"provider": "old"}}
+    with session_scope() as session:
+        cached = session.get(OrderOcrCache, f.id)
+        if cached is None:
+            session.add(OrderOcrCache(order_id=f.id, payload=cached_input))
+        else:
+            cached.payload = cached_input
+    before_job = get_job(f.job)
+    assert before_job["status"] == "running"
+    payload = f.get()
+    assert payload["ocr_status"] == "running"
     assert payload.get("ocr_error") in {None, ""}
+    with f.readonly():
+        response = f.client.get("/orders?include_ocr=true", headers=f.actor.headers)
+    assert response.status_code == 200
+    (row,) = [item for item in response.json()["orders"] if item["id"] == f.id]
+    assert row["ocr_status"] == "running"
+    assert get_job(f.job) == before_job
+    with session_scope() as session:
+        assert session.get(OrderOcrCache, f.id).payload == cached_input
 
 
-def test_list_orders_include_ocr_prefers_cached_success_over_non_reparse_running_status(monkeypatch):
+def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeypatch, owned_registration):
     order_service.clear_all()
-    order = _create_seed_order("msg-status-api-001-list")
-    job_id = f"OCR-{order['message_id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-
-    def _fake_cached_payload(_order_id: str):
-        return {
-            "status": "success",
-            "rows": [["dummy"]],
-            "metrics": {"provider": "old"},
-        }
-
-    monkeypatch.setattr(order_service, "get_cached_ocr_payload", _fake_cached_payload)
-
-    client = TestClient(app)
-    res = client.get("/orders?include_ocr=true")
-    assert res.status_code == 200
-    rows = res.json().get("orders") or []
-    row = next(item for item in rows if item.get("id") == order["id"])
-    assert row.get("ocr_status") == "success"
-
-
-def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeypatch):
-    order_service.clear_all()
-    _create_seed_order("msg-status-api-read-workflow-no-refresh")
+    _create_seed_order(owned_registration, "msg-status-api-read-workflow-no-refresh")
 
     def _fake_workflow_state(_order_id: str, *, refresh: bool = False):
         if refresh:
@@ -128,487 +127,281 @@ def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeyp
     assert res.status_code == 200
 
 
-def test_get_order_preserves_terminal_reparse_failure_status(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-001b")
-    output_path = tmp_path / "ocr_output_done.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
+@pytest.mark.parametrize("failure", ["sheet_date_anchor_drift", "main_ocr_failed:gemini"],
+    ids=["native_anchor_failure_keeps_saved_five", "historical_provider_failure_detail_keeps_saved_five"])
+def test_owned_terminal_failure_cannot_be_completed_by_stale_done_output(history_case, monkeypatch, tmp_path, failure):
+    from copy import deepcopy
+    from src.models.ocr_job import OcrJob
+    from src.services import hakodate_cell_ocr_batch_service as batch
 
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="failed")
-    update_job(
-        job_id,
-        status="failed",
-        output_reference=f"file://{output_path}",
-        error_message="sheet_date_anchor_drift",
-        metrics={"request_mode": "ocr_reparse"},
-    )
+    case = _owned_status_case(history_case)
+    selected_sheet = case.produce(cell_values="5")["sheet"]
+    case.save(selected_sheet)
+    selected = case.evidence
+    calls = case.prepare_provider(cell_values="9")
+    output_path = tmp_path / ("ocr_output_done_llm.json" if failure.startswith("main_ocr") else "ocr_output_done.json")
+    stale_output = {"status": "done", "table_raw": "|a|b|"}
+    output_path.write_text(json.dumps(stale_output), encoding="utf-8")
+    case.protected += (output_path,)
 
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    payload = res.json()
+    def fail(**_kwargs):
+        raise RuntimeError(failure)
+
+    monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", fail)
+    with case.execution():
+        result, error = order_service.rerun_ocr_evidence_only(
+            case.id, job_id=case.job, project_sheet=False, refresh_workflow=False)
+    assert isinstance(result, dict)
+    assert result["terminal_receipt"]["status"] == "failed"
+    assert result["terminal_receipt"]["evidence_run_id"] is None
+    assert error == "hakodate_live_rerun_failed"
+    assert calls == []
+    with session_scope() as session:
+        failed = session.get(OcrJob, case.job)
+        terminal = deepcopy(failed.metrics["rerun_terminal_receipt"])
+        failed.output_reference = f"file://{output_path}"
+        assert failed.metrics["rerun_terminal_receipt"] == terminal
+    job = get_job(case.job)
+    assert job["status"] == "failed"
+    receipt = job["metrics"]["rerun_terminal_receipt"]
+    assert receipt["status"] == "failed"
+    assert receipt == result["terminal_receipt"]
+    assert job["metrics"]["error_detail"] == failure
+    assert job["metrics"]["request_mode"] == "ocr_rerun"
+    payload = case.get()
     assert payload.get("ocr_status") == "failed"
-    assert payload.get("ocr_error") == "sheet_date_anchor_drift"
+    assert payload.get("ocr_error") == "hakodate_live_rerun_failed"
+    assert get_job(case.job) == job
+    assert json.loads(output_path.read_text()) == stale_output
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == selected
+        assert current["rows"] == selected_sheet["rows"]
+        assert case.get("workflow-v2")["state"] == "ocr_failed"
 
 
-def test_get_order_does_not_mark_reparse_job_done_while_running(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-001c")
+def test_get_order_does_not_mark_reparse_job_done_while_running(tmp_path, history_case):
+    case = _owned_status_case(history_case)
+    case.queue()
     output_path = tmp_path / "ocr_output_done_running.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-        metrics={"request_mode": "ocr_reparse"},
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    payload = res.json()
+    output_payload = {"status": "done", "table_raw": "|a|b|"}
+    output_path.write_text(json.dumps(output_payload), encoding="utf-8")
+    case.protected += (output_path,)
+    with case.execution():
+        progress = order_service._update_reparse_job_progress(case.job,
+            status="running", processing_stage="ocr_pipeline", result_state="running",
+            metrics_patch={"request_mode": "ocr_reparse"})
+        assert progress is not None and progress["status"] == "running"
+        updated, accepted = order_service.update_job_for_workflow_attempt(
+            case.job, case.queued["ocr_job"]["workflow_attempt_id"], order_id=case.id,
+            expected_workflow_revision=case.queued["workflow"]["revision"],
+            output_reference=f"file://{output_path}")
+    assert accepted is True and updated["output_reference"] == f"file://{output_path}"
+    before = get_job(case.job)
+    payload = case.get()
     assert payload.get("ocr_status") == "running"
-    job = get_job(job_id)
+    job = get_job(case.job)
     assert job is not None
     assert job.get("status") == "running"
+    assert job == before
+    assert job["metrics"].get("rerun_terminal_receipt") is None
+    assert job["metrics"]["request_mode"] == "ocr_reparse"
+    assert json.loads(output_path.read_text()) == output_payload
+    with case.readonly():
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
 
 
-def test_draft_sheet_surfaces_running_llm_reparse_health():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-draft-llm-running")
+def _owned_status_case(history_case):
+    from datetime import date
+    period = "2026-02@2026-02-15~2026-02-21"
+    case = history_case(week=period, period=period, received=datetime(2026, 2, 15, 9),
+        lines=[{"date": date(2026, 2, 15), "daypart": "朝", "menu_name": "Menu A",
+            "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 5}],
+        menu_entries=[{"id": "status-awaiting-feb-15", "monthly_menu_id": "2026-02",
+            "menu_date": date(2026, 2, 15), "daypart": "朝", "name": "Menu A",
+            "slot_index": 0, "diet_type": "regular"}])
+    return case
 
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        error_message=None,
-        metrics={
+
+def _awaiting_output_status_case(history_case, *, request_mode, error_message="ocr_output_pending", extra_metrics=None):
+    case = _owned_status_case(history_case)
+    case.queue()
+    with case.execution():
+        progress = order_service._update_reparse_job_progress(case.job,
+            status="awaiting_output", processing_stage="ocr_pipeline", result_state="awaiting_output",
+            error_message=error_message, metrics_patch={"request_mode": request_mode,
+                "order_id": case.id, "output_reference": "file://pending-output.json",
+                **(extra_metrics or {})})
+    assert progress is not None and progress["status"] == "awaiting_output"
+    return case
+
+
+def test_get_order_surfaces_awaiting_output_llm_reparse_as_active(history_case):
+    case = _awaiting_output_status_case(history_case, request_mode="llm_reparse", extra_metrics={
             "request_mode": "llm_reparse",
             "requested_provider": "gemini",
             "llm_assist": True,
-            "processing_stage": "ocr_pipeline",
-            "result_state": "processing",
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/draft-sheet")
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload.get("reparse_health") == "running"
-
-
-def test_get_order_surfaces_awaiting_output_llm_reparse_as_active():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-awaiting-llm-running")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
-        error_message="ocr_output_pending",
-        metrics={
-            "request_mode": "llm_reparse",
-            "requested_provider": "gemini",
-            "llm_assist": True,
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "order_id": order["id"],
-            "output_reference": "file://pending-output.json",
-        },
-    )
-
-    client = TestClient(app)
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
-    payload = detail.json()
+        })
+    before_job = get_job(case.job)
+    payload = case.get()
     assert payload.get("ocr_status") == "awaiting_output"
-
-    workflow = client.get(f"/orders/{order['id']}/workflow-state")
-    assert workflow.status_code == 200
-    workflow_payload = workflow.json()
-    reparse_state = workflow_payload.get("reparse_state") or {}
+    workflow_payload = case.get("workflow-v2")
+    reparse_state = workflow_payload["ocr_job"]
     assert reparse_state.get("status") == "awaiting_output"
-    assert reparse_state.get("request_mode") == "llm_reparse"
+    assert get_job(case.job)["metrics"]["request_mode"] == "llm_reparse"
+    assert get_job(case.job) == before_job
 
 
-def test_get_order_surfaces_awaiting_output_ocr_rerun_as_active():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-awaiting-ocr-rerun")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
-        error_message="ocr_output_pending",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "order_id": order["id"],
-            "output_reference": "file://pending-output.json",
-        },
-    )
-
-    client = TestClient(app)
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
-    payload = detail.json()
+def test_get_order_surfaces_awaiting_output_ocr_rerun_as_active(history_case):
+    case = _awaiting_output_status_case(history_case, request_mode="ocr_rerun")
+    before_job = get_job(case.job)
+    payload = case.get()
     assert payload.get("ocr_status") == "awaiting_output"
-
-    workflow = client.get(f"/orders/{order['id']}/workflow-state")
-    assert workflow.status_code == 200
-    workflow_payload = workflow.json()
-    reparse_state = workflow_payload.get("reparse_state") or {}
+    workflow_payload = case.get("workflow-v2")
+    reparse_state = workflow_payload["ocr_job"]
     assert reparse_state.get("status") == "awaiting_output"
-    assert reparse_state.get("request_mode") == "ocr_rerun"
-    assert workflow_payload.get("state") == "rerun_in_progress"
+    assert get_job(case.job)["metrics"]["request_mode"] == "ocr_rerun"
+    assert workflow_payload.get("state") == "ocr_running"
+    assert get_job(case.job) == before_job
 
 
-def test_get_order_prefers_live_metrics_error_for_active_ocr_rerun():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-awaiting-ocr-rerun-metrics-error")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
+def test_get_order_prefers_live_metrics_error_for_active_ocr_rerun(history_case):
+    case = _awaiting_output_status_case(history_case, request_mode="ocr_rerun",
         error_message="OCR pipeline request timeout: The read operation timed out",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "error": "ocr_output_pending",
-            "order_id": order["id"],
-            "output_reference": "file://pending-output.json",
-        },
-    )
-
-    client = TestClient(app)
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
-    payload = detail.json()
+        extra_metrics={"error": "ocr_output_pending"})
+    before_job = get_job(case.job)
+    payload = case.get()
     assert payload.get("ocr_status") == "awaiting_output"
     assert payload.get("ocr_error") == "ocr_output_pending"
+    assert get_job(case.job) == before_job
 
 
-def test_get_order_reconciles_ocr_rerun_when_pending_reference_has_newer_completed_output(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-awaiting-ocr-rerun-completed-neighbor")
-    order_service._save_order_ocr_cache(
-        order["id"],
-        {
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|5|",
-            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-            "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "5"]]}],
-        },
-    )
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
-        error_message="ocr_output_pending",
-        output_reference="file://pending-output.json",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "order_id": order["id"],
-        },
-    )
-
-    def _load_output(output_ref: str):
-        if output_ref == "gs://bucket/output/OCR-order-rerun-final.json":
-            return {
-                "status": "done",
-                "stage": "done",
-                "input_reference": "gs://bucket/input/OCR-order-rerun.pdf",
-                "output_reference": output_ref,
-                "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-                "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|",
-                "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "8"]]}],
-            }
-        return {
-            "status": "running",
-            "stage": "ocr",
-            "output_reference": output_ref,
-        }
-
-    monkeypatch.setattr(order_service, "_load_pipeline_output_once", _load_output)
-    monkeypatch.setattr(
-        order_service,
-        "_list_latest_completed_ocr_outputs",
-        lambda *_args, **_kwargs: [
-            (
-                "gs://bucket/output/OCR-order-rerun-final.json",
-                {
-                    "status": "done",
-                    "stage": "done",
-                    "input_reference": "gs://bucket/input/OCR-order-rerun.pdf",
-                    "output_reference": "gs://bucket/output/OCR-order-rerun-final.json",
-                    "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-                    "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|",
-                    "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "8"]]}],
-                    "template_resolution": {
-                        "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-                        "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
-                        "confidence": 0.99,
-                        "blocked": False,
-                        "blocked_reasons": [],
-                    },
-                    "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["02/15", "朝", "Menu A", "8"]]}],
-                    "table_box": [0.1, 0.2, 0.9, 0.8],
-                    "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
-                    "grid_row_edges": [0.2, 0.4, 0.8],
-                },
-            )
-        ],
-    )
-
-    client = TestClient(app)
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
-    payload = detail.json()
-    assert payload.get("ocr_status") == "done"
-    assert payload.get("ocr_result_state") == "evidence_ready"
-    assert payload.get("ocr_error") in {None, ""}
-    assert ((payload.get("ocr_metrics") or {}).get("error")) in {None, ""}
-
-    workflow = client.get(f"/orders/{order['id']}/workflow-state")
-    assert workflow.status_code == 200
-    workflow_payload = workflow.json()
-    reparse_state = workflow_payload.get("reparse_state") or {}
-    assert reparse_state.get("status") == "done"
-    assert workflow_payload.get("state") != "rerun_in_progress"
-    assert workflow_payload.get("ocr_last_reparse_error") in {None, ""}
-    assert workflow_payload.get("ocr_reparse_status") not in {"failed", "running"}
-
-    draft = client.get(f"/orders/{order['id']}/draft-sheet")
-    assert draft.status_code == 200
-    draft_payload = draft.json()
-    assert draft_payload.get("reparse_status") == "done"
-    assert draft_payload.get("reparse_error") in {None, ""}
-    assert draft_payload.get("reparse_request_mode") == "ocr_rerun"
-
-    output = client.get(f"/orders/{order['id']}/ocr-output")
-    assert output.status_code == 200
-    output_payload = output.json()
-    assert output_payload.get("output_reference") == "gs://bucket/output/OCR-order-rerun-final.json"
-
-
-def test_get_order_keeps_ocr_rerun_active_when_only_older_completed_output_exists(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-awaiting-ocr-rerun-older-output")
-    order_service._save_order_ocr_cache(
-        order["id"],
-        {
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|5|",
-            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-            "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "5"]]}],
-        },
-    )
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
-        error_message="ocr_output_pending",
-        output_reference=f"gs://bucket/output/OCR-{order['id']}_20260422_160712_447631.pdf.json",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "order_id": order["id"],
-            "awaiting_output_since": "2026-04-22T16:07:12",
-            "stage_updated_at": "2026-04-22T16:07:12",
-        },
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_load_pipeline_output_once",
-        lambda output_ref: {
-            "status": "running",
-            "stage": "ocr",
-            "output_reference": output_ref,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_list_latest_completed_ocr_outputs",
-        lambda *_args, **_kwargs: [
-            (
-                "gs://bucket/output/OCR-ORD596231b6_20260422_154441_050299.pdf.json",
-                {
-                    "status": "done",
-                    "stage": "done",
-                    "input_reference": "gs://bucket/input/OCR-order-rerun-old.pdf",
-                    "output_reference": f"gs://bucket/output/OCR-{order['id']}_20260422_154441_050299.pdf.json",
-                    "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-                    "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|",
-                    "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "8"]]}],
-                    "template_resolution": {
-                        "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-                        "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
-                        "confidence": 0.99,
-                        "blocked": False,
-                        "blocked_reasons": [],
-                    },
-                    "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["02/15", "朝", "Menu A", "8"]]}],
-                    "table_box": [0.1, 0.2, 0.9, 0.8],
-                    "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
-                    "grid_row_edges": [0.2, 0.4, 0.8],
-                },
-            )
-        ],
-    )
-
-    client = TestClient(app)
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
-    payload = detail.json()
+@pytest.mark.parametrize("neighbor_age", ["newer", "older"])
+def test_get_order_does_not_promote_unowned_completed_neighbor_output(history_case, tmp_path, neighbor_age):
+    case = _awaiting_output_status_case(history_case, request_mode="ocr_rerun")
+    cached_input = {'table_raw': '|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|5|', 'pages': [{'page_index': 1, 'ocr_overlay_uri': 'gs://bucket/ocr.png'}], 'tables': [{'page_index': 1, 'rows': [['02/15', '朝', 'Menu A', '5']]}]}
+    completed_outputs = [('gs://bucket/output/OCR-order-rerun-final.json', {'status': 'done', 'stage': 'done', 'input_reference': 'gs://bucket/input/OCR-order-rerun.pdf', 'output_reference': 'gs://bucket/output/OCR-order-rerun-final.json', 'pages': [{'page_index': 1, 'ocr_overlay_uri': 'gs://bucket/ocr.png'}], 'table_raw': '|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|', 'tables': [{'page_index': 1, 'rows': [['02/15', '朝', 'Menu A', '8']]}], 'template_resolution': {'resolved_template_id': 'fax_layout_regular_soft_mixer_forbidden_v1', 'candidate_template_ids': ['fax_layout_regular_soft_mixer_forbidden_v1'], 'confidence': 0.99, 'blocked': False, 'blocked_reasons': []}, 'quantity_subgrid_passes': [{'page_index': 1, 'normalized_rows': [['02/15', '朝', 'Menu A', '8']]}], 'table_box': [0.1, 0.2, 0.9, 0.8], 'grid_column_edges': [0.1, 0.3, 0.6, 0.9], 'grid_row_edges': [0.2, 0.4, 0.8]})]
+    order = {"id": case.id}
+    if neighbor_age == "older":
+        completed_outputs = [('gs://bucket/output/OCR-ORD596231b6_20260422_154441_050299.pdf.json', {'status': 'done', 'stage': 'done', 'input_reference': 'gs://bucket/input/OCR-order-rerun-old.pdf', 'output_reference': f"gs://bucket/output/OCR-{order['id']}_20260422_154441_050299.pdf.json", 'pages': [{'page_index': 1, 'ocr_overlay_uri': 'gs://bucket/ocr.png'}], 'table_raw': '|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|', 'tables': [{'page_index': 1, 'rows': [['02/15', '朝', 'Menu A', '8']]}], 'template_resolution': {'resolved_template_id': 'fax_layout_regular_soft_mixer_forbidden_v1', 'candidate_template_ids': ['fax_layout_regular_soft_mixer_forbidden_v1'], 'confidence': 0.99, 'blocked': False, 'blocked_reasons': []}, 'quantity_subgrid_passes': [{'page_index': 1, 'normalized_rows': [['02/15', '朝', 'Menu A', '8']]}], 'table_box': [0.1, 0.2, 0.9, 0.8], 'grid_column_edges': [0.1, 0.3, 0.6, 0.9], 'grid_row_edges': [0.2, 0.4, 0.8]})]
+    (neighbor_reference, neighbor_payload), = completed_outputs
+    assert neighbor_reference.startswith("gs://bucket/output/OCR-")
+    assert neighbor_payload["tables"][0]["rows"] == [["02/15", "朝", "Menu A", "8"]]
+    neighbor = tmp_path / neighbor_reference.rsplit("/", 1)[1]
+    neighbor.write_text(json.dumps(neighbor_payload), encoding="utf-8")
+    pending = tmp_path / ("pending-output.json" if neighbor_age == "newer" else
+                          f"OCR-{case.id}_20260422_160712_447631.pdf.json")
+    pending.write_text(json.dumps({"status": "running", "stage": "ocr",
+                                  "output_reference": "file://pending-output.json"}), encoding="utf-8")
+    case.protected += (neighbor, pending)
+    with session_scope() as session:
+        cached = session.get(OrderOcrCache, case.id)
+        if cached is None:
+            session.add(OrderOcrCache(order_id=case.id, payload=cached_input))
+        else:
+            cached.payload = cached_input
+    with case.execution():
+        if neighbor_age == "older":
+            progress = order_service._update_reparse_job_progress(case.job, metrics_patch={
+                "awaiting_output_since": "2026-04-22T16:07:12",
+                "stage_updated_at": "2026-04-22T16:07:12"})
+            assert progress is not None
+        updated, accepted = order_service.update_job_for_workflow_attempt(
+            case.job, case.queued["ocr_job"]["workflow_attempt_id"], order_id=case.id,
+            expected_workflow_revision=case.queued["workflow"]["revision"],
+            output_reference=str(pending))
+    assert accepted is True and updated["output_reference"] == str(pending)
+    before_job = get_job(case.job)
+    payload = case.get()
     assert payload.get("ocr_status") == "awaiting_output"
-
-    workflow = client.get(f"/orders/{order['id']}/workflow-state")
-    assert workflow.status_code == 200
-    workflow_payload = workflow.json()
-    reparse_state = workflow_payload.get("reparse_state") or {}
-    assert reparse_state.get("status") in {"awaiting_output", "recovering"}
-    assert workflow_payload.get("state") == "rerun_in_progress"
-
-
-def test_draft_sheet_surfaces_awaiting_output_ocr_rerun_state():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-draft-awaiting-ocr-rerun")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
-        error_message="OCR pipeline request timeout: The read operation timed out",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "error": "ocr_output_pending",
-            "order_id": order["id"],
-            "output_reference": "file://pending-output.json",
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/draft-sheet")
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload.get("reparse_health") == "awaiting_output"
-    assert payload.get("reparse_status") == "awaiting_output"
-    assert payload.get("reparse_error") == "ocr_output_pending"
-    assert payload.get("reparse_request_mode") == "ocr_rerun"
+    assert payload.get("ocr_error") == "ocr_output_pending"
+    workflow_payload = case.get("workflow-v2")
+    assert workflow_payload["ocr_job"]["status"] == "awaiting_output"
+    assert workflow_payload["state"] == "ocr_running"
+    assert get_job(case.job) == before_job
+    assert get_job(case.job)["metrics"].get("rerun_terminal_receipt") is None
+    assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+    with session_scope() as session:
+        assert session.get(OrderOcrCache, case.id).payload == cached_input
+    assert payload["lines"][0]["quantity_original"] == 5
 
 
-def test_done_ocr_rerun_heals_stale_pending_error_across_detail_surfaces(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-done-ocr-rerun-stale-pending")
+def test_owned_completed_rerun_publishes_eight_without_neighbor_discovery(history_case):
+    case = _owned_status_case(history_case)
+    source = case.produce(cell_values="8")
+    assert source["selected_ocr_result_id"] == case.evidence
+    assert str(source["sheet"]["rows"][0][3]) == "8"
+    job = get_job(case.job)
+    assert job["status"] == "done"
+    receipt = job["metrics"]["rerun_terminal_receipt"]
+    assert receipt["status"] == "done"
+    assert receipt["evidence_run_id"] == case.evidence
+    payload = case.get()
+    assert payload["ocr_status"] == "done"
+    assert payload.get("ocr_error") in {None, ""}
+    assert (payload.get("ocr_metrics") or {}).get("error") in {None, ""}
+    workflow_payload = case.get("workflow-v2")
+    assert workflow_payload["ocr_job"]["status"] == "done"
+    assert workflow_payload["state"] != "ocr_running"
+    assert workflow_payload["ocr_job"]["error_message"] in {None, ""}
+    case.save(source["sheet"])
+    saved = case.get("workflow-v2/sheet")
+    assert saved["sheet"]["rows"] == source["sheet"]["rows"]
+    assert get_job(case.job) == job
+
+
+
+
+def test_done_owned_rerun_keeps_stale_pending_diagnostics_readonly(history_case, tmp_path):
+    from src.models.ocr_job import OcrJob
+
+    case = _owned_status_case(history_case)
+    source = case.produce(cell_values="8")
+    order = {"id": case.id}
+    real_receipt = get_job(case.job)["metrics"]["rerun_terminal_receipt"]
+    assert real_receipt["status"] == "done"
+    assert real_receipt["evidence_run_id"] == case.evidence
     output_path = tmp_path / "ocr_done_final.json"
-    output_path.write_text(
-        json.dumps(
-            {
-                "status": "done",
-                "stage": "done",
-                "input_reference": "file://dummy-order.pdf",
-                "output_reference": f"file://{output_path}",
-                "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-                "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|",
-                "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "8"]]}],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    order_service._save_order_ocr_cache(
-        order["id"],
-        {
-            "status": "done",
-            "stage": "done",
-            "input_reference": "file://dummy-order.pdf",
-            "output_reference": f"file://{output_path}",
-            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr.png"}],
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|",
-            "tables": [{"page_index": 1, "rows": [["02/15", "朝", "Menu A", "8"]]}],
-        },
-    )
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message="ocr_output_pending",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "evidence_ready",
-            "result_state": "evidence_ready",
-            "error": "ocr_output_pending",
-            "trigger_error": "OCR pipeline request timeout: The read operation timed out",
-            "awaiting_output_since": "2026-04-22T16:26:04.410692",
-            "next_recovery_at": "2026-04-22T16:36:04.410692",
-            "evidence_run_id": "OEV-stale-done",
-            "new_evidence_available": True,
-            "order_id": order["id"],
-        },
-    )
-
-    client = TestClient(app)
-
-    detail = client.get(f"/orders/{order['id']}")
-    assert detail.status_code == 200
-    detail_payload = detail.json()
-    assert detail_payload.get("ocr_status") == "done"
-    assert detail_payload.get("ocr_error") in {None, ""}
-    assert ((detail_payload.get("ocr_metrics") or {}).get("error")) in {None, ""}
-    assert ((detail_payload.get("ocr_metrics") or {}).get("trigger_error")) in {None, ""}
-
-    draft = client.get(f"/orders/{order['id']}/draft-sheet")
-    assert draft.status_code == 200
-    draft_payload = draft.json()
-    assert draft_payload.get("reparse_status") == "done"
-    assert draft_payload.get("reparse_error") in {None, ""}
-
-    workflow = client.get(f"/orders/{order['id']}/workflow-state")
-    assert workflow.status_code == 200
-    workflow_payload = workflow.json()
-    reparse_state = workflow_payload.get("reparse_state") or {}
-    assert reparse_state.get("status") == "done"
-    assert workflow_payload.get("ocr_last_reparse_error") in {None, ""}
-    assert workflow_payload.get("ocr_reparse_status") not in {"failed", "running"}
-
-    healed_job = get_job(job_id)
-    assert healed_job is not None
-    assert healed_job.get("error_message") in {None, ""}
-    healed_metrics = healed_job.get("metrics") or {}
-    assert healed_metrics.get("error") in {None, ""}
-    assert healed_metrics.get("trigger_error") in {None, ""}
-    assert healed_metrics.get("awaiting_output_since") in {None, ""}
-    assert healed_metrics.get("next_recovery_at") in {None, ""}
+    cached_input = {'status': 'done', 'stage': 'done', 'input_reference': 'file://dummy-order.pdf', 'output_reference': f'file://{output_path}', 'pages': [{'page_index': 1, 'ocr_overlay_uri': 'gs://bucket/ocr.png'}], 'table_raw': '|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|8|', 'tables': [{'page_index': 1, 'rows': [['02/15', '朝', 'Menu A', '8']]}]}
+    output_path.write_text(json.dumps(cached_input, ensure_ascii=False), encoding="utf-8")
+    case.protected += (output_path,)
+    stale_metrics = {'request_mode': 'ocr_rerun', 'processing_stage': 'evidence_ready', 'result_state': 'evidence_ready', 'error': 'ocr_output_pending', 'trigger_error': 'OCR pipeline request timeout: The read operation timed out', 'awaiting_output_since': '2026-04-22T16:26:04.410692', 'next_recovery_at': '2026-04-22T16:36:04.410692', 'evidence_run_id': 'OEV-stale-done', 'new_evidence_available': True, 'order_id': order['id']}
+    # Deliberate stale diagnostic metadata, never a fabricated evidence/receipt.
+    with session_scope() as session:
+        job = session.get(OcrJob, case.job)
+        job.error_message = "ocr_output_pending"
+        job.metrics = {**job.metrics, **stale_metrics}
+        cached = session.get(OrderOcrCache, case.id)
+        if cached is None:
+            session.add(OrderOcrCache(order_id=case.id, payload=cached_input))
+        else:
+            cached.payload = cached_input
+    before_job = get_job(case.job)
+    detail_payload = case.get()
+    assert detail_payload["ocr_status"] == "done"
+    assert detail_payload["ocr_error"] == "ocr_output_pending"
+    assert detail_payload["ocr_metrics"]["error"] == "ocr_output_pending"
+    assert detail_payload["ocr_metrics"]["trigger_error"] == stale_metrics["trigger_error"]
+    workflow_payload = case.get("workflow-v2")
+    assert workflow_payload["ocr_job"]["status"] == "done"
+    assert workflow_payload["ocr_job"]["error_message"] == "ocr_output_pending"
+    assert workflow_payload["state"] != "ocr_running"
+    assert case.get("workflow-v2/sheet-source")["sheet"] == source["sheet"]
+    retained_job = get_job(case.job)
+    assert isinstance(retained_job, dict)
+    assert retained_job == before_job
+    assert retained_job["metrics"]["rerun_terminal_receipt"] == real_receipt
+    assert retained_job["metrics"]["error"] == "ocr_output_pending"
+    assert retained_job["metrics"]["trigger_error"] == stale_metrics["trigger_error"]
+    assert retained_job["metrics"]["awaiting_output_since"] == stale_metrics["awaiting_output_since"]
+    assert retained_job["metrics"]["next_recovery_at"] == stale_metrics["next_recovery_at"]
+    with session_scope() as session:
+        assert session.get(OrderOcrCache, case.id).payload == cached_input
 
 
-def test_detail_reads_do_not_wait_for_missing_ocr_output_and_surface_rerun(monkeypatch):
+def test_detail_reads_do_not_wait_for_missing_ocr_output_and_surface_rerun(monkeypatch, owned_registration):
     order_service.clear_all()
-    order = _create_seed_order("msg-status-api-loading-root-fix")
+    order = _create_seed_order(owned_registration, "msg-status-api-loading-root-fix")
 
     job_id = f"OCR-{order['id']}"
     create_job(job_id, input_reference=order["document"], status="failed")
@@ -653,54 +446,45 @@ def test_detail_reads_do_not_wait_for_missing_ocr_output_and_surface_rerun(monke
     }
 
 
-def test_get_ocr_output_returns_pending_when_active_ocr_rerun_output_is_pending(monkeypatch):
+def test_get_ocr_output_returns_pending_when_active_ocr_rerun_output_is_pending(monkeypatch, history_case):
+    case = _awaiting_output_status_case(history_case, request_mode="ocr_rerun",
+        error_message="OCR pipeline request timeout: The read operation timed out")
+    stale = {
+        "status": "done",
+        "table_raw": "|日付|区分|メニュー|常食|\\n|---|---|---|---|\\n|02/15|朝|Menu A|5|",
+        "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-old.png"}],
+        "output_reference": "gs://bucket/output/OCR-old.pdf.json",
+    }
+    with session_scope() as session:
+        session.add(OrderOcrCache(order_id=case.id, payload=stale))
+    output_ref = f"gs://bucket/output/OCR-{case.id}_20260422_162548_904035.pdf.json"
+    with case.execution():
+        updated, accepted = order_service.update_job_for_workflow_attempt(
+            case.job, case.queued["ocr_job"]["workflow_attempt_id"], order_id=case.id,
+            expected_workflow_revision=case.queued["workflow"]["revision"],
+            output_reference=output_ref)
+    assert accepted is True and updated["output_reference"] == output_ref
+
+    def unexpected_discovery(*_args, **_kwargs):
+        raise AssertionError("pending HTTP read must not discover or load pipeline output")
+
+    monkeypatch.setattr(order_service, "_load_pipeline_output_once", unexpected_discovery)
+    before = get_job(case.job)
+    with case.readonly():
+        response = case.client.get(f"/orders/{case.id}/ocr-output", headers=case.actor.headers)
+        assert response.status_code == 202
+        assert response.json() == {"pending": True}
+        assert get_job(case.job) == before
+        assert before["status"] == "awaiting_output"
+        assert before["metrics"].get("rerun_terminal_receipt") is None
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == stale
+
+
+def test_get_order_does_not_reconcile_completed_first_pass_output(monkeypatch, tmp_path, owned_registration):
     order_service.clear_all()
-    order = _create_seed_order("msg-status-api-ocr-output-active-rerun-pending")
-    order_service._save_order_ocr_cache(  # noqa: SLF001
-        order["id"],
-        {
-            "status": "done",
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|02/15|朝|Menu A|5|",
-            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/ocr-old.png"}],
-            "output_reference": "gs://bucket/output/OCR-old.pdf.json",
-        },
-    )
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="awaiting_output")
-    update_job(
-        job_id,
-        status="awaiting_output",
-        error_message="OCR pipeline request timeout: The read operation timed out",
-        output_reference=f"gs://bucket/output/OCR-{order['id']}_20260422_162548_904035.pdf.json",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "awaiting_output",
-            "error": "ocr_output_pending",
-            "order_id": order["id"],
-        },
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_load_pipeline_output_once",
-        lambda output_ref: {
-            "status": "running",
-            "stage": "ocr",
-            "output_reference": output_ref,
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 202
-    assert res.json() == {"pending": True}
-
-
-def test_get_order_does_not_reconcile_completed_first_pass_output(monkeypatch, tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-first-pass-reconcile")
+    order = _create_seed_order(owned_registration, "msg-status-api-first-pass-reconcile")
     output_path = tmp_path / "ocr_output_done_first_pass.json"
     output_path.write_text(
         json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
@@ -734,9 +518,9 @@ def test_get_order_does_not_reconcile_completed_first_pass_output(monkeypatch, t
     assert get_job(job_id)["status"] == "running"
 
 
-def test_get_order_does_not_reconcile_done_first_pass_output_without_evidence(monkeypatch, tmp_path):
+def test_get_order_does_not_reconcile_done_first_pass_output_without_evidence(monkeypatch, tmp_path, owned_registration):
     order_service.clear_all()
-    order = _create_seed_order("msg-status-api-first-pass-done-missing-evidence")
+    order = _create_seed_order(owned_registration, "msg-status-api-first-pass-done-missing-evidence")
     output_path = tmp_path / "ocr_output_done_first_pass_missing_evidence.json"
     output_path.write_text(
         json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
@@ -767,47 +551,46 @@ def test_get_order_does_not_reconcile_done_first_pass_output_without_evidence(mo
     assert get_job(job_id)["status"] == "done"
 
 
-def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evidence_exists(monkeypatch, tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-first-pass-already-persisted")
+def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evidence_exists(monkeypatch, tmp_path, history_case):
+    case = _owned_status_case(history_case)
+    source = case.produce(cell_values="5")
+    case.save(source["sheet"])
+    selected = order_service.get_ocr_evidence_run(case.evidence)
     output_path = tmp_path / "ocr_output_done_first_pass_already_persisted.json"
-    output_path.write_text(
-        json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
-        encoding="utf-8",
-    )
+    original = {"status": "done", "table_raw": "|02/15|朝|Menu A|",
+        "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}
+    output_path.write_text(json.dumps(original), encoding="utf-8")
+    case.protected += (output_path,)
+    job_id = f"OCR-unowned-first-pass-{case.id}"
+    created, fresh = create_job(job_id, input_reference=str(case.pdf),
+        status="done", order_id=case.id)
+    assert fresh is True
+    update_job(job_id, status="done", output_reference=f"file://{output_path}",
+        metrics={"request_mode": "ingest_first_pass"}, error_message=None)
+    diagnostic = get_job(job_id)
+    assert diagnostic["metrics"].get("workflow_attempt_id") is None
+    assert diagnostic["metrics"].get("rerun_terminal_receipt") is None
+    seen = []
+    reconcile = order_service.reconcile_completed_ocr_job
 
-    job_id = f"OCR-{order['message_id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-    )
-
-    seen: list[str] = []
-
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_latest_ocr_evidence_run",
-        lambda *_args, **_kwargs: {"id": "OEVexisting"},
-    )
-
-    def _fake_reconcile(target_job_id: str) -> bool:
+    def observe(target_job_id):
         seen.append(target_job_id)
-        return True
+        return reconcile(target_job_id)
 
-    monkeypatch.setattr(orders_api.order_service, "reconcile_completed_ocr_job", _fake_reconcile)
+    monkeypatch.setattr(order_service, "reconcile_completed_ocr_job", observe)
+    with case.readonly():
+        response = case.client.get(f"/orders/{case.id}", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        assert seen == []
+        assert order_service.get_ocr_evidence_run(case.evidence) == selected
+        assert order_service.get_current_sheet_context(case.id)["rows"] == source["sheet"]["rows"]
+        assert get_job(job_id) == diagnostic
+    assert json.loads(output_path.read_text()) == original
 
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    assert seen == []
 
-
-def test_get_order_does_not_reconcile_done_order_bound_first_pass_output_without_evidence(monkeypatch, tmp_path):
+def test_get_order_does_not_reconcile_done_order_bound_first_pass_output_without_evidence(monkeypatch, tmp_path, owned_registration):
     order_service.clear_all()
-    order = _create_seed_order("msg-status-api-order-bound-first-pass")
+    order = _create_seed_order(owned_registration, "msg-status-api-order-bound-first-pass")
     output_path = tmp_path / "ocr_output_done_order_bound_first_pass.json"
     output_path.write_text(
         json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
@@ -839,9 +622,9 @@ def test_get_order_does_not_reconcile_done_order_bound_first_pass_output_without
     assert get_job(job_id)["status"] == "done"
 
 
-def test_list_orders_include_ocr_keeps_running_status():
+def test_list_orders_include_ocr_keeps_running_status(owned_registration):
     order_service.clear_all()
-    order = _create_seed_order("msg-status-api-002")
+    order = _create_seed_order(owned_registration, "msg-status-api-002")
     create_job(f"OCR-{order['id']}", input_reference=order["document"], status="running")
 
     client = TestClient(app)
@@ -946,41 +729,14 @@ def test_list_orders_page_uses_cursor_for_next_page():
     assert [row.get("id") for row in second_page["orders"]] == ["ORDpage2", "ORDpage1"]
 
 
-def test_confirm_endpoint_blocks_when_weekly_menu_missing(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-confirm-block")
-    monkeypatch.setattr(
-        orders_api.order_service,
-        "get_order_workflow_state",
-        lambda _order_id, refresh=False: {
-            "state": "draft_ready",
-            "apply_gate": {
-                "can_apply": False,
-                "can_confirm": False,
-                "blockers": ["weekly_menu_missing"],
-                "confirm_blockers": ["weekly_menu_missing"],
-                "warnings": [],
-                "confirm_warnings": [],
-            },
-        },
-    )
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/confirm")
-
-    assert res.status_code == 409
-    detail = res.json().get("detail") or {}
-    assert detail.get("error") == "weekly_menu_missing"
-
-
-def test_get_bags_rebuilds_stale_materialized_payload():
+def test_get_bags_rebuilds_stale_materialized_payload(owned_outputs):
     order_service.clear_all()
     payload = IngestEmailPayload(
         message_id="msg-status-api-bags-001",
         pdf_uri="file://dummy-bags.pdf",
         received_at=datetime(2026, 4, 18, 9, 0, 0),
         facility_hint="FAC00003",
-        week_hint="2026-04",
+        week_hint="2026-04@2026-04-18~2026-04-18",
     )
     lines = [
         {
@@ -1002,7 +758,8 @@ def test_get_bags_rebuilds_stale_materialized_payload():
             "quantity_original": 8,
         },
     ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
+    order = owned_outputs.create_order_from_ingest(payload, physical_slot=0, lines=lines,
+        recipe={"qty_per_serving": 40, "unit_type": "g", "category": "主菜"})
     with session_scope() as session:
         session.add(
                 Bag(
@@ -1030,46 +787,21 @@ def test_get_bags_rebuilds_stale_materialized_payload():
     }
 
 
-def test_build_order_lines_for_outputs_prefers_stored_week_value_over_resolved_week(monkeypatch):
-    order = {
-        "id": "ORDbagsweek001",
-        "facility": "FAC00003",
-        "stored_week_value": "2026-04",
-        "persisted_week_value": "2026-04@2026-04-12~2026-04-18",
-        "week_value": "2026-04@2026-04-12~2026-04-18",
-        "lines": [
-            {
-                "date": "2026-04-18",
-                "daypart": "昼",
-                "menu_name": "筑前煮",
-                "diet_type": "regular",
-                "area_id": "2F",
-                "bag_type": "standard",
-                "quantity_original": 9,
-            }
-        ],
-    }
-
-    def _fake_entries(week_value, facility_id):
-        if week_value == "2026-04@2026-04-12~2026-04-18":
-            return [
-                {
-                    "date": "2026-04-18",
-                    "daypart": "昼",
-                    "menu": "別メニュー",
-                }
-            ]
-        return []
-
-    monkeypatch.setattr(order_service, "_collect_menu_entries_for_week", _fake_entries)
-    monkeypatch.setattr(order_service, "_collect_menu_items_for_week", lambda *_args, **_kwargs: [])
-
-    lines = output_builder.build_order_lines_for_outputs(order)
-
+def test_build_order_lines_for_outputs_uses_owned_period_not_stale_display_metadata(owned_outputs):
+    payload = IngestEmailPayload(message_id="owned-output-week", pdf_uri="component:authored",
+        received_at=datetime(2026, 4, 18), facility_hint="FAC00003",
+        week_hint="2026-04@2026-04-12~2026-04-18")
+    order = owned_outputs.create_order_from_ingest(payload, physical_slot=0, lines=[{
+        "date": "2026-04-18", "daypart": "昼", "menu_name": "筑前煮", "diet_type": "regular",
+        "area_id": "2F", "bag_type": "standard", "quantity_original": 9}],
+        recipe={"qty_per_serving": 40, "unit_type": "g", "category": "副菜"})
+    displayed = {**order, "stored_week_value": "2026-04", "week_value": "2026-05"}
+    lines = output_builder.build_order_lines_for_outputs(displayed)
     assert [line.get("menu_name") for line in lines] == ["筑前煮"]
+    assert [str(line.get("date")) for line in lines] == ["2026-04-18"]
 
 
-def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type():
+def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type(owned_outputs):
     order_service.clear_all()
     month_id = "2026-02"
     menu_csv = "menu\n筑前煮\n".encode("utf-8")
@@ -1085,7 +817,7 @@ def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type():
         pdf_uri="file://dummy-daily-bags.pdf",
         received_at=datetime(2026, 2, 18, 9, 0, 0),
         facility_hint="FAC00003",
-        week_hint="2026-02",
+        week_hint="2026-02@2026-02-18~2026-02-18",
     )
     lines = [
         {
@@ -1125,7 +857,7 @@ def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type():
             "quantity_original": 3,
         },
     ]
-    order_service.create_order_from_ingest(payload, lines=lines)
+    owned_outputs.create_order_from_ingest(payload, physical_slot=0, lines=lines)
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-02-18")
@@ -1143,9 +875,9 @@ def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type():
     assert mixer["calculation_basis_label"] == "50g/人"
 
 
-def test_get_daily_bags_uses_current_lines_without_materialized_rebuild(monkeypatch):
+def test_get_daily_bags_uses_current_lines_without_materialized_rebuild(monkeypatch, owned_outputs):
     order_service.clear_all()
-    month_id = "2026-02-stale"
+    month_id = "2026-02"
     menu_csv = "menu\n筑前煮\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "筑前煮")
@@ -1159,11 +891,11 @@ def test_get_daily_bags_uses_current_lines_without_materialized_rebuild(monkeypa
         pdf_uri="file://dummy-daily-bags-stale.pdf",
         received_at=datetime(2026, 2, 18, 9, 0, 0),
         facility_hint="FAC00003",
-        week_hint="2026-02",
+        week_hint="2026-02@2026-02-18~2026-02-18",
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         payload,
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-02-18",
                 "daypart": "昼",
@@ -1236,27 +968,27 @@ def test_get_daily_bags_returns_empty_groups_when_target_date_has_no_output_rows
     assert payload["groups"] == []
 
 
-def test_daily_bags_prefers_line_daypart_over_snapshot_daypart():
+def test_daily_bags_prefers_line_daypart_over_snapshot_daypart(owned_outputs):
     order_service.clear_all()
-    month_id = f"2026-03-status-api-daypart-{uuid4().hex[:8]}"
+    month_id = "2026-03"
     menu_csv = "menu\n豆腐の煮物\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "豆腐の煮物")
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "朝食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
     payload = IngestEmailPayload(
         message_id="msg-status-api-daily-bags-daypart-001",
         pdf_uri="file://dummy-daily-bags-daypart.pdf",
         received_at=datetime(2026, 3, 24, 9, 0, 0),
         facility_hint="FAC00003",
-        week_hint="2026-03",
+        week_hint="2026-03@2026-03-24~2026-03-24",
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         payload,
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1297,7 +1029,7 @@ def test_daily_bags_prefers_line_daypart_over_snapshot_daypart():
     assert group["menu_category"] == "主菜"
 
 
-def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master():
+def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_outputs):
     order_service.clear_all()
     month_id = "2099-03"
     menu_name = f"豆腐の煮物-{uuid4().hex[:6]}"
@@ -1319,18 +1051,20 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master():
                 name=menu_name,
                 category="副菜",
                 slot_index=2,
+                diet_type="regular",
                 facility_override=None,
             )
         )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-entry-001",
             pdf_uri="file://dummy-daily-bags-entry.pdf",
             received_at=datetime(2099, 3, 24, 9, 0, 0),
             facility_hint="FAC00003",
-            week_hint=month_id,
+            week_hint="2099-03@2099-03-24~2099-03-24",
         ),
-        lines=[
+        recipe={"qty_per_serving": 70, "unit_type": "g", "category": "主菜"},
+        physical_category="副菜", physical_slot=2, lines=[
             {
                 "date": "2099-03-24",
                 "daypart": "昼",
@@ -1342,7 +1076,7 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master():
             }
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2099-03-24")
@@ -1351,11 +1085,11 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master():
     group = next(item for item in res.json()["groups"] if item.get("menu_name") == menu_name)
     assert group["menu_category"] == "副菜"
     regular = next(item for item in group["diet_groups"] if item.get("diet_type") == "regular")
-    assert regular["calculation_basis_label"] == "40g/人"
-    assert regular["total_amount_label"] == "360g"
+    assert regular["calculation_basis_label"] == "70g/人"
+    assert regular["total_amount_label"] == "630g"
 
 
-def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults():
+def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults(owned_outputs):
     order_service.clear_all()
     month_id = "2099-03"
     menu_name = f"豆腐の煮物-{uuid4().hex[:6]}"
@@ -1377,18 +1111,20 @@ def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults():
                 name=menu_name,
                 category="副菜",
                 slot_index=1,
+                diet_type="regular",
             )
         )
 
-    order_service.create_order_from_ingest(
+    owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-entry-001",
             pdf_uri="file://dummy-daily-bags-entry.pdf",
             received_at=datetime(2099, 3, 24, 9, 0, 0),
             facility_hint="FAC00003",
-            week_hint=month_id,
+            week_hint="2099-03@2099-03-24~2099-03-24",
         ),
-        lines=[
+        recipe={"qty_per_serving": 70, "unit_type": "g", "category": "主菜"},
+        physical_category="副菜", physical_slot=1, lines=[
             {
                 "date": "2099-03-24",
                 "daypart": "昼",
@@ -1408,13 +1144,13 @@ def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults():
     group = next(item for item in res.json()["groups"] if item.get("menu_name") == menu_name)
     assert group["menu_category"] == "副菜"
     regular = next(item for item in group["diet_groups"] if item.get("diet_type") == "regular")
-    assert regular["calculation_basis_label"] == "40g/人"
-    assert regular["total_amount_label"] == "360g"
+    assert regular["calculation_basis_label"] == "70g/人"
+    assert regular["total_amount_label"] == "630g"
 
 
-def test_daily_bags_prefers_current_menu_qty_over_stale_snapshot_qty():
+def test_daily_bags_prefers_current_menu_qty_over_stale_snapshot_qty(owned_outputs):
     order_service.clear_all()
-    month_id = "2099-03"
+    month_id = "2026-03"
     menu_name = f"南瓜サラダ-{uuid4().hex[:6]}"
     menu_csv = f"menu\n{menu_name}\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
@@ -1424,15 +1160,15 @@ def test_daily_bags_prefers_current_menu_qty_over_stale_snapshot_qty():
         menu_item["id"],
         {"qty_per_serving": 50, "unit_type": "g", "daypart": "夕食", "category": "副菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-snapshot-qty-001",
             pdf_uri="file://dummy-daily-bags-snapshot-qty.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00003",
-            week_hint=month_id,
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "夕",
@@ -1444,7 +1180,7 @@ def test_daily_bags_prefers_current_menu_qty_over_stale_snapshot_qty():
             }
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
     with session_scope() as session:
         session.add(
             OrderMenuSnapshot(
@@ -1475,9 +1211,9 @@ def test_daily_bags_prefers_current_menu_qty_over_stale_snapshot_qty():
     assert regular["total_amount_label"] == "450g"
 
 
-def test_daily_bags_treats_staff_as_regular():
+def test_daily_bags_treats_staff_as_regular(owned_outputs):
     order_service.clear_all()
-    month_id = f"2026-03-status-api-staff-{uuid4().hex[:8]}"
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -1486,15 +1222,15 @@ def test_daily_bags_treats_staff_as_regular():
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-staff-001",
             pdf_uri="file://dummy-daily-bags-staff.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00014",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1515,7 +1251,7 @@ def test_daily_bags_treats_staff_as_regular():
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-03-24")
@@ -1528,9 +1264,9 @@ def test_daily_bags_treats_staff_as_regular():
     assert not any(item.get("diet_type") == "staff" for item in group["diet_groups"])
 
 
-def test_daily_bags_treats_daycare_as_regular():
+def test_daily_bags_treats_daycare_as_regular(owned_outputs):
     order_service.clear_all()
-    month_id = f"2026-03-status-api-daycare-{uuid4().hex[:8]}"
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -1539,15 +1275,15 @@ def test_daily_bags_treats_daycare_as_regular():
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-daycare-001",
             pdf_uri="file://dummy-daily-bags-daycare.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00004",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1568,7 +1304,7 @@ def test_daily_bags_treats_daycare_as_regular():
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-03-24")
@@ -1581,9 +1317,9 @@ def test_daily_bags_treats_daycare_as_regular():
     assert not any(item.get("diet_type") == "daycare" for item in group["diet_groups"])
 
 
-def test_daily_bags_treats_regular_bag_and_1600_as_regular():
+def test_daily_bags_treats_regular_bag_and_1600_as_regular(owned_outputs):
     order_service.clear_all()
-    month_id = f"2026-03-status-api-regular-bucket-{uuid4().hex[:8]}"
+    month_id = "2026-03"
     menu_csv = "menu\nホイコーロー\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "ホイコーロー")
@@ -1592,15 +1328,15 @@ def test_daily_bags_treats_regular_bag_and_1600_as_regular():
         menu_item["id"],
         {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-regular-bucket-001",
             pdf_uri="file://dummy-daily-bags-regular-bucket.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00004",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1630,7 +1366,7 @@ def test_daily_bags_treats_regular_bag_and_1600_as_regular():
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-03-24")
@@ -1643,26 +1379,27 @@ def test_daily_bags_treats_regular_bag_and_1600_as_regular():
     assert not any(item.get("diet_type") in {"regular_bag", "regular_1600kcal"} for item in group["diet_groups"])
 
 
-def test_daily_bags_splits_garnish_and_canonicalizes_cut_units():
+def test_daily_bags_splits_garnish_and_canonicalizes_cut_units(owned_outputs):
     order_service.clear_all()
-    month_id = f"2026-03-status-api-garnish-cut-{uuid4().hex[:8]}"
+    month_id = "2026-03"
     menu_csv = "menu\n白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ")
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 1, "unit_type": "枚", "daypart": "夕食", "category": "主菜"},
+        {"qty_per_serving": 1, "unit_type": "切", "daypart": "夕食", "category": "主菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-garnish-cut-001",
             pdf_uri="file://dummy-daily-bags-garnish-cut.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00001",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        accessory_masters={"ﾌﾞﾛｯｺﾘｰ": {"qty_per_serving": 30, "unit_type": "g"}},
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "夕",
@@ -1674,7 +1411,7 @@ def test_daily_bags_splits_garnish_and_canonicalizes_cut_units():
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-03-24")
@@ -1696,45 +1433,18 @@ def test_daily_bags_splits_garnish_and_canonicalizes_cut_units():
     assert garnish_regular["total_amount_label"] == "120g"
 
 
-def test_build_order_lines_for_outputs_matches_split_main_line_to_combined_menu_item(monkeypatch):
-    order = {
-        "id": "ORD-garnish-alias-001",
-        "facility": "FAC00001",
-        "week_value": "2026-03",
-        "lines": [
-            {
-                "date": "2026-03-24",
-                "daypart": "夕",
-                "menu_name": "白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ",
-                "diet_type": "regular",
-                "area_id": "X",
-                "bag_type": "standard",
-                "quantity_original": 4,
-            }
-        ],
-    }
-
-    monkeypatch.setattr(output_builder.config_service, "get_facility_config", lambda _facility_id: None)
-    monkeypatch.setattr(output_builder.menu_service, "get_menu_entries_for_facility", lambda _month_id, _facility_id: [])
-    monkeypatch.setattr(
-        output_builder.menu_service,
-        "get_menu_items_for_facility",
-        lambda _month_id, _facility_id: [
-            {
-                "name": "白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ",
-                "qty_per_serving": 1,
-                "unit_type": "枚",
-                "daypart": "夕食",
-                "category": "主菜",
-            }
-        ],
-    )
-    monkeypatch.setattr(output_builder, "get_order_menu_snapshot", lambda _order_id: {})
-
+def test_build_order_lines_for_outputs_matches_owned_split_main_and_explicit_garnish_recipe(owned_outputs):
+    payload = IngestEmailPayload(message_id="owned-garnish-alias", pdf_uri="component:authored",
+        received_at=datetime(2026, 3, 24), facility_hint="FAC00001",
+        week_hint="2026-03@2026-03-24~2026-03-24")
+    order = owned_outputs.create_order_from_ingest(payload, physical_slot=0, lines=[{
+        "date": "2026-03-24", "daypart": "夕", "menu_name": "白身魚のフライ 添)ﾌﾞﾛｯｺﾘｰ",
+        "diet_type": "regular", "area_id": "X", "bag_type": "standard", "quantity_original": 4}],
+        recipe={"qty_per_serving": 1, "unit_type": "枚", "category": "主菜"},
+        accessory_masters={"ﾌﾞﾛｯｺﾘｰ": {"qty_per_serving": 30, "unit_type": "g"}})
     lines = output_builder.build_order_lines_for_outputs(order)
     main_line = next(item for item in lines if item.get("menu_name") == "白身魚のフライ")
     garnish_line = next(item for item in lines if item.get("menu_name") == "ﾌﾞﾛｯｺﾘｰ")
-
     assert main_line["menu_category"] == "主菜"
     assert main_line["menu_qty_per_serving"] == 1
     assert main_line["menu_unit_type"] == "枚"
@@ -1743,9 +1453,9 @@ def test_build_order_lines_for_outputs_matches_split_main_line_to_combined_menu_
     assert garnish_line["menu_unit_type"] == "g"
 
 
-def test_daily_bags_merges_forbidden_diets():
+def test_daily_bags_merges_forbidden_diets(owned_outputs):
     order_service.clear_all()
-    month_id = f"2026-03-status-api-forbidden-bucket-{uuid4().hex[:8]}"
+    month_id = "2026-03"
     menu_csv = "menu\n豆腐の煮物\n".encode("utf-8")
     menu_service.create_menu(month_id, menu_csv, "menu.csv")
     menu_item = menu_service.create_item_stub(month_id, "豆腐の煮物")
@@ -1754,15 +1464,15 @@ def test_daily_bags_merges_forbidden_diets():
         menu_item["id"],
         {"qty_per_serving": 40, "unit_type": "g", "daypart": "昼食", "category": "副菜"},
     )
-    order = order_service.create_order_from_ingest(
+    order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-forbidden-bucket-001",
             pdf_uri="file://dummy-daily-bags-forbidden-bucket.pdf",
             received_at=datetime(2026, 3, 24, 9, 0, 0),
             facility_hint="FAC00014",
-            week_hint="2026-03",
+            week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        lines=[
+        physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1801,7 +1511,7 @@ def test_daily_bags_merges_forbidden_diets():
             },
         ],
     )
-    order_service.set_status(order["id"], "確定")
+    owned_outputs.assert_confirmed(order["id"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-03-24")
@@ -2107,591 +1817,156 @@ def test_daily_bag_audit_returns_blocker_when_summary_cannot_be_built(monkeypatc
     assert result["ai"]["items"] == []
 
 
-def test_reparse_endpoint_marks_job_running_before_background(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(job_id, status="done", metrics={"changed": False}, error_message=None)
 
-    monkeypatch.setattr(orders_api, "_run_reparse_background", lambda *_args, **_kwargs: None)
 
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/reparse", json={"ocr_provider": "gemini", "llm_assist": True})
-    assert res.status_code == 202
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "running"
-    assert job.get("error_message") in {None, ""}
-    assert job.get("output_reference") in {None, ""}
-    assert (job.get("metrics") or {}).get("request_mode") == "llm_reparse"
-
-
-def test_reparse_endpoint_rejects_removed_tesseract_provider():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-reparse-tesseract-removed")
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/reparse", json={"ocr_provider": "tesseract", "force": True})
-
-    assert res.status_code == 400
-    assert res.json()["detail"] == "ocr_provider=tesseract has been removed"
-    assert get_job(f"OCR-{order['id']}") is None
-
-
-def test_ocr_rerun_endpoint_rejects_removed_tesseract_provider():
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-rerun-tesseract-removed")
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/ocr-rerun", json={"ocr_provider": "tesseract"})
-
-    assert res.status_code == 400
-    assert res.json()["detail"] == "ocr_provider=tesseract has been removed"
-    assert get_job(f"OCR-{order['id']}") is None
-
-
-def test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-default-llm")
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
-        captured["order_id"] = order_id
-        captured["ocr_prompt"] = ocr_prompt
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["ocr_model"] = ocr_model
-        captured["llm_assist"] = llm_assist
-
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/reparse")
-
-    assert res.status_code == 202
-    assert captured["order_id"] == order["id"]
-    assert captured["ocr_provider"] is None
-    assert captured["ocr_model"] is None
-    assert captured["llm_assist"] is True
-
-
-def test_get_order_preserves_terminal_llm_reparse_failure_status_against_cached_done(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-001b-llm")
-    output_path = tmp_path / "ocr_output_done_llm.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="failed")
-    update_job(
-        job_id,
-        status="failed",
-        output_reference=f"file://{output_path}",
-        error_message="main_ocr_failed:gemini",
-        metrics={
-            "request_mode": "llm_reparse",
-            "requested_provider": "gemini",
-            "llm_assist": True,
-            "processing_stage": "inference",
-            "result_state": "hard_failed",
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload.get("ocr_status") == "failed"
-    assert payload.get("ocr_error") == "main_ocr_failed:gemini"
-    assert (payload.get("ocr_metrics") or {}).get("request_mode") == "llm_reparse"
-
-
-def test_reparse_endpoint_passes_explicit_ocr_model(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-model")
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
-        captured["order_id"] = order_id
-        captured["ocr_prompt"] = ocr_prompt
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["ocr_model"] = ocr_model
-        captured["llm_assist"] = llm_assist
-
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(
-        f"/orders/{order['id']}/reparse",
-        json={"ocr_provider": "gemini", "ocr_model": "gemini-2.5-pro", "llm_assist": True},
-    )
-
-    assert res.status_code == 202
-    assert captured["order_id"] == order["id"]
-    assert captured["ocr_provider"] == "gemini"
-    assert captured["ocr_model"] == "gemini-2.5-pro"
-    assert captured["llm_assist"] is True
-
-
-def test_reparse_endpoint_accepts_llm_model_alias(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-llm-model")
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
-        captured["order_id"] = order_id
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["ocr_model"] = ocr_model
-        captured["llm_assist"] = llm_assist
-
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(
-        f"/orders/{order['id']}/reparse",
-        json={"ocr_provider": "gemini", "llm_model": "gemini-2.5-flash", "llm_assist": True},
-    )
-
-    assert res.status_code == 202
-    assert captured["order_id"] == order["id"]
-    assert captured["ocr_provider"] == "gemini"
-    assert captured["ocr_model"] == "gemini-2.5-flash"
-    assert captured["llm_assist"] is True
-
-
-def test_reparse_endpoint_accepts_prompt_preset(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-preset")
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
-        captured["order_id"] = order_id
-        captured["ocr_prompt"] = ocr_prompt
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["ocr_model"] = ocr_model
-        captured["llm_assist"] = llm_assist
-
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(
-        f"/orders/{order['id']}/reparse",
-        json={"ocr_provider": "gemini", "llm_assist": True, "prompt_preset": "row_alignment"},
-    )
-
-    assert res.status_code == 202
-    assert captured["order_id"] == order["id"]
-    assert captured["prompt_preset"] == "row_alignment"
-    assert captured["llm_assist"] is True
-
-
-def test_reparse_endpoint_accepts_merged_cell_prompt_preset(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-merged-preset")
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_prompt, prompt_preset=None, ocr_provider=None, ocr_model=None, llm_assist=False):
-        captured["order_id"] = order_id
-        captured["prompt_preset"] = prompt_preset
-        captured["ocr_provider"] = ocr_provider
-        captured["llm_assist"] = llm_assist
-
-    monkeypatch.setattr(orders_api, "_run_reparse_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(
-        f"/orders/{order['id']}/reparse",
-        json={"ocr_provider": "gemini", "llm_assist": True, "prompt_preset": "merged_cell_quantity_spans"},
-    )
-
-    assert res.status_code == 202
-    assert captured["order_id"] == order["id"]
-    assert captured["prompt_preset"] == "merged_cell_quantity_spans"
-    assert captured["ocr_provider"] == "gemini"
-    assert captured["llm_assist"] is True
-
-
-def test_ocr_recover_endpoint_requests_pipeline_first_pass(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-recover")
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_job_id):
-        captured["order_id"] = order_id
-        captured["ocr_job_id"] = ocr_job_id
-
-    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/ocr-recover")
-
-    assert res.status_code == 202
-    assert res.json()["accepted"] is True
-    assert res.json()["mode"] == "pipeline_recovery"
-    assert captured["order_id"] == order["id"]
-    assert captured["ocr_job_id"] == f"OCR-{order['id']}"
-
-
-def test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass(monkeypatch):
-    order_service.clear_all()
-    monkeypatch.setenv("OCR_JOB_STALE_MINUTES", "1")
-    order = _create_seed_order("msg-status-api-003-recover-stale")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "processing_stage": "llm_reparse",
-            "result_state": "processing",
-            "stage_updated_at": (datetime.utcnow() - timedelta(minutes=5)).isoformat(),
-        },
-    )
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_job_id):
-        captured["order_id"] = order_id
-        captured["ocr_job_id"] = ocr_job_id
-
-    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/ocr-recover")
-
-    assert res.status_code == 202
-    assert res.json()["accepted"] is True
-    assert res.json()["mode"] == "pipeline_recovery"
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "running"
-    assert job.get("metrics", {}).get("processing_stage") == "queued"
-    assert captured["order_id"] == order["id"]
-    assert captured["ocr_job_id"] == job_id
-
-
-def test_ocr_rerun_endpoint_force_replaces_active_job(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003-rerun-force")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "ocr_pipeline",
-            "result_state": "processing",
-        },
-    )
-    captured: dict[str, object] = {}
-
-    def _fake_run(order_id, ocr_job_id):
-        captured["order_id"] = order_id
-        captured["ocr_job_id"] = ocr_job_id
-
-    monkeypatch.setattr(orders_api, "_run_ocr_rerun_background", _fake_run)
-
-    client = TestClient(app)
-    res = client.post(f"/orders/{order['id']}/ocr-rerun", json={"force": True})
-
-    assert res.status_code == 202
-    assert res.json()["accepted"] is True
-    assert res.json()["mode"] == "pipeline_rerun"
-    assert captured["order_id"] == order["id"]
-    assert captured["ocr_job_id"] == job_id
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "running"
-    metrics = job.get("metrics") or {}
-    assert metrics.get("request_mode") == "ocr_rerun"
-    assert metrics.get("processing_stage") == "queued"
-
-
-def test_run_reparse_background_marks_job_failed_on_crash(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003b")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "request_mode": "llm_reparse",
-            "requested_provider": "gemini",
-            "llm_assist": True,
-            "processing_stage": "queued",
-            "result_state": "processing",
-        },
-    )
-
-    def _raise(*_args, **_kwargs):
+def test_owned_reparse_callback_propagates_crash_to_delivery_terminal_owner(history_case, monkeypatch):
+    f = history_case()
+    f.queue()
+    def fail(**_kwargs):
         raise RuntimeError("boom")
-
-    monkeypatch.setattr(order_service, "reparse_order", _raise)
-
-    orders_api._run_reparse_background(order["id"], None, None, "gemini", None, True)
-
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "failed"
-    assert "reparse_crashed:boom" in str(job.get("error_message") or "")
-    metrics = job.get("metrics") or {}
-    assert metrics.get("request_mode") == "llm_reparse"
-    assert metrics.get("requested_provider") == "gemini"
-    assert metrics.get("processing_stage") == "crashed"
-    assert metrics.get("result_state") == "hard_failed"
-    assert metrics.get("error") == "reparse_crashed"
-    assert metrics.get("crash_detail") == "boom"
+    monkeypatch.setattr(order_service, "reparse_order", lambda *_args, **kwargs: fail(**kwargs))
+    with f.execution(), pytest.raises(orders_api.OcrBackgroundExecutionFailure, match="boom"):
+        orders_api._run_reparse_background(f.id, None, expected_revision=f.queued["workflow"]["revision"],
+            workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"], ocr_job_id=f.job)
+    job = get_job(f.job)
+    assert job["status"] == "running"
+    assert "workflow_terminal_receipt" not in (job.get("metrics") or {})
 
 
-def test_run_reparse_background_marks_job_failed_on_system_exit(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003c")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "request_mode": "llm_reparse",
-            "requested_provider": "gemini",
-            "llm_assist": True,
-            "processing_stage": "queued",
-            "result_state": "processing",
-        },
-    )
 
-    def _raise(*_args, **_kwargs):
+def test_owned_reparse_callback_does_not_forge_terminal_receipt_on_system_exit(history_case, monkeypatch):
+    f = history_case()
+    f.queue()
+    def fail(*_args, **_kwargs):
         raise SystemExit(1)
-
-    monkeypatch.setattr(order_service, "reparse_order", _raise)
-
-    orders_api._run_reparse_background(order["id"], None, None, "gemini", None, True)
-
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "failed"
-    assert "reparse_crashed:1" in str(job.get("error_message") or "")
-    metrics = job.get("metrics") or {}
-    assert metrics.get("processing_stage") == "crashed"
-    assert metrics.get("result_state") == "hard_failed"
-    assert metrics.get("error") == "reparse_crashed"
-    assert metrics.get("crash_detail") == "1"
+    monkeypatch.setattr(order_service, "reparse_order", fail)
+    with f.execution(), pytest.raises(SystemExit) as raised:
+        orders_api._run_reparse_background(f.id, None, expected_revision=f.queued["workflow"]["revision"],
+            workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"], ocr_job_id=f.job)
+    assert raised.value.code == 1
+    assert get_job(f.job)["status"] == "running"
 
 
-def test_run_ocr_rerun_background_marks_job_failed_on_system_exit(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003d")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "queued",
-            "result_state": "processing",
-        },
-    )
 
-    def _raise(*_args, **_kwargs):
+def test_owned_rerun_callback_propagates_system_exit_without_claiming_success(history_case, monkeypatch):
+    f = history_case()
+    f.queue()
+    def fail(*_args, **_kwargs):
         raise SystemExit(1)
-
-    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", _raise)
-
-    orders_api._run_ocr_rerun_background(order["id"], job_id)
-
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "failed"
-    assert "ocr_rerun_crashed:1" in str(job.get("error_message") or "")
-    metrics = job.get("metrics") or {}
-    assert metrics.get("request_mode") == "ocr_rerun"
-    assert metrics.get("processing_stage") == "crashed"
-    assert metrics.get("result_state") == "hard_failed"
-    assert metrics.get("error") == "1"
+    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", fail)
+    with f.execution(), pytest.raises(SystemExit) as raised:
+        orders_api._run_ocr_rerun_background(f.id, f.job,
+            expected_revision=f.queued["workflow"]["revision"],
+            workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"])
+    assert raised.value.code == 1
+    assert get_job(f.job)["status"] == "running"
 
 
-def test_run_ocr_rerun_background_acquires_execution_slot_before_pipeline(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003e")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "queued",
-            "result_state": "processing",
-        },
-    )
-    events: list[str] = []
 
-    class _FakeSlot:
-        def __enter__(self):
-            events.append("slot_acquired")
-            return {"backend": "test", "slot": 0}
-
-        def __exit__(self, *_args):
-            events.append("slot_released")
-            return False
-
-    def _fake_slot(**_kwargs):
-        return _FakeSlot()
-
-    def _fake_rerun(*_args, **_kwargs):
-        events.append("pipeline_started")
-        return {"id": "EVID-test"}, None
-
-    def _fake_mark(*_args, **_kwargs):
-        events.append("workflow_completed")
-        return {"state": "ocr_completed"}
-
-    monkeypatch.setattr(orders_api, "acquire_ocr_execution_slot", _fake_slot)
-    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", _fake_rerun)
-    monkeypatch.setattr(orders_api.order_workflow_v2_service, "mark_ocr_run_completed", _fake_mark)
-
-    orders_api._run_ocr_rerun_background(order["id"], job_id)
-
-    assert events == ["slot_acquired", "pipeline_started", "slot_released", "workflow_completed"]
-    job = get_job(job_id)
-    assert job is not None
-    metrics = job.get("metrics") or {}
-    assert metrics.get("processing_stage") == "ocr_slot_acquired"
-    assert metrics.get("ocr_execution_slot") == {"backend": "test", "slot": 0}
-    assert isinstance(metrics.get("ocr_slot_wait_seconds"), (int, float))
+def test_owned_rerun_callback_acquires_real_slot_before_external_recognition(history_case, monkeypatch):
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    f = history_case()
+    calls = f.prepare_provider()
+    provider = batch.build_hakodate_best_method_for_manifest_item
+    stages = []
+    def observe(**kwargs):
+        metrics = get_job(f.job)["metrics"]
+        stages.append(metrics["processing_stage"])
+        assert metrics["ocr_execution_slot"]["backend"] == "local_semaphore"
+        return provider(**kwargs)
+    monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", observe)
+    with f.execution():
+        result = orders_api._run_ocr_rerun_background(f.id, f.job,
+            expected_revision=f.queued["workflow"]["revision"],
+            workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"])
+    assert stages == ["ocr_slot_acquired"]
+    assert len(calls) == 1
+    assert result["terminal_receipt"]["job_id"] == f.job
+    assert result["terminal_receipt"]["order_id"] == f.id
+    assert result["terminal_receipt"]["status"] == "done"
 
 
-def test_run_ocr_rerun_background_marks_slot_timeout_failed(monkeypatch):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-003f")
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        metrics={
-            "request_mode": "ocr_rerun",
-            "processing_stage": "queued",
-            "result_state": "processing",
-        },
-    )
-    completed: dict[str, object] = {}
 
-    def _raise_timeout(**_kwargs):
-        raise orders_api.OcrExecutionSlotTimeout("ocr_execution_slot_timeout")
-
-    def _fake_mark(order_id, job_id, error=None, **_kwargs):
-        completed["order_id"] = order_id
-        completed["job_id"] = job_id
-        completed["error"] = error
-        return {"state": "ocr_failed"}
-
-    def _fail_rerun(*_args, **_kwargs):
-        raise AssertionError("OCR pipeline must not start without execution slot")
-
-    monkeypatch.setattr(orders_api, "acquire_ocr_execution_slot", _raise_timeout)
-    monkeypatch.setattr(order_service, "rerun_ocr_evidence_only", _fail_rerun)
-    monkeypatch.setattr(orders_api.order_workflow_v2_service, "mark_ocr_run_completed", _fake_mark)
-
-    orders_api._run_ocr_rerun_background(order["id"], job_id)
-
-    job = get_job(job_id)
-    assert job is not None
-    assert job.get("status") == "failed"
-    assert job.get("error_message") == "ocr_execution_slot_timeout"
-    metrics = job.get("metrics") or {}
-    assert metrics.get("processing_stage") == "ocr_execution_slot_timeout"
-    assert metrics.get("result_state") == "hard_failed"
-    assert completed == {
-        "order_id": order["id"],
-        "job_id": job_id,
-        "error": "ocr_execution_slot_timeout",
-    }
+def test_owned_rerun_real_slot_timeout_persists_failed_owned_receipt(history_case, monkeypatch):
+    from src.services.ocr_execution_lock_service import acquire_ocr_execution_slot
+    f = history_case()
+    f.queue()
+    monkeypatch.setenv("WORKFLOW_V2_OCR_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("WORKFLOW_V2_OCR_SLOT_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("WORKFLOW_V2_OCR_SLOT_POLL_SECONDS", "0.5")
+    with acquire_ocr_execution_slot(order_id=f.id, job_id="owned-slot-holder"):
+        with f.execution():
+            result = orders_api._run_ocr_rerun_background(f.id, f.job,
+                expected_revision=f.queued["workflow"]["revision"],
+                workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"])
+    receipt = result["terminal_receipt"]
+    assert receipt["status"] == "failed"
+    assert receipt["job_id"] == f.job and receipt["order_id"] == f.id
+    job = get_job(f.job)
+    assert job["status"] == "failed"
+    assert job["error_message"] == "ocr_execution_slot_timeout"
+    assert job["metrics"]["processing_stage"] == "ocr_execution_slot_timeout"
 
 
-def test_get_ocr_output_includes_reparse_debug_from_cache(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-004")
-    output_path = tmp_path / "ocr_output.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
 
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-    )
-    order_service._save_order_ocr_cache(  # noqa: SLF001
-        order["id"],
-        {
-            "_reparse_debug": {
-                "provider": "gemini",
-                "requested_provider": "gemini",
-                "row_count": 55,
-            }
-        },
-    )
+def _owned_debug_case(history_case, *, metrics, cached_debug):
+    from copy import deepcopy
+    from src.models.ocr_job import OcrJob
 
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
-    assert payload.get("status") == "done"
-    assert payload.get("_reparse_debug", {}).get("provider") == "gemini"
-    assert payload.get("_reparse_debug", {}).get("row_count") == 55
+    case = _owned_status_case(history_case)
+    sheet = case.produce(cell_values="5")["sheet"]
+    case.save(sheet)
+    selected = case.evidence
+    with session_scope() as session:
+        job = session.get(OcrJob, case.job)
+        terminal = deepcopy(job.metrics["rerun_terminal_receipt"])
+        # Deliberately stale/display-only diagnostics, not a forged producer result.
+        job.metrics = {**job.metrics, **deepcopy(metrics)}
+        assert job.status == "done"
+        assert job.metrics["rerun_terminal_receipt"] == terminal
+        cached = session.get(OrderOcrCache, case.id)
+        if cached is None:
+            session.add(OrderOcrCache(order_id=case.id, payload={"_reparse_debug": deepcopy(cached_debug)}))
+        else:
+            cached.payload = {**(cached.payload or {}), "_reparse_debug": deepcopy(cached_debug)}
+    return case, sheet, selected, get_job(case.job)
 
 
-def test_get_ocr_output_refreshes_stale_reparse_debug_with_latest_job_metrics(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-005")
-    output_path = tmp_path / "ocr_output_latest.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
+def _read_owned_debug(case, sheet, selected, job):
+    evidence = order_service.get_ocr_evidence_run(selected)
+    with case.readonly():
+        response = case.client.get(f"/orders/{case.id}/ocr-output", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        assert get_job(case.job) == job
+        assert order_service.get_ocr_evidence_run(selected) == evidence
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == selected
+        assert current["rows"] == sheet["rows"]
+    return response.json()
 
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-        metrics={
-            "provider": "gemini",
-            "requested_provider": "gemini",
-            "row_count": 54,
-            "line_count": 216,
-            "before_count": 78,
-            "after_count": 216,
-            "changed": True,
-            "llm_assist": True,
-        },
-    )
-    order_service._save_order_ocr_cache(  # noqa: SLF001
-        order["id"],
-        {
-            "_reparse_debug": {
-                "provider": "gemini",
-                "requested_provider": "gemini",
-                "row_count": 34,
-                "line_count": 78,
-                "before_count": 78,
-                "after_count": 78,
-                "changed": False,
-            }
-        },
-    )
 
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
+def test_unselected_cache_debug_cannot_replace_owned_ocr_output(history_case):
+    historical = {"provider": "gemini", "requested_provider": "gemini", "row_count": 55}
+    # Historical formatting remains a pure diagnostic component, not OCR provenance.
+    parsed = {"status": "done", "_reparse_debug": historical}
+    retained, changed = order_service._sync_reparse_debug_from_job_metrics(parsed, {})
+    assert changed is False
+    assert retained["status"] == "done"
+    assert retained["_reparse_debug"]["provider"] == "gemini"
+    assert retained["_reparse_debug"]["row_count"] == 55
+    case, sheet, selected, job = _owned_debug_case(history_case, metrics={}, cached_debug=historical)
+    payload = _read_owned_debug(case, sheet, selected, job)
+    assert (payload.get("_reparse_debug") or {}).get("row_count") != 55
+
+
+def test_owned_output_debug_uses_explicit_job_diagnostics_without_changing_source(history_case):
+    metrics = {"provider": "gemini", "requested_provider": "gemini", "row_count": 54,
+        "line_count": 216, "before_count": 78, "after_count": 216,
+        "changed": True, "llm_assist": True}
+    stale = {"provider": "gemini", "requested_provider": "gemini", "row_count": 34,
+        "line_count": 78, "before_count": 78, "after_count": 78, "changed": False}
+    case, sheet, selected, job = _owned_debug_case(history_case, metrics=metrics, cached_debug=stale)
+    payload = _read_owned_debug(case, sheet, selected, job)
     debug = payload.get("_reparse_debug") or {}
     assert debug.get("provider") == "gemini"
     assert debug.get("requested_provider") == "gemini"
@@ -2701,142 +1976,71 @@ def test_get_ocr_output_refreshes_stale_reparse_debug_with_latest_job_metrics(tm
     assert debug.get("changed") is True
 
 
-def test_get_ocr_output_surfaces_failed_llm_reparse_debug_from_job_metrics(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-005-failed-llm")
-    output_path = tmp_path / "ocr_output_failed_llm.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="failed")
-    update_job(
-        job_id,
-        status="failed",
-        output_reference=f"file://{output_path}",
-        error_message="main_ocr_failed:gemini",
-        metrics={
-            "request_mode": "llm_reparse",
-            "requested_provider": "gemini",
-            "llm_assist": True,
-            "processing_stage": "inference",
-            "result_state": "hard_failed",
-            "error": "main_ocr_failed:gemini",
-            "confirmed_lines_retained": True,
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
+def test_owned_output_displays_historical_failure_diagnostics_without_forging_failed_execution(history_case):
+    metrics = {"request_mode": "llm_reparse", "requested_provider": "gemini",
+        "llm_assist": True, "processing_stage": "inference", "result_state": "hard_failed",
+        "error": "main_ocr_failed:gemini", "confirmed_lines_retained": True}
+    case, sheet, selected, job = _owned_debug_case(history_case, metrics=metrics, cached_debug={})
+    payload = _read_owned_debug(case, sheet, selected, job)
     debug = payload.get("_reparse_debug") or {}
     assert debug.get("provider") == "gemini"
     assert debug.get("requested_provider") == "gemini"
     assert debug.get("error") == "main_ocr_failed:gemini"
     assert debug.get("processing_stage") == "inference"
     assert debug.get("result_state") == "hard_failed"
+    assert job["status"] == "done"
+    assert job["metrics"]["rerun_terminal_receipt"]["status"] == "done"
 
 
-def test_get_ocr_output_clears_stale_reparse_error_on_success_metrics(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-006")
-    output_path = tmp_path / "ocr_output_success.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-        metrics={
-            "provider": "gemini",
-            "requested_provider": "gemini",
-            "row_count": 43,
-            "line_count": 29,
-            "before_count": 7,
-            "after_count": 29,
-            "changed": True,
-            "llm_assist": True,
-        },
-    )
-    order_service._save_order_ocr_cache(  # noqa: SLF001
-        order["id"],
-        {
-            "_reparse_debug": {
-                "provider": "gemini",
-                "error": "sheet_row_coverage_low",
-                "reject_reasons": ["sheet_row_coverage_low"],
-                "validation_detail": {"expected_row_count": 56, "actual_row_count": 43},
-            }
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
+def test_owned_output_debug_clears_stale_errors_without_overwriting_saved_five(history_case):
+    metrics = {"provider": "gemini", "requested_provider": "gemini", "row_count": 43,
+        "line_count": 29, "before_count": 7, "after_count": 29,
+        "changed": True, "llm_assist": True}
+    stale = {"provider": "gemini", "error": "sheet_row_coverage_low",
+        "reject_reasons": ["sheet_row_coverage_low"],
+        "validation_detail": {"expected_row_count": 56, "actual_row_count": 43}}
+    merged, changed = order_service._sync_reparse_debug_from_job_metrics(
+        {"_reparse_debug": stale}, {"status": "done", "metrics": metrics})
+    assert changed is True
+    assert merged["_reparse_debug"]["error"] is None
+    assert merged["_reparse_debug"]["reject_reasons"] == []
+    assert merged["_reparse_debug"]["validation_detail"] == {}
+    case, sheet, selected, job = _owned_debug_case(history_case, metrics=metrics, cached_debug=stale)
+    payload = _read_owned_debug(case, sheet, selected, job)
     debug = payload.get("_reparse_debug") or {}
     assert debug.get("provider") == "gemini"
     assert debug.get("error") in {None, ""}
-    assert debug.get("reject_reasons") == []
-    assert debug.get("validation_detail") == {}
+    assert debug.get("reject_reasons", []) == []
+    assert debug.get("validation_detail", {}) == {}
 
 
-def test_get_ocr_output_keeps_reparse_warning_fields_on_success_metrics(tmp_path):
-    order_service.clear_all()
-    order = _create_seed_order("msg-status-api-007")
-    output_path = tmp_path / "ocr_output_warning.json"
-    output_path.write_text(json.dumps({"status": "done", "table_raw": "|a|b|"}), encoding="utf-8")
-
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-        metrics={
-            "provider": "gemini",
-            "requested_provider": "gemini",
-            "row_count": 62,
-            "line_count": 248,
-            "before_count": 78,
-            "after_count": 248,
-            "changed": True,
-            "llm_assist": True,
-            "warning_reasons": ["sheet_column_anomaly"],
-            "warning_detail": {
-                "quality_issue": "column_anomaly",
-                "column_anomaly_count": 1,
-            },
-        },
-    )
-    order_service._save_order_ocr_cache(  # noqa: SLF001
-        order["id"],
-        {
-            "_reparse_debug": {
-                "provider": "gemini",
-                "warning_reasons": [],
-                "warning_detail": {},
-            }
-        },
-    )
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
+def test_owned_output_preserves_explicit_warning_diagnostics_and_saved_five(history_case):
+    metrics = {"provider": "gemini", "requested_provider": "gemini", "row_count": 62,
+        "line_count": 248, "before_count": 78, "after_count": 248,
+        "changed": True, "llm_assist": True, "warning_reasons": ["sheet_column_anomaly"],
+        "warning_detail": {"quality_issue": "column_anomaly", "column_anomaly_count": 1}}
+    stale = {"provider": "gemini", "warning_reasons": [], "warning_detail": {}}
+    case, sheet, selected, job = _owned_debug_case(history_case, metrics=metrics, cached_debug=stale)
+    payload = _read_owned_debug(case, sheet, selected, job)
     debug = payload.get("_reparse_debug") or {}
     assert debug.get("provider") == "gemini"
     assert debug.get("warning_reasons") == ["sheet_column_anomaly"]
-    assert (debug.get("warning_detail") or {}).get("quality_issue") == "column_anomaly"
+    assert debug.get("warning_detail", {}).get("quality_issue") == "column_anomaly"
 
 
-def test_get_ocr_output_api_recanonicalizes_stale_aux_position_fallback():
-    order_service.clear_all()
-    order = _create_seed_order_for_facility("msg-status-api-fac00004-aux-001", "FAC00004")
+def test_owned_output_refuses_stale_aux_position_mapping_without_copying_totals(history_case):
+    from datetime import date
+    from src.services.candidate_resolution_service import build_column_mapping_resolution
+    from tests.integration.test_draft_sheet_service import _fac00004_owned_source, _legacy_aux_target_refused
+
+    expected = [["04/26", "朝", "主", "鶏じゃが", "66", "", "", "", "", "", "", ""]]
+    case, source, fields, header = _fac00004_owned_source(history_case,
+        rows=expected, menu_entries=[{"id": "status-aux-april26", "monthly_menu_id": "2026-04",
+            "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "鶏じゃが",
+            "category": "主", "slot_index": 0, "diet_type": "regular"}], lines=[])
+    case.save(source["sheet"])
+    _legacy_aux_target_refused(case, "67")
+    _legacy_aux_target_refused(case, "70")
     rows = [
         ["", "", "", "", "", "", "", "", "", "", "", "山田菜", "備考欄"],
         ["", "", "", "献立", "合計", "#☆", "通所", "職員", "平森", "", "", "", ""],
@@ -2844,9 +2048,7 @@ def test_get_ocr_output_api_recanonicalizes_stale_aux_position_fallback():
         ["", "", "", "", "70", "", "", "", "", "", "", "", ""],
         ["4/26", "朝", "主", "鶏じゃが", "67", "66", "", "", "", "", "", "", ""],
     ]
-    order_service._save_order_ocr_cache(  # noqa: SLF001
-        order["id"],
-        {
+    stale = {
             "status": "done",
             "table_raw": "|日付|区分|副区分|献立|合計|#☆|通所|職員|平森|肉蒸|魚禁|揚げ物|備考|\n|---|---|---|---|---|---|---|---|---|---|---|---|---|",
             "tables": [
@@ -2885,26 +2087,41 @@ def test_get_ocr_output_api_recanonicalizes_stale_aux_position_fallback():
                     "auto_selectable": True,
                 }
             ],
-        },
-    )
+        }
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, case.id)
+        if cache is None:
+            session.add(OrderOcrCache(order_id=case.id, payload=stale))
+        else:
+            cache.payload = stale
+    with case.readonly():
+        resolution = build_column_mapping_resolution(stale)
+        assert resolution["blocked"] is True
+        assert "position_fallback_removed" in resolution["blocked_reasons"]
+        assert resolution["resolved_value"] is None
+        response = case.client.get(f"/orders/{case.id}/ocr-output", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == expected
+        assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == expected
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == stale
 
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
-    resolution = payload.get("column_mapping_resolution") or {}
-    assert resolution.get("resolved_value") == (
-        "5:qty.regular_x|6:qty.daycare_x|7:qty.staff_x|8:qty.no_meat_x|"
-        "9:qty.no_fish_x|10:qty.no_fried_x|11:qty.change_1_x"
-    )
 
+def test_formally_saved_seventy_is_not_replaced_by_stale_reject_five(history_case):
+    from datetime import date
+    from tests.integration.test_draft_sheet_service import _fac00004_owned_source, _legacy_aux_target_refused
 
-def test_get_ocr_output_prefers_applied_reparse_revision_over_stale_reject_candidate():
-    order_service.clear_all()
-    order = _create_seed_order_for_facility("msg-status-api-fac00004-applied-001", "FAC00004")
-    template = config_service.get_facility_config("FAC00004").get("fax_template")
-    fields = order_service._row_fields_from_template(template)
-    header = order_service._sheet_header_from_template(fields, template)
+    native_rows = [["02/15", "朝", "主", "Menu A", "5", "", "", "", "", "", "", ""]]
+    case, source, native_fields, native_header = _fac00004_owned_source(history_case,
+        rows=native_rows, menu_entries=[{"id": "status-applied-feb15", "monthly_menu_id": "2026-02",
+            "menu_date": date(2026, 2, 15), "daypart": "朝", "name": "Menu A",
+            "category": "主", "slot_index": 0, "diet_type": "regular"}], lines=[],
+        period="2026-02@2026-02-15~2026-02-21", received=datetime(2026, 2, 15, 9))
+    _legacy_aux_target_refused(case, "70")
+    fields = [*native_fields[:4], "aux.col_4", *native_fields[4:]]
+    header = [*native_header[:4], "合計", *native_header[4:]]
     quantity_fields = [field for field in fields if field.startswith("qty.")]
     aux_fields = [field for field in fields if field.startswith("aux.")]
     assert quantity_fields
@@ -2912,111 +2129,105 @@ def test_get_ocr_output_prefers_applied_reparse_revision_over_stale_reject_candi
     diet_key, area_key = order_service._quantity_meta_from_field(quantity_fields[0])
     assert diet_key and area_key
 
-    def _build_row(*, aux_total: str, qty_value: str) -> list[str]:
+    def build_row(aux_total, quantity):
         row = [""] * len(fields)
-        row[fields.index("date_mmdd")] = "02/15"
-        row[fields.index("daypart")] = "朝"
-        menu_field = "menu" if "menu" in fields else "menu_name"
-        row[fields.index(menu_field)] = "Menu A"
-        row[fields.index(aux_fields[0])] = "主"
-        row[fields.index(aux_fields[1])] = aux_total
-        row[fields.index(quantity_fields[0])] = qty_value
+        for field, value in {"date_mmdd": "02/15", "daypart": "朝", "menu": "Menu A",
+            aux_fields[0]: "主", aux_fields[1]: aux_total, quantity_fields[0]: quantity}.items():
+            row[fields.index(field)] = value
         return row
 
-    stale_rows = [_build_row(aux_total="5", qty_value="5")]
-    stale_digest = order_service._sheet_digest(
-        fields=fields,
-        header=header,
-        rows_payload=stale_rows,
-        row_ids=["draft-1"],
-    )
-    order_service._append_edited_ocr_revision(  # noqa: SLF001
-        order_id=order["id"],
-        ui_mode="sheet",
-        fields=fields,
-        header=header,
-        rows_payload=stale_rows,
-        row_ids=["draft-1"],
-        before_digest=stale_digest,
-        after_digest=stale_digest,
-        revision_meta={
-            "sheet_save_only": True,
-            "sheet_save_mode": "draft_candidate",
-            "review_state": "auto_apply_blocked",
-            "draft_from_reparse_reject": True,
-            "raw_output_override": order_service._build_revision_raw_output_override(  # noqa: SLF001
-                fields=fields,
-                header=header,
-                rows=stale_rows,
-                template=template,
-                provider="gemini",
-            ),
-        },
-    )
-
-    applied_rows = [_build_row(aux_total="70", qty_value="70")]
-    order_service._publish_applied_reparse_revision(  # noqa: SLF001
-        order_id=order["id"],
-        template=template,
-        previous_sheet_context={
-            "fields": fields,
-            "header": header,
-            "rows": stale_rows,
-            "row_ids": ["draft-1"],
-        },
-        current_sheet_context={
-            "fields": fields,
-            "header": header,
-            "rows": applied_rows,
-            "row_ids": ["row-1"],
-        },
-        ocr_rows=applied_rows,
-        provider="gemini",
-        llm_assist=True,
-        warning_reasons=[],
-    )
+    stale_rows = [build_row("5", "5")]
+    stale_digest = order_service._sheet_digest(fields=fields, header=header,
+        rows_payload=stale_rows, row_ids=["draft-1"])
+    applied_rows = [build_row("70", "70")]
+    # These are explicit operator-edited display/quantity values, not recognized totals.
+    edited = {**source["sheet"], "fields": fields, "header": header,
+        "rows": applied_rows, "row_ids": ["row-1"]}
+    case.save(edited)
+    saved = order_service.get_current_sheet_context(case.id)
+    assert saved["base_evidence_run_id"] == case.evidence
+    assert saved["rows"] == applied_rows
+    stale_latest = {
+        "revision_id": "OCRREV-stale-latest",
+        "edited_at": "2026-02-15T00:00:00",
+        "ui_mode": "sheet", "fields": fields, "header": header,
+        "row_ids": ["draft-1"], "rows": stale_rows, "row_count": len(stale_rows),
+        "before_digest": stale_digest, "after_digest": stale_digest, "changed": False,
+        "sheet_save_only": True, "sheet_save_mode": "draft_candidate",
+        "review_state": "auto_apply_blocked", "draft_from_reparse_reject": True,
+        "markdown": order_service._build_markdown_table_string(header, stale_rows),
+    }
     with session_scope() as session:
-        cache = session.get(OrderOcrCache, order["id"])
+        cache = session.get(OrderOcrCache, case.id)
         assert cache is not None
         payload = dict(cache.payload or {})
-        edited = dict(payload.get("_edited_ocr") or {})
-        stale_latest = {
-            "revision_id": "OCRREV-stale-latest",
-            "edited_at": "2026-02-15T00:00:00",
-            "ui_mode": "sheet",
-            "fields": fields,
-            "header": header,
-            "row_ids": ["draft-1"],
-            "rows": stale_rows,
-            "row_count": len(stale_rows),
-            "before_digest": stale_digest,
-            "after_digest": stale_digest,
-            "changed": False,
-            "sheet_save_only": True,
-            "sheet_save_mode": "draft_candidate",
-            "review_state": "auto_apply_blocked",
-            "draft_from_reparse_reject": True,
-            "markdown": order_service._build_markdown_table_string(header, stale_rows),  # noqa: SLF001
-        }
-        edited["latest"] = stale_latest
-        edited["revisions"] = [stale_latest]
-        payload["_edited_ocr"] = edited
-        payload["edited_table"] = {
-            "header": header,
-            "rows": stale_rows,
-            "row_ids": ["draft-1"],
-            "edited_at": stale_latest["edited_at"],
-            "revision_id": stale_latest["revision_id"],
-        }
+        edited_archive = dict(payload.get("_edited_ocr") or {})
+        edited_archive["latest"] = stale_latest
+        edited_archive["revisions"] = [stale_latest]
+        payload["_edited_ocr"] = edited_archive
+        payload["edited_table"] = {"header": header, "rows": stale_rows,
+            "row_ids": ["draft-1"], "edited_at": stale_latest["edited_at"],
+            "revision_id": stale_latest["revision_id"]}
         cache.payload = payload
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["draft_id"]
+        assert current["base_evidence_run_id"] == case.evidence
+        assert len(current["rows"]) == 1
+        assert current["rows"][0][fields.index(aux_fields[1])] == "70"
+        assert current["rows"][0][fields.index(quantity_fields[0])] == "70"
+        assert current["rows"] == applied_rows
+        # Native selected source stays five; the old applied-cache mirror is not authority.
+        assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == native_rows
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == payload
 
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert res.status_code == 200
-    payload = res.json()
-    latest = ((payload.get("_edited_ocr") or {}).get("latest") or {})
-    assert latest.get("sheet_save_mode") == "applied"
-    assert latest.get("reparse_applied") is True
-    assert latest.get("row_count") == 1
-    assert latest.get("rows", [])[0][fields.index(aux_fields[1])] == "70"
-    assert (payload.get("edited_table") or {}).get("rows", [])[0][fields.index(aux_fields[1])] == "70"
+STATUS_RETIRED_CASES = [
+    ("refuse_draft_sheet_legacy_running_llm_reparse_health", "test_draft_sheet_surfaces_running_llm_reparse_health", "GET", "draft-sheet", None),
+    ("refuse_draft_sheet_legacy_awaiting_output_ocr_rerun_state", "test_draft_sheet_surfaces_awaiting_output_ocr_rerun_state", "GET", "draft-sheet", None),
+    ("refuse_confirm_endpoint_blocks_when_weekly_menu_missing", "test_confirm_endpoint_blocks_when_weekly_menu_missing", "POST", "confirm", None),
+    ("refuse_reparse_endpoint_legacy_job_running_before_background", "test_reparse_endpoint_marks_job_running_before_background", "POST", "reparse", {"ocr_provider": "gemini", "llm_assist": True}),
+    ("refuse_reparse_endpoint_rejects_removed_tesseract_provider", "test_reparse_endpoint_rejects_removed_tesseract_provider", "POST", "reparse", {"ocr_provider": "tesseract", "force": True}),
+    ("refuse_ocr_rerun_endpoint_rejects_removed_tesseract_provider", "test_ocr_rerun_endpoint_rejects_removed_tesseract_provider", "POST", "ocr-rerun", {"ocr_provider": "tesseract"}),
+    ("refuse_reparse_endpoint_legacy_llm_assist_for_user_requested_reparse", "test_reparse_endpoint_defaults_to_llm_assist_for_user_requested_reparse", "POST", "reparse", None),
+    ("refuse_reparse_endpoint_legacy_explicit_ocr_model", "test_reparse_endpoint_passes_explicit_ocr_model", "POST", "reparse", {"ocr_provider": "gemini", "ocr_model": "gemini-2.5-pro", "llm_assist": True}),
+    ("refuse_reparse_endpoint_legacy_llm_model_alias", "test_reparse_endpoint_accepts_llm_model_alias", "POST", "reparse", {"ocr_provider": "gemini", "llm_model": "gemini-2.5-flash", "llm_assist": True}),
+    ("refuse_reparse_endpoint_legacy_prompt_preset", "test_reparse_endpoint_accepts_prompt_preset", "POST", "reparse", {"ocr_provider": "gemini", "llm_assist": True, "prompt_preset": "row_alignment"}),
+    ("refuse_reparse_endpoint_legacy_merged_cell_prompt_preset", "test_reparse_endpoint_accepts_merged_cell_prompt_preset", "POST", "reparse", {"ocr_provider": "gemini", "llm_assist": True, "prompt_preset": "merged_cell_quantity_spans"}),
+    ("refuse_ocr_recover_endpoint_legacy_pipeline_first_pass", "test_ocr_recover_endpoint_requests_pipeline_first_pass", "POST", "ocr-recover", None),
+    ("refuse_ocr_recover_endpoint_legacy_stale_job_with_pipeline_first_pass", "test_ocr_recover_endpoint_retries_stale_job_with_pipeline_first_pass", "POST", "ocr-recover", None),
+    ("refuse_ocr_rerun_endpoint_legacy_active_job", "test_ocr_rerun_endpoint_force_replaces_active_job", "POST", "ocr-rerun", {"force": True}),
+]
+
+
+def test_retired_status_requests_refuse_without_mutation_or_lost_saved_values(history_case):
+    from tests.contract.test_orders_ocr_sheet_history_api import _sheet
+    f = history_case()
+    f.produce()
+    saved = f.save(_sheet("8", "retained", "status-retained"))["saved_sheet"]
+    for case_id, _old_name, method, endpoint, body in STATUS_RETIRED_CASES:
+        _refuse(f, method, endpoint, body)
+        assert f.get("workflow-v2/sheet")["sheet"] == saved["sheet"], case_id
+
+
+def test_current_owned_detail_and_list_ignore_unowned_cache_success(history_case):
+    from tests.contract.test_orders_ocr_sheet_history_api import _sheet
+    f = history_case()
+    f.produce()
+    saved = f.save(_sheet("8", "operator-retained", "status-current"))["saved_sheet"]["sheet"]
+    job = get_job(f.job)
+    assert job["status"] == "done"
+    with session_scope() as session:
+        cached = session.get(OrderOcrCache, f.id)
+        assert cached is not None
+        cached.payload = {"status": "success", "rows": [["dummy"]], "metrics": {"provider": "old"}}
+    detail = f.get()
+    assert detail["ocr_status"] == "done"
+    assert detail.get("ocr_error") in {None, ""}
+    with f.readonly():
+        response = f.client.get("/orders?include_ocr=true", headers=f.actor.headers)
+    assert response.status_code == 200
+    (listed,) = [row for row in response.json()["orders"] if row["id"] == f.id]
+    assert listed["ocr_status"] == "done"
+    assert f.get("workflow-v2/sheet")["sheet"] == saved
+    assert get_job(f.job)["status"] == "done"

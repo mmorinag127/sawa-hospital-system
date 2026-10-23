@@ -8,27 +8,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import order_service  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: E402,F401
 from src.services.ocr_sheet_revision_service import normalize_sheet_revision_snapshot  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 
 
-def _seed_order(*, message_id: str):
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 1, 8, 9, 0, 0),
-        facility_hint="FAC00001",
-        week_hint="2026-01",
-    )
-    return order_service.create_order_from_ingest(payload)
-
-
 def _build_revision_payload(idx: int):
     fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"]
     header = ["日付", "区分", "メニュー", "常食2F", "備考"]
-    rows = [[f"01/0{idx + 1}", "朝", f"Menu {idx}", "5", f"note-{idx}"]]
+    rows = [[f"01/{idx + 1:02d}", "朝", f"Menu {idx}", "5", f"note-{idx}"]]
     row_ids = [f"row-{idx}-1"]
     return fields, header, rows, row_ids
 
@@ -54,9 +43,10 @@ def _clear_ocr_cache(order_id: str) -> None:
         session.execute(delete(OrderOcrCache).where(OrderOcrCache.order_id == order_id))
 
 
-def test_append_edited_revision_is_reflected_in_edit_history():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-rev-1")
+def test_append_edited_revision_is_reflected_in_edit_history(history_case):
+    f = history_case(week="2026-01@2026-01-01~2026-01-31", period="2026-01@2026-01-01~2026-01-31")
+    f.produce()
+    order = {"id": f.id}
     _clear_ocr_cache(order["id"])
 
     fields, header, rows, row_ids = _build_revision_payload(1)
@@ -76,6 +66,7 @@ def test_append_edited_revision_is_reflected_in_edit_history():
         before_digest=before,
         after_digest=after,
         revision_meta={"review_state": "draft_ready"},
+        synchronous_write_input=order_service._capture_synchronous_cache_write_input(order["id"]),
     )
 
     history, error = order_service.get_ocr_edit_history(order["id"])
@@ -87,9 +78,10 @@ def test_append_edited_revision_is_reflected_in_edit_history():
     assert history["revisions"][0]["rows"][0][0] == "01/02"
 
 
-def test_revision_history_keeps_latest_twenty_revisions_and_overwrites_edited_cache():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-ocr-rev-2")
+def test_revision_history_keeps_latest_twenty_revisions_and_overwrites_edited_cache(history_case):
+    f = history_case(week="2026-01@2026-01-01~2026-01-31", period="2026-01@2026-01-01~2026-01-31")
+    f.produce()
+    order = {"id": f.id}
     order_id = order["id"]
     _clear_ocr_cache(order_id)
 
@@ -111,6 +103,7 @@ def test_revision_history_keeps_latest_twenty_revisions_and_overwrites_edited_ca
             before_digest=before,
             after_digest=after,
             revision_meta={"review_state": "draft_saved"},
+            synchronous_write_input=order_service._capture_synchronous_cache_write_input(order_id),
         )
 
     history, error = order_service.get_ocr_edit_history(order_id)
@@ -137,3 +130,15 @@ def test_normalized_snapshot_is_written_for_revision_rows():
     assert snapshot["header"] == header
     assert snapshot["rows"] == rows
     assert snapshot["row_ids"] == row_ids
+
+
+def test_edited_revision_without_captured_input_is_refused_without_mutation(history_case):
+    f = history_case()
+    f.produce()
+    fields, header, rows, row_ids = _build_revision_payload(1)
+    before, after = _build_digests(fields=fields, header=header, rows=rows, row_ids=row_ids)
+    with f.readonly():
+        result = order_service._append_edited_ocr_revision(order_id=f.id,
+            ui_mode="sheet", fields=fields, header=header, rows_payload=rows,
+            row_ids=row_ids, before_digest=before, after_digest=after)
+    assert result is None

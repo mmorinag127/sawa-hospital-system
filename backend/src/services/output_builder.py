@@ -1745,6 +1745,7 @@ def build_order_lines_for_outputs(
     timings: dict[str, float] | None = None,
     producer_candidate: dict | None = None,
     accepted_candidate: dict | None = None,
+    include_daily_overrides: bool = True,
 ) -> list[dict]:
     from copy import deepcopy
     if producer_candidate is None:
@@ -1752,7 +1753,9 @@ def build_order_lines_for_outputs(
         lines = accepted.get("output_lines")
         if not isinstance(lines, list):
             raise ValueError("accepted output-lines receipt missing")
-        return deepcopy(lines)
+        copied = deepcopy(lines)
+        return (daily_output_override_service.apply_overrides_to_lines(copied, order.get("facility"))
+                if include_daily_overrides else copied)
     configured = producer_candidate.get("configured_input")
     if not isinstance(configured, dict) or not isinstance(configured.get("facility"), dict) or not isinstance(configured.get("policy"), dict):
         raise ValueError("bagging captured configuration required")

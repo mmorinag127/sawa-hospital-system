@@ -1,6 +1,7 @@
 import pathlib
+import json
 import sys
-from datetime import datetime
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -8,39 +9,82 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.main import app  # noqa: E402
-from src.services import order_service, output_builder  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
+from src.services import order_service, output_builder, menu_service  # noqa: E402
+from tests.helpers.newnarrowbaggingfixture import (  # noqa: E402
+    selected_bagging_order, accepted_bagging_order,
+)
+
+
+def _daily_lines(*, target_date="2026-04-18", daypart="昼",
+                 menu_name="筑前煮", diet_type="regular", quantity=9):
+    return [{"date": target_date, "daypart": daypart, "menu_name": menu_name,
+             "diet_type": diet_type, "area_id": "2F", "bag_type": "standard",
+             "quantity_original": quantity}]
+
+
+@pytest.fixture
+def daily_override_sources(monkeypatch, tmp_path, isolated_formal_schema, request):
+    """Authored output components, not recognition or real FAX proof."""
+    order_service.clear_all()
+    # Prepare the complete canonical source set before capturing any order.
+    menus = getattr(request, "param", {
+        "FAC00003": ["筑前煮", "白身魚のフライ"],
+        "FAC00004": ["筑前煮", "ハンバーグ"],
+        "FAC00005": ["春巻き"],
+        "FAC00006": ["焼き海苔"],
+    })
+    for facility, names in menus.items():
+        lines = [line for name in names for line in _daily_lines(menu_name=name)]
+        selected_bagging_order(monkeypatch, tmp_path, lines,
+            facility_id=facility, menu_category="副菜",
+            menu_qty_per_serving=40, menu_unit_type="g", prepare_only=True)
+    path = tmp_path / "authored-facilities.json"
+    configured = json.loads(path.read_text())
+    for facility in configured["facilities"]:
+        facility["versions"][0]["valid_from"] = "2026-04-17"
+    path.write_text(json.dumps(configured))
+    return monkeypatch, tmp_path
 
 
 def _create_daily_override_order(
-    *,
-    message_id: str,
-    facility_hint: str = "FAC00003",
-    target_date: str = "2026-04-18",
-    daypart: str = "昼",
-    menu_name: str = "筑前煮",
-    diet_type: str = "regular",
-    quantity: float = 9,
+    sources, *, message_id: str, facility_hint: str = "FAC00003",
+    target_date: str = "2026-04-18", daypart: str = "昼",
+    menu_name: str = "筑前煮", diet_type: str = "regular", quantity: float = 9, week_start=None,
 ):
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri=f"file://{message_id}.pdf",
-        received_at=datetime(2026, 4, 18, 9, 0, 0),
-        facility_hint=facility_hint,
-        week_hint="2026-04",
-    )
-    lines = [
-        {
-            "date": target_date,
-            "daypart": daypart,
-            "menu_name": menu_name,
-            "diet_type": diet_type,
-            "area_id": "2F",
-            "bag_type": "standard",
-            "quantity_original": quantity,
-        }
-    ]
-    return order_service.create_order_from_ingest(payload, lines=lines)
+    monkeypatch, tmp_path = sources
+    order = accepted_bagging_order(monkeypatch, tmp_path,
+        _daily_lines(target_date=target_date, daypart=daypart, menu_name=menu_name,
+                     diet_type=diet_type, quantity=quantity),
+        facility_id=facility_hint, message_id=message_id,
+        menu_category="副菜", prepared_sources=True, confirm=True, week_start=week_start)
+    return order_service.get_order_by_id(order["id"])
+
+
+def _original_receipt(client, *, menu_name="筑前煮"):
+    response = client.get("/orders/daily-output-overrides",
+        params={"date": "2026-04-18", "daypart": "昼", "menu_name": menu_name,
+                "menu_category": "副菜1"})
+    assert response.status_code == 200
+    return response.json()["original_receipt"]
+
+
+def _create_ambiguous_originals(sources):
+    first = _create_daily_override_order(sources, message_id="ORD-AMB-001", quantity=9)
+    # Explicit later menu edit: the first accepted publication stays immutable.
+    items = menu_service.get_menu_items_for_facility("2026-04", "FAC00003")
+    item = next(item for item in items if item["name"] == "筑前煮")
+    assert menu_service.update_item("2026-04", item["id"],
+        {"qty_per_serving": 50, "unit_type": "g"}) is True
+    second = _create_daily_override_order(sources, message_id="ORD-AMB-002", quantity=8,
+                                          week_start="2026-04-17")
+    for order, amount, people in ((first, 40, 9), (second, 50, 8)):
+        lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(order["id"]))
+        line = next(line for line in lines if line["menu_name"] == "筑前煮")
+        assert line["menu_qty_per_serving"] == amount
+        assert line["menu_unit_type"] == "g"
+        assert line["quantity_original"] == people
+        assert line["menu_qty_per_serving"] * line["quantity_original"] == amount * people
+    return first, second
 
 
 def _find_daily_bag_diet_group(payload: dict, *, menu_name: str, diet_type: str):
@@ -53,16 +97,16 @@ def _find_daily_bag_diet_group(payload: dict, *, menu_name: str, diet_type: str)
     raise AssertionError(f"diet group not found for {menu_name}/{diet_type}")
 
 
-def test_daily_output_override_updates_daily_bags_and_order_bags(monkeypatch):
+def test_daily_output_override_updates_daily_bags_and_order_bags(monkeypatch, daily_override_sources):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    order_service.clear_all()
-    order = _create_daily_override_order(message_id="msg-daily-override-001")
+    order = _create_daily_override_order(daily_override_sources, message_id="msg-daily-override-001")
 
     client = TestClient(app)
 
     editor_res = client.get(
         "/orders/daily-output-overrides",
         params={
+            "menu_category": "副菜1",
             "date": "2026-04-18",
             "daypart": "昼",
             "menu_name": "筑前煮",
@@ -79,6 +123,8 @@ def test_daily_output_override_updates_daily_bags_and_order_bags(monkeypatch):
     save_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client),
             "date": "2026-04-18",
             "facility_id": "FAC00003",
             "menu_name": "筑前煮",
@@ -110,6 +156,7 @@ def test_daily_output_override_updates_daily_bags_and_order_bags(monkeypatch):
     editor_after_res = client.get(
         "/orders/daily-output-overrides",
         params={
+            "menu_category": "副菜1",
             "date": "2026-04-18",
             "daypart": "昼",
             "menu_name": "筑前煮",
@@ -140,34 +187,43 @@ def test_daily_output_override_updates_daily_bags_and_order_bags(monkeypatch):
     assert applied[0].get("unit_type") == "g"
 
     override_id = save_payload.get("override", {}).get("id")
-    delete_res = client.delete(f"/orders/daily-output-overrides/{override_id}")
+    delete_res = client.request("DELETE", f"/orders/daily-output-overrides/{override_id}",
+        json={"original_receipt": _original_receipt(client)})
     assert delete_res.status_code == 200
+    _original_receipt(client)
     order_bags_after_delete = client.get(f"/orders/{order['id']}/bags")
     assert order_bags_after_delete.status_code == 200
     assert (order_bags_after_delete.json().get("applied_portion_overrides") or []) == []
 
 
-def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
+@pytest.mark.parametrize("daily_override_sources", [{
+    "FAC00003": ["白身魚のフライ"], "FAC00004": ["ハンバーグ"],
+    "FAC00005": ["春巻き"], "FAC00006": ["焼き海苔"],
+}], indirect=True)
+def test_daily_output_override_normalizes_non_gram_units(monkeypatch, daily_override_sources):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    order_service.clear_all()
     cut_order = _create_daily_override_order(
+        daily_override_sources,
         message_id="msg-daily-override-cut-001",
         menu_name="白身魚のフライ",
         quantity=4,
     )
     count_order = _create_daily_override_order(
+        daily_override_sources,
         message_id="msg-daily-override-count-001",
         facility_hint="FAC00004",
         menu_name="ハンバーグ",
         quantity=3,
     )
     stick_order = _create_daily_override_order(
+        daily_override_sources,
         message_id="msg-daily-override-stick-001",
         facility_hint="FAC00005",
         menu_name="春巻き",
         quantity=5,
     )
     sheet_order = _create_daily_override_order(
+        daily_override_sources,
         message_id="msg-daily-override-sheet-001",
         facility_hint="FAC00006",
         menu_name="焼き海苔",
@@ -179,6 +235,8 @@ def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
     cut_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client, menu_name="白身魚のフライ"),
             "date": "2026-04-18",
             "facility_id": "FAC00003",
             "menu_name": "白身魚のフライ",
@@ -189,12 +247,15 @@ def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
             "note": "魚は2切",
         },
     )
-    assert cut_res.status_code == 200
+    assert cut_res.status_code == 200, cut_res.text
+    _original_receipt(client, menu_name="白身魚のフライ")
     assert cut_res.json().get("override", {}).get("unit_type") == "切"
 
     count_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client, menu_name="ハンバーグ"),
             "date": "2026-04-18",
             "facility_id": "FAC00004",
             "menu_name": "ハンバーグ",
@@ -206,11 +267,14 @@ def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
         },
     )
     assert count_res.status_code == 200
+    _original_receipt(client, menu_name="ハンバーグ")
     assert count_res.json().get("override", {}).get("unit_type") == "個"
 
     stick_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client, menu_name="春巻き"),
             "date": "2026-04-18",
             "facility_id": "FAC00005",
             "menu_name": "春巻き",
@@ -222,11 +286,14 @@ def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
         },
     )
     assert stick_res.status_code == 200
+    _original_receipt(client, menu_name="春巻き")
     assert stick_res.json().get("override", {}).get("unit_type") == "本"
 
     sheet_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client, menu_name="焼き海苔"),
             "date": "2026-04-18",
             "facility_id": "FAC00006",
             "menu_name": "焼き海苔",
@@ -238,6 +305,7 @@ def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
         },
     )
     assert sheet_res.status_code == 200
+    _original_receipt(client, menu_name="焼き海苔")
     assert sheet_res.json().get("override", {}).get("unit_type") == "枚"
 
     cut_lines = output_builder.build_order_lines_for_outputs(order_service.get_order_by_id(cut_order["id"]))
@@ -276,17 +344,18 @@ def test_daily_output_override_normalizes_non_gram_units(monkeypatch):
     assert sheet_group.get("total_amount_label") == "18枚"
 
 
-def test_daily_output_override_bulk_updates_all_facilities(monkeypatch):
+def test_daily_output_override_bulk_updates_all_facilities(monkeypatch, daily_override_sources):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    order_service.clear_all()
-    order_a = _create_daily_override_order(message_id="msg-daily-override-bulk-001", facility_hint="FAC00003", quantity=9)
-    order_b = _create_daily_override_order(message_id="msg-daily-override-bulk-002", facility_hint="FAC00004", quantity=4)
+    order_a = _create_daily_override_order(daily_override_sources, message_id="msg-daily-override-bulk-001", facility_hint="FAC00003", quantity=9)
+    order_b = _create_daily_override_order(daily_override_sources, message_id="msg-daily-override-bulk-002", facility_hint="FAC00004", quantity=4)
 
     client = TestClient(app)
 
     bulk_res = client.post(
         "/orders/daily-output-overrides/upsert-bulk",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client),
             "date": "2026-04-18",
             "menu_name": "筑前煮",
             "daypart": "昼",
@@ -306,6 +375,7 @@ def test_daily_output_override_bulk_updates_all_facilities(monkeypatch):
     editor_res = client.get(
         "/orders/daily-output-overrides",
         params={
+            "menu_category": "副菜1",
             "date": "2026-04-18",
             "daypart": "昼",
             "menu_name": "筑前煮",
@@ -323,37 +393,18 @@ def test_daily_output_override_bulk_updates_all_facilities(monkeypatch):
     assert diet_group.get("total_amount_label") == "26切"
 
 
-def test_daily_output_override_bulk_requires_intervention_when_rows_are_ambiguous(monkeypatch):
+def test_daily_output_override_bulk_requires_intervention_when_rows_are_ambiguous(monkeypatch, daily_override_sources):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    order_service.clear_all()
-
-    def _fake_list_daily_output_override_editor_rows(target_date, *, daypart, menu_name, menu_category=None):
-        assert str(target_date) == "2026-04-18"
-        return {
-            "date": "2026-04-18",
-            "daypart": daypart,
-            "menu_name": menu_name,
-            "menu_category": menu_category or "",
-            "rows": [
-                {
-                    "facility_id": "FAC00003",
-                    "facility_label": "施設A (FAC00003)",
-                    "diet_type": "regular",
-                    "requires_intervention": True,
-                    "current_variants": [
-                        {"basis_label": "40g/人", "order_ids": ["ORD-A"]},
-                        {"basis_label": "50g/人", "order_ids": ["ORD-B"]},
-                    ],
-                }
-            ],
-        }
-
-    monkeypatch.setattr(order_service, "list_daily_output_override_editor_rows", _fake_list_daily_output_override_editor_rows)
-
+    _create_ambiguous_originals(daily_override_sources)
     client = TestClient(app)
+    target_date = _original_receipt(client)["date"]
+    assert str(target_date) == "2026-04-18"
+
     res = client.post(
         "/orders/daily-output-overrides/upsert-bulk",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client),
             "date": "2026-04-18",
             "menu_name": "筑前煮",
             "daypart": "昼",
@@ -367,59 +418,17 @@ def test_daily_output_override_bulk_requires_intervention_when_rows_are_ambiguou
     assert len(detail.get("rows") or []) == 1
 
 
-def test_daily_output_override_requires_acknowledgement_for_ambiguous_rows(monkeypatch):
+def test_daily_output_override_requires_acknowledgement_for_ambiguous_rows(monkeypatch, daily_override_sources):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    order_service.clear_all()
-    fake_orders = [
-        {"id": "ORD-AMB-001"},
-        {"id": "ORD-AMB-002"},
-    ]
-
-    def _fake_list_orders_by_line_date(target_date, facility_id=None, status=None):
-        assert str(target_date) == "2026-04-18"
-        return fake_orders
-
-    def _fake_get_order_by_id(order_id: str):
-        return {
-            "id": order_id,
-            "facility": "FAC00003",
-            "week": "2026-04",
-            "week_value": "2026-04",
-            "lines": [],
-        }
-
-    def _fake_build_order_lines_for_outputs(order_payload: dict):
-        order_id = str(order_payload.get("id") or "")
-        qty_per_serving = 40.0 if order_id == "ORD-AMB-001" else 50.0
-        quantity = 9.0 if order_id == "ORD-AMB-001" else 8.0
-        return [
-            {
-                "date": "2026-04-18",
-                "daypart": "昼",
-                "menu_name": "筑前煮",
-                "diet_type": "regular",
-                "area_id": "2F",
-                "bag_type": "standard",
-                "quantity_original": quantity,
-                "quantity_corrected": quantity,
-                "menu_qty_per_serving": qty_per_serving,
-                "menu_unit_type": "g",
-                "actual_amount": quantity * qty_per_serving,
-                "actual_unit_type": "g",
-                "menu_category": "副菜",
-            }
-        ]
-
-    monkeypatch.setattr(order_service, "list_orders_by_line_date", _fake_list_orders_by_line_date)
-    monkeypatch.setattr(order_service, "get_order_by_id", _fake_get_order_by_id)
-    monkeypatch.setattr(order_service, "_rebuild_bags_for_override_scope", lambda target_date, facility_id: ["ORD-AMB-001", "ORD-AMB-002"])
-    monkeypatch.setattr(output_builder, "build_order_lines_for_outputs", _fake_build_order_lines_for_outputs)
-
+    _create_ambiguous_originals(daily_override_sources)
     client = TestClient(app)
+    target_date = _original_receipt(client)["date"]
+    assert str(target_date) == "2026-04-18"
 
     editor_res = client.get(
         "/orders/daily-output-overrides",
         params={
+            "menu_category": "副菜1",
             "date": "2026-04-18",
             "daypart": "昼",
             "menu_name": "筑前煮",
@@ -435,6 +444,8 @@ def test_daily_output_override_requires_acknowledgement_for_ambiguous_rows(monke
     blocked_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client),
             "date": "2026-04-18",
             "facility_id": "FAC00003",
             "menu_name": "筑前煮",
@@ -453,6 +464,8 @@ def test_daily_output_override_requires_acknowledgement_for_ambiguous_rows(monke
     acknowledged_res = client.post(
         "/orders/daily-output-overrides/upsert",
         json={
+            "menu_category": "副菜1",
+            "original_receipt": _original_receipt(client),
             "date": "2026-04-18",
             "facility_id": "FAC00003",
             "menu_name": "筑前煮",
@@ -465,4 +478,5 @@ def test_daily_output_override_requires_acknowledgement_for_ambiguous_rows(monke
         },
     )
     assert acknowledged_res.status_code == 200
+    _original_receipt(client)
     assert acknowledged_res.json().get("override", {}).get("qty_per_serving") == 45

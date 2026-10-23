@@ -70,9 +70,11 @@ def test_system_status_and_admin_endpoints(hospital_admin):
     assert (quality.get("scope") or {}).get("job_type") == "llm_reparse_only"
     assert (quality.get("scope") or {}).get("mode") in {"explicit_only", "legacy_heuristic"}
     pipeline = status_payload.get("ocr_pipeline") or {}
-    assert pipeline.get("trigger_mode") in {"gcs_only", "gcs_http", "http_only"}
-    assert pipeline.get("wait_strategy") == "poll_output_gcs"
-    assert isinstance(pipeline.get("sync_wait_supported"), bool)
+    assert pipeline.get("source") == "recorded_sql_workflow/v1"
+    assert pipeline == {**status_payload["ocr_operations"]["summary"],
+                        "source": status_payload["ocr_operations"]["source"]}
+    assert isinstance(pipeline.get("counts"), dict)
+    assert pipeline["total"] == len(status_payload["ocr_operations"]["items"])
     intake = status_payload.get("intake") or {}
     assert intake.get("mode") == "manual_upload"
     assert intake.get("manual_upload_enabled") is True
@@ -431,7 +433,7 @@ def test_health_backlog_requires_operator_when_auth_enabled(hospital_operator):
     assert auth_res.status_code == 200
 
 
-def test_system_status_reflects_latest_pipeline_request_in_gcs_only_mode(monkeypatch, tmp_path, hospital_operator):
+def test_system_status_ignores_unowned_gcs_request_and_exposes_unowned_sql_job(isolated_formal_schema, monkeypatch, tmp_path, hospital_operator):
     monkeypatch.setenv("OCR_PIPELINE_STATE_URI", str(tmp_path / "pipeline-state.json"))
     save_pipeline_error("MAIN-old", "OCR pipeline output not found: gs://bucket/output/old.json")
     save_pipeline_request("MAIN-new", "gs://bucket/input/new.pdf")
@@ -441,6 +443,13 @@ def test_system_status_reflects_latest_pipeline_request_in_gcs_only_mode(monkeyp
 
     assert res.status_code == 200
     pipeline = res.json().get("ocr_pipeline") or {}
-    assert pipeline.get("status") == "running"
-    assert pipeline.get("last_job_id") == "MAIN-new"
-    assert pipeline.get("last_input_ref") == "gs://bucket/input/new.pdf"
+    assert pipeline.get("status") == "idle"
+    assert pipeline["source"] == "recorded_sql_workflow/v1"
+    assert res.json()["ocr_operations"]["items"] == []
+    create_job("unowned-sql-status", input_reference="component:unowned", status="running")
+    sql_res = client.get("/system/status", headers=hospital_operator.headers)
+    assert sql_res.status_code == 200
+    assert sql_res.json()["ocr_pipeline"]["status"] == "blocked"
+    item = next(item for item in sql_res.json()["ocr_operations"]["items"]
+                if item["job_id"] == "unowned-sql-status")
+    assert item["blockers"] == ["ocr_active_job_not_referenced_by_workflow"]

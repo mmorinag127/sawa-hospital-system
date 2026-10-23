@@ -25,6 +25,19 @@ os.environ.setdefault("OPERATOR_PASSWORD", "operator-pass")
 os.environ.setdefault("ADMIN_USER", "admin")
 os.environ.setdefault("ADMIN_PASSWORD", "admin-pass")
 
+
+@pytest.fixture(autouse=True)
+def restore_test_auth_environment():
+    """Restore after nested actor contexts and the test's monkeypatch teardown."""
+    keys = ("AUTH_DISABLED", "AUTH_PROVIDER")
+    before = {key: os.environ.get(key) for key in keys}
+    yield
+    for key, value in before.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
 with pytest.MonkeyPatch.context() as target:
     target.setenv("ALEMBIC_DB_URI", DB_URI)
     config = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
@@ -107,6 +120,11 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
         from src.maintenance.formal_migration_schema import require_formal_head
         with isolated.connect() as connection:
             require_formal_head(connection)
+        if isolated.dialect.name == "sqlite":
+            isolated.dispose()
+            @sa.event.listens_for(isolated, "connect")
+            def require_foreign_keys(connection, _record):
+                connection.execute("PRAGMA foreign_keys=ON")
         # Existing services hold imported engine aliases; session_scope uses this module's globals.
         monkeypatch.setattr(runtime_db, "SessionLocal", sessionmaker(isolated, autoflush=False, autocommit=False, future=True))
         for module in tuple(sys.modules.values()):

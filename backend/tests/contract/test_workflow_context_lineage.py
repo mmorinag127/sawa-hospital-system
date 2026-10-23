@@ -139,7 +139,8 @@ def test_context_materializes_exact_dated_selection_once_and_reuses_it(context_s
     assert response.status_code == 200, response.text
     initial_read_count = len(reads)
     result = response.json()
-    assert result["revision"] == 2
+    # Creation, context selection and command publication each persist a version.
+    assert result["revision"] == 3
     with session_scope() as session:
         projection = session.query(FacilityTemplateVersion).one()
         receipt = lineage.verify_projection(projection)

@@ -50,7 +50,7 @@ def test_condiment_bags_are_merged_across_diet_and_area(isolated_formal_schema, 
             "quantity_original": 4,
         },
     ]
-    order = accepted_bagging_order(monkeypatch, tmp_path, lines)
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True)
     with session_scope() as session:
         original = output_builder._capture_output_adoption(order["id"], session)
         rebuilt = rebuild_bags(order["id"], write_session=session, original_adoption=original)
@@ -107,7 +107,7 @@ def test_get_bag_summary_rebuilds_stale_materialized_bags(isolated_formal_schema
             "quantity_original": 3,
         },
     ]
-    order = accepted_bagging_order(monkeypatch, tmp_path, lines)
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines, confirm=True)
 
     with session_scope() as session:
         session.add(
@@ -248,7 +248,7 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(isolat
     assert ws_out.cell(row=3, column=4).value in ("", None)
 
 
-def test_delivery_slot_template_applies_configured_headers(tmp_path):
+def test_delivery_slot_template_preserves_authored_fixed_headers(tmp_path):
     template_path = tmp_path / "delivery_slot_headers.xlsx"
     wb = Workbook()
     ws = wb.active
@@ -296,41 +296,25 @@ def test_delivery_slot_template_applies_configured_headers(tmp_path):
 
     actual = load_workbook(output_path)
     ws_out = actual["2026-05-24"]
-    assert ws_out.cell(row=2, column=4).value == "常食"
-    assert ws_out.cell(row=2, column=5).value == "肉禁"
-    assert ws_out.cell(row=2, column=6).value == "魚禁"
-    assert ws_out.cell(row=1, column=7).value in ("", None)
+    authored = load_workbook(template_path)["Template"]
+    assert [[ws_out.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)] == [
+        [authored.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)]
 
 
-def test_ikebukuro_label_expiry_is_plus_three_months_and_content_amount_fallbacks():
-    _reset_orders_and_menus()
-
-    payload = IngestEmailPayload(
-        message_id="label-ikebukuro-001",
-        pdf_uri="file:///tmp/label-ikebukuro.pdf",
-        received_at=datetime(2025, 1, 5, 12, 0, 0),
-        facility_hint="FAC00005",
-        week_hint="2025-01",
-    )
-    lines = [
-        {
-            "line_id": "1",
-            "date": "2025-01-06",
-            "daypart": "朝",
-            "menu_name": "テストメニュー",
-            "diet_type": "regular",
-            "area_id": "2F",
-            "bag_type": "standard",
-            "quantity_original": 2,
-        }
-    ]
-    order = order_service.create_order_from_ingest(payload, lines=lines)
-    outputs = build_outputs(order["id"])
-
+def test_label_expiry_plus_three_months_uses_explicit_recipe_amount(isolated_formal_schema, monkeypatch, tmp_path):
+    from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+    monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
+    order = accepted_bagging_order(monkeypatch, tmp_path, [{
+        "date": "2025-01-06", "daypart": "朝", "menu_name": "テストメニュー",
+        "diet_type": "regular", "area_id": "2F", "bag_type": "standard",
+        "quantity_original": 2,
+    }], menu_qty_per_serving=1, menu_unit_type="g",
+        label_profile={"expiry_offset_months": 3}, confirm=True)
+    outputs = output_builder.build_output_preview(order["id"], "labels")
     with pathlib.Path(outputs["labels"]).open("r", newline="", encoding="cp932") as handle:
         rows = list(csv.DictReader(handle))
-
     assert len(rows) == 1
     assert rows[0]["賞味期限"] == "2025年4月6日"
-    assert rows[0]["内容量"] == "2人前"
-    assert rows[0]["実量"] in ("", None)
+    assert rows[0]["内容量"] == "2g"
+    assert rows[0]["内容詳細"] == "1g"
+    assert rows[0][""] == "2人前"

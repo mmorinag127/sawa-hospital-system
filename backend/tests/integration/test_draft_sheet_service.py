@@ -8,57 +8,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.db import session_scope  # noqa: E402
-from src.models.facility_template_version import FacilityTemplateVersion  # noqa: E402
-from src.models.order import Order, OrderLine  # noqa: E402
+from src.models.order import OrderLine  # noqa: E402
 from src.models.order_sheet_draft import OrderSheetDraft  # noqa: E402
-from src.services import draft_sheet_service, ocr_evidence_service, order_current_state_service, order_service  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
-from tests.helpers.authored_sheet_case import authored_sheet_case, prepare_rerun, save_draft  # noqa: E402,F401
+from src.services import draft_sheet_service, order_current_state_service, order_service  # noqa: E402
+from tests.helpers.authored_sheet_case import authored_sheet_case, prepare_rerun, publish_current, save_draft  # noqa: E402,F401
+from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: E402,F401
 from tests.unit.test_disabled_facility_columns import _snapshot  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
 
-def _seed_order(message_id: str) -> dict:
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=datetime(2026, 3, 22, 9, 0, 0),
-        facility_hint="FAC00001",
-        week_hint="2026-03",
-    )
-    return order_service.create_order_from_ingest(
-        payload,
-        lines=[
-            {
-                "date": "2026-03-22",
-                "daypart": "朝",
-                "menu_name": "Menu A",
-                "diet_type": "regular",
-                "area_id": "2F",
-                "bag_type": "standard",
-                "quantity_original": 3,
-            }
-        ],
-    )
 
 
-def _seed_order_for_facility(
-    message_id: str,
-    *,
-    facility_id: str,
-    received_at: datetime,
-    week_hint: str,
-    lines: list[dict] | None,
-) -> dict:
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy.pdf",
-        received_at=received_at,
-        facility_hint=facility_id,
-        week_hint=week_hint,
-    )
-    return order_service.create_order_from_ingest(payload, lines=lines)
 
 
 def _sample_payload(quantity: str = "3") -> dict:
@@ -91,118 +52,12 @@ def _sample_payload(quantity: str = "3") -> dict:
     }
 
 
-def _attach_active_template_version(order_id: str, facility_id: str = "FAC00001") -> str:
-    version_id = f"FTV-{order_id}"
-    with session_scope() as session:
-        order = session.get(Order, order_id)
-        if order is not None:
-            order.template_version_id = version_id
-        session.add(
-            FacilityTemplateVersion(
-                id=version_id,
-                facility_id=facility_id,
-                version="test",
-                status="active",
-                template_id="fax_layout_regular_soft_mixer_forbidden_v1",
-                source="test",
-                columns_json=[
-                    {"source_index": 0, "role": "date", "header": "日付"},
-                    {"source_index": 1, "role": "daypart", "header": "区分"},
-                    {"source_index": 2, "role": "menu_name", "header": "メニュー"},
-                    {
-                        "source_index": 3,
-                        "role": "quantity",
-                        "header": "常食2F",
-                        "diet_type": "regular",
-                        "area_id": "2F",
-                    },
-                ],
-                cells_json=[],
-                template_digest=f"digest-{order_id}",
-                validation_json={"errors": [], "warnings": []},
-                created_by="test",
-                created_at=datetime.utcnow(),
-                activated_at=datetime.utcnow(),
-            )
-        )
-    return version_id
 
 
-def _sample_hakodate_payload(quantity: str = "9") -> dict:
-    return {
-        "status": "done",
-        "stage": "done",
-        "engine": "hakodate_best_method_pipeline",
-        "input_reference": "file://dummy.pdf",
-        "hakodate_preprocessing": {
-            "target_cell_map": [
-                {
-                    "target_id": "target-1",
-                    "target_cell_id": "D11",
-                    "sheet_cell": "D11",
-                    "worksheet_row": 11,
-                    "worksheet_col": 4,
-                    "row_index": 0,
-                    "field": "qty.regular_2f",
-                    "semantic_field": "qty.regular_2f",
-                    "bbox": [90.0, 190.0, 110.0, 210.0],
-                    "center": [100.0, 200.0],
-                    "logical_targets": [
-                        {
-                            "sheet_cell": "D11",
-                            "worksheet_row": 11,
-                            "worksheet_col": 4,
-                            "field": "qty.regular_2f",
-                            "date": "03/22",
-                            "daypart": "朝",
-                            "menu_name": "Menu A",
-                        }
-                    ],
-                    "source": "hakodate_best_method_pipeline",
-                }
-            ],
-            "source": "hakodate_best_method_pipeline",
-        },
-        "hakodate_ocr_evidence_records": [
-            {
-                "evidence_id": "evidence-1",
-                "text": quantity,
-                "normalized_value": quantity,
-                "center": [100.0, 200.0],
-                "confidence": None,
-                "engine": "yomitoku_contact_sheet_batch",
-                "source_scope": "hakodate_cell_crop_batch",
-            }
-        ],
-        "hakodate_canonical_pipeline": {
-            "producer": "hakodate_cell_ocr_batch_service.build_hakodate_best_method_for_manifest_item",
-            "source": "live_order_facility_source_workbook",
-            "manifest_path": None,
-        },
-    }
 
 
-def _sample_hakodate_base_sheet(order_id: str) -> dict:
-    return {
-        "order_id": order_id,
-        "facility_id": "FAC00001",
-        "week_id": "2026-03@2026-03-22~2026-03-28",
-        "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-        "header": ["日付", "区分", "メニュー", "常食2F"],
-        "rows": [["03/22", "朝", "Menu A", ""]],
-        "row_ids": ["row-1"],
-        "source": "hakodate_weekly_menu_template",
-        "warnings": [],
-        "blockers": [],
-        "review_state": "review_required",
-    }
 
 
-def _sample_hakodate_base_sheet_with_quantity(order_id: str, quantity: str) -> dict:
-    sheet = _sample_hakodate_base_sheet(order_id)
-    sheet["rows"][0][3] = quantity
-    return sheet
 
 
 def _append_sheet_revision(
@@ -230,6 +85,7 @@ def _append_sheet_revision(
         before_digest=digest,
         after_digest=digest,
         revision_meta=revision_meta,
+        synchronous_write_input=order_service._capture_synchronous_cache_write_input(order_id),
     )
 
 
@@ -255,712 +111,297 @@ def test_build_initial_sheet_draft_prefers_latest_saved_draft(authored_sheet_cas
     assert built["rows"] == [["9"]]
 
 
-def test_build_initial_sheet_draft_from_latest_evidence_run() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-draft-evidence")
-
-    evidence = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("5"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    built = draft_sheet_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(evidence, dict)
+def test_initial_draft_uses_actual_selected_native_evidence_five(authored_sheet_case):
+    case = authored_sheet_case(quantity=3, cell_values="5", include_remarks=False)
+    job = order_service.get_ocr_job(case.job)
+    assert job["status"] == "done"
+    assert job["metrics"]["rerun_terminal_receipt"]["evidence_run_id"] == case.evidence
+    with case.readonly():
+        built = draft_sheet_service.build_initial_sheet_draft(case.id)
     assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert "monthly_menu_object_missing" in (built.get("warnings") or [])
-    assert "monthly_menu_object_missing" in (built.get("apply_blockers") or [])
+    assert built == case.selected_sheet
+    assert built["base_evidence_run_id"] == case.evidence
+    assert built["source"] == "workflow_v2_selected_ocr_projection"
+    assert built["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    assert order_service.get_order_by_id(case.id)["week_value"] == "2026-03@2026-03-22~2026-03-28"
 
 
-def test_build_initial_sheet_draft_falls_back_to_legacy_cache_revision() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-draft-legacy")
-
-    order_service._save_order_ocr_cache(
-        order["id"],
-        {
-            "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/22|朝|Menu A|3|",
-            "_edited_ocr": {
-                "latest": {
-                    "ui_mode": "sheet",
-                    "fields": ["date_mmdd", "daypart", "menu", "qty"],
-                    "header": ["日付", "区分", "メニュー", "常食2F"],
-                    "rows": [["03/22", "朝", "Menu A", "8"]],
-                    "row_ids": ["row-a"],
-                }
-            },
-        },
-    )
-
-    built = draft_sheet_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert "monthly_menu_object_missing" in (built.get("warnings") or [])
-    assert "monthly_menu_object_missing" in (built.get("apply_blockers") or [])
+UNSELECTED_BOOTSTRAP_CASES = (
+    ("refuse_unselected_legacy_evidence_payload", "test_build_initial_sheet_draft_from_latest_evidence_run", "draft", _sample_payload('5')),
+    ("refuse_unselected_edited_cache_revision", "test_build_initial_sheet_draft_refuses_legacy_cache_revision_as_current_source", "draft", {'table_raw': '|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|03/22|朝|Menu A|3|', '_edited_ocr': {'latest': {'ui_mode': 'sheet', 'fields': ['date_mmdd', 'daypart', 'menu', 'qty'], 'header': ['日付', '区分', 'メニュー', '常食2F'], 'rows': [['03/22', '朝', 'Menu A', '8']], 'row_ids': ['row-a']}}}),
+    ("refuse_semantic_bootstrap_without_selected_source", "test_order_service_build_initial_sheet_draft_prefers_semantic_sheet", "order", None),
+    ("refuse_warning_only_bootstrap_without_selected_source", "test_order_service_build_initial_sheet_draft_keeps_semantic_sheet_when_only_evidence_recovery_warning_remains", "order", None),
+    ("refuse_recoverable_bootstrap_without_selected_source", "test_build_initial_sheet_draft_uses_recoverable_semantic_payload", "order", None),
+    ("refuse_weekly_warning_bootstrap_without_selected_source", "test_build_initial_sheet_draft_keeps_semantic_shell_when_weekly_menu_warning_remains", "order", None),
+    ("refuse_empty_shell_bootstrap_without_selected_source", "test_build_initial_sheet_draft_keeps_blocked_empty_semantic_shell", "order", None),
+    ("refuse_structured_payload_bootstrap_without_selected_source", "test_build_initial_sheet_draft_keeps_blocked_shell_when_menu_missing_even_if_structured_rows_exist", "order", _sample_payload('7')),
+    ("refuse_current_structured_payload_without_selected_source", "test_get_current_sheet_context_keeps_blocked_shell_when_menu_missing_even_if_structured_rows_exist", "current", _sample_payload('9')),
+    ("refuse_current_wrapped_payload_without_selected_source", "test_get_current_sheet_context_keeps_blocked_shell_for_wrapped_raw_output_when_menu_missing", "current", {**_sample_payload('9'), 'raw_output': _sample_payload('9'), 'capabilities': {'step2_view_ready': True, 'step2_edit_ready': True, 'semantic_shell_only': True}}),
+)
 
 
-def test_order_service_build_initial_sheet_draft_prefers_semantic_sheet(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-draft-semantic-sheet")
+def test_unselected_legacy_bootstrap_inputs_never_create_successful_sheet(authored_sheet_case):
+    from src.models.menu import MonthlyMenu, MonthlyMenuEntry
+    from src.models.order_ocr_cache import OrderOcrCache
 
-    built = order_service.build_initial_sheet_draft(order["id"])
+    case = authored_sheet_case(quantity=3, include_remarks=False, produce=False)
+    case.queue()
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenu).delete()
+    for case_id, old_name, kind, payload in UNSELECTED_BOOTSTRAP_CASES:
+        if payload is None:
+            with session_scope() as session:
+                session.query(OrderOcrCache).filter_by(order_id=case.id).delete()
+        else:
+            _store_unowned_overlay(case, payload)
+        with case.readonly():
+            if kind == "draft":
+                with pytest.raises(ValueError, match="^selected_ocr_required$"):
+                    draft_sheet_service.build_initial_sheet_draft(case.id)
+            elif kind == "order":
+                with pytest.raises(ValueError, match="^selected_ocr_required$"):
+                    order_service.build_initial_sheet_draft(case.id)
+            else:
+                current = order_service.get_current_sheet_context(case.id)
+                assert isinstance(current, dict), case_id
+                assert current["draft_id"] is None
+                assert current["draft_payload"] is None
+                assert current["rows"] == []
+                assert current["blockers"] == ["selected_ocr_required"]
+            diagnostics = order_service._build_monthly_menu_diagnostics(
+                week_id="2026-03@2026-03-22~2026-03-28", facility_id=case.facility)
+            assert diagnostics["order_codes"] == ["monthly_menu_object_missing"]
+            assert diagnostics["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
+            assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+            assert draft_sheet_service.get_selected_sheet_draft(case.id) is None
+        case.observations.append({"case_id": case_id, "former_node": old_name})
+        with session_scope() as session:
+            cached = session.get(OrderOcrCache, case.id)
+            if payload is None:
+                assert cached is None
+            else:
+                assert isinstance(cached, OrderOcrCache)
+                assert cached.payload == payload
 
-    assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert "monthly_menu_object_missing" in (built.get("warnings") or [])
-    assert "monthly_menu_object_missing" in (built.get("apply_blockers") or [])
 
 
-def test_order_service_build_initial_sheet_draft_keeps_semantic_sheet_when_only_evidence_recovery_warning_remains(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-draft-semantic-shell-over-raw-evidence")
-
-    built = order_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
 
 
-def test_get_latest_sheet_draft_upgrades_generic_cols_from_semantic_sheet(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-generic-draft-upgrade")
 
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "ocr_evidence",
-            "fields": ["col1", "col2", "col3", "col4"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
+
+
+@pytest.mark.parametrize("case_id,quantity_header,remove_menu", [
+    ("retain_generic_over_semantic_reprojection", "常食2F", False),
+    ("retain_generic_over_recoverable_reprojection", "常食", False),
+    ("retain_generic_when_physical_menu_missing", "常食", True),
+], ids=["retain_generic_over_semantic_reprojection",
+        "retain_generic_over_recoverable_reprojection", "retain_generic_when_physical_menu_missing"])
+def test_selected_generic_saved_values_are_not_replaced_by_semantic_refresh(
+    authored_sheet_case, case_id, quantity_header, remove_menu,
+) -> None:
+    from src.models.menu import MonthlyMenuEntry
+
+    case = authored_sheet_case(quantity=3, include_remarks=False)
+    assert case.selected_sheet["fields"][:3] == ["date_mmdd", "daypart", "menu"]
+    assert "qty.regular_2f" in case.selected_sheet["fields"]
+    assert case.selected_sheet["rows"][0][:3] == ["03/22", "朝", "Menu A"]
+    assert str(case.selected_sheet["rows"][0][3]) == "3"
+    sheet = {
+        "order_id": case.id, "source": "ocr_evidence",
+        "fields": ["col1", "col2", "col3", "col4"],
+        "header": ["日付", "区分", "メニュー", quantity_header],
+        "rows": [["03/22", "朝", "Menu A", "5"]], "row_ids": ["row-1"],
+    }
+    saved = save_draft(case, sheet)
     assert isinstance(saved, dict)
-
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
-
-    assert isinstance(current, dict)
-    assert current["source"] == "review_blocked"
-    assert current["rows"] == []
+    if remove_menu:
+        with session_scope() as session:
+            session.query(MonthlyMenuEntry).delete()
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id,
+            refresh_draft_from_semantic=True, upgrade_generic_from_sheet=True,
+            backfill_from_revision=False)
+    assert isinstance(current, dict), case_id
+    assert current["draft_id"] == saved["id"]
+    assert current["draft_payload"] == sheet
+    for key in ("fields", "header", "rows", "row_ids"):
+        assert current[key] == sheet[key], (case_id, key)
+        assert current["draft_record"]["draft_sheet_json"][key] == sheet[key], (case_id, key)
+    assert current["source"] == "ocr_evidence"
     assert current["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
+    assert draft_sheet_service.get_selected_sheet_draft(case.id)["draft_sheet_json"] == sheet
+    if remove_menu:
+        assert current["sheet_unavailable"] is True
+        blocker_tokens = set(current.get("blockers") or []) | set(
+            (current.get("menu_diagnostics") or {}).get("order_codes") or [])
+        assert "monthly_menu_object_missing" in blocker_tokens or "menu_entries_missing" in blocker_tokens
+        with case.readonly():
+            payload, error = order_service.get_ocr_sheet(case.id)
+        assert payload is None
+        assert error in blocker_tokens
 
 
-def test_build_initial_sheet_draft_uses_recoverable_semantic_payload(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-recoverable-semantic")
-
-    built = order_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(built, dict)
-    assert built["rows"] == []
-    assert built["source"] == "review_blocked"
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
 
 
-def test_build_initial_sheet_draft_keeps_semantic_shell_when_weekly_menu_warning_remains(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-weekly-warning-semantic-shell")
-
-    built = order_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
 
 
-def test_build_initial_sheet_draft_keeps_blocked_empty_semantic_shell(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-blocked-empty-semantic-shell")
-
-    built = order_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
-    assert built["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert "monthly_menu_object_missing" in (built.get("warnings") or [])
-    assert "monthly_menu_object_missing" in (built.get("apply_blockers") or [])
 
 
-def test_build_initial_sheet_draft_keeps_blocked_shell_when_menu_missing_even_if_structured_rows_exist(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-menu-missing-ocr-seed")
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("7"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda week_id, facility_id=None: [])
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-03",
-            "resolved_week_id": week_id,
-            "order_codes": ["monthly_menu_object_missing"],
-            "row_codes": [],
-            "global_entries_count": 0,
-            "facility_entries_count": 0,
-        },
-    )
-    built = order_service.build_initial_sheet_draft(order["id"])
-
-    assert isinstance(built, dict)
-    assert built["source"] == "review_blocked"
-    assert built["rows"] == []
 
 
-def test_get_current_sheet_context_keeps_blocked_shell_when_menu_missing_even_if_structured_rows_exist(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-menu-missing-ocr-seed")
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("9"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda week_id, facility_id=None: [])
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-03",
-            "resolved_week_id": week_id,
-            "order_codes": ["monthly_menu_object_missing"],
-            "row_codes": [],
-            "global_entries_count": 0,
-            "facility_entries_count": 0,
-        },
-    )
-    current = order_service.get_current_sheet_context(order["id"])
-
-    assert isinstance(current, dict)
-    assert current["source"] == "review_blocked"
-    assert current["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert "monthly_menu_object_missing" in (current.get("warnings") or [])
-    assert current["rows"] == []
 
 
-def test_get_current_sheet_context_keeps_blocked_shell_for_wrapped_raw_output_when_menu_missing(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-menu-missing-wrapped-ocr-seed")
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            **_sample_payload("9"),
-            "raw_output": _sample_payload("9"),
-            "capabilities": {
-                "step2_view_ready": True,
-                "step2_edit_ready": True,
-                "semantic_shell_only": True,
-            },
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", lambda week_id, facility_id=None: [])
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-03",
-            "resolved_week_id": week_id,
-            "order_codes": ["monthly_menu_object_missing"],
-            "row_codes": [],
-            "global_entries_count": 0,
-            "facility_entries_count": 0,
-        },
-    )
-    current = order_service.get_current_sheet_context(order["id"])
-
-    assert isinstance(current, dict)
-    assert current["source"] == "review_blocked"
-    assert current["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert "monthly_menu_object_missing" in (current.get("warnings") or [])
-    assert current["rows"] == []
 
 
-def test_get_current_sheet_context_rebases_stale_saved_draft_to_authoritative_aux_schema(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        "msg-current-sheet-fac00004-aux-schema-rebase",
-        facility_id="FAC00004",
-        received_at=datetime(2026, 4, 26, 9, 0, 0),
-        week_hint="2026-04",
-        lines=None,
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "鶏じゃが",
-                "menu_date": date(2026, 4, 26),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-04",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 1,
-            "facility_entries_count": 1,
-        },
-    )
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        ["日付", "区分", "副区分", "メニュー", "合計", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-                        ["04/26", "朝", "主", "鶏じゃが", "67", "66", "", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分|副区分|メニュー|合計|常食|通所|職員|肉禁|魚禁|揚げ物禁|変更1|備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|04/26|朝|主|鶏じゃが|67|66|||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    saved_draft = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "facility_id": "FAC00004",
-            "resolved_week_id": "2026-04@2026-04-26~2026-04-30",
-            "fields": [
-                "date_mmdd",
-                "daypart",
-                "menu",
-                "qty.regular_x",
-                "qty.daycare_x",
-                "qty.staff_x",
-                "qty.no_meat_x",
-                "qty.no_fish_x",
-                "qty.no_fried_x",
-                "qty.change_1_x",
-                "remarks",
-            ],
-            "header": ["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-            "rows": [["04/26", "朝", "鶏じゃが", "9", "4", "", "", "", "", "", ""]],
-            "row_ids": ["row-1"],
-            "warnings": ["sheet_quantity_column_unmapped"],
-        },
-        draft_state="draft_ready",
-        warnings=["sheet_quantity_column_unmapped"],
-        edited_by="tester",
-    )
-    assert isinstance(saved_draft, dict)
-
-    order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        draft_id=str(saved_draft.get("id") or "").strip() or None,
-        evidence_run_id=None,
-        state_json={
-            "order_id": order["id"],
-            "draft_id": str(saved_draft.get("id") or "").strip(),
-            "source": "weekly_menu+ocr_payload",
-            "facility_id": "FAC00004",
-            "resolved_week_id": "2026-04@2026-04-26~2026-04-30",
-            "fields": [
-                "date_mmdd",
-                "daypart",
-                "menu",
-                "qty.regular_x",
-                "qty.daycare_x",
-                "qty.staff_x",
-                "qty.no_meat_x",
-                "qty.no_fish_x",
-                "qty.no_fried_x",
-                "qty.change_1_x",
-                "remarks",
-            ],
-            "header": ["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-            "rows": [["04/26", "朝", "鶏じゃが", "9", "4", "", "", "", "", "", ""]],
-            "row_ids": ["row-1"],
-        },
-    )
-
-    latest = draft_sheet_service.get_latest_sheet_draft(order["id"])
-    assert isinstance(latest, dict)
-    rebase_required, rebuilt = order_service._draft_record_requires_current_sheet_semantic_rebase(order["id"], latest)
-    assert rebase_required is True
-    assert isinstance(rebuilt, dict)
-    assert rebuilt["fields"] == [
-        "date_mmdd",
-        "daypart",
-        "aux.col_2",
-        "menu",
-        "aux.col_4",
-        "qty.regular_x",
-        "qty.daycare_x",
-        "qty.staff_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
-        "qty.no_fried_x",
-        "qty.change_1_x",
-        "remarks",
-    ]
-    assert rebuilt["header"] == [
-        "日付",
-        "区分",
-        "副区分",
-        "メニュー",
-        "合計",
-        "常食",
-        "通所",
-        "職員",
-        "肉禁",
-        "魚禁",
-        "揚げ物禁",
-        "変更1",
-        "備考欄",
-    ]
-    assert rebuilt["rows"] == [["04/26", "朝", "主", "鶏じゃが", "67", "66", "", "", "", "", "", "", ""]]
-
-    refreshed = order_service._rebase_draft_record_to_facility_schema(
-        order["id"],
-        latest,
-        edited_by="current-sheet-refresh",
-    )
-    refreshed_payload = refreshed.get("draft_sheet_json") if isinstance(refreshed, dict) else None
-    assert isinstance(refreshed_payload, dict)
-    assert refreshed_payload["fields"] == rebuilt["fields"]
-    assert refreshed_payload["header"] == rebuilt["header"]
-    assert refreshed_payload["rows"] == rebuilt["rows"]
+def _fac00004_owned_source(history_case, *, rows, menu_entries, lines,
+    period="2026-04@2026-04-26~2026-04-30", received=datetime(2026, 4, 26, 9)):
+    from src.services import hakodate_assignment_service
+    fields = ["date_mmdd", "daypart", "aux.col_2", "menu",
+        "qty.regular_x", "qty.daycare_x", "qty.staff_x", "qty.no_meat_x",
+        "qty.no_fish_x", "qty.no_fried_x", "qty.change_1_x", "remarks"]
+    header = ["日付", "区分", "副区分", "メニュー", "常食", "通所", "職員",
+        "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"]
+    roles = ["date", "daypart", "aux", "menu_name",
+        "quantity", "quantity", "quantity", "quantity", "quantity", "quantity", "quantity", "note"]
+    columns = [{"index": index, "source_index": index, "name": field,
+                "header": header[index], "role": roles[index]} for index, field in enumerate(fields)]
+    for column in columns:
+        if column["role"] == "quantity":
+            column.update(diet_type=column["name"][4:-2], area_id="X")
+    assert len(rows) == len(menu_entries)
+    declared = {}
+    for row, entry in zip(rows, menu_entries, strict=True):
+        assert row[:4] == [entry["menu_date"].strftime("%m/%d"), entry["daypart"],
+                           entry["category"], entry["name"]]
+        identity = (entry["menu_date"].isoformat(), order_service._normalize_daypart_key(entry["daypart"]),
+                    hakodate_assignment_service._normalize_slot_text(entry["name"]))
+        assert identity not in declared, "duplicate authored menu identity"
+        declared[identity] = row
+    case = history_case(facility="FAC00004", week=period, period=period,
+        received=received, lines=lines, columns=columns,
+        menu_entries=menu_entries)
+    def recognize(region):
+        values = set()
+        for target in region["logical_targets"]:
+            identity = (str(target["date"]), order_service._normalize_daypart_key(target["daypart"]),
+                        hakodate_assignment_service._normalize_slot_text(target["menu_name"]))
+            assert identity in declared, "physical target lacks an explicit authored menu"
+            row = declared[identity]
+            values.add(row[fields.index(target["field"])])
+        assert len(values) == 1, "a physical cell cannot merge different declared values"
+        return values.pop()
+    source = case.produce(cell_values=recognize)
+    assert source["sheet"]["fields"] == fields
+    assert source["sheet"]["header"] == header
+    assert source["sheet"]["rows"] == rows
+    return case, source, fields, header
 
 
-def test_get_current_sheet_context_rebases_stale_aux_values_even_when_schema_already_matches(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        "msg-current-sheet-fac00004-aux-values-rebase",
-        facility_id="FAC00004",
-        received_at=datetime(2026, 4, 26, 9, 0, 0),
-        week_hint="2026-04@2026-04-26~2026-04-30",
-        lines=[
-            {
-                "date": "2026-04-26",
-                "daypart": "朝",
-                "menu_name": "鶏じゃが",
-                "diet_type": "regular",
-                "area_id": "X",
-                "bag_type": "standard",
-                "quantity_original": 3,
-            }
-        ],
-    )
+def _legacy_aux_target_refused(case, value):
+    from src.services.hakodate_ocr_evidence_service import authored_cell_role
+    target = {"role": "aux", "field": "aux.col_4", "semantic_field": "aux.col_4",
+              "worksheet_col": 5, "field_label": "合計", "ocr_text": value}
+    with case.readonly():
+        with pytest.raises(ValueError, match="^hakodate_target_role_unresolved$"):
+            authored_cell_role(target)
+    assert target["ocr_text"] == value
 
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "鶏じゃが",
-                "menu_date": date(2026, 4, 26),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-04",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 1,
-            "facility_entries_count": 1,
-        },
-    )
 
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        ["日付", "区分", "副区分", "メニュー", "合計", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"],
-                        ["04/26", "朝", "主", "鶏じゃが", "67", "66", "", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分|副区分|メニュー|合計|常食|通所|職員|肉禁|魚禁|揚げ物禁|変更1|備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|04/26|朝|主|鶏じゃが|67|66|||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    fields = [
-        "date_mmdd",
-        "daypart",
-        "aux.col_2",
-        "menu",
-        "aux.col_4",
-        "qty.regular_x",
-        "qty.daycare_x",
-        "qty.staff_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
-        "qty.no_fried_x",
-        "qty.change_1_x",
-        "remarks",
-    ]
-    header = [
-        "日付",
-        "区分",
-        "副区分",
-        "メニュー",
-        "合計",
-        "常食",
-        "通所",
-        "職員",
-        "肉禁",
-        "魚禁",
-        "揚げ物禁",
-        "変更1",
-        "備考欄",
-    ]
-    stale_rows = [["04/26", "朝", "", "鶏じゃが", "", "9", "4", "", "", "", "", "", ""]]
-
-    saved_draft = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "facility_id": "FAC00004",
-            "resolved_week_id": "2026-04@2026-04-26~2026-04-30",
-            "fields": fields,
-            "header": header,
-            "rows": stale_rows,
-            "row_ids": ["row-1"],
-            "warnings": ["sheet_quantity_column_unmapped"],
-        },
-        draft_state="draft_ready",
-        warnings=["sheet_quantity_column_unmapped"],
-        edited_by="tester",
-    )
-    assert isinstance(saved_draft, dict)
-
-    order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        draft_id=str(saved_draft.get("id") or "").strip() or None,
-        evidence_run_id=None,
-        state_json={
-            "order_id": order["id"],
-            "draft_id": str(saved_draft.get("id") or "").strip(),
-            "source": "weekly_menu+ocr_payload",
-            "facility_id": "FAC00004",
-            "resolved_week_id": "2026-04@2026-04-26~2026-04-30",
-            "fields": fields,
-            "header": header,
-            "rows": stale_rows,
-            "row_ids": ["row-1"],
-        },
-    )
-
-    latest = draft_sheet_service.get_latest_sheet_draft(order["id"])
-    assert isinstance(latest, dict)
-    rebase_required, rebuilt = order_service._draft_record_requires_current_sheet_semantic_rebase(order["id"], latest)
-    assert rebase_required is True
+@pytest.mark.parametrize("saved_has_aux", [False, True], ids=[
+    "retain_saved_schema_without_aux", "retain_saved_aux_blanks_with_matching_schema",
+])
+def test_owned_aux_source_does_not_overwrite_selected_operator_schema_or_values(history_case, saved_has_aux):
+    period = "2026-04@2026-04-26~2026-04-30"
+    original_row = ["04/26", "朝", "主", "鶏じゃが", "66", "", "", "", "", "", "", ""]
+    lines = [{"date": date(2026, 4, 26), "daypart": "朝", "menu_name": "鶏じゃが",
+        "diet_type": "regular", "area_id": "X", "bag_type": "standard", "quantity_original": 3}] if saved_has_aux else []
+    case, source, fields, header = _fac00004_owned_source(history_case,
+        rows=[original_row], lines=lines, menu_entries=[{
+            "id": "aux-april-26", "monthly_menu_id": "2026-04",
+            "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "鶏じゃが",
+            "category": "主", "slot_index": 0, "diet_type": "regular"}])
+    rebuilt = source["sheet"]
     assert isinstance(rebuilt, dict)
     assert rebuilt["fields"] == fields
     assert rebuilt["header"] == header
-    assert rebuilt["rows"] == [["04/26", "朝", "主", "鶏じゃが", "67", "66", "", "", "", "", "", "", ""]]
-
-    refreshed = order_service._rebase_draft_record_to_facility_schema(
-        order["id"],
-        latest,
-        edited_by="current-sheet-refresh",
-    )
+    assert rebuilt["rows"] == [original_row]
+    assert rebuilt["rows"][0][:6] == ["04/26", "朝", "主", "鶏じゃが", "66", ""]
+    _legacy_aux_target_refused(case, "67")
+    if saved_has_aux:
+        saved_fields = ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4",
+            "qty.regular_x", "qty.daycare_x", "qty.staff_x", "qty.no_meat_x",
+            "qty.no_fish_x", "qty.no_fried_x", "qty.change_1_x", "remarks"]
+        saved_header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "通所", "職員",
+            "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"]
+        saved_rows = [["04/26", "朝", "", "鶏じゃが", "", "9", "4", "", "", "", "", "", ""]]
+    else:
+        saved_fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.daycare_x",
+            "qty.staff_x", "qty.no_meat_x", "qty.no_fish_x", "qty.no_fried_x", "qty.change_1_x", "remarks"]
+        saved_header = ["日付", "区分", "メニュー", "常食", "通所", "職員", "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"]
+        saved_rows = [["04/26", "朝", "鶏じゃが", "9", "4", "", "", "", "", "", ""]]
+    sheet = {"order_id": case.id, "source": "weekly_menu+ocr_payload", "facility_id": "FAC00004",
+        "resolved_week_id": period, "fields": saved_fields, "header": saved_header,
+        "rows": saved_rows, "row_ids": ["row-1"], "warnings": ["sheet_quantity_column_unmapped"]}
+    saved_draft = save_draft(case, sheet)
+    assert isinstance(saved_draft, dict)
+    published = publish_current(case)
+    assert published["draft_id"] == saved_draft["id"]
+    latest = draft_sheet_service.get_selected_sheet_draft(case.id)
+    assert isinstance(latest, dict)
+    captured = order_service._capture_synchronous_cache_write_input(case.id)
+    assert isinstance(captured, dict)
+    with case.readonly():
+        rebase_required, replacement = order_service._draft_record_requires_current_sheet_semantic_rebase(
+            case.id, latest)
+        refreshed = order_service._rebase_draft_record_to_facility_schema(
+            case.id, latest, edited_by="current-sheet-refresh", synchronous_write_input=captured)
+        current = order_service.get_current_sheet_context(case.id)
+    assert rebase_required is False
+    assert replacement is None
     refreshed_payload = refreshed.get("draft_sheet_json") if isinstance(refreshed, dict) else None
     assert isinstance(refreshed_payload, dict)
-    assert refreshed_payload["fields"] == fields
-    assert refreshed_payload["header"] == header
-    assert refreshed_payload["rows"][0][:7] == ["04/26", "朝", "主", "鶏じゃが", "67", "66", ""]
+    assert refreshed_payload["fields"] == saved_fields
+    assert refreshed_payload["header"] == saved_header
+    assert refreshed_payload["rows"] == saved_rows
+    assert current["draft_payload"] == sheet
+    assert current["rows"] == saved_rows
+    assert current["row_ids"] == ["row-1"]
+    assert order_current_state_service.get_current_state_payload(case.id) == published
 
 
-def test_get_ocr_sheet_prefers_applied_reparse_revision_quantities_without_erasing_aux_display(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        "msg-current-sheet-fac00004-applied-reparse-qty-overlay",
-        facility_id="FAC00004",
-        received_at=datetime(2026, 4, 26, 9, 0, 0),
-        week_hint="2026-04",
-        lines=None,
-    )
 
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "大豆のトマト煮",
-                "menu_date": date(2026, 4, 26),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            },
-            {
-                "menu_name": "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ",
-                "menu_date": date(2026, 4, 26),
-                "daypart_key": "breakfast",
-                "slot_index": 1,
-                "order": 1,
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-04",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 2,
-            "facility_entries_count": 2,
-        },
-    )
 
-    fields = [
-        "date_mmdd",
-        "daypart",
-        "aux.col_2",
-        "menu",
-        "aux.col_4",
-        "qty.regular_x",
-        "qty.daycare_x",
-        "qty.staff_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
-        "qty.no_fried_x",
-        "qty.change_1_x",
-        "remarks",
-    ]
-    header = [
-        "日付",
-        "区分",
-        "副区分",
-        "メニュー",
-        "合計",
-        "常食",
-        "通所",
-        "職員",
-        "肉禁",
-        "魚禁",
-        "揚げ物禁",
-        "変更1",
-        "備考欄",
-    ]
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        header,
-                        ["04/26", "朝", "主", "大豆のトマト煮", "70", "", "", "", "", "", "", "", ""],
-                        ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "", "", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分|副区分|メニュー|合計|常食|通所|職員|肉禁|魚禁|揚げ物禁|変更1|備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|04/26|朝|主|大豆のトマト煮|70||||||||\n"
-                "|04/26|朝|副①|胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ|70||||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    _append_sheet_revision(
-        order_id=order["id"],
-        fields=fields,
-        header=header,
-        rows=[
-            ["04/26", "朝", "", "大豆のトマト煮", "", "70", "", "", "", "", "", "", ""],
-            ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "", "70", "", "", "", "", "", "", ""],
-        ],
-        row_ids=["ocr-row-1", "ocr-row-2"],
-        revision_meta={
-            "sheet_save_mode": "applied",
-            "reparse_applied": True,
-            "provider": "gemini",
-            "llm_assist": True,
-        },
-    )
-
-    sheet, error = order_service.get_ocr_sheet(order["id"], use_saved_draft=False)
+def test_get_ocr_sheet_preserves_formally_saved_quantity_and_aux_display(history_case) -> None:
+    original_rows = [["04/26", "朝", "主", "大豆のトマト煮", "", "", "", "", "", "", "", ""],
+        ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "", "", "", "", "", "", "", ""]]
+    case, source, native_fields, native_header = _fac00004_owned_source(history_case,
+        rows=original_rows, menu_entries=[{"id": "owned-aux-main", "monthly_menu_id": "2026-04",
+        "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "大豆のトマト煮",
+        "category": "主", "slot_index": 0, "diet_type": "regular"},
+        {"id": "owned-aux-side", "monthly_menu_id": "2026-04",
+        "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ",
+        "category": "副①", "slot_index": 1, "diet_type": "regular"}], lines=[])
+    _legacy_aux_target_refused(case, "70")
+    order = {"id": case.id}
+    fields = ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4",
+        "qty.regular_x", "qty.daycare_x", "qty.staff_x", "qty.no_meat_x",
+        "qty.no_fish_x", "qty.no_fried_x", "qty.change_1_x", "remarks"]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "通所", "職員",
+        "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"]
+    revision_rows = [['04/26', '朝', '', '大豆のトマト煮', '', '70', '', '', '', '', '', '', ''], ['04/26', '朝', '', '胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ', '', '70', '', '', '', '', '', '', '']]
+    _append_sheet_revision(order_id=order['id'], fields=fields, header=header, rows=[['04/26', '朝', '', '大豆のトマト煮', '', '70', '', '', '', '', '', '', ''], ['04/26', '朝', '', '胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ', '', '70', '', '', '', '', '', '', '']], row_ids=['ocr-row-1', 'ocr-row-2'], revision_meta={'sheet_save_mode': 'applied', 'reparse_applied': True, 'provider': 'gemini', 'llm_assist': True})
+    history, history_error = order_service.get_ocr_edit_history(case.id)
+    assert history_error is None
+    assert any(item["rows"] == revision_rows for item in history["revisions"])
+    edited_rows = [["04/26", "朝", "主", "大豆のトマト煮", "70", "70", "", "", "", "", "", "", ""],
+        ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", "", "", "", "", "", "", ""]]
+    edited = {**source["sheet"], "fields": fields, "header": header, "rows": edited_rows,
+              "row_ids": ["ocr-row-1", "ocr-row-2"]}
+    saved = save_draft(case, edited)
+    assert saved["base_evidence_run_id"] == case.evidence
+    with case.readonly():
+        sheet, error = order_service.get_ocr_sheet(order["id"], use_saved_draft=True)
 
     assert error is None
     assert isinstance(sheet, dict)
@@ -974,563 +415,224 @@ def test_get_ocr_sheet_prefers_applied_reparse_revision_quantities_without_erasi
     assert sheet["rows"][1][3] == "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ"
     assert sheet["rows"][1][4] == "70"
     assert sheet["rows"][1][5] == "70"
+    assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == original_rows
 
 
-def test_get_current_sheet_context_uses_applied_reparse_revision_without_erasing_aux_display(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        "msg-current-context-fac00004-applied-reparse-qty-overlay",
-        facility_id="FAC00004",
-        received_at=datetime(2026, 4, 26, 9, 0, 0),
-        week_hint="2026-04",
-        lines=None,
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "大豆のトマト煮",
-                "menu_date": date(2026, 4, 26),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-04",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 1,
-            "facility_entries_count": 1,
-        },
-    )
-
-    fields = [
-        "date_mmdd",
-        "daypart",
-        "aux.col_2",
-        "menu",
-        "aux.col_4",
-        "qty.regular_x",
-        "qty.daycare_x",
-        "qty.staff_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
-        "qty.no_fried_x",
-        "qty.change_1_x",
-        "remarks",
-    ]
-    header = [
-        "日付",
-        "区分",
-        "副区分",
-        "メニュー",
-        "合計",
-        "常食",
-        "通所",
-        "職員",
-        "肉禁",
-        "魚禁",
-        "揚げ物禁",
-        "変更1",
-        "備考欄",
-    ]
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        header,
-                        ["04/26", "朝", "主", "大豆のトマト煮", "70", "", "", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分|副区分|メニュー|合計|常食|通所|職員|肉禁|魚禁|揚げ物禁|変更1|備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|04/26|朝|主|大豆のトマト煮|70||||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    _append_sheet_revision(
-        order_id=order["id"],
-        fields=fields,
-        header=header,
-        rows=[["04/26", "朝", "", "大豆のトマト煮", "", "70", "", "", "", "", "", "", ""]],
-        row_ids=["ocr-row-1"],
-        revision_meta={
-            "sheet_save_mode": "applied",
-            "reparse_applied": True,
-            "provider": "gemini",
-            "llm_assist": True,
-        },
-    )
-
-    current = order_service.get_current_sheet_context(order["id"])
-
+def test_get_current_sheet_context_preserves_formally_saved_quantity_and_aux_display(history_case) -> None:
+    original_rows = [["04/26", "朝", "主", "大豆のトマト煮", "", "", "", "", "", "", "", ""]]
+    case, source, native_fields, native_header = _fac00004_owned_source(history_case,
+        rows=original_rows, menu_entries=[{"id": "owned-aux-main", "monthly_menu_id": "2026-04",
+        "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "大豆のトマト煮",
+        "category": "主", "slot_index": 0, "diet_type": "regular"}], lines=[])
+    _legacy_aux_target_refused(case, "70")
+    order = {"id": case.id}
+    fields = ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4",
+        "qty.regular_x", "qty.daycare_x", "qty.staff_x", "qty.no_meat_x",
+        "qty.no_fish_x", "qty.no_fried_x", "qty.change_1_x", "remarks"]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "通所", "職員",
+        "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"]
+    revision_rows = [['04/26', '朝', '', '大豆のトマト煮', '', '70', '', '', '', '', '', '', '']]
+    _append_sheet_revision(order_id=order['id'], fields=fields, header=header, rows=[['04/26', '朝', '', '大豆のトマト煮', '', '70', '', '', '', '', '', '', '']], row_ids=['ocr-row-1'], revision_meta={'sheet_save_mode': 'applied', 'reparse_applied': True, 'provider': 'gemini', 'llm_assist': True})
+    history, history_error = order_service.get_ocr_edit_history(case.id)
+    assert history_error is None
+    assert any(item["rows"] == revision_rows for item in history["revisions"])
+    edited_rows = [["04/26", "朝", "主", "大豆のトマト煮", "70", "70", "", "", "", "", "", "", ""]]
+    edited = {**source["sheet"], "fields": fields, "header": header, "rows": edited_rows,
+              "row_ids": ["ocr-row-1"]}
+    saved = save_draft(case, edited)
+    assert saved["base_evidence_run_id"] == case.evidence
+    with case.readonly():
+        current = order_service.get_current_sheet_context(order["id"])
     assert isinstance(current, dict)
     assert current["rows"] == [["04/26", "朝", "主", "大豆のトマト煮", "70", "70", "", "", "", "", "", "", ""]]
+    assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == original_rows
 
 
-def test_get_ocr_sheet_ignores_non_authoritative_reparse_candidate_revision(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order_for_facility(
-        "msg-current-sheet-fac00004-reparse-candidate-not-current",
-        facility_id="FAC00004",
-        received_at=datetime(2026, 4, 26, 9, 0, 0),
-        week_hint="2026-04",
-        lines=None,
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "大豆のトマト煮",
-                "menu_date": date(2026, 4, 26),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-04",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 1,
-            "facility_entries_count": 1,
-        },
-    )
-
-    fields = [
-        "date_mmdd",
-        "daypart",
-        "aux.col_2",
-        "menu",
-        "aux.col_4",
-        "qty.regular_x",
-        "qty.daycare_x",
-        "qty.staff_x",
-        "qty.no_meat_x",
-        "qty.no_fish_x",
-        "qty.no_fried_x",
-        "qty.change_1_x",
-        "remarks",
-    ]
-    header = [
-        "日付",
-        "区分",
-        "副区分",
-        "メニュー",
-        "合計",
-        "常食",
-        "通所",
-        "職員",
-        "肉禁",
-        "魚禁",
-        "揚げ物禁",
-        "変更1",
-        "備考欄",
-    ]
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "template_id": "fax_layout_regular_staff_daycare_other_forbidden_v1",
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        header,
-                        ["04/26", "朝", "主", "大豆のトマト煮", "70", "", "", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分|副区分|メニュー|合計|常食|通所|職員|肉禁|魚禁|揚げ物禁|変更1|備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|04/26|朝|主|大豆のトマト煮|70||||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    _append_sheet_revision(
-        order_id=order["id"],
-        fields=fields,
-        header=header,
-        rows=[["04/26", "朝", "", "大豆のトマト煮", "", "99", "", "", "", "", "", "", ""]],
-        row_ids=["ocr-row-1"],
-        revision_meta={
-            "sheet_save_mode": "draft_candidate",
-            "draft_from_reparse_reject": True,
-            "provider": "gemini",
-            "llm_assist": True,
-        },
-    )
-
-    sheet, error = order_service.get_ocr_sheet(order["id"], use_saved_draft=False)
-
+def test_get_ocr_sheet_ignores_non_authoritative_reparse_candidate_revision(history_case) -> None:
+    original_rows = [["04/26", "朝", "主", "大豆のトマト煮", "", "", "", "", "", "", "", ""]]
+    case, source, native_fields, native_header = _fac00004_owned_source(history_case,
+        rows=original_rows, menu_entries=[{"id": "owned-aux-main", "monthly_menu_id": "2026-04",
+        "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "大豆のトマト煮",
+        "category": "主", "slot_index": 0, "diet_type": "regular"}], lines=[])
+    _legacy_aux_target_refused(case, "70")
+    order = {"id": case.id}
+    fields = ["date_mmdd", "daypart", "aux.col_2", "menu", "aux.col_4",
+        "qty.regular_x", "qty.daycare_x", "qty.staff_x", "qty.no_meat_x",
+        "qty.no_fish_x", "qty.no_fried_x", "qty.change_1_x", "remarks"]
+    header = ["日付", "区分", "副区分", "メニュー", "合計", "常食", "通所", "職員",
+        "肉禁", "魚禁", "揚げ物禁", "変更1", "備考欄"]
+    revision_rows = [['04/26', '朝', '', '大豆のトマト煮', '', '99', '', '', '', '', '', '', '']]
+    _append_sheet_revision(order_id=order['id'], fields=fields, header=header, rows=[['04/26', '朝', '', '大豆のトマト煮', '', '99', '', '', '', '', '', '', '']], row_ids=['ocr-row-1'], revision_meta={'sheet_save_mode': 'draft_candidate', 'draft_from_reparse_reject': True, 'provider': 'gemini', 'llm_assist': True})
+    history, history_error = order_service.get_ocr_edit_history(case.id)
+    assert history_error is None
+    assert any(item["rows"] == revision_rows for item in history["revisions"])
+    with case.readonly():
+        sheet, error = order_service.get_ocr_sheet(case.id, use_saved_draft=False)
     assert error is None
     assert isinstance(sheet, dict)
-    assert sheet["rows"] == [["04/26", "朝", "主", "大豆のトマト煮", "70", "", "", "", "", "", "", "", ""]]
+    assert sheet["rows"] == original_rows
+    assert sheet["fields"] == native_fields
+    assert all("99" not in row for row in sheet["rows"])
+    assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == original_rows
 
 
-def test_get_current_sheet_context_does_not_rebase_auto_apply_blocked_draft_on_read(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-read-does-not-rebase-blocked-draft")
-
-    original_rows = [
-        ["03/22", "朝", "Menu A", "5", ""],
-        ["01/01", "\"", "Ghost Menu", "23", ""],
-    ]
-    saved_draft = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "draft_sheet",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "header": ["日付", "区分", "メニュー", "常食", "備考"],
-            "rows": original_rows,
-            "row_ids": ["draft-2", "draft-1"],
-            "warnings": ["stale-current-warning-should-drop"],
-        },
-        draft_state="auto_apply_blocked",
-        blockers=["sheet_canonical_mismatch"],
-        warnings=["sheet_ocr_review_required"],
-        edited_by="tester",
+def test_get_current_sheet_context_does_not_rebase_auto_apply_blocked_draft_on_read(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, area="X")
+    order = {"id": case.id}
+    original_rows = [['03/22', '朝', 'Menu A', '5', ''], ['01/01', '"', 'Ghost Menu', '23', '']]
+    sheet = {'order_id': order['id'], 'source': 'draft_sheet', 'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x', 'remarks'], 'header': ['日付', '区分', 'メニュー', '常食', '備考'], 'rows': original_rows, 'row_ids': ['draft-2', 'draft-1'], 'warnings': ['stale-current-warning-should-drop']}
+    captured = order_service._capture_synchronous_cache_write_input(case.id)
+    assert isinstance(captured, dict)
+    historical = draft_sheet_service.persist_sheet_draft(
+        order_id=case.id, draft_sheet_json=sheet,
+        base_evidence_run_id=captured["evidence_run_id"],
+        template_version_id=captured["evidence"]["template_version_id"],
+        draft_state="auto_apply_blocked", blockers=["sheet_canonical_mismatch"],
+        warnings=["sheet_ocr_review_required"], edited_by="tester",
+        synchronous_write_input=captured,
     )
+    assert isinstance(historical, dict)
+    saved_draft = save_draft(case, sheet)
     assert isinstance(saved_draft, dict)
-
-    monkeypatch.setattr(
-        order_service,
-        "_build_best_available_semantic_draft",
-        lambda _order_id, use_saved_draft=False: {
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "header": ["日付", "区分", "メニュー", "常食", "備考"],
-            "rows": [["03/22", "朝", "Menu A", "", ""]],
-            "row_ids": ["fresh-1"],
-            "warnings": [],
-        },
-    )
-
-    current = order_service.get_current_sheet_context(order["id"])
-    refreshed_draft = draft_sheet_service.get_latest_sheet_draft(order["id"])
-
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        refreshed_draft = draft_sheet_service.get_latest_sheet_draft(case.id)
     assert isinstance(current, dict)
     assert current["source"] == "draft_sheet"
     assert current["rows"][0] == original_rows[0]
-    assert current["rows"][1] == ["01/01", "朝", "Ghost Menu", "23", ""]
+    assert current["rows"][1] == original_rows[1]
+    assert current["rows"][1][3] == "23"
     assert refreshed_draft is not None
     assert refreshed_draft["id"] == saved_draft["id"]
-    assert refreshed_draft["blockers_json"] == ["sheet_canonical_mismatch"]
-    assert refreshed_draft["warnings_json"] == ["sheet_ocr_review_required"]
     assert refreshed_draft["draft_sheet_json"]["rows"] == original_rows
+    assert current["row_ids"] == ["draft-2", "draft-1"]
+    with session_scope() as session:
+        retained = session.get(OrderSheetDraft, historical["id"])
+        assert retained.draft_state == "auto_apply_blocked"
+        assert retained.blockers_json == ["sheet_canonical_mismatch"]
+        assert retained.warnings_json == ["sheet_ocr_review_required"]
+        assert retained.draft_sheet_json["rows"] == original_rows
 
 
-def test_get_current_sheet_context_uses_weekly_menu_with_payload_overlay_when_payload_rows_are_unparseable(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-menu-missing-structured-fallback")
+def _owned_march_projection(history_case, *, menu_entries, regular_values):
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f",
+        "qty.soft_2f", "qty.soft_3f", "qty.mixer_2f", "qty.mixer_3f", "remarks"]
+    header = ["日付", "区分", "メニュー", "常食2F", "常食3F",
+        "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"]
+    roles = ["date", "daypart", "menu_name", *["quantity"] * 6, "note"]
+    columns = [{"index": i, "source_index": i, "name": field, "header": header[i],
+                "role": roles[i]} for i, field in enumerate(fields)]
+    for column, (diet, area) in zip(columns[3:9], [
+        ("regular", "2F"), ("regular", "3F"), ("soft", "2F"),
+        ("soft", "3F"), ("mixer", "2F"), ("mixer", "3F"),
+    ], strict=True):
+        column.update(diet_type=diet, area_id=area)
+    assert set(regular_values) == {entry["name"] for entry in menu_entries}
+    period = "2026-03@2026-03-22~2026-03-28"
+    case = history_case(week=period, period=period, received=datetime(2026, 3, 22, 9),
+        columns=columns, lines=[{"date": date(2026, 3, 22), "daypart": "朝", "menu_name": "Menu A",
+            "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 3}],
+        menu_entries=menu_entries)
+    values = {(name, field): regular_values[name] if field == "qty.regular_2f" else ""
+              for name in regular_values for field in fields[3:]}
+    def recognize(region):
+        recognized = {values[(target["menu_name"], target["field"])]
+                      for target in region["logical_targets"]}
+        assert len(recognized) == 1
+        return recognized.pop()
+    source = case.produce(cell_values=recognize)
+    assert source["sheet"]["fields"] == fields
+    assert source["sheet"]["header"] == header
+    return case, source
 
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "column_mapping_resolution": {
-                "resolved_value": (
-                    "4:qty.regular_2f|5:qty.regular_3f|6:qty.soft_2f|"
-                    "7:qty.soft_3f|8:qty.mixer_2f|9:qty.mixer_3f"
-                ),
-                "decision_source": "position_fallback",
-            },
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        ["日付", "区分", "", "献立", "常食", "", "軟菜", "", "ミキサー", "", "備考欄"],
-                        ["", "", "", "", "2F", "3F", "2F", "3F", "2F", "3F", ""],
-                        ["03/22", "朝", "主A", "Menu A", "9", "", "", "", "", "", ""],
-                        ["", "昼", "主A", "Menu B", "8", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分||献立|常食| |軟菜| |ミキサー| |備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|03/22|朝|主A|Menu A|9|||||||\n"
-                "||昼|主A|Menu B|8||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
 
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "Menu A",
-                "menu_date": date(2026, 3, 22),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            },
-            {
-                "menu_name": "Menu B",
-                "menu_date": date(2026, 3, 22),
-                "daypart_key": "lunch",
-                "slot_index": 1,
-                "order": 1,
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-03",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 2,
-            "facility_entries_count": 2,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_extract_sheet_rows_from_payload_uncanonicalized",
-        lambda payload, template: [],
-    )
+def _store_unowned_overlay(case, payload):
+    from src.models.order_ocr_cache import OrderOcrCache
+    with session_scope() as session:
+        cached = session.get(OrderOcrCache, case.id)
+        if cached is None:
+            session.add(OrderOcrCache(order_id=case.id, payload=payload))
+        else:
+            cached.payload = payload
 
-    current = order_service.get_current_sheet_context(order["id"])
 
+@pytest.mark.parametrize("mapping_location", ["payload-position-metadata", "unowned-candidate-table"])
+def test_unowned_legacy_table_cannot_overlay_owned_saved_quantities(history_case, mapping_location):
+    entries = [
+        {"id": "march-a", "monthly_menu_id": "2026-03", "menu_date": date(2026, 3, 22),
+         "daypart": "朝", "name": "Menu A", "slot_index": 0, "diet_type": "regular"},
+        {"id": "march-b", "monthly_menu_id": "2026-03", "menu_date": date(2026, 3, 22),
+         "daypart": "昼", "name": "Menu B", "slot_index": 0, "diet_type": "regular"},
+    ]
+    case, source = _owned_march_projection(history_case,
+        menu_entries=entries, regular_values={"Menu A": "", "Menu B": ""})
+    saved = save_draft(case, source["sheet"])
+    if mapping_location == "payload-position-metadata":
+        legacy = {'column_mapping_resolution': {'resolved_value': '4:qty.regular_2f|5:qty.regular_3f|6:qty.soft_2f|7:qty.soft_3f|8:qty.mixer_2f|9:qty.mixer_3f', 'decision_source': 'position_fallback'}, 'tables': [{'table_id': 'p1_t1', 'page_index': 1, 'rows': [['日付', '区分', '', '献立', '常食', '', '軟菜', '', 'ミキサー', '', '備考欄'], ['', '', '', '', '2F', '3F', '2F', '3F', '2F', '3F', ''], ['03/22', '朝', '主A', 'Menu A', '9', '', '', '', '', '', ''], ['', '昼', '主A', 'Menu B', '8', '', '', '', '', '', '']]}], 'table_raw': '|日付|区分||献立|常食| |軟菜| |ミキサー| |備考欄|\n|---|---|---|---|---|---|---|---|---|---|---|\n|03/22|朝|主A|Menu A|9|||||||\n||昼|主A|Menu B|8||||||'}
+    else:
+        legacy = {'tables': [{'table_id': 'p1_t1', 'page_index': 1, 'rows': [['日付', '区分', '', '献立', '常食', '', '軟菜', '', 'ミキサー', '', '備考欄'], ['', '', '', '', '2F', '3F', '2F', '3F', '2F', '3F', ''], ['03/22', '朝', '主A', 'Menu A', '9', '', '', '', '', '', ''], ['', '昼', '主A', 'Menu B', '8', '', '', '', '', '', '']]}], 'table_raw': '|日付|区分||献立|常食| |軟菜| |ミキサー| |備考欄|\n|---|---|---|---|---|---|---|---|---|---|---|\n|03/22|朝|主A|Menu A|9|||||||\n||昼|主A|Menu B|8||||||'}
+    _store_unowned_overlay(case, legacy)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
     assert isinstance(current, dict)
-    assert current["source"] == "weekly_menu"
-    assert "sheet_payload_mapping_blocked_unresolved_template" in (current.get("warnings") or [])
+    assert current["source"] == "workflow_v2_selected_ocr_projection"
+    assert current["draft_id"] == saved["id"]
     assert current["rows"] == [
         ["03/22", "朝", "Menu A", "", "", "", "", "", "", ""],
         ["03/22", "昼", "Menu B", "", "", "", "", "", "", ""],
     ]
+    assert current["draft_payload"] == source["sheet"]
+    from src.models.order_ocr_cache import OrderOcrCache
+    with session_scope() as session:
+        assert session.get(OrderOcrCache, case.id).payload == legacy
 
 
-def test_get_current_sheet_context_uses_candidate_column_mapping_for_quantity_overlay(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-candidate-column-mapping")
-
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
-            "tables": [
-                {
-                    "table_id": "p1_t1",
-                    "page_index": 1,
-                    "rows": [
-                        ["日付", "区分", "", "献立", "常食", "", "軟菜", "", "ミキサー", "", "備考欄"],
-                        ["", "", "", "", "2F", "3F", "2F", "3F", "2F", "3F", ""],
-                        ["03/22", "朝", "主A", "Menu A", "9", "", "", "", "", "", ""],
-                        ["", "昼", "主A", "Menu B", "8", "", "", "", "", "", ""],
-                    ],
-                }
-            ],
-            "table_raw": (
-                "|日付|区分||献立|常食| |軟菜| |ミキサー| |備考欄|\n"
-                "|---|---|---|---|---|---|---|---|---|---|---|\n"
-                "|03/22|朝|主A|Menu A|9|||||||\n"
-                "||昼|主A|Menu B|8||||||"
-            ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "Menu A",
-                "menu_date": date(2026, 3, 22),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            },
-            {
-                "menu_name": "Menu B",
-                "menu_date": date(2026, 3, 22),
-                "daypart_key": "lunch",
-                "slot_index": 1,
-                "order": 1,
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-03",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 2,
-            "facility_entries_count": 2,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "get_order_candidate_resolution",
-        lambda order_id: {
-            "resolutions": {
-                "template": {
-                    "decision_type": "template",
-                    "resolved_value": "fax_layout_regular_soft_mixer_forbidden_v1",
-                    "confidence": "high",
-                    "blocked": False,
-                    "blocked_reasons": [],
-                    "requires_user_choice": False,
-                    "candidates": [],
-                },
-                "column_mapping": {
-                    "decision_type": "column_mapping",
-                    "resolved_value": (
-                        "4:qty.regular_2f|5:qty.regular_3f|6:qty.soft_2f|"
-                        "7:qty.soft_3f|8:qty.mixer_2f|9:qty.mixer_3f"
-                    ),
-                    "decision_source": "position_fallback",
-                    "confidence": "high",
-                    "blocked": False,
-                    "blocked_reasons": [],
-                    "requires_user_choice": False,
-                    "candidates": [],
-                    "partial_quantity_mapping": False,
-                    "mapped_quantity_fields": [
-                        "qty.regular_2f",
-                        "qty.regular_3f",
-                        "qty.soft_2f",
-                        "qty.soft_3f",
-                        "qty.mixer_2f",
-                        "qty.mixer_3f",
-                    ],
-                    "expected_quantity_fields": [
-                        "qty.regular_2f",
-                        "qty.regular_3f",
-                        "qty.soft_2f",
-                        "qty.soft_3f",
-                        "qty.mixer_2f",
-                        "qty.mixer_3f",
-                    ],
-                }
-            }
-        },
-    )
-
-    current = order_service.get_current_sheet_context(order["id"])
-
-    assert isinstance(current, dict)
-    assert current["source"] == "weekly_menu+ocr_payload"
-    assert "sheet_quantity_column_unmapped" in (current.get("warnings") or [])
-    assert "ocr_evidence_recovery_required" in (current.get("warnings") or [])
-    assert current["rows"] == [
-        ["03/22", "朝", "Menu A", "", "", "", "", "", "", ""],
-        ["03/22", "昼", "Menu B", "", "", "", "", "", "", ""],
+def test_owned_projection_and_formal_save_keep_nine_and_eight_in_exact_menu_cells(history_case):
+    entries = [
+        {"id": "march-a", "monthly_menu_id": "2026-03", "menu_date": date(2026, 3, 22),
+         "daypart": "朝", "name": "Menu A", "slot_index": 0, "diet_type": "regular"},
+        {"id": "march-b", "monthly_menu_id": "2026-03", "menu_date": date(2026, 3, 22),
+         "daypart": "昼", "name": "Menu B", "slot_index": 0, "diet_type": "regular"},
     ]
+    case, source = _owned_march_projection(history_case,
+        menu_entries=entries, regular_values={"Menu A": "9", "Menu B": "8"})
+    saved = save_draft(case, source["sheet"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+    assert current["draft_id"] == saved["id"]
+    assert current["rows"] == [
+        ["03/22", "朝", "Menu A", "9", "", "", "", "", "", ""],
+        ["03/22", "昼", "Menu B", "8", "", "", "", "", "", ""],
+    ]
+    assert case.get("workflow-v2/sheet")["sheet"] == source["sheet"]
 
 
-def test_get_current_sheet_context_does_not_append_ocr_only_menu_rows_to_weekly_menu(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-no-ocr-menu-append")
 
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("4"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
 
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_safe",
-        lambda week_id, facility_id=None: [
-            {
-                "menu_name": "Menu A",
-                "menu_date": date(2026, 3, 22),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_monthly_menu_diagnostics",
-        lambda *, week_id, facility_id: {
-            "month_id": "2026-03",
-            "resolved_week_id": week_id,
-            "order_codes": [],
-            "row_codes": [],
-            "global_entries_count": 1,
-            "facility_entries_count": 1,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_position_menu_entries_from_ocr_payload",
-        lambda *, payload, template, received_at: [
-            {
-                "menu_name": "Menu A",
-                "menu_date": date(2026, 3, 22),
-                "daypart_key": "breakfast",
-                "slot_index": 0,
-                "order": 0,
-            },
-            {
-                "menu_name": "OCR Extra",
-                "menu_date": date(2026, 3, 23),
-                "daypart_key": "lunch",
-                "slot_index": 1,
-                "order": 1,
-            },
-        ],
-    )
-
-    current = order_service.get_current_sheet_context(order["id"])
-
+def test_current_owned_projection_does_not_append_unowned_ocr_menu_candidates(history_case):
+    entries = [{"id": "march-a", "monthly_menu_id": "2026-03", "menu_date": date(2026, 3, 22),
+        "daypart": "朝", "name": "Menu A", "slot_index": 0, "diet_type": "regular"}]
+    case, source = _owned_march_projection(history_case,
+        menu_entries=entries, regular_values={"Menu A": "4"})
+    saved = save_draft(case, source["sheet"])
+    legacy = _sample_payload("4")
+    legacy["tables"][0]["rows"].append(["03/23", "lunch", "OCR Extra", ""])
+    legacy["table_raw"] += "\n|03/23|lunch|OCR Extra||"
+    _store_unowned_overlay(case, legacy)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
     assert isinstance(current, dict)
-    assert current["source"] == "weekly_menu+ocr_payload"
+    assert current["source"] == "workflow_v2_selected_ocr_projection"
     assert current["rows"] == [["03/22", "朝", "Menu A", "4", "", "", "", "", "", ""]]
+    assert current["draft_id"] == saved["id"]
+    assert all(row[2] != "OCR Extra" for row in current["rows"])
+    assert case.get("workflow-v2/sheet")["sheet"] == source["sheet"]
+    from src.models.order_ocr_cache import OrderOcrCache
+    with session_scope() as session:
+        assert session.get(OrderOcrCache, case.id).payload == legacy
 
 
-def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(monkeypatch, authored_sheet_case) -> None:
+def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(authored_sheet_case) -> None:
     case = authored_sheet_case(quantity=3, cell_values="9")
     assert case.selected_sheet["rows"][0][3] == "9"
     order = {"id": case.id}
@@ -1545,11 +647,6 @@ def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(mon
             "warnings": [],
         })
     assert isinstance(saved, dict)
-
-    def unexpected_semantic_rebuild(*_args, **_kwargs):
-        raise AssertionError("saved operator rows must not be reconstructed on read")
-
-    monkeypatch.setattr(order_service, "_build_best_available_semantic_draft", unexpected_semantic_rebuild)
 
     with session_scope() as session:
         before_count = (
@@ -1580,40 +677,42 @@ def test_get_current_sheet_context_does_not_persist_semantic_refresh_on_read(mon
     assert after_count == before_count
 
 
-def test_get_current_sheet_context_ignores_non_authoritative_auto_blocked_draft_and_uses_canonical_skeleton() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-non-authoritative-auto-draft")
-
+def _unselected_blocked_draft(case):
+    captured = order_service._capture_synchronous_cache_write_input(case.id)
+    assert isinstance(captured, dict)
     blocked = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
+        order_id=case.id,
         draft_sheet_json={
-            "order_id": order["id"],
-            "source": "review_blocked",
+            "order_id": case.id, "source": "review_blocked",
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
             "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [],
-            "row_ids": [],
-            "warnings": ["menu_entries_missing", "rows_empty"],
+            "rows": [], "row_ids": [], "warnings": ["menu_entries_missing", "rows_empty"],
         },
-        draft_state="draft_ready",
-        blockers=["rows_empty"],
-        warnings=["menu_entries_missing", "rows_empty"],
-        edited_by="rerun-ocr-evidence",
+        base_evidence_run_id=captured["evidence_run_id"],
+        template_version_id=captured["evidence"]["template_version_id"],
+        draft_state="draft_ready", blockers=["rows_empty"],
+        warnings=["menu_entries_missing", "rows_empty"], edited_by="rerun-ocr-evidence",
+        synchronous_write_input=captured,
     )
     assert isinstance(blocked, dict)
+    assert blocked["draft_sheet_json"]["rows"] == []
+    return blocked
 
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
 
+def test_get_current_sheet_context_ignores_non_authoritative_auto_blocked_draft_and_uses_canonical_skeleton(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=3, include_remarks=False)
+    blocked = _unselected_blocked_draft(case)
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id,
+            refresh_draft_from_semantic=True, upgrade_generic_from_sheet=True,
+            backfill_from_revision=False)
     assert isinstance(current, dict)
     assert current["draft_id"] is None
-    assert current["source"] == "review_blocked"
+    assert current["source"] == "workflow_v2_selected_ocr_projection"
     assert current["fields"][:3] == ["date_mmdd", "daypart", "menu"]
-    assert current["rows"] == []
+    assert current["rows"] == [["03/22", "朝", "Menu A", "3"]]
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, blocked["id"]).draft_sheet_json["rows"] == []
 
 
 def test_get_current_sheet_context_keeps_operator_forced_repair_draft_as_authoritative_current_truth(authored_sheet_case) -> None:
@@ -1652,133 +751,33 @@ def test_get_current_sheet_context_keeps_operator_forced_repair_draft_as_authori
     assert current["rows"] == [["03/22", "朝", "Menu A", "7"]]
 
 
-def test_resolve_active_ocr_evidence_run_ignores_non_authoritative_auto_draft_base_evidence() -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-active-evidence-ignores-auto-draft")
-
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-    second = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("9"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
+def test_resolve_active_ocr_evidence_run_ignores_non_authoritative_auto_draft_base_evidence(authored_sheet_case) -> None:
+    case, first, saved, second = _saved_three_and_owned_candidate(authored_sheet_case, candidate_quantity="9")
+    blocked = _unselected_blocked_draft(case)
+    with case.readonly():
+        before_selection = order_service._resolve_active_ocr_evidence_run(case.id)
     assert isinstance(first, dict)
     assert isinstance(second, dict)
-
-    blocked = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "review_blocked",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [],
-            "row_ids": [],
-            "warnings": ["menu_entries_missing", "rows_empty"],
-        },
-        base_evidence_run_id=first["id"],
-        draft_state="draft_ready",
-        blockers=["rows_empty"],
-        warnings=["menu_entries_missing", "rows_empty"],
-        edited_by="rerun-ocr-evidence",
-    )
     assert isinstance(blocked, dict)
-
-    resolved = order_service._resolve_active_ocr_evidence_run(order["id"])
-
+    assert before_selection["id"] == first["id"]
+    assert draft_sheet_service.get_selected_sheet_draft(case.id)["id"] == saved["id"]
+    case.command("POST", f"ocr-results/{second['id']}/select")
+    with case.readonly():
+        resolved = order_service._resolve_active_ocr_evidence_run(case.id)
     assert isinstance(resolved, dict)
     assert resolved["id"] == second["id"]
+    source = case.get("workflow-v2/sheet-source")
+    assert str(source["sheet"]["rows"][0][3]) == "9"
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, blocked["id"]).draft_sheet_json["rows"] == []
+        assert session.get(OrderSheetDraft, saved["id"]).draft_sheet_json == saved["draft_sheet_json"]
 
 
-def test_get_latest_sheet_draft_upgrades_generic_cols_from_recoverable_semantic_sheet(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-generic-draft-recoverable-upgrade")
-
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "ocr_evidence",
-            "fields": ["col1", "col2", "col3", "col4"],
-            "header": ["日付", "区分", "メニュー", "常食"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
-
-    assert isinstance(current, dict)
-    assert current["fields"][:3] == ["date_mmdd", "daypart", "menu"]
-    assert "qty.regular_2f" in current["fields"]
-    assert current["source"] == "review_blocked"
-    assert current["rows"] == []
-    assert current["draft_record"]["draft_sheet_json"]["fields"][:3] == [
-        "date_mmdd",
-        "daypart",
-        "menu",
-    ]
-    assert current["draft_record"]["draft_sheet_json"]["rows"] == []
 
 
-def test_get_current_sheet_context_projects_blocked_empty_semantic_shell_over_generic_saved_draft(
-    monkeypatch,
-) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-generic-draft-blocked-empty-upgrade")
-
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "ocr_evidence",
-            "fields": ["col1", "col2", "col3", "col4"],
-            "header": ["日付", "区分", "メニュー", "常食"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-
-    current = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
-
-    assert isinstance(current, dict)
-    assert current["fields"][:3] == ["date_mmdd", "daypart", "menu"]
-    assert current["rows"] == []
-    blocker_tokens = set(current.get("blockers") or []) | set((current.get("menu_diagnostics") or {}).get("order_codes") or [])
-    assert "monthly_menu_object_missing" in blocker_tokens or "menu_entries_missing" in blocker_tokens
-    assert current["draft_record"]["draft_sheet_json"]["fields"][:3] == [
-        "date_mmdd",
-        "daypart",
-        "menu",
-    ]
-    assert current["draft_record"]["draft_sheet_json"]["rows"] == []
 
 
-def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(monkeypatch, authored_sheet_case) -> None:
+def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(authored_sheet_case) -> None:
     case = authored_sheet_case(quantity=3, cell_values="6")
     assert case.selected_sheet["rows"][0][3] == "6"
     order = {"id": case.id}
@@ -1793,11 +792,6 @@ def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(monkeypatch, a
         })
     assert isinstance(saved, dict)
 
-    def unexpected_projection(*_args, **_kwargs):
-        raise AssertionError("no opt-in must preserve the saved generic sheet")
-
-    monkeypatch.setattr(order_service, "get_ocr_sheet", unexpected_projection)
-
     with case.readonly():
         current = order_service.get_latest_sheet_draft(
             order["id"],
@@ -1811,69 +805,43 @@ def test_get_latest_sheet_draft_keeps_generic_cols_without_opt_in(monkeypatch, a
     assert draft_json["rows"] == [["03/22", "朝", "Menu A", "5"]]
 
 
-def test_rerun_ocr_evidence_only_persists_new_evidence_without_overwriting_current_draft(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-only")
-    _attach_active_template_version(order["id"])
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-    assert isinstance(first, dict)
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "3"]],
-            "row_ids": ["row-1"],
-        },
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-    assert saved["base_evidence_run_id"] == first["id"]
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
-    monkeypatch.setattr(
-        order_service,
-        "_hakodate_canonical_payload_from_manifest_item",
-        lambda **_kwargs: _sample_hakodate_payload("9"),
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_hakodate_weekly_menu_base_sheet",
-        lambda order_id: (_sample_hakodate_base_sheet_with_quantity(order_id, "3"), None),
-    )
-
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
-
-    assert error is None
-    assert isinstance(rerun, dict)
-    assert rerun["id"] != first["id"]
-
-    current_draft = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=True)
-    assert isinstance(current_draft, dict)
-    draft_json = current_draft["draft_sheet_json"]
-    assert "qty.regular_2f" in draft_json["fields"]
-    assert all(not str(field or "").startswith("col") for field in draft_json["fields"])
-    regular_index = draft_json["fields"].index("qty.regular_2f")
-    assert draft_json["rows"][0][:3] == ["03/22", "朝", "Menu A"]
-    assert draft_json["rows"][0][regular_index] == "3"
-    assert current_draft["base_evidence_run_id"] == rerun["id"]
-
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    assert isinstance(latest_evidence, dict)
-    assert latest_evidence["id"] == rerun["id"]
-
+def test_owned_rerun_keeps_saved_quantities_and_requires_explicit_candidate_adoption(authored_sheet_case):
+    case = authored_sheet_case(quantity=3)
+    saved_sheet = {"fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
+        "header": ["日付", "区分", "メニュー", "常食2F", "備考"],
+        "rows": [["03/22", "朝", "Menu A", "3", "retained"]], "row_ids": ["row-1"],
+        "week_id": "2026-03@2026-03-22~2026-03-28"}
+    saved = save_draft(case, saved_sheet)
+    before = _snapshot(case.engine)
+    original_pdf = case.pdf.read_bytes()
+    calls = prepare_rerun(case, cell_values="9")
+    with case.execution():
+        rerun, error = order_service.rerun_ocr_evidence_only(case.id, job_id=case.job,
+            project_sheet=False, refresh_workflow=False)
+    assert error is None and isinstance(rerun, dict)
+    assert len(calls) == 1
+    assert rerun["id"] != saved["base_evidence_run_id"]
+    assert rerun["terminal_receipt"]["status"] == "done"
+    job = order_service.get_ocr_job(case.job)
+    assert job["status"] == "done"
+    after = _snapshot(case.engine)
+    for table in ("order_sheet_drafts", "order_lines"):
+        assert after[table] == before[table], table
+    for table in ("order_documents", "uploaded_pdfs", "order_versions"):
+        assert after[table] == before[table], table
+    assert case.pdf.read_bytes() == original_pdf
     with session_scope() as session:
-        lines = session.query(OrderLine).filter(OrderLine.order_id == order["id"]).all()
-        assert len(lines) == 1
-        assert lines[0].quantity_original == 3
+        retained = session.get(OrderSheetDraft, saved["id"])
+        assert retained.draft_sheet_json == saved_sheet
+        assert retained.base_evidence_run_id == saved["base_evidence_run_id"]
+        lines = session.query(OrderLine).filter_by(order_id=case.id).all()
+        assert len(lines) == 1 and lines[0].quantity_original == 3
+    case.command("POST", f"ocr-results/{rerun['id']}/select")
+    source = case.get("workflow-v2/sheet-source")
+    assert source["selected_ocr_result_id"] == rerun["id"]
+    assert str(source["sheet"]["rows"][0][3]) == "9"
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, saved["id"]).draft_sheet_json == saved_sheet
 
 
 def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
@@ -1992,59 +960,18 @@ def test_rerun_ocr_evidence_only_maps_empty_done_output_to_evidence_unusable(mon
     _assert_rejected_rerun(case, rerun, error, diagnostic, before)
 
 
-def test_rerun_ocr_evidence_only_preserves_partial_pipeline_output_as_awaiting_output(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-rerun-evidence-partial")
-    _attach_active_template_version(order["id"])
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-    assert isinstance(first, dict)
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "3"]],
-            "row_ids": ["row-1"],
-        },
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda _uri: b"%PDF-rerun%")
-    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", lambda **_kwargs: _sample_hakodate_payload("9"))
-    monkeypatch.setattr(
-        order_service,
-        "_build_hakodate_weekly_menu_base_sheet",
-        lambda order_id: (_sample_hakodate_base_sheet_with_quantity(order_id, "3"), None),
-    )
-
-    rerun, error = order_service.rerun_ocr_evidence_only(order["id"])
-
-    assert error is None
-    assert isinstance(rerun, dict)
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
-    assert isinstance(job, dict)
-    assert job["status"] == "done"
-    current_draft = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=True)
-    assert isinstance(current_draft, dict)
-    draft_json = current_draft["draft_sheet_json"]
-    assert "qty.regular_2f" in draft_json["fields"]
-    assert all(not str(field or "").startswith("col") for field in draft_json["fields"])
-    regular_index = draft_json["fields"].index("qty.regular_2f")
-    assert draft_json["rows"][0][:3] == ["03/22", "朝", "Menu A"]
-    assert draft_json["rows"][0][regular_index] == "3"
-    assert current_draft["base_evidence_run_id"] == rerun["id"]
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    assert isinstance(latest_evidence, dict)
-    assert latest_evidence["id"] == rerun["id"]
+def test_unowned_rerun_cannot_publish_partial_pipeline_output(authored_sheet_case):
+    case = authored_sheet_case(quantity=3)
+    saved = save_draft(case, {"fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "rows": [["03/22", "朝", "Menu A", "3"]], "row_ids": ["row-1"],
+        "week_id": "2026-03@2026-03-22~2026-03-28"})
+    with case.readonly():
+        rerun, error = order_service.rerun_ocr_evidence_only(case.id)
+    assert rerun is None and error == "workflow_job_required"
+    with session_scope() as session:
+        retained = session.get(OrderSheetDraft, saved["id"])
+        assert retained.draft_sheet_json["rows"] == [["03/22", "朝", "Menu A", "3"]]
+        assert retained.base_evidence_run_id == case.evidence
 
 
 def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, authored_sheet_case) -> None:
@@ -2097,11 +1024,11 @@ def test_rerun_ocr_evidence_only_uses_pipeline_wait_timeout_plus_grace(monkeypat
     captured: dict[str, object] = {}
     produce = order_service._hakodate_canonical_payload_from_manifest_item
 
-    def _fake_hakodate(**kwargs):
+    def _observe_hakodate(**kwargs):
         captured.update(kwargs)
         return produce(**kwargs)
 
-    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", _fake_hakodate)
+    monkeypatch.setattr(order_service, "_hakodate_canonical_payload_from_manifest_item", _observe_hakodate)
 
     with case.execution():
         rerun, error = order_service.rerun_ocr_evidence_only(order["id"], job_id=case.job)
@@ -2112,184 +1039,72 @@ def test_rerun_ocr_evidence_only_uses_pipeline_wait_timeout_plus_grace(monkeypat
     assert captured["item"] == {"source": "live_order_facility_source_workbook"}
 
 
-def test_switch_draft_to_latest_evidence_explicitly_adopts_new_candidate(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-switch-evidence-adopt")
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
+def _saved_three_and_owned_candidate(authored_sheet_case, *, candidate_quantity="8"):
+    case = authored_sheet_case(quantity=3, include_remarks=False)
+    first = order_service.get_ocr_evidence_run(case.evidence)
     assert isinstance(first, dict)
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "3"]],
-            "row_ids": ["row-1"],
-        },
-        edited_by="tester",
-    )
+    saved = save_draft(case, {
+        "order_id": case.id, "source": "manual_draft",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["03/22", "朝", "Menu A", "3"]], "row_ids": ["row-1"],
+    })
     assert isinstance(saved, dict)
-    second = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("8"),
-        schema_version="v2_evidence_rerun",
-        producer_version="rerun",
-        source="ocr-rerun",
-    )
-    assert isinstance(second, dict)
+    assert saved["base_evidence_run_id"] == first["id"]
+    calls = prepare_rerun(case, cell_values=candidate_quantity)
+    with case.execution():
+        second, error = order_service.rerun_ocr_evidence_only(case.id, job_id=case.job,
+            project_sheet=False, refresh_workflow=False)
+    assert error is None and isinstance(second, dict)
+    assert len(calls) == 1
+    assert second["id"] != first["id"]
+    assert second["terminal_receipt"]["status"] == "done"
+    assert second["terminal_receipt"]["evidence_run_id"] == second["id"]
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, saved["id"]).draft_sheet_json == saved["draft_sheet_json"]
+    return case, first, saved, second
 
-    monkeypatch.setattr(
-        order_service,
-        "get_ocr_sheet",
-        lambda _order_id, use_saved_draft=True, evidence_run_override=None: (
-            {
-                "source": "weekly_menu+ocr_payload",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [["03/22", "朝", "Menu A", "8"]],
-                "row_ids": ["row-1"],
-                "base_evidence_run_id": second["id"],
-            },
-            None,
-        ),
-    )
 
-    switched, error = order_service.switch_draft_to_latest_evidence(order["id"], edited_by="switch-test")
-
+def test_switch_draft_to_latest_evidence_explicitly_adopts_new_candidate(authored_sheet_case) -> None:
+    case, first, saved, second = _saved_three_and_owned_candidate(authored_sheet_case)
+    case.command("POST", f"ocr-results/{second['id']}/select")
+    source = case.get("workflow-v2/sheet-source")
+    assert source["selected_ocr_result_id"] == second["id"]
+    case.save(source["sheet"])
+    switched = draft_sheet_service.get_selected_sheet_draft(case.id)
+    with case.readonly():
+        saved_sheet, error = order_service.get_ocr_sheet(case.id)
     assert error is None
     assert isinstance(switched, dict)
     assert switched["base_evidence_run_id"] == second["id"]
     assert switched["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
+    assert saved_sheet["rows"] == switched["draft_sheet_json"]["rows"]
+    with session_scope() as session:
+        original = session.get(OrderSheetDraft, saved["id"])
+        assert original.base_evidence_run_id == first["id"]
+        assert original.draft_sheet_json == saved["draft_sheet_json"]
 
 
-def test_get_candidate_draft_preview_returns_latest_candidate_without_mutating_current_draft(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-candidate-preview-readonly")
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-    assert isinstance(first, dict)
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "3"]],
-            "row_ids": ["row-1"],
-            "base_evidence_run_id": first["id"],
-        },
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-    second = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("8"),
-        schema_version="v2_evidence_rerun",
-        producer_version="rerun",
-        source="ocr-rerun",
-    )
-    assert isinstance(second, dict)
-
-    monkeypatch.setattr(
-        order_service,
-        "get_order_workflow_state",
-        lambda *_args, **_kwargs: {"candidate_evidence_run_id": second["id"]},
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_build_best_available_semantic_draft_with_error",
-        lambda *_args, **_kwargs: (
-            {
-                "source": "weekly_menu+ocr_payload",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [["03/22", "朝", "Menu A", "8"]],
-                "row_ids": ["row-1"],
-                "base_evidence_run_id": second["id"],
-            },
-            None,
-        ),
-    )
-
-    preview, error = order_service.get_candidate_draft_preview(order["id"])
-
+def test_get_candidate_draft_preview_returns_latest_candidate_without_mutating_current_draft(authored_sheet_case) -> None:
+    case, first, saved, second = _saved_three_and_owned_candidate(authored_sheet_case)
+    order_service.workflow_state_service.refresh_workflow_state(case.id)
+    with case.readonly():
+        preview, error = order_service.get_candidate_draft_preview(case.id)
     assert error is None
     assert isinstance(preview, dict)
     assert preview["base_evidence_run_id"] == second["id"]
     assert preview["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
-    latest = draft_sheet_service.get_latest_sheet_draft(order["id"])
+    latest = draft_sheet_service.get_selected_sheet_draft(case.id)
     assert isinstance(latest, dict)
     assert latest["base_evidence_run_id"] == first["id"]
+    assert latest["id"] == saved["id"]
+    assert latest["draft_sheet_json"] == saved["draft_sheet_json"]
 
 
-def test_candidate_sheet_state_marks_real_candidate_diff_previewable(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-candidate-sheet-state-diff")
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
-    assert isinstance(first, dict)
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "3"]],
-            "row_ids": ["row-1"],
-            "base_evidence_run_id": first["id"],
-        },
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
-    second = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("8"),
-        schema_version="v2_evidence_rerun",
-        producer_version="rerun",
-        source="ocr-rerun",
-    )
-    assert isinstance(second, dict)
-
-    monkeypatch.setattr(
-        order_service,
-        "_build_best_available_semantic_draft_with_error",
-        lambda *_args, **_kwargs: (
-            {
-                "order_id": order["id"],
-                "source": "weekly_menu+ocr_payload",
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-                "header": ["日付", "区分", "メニュー", "常食2F"],
-                "rows": [["03/22", "朝", "Menu A", "8"]],
-                "row_ids": ["row-1"],
-                "base_evidence_run_id": second["id"],
-            },
-            None,
-        ),
-    )
-    state = order_service.candidate_sheet_state(
-        order["id"],
-        candidate_evidence_run_id=second["id"],
-    )
-
+def test_candidate_sheet_state_marks_real_candidate_diff_previewable(authored_sheet_case) -> None:
+    case, first, saved, second = _saved_three_and_owned_candidate(authored_sheet_case)
+    with case.readonly():
+        state = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=second["id"])
     assert state["candidate_preview_available"] is True
     assert state["candidate_has_meaningful_diff"] is True
     assert state["candidate_preview_error"] is None
@@ -2298,98 +1113,69 @@ def test_candidate_sheet_state_marks_real_candidate_diff_previewable(monkeypatch
     assert isinstance(preview, dict)
     assert preview["base_evidence_run_id"] == second["id"]
     assert preview["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
+    retained = draft_sheet_service.get_selected_sheet_draft(case.id)
+    assert retained["base_evidence_run_id"] == first["id"]
+    assert retained["draft_sheet_json"] == saved["draft_sheet_json"]
 
 
-def test_get_current_sheet_context_returns_transient_semantic_initial_with_menu_diagnostics(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order("msg-current-sheet-context-transient")
+def test_owned_transient_source_six_and_actual_menu_loss_are_not_fallback_success(authored_sheet_case):
+    from src.models.menu import MonthlyMenuEntry
 
-    monkeypatch.setattr(
-        draft_sheet_service,
-        "get_latest_sheet_draft",
-        lambda _order_id: None,
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: {
-            "order_id": _order_id,
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "6"]],
-            "row_ids": ["semantic-1"],
-            "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-            "menu_diagnostics": {
-                "month_id": "2026-03",
-                "resolved_week_id": "2026-03@2026-03-22~2026-03-28",
-                "order_codes": ["menu_entries_missing"],
-                "row_codes": [],
-            },
-            "warnings": ["sheet_weekly_menu_missing"],
-        },
-    )
-    order_current_state_service.delete_current_state(order["id"])
-
-    context = order_service.get_current_sheet_context(
-        order["id"],
-        refresh_draft_from_semantic=True,
-        upgrade_generic_from_sheet=True,
-        backfill_from_revision=False,
-    )
-
+    case = authored_sheet_case(quantity=3, cell_values="6", include_remarks=False)
+    evidence = order_service.get_ocr_evidence_run(case.evidence)
+    with case.readonly():
+        context = order_service.get_current_sheet_context(case.id,
+            refresh_draft_from_semantic=True, upgrade_generic_from_sheet=True,
+            backfill_from_revision=False)
     assert isinstance(context, dict)
     assert context["draft_id"] is None
-    assert context["source"] == "weekly_menu+ocr_payload"
+    assert context["source"] == "workflow_v2_selected_ocr_projection"
     assert context["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_2f"]
+    assert context["rows"] == [["03/22", "朝", "Menu A", "6"]]
     assert context["resolved_week_id"] == "2026-03@2026-03-22~2026-03-28"
-    assert context["menu_diagnostics"]["order_codes"] == ["menu_entries_missing"]
+    assert context["menu_diagnostics"]["order_codes"] == []
     assert context["has_semantic_fields"] is True
     assert str(context["current_sheet_revision_id"]).startswith("current:")
+    assert order_current_state_service.get_current_state(case.id) is None
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
+    with case.readonly():
+        blocked = order_service.get_current_sheet_context(case.id)
+        diagnostics = order_service._build_monthly_menu_diagnostics(
+            week_id="2026-03@2026-03-22~2026-03-28", facility_id=case.facility)
+    assert blocked["draft_payload"] is None
+    assert blocked["rows"] == []
+    assert blocked["blockers"] == ["hakodate_original_expectation_required"]
+    assert diagnostics["order_codes"] == ["menu_entries_missing"]
+    assert order_service.get_ocr_evidence_run(case.evidence) == evidence
+    assert order_current_state_service.get_current_state(case.id) is None
 
 
-def test_current_sheet_context_prefers_canonical_order_week_over_stale_draft_week(
-    isolated_formal_schema, tmp_path, monkeypatch,
-) -> None:
-    from src.models.menu import MonthlyMenuEntry
-    from tests.contract.auth_support import registered_hospital_operator
-    from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase, _line
-    from tests.integration.test_ocr_sheet_history import _seed_monthly_menu_custom_entries
-
+def test_current_sheet_context_prefers_canonical_order_week_over_stale_draft_week(authored_sheet_case) -> None:
     week = "2026-03@2026-03-22~2026-03-28"
-    with registered_hospital_operator(monkeypatch) as actor:
-        f = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
-            week=week, period=week, received=datetime(2026, 3, 22, 9),
-            lines=[_line("2026-03-22", "Menu A", 3, daypart="朝")], menu=False)
-        _seed_monthly_menu_custom_entries(month_id="2026-03", month_start=date(2026, 3, 1),
-            entries=[(date(2026, 3, 22), "朝", "Menu A", 0)])
-        with session_scope() as session:
-            session.get(MonthlyMenuEntry, "seed-entry-2026-03-custom-0").diet_type = "regular"
-        source = f.produce()["sheet"]
-        assert source["rows"][0][:3] == ["03/22", "朝", "Menu A"]
-        sheet = {
-            "order_id": f.id,
-            "source": "manual_draft",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-            "resolved_week_id": "2026-03@2026-03-01~2026-03-07",
-            "week_id": "2026-03@2026-03-01~2026-03-07",
-        }
-        saved = f.save(sheet)
-        assert isinstance(saved, dict)
-        with f.readonly():
-            current = order_service.get_current_sheet_context(f.id,
-                refresh_draft_from_semantic=False, upgrade_generic_from_sheet=False,
-                backfill_from_revision=False)
-            assert isinstance(current, dict)
-            assert current["resolved_week_id"] == week
-            flattened = order_service.flatten_current_sheet_payload(f.id, current)
-            assert flattened["resolved_week_id"] == week
-            for key in ("fields", "header", "rows", "row_ids"):
-                assert current[key] == flattened[key] == sheet[key]
-        assert f.get("workflow-v2/sheet")["sheet"] == sheet
-        assert f.get()["persisted_week_value"] == week
-        assert f.get("workflow-v2/sheet-source")["sheet"]["row_ids"] == source["row_ids"]
-        f.client.close()
+    f = authored_sheet_case(quantity=3, include_remarks=False)
+    source = f.selected_sheet
+    assert source["rows"][0][:3] == ["03/22", "朝", "Menu A"]
+    sheet = {
+        "order_id": f.id, "source": "manual_draft",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["03/22", "朝", "Menu A", "5"]], "row_ids": ["row-1"],
+        "resolved_week_id": "2026-03@2026-03-01~2026-03-07",
+        "week_id": "2026-03@2026-03-01~2026-03-07",
+    }
+    saved = f.save(sheet)
+    assert isinstance(saved, dict)
+    with f.readonly():
+        current = order_service.get_current_sheet_context(f.id,
+            refresh_draft_from_semantic=False, upgrade_generic_from_sheet=False,
+            backfill_from_revision=False)
+        assert isinstance(current, dict)
+        assert current["resolved_week_id"] == week
+        flattened = order_service.flatten_current_sheet_payload(f.id, current)
+        assert flattened["resolved_week_id"] == week
+        for key in ("fields", "header", "rows", "row_ids"):
+            assert current[key] == flattened[key] == sheet[key]
+    assert f.get("workflow-v2/sheet")["sheet"] == sheet
+    assert f.get()["persisted_week_value"] == week
+    assert f.get("workflow-v2/sheet-source")["sheet"]["row_ids"] == source["row_ids"]

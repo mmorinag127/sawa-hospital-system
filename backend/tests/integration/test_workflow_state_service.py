@@ -1,7 +1,7 @@
 import json
 import pathlib
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -12,13 +12,14 @@ from src.db import session_scope  # noqa: E402
 from src.models.order_workflow_state import OrderWorkflowState  # noqa: E402
 from src.services import config_service, critical_decision_service, draft_sheet_service, order_current_state_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
-from src.workers.ingest_mail_adapter import IngestEmailPayload  # noqa: E402
 from src.models.order import Order, OrderLine  # noqa: E402
 from src.models.order_current_state import OrderCurrentState  # noqa: E402
 from src.models.menu import MonthlyMenuEntry  # noqa: E402
 from tests.helpers.authored_sheet_case import PERIOD, authored_sheet_case, publish_current, save_draft  # noqa: E402,F401
 from src.services.workflow_attempt_guard_service import CurrentSheetInputChanged  # noqa: E402
 from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal  # noqa: E402
+from tests.helpers.owned_order import authored_layout_registration, owned_registration  # noqa: E402,F401
+from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: E402,F401
 
 pytestmark = pytest.mark.usefixtures("isolated_formal_schema")
 
@@ -45,24 +46,14 @@ def _structured_cells(rows: list[list[str]]) -> list[dict[str, object]]:
     return cells
 
 
-def _seed_order(
-    *,
-    message_id: str,
-    facility_hint: str | None = None,
-    week_hint: str | None = "2026-03",
-) -> dict:
-    payload = IngestEmailPayload(
-        message_id=message_id,
-        pdf_uri="file://dummy-workflow.pdf",
-        received_at=datetime(2026, 3, 22, 9, 0, 0),
-        facility_hint=facility_hint,
-        week_hint=week_hint,
-    )
-    return order_service.create_order_from_ingest(payload, lines=None)
+def _seed_order(register, *, message_id, facility_id, week, effective_date):
+    """Registration-only component: explicit source/period and real ingest owner."""
+    return register(message_id=message_id, facility_id=facility_id,
+        received_at=datetime(2026, 3, 22, 9), week=week,
+        effective_date=effective_date, lines=[])
 
 
-def _persist_evidence(
-    order_id: str,
+def _legacy_unowned_evidence_payload(
     *,
     facility_choice_required: bool = False,
     degraded: bool = False,
@@ -111,7 +102,11 @@ def _persist_evidence(
         ]
     if isinstance(extra_payload, dict):
         payload.update(extra_payload)
-    evidence = order_service.persist_ocr_evidence_run(order_id, payload)
+    return payload
+
+
+def _persist_evidence(order_id: str, **kwargs) -> dict:
+    evidence = order_service.persist_ocr_evidence_run(order_id, _legacy_unowned_evidence_payload(**kwargs))
     assert isinstance(evidence, dict)
     return evidence
 
@@ -221,30 +216,25 @@ def test_refresh_workflow_state_does_not_overwrite_workflow_v2_owned_row(monkeyp
         assert row.secondary_actions_json["legacy_workflow_state"]["state"] == "uploaded"
 
 
-def test_persist_current_state_upserts_existing_order_row() -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-upsert-001")
-
-    first = order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        state_json={"order_id": order["id"], "source": "seed-a"},
-        draft_id="draft-a",
-        evidence_run_id="evidence-a",
-    )
-    second = order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        state_json={"order_id": order["id"], "source": "seed-b"},
-        draft_id="draft-b",
-        evidence_run_id="evidence-b",
-    )
+def test_persist_current_state_upserts_existing_order_row(authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    first_draft = save_draft(case, _semantic_initial_draft(case.id, source="seed-a"))
+    first = publish_current(case)
+    second_draft = save_draft(case, _semantic_initial_draft(case.id, source="seed-b"))
+    second = publish_current(case)
     persisted = order_current_state_service.get_current_state(order["id"])
 
     assert isinstance(first, dict)
     assert isinstance(second, dict)
     assert isinstance(persisted, dict)
-    assert persisted["draft_id"] == "draft-b"
-    assert persisted["evidence_run_id"] == "evidence-b"
+    assert persisted["draft_id"] == second_draft["id"]
+    assert persisted["evidence_run_id"] == case.evidence
     assert persisted["state_json"]["source"] == "seed-b"
+    assert first["draft_id"] == first_draft["id"] != second_draft["id"]
+    assert persisted["state_json"]["rows"] == second_draft["draft_sheet_json"]["rows"]
+    with session_scope() as session:
+        assert session.query(OrderCurrentState).filter_by(order_id=case.id).count() == 1
 
 
 def test_get_current_sheet_context_prefers_persisted_current_state_snapshot(monkeypatch, authored_sheet_case) -> None:
@@ -344,30 +334,21 @@ def test_get_current_sheet_context_rebuilds_when_persisted_current_state_lines_t
         assert current[key] == saved_draft["draft_sheet_json"][key]
 
 
-def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidence_changes(monkeypatch) -> None:
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-current-state-snapshot-stale-evidence-001")
-    saved_draft = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json=_semantic_initial_draft(order["id"], source="manual_draft"),
-        draft_state="draft_ready",
-        edited_by="tester",
-    )
-    workflow_state_service.refresh_workflow_state(order["id"])
-    persisted = order_current_state_service.get_current_state_payload(order["id"])
+def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidence_changes(monkeypatch, authored_sheet_case) -> None:
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    order = {"id": case.id}
+    saved_draft = save_draft(case, _semantic_initial_draft(case.id, source="manual_draft"))
+    persisted = publish_current(case)
 
     assert isinstance(saved_draft, dict)
     assert isinstance(persisted, dict)
 
-    persisted["base_evidence_run_id"] = "OEV-old"
-    order_current_state_service.persist_current_state(
-        order_id=order["id"],
-        state_json=persisted,
-        draft_id=str(saved_draft.get("id") or "").strip() or None,
-        evidence_run_id="OEV-old",
-    )
-
-    monkeypatch.setattr(order_service, "get_latest_ocr_evidence_run", lambda *_args, **_kwargs: {"id": "OEV-new"})
+    # Corrupt only the stored snapshot; the selected source/receipt stays real.
+    with session_scope() as session:
+        stored = session.get(OrderCurrentState, case.id)
+        assert stored.evidence_run_id == case.evidence
+        stored.state_json = {**stored.state_json, "base_evidence_run_id": "OEV-old"}
+    physical_snapshot = order_current_state_service.get_current_state(case.id)
     calls = {"count": 0}
     original_builder = order_service._build_current_sheet_context_uncached
 
@@ -377,13 +358,19 @@ def test_get_current_sheet_context_rebuilds_when_persisted_current_state_evidenc
 
     monkeypatch.setattr(order_service, "_build_current_sheet_context_uncached", _wrapped_builder)
 
-    current = order_service.get_current_sheet_context(order["id"])
-    snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(order["id"])
+        snapshot_after = order_current_state_service.get_current_state_payload(order["id"])
 
     assert isinstance(current, dict)
     assert calls["count"] == 1
-    assert isinstance(snapshot_after, dict)
-    assert snapshot_after["base_evidence_run_id"] == "OEV-old"
+    assert snapshot_after is None
+    assert order_current_state_service.get_current_state(case.id) == physical_snapshot
+    assert physical_snapshot["evidence_run_id"] == case.evidence
+    assert physical_snapshot["state_json"]["base_evidence_run_id"] == "OEV-old"
+    assert current["base_evidence_run_id"] == case.evidence
+    assert current["draft_id"] == saved_draft["id"]
+    assert current["rows"] == saved_draft["draft_sheet_json"]["rows"]
 
 
 def test_get_current_sheet_context_does_not_delete_unusable_current_state_on_read(authored_sheet_case) -> None:
@@ -406,9 +393,11 @@ def test_get_current_sheet_context_does_not_delete_unusable_current_state_on_rea
     assert snapshot_after["state_json"]["source"] == "stale-transient"
 
 
-def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeypatch) -> None:
+def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeypatch, authored_layout_registration) -> None:
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-read-no-decision-sync-001")
+    order = authored_layout_registration(message_id="msg-workflow-read-no-decision-sync-001",
+        facility_id="FAC00001", received_at=datetime(2026, 3, 22, 9),
+        week=PERIOD, effective_date="2026-03-22", lines=[])
     order_payload = order_service.get_order_by_id(order["id"])
 
     monkeypatch.setattr(
@@ -481,56 +470,50 @@ def test_get_current_sheet_context_does_not_reuse_transient_current_state_snapsh
     assert order_current_state_service.get_current_state(case.id) == physical_snapshot
 
 
-def test_refresh_workflow_state_moves_from_choice_required_to_apply_ready_after_facility_choice(monkeypatch):
+def test_unselected_facility_candidates_cannot_replace_explicit_owned_selection(monkeypatch, authored_sheet_case):
+    from src.services import ingest_job_service
+    from tests.helpers.ingest_original import configure_delivery
+
+    configure_delivery(monkeypatch)
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, case.selected_sheet)
+    candidates = [
+        {"facility_id": "FAC00001", "facility_name": "Facility 1", "score": 0.81},
+        {"facility_id": "FAC00002", "facility_name": "Facility 2", "score": 0.76},
+    ]
+    payload = {
+        "message_id": "msg-workflow-state-001",
+        "pdf_uri": str(case.pdf),
+        "received_at": datetime(2026, 3, 22, 9),
+        "facility_hint": None,
+        "week_hint": PERIOD,
+        "facility_selection": None,
+        "facility_candidates": candidates,
+    }
+    with case.readonly():
+        with pytest.raises(ValueError, match="^ingest_facility_selection_missing$"):
+            ingest_job_service.create_ingest_receipt(payload)
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["draft_payload"] == case.selected_sheet
+        assert current["base_evidence_run_id"] == case.evidence
+        with session_scope() as session:
+            assert session.get(Order, case.id).facility_code == case.facility
+    assert payload["facility_hint"] is None
+    assert payload["facility_selection"] is None
+    assert payload["facility_candidates"] == candidates
+    assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+
+
+def test_project_workflow_state_returns_uploaded_without_evidence(authored_layout_registration, isolated_formal_schema):
+    from tests.contract.test_orders_ocr_sheet_history_api import _snapshot
+
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-001", facility_hint=None, week_hint="2026-03")
-    _persist_evidence(order["id"], facility_choice_required=True)
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-002", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "identity_choice_required"
-    assert workflow["primary_action"] == "resolve_identity_choice"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert "facility_choice_required" in (workflow["apply_gate"]["blockers"] or [])
-    decisions = workflow.get("critical_decisions") or []
-    assert any(item.get("decision_type") == "facility" for item in decisions)
-
-    result, error = order_service.choose_critical_decision(
-        order["id"],
-        "facility",
-        "FAC00001",
-        selected_by="test",
-    )
-
-    assert error is None
-    assert isinstance(result, dict)
-    next_workflow = result.get("workflow_state") or {}
-    assert next_workflow.get("state") == "draft_blocked"
-    blockers = next_workflow.get("apply_gate", {}).get("blockers") or []
-    assert "column_mapping_choice_required" not in blockers
-    assert "draft_rows_empty" in blockers
-    assert next_workflow.get("apply_gate", {}).get("can_apply") is False
-    assert "column_mapping" not in (
-        next_workflow.get("candidate_resolution", {}).get("gate_summary", {}).get("choice_required_types") or []
-    )
-
-
-def test_refresh_workflow_state_returns_uploaded_without_evidence():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-002", facility_hint="FAC00001", week_hint="2026-03")
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    before = _snapshot(isolated_formal_schema)
+    workflow = workflow_state_service.project_workflow_state(order["id"])
+    assert _snapshot(isolated_formal_schema) == before
 
     assert isinstance(workflow, dict)
     assert workflow["state"] == "uploaded"
@@ -540,9 +523,11 @@ def test_refresh_workflow_state_returns_uploaded_without_evidence():
     assert "evidence_edit_unavailable" in blockers
 
 
-def test_refresh_workflow_state_ignores_order_bound_first_pass_job_as_reparse_state(tmp_path):
+def test_project_workflow_state_ignores_order_bound_first_pass_job_as_reparse_state(tmp_path, authored_layout_registration, isolated_formal_schema):
+    from tests.contract.test_orders_ocr_sheet_history_api import _snapshot
+
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-first-pass-order-job", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-first-pass-order-job", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     job_id = f"OCR-{order['id']}"
     output_path = tmp_path / "first_pass_order_job_output.json"
     output_path.write_text('{"status":"done","table_raw":"|03/22|朝|Menu A|"}', encoding="utf-8")
@@ -554,11 +539,17 @@ def test_refresh_workflow_state_ignores_order_bound_first_pass_job_as_reparse_st
         metrics={"request_mode": "ingest_first_pass", "processing_stage": "ocr_pipeline"},
     )
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    before_job = get_ocr_job(job_id)
+    original_output = output_path.read_bytes()
+    before = _snapshot(isolated_formal_schema)
+    workflow = workflow_state_service.project_workflow_state(order["id"])
+    assert _snapshot(isolated_formal_schema) == before
 
     assert isinstance(workflow, dict)
     assert workflow["state"] == "uploaded"
     assert (workflow.get("reparse_state") or {}).get("status") == "idle"
+    assert get_ocr_job(job_id) == before_job
+    assert output_path.read_bytes() == original_output
 
 
 def test_list_workflow_states_serializes_within_session(authored_sheet_case):
@@ -575,65 +566,72 @@ def test_list_workflow_states_serializes_within_session(authored_sheet_case):
     assert listed[order["id"]]["state"] == workflow["state"]
 
 
-def test_refresh_workflow_state_returns_recovery_required_for_degraded_evidence():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-003", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"], degraded=True)
+def test_missing_actual_native_artifact_requires_recovery_without_unowned_cache_substitution(authored_sheet_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+    from src.services import canonical_ocr_artifact_service
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "recovery_required"
-    assert workflow["primary_action"] == "recover_ocr_evidence"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert "evidence_view_unavailable" in (workflow["apply_gate"]["blockers"] or [])
-
-
-def test_refresh_workflow_state_returns_semantic_shell_only_for_partial_semantic_evidence(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-semantic-shell", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "template_id": "unknown-template",
-            "template_resolution": {
-                "resolved_template_id": "unknown-template",
-                "candidate_template_ids": ["unknown-template"],
-                "confidence": 0.91,
-                "blocked": False,
-                "blocked_reasons": [],
-            },
-            "quantity_subgrid_passes": [],
-            "table_box": None,
-            "grid_column_edges": [],
-            "grid_row_edges": [],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "semantic_shell_only"
-    assert workflow["primary_action"] == "rerun_ocr_pipeline"
-    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    selected = order_service.get_ocr_evidence_run(case.evidence)
+    original = _legacy_unowned_evidence_payload(degraded=True)
+    assert "input_reference" not in original and "pages" not in original
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        output, error = order_service.get_ocr_output(case.id)
+        assert error is None and isinstance(output, dict)
+        assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    overlay = pathlib.Path(selected["payload_json"]["hakodate_overlay"]["uri"])
+    assert overlay.resolve().is_relative_to(case.root.resolve())
+    assert overlay.is_file()
+    overlay.unlink()
+    with case.readonly():
+        with pytest.raises(ValueError, match="^canonical_artifact_bytes_unavailable$"):
+            canonical_ocr_artifact_service.validate_payload(selected["payload_json"])
+        output, error = order_service.get_ocr_output(case.id)
+        assert output is None
+        assert error == "ocr_evidence_recovery_required"
+        stored = order_service.get_ocr_evidence_run(case.evidence)
+        assert stored["payload_json"] == selected["payload_json"]
+        assert stored["artifact_digest"] == selected["artifact_digest"]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
 
 
-def test_refresh_workflow_state_does_not_get_stuck_semantic_shell_only_when_resolved_template_can_supply_grid(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-template-grid-reuse", facility_hint="FAC00006", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
+def test_unowned_partial_template_metadata_cannot_degrade_owned_saved_sheet(authored_sheet_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    original = _legacy_unowned_evidence_payload(extra_payload={
+        "template_id": "unknown-template",
+        "template_resolution": {"resolved_template_id": "unknown-template",
+            "candidate_template_ids": ["unknown-template"], "confidence": 0.91,
+            "blocked": False, "blocked_reasons": []},
+        "quantity_subgrid_passes": [], "table_box": None,
+        "grid_column_edges": [], "grid_row_edges": [],
+    })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert isinstance(state, dict)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert "semantic_shell_only" not in state["apply_gate"]["blockers"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
+
+
+def test_owned_template_grid_does_not_depend_on_legacy_classification_guess(authored_sheet_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    case = authored_sheet_case(quantity=5, area="X", facility="FAC00006", include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id,
+        fields=["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        header=["日付", "区分", "メニュー", "常食"]))
+    original = _legacy_unowned_evidence_payload(extra_payload={
             "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
             "template_resolution": template_resolution_service.build_template_resolution(
                 requested_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
@@ -655,103 +653,82 @@ def test_refresh_workflow_state_does_not_get_stuck_semantic_shell_only_when_reso
             "table_box": None,
             "grid_column_edges": [],
             "grid_row_edges": [],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: _semantic_initial_draft(order["id"]),
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["primary_action"] == "apply_draft"
-    assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
+        })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert isinstance(state, dict)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert "semantic_shell_only" not in state["apply_gate"]["blockers"]
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert "qty.regular_x" in current["fields"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
 
 
-def test_refresh_workflow_state_uses_position_fallback_for_missing_template_grid(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-position-fallback", facility_hint="FAC00001", week_hint="2026-03")
+def test_explicit_owned_columns_work_without_legacy_grid_or_position_fallback(history_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f",
+        "qty.soft_2f", "qty.soft_3f", "qty.mixer_2f", "qty.mixer_3f", "remarks"]
     rows = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
     ]
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "template_resolution": None,
-            "quantity_subgrid_passes": [],
-            "table_box": None,
-            "grid_column_edges": [],
-            "grid_row_edges": [],
-            "tables": [
-                {
-                    "page_index": 1,
-                    "table_id": "page1_table1",
-                    "row_count": len(rows),
-                    "col_count": len(rows[0]),
-                    "rows": rows,
-                    "cells": _structured_cells(rows),
-                }
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: _semantic_initial_draft(
-            order["id"],
-            fields=[
-                "date_mmdd",
-                "daypart",
-                "menu",
-                "qty.regular_2f",
-                "qty.regular_3f",
-                "qty.soft_2f",
-                "qty.soft_3f",
-                "qty.mixer_2f",
-                "qty.mixer_3f",
-                "remarks",
-            ],
-            header=rows[0],
-            rows=[rows[1]],
-        ),
-    )
+    roles = ["date", "daypart", "menu_name", *["quantity"] * 6, "note"]
+    columns = [{"index": i, "source_index": i, "name": field, "header": rows[0][i],
+        "role": roles[i]} for i, field in enumerate(fields)]
+    for column, (diet, area) in zip(columns[3:9], [
+        ("regular", "2F"), ("regular", "3F"), ("soft", "2F"), ("soft", "3F"),
+        ("mixer", "2F"), ("mixer", "3F"),
+    ], strict=True):
+        column.update(diet_type=diet, area_id=area)
+    period = "2026-03@2026-03-22~2026-03-28"
+    case = history_case(week=period, period=period, received=datetime(2026, 3, 22, 9),
+        lines=[], columns=columns, menu_entries=[{"id": "owned-six-diet-menu",
+            "monthly_menu_id": "2026-03", "menu_date": date(2026, 3, 22), "daypart": "朝",
+            "name": "献立A", "slot_index": 0, "diet_type": "regular"}])
+    values = dict(zip(fields[3:], rows[1][3:], strict=True))
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    def recognize(region):
+        declared = {values[target["field"]] for target in region["logical_targets"]}
+        assert len(declared) == 1
+        return declared.pop()
 
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["primary_action"] == "apply_draft"
-    assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
+    source = case.produce(cell_values=recognize)
+    assert source["sheet"]["fields"] == fields
+    assert source["sheet"]["rows"] == [rows[1]]
+    case.save(source["sheet"])
+    stale = {"template_resolution": None, "quantity_subgrid_passes": [],
+        "table_box": None, "grid_column_edges": [], "grid_row_edges": [],
+        "tables": [{"page_index": 1, "table_id": "page1_table1", "row_count": len(rows),
+            "col_count": len(rows[0]), "rows": rows, "cells": _structured_cells(rows)}]}
+    with session_scope() as session:
+        cached = session.get(OrderOcrCache, case.id)
+        assert cached is not None
+        cached.payload = stale
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(case.id)
+        assert isinstance(workflow, dict)
+        assert workflow["state"] == "apply_ready"
+        assert workflow["primary_action"] == "apply_draft"
+        assert "semantic_shell_only" not in (workflow["apply_gate"]["blockers"] or [])
+        mapping = workflow["candidate_resolution"]["resolutions"]["column_mapping"]
+        assert mapping["decision_source"] != "position_fallback"
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == [rows[1]]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == stale
 
 
-def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_high_risk_numeric_issues(monkeypatch):
+def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_high_risk_numeric_issues(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-position-fallback-high-risk", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-position-fallback-high-risk", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     rows = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
@@ -796,13 +773,13 @@ def test_refresh_workflow_state_keeps_numeric_review_when_position_fallback_has_
     assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
 
 
-def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(monkeypatch):
+def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(monkeypatch, authored_layout_registration):
     config_service.reload_configs()
     order_service.clear_all()
-    order = _seed_order(
+    order = _seed_order(authored_layout_registration,
         message_id="msg-workflow-state-position-fallback-partial",
-        facility_hint="FAC00005",
-        week_hint="2026-03",
+        facility_id="FAC00005",
+        week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22",
     )
     rows = [
         ["日付", "", "区 分", "", "献立", "軟菜", "* # は", "熱食 【 軟菜 】", "", "変更1", "変更2", "備考欄"],
@@ -851,13 +828,13 @@ def test_refresh_workflow_state_keeps_partial_position_fallback_apply_blocked(mo
     assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
 
 
-def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch):
+def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch, authored_layout_registration):
     config_service.reload_configs()
     order_service.clear_all()
-    order = _seed_order(
+    order = _seed_order(authored_layout_registration,
         message_id="msg-workflow-state-structural-projection-001",
-        facility_hint="FAC00005",
-        week_hint="2026-04",
+        facility_id="FAC00005",
+        week="2026-04@2026-04-05~2026-04-11", effective_date="2026-04-05",
     )
     rows = [
         ["", "日付", "区 分", "", "献立", "##", "44日", "禁食【軟菜】", "", "備考欄"],
@@ -904,9 +881,9 @@ def test_refresh_workflow_state_blocks_malformed_raw_ocr_projection(monkeypatch)
     assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
 
 
-def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_conflicts_with_evidence(monkeypatch):
+def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_conflicts_with_evidence(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-position-fallback-facility-conflict", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-position-fallback-facility-conflict", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     rows = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
@@ -953,9 +930,9 @@ def test_refresh_workflow_state_does_not_use_position_fallback_when_facility_con
     assert workflow["candidate_resolution"]["resolutions"]["column_mapping"].get("decision_source") != "position_fallback"
 
 
-def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fallback(monkeypatch):
+def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fallback(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-position-fallback-stale-ambiguous", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-position-fallback-stale-ambiguous", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     rows_a = [
         ["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
         ["03/22", "朝", "献立A", "5", "4", "3", "2", "1", "1", ""],
@@ -1042,925 +1019,387 @@ def test_refresh_workflow_state_requires_choice_for_stale_ambiguous_position_fal
     )
 
 
-def test_refresh_workflow_state_suppresses_stale_draft_layout_blockers_when_position_fallback_is_ready(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(
-        message_id="msg-workflow-state-position-fallback-stale-draft-blockers",
-        facility_hint="FAC00002",
-        week_hint="2026-03",
-    )
-    rows = [
+def _owned_fac2_twenty_three_twenty_seven(history_case, *, schema_fault=False):
+    from copy import deepcopy
+    from src.models.order_sheet_draft import OrderSheetDraft
+
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.no_meat_x",
+        "qty.no_fish_x", "qty.change_1_x", "qty.change_2_x", "remarks"]
+    header = ["日付", "区分", "メニュー", "常食", "肉禁", "魚禁", "変更1", "変更2", "備考"]
+    roles = ["date", "daypart", "menu_name", *["quantity"] * 5, "note"]
+    columns = [{"index": i, "source_index": i, "name": field, "header": header[i],
+        "role": roles[i]} for i, field in enumerate(fields)]
+    for column, diet in zip(columns[3:8], ["regular", "no_meat", "no_fish", "change_1", "change_2"], strict=True):
+        column.update(diet_type=diet, area_id="X")
+    period = "2026-03@2026-03-22~2026-03-28"
+    menus = [("Menu A", "朝", "23"), ("Menu B", "昼", "27")]
+    entries = [{"id": f"fac2-slot-{i}", "monthly_menu_id": "2026-03",
+        "menu_date": date(2026, 3, 22), "daypart": daypart, "name": name,
+        "slot_index": 0, "diet_type": "regular"} for i, (name, daypart, _) in enumerate(menus)]
+    case = history_case(facility="FAC00002", week=period, period=period,
+        received=datetime(2026, 3, 22, 9), columns=columns, lines=[], menu_entries=entries)
+    values = {(name, field): quantity if field == "qty.regular_x" else ""
+        for name, _, quantity in menus for field in fields[3:]}
+
+    def recognize(region):
+        declared = {values[(target["menu_name"], target["field"])] for target in region["logical_targets"]}
+        assert len(declared) == 1
+        return declared.pop()
+
+    source = case.produce(cell_values=recognize)
+    assert source["sheet"]["rows"] == [
+        ["03/22", "朝", "Menu A", "23", "", "", "", "", ""],
+        ["03/22", "昼", "Menu B", "27", "", "", "", "", ""],
+    ]
+    sheet = {"order_id": case.id, "source": "weekly_menu", "fields": fields,
+        "header": header, "rows": [
+            ["03/22", "breakfast", "Menu A", "23", "", "", "", "", ""],
+            ["03/22", "lunch", "Menu B", "27", "", "", "", "", ""],
+        ], "row_ids": ["draft-row-1", "draft-row-2"]}
+    if schema_fault:
+        sheet = deepcopy(sheet)
+        index = sheet["fields"].index("qty.change_2_x")
+        sheet["fields"].pop(index)
+        sheet["header"].pop(index)
+        for row in sheet["rows"]:
+            assert row[index] == ""
+            row.pop(index)
+    saved = save_draft(case, sheet)
+    with session_scope() as session:
+        draft = session.get(OrderSheetDraft, saved["id"])
+        draft.blockers_json = ["template_unresolved"]
+        draft.warnings_json = ["template_unresolved", "sheet_quantity_column_unmapped",
+            "ocr_evidence_recovery_required", "sheet_ocr_review_required"]
+    noisy = [
         ["日 付", "区 分", "", "献立", "常食", "", "事故", "", "変更の", "変更の", "備考欄"],
         ["", "", "", "", "", "", "肉款", "魚炊", "", "", ""],
-        ["3/22", "\"", "VF", "Menu A", "23", "", "", "", "", "", ""],
+        ["3/22", '"', "VF", "Menu A", "23", "", "", "", "", "", ""],
         ["", "", "48", "Menu B", "27", "", "", "", "", "", ""],
     ]
-    evidence = order_service.persist_ocr_evidence_run(
-        order["id"],
-        {
-            "input_reference": "gs://bucket/orders/order.pdf",
-            "tables": [
-                {
-                    "page_index": 1,
-                    "table_id": "page1_table1",
-                    "row_count": len(rows),
-                    "col_count": len(rows[0]),
-                    "rows": rows,
-                    "cells": _structured_cells(rows),
-                }
-            ],
-            "pages": [
-                {
-                    "page_index": 1,
-                    "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
-                    "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
-                }
-            ],
-        },
-    )
-    assert isinstance(evidence, dict)
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu",
-            "fields": [
-                "date_mmdd",
-                "daypart",
-                "menu",
-                "qty.regular_x",
-                "qty.no_meat_x",
-                "qty.no_fish_x",
-                "qty.change_1_x",
-                "qty.change_2_x",
-                "remarks",
-            ],
-            "header": ["日付", "区分", "メニュー", "常食", "肉禁", "魚禁", "変更1", "変更2", "備考"],
-            "rows": [
-                ["03/22", "breakfast", "Menu A", "23", "", "", "", "", ""],
-                ["03/22", "lunch", "Menu B", "27", "", "", "", "", ""],
-            ],
-            "row_ids": ["draft-row-1", "draft-row-2"],
-        },
-        draft_state="draft_ready",
-        blockers=["template_unresolved"],
-        warnings=[
-            "template_unresolved",
-            "sheet_quantity_column_unmapped",
-            "ocr_evidence_recovery_required",
-            "sheet_ocr_review_required",
-        ],
-    )
-    assert saved is not None
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] == "ocr_evidence"
-    assert workflow["state"] == "draft_blocked"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert "template_unresolved" in (workflow["apply_gate"]["blockers"] or [])
-    assert "sheet_quantity_column_unmapped" in (workflow["apply_gate"]["blockers"] or [])
-    assert "draft_newer_than_lines" in (workflow["apply_gate"]["blockers"] or [])
+    original = {"input_reference": "gs://bucket/orders/order.pdf",
+        "tables": [{"page_index": 1, "table_id": "page1_table1",
+            "row_count": len(noisy), "col_count": len(noisy[0]), "rows": noisy,
+            "cells": _structured_cells(noisy)}],
+        "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
+            "layout_overlay_uri": "gs://bucket/orders/page1-layout.png"}]}
+    _store_unowned_workflow_payload(case, original)
+    return case, sheet, original
 
 
-def test_refresh_workflow_state_keeps_active_evidence_layout_blockers_for_authoritative_draft(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(
-        message_id="msg-workflow-state-position-fallback-current-layout-blockers",
-        facility_hint="FAC00002",
-        week_hint="2026-03",
-    )
-    rows = [
-        ["日 付", "区 分", "", "献立", "常食", "", "事故", "", "変更の", "変更の", "備考欄"],
-        ["", "", "", "", "", "", "肉款", "魚炊", "", "", ""],
-        ["3/22", "\"", "VF", "Menu A", "23", "", "", "", "", "", ""],
-        ["", "", "48", "Menu B", "27", "", "", "", "", "", ""],
-    ]
-    evidence = order_service.persist_ocr_evidence_run(
-        order["id"],
-        {
-            "input_reference": "gs://bucket/orders/order.pdf",
-            "tables": [
-                {
-                    "page_index": 1,
-                    "table_id": "page1_table1",
-                    "row_count": len(rows),
-                    "col_count": len(rows[0]),
-                    "rows": rows,
-                    "cells": _structured_cells(rows),
-                }
-            ],
-            "pages": [
-                {
-                    "page_index": 1,
-                    "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
-                    "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
-                }
-            ],
-        },
-    )
-    assert isinstance(evidence, dict)
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu",
-            "fields": [
-                "date_mmdd",
-                "daypart",
-                "menu",
-                "qty.regular_x",
-                "qty.no_meat_x",
-                "qty.no_fish_x",
-                "qty.change_1_x",
-                "qty.change_2_x",
-                "remarks",
-            ],
-            "header": ["日付", "区分", "メニュー", "常食", "肉禁", "魚禁", "変更1", "変更2", "備考"],
-            "rows": [
-                ["03/22", "breakfast", "Menu A", "23", "", "", "", "", ""],
-                ["03/22", "lunch", "Menu B", "27", "", "", "", "", ""],
-            ],
-            "row_ids": ["draft-row-1", "draft-row-2"],
-            "base_evidence_run_id": evidence["id"],
-        },
-        base_evidence_run_id=evidence["id"],
-        draft_state="draft_ready",
-        blockers=["template_unresolved"],
-        warnings=[
-            "template_unresolved",
-            "sheet_quantity_column_unmapped",
-            "ocr_evidence_recovery_required",
-            "sheet_ocr_review_required",
-        ],
-    )
-    assert saved is not None
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+def test_owned_saved_twenty_three_twenty_seven_retain_explicit_layout_blockers(history_case):
+    from src.models.order_ocr_cache import OrderOcrCache
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] in {"draft_blocked", "review_required"}
-    assert "template_unresolved" in (workflow["apply_gate"]["blockers"] or [])
-    assert "sheet_quantity_column_unmapped" in (workflow["apply_gate"]["blockers"] or [])
+    case, sheet, original = _owned_fac2_twenty_three_twenty_seven(history_case)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "draft_blocked"
+        assert state["apply_gate"]["can_apply"] is False
+        mapping = state["candidate_resolution"]["resolutions"]["column_mapping"]
+        assert mapping["decision_source"] != "position_fallback"
+        assert order_service.get_current_sheet_context(case.id)["rows"] == sheet["rows"]
+        assert "template_unresolved" in state["apply_gate"]["blockers"]
+        assert "sheet_quantity_column_unmapped" in state["apply_gate"]["blockers"]
+        assert "draft_newer_than_lines" in state["apply_gate"]["blockers"]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
 
 
-def test_refresh_workflow_state_returns_new_evidence_available_when_latest_evidence_differs_from_draft(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-new-evidence", facility_hint="FAC00001", week_hint="2026-03")
-    first = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|"})
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        base_evidence_run_id=first["id"],
-        edited_by="tester",
-    )
+def test_current_schema_failure_and_saved_layout_blockers_preserve_authoritative_quantities(history_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+    from src.services import order_workflow_v2_service as workflow
+    from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
+
+    case, sheet, original = _owned_fac2_twenty_three_twenty_seven(history_case, schema_fault=True)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "draft_blocked"
+        assert state["apply_gate"]["can_apply"] is False
+        assert state["apply_gate"]["can_confirm"] is False
+        assert "quantity_template_field_missing" in state["apply_gate"]["blockers"]
+        assert "template_unresolved" in state["apply_gate"]["blockers"]
+        assert "sheet_quantity_column_unmapped" in state["apply_gate"]["blockers"]
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == sheet["rows"]
+        assert [row[3] for row in current["rows"]] == ["23", "27"]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
+    revision = case.revision()
+    with unchanged_after_refusal(case, revision):
+        result, error = workflow.run_bagging(case.id, expected_revision=revision)
+        assert result is None and error == "quantity_template_field_missing"
+
+
+def _saved_five_with_owned_candidate(authored_sheet_case):
+    from tests.helpers.authored_sheet_case import prepare_rerun
+
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    first = order_service.get_ocr_evidence_run(case.evidence)
+    saved = save_draft(case, {
+        "order_id": case.id, "source": "weekly_menu+ocr_payload",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["03/22", "朝", "Menu A", "5"]], "row_ids": ["row-1"],
+    })
+    calls = prepare_rerun(case, cell_values="8")
+    with case.execution():
+        second, error = order_service.rerun_ocr_evidence_only(case.id, job_id=case.job,
+            project_sheet=False, refresh_workflow=False)
+    assert error is None and isinstance(second, dict)
+    assert len(calls) == 1
+    assert second["id"] != first["id"]
+    assert second["terminal_receipt"]["status"] == "done"
+    assert second["terminal_receipt"]["evidence_run_id"] == second["id"]
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == first["id"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    return case, first, saved, second
+
+
+def test_project_workflow_state_returns_new_evidence_available_when_latest_evidence_differs_from_draft(authored_sheet_case):
+    case, first, saved, second = _saved_five_with_owned_candidate(authored_sheet_case)
+    order = {"id": case.id}
     assert isinstance(saved, dict)
     assert saved["base_evidence_run_id"] == first["id"]
-    second = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
-            "quantity_subgrid_passes": [],
-            "table_box": None,
-            "grid_column_edges": [],
-            "grid_row_edges": [],
-        },
-    )
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["primary_action"] == "apply_draft"
+    assert workflow["state"] == "new_evidence_available"
+    assert workflow["primary_action"] == "select_candidate_evidence"
     assert workflow["evidence_run_id"] == first["id"]
     assert workflow["active_evidence_run_id"] == first["id"]
     assert workflow["candidate_prompt_visible"] is True
     assert workflow["candidate_evidence_run_id"] == second["id"]
     assert workflow["current_sheet_revision_id"] == saved["id"]
     assert workflow["apply_gate"]["can_apply"] is True
+    with case.readonly():
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=second["id"])
+        assert preview["candidate_preview_error"] is None
+        assert preview["candidate_preview_draft"]["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
+        assert order_service.get_current_sheet_context(case.id)["rows"] == saved["draft_sheet_json"]["rows"]
 
 
-def test_refresh_workflow_state_new_evidence_available_retains_apply_readiness_for_clean_draft(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-new-evidence-clean-draft", facility_hint="FAC00001", week_hint="2026-03")
-    first = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|"})
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        base_evidence_run_id=first["id"],
-        edited_by="tester",
-        blockers=[],
-        warnings=[],
-    )
+def test_project_workflow_state_new_evidence_available_retains_apply_readiness_for_clean_draft(authored_sheet_case):
+    case, first, saved, second = _saved_five_with_owned_candidate(authored_sheet_case)
+    order = {"id": case.id}
     assert isinstance(saved, dict)
+    assert saved["base_evidence_run_id"] == first["id"]
 
-    second = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
-            "quantity_subgrid_passes": [],
-            "table_box": None,
-            "grid_column_edges": [],
-            "grid_row_edges": [],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(order["id"])
 
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
+    assert workflow["state"] == "new_evidence_available"
     assert workflow["candidate_prompt_visible"] is True
     assert workflow["candidate_evidence_run_id"] == second["id"]
     assert workflow["apply_gate"]["can_apply"] is True
     assert "draft_newer_than_lines" in (workflow["apply_gate"].get("blockers") or [])
+    with case.readonly():
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=second["id"])
+        assert preview["candidate_preview_error"] is None
+        assert preview["candidate_preview_draft"]["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
+        assert order_service.get_current_sheet_context(case.id)["rows"] == saved["draft_sheet_json"]["rows"]
 
 
-def test_refresh_workflow_state_uses_candidate_sheet_state_to_block_unpreviewable_candidate(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-CAND-BLOCK-001"
-    active_evidence_run = {
-        "id": "OEV-ACTIVE-BLOCK-001",
-        "payload_json": {},
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    candidate_evidence_run = {
-        "id": "OEV-CAND-BLOCK-001",
-        "payload_json": {},
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    draft_record = {
-        "id": "ODR-BLOCK-001",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-            "base_evidence_run_id": active_evidence_run["id"],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service.ocr_evidence_service,
-        "get_latest_evidence_run",
-        lambda _order_id: active_evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_resolve_active_evidence_run",
-        lambda *_args, **_kwargs: active_evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_augment_workflow_evidence_run",
-        lambda evidence_run, **_kwargs: evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_resolve_candidate_evidence_run",
-        lambda *_args, **_kwargs: candidate_evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service.candidate_resolution_service,
-        "resolve_order_candidates",
-        lambda **_kwargs: {"critical_choices": [], "resolutions": {}},
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_merge_selected_decisions_into_resolution",
-        lambda resolution, decisions: (resolution, set()),
-    )
-    monkeypatch.setattr(
-        workflow_state_service.apply_gate_service,
-        "evaluate_apply_gate",
-        lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []},
-    )
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: {
-            "candidate_evidence_run_id": candidate_evidence_run["id"],
-            "current_sheet_revision_id": "REV-BLOCK-001",
-            "candidate_preview_available": False,
-            "candidate_has_meaningful_diff": False,
-            "candidate_preview_error": "template_unresolved",
-            "candidate_preview_draft": None,
-        },
-    )
+@pytest.mark.parametrize("fault,artifact,code", [
+    ("missing-overlay", "overlay", "canonical_artifact_bytes_unavailable"),
+    ("changed-records", "records", "canonical_artifact_bytes_changed"),
+])
+def test_unpreviewable_owned_candidate_cannot_replace_saved_five(authored_sheet_case, fault, artifact, code):
+    from src.services import canonical_ocr_artifact_service
 
-    workflow = workflow_state_service.refresh_workflow_state(order_id)
+    case, active, saved, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
+    before_job = get_ocr_job(case.job)
+    with case.readonly():
+        preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=candidate["id"])
+        assert preview["candidate_preview_available"] is True
+        assert preview["candidate_preview_draft"]["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
+    path = pathlib.Path(candidate["payload_json"]["hakodate_canonical_pipeline"]["outputs"][artifact])
+    assert path.resolve().is_relative_to(case.root.resolve()) and path.is_file()
+    if fault == "missing-overlay":
+        path.unlink()
+    else:
+        path.write_bytes(b"deliberately changed owned records artifact")
+    with case.readonly():
+        with pytest.raises(ValueError, match="^" + code + "$"):
+            canonical_ocr_artifact_service.validate_payload(candidate["payload_json"])
+        preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=candidate["id"])
+        assert preview["candidate_evidence_run_id"] == candidate["id"]
+        assert preview["candidate_preview_available"] is False
+        assert preview["candidate_has_meaningful_diff"] is False
+        assert preview["candidate_preview_error"] == code
+        assert preview["candidate_preview_draft"] is None
+        assert preview["current_sheet_revision_id"] == saved["id"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == active["id"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        stored = order_service.get_ocr_evidence_run(candidate["id"])
+        assert stored["payload_json"] == candidate["payload_json"]
+        assert stored["artifact_digest"] == candidate["artifact_digest"]
+        assert get_ocr_job(case.job) == before_job
 
+
+def test_real_candidate_selection_rejects_stale_workflow_revision_and_keeps_saved_five(authored_sheet_case):
+    case, active, first_save, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
+    stale_revision = case.revision()
+    latest = save_draft(case, first_save["draft_sheet_json"])
+    assert latest["id"] != first_save["id"]
+    with case.readonly():
+        preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=candidate["id"])
+        assert preview["candidate_preview_available"] is True
+        assert preview["current_sheet_revision_id"] == latest["id"]
+        assert preview["current_sheet_revision_id"] != first_save["id"]
+        response = case.client.post(f"/orders/{case.id}/workflow-v2/ocr-results/{candidate['id']}/select",
+            headers={**case.actor.headers, "If-Match": f'"{stale_revision}"'})
+        assert response.status_code == 409
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == latest
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == active["id"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+
+
+def _produce_unselected_nine(case):
+    from tests.helpers.authored_sheet_case import prepare_rerun
+
+    calls = prepare_rerun(case, cell_values="9")
+    with case.execution():
+        evidence, error = order_service.rerun_ocr_evidence_only(
+            case.id, job_id=case.job, project_sheet=False, refresh_workflow=False,
+        )
+    assert error is None and isinstance(evidence, dict)
+    assert len(calls) == 1
+    assert evidence["terminal_receipt"]["status"] == "done"
+    assert evidence["terminal_receipt"]["evidence_run_id"] == evidence["id"]
+    return evidence
+
+
+def test_refresh_workflow_state_hides_new_candidate_after_acknowledging_current_sheet(authored_sheet_case):
+    case, active, saved, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
+    workflow = workflow_state_service.refresh_workflow_state(case.id)
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["candidate_evidence_run_id"] is None
-    assert workflow["candidate_sheet_state"]["candidate_evidence_run_id"] == candidate_evidence_run["id"]
-    assert workflow["candidate_sheet_state"]["candidate_preview_available"] is False
-    assert workflow["candidate_sheet_state"]["candidate_preview_error"] == "template_unresolved"
-
-
-def test_refresh_workflow_state_hides_candidate_prompt_when_candidate_preview_revision_mismatches_current(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-CAND-REV-MISMATCH-001"
-    active_evidence_run = {
-        "id": "OEV-ACTIVE-REV-MISMATCH-001",
-        "payload_json": {},
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    candidate_evidence_run = {
-        "id": "OEV-CAND-REV-MISMATCH-001",
-        "payload_json": {},
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    draft_record = {
-        "id": "ODR-REV-MISMATCH-001",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-            "current_sheet_revision_id": draft_record["id"],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service.ocr_evidence_service,
-        "get_latest_evidence_run",
-        lambda _order_id: active_evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_resolve_active_evidence_run",
-        lambda *_args, **_kwargs: active_evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_augment_workflow_evidence_run",
-        lambda evidence_run, **_kwargs: evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_resolve_candidate_evidence_run",
-        lambda *_args, **_kwargs: candidate_evidence_run,
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service.candidate_resolution_service,
-        "resolve_order_candidates",
-        lambda **_kwargs: {"critical_choices": [], "resolutions": {}},
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_merge_selected_decisions_into_resolution",
-        lambda resolution, decisions: (resolution, set()),
-    )
-    monkeypatch.setattr(
-        workflow_state_service.apply_gate_service,
-        "evaluate_apply_gate",
-        lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []},
-    )
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: {
-            "current_sheet_revision_id": "ODR-OTHER-REVISION",
-            "candidate_evidence_run_id": candidate_evidence_run["id"],
-            "candidate_preview_available": True,
-            "candidate_has_meaningful_diff": True,
-            "candidate_preview_error": None,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order_id)
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["current_sheet_revision_id"] == draft_record["id"]
-    assert workflow["candidate_prompt_visible"] is False
-    assert workflow["candidate_evidence_run_id"] is None
-    assert workflow["candidate_sheet_state"]["candidate_evidence_run_id"] == candidate_evidence_run["id"]
-
-
-def test_refresh_workflow_state_hides_new_candidate_after_acknowledging_current_sheet(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-ACK-001"
-    active_evidence_run = {"id": "OEV-ACTIVE-001", "payload_json": {}, "created_at": datetime.utcnow().isoformat()}
-    candidate_evidence_run = {"id": "OEV-CAND-001", "payload_json": {}, "created_at": datetime.utcnow().isoformat()}
-    draft_record = {
-        "id": "ODR-001",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(workflow_state_service.ocr_evidence_service, "get_latest_evidence_run", lambda _order_id: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_active_evidence_run", lambda *_args, **_kwargs: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_augment_workflow_evidence_run", lambda evidence_run, **_kwargs: evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_candidate_evidence_run", lambda *_args, **_kwargs: candidate_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_build_menu_context_from_current_sheet_context", lambda **_kwargs: {"month_id": "2026-03", "weekly_menu_missing": False, "menu_entries_missing": False, "entries_count": 21})
-    monkeypatch.setattr(workflow_state_service.candidate_resolution_service, "resolve_order_candidates", lambda **_kwargs: {"critical_choices": [], "resolutions": {}})
-    monkeypatch.setattr(workflow_state_service, "_merge_selected_decisions_into_resolution", lambda resolution, decisions: (resolution, set()))
-    monkeypatch.setattr(workflow_state_service.apply_gate_service, "evaluate_apply_gate", lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []})
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: {
-            "current_sheet_revision_id": "OCRREV-001",
-            "candidate_preview_available": True,
-            "candidate_has_meaningful_diff": True,
-            "candidate_preview_error": None,
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order_id)
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
+    assert workflow["state"] == "new_evidence_available"
     assert workflow["candidate_prompt_visible"] is True
-    assert workflow["candidate_evidence_run_id"] == candidate_evidence_run["id"]
+    assert workflow["candidate_evidence_run_id"] == candidate["id"]
 
     decision = critical_decision_service.acknowledge_candidate_evidence(
-        order_id,
-        candidate_evidence_run["id"],
-        selected_by="tester",
+        case.id, candidate["id"], selected_by="tester",
     )
     assert isinstance(decision, dict)
-
-    refreshed = workflow_state_service.refresh_workflow_state(order_id)
+    assert decision["selected_value"] == candidate["id"]
+    refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(refreshed, dict)
     assert refreshed["state"] == "apply_ready"
     assert refreshed["candidate_prompt_visible"] is False
     assert refreshed["candidate_evidence_run_id"] is None
-    assert refreshed["acknowledged_candidate_evidence_run_id"] == candidate_evidence_run["id"]
-    assert refreshed["active_evidence_run_id"] == active_evidence_run["id"]
+    assert refreshed["acknowledged_candidate_evidence_run_id"] == candidate["id"]
+    assert refreshed["active_evidence_run_id"] == active["id"]
     assert refreshed["apply_gate"]["can_apply"] is True
+    with case.readonly():
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
 
 
-def test_refresh_workflow_state_reprompts_when_new_candidate_arrives_after_acknowledgement(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-ACK-002"
-    base_time = datetime.utcnow()
-    active_evidence_run = {"id": "OEV-ACTIVE-002", "payload_json": {}, "created_at": (base_time - timedelta(hours=2)).isoformat()}
-    current_candidate = {"id": "OEV-CAND-002", "payload_json": {}, "created_at": (base_time - timedelta(hours=1)).isoformat()}
-    draft_record = {
-        "id": "ODR-002",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-        },
+def test_refresh_workflow_state_reprompts_when_new_candidate_arrives_after_acknowledgement(authored_sheet_case):
+    case, active, saved, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
+    decision = critical_decision_service.acknowledge_candidate_evidence(
+        case.id, candidate["id"], selected_by="tester",
     )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(workflow_state_service.ocr_evidence_service, "get_latest_evidence_run", lambda _order_id: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_active_evidence_run", lambda *_args, **_kwargs: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_augment_workflow_evidence_run", lambda evidence_run, **_kwargs: evidence_run)
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_resolve_candidate_evidence_run",
-        lambda *_args, **_kwargs: current_candidate,
-    )
-    monkeypatch.setattr(workflow_state_service, "_build_menu_context_from_current_sheet_context", lambda **_kwargs: {"month_id": "2026-03", "weekly_menu_missing": False, "menu_entries_missing": False, "entries_count": 21})
-    monkeypatch.setattr(workflow_state_service.candidate_resolution_service, "resolve_order_candidates", lambda **_kwargs: {"critical_choices": [], "resolutions": {}})
-    monkeypatch.setattr(workflow_state_service, "_merge_selected_decisions_into_resolution", lambda resolution, decisions: (resolution, set()))
-    monkeypatch.setattr(workflow_state_service.apply_gate_service, "evaluate_apply_gate", lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []})
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: {
-            "current_sheet_revision_id": "OCRREV-002",
-            "candidate_preview_available": True,
-            "candidate_has_meaningful_diff": True,
-            "candidate_preview_error": None,
-        },
-    )
-
-    critical_decision_service.acknowledge_candidate_evidence(
-        order_id,
-        current_candidate["id"],
-        selected_by="tester",
-    )
-    current_candidate = {
-        "id": "OEV-CAND-003",
-        "payload_json": {},
-        "created_at": (datetime.utcnow() + timedelta(seconds=1)).isoformat(),
-    }
-
-    refreshed = workflow_state_service.refresh_workflow_state(order_id)
+    assert decision is not None
+    newer = _produce_unselected_nine(case)
+    assert newer["id"] not in {active["id"], candidate["id"]}
+    refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(refreshed, dict)
-    assert refreshed["state"] == "apply_ready"
+    assert refreshed["state"] == "new_evidence_available"
     assert refreshed["candidate_prompt_visible"] is True
-    assert refreshed["candidate_evidence_run_id"] == "OEV-CAND-003"
-    assert refreshed["acknowledged_candidate_evidence_run_id"] == "OEV-CAND-002"
-    assert refreshed["active_evidence_run_id"] == active_evidence_run["id"]
+    assert refreshed["candidate_evidence_run_id"] == newer["id"]
+    assert refreshed["acknowledged_candidate_evidence_run_id"] == candidate["id"]
+    assert refreshed["active_evidence_run_id"] == active["id"]
+    with case.readonly():
+        preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=newer["id"])
+        assert preview["candidate_preview_draft"]["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "9"]]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
 
 
-def test_refresh_workflow_state_suppresses_older_pending_candidate_ids_after_acknowledgement(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-ACK-003"
-    base_time = datetime.utcnow()
-    active_evidence_run = {"id": "OEV-ACTIVE-003", "payload_json": {}, "created_at": (base_time - timedelta(hours=3)).isoformat()}
-    visible_candidate = {"id": "OEV-CAND-004", "payload_json": {}, "created_at": (base_time - timedelta(hours=2)).isoformat()}
-    older_pending_candidate = {"id": "OEV-CAND-005", "payload_json": {}, "created_at": (base_time - timedelta(hours=1)).isoformat()}
-    draft_record = {
-        "id": "ODR-003",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(workflow_state_service.ocr_evidence_service, "get_latest_evidence_run", lambda _order_id: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_active_evidence_run", lambda *_args, **_kwargs: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_augment_workflow_evidence_run", lambda evidence_run, **_kwargs: evidence_run)
+def test_refresh_workflow_state_suppresses_older_pending_candidate_ids_after_acknowledgement(authored_sheet_case):
+    from copy import deepcopy
+    from src.models.ocr_job import OcrJob
 
-    current_candidate = visible_candidate
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_resolve_candidate_evidence_run",
-        lambda *_args, **_kwargs: current_candidate,
-    )
-    monkeypatch.setattr(workflow_state_service, "_build_menu_context_from_current_sheet_context", lambda **_kwargs: {"month_id": "2026-03", "weekly_menu_missing": False, "menu_entries_missing": False, "entries_count": 21})
-    monkeypatch.setattr(workflow_state_service.candidate_resolution_service, "resolve_order_candidates", lambda **_kwargs: {"critical_choices": [], "resolutions": {}})
-    monkeypatch.setattr(workflow_state_service, "_merge_selected_decisions_into_resolution", lambda resolution, decisions: (resolution, set()))
-    monkeypatch.setattr(workflow_state_service.apply_gate_service, "evaluate_apply_gate", lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []})
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: {
-            "current_sheet_revision_id": "OCRREV-003",
-            "candidate_preview_available": True,
-            "candidate_has_meaningful_diff": True,
-            "candidate_preview_error": None,
-        },
-    )
-
-    initial = workflow_state_service.refresh_workflow_state(order_id)
-    assert initial["state"] == "apply_ready"
+    case, active, saved, older = _saved_five_with_owned_candidate(authored_sheet_case)
+    visible = _produce_unselected_nine(case)
+    initial = workflow_state_service.refresh_workflow_state(case.id)
+    assert initial["state"] == "new_evidence_available"
     assert initial["candidate_prompt_visible"] is True
-    assert initial["candidate_evidence_run_id"] == visible_candidate["id"]
-
-    critical_decision_service.acknowledge_candidate_evidence(
-        order_id,
-        visible_candidate["id"],
-        selected_by="tester",
+    assert initial["candidate_evidence_run_id"] == visible["id"]
+    decision = critical_decision_service.acknowledge_candidate_evidence(
+        case.id, visible["id"], selected_by="tester",
     )
-    current_candidate = older_pending_candidate
-
-    refreshed = workflow_state_service.refresh_workflow_state(order_id)
+    assert decision is not None
+    with session_scope() as session:
+        job = session.get(OcrJob, case.job)
+        receipt = deepcopy(job.metrics["rerun_terminal_receipt"])
+        # A stale diagnostic pointer is not a new terminal result or a new source.
+        job.metrics = {**job.metrics, "evidence_run_id": older["id"], "new_evidence_available": True}
+        assert job.metrics["rerun_terminal_receipt"] == receipt
+    job_before = get_ocr_job(case.job)
+    refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(refreshed, dict)
     assert refreshed["state"] == "apply_ready"
     assert refreshed["candidate_prompt_visible"] is False
     assert refreshed["candidate_evidence_run_id"] is None
-    assert refreshed["acknowledged_candidate_evidence_run_id"] == visible_candidate["id"]
+    assert refreshed["acknowledged_candidate_evidence_run_id"] == visible["id"]
+    assert refreshed["active_evidence_run_id"] == active["id"]
+    with case.readonly():
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert get_ocr_job(case.job) == job_before
 
 
-def test_refresh_workflow_state_does_not_prompt_when_candidate_preview_contract_is_unavailable(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-CAND-CONTRACT-001"
-    active_evidence_run = {"id": "OEV-ACTIVE-C-001", "payload_json": {}, "created_at": datetime.utcnow().isoformat()}
-    candidate_evidence_run = {"id": "OEV-CAND-C-001", "payload_json": {}, "created_at": datetime.utcnow().isoformat()}
-    draft_record = {
-        "id": "ODR-C-001",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(workflow_state_service.ocr_evidence_service, "get_latest_evidence_run", lambda _order_id: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_active_evidence_run", lambda *_args, **_kwargs: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_augment_workflow_evidence_run", lambda evidence_run, **_kwargs: evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_candidate_evidence_run", lambda *_args, **_kwargs: candidate_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_build_menu_context_from_current_sheet_context", lambda **_kwargs: {"month_id": "2026-03", "weekly_menu_missing": False, "menu_entries_missing": False, "entries_count": 21})
-    monkeypatch.setattr(workflow_state_service.candidate_resolution_service, "resolve_order_candidates", lambda **_kwargs: {"critical_choices": [], "resolutions": {}})
-    monkeypatch.setattr(workflow_state_service, "_merge_selected_decisions_into_resolution", lambda resolution, decisions: (resolution, set()))
-    monkeypatch.setattr(workflow_state_service.apply_gate_service, "evaluate_apply_gate", lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []})
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: {
-            "current_sheet_revision_id": "OCRREV-C-001",
-            "candidate_preview_available": False,
-            "candidate_has_meaningful_diff": False,
-            "candidate_preview_error": "candidate_preview_unavailable",
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order_id)
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["candidate_evidence_run_id"] is None
-    assert workflow["candidate_sheet_state"]["candidate_preview_available"] is False
-    assert workflow["candidate_sheet_state"]["candidate_preview_error"] == "candidate_preview_unavailable"
 
 
-def test_refresh_workflow_state_skips_candidate_preview_build_when_requested(monkeypatch):
-    order_service.clear_all()
-    order_id = "ORD-WORKFLOW-CAND-LIGHT-001"
-    active_evidence_run = {"id": "OEV-ACTIVE-LIGHT-001", "payload_json": {}, "created_at": datetime.utcnow().isoformat()}
-    candidate_evidence_run = {"id": "OEV-CAND-LIGHT-001", "payload_json": {}, "created_at": datetime.utcnow().isoformat()}
-    draft_record = {
-        "id": "ODR-LIGHT-001",
-        "base_evidence_run_id": active_evidence_run["id"],
-        "draft_sheet_json": {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-    }
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_workflow_current_sheet_context",
-        lambda *_args, **_kwargs: {
-            "draft_record": draft_record,
-            "draft_payload": draft_record["draft_sheet_json"],
-            "fields": list(draft_record["draft_sheet_json"]["fields"]),
-            "header": list(draft_record["draft_sheet_json"]["header"]),
-            "base_evidence_run_id": active_evidence_run["id"],
-            "current_sheet_revision_id": draft_record["id"],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_load_order_payload",
-        lambda _order_id: {
-            "id": order_id,
-            "status": "要確認",
-            "facility": "FAC00001",
-            "week_value": "2026-03@2026-03-22~2026-03-28",
-            "received_at": datetime(2026, 3, 22, 9, 0, 0).isoformat(),
-        },
-    )
-    monkeypatch.setattr(workflow_state_service.ocr_evidence_service, "get_latest_evidence_run", lambda _order_id: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_active_evidence_run", lambda *_args, **_kwargs: active_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_augment_workflow_evidence_run", lambda evidence_run, **_kwargs: evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_resolve_candidate_evidence_run", lambda *_args, **_kwargs: candidate_evidence_run)
-    monkeypatch.setattr(workflow_state_service, "_build_menu_context_from_current_sheet_context", lambda **_kwargs: {"month_id": "2026-03", "weekly_menu_missing": False, "menu_entries_missing": False, "entries_count": 21})
-    monkeypatch.setattr(workflow_state_service.candidate_resolution_service, "resolve_order_candidates", lambda **_kwargs: {"critical_choices": [], "resolutions": {}})
-    monkeypatch.setattr(workflow_state_service, "_merge_selected_decisions_into_resolution", lambda resolution, decisions: (resolution, set()))
-    monkeypatch.setattr(workflow_state_service.apply_gate_service, "evaluate_apply_gate", lambda **_kwargs: {"can_apply": True, "can_confirm": True, "blockers": [], "warnings": []})
-    monkeypatch.setattr(workflow_state_service, "_latest_confirmed_snapshot_id", lambda _order_id: None)
-    monkeypatch.setattr(order_service, "get_order_review_summary", lambda *args, **kwargs: {})
-    monkeypatch.setattr(
-        order_service,
-        "candidate_sheet_state",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("candidate preview should be skipped")),
-    )
+def test_refresh_workflow_state_skips_candidate_preview_build_when_requested(monkeypatch, authored_sheet_case):
+    case, active, saved, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
+    current_revision = order_service.get_current_sheet_context(case.id)["current_sheet_revision_id"]
 
+    def unexpected_preview(*_args, **_kwargs):
+        raise AssertionError("candidate preview should be skipped")
+
+    monkeypatch.setattr(order_service, "candidate_sheet_state", unexpected_preview)
     workflow = workflow_state_service.refresh_workflow_state(
-        order_id,
-        include_candidate_preview=False,
+        case.id, include_candidate_preview=False,
     )
 
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "apply_ready"
-    assert workflow["candidate_prompt_visible"] is False
-    assert workflow["candidate_evidence_run_id"] is None
-    assert workflow["current_sheet_revision_id"] == draft_record["id"]
-    assert workflow["candidate_sheet_state"]["candidate_evidence_run_id"] == candidate_evidence_run["id"]
+    assert workflow["state"] == "new_evidence_available"
+    assert workflow["candidate_prompt_visible"] is True
+    assert workflow["candidate_evidence_run_id"] == candidate["id"]
+    assert workflow["current_sheet_revision_id"] == current_revision
+    assert workflow["candidate_sheet_state"]["candidate_evidence_run_id"] == candidate["id"]
     assert workflow["candidate_sheet_state"]["candidate_preview_available"] is False
     assert workflow["candidate_sheet_state"]["candidate_has_meaningful_diff"] is False
+    with case.readonly():
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == active["id"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
 
 
-def test_save_ocr_sheet_exact_invokes_authoritative_candidate_acknowledgement(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-save-ack", facility_hint="FAC00001", week_hint="2026-03")
-    calls: list[tuple[str, str]] = []
-
-    def _fake_acknowledge(order_id: str, *, selected_by: str):
-        calls.append((order_id, selected_by))
-        return {"state": "apply_ready"}
-
-    monkeypatch.setattr(
-        order_service,
-        "_acknowledge_current_candidate_after_authoritative_action",
-        _fake_acknowledge,
-    )
-
+def test_exact_internal_save_acknowledges_actual_selected_evidence(authored_sheet_case):
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    original_evidence = order_service.get_ocr_evidence_run(case.evidence)
+    selected_draft = draft_sheet_service.get_selected_sheet_draft(case.id)
     result, error = order_service.save_ocr_sheet_exact(
-        order["id"],
+        case.id,
         header=["日付", "区分", "メニュー", "常食2F"],
         rows=[["03/22", "朝", "Menu A", "5"]],
         ui_mode="sheet",
@@ -1970,609 +1409,199 @@ def test_save_ocr_sheet_exact_invokes_authoritative_candidate_acknowledgement(mo
 
     assert error is None
     assert isinstance(result, dict)
-    assert calls == [(order["id"], "save-ocr-sheet-exact")]
+    decision = critical_decision_service.get_acknowledged_candidate_evidence_decision(case.id)
+    assert decision is not None
+    assert decision["selected_value"] == case.evidence
+    assert decision["selected_by"] == "save-ocr-sheet-exact"
+    assert result["draft"]["base_evidence_run_id"] == case.evidence
+    assert result["draft"]["draft_sheet_json"]["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    with case.readonly():
+        assert order_service.get_ocr_evidence_run(case.evidence) == original_evidence
+        assert draft_sheet_service.get_latest_sheet_draft(case.id) == result["draft"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == selected_draft
 
 
-def test_acknowledge_current_candidate_evidence_uses_cached_candidate_and_lightweight_refresh(monkeypatch):
-    order_service.clear_all()
-    captured: dict[str, object] = {}
+def test_cached_workflow_without_candidate_identity_cannot_acknowledge_latest_evidence(authored_sheet_case):
+    case, first, saved, second = _saved_five_with_owned_candidate(authored_sheet_case)
+    second_record = order_service.get_ocr_evidence_run(second["id"])
+    projected = workflow_state_service.refresh_workflow_state(case.id)
+    assert projected["candidate_evidence_run_id"] == second["id"]
+    cached = order_service.get_order_workflow_state(case.id, refresh=False)
+    assert isinstance(cached, dict)
+    assert "candidate_evidence_run_id" not in cached
+    decision = critical_decision_service.get_acknowledged_candidate_evidence_decision(case.id)
 
-    def _fake_get_order_workflow_state(order_id: str, *, refresh: bool = False):
-        captured["refresh"] = refresh
-        assert order_id == "ORD-WORKFLOW-ACK-LIGHT-001"
-        if refresh:
-            raise AssertionError("candidate acknowledgement should not force a preview refresh before ack")
-        return {
-            "candidate_evidence_run_id": "OEV-CACHED-001",
-            "current_sheet_revision_id": "ODR-CACHED-001",
-        }
-
-    def _fake_acknowledge(order_id: str, candidate_evidence_run_id: str, *, selected_by: str):
-        captured["ack"] = (order_id, candidate_evidence_run_id, selected_by)
-        return {"selected_value": candidate_evidence_run_id}
-
-    def _fake_refresh(order_id: str, *, include_candidate_preview: bool = True, **_kwargs):
-        captured["light_refresh"] = (order_id, include_candidate_preview)
-        return {
-            "state": "apply_ready",
-            "candidate_prompt_visible": False,
-            "current_sheet_revision_id": "ODR-CACHED-001",
-        }
-
-    monkeypatch.setattr(order_service, "get_order_workflow_state", _fake_get_order_workflow_state)
-    monkeypatch.setattr(critical_decision_service, "acknowledge_candidate_evidence", _fake_acknowledge)
-    monkeypatch.setattr(workflow_state_service, "refresh_workflow_state", _fake_refresh)
-
-    workflow, error = order_service.acknowledge_current_candidate_evidence(
-        "ORD-WORKFLOW-ACK-LIGHT-001",
-        selected_by="tester",
-    )
-
-    assert error is None
-    assert workflow == {
-        "state": "apply_ready",
-        "candidate_prompt_visible": False,
-        "current_sheet_revision_id": "ODR-CACHED-001",
-    }
-    assert captured["refresh"] is False
-    assert captured["ack"] == ("ORD-WORKFLOW-ACK-LIGHT-001", "OEV-CACHED-001", "tester")
-    assert captured["light_refresh"] == ("ORD-WORKFLOW-ACK-LIGHT-001", False)
+    with case.readonly():
+        workflow, error = order_service.acknowledge_current_candidate_evidence(
+            case.id, selected_by="tester",
+        )
+        assert workflow is None
+        assert error == "candidate_not_found"
+        assert critical_decision_service.get_acknowledged_candidate_evidence_decision(case.id) == decision
+        assert order_service.get_order_workflow_state(case.id, refresh=False) == cached
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == first["id"]
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert order_service.get_ocr_evidence_run(second["id"]) == second_record
 
 
-def test_apply_latest_draft_invokes_authoritative_candidate_acknowledgement(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-apply-ack", facility_hint="FAC00001", week_hint="2026-03")
-    saved, error = order_service.save_ocr_sheet_exact(
-        order["id"],
-        header=["日付", "区分", "メニュー", "常食2F"],
-        rows=[["03/22", "朝", "Menu A", "5"]],
-        ui_mode="sheet",
-        fields=["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-        row_ids=["row-1"],
-    )
-    assert error is None
+def test_internal_apply_materializes_owned_saved_five_and_records_real_acknowledgement(authored_sheet_case):
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
     assert isinstance(saved, dict)
-
-    calls: list[tuple[str, str]] = []
-
-    def _fake_acknowledge(order_id: str, *, selected_by: str):
-        calls.append((order_id, selected_by))
-        return {"state": "apply_ready"}
-
-    monkeypatch.setattr(
-        order_service,
-        "_acknowledge_current_candidate_after_authoritative_action",
-        _fake_acknowledge,
-    )
-
-    applied, apply_error = order_service.apply_latest_draft(order["id"])
+    assert saved["base_evidence_run_id"] == case.evidence
+    evidence = order_service.get_ocr_evidence_run(case.evidence)
+    applied, apply_error = order_service.apply_latest_draft(case.id)
 
     assert apply_error is None
     assert isinstance(applied, dict)
-    assert calls == [(order["id"], "apply-latest-draft")]
+    assert applied["id"] == case.id
+    assert applied["reparse"]["materialized_source"] == "draft_sheet"
+    with session_scope() as session:
+        lines = session.query(OrderLine).filter_by(order_id=case.id).all()
+        assert len(lines) == 1
+        assert lines[0].date.isoformat() == "2026-03-22"
+        assert lines[0].menu_name == "Menu A"
+        assert lines[0].quantity_original == 5
+        assert lines[0].quantity_corrected is None
+    decision = critical_decision_service.get_acknowledged_candidate_evidence_decision(case.id)
+    assert decision is not None
+    assert decision["selected_value"] == case.evidence
+    assert decision["selected_by"] == "apply-latest-draft"
+    with case.readonly():
+        assert order_service.get_ocr_evidence_run(case.evidence) == evidence
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
 
 
-def test_authoritative_candidate_acknowledgement_falls_back_to_active_evidence_when_candidate_already_collapsed(monkeypatch):
-    order_id = "ORD-WORKFLOW-ACTIVE-HORIZON-001"
-    workflow_states = [
-        {
-            "state": "apply_ready",
-            "candidate_evidence_run_id": None,
-            "active_evidence_run_id": "OEV-ACTIVE-HORIZON-001",
-        },
-        {
-            "state": "apply_ready",
-            "candidate_evidence_run_id": None,
-            "active_evidence_run_id": "OEV-ACTIVE-HORIZON-001",
-        },
-    ]
-    calls: list[tuple[str, str, str]] = []
-
-    def _fake_get_order_workflow_state(_order_id: str, *, refresh: bool = False):
-        assert _order_id == order_id
-        assert refresh is True
-        return workflow_states.pop(0)
-
-    def _fake_acknowledge_candidate_evidence(_order_id: str, evidence_run_id: str, *, selected_by: str | None = None):
-        calls.append((_order_id, evidence_run_id, str(selected_by or "")))
-        return {"selected_value": evidence_run_id}
-
-    monkeypatch.setattr(order_service, "get_order_workflow_state", _fake_get_order_workflow_state)
-    monkeypatch.setattr(
-        critical_decision_service,
-        "acknowledge_candidate_evidence",
-        _fake_acknowledge_candidate_evidence,
-    )
-
+def test_internal_acknowledgement_uses_explicit_selected_source_without_a_candidate(authored_sheet_case):
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, case.selected_sheet)
+    before = workflow_state_service.project_workflow_state(case.id)
+    assert before["candidate_evidence_run_id"] is None
+    assert before["active_evidence_run_id"] == case.evidence
+    original_evidence = order_service.get_ocr_evidence_run(case.evidence)
     refreshed = order_service._acknowledge_current_candidate_after_authoritative_action(
-        order_id,
+        case.id,
         selected_by="save-ocr-sheet-exact",
     )
 
     assert isinstance(refreshed, dict)
-    assert refreshed["active_evidence_run_id"] == "OEV-ACTIVE-HORIZON-001"
-    assert calls == [(order_id, "OEV-ACTIVE-HORIZON-001", "save-ocr-sheet-exact")]
+    assert refreshed["active_evidence_run_id"] == case.evidence
+    assert refreshed["candidate_evidence_run_id"] is None
+    decision = critical_decision_service.get_acknowledged_candidate_evidence_decision(case.id)
+    assert decision is not None
+    assert decision["order_id"] == case.id
+    assert decision["selected_value"] == case.evidence
+    assert decision["selected_by"] == "save-ocr-sheet-exact"
+    with case.readonly():
+        assert order_service.get_ocr_evidence_run(case.evidence) == original_evidence
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == case.selected_sheet["rows"]
 
 
-def test_refresh_workflow_state_uses_rerun_job_metrics_to_surface_new_candidate(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-candidate", facility_hint="FAC00001", week_hint="2026-03")
-    first = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|"})
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
-        },
-        base_evidence_run_id=first["id"],
-        edited_by="tester",
-    )
-    assert isinstance(saved, dict)
+def test_refresh_workflow_state_uses_owned_terminal_metrics_to_surface_new_candidate(authored_sheet_case):
+    case, first, saved, second = _saved_five_with_owned_candidate(authored_sheet_case)
+    job = get_ocr_job(case.job)
+    assert job["status"] == "done"
+    assert job["metrics"]["new_evidence_available"] is True
+    assert job["metrics"]["evidence_run_id"] == second["id"]
+    assert job["metrics"]["rerun_terminal_receipt"] == second["terminal_receipt"]
     assert saved["base_evidence_run_id"] == first["id"]
-    second = _persist_evidence(
-        order["id"],
-        extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|"},
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "get_ocr_job",
-        lambda _job_id: {
-            "id": f"OCR-{order['id']}",
-            "status": "done",
-            "metrics": {
-                "request_mode": "ocr_rerun",
-                "new_evidence_available": True,
-                "evidence_run_id": second["id"],
-            },
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "describe_job_state",
-        lambda _job: {"status": "done", "job_id": f"OCR-{order['id']}"},
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    workflow = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(workflow, dict)
     assert workflow["state"] == "new_evidence_available"
     assert workflow["active_evidence_run_id"] == first["id"]
     assert workflow["candidate_evidence_run_id"] == second["id"]
+    with case.readonly():
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert get_ocr_job(case.job) == job
 
 
-def test_refresh_workflow_state_ignores_stale_rerun_candidate_when_latest_is_already_active(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-stale-rerun-candidate", facility_hint="FAC00001", week_hint="2026-03")
-    older = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|"})
-    latest = _persist_evidence(order["id"], extra_payload={"table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|"})
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "8"]],
-            "row_ids": ["row-1"],
-        },
-        base_evidence_run_id=latest["id"],
-        edited_by="tester",
-    )
+def test_owned_selected_eight_is_not_replaced_by_stale_candidate_five(authored_sheet_case):
+    from copy import deepcopy
+    from src.models.ocr_job import OcrJob
+
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    older = case.evidence
+    source = case.produce(cell_values="8")
+    latest = case.evidence
+    assert latest != older
+    assert source["selected_ocr_result_id"] == latest
+    assert source["sheet"]["rows"] == [["03/22", "朝", "Menu A", "8"]]
+    saved = save_draft(case, {
+        "order_id": case.id, "source": "weekly_menu+ocr_payload",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "header": ["日付", "区分", "メニュー", "常食2F"],
+        "rows": [["03/22", "朝", "Menu A", "8"]], "row_ids": ["row-1"],
+    })
     assert isinstance(saved, dict)
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "get_ocr_job",
-        lambda _job_id: {
-            "id": f"OCR-{order['id']}",
-            "status": "done",
-            "metrics": {
-                "request_mode": "ocr_rerun",
-                "new_evidence_available": True,
-                "evidence_run_id": older["id"],
-            },
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "describe_job_state",
-        lambda _job: {"status": "done", "job_id": f"OCR-{order['id']}"},
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
+    assert saved["base_evidence_run_id"] == latest
+    with session_scope() as session:
+        job = session.get(OcrJob, case.job)
+        receipt = deepcopy(job.metrics["rerun_terminal_receipt"])
+        # Deliberate stale diagnostic metadata; never alter physical ownership or its receipt.
+        job.metrics = {**job.metrics, "request_mode": "ocr_rerun",
+                       "new_evidence_available": True, "evidence_run_id": older}
+        assert job.metrics["rerun_terminal_receipt"] == receipt
+    before_job = get_ocr_job(case.job)
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(case.id)
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == latest
+        assert current["rows"] == source["sheet"]["rows"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
     assert isinstance(workflow, dict)
     assert workflow["state"] == "apply_ready"
-    assert workflow["active_evidence_run_id"] == latest["id"]
+    assert workflow["active_evidence_run_id"] == latest
     assert workflow["candidate_evidence_run_id"] is None
+    assert get_ocr_job(case.job) == before_job
+    assert before_job["metrics"]["rerun_terminal_receipt"] == receipt
 
 
-def test_refresh_workflow_state_returns_rerun_in_progress_when_ocr_rerun_running(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-running", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"])
-    monkeypatch.setattr(
-        workflow_state_service,
-        "get_ocr_job",
-        lambda _job_id: {
-            "id": f"OCR-{order['id']}",
-            "status": "running",
-            "metrics": {"processing_stage": "ocr_pipeline", "request_mode": "ocr_rerun"},
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "describe_job_state",
-        lambda _job: {"status": "running", "job_id": f"OCR-{order['id']}"},
-    )
+def test_owned_running_rerun_retains_selected_saved_five(authored_sheet_case):
+    from tests.helpers.authored_sheet_case import prepare_rerun
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    active = case.evidence
+    calls = prepare_rerun(case, cell_values="9")
+    with case.execution():
+        progress = order_service._update_reparse_job_progress(case.job,
+            status="running", processing_stage="ocr_pipeline", result_state="running",
+            metrics_patch={"request_mode": "ocr_rerun", "order_id": case.id})
+    assert progress is not None and progress["status"] == "running"
+    before_job = get_ocr_job(case.job)
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(case.id)
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == active
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
     assert isinstance(workflow, dict)
     assert workflow["state"] == "rerun_in_progress"
     assert workflow["primary_action"] == "wait_for_rerun"
+    assert case.get("workflow-v2")["state"] == "ocr_running"
+    assert get_ocr_job(case.job) == before_job
+    assert calls == []
 
 
-def test_get_order_workflow_state_heals_failed_rerun_back_to_awaiting_output_when_current_output_is_pending(monkeypatch, tmp_path):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-pending-heal", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"])
-    output_path = tmp_path / "ocr_rerun_pending.json"
-    output_path.write_text(
-        json.dumps(
-            {
-                "status": "running",
-                "stage": "ocr",
-                "input_reference": "file://dummy-workflow.pdf",
-                "output_reference": f"file://{output_path}",
-            }
-        ),
-        encoding="utf-8",
-    )
-    create_job(f"OCR-{order['id']}", input_reference="file://dummy-workflow.pdf", status="failed")
-    update_job(
-        f"OCR-{order['id']}",
-        status="failed",
-        output_reference=f"file://{output_path}",
-        error_message="ocr_pipeline_failed:SystemExit(1)",
-        metrics={
-            "processing_stage": "ocr_pipeline",
-            "request_mode": "ocr_rerun",
-            "result_state": "hard_failed",
-            "order_id": order["id"],
-        },
-    )
-
-    workflow = order_service.get_order_workflow_state(order["id"], refresh=True)
-
-    rerun_job = get_ocr_job(f"OCR-{order['id']}")
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "rerun_in_progress"
-    reparse_state = workflow.get("reparse_state") or {}
-    assert reparse_state.get("status") == "awaiting_output"
-    assert isinstance(rerun_job, dict)
-    assert rerun_job["status"] == "awaiting_output"
-    assert rerun_job["output_reference"] == f"file://{output_path}"
-
-
-def test_get_order_workflow_state_reconciles_completed_rerun_output_when_current_reference_is_still_pending(
-    monkeypatch,
-    tmp_path,
-):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-pending-current-output", facility_hint="FAC00001", week_hint="2026-03")
-    old_evidence = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|",
-        },
-    )
-    assert isinstance(old_evidence, dict)
-    pending_output_path = tmp_path / "ocr_rerun_pending_current_ref.json"
-    pending_output_path.write_text(
-        json.dumps(
-            {
-                "status": "running",
-                "stage": "ocr",
-                "input_reference": "file://dummy-workflow.pdf",
-                "output_reference": f"file://{pending_output_path}",
-            }
-        ),
-        encoding="utf-8",
-    )
-    create_job(f"OCR-{order['id']}", input_reference="file://dummy-workflow.pdf", status="awaiting_output")
-    update_job(
-        f"OCR-{order['id']}",
-        status="awaiting_output",
-        output_reference=f"file://{pending_output_path}",
-        error_message="ocr_output_pending",
-        metrics={
-            "processing_stage": "ocr_pipeline",
-            "request_mode": "ocr_rerun",
-            "result_state": "awaiting_output",
-            "order_id": order["id"],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
+def test_unowned_failed_jobs_cannot_heal_or_replace_owned_saved_five(authored_sheet_case, tmp_path):
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    active = case.evidence
+    owned_job = get_ocr_job(case.job)
+    assert owned_job["status"] == "done"
+    pending = tmp_path / "ocr_rerun_pending.json"
+    pending_payload = {
+        "status": "running", "stage": "ocr", "input_reference": "file://dummy-workflow.pdf",
+        "output_reference": f"file://{pending}",
+    }
     completed_payload = {
-        "status": "done",
-        "stage": "done",
-        "input_reference": "gs://bucket/input/OCR-order-rerun-new.pdf",
-        "output_reference": "gs://bucket/output/OCR-order-rerun-new.pdf.json",
-        "pages": [
-            {
-                "page_index": 1,
-                "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
-                "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
-            }
-        ],
-        "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|9|",
-        "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "9"]]}],
-        "template_resolution": {
-            "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-            "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
-            "confidence": 0.99,
-            "blocked": False,
-            "blocked_reasons": [],
-        },
-        "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "9"]]}],
-        "table_box": [0.1, 0.2, 0.9, 0.8],
-        "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
-        "grid_row_edges": [0.2, 0.4, 0.8],
-    }
-    monkeypatch.setattr(
-        order_service,
-        "_list_latest_completed_ocr_outputs",
-        lambda *_args, **_kwargs: [("gs://bucket/output/OCR-order-rerun-new.pdf.json", completed_payload)],
-    )
-
-    workflow = order_service.get_order_workflow_state(order["id"], refresh=True)
-
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    rerun_job = get_ocr_job(f"OCR-{order['id']}")
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] != "rerun_in_progress"
-    assert isinstance(latest_evidence, dict)
-    assert latest_evidence["source"] == "ocr-rerun-reconcile"
-    assert latest_evidence["id"] != old_evidence["id"]
-    assert isinstance(rerun_job, dict)
-    assert rerun_job["status"] == "done"
-    assert rerun_job["output_reference"] == "gs://bucket/output/OCR-order-rerun-new.pdf.json"
-
-
-def test_get_order_workflow_state_keeps_rerun_awaiting_output_when_only_older_completed_output_exists(
-    monkeypatch,
-    tmp_path,
-):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-older-output", facility_hint="FAC00001", week_hint="2026-03")
-    old_evidence = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|",
-        },
-    )
-    assert isinstance(old_evidence, dict)
-    pending_output_path = tmp_path / f"OCR-{order['id']}_20260322_120000_000001.pdf.json"
-    pending_output_path.write_text(
-        json.dumps(
-            {
-                "status": "running",
-                "stage": "ocr",
-                "input_reference": "file://dummy-workflow.pdf",
-                "output_reference": f"file://{pending_output_path}",
-            }
-        ),
-        encoding="utf-8",
-    )
-    create_job(f"OCR-{order['id']}", input_reference="file://dummy-workflow.pdf", status="awaiting_output")
-    update_job(
-        f"OCR-{order['id']}",
-        status="awaiting_output",
-        output_reference=f"file://{pending_output_path}",
-        error_message="ocr_output_pending",
-        metrics={
-            "processing_stage": "ocr_pipeline",
-            "request_mode": "ocr_rerun",
-            "result_state": "awaiting_output",
-            "order_id": order["id"],
-            "awaiting_output_since": "2026-03-22T12:00:00",
-            "stage_updated_at": "2026-03-22T12:00:00",
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    older_completed_payload = {
-        "status": "done",
-        "stage": "done",
-        "input_reference": "gs://bucket/input/OCR-order-rerun-old.pdf",
-        "output_reference": f"gs://bucket/output/OCR-{order['id']}_20260322_115959_999999.pdf.json",
-        "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png"}],
-        "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
-        "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "8"]]}],
-        "template_resolution": {
-            "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-            "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
-            "confidence": 0.99,
-            "blocked": False,
-            "blocked_reasons": [],
-        },
-        "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "8"]]}],
-        "table_box": [0.1, 0.2, 0.9, 0.8],
-        "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
-        "grid_row_edges": [0.2, 0.4, 0.8],
-    }
-    monkeypatch.setattr(
-        order_service,
-        "_list_latest_completed_ocr_outputs",
-        lambda *_args, **_kwargs: [(older_completed_payload["output_reference"], older_completed_payload)],
-    )
-
-    workflow = order_service.get_order_workflow_state(order["id"], refresh=True)
-
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    rerun_job = get_ocr_job(f"OCR-{order['id']}")
-
-    assert isinstance(workflow, dict)
-    reparse_state = workflow.get("reparse_state") or {}
-    assert reparse_state.get("status") in {"awaiting_output", "recovering"}
-    assert isinstance(latest_evidence, dict)
-    assert latest_evidence["id"] == old_evidence["id"]
-    assert isinstance(rerun_job, dict)
-    assert rerun_job["status"] in {"awaiting_output", "recovering"}
-    assert rerun_job["output_reference"] == f"file://{pending_output_path}"
-
-
-def test_get_order_workflow_state_reconciles_completed_rerun_output(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-reconcile", facility_hint="FAC00001", week_hint="2026-03")
-    old_evidence = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|",
-        },
-    )
-    assert isinstance(old_evidence, dict)
-    create_job(f"OCR-{order['id']}", input_reference="file://dummy-workflow.pdf", status="running")
-    update_job(
-        f"OCR-{order['id']}",
-        status="running",
-        metrics={
-            "processing_stage": "ocr_pipeline",
-            "request_mode": "ocr_rerun",
-            "status": "running",
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    new_payload = {
-        "status": "done",
-        "stage": "done",
-        "input_reference": "gs://bucket/input/OCR-order-rerun.pdf",
-        "output_reference": "gs://bucket/output/OCR-order-rerun.pdf.json",
-        "pages": [
-            {
-                "page_index": 1,
-                "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
-                "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
-            }
-        ],
-        "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
-        "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "8"]]}],
-        "template_resolution": {
-            "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
-            "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
-            "confidence": 0.99,
-            "blocked": False,
-            "blocked_reasons": [],
-        },
-        "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "8"]]}],
-        "table_box": [0.1, 0.2, 0.9, 0.8],
-        "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
-        "grid_row_edges": [0.2, 0.4, 0.8],
-    }
-    monkeypatch.setattr(
-        order_service,
-        "_list_latest_completed_ocr_outputs",
-        lambda *_args, **_kwargs: [("gs://bucket/output/OCR-order-rerun.pdf.json", new_payload)],
-    )
-
-    workflow = order_service.get_order_workflow_state(order["id"], refresh=True)
-
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    rerun_job = get_ocr_job(f"OCR-{order['id']}")
-
-    assert isinstance(workflow, dict)
-    assert isinstance(latest_evidence, dict)
-    assert latest_evidence["source"] == "ocr-rerun-reconcile"
-    assert latest_evidence["id"] != old_evidence["id"]
-    assert isinstance(rerun_job, dict)
-    assert rerun_job["status"] == "done"
-    assert rerun_job["output_reference"] == "gs://bucket/output/OCR-order-rerun.pdf.json"
-
-
-def test_get_order_workflow_state_reconciles_completed_rerun_output_after_timeout_failure(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-timeout-reconcile", facility_hint="FAC00001", week_hint="2026-03")
-    old_evidence = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|5|",
-        },
-    )
-    assert isinstance(old_evidence, dict)
-    create_job(f"OCR-{order['id']}", input_reference="file://dummy-workflow.pdf", status="failed")
-    update_job(
-        f"OCR-{order['id']}",
-        status="failed",
-        error_message="evidence_rerun_failed:OCR pipeline output not found",
-        metrics={
-            "processing_stage": "ocr_pipeline",
-            "request_mode": "ocr_rerun",
-            "status": "failed",
-            "error": "evidence_rerun_failed",
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    new_payload = {
         "status": "done",
         "stage": "done",
         "input_reference": "gs://bucket/input/OCR-order-rerun-timeout.pdf",
@@ -2598,78 +1627,255 @@ def test_get_order_workflow_state_reconciles_completed_rerun_output_after_timeou
         "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
         "grid_row_edges": [0.2, 0.4, 0.8],
     }
-    monkeypatch.setattr(
-        order_service,
-        "_list_latest_completed_ocr_outputs",
-        lambda *_args, **_kwargs: [("gs://bucket/output/OCR-order-rerun-timeout.pdf.json", new_payload)],
-    )
+    specimens = [
+        ("failed-pending", pending, pending_payload, "ocr_pipeline_failed:SystemExit(1)",
+         {"processing_stage": "ocr_pipeline", "request_mode": "ocr_rerun",
+          "result_state": "hard_failed", "order_id": case.id}),
+        ("failed-timeout-nine", tmp_path / "ocr-rerun-timeout.pdf.json", completed_payload,
+         "evidence_rerun_failed:OCR pipeline output not found",
+         {"processing_stage": "ocr_pipeline", "request_mode": "ocr_rerun",
+          "status": "failed", "error": "evidence_rerun_failed"}),
+    ]
+    for case_id, path, payload, failure, metrics in specimens:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        case.protected += (path,)
+        # Deliberately unowned diagnostic jobs, not fabricated successful executions.
+        job_id = f"OCR-unowned-{case.id}-{case_id}"
+        created, fresh = create_job(job_id, input_reference="file://dummy-workflow.pdf",
+            status="failed", order_id=case.id)
+        assert fresh is True
+        update_job(job_id, status="failed", output_reference=f"file://{path}",
+            error_message=failure, metrics=metrics)
+        before = get_ocr_job(job_id)
+        assert before["metrics"].get("workflow_attempt_id") is None
+        assert before["metrics"].get("rerun_terminal_receipt") is None
+        with case.readonly():
+            assert order_service._reconcile_finished_ocr_rerun(case.id) is False
+            current = order_service.get_current_sheet_context(case.id)
+            assert current["draft_id"] == saved["id"]
+            assert current["base_evidence_run_id"] == active
+            assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+            assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+            assert json.loads(path.read_text()) == payload
+        workflow = case.get("workflow-v2")
+        assert workflow["state"] == "sheet_saved"
+        assert workflow["selected_ocr_result_id"] == active
+        assert workflow["saved_sheet_id"] == saved["id"]
+        assert workflow["ocr_job"]["status"] == "done"
+        assert get_ocr_job(case.job) == owned_job
+        assert get_ocr_job(job_id) == before
+        assert before["status"] == "failed"
+        assert before["error_message"] == failure
+        assert before["output_reference"] == f"file://{path}"
 
-    workflow = order_service.get_order_workflow_state(order["id"], refresh=True)
 
-    latest_evidence = order_service.get_latest_ocr_evidence_run(order["id"], backfill_from_cache=False)
-    rerun_job = get_ocr_job(f"OCR-{order['id']}")
-
-    assert isinstance(workflow, dict)
-    assert isinstance(latest_evidence, dict)
-    assert latest_evidence["source"] == "ocr-rerun-reconcile"
-    assert latest_evidence["id"] != old_evidence["id"]
-    assert isinstance(rerun_job, dict)
-    assert rerun_job["status"] == "done"
-    assert rerun_job["output_reference"] == "gs://bucket/output/OCR-order-rerun-timeout.pdf.json"
-
-
-def test_refresh_workflow_state_returns_rerun_failed_keep_current_when_latest_rerun_failed(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-rerun-failed", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"])
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
+def _unowned_completed_rerun_specimen(case_id, order_id):
+    specimens = {
+        "awaiting-newer-nine": {
+            "status": "done",
+            "stage": "done",
+            "input_reference": "gs://bucket/input/OCR-order-rerun-new.pdf",
+            "output_reference": "gs://bucket/output/OCR-order-rerun-new.pdf.json",
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
+                    "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
+                }
+            ],
+            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|9|",
+            "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "9"]]}],
+            "template_resolution": {
+                "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+                "confidence": 0.99,
+                "blocked": False,
+                "blocked_reasons": [],
+            },
+            "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "9"]]}],
+            "table_box": [0.1, 0.2, 0.9, 0.8],
+            "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
+            "grid_row_edges": [0.2, 0.4, 0.8],
         },
-    )
-    order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [["03/22", "朝", "Menu A", "5"]],
-            "row_ids": ["row-1"],
+        "awaiting-older-eight": {
+            "status": "done",
+            "stage": "done",
+            "input_reference": "gs://bucket/input/OCR-order-rerun-old.pdf",
+            "output_reference": f"gs://bucket/output/OCR-{order_id}_20260322_115959_999999.pdf.json",
+            "pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png"}],
+            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
+            "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "8"]]}],
+            "template_resolution": {
+                "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+                "confidence": 0.99,
+                "blocked": False,
+                "blocked_reasons": [],
+            },
+            "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "8"]]}],
+            "table_box": [0.1, 0.2, 0.9, 0.8],
+            "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
+            "grid_row_edges": [0.2, 0.4, 0.8],
         },
-        edited_by="tester",
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "get_ocr_job",
-        lambda _job_id: {
-            "id": f"OCR-{order['id']}",
-            "status": "failed",
-            "metrics": {"processing_stage": "ocr_pipeline", "request_mode": "ocr_rerun"},
+        "running-current-nine": {
+            "status": "done",
+            "stage": "done",
+            "input_reference": "gs://bucket/input/OCR-order-rerun.pdf",
+            "output_reference": "gs://bucket/output/OCR-order-rerun.pdf.json",
+            "pages": [
+                {
+                    "page_index": 1,
+                    "ocr_overlay_uri": "gs://bucket/orders/page1-ocr.png",
+                    "layout_overlay_uri": "gs://bucket/orders/page1-layout.png",
+                }
+            ],
+            "table_raw": "|日付|区分|メニュー|常食|\n|---|---|---|---|\n|03/22|朝|Menu A|8|",
+            "tables": [{"page_index": 1, "rows": [["03/22", "朝", "Menu A", "8"]]}],
+            "template_resolution": {
+                "resolved_template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
+                "candidate_template_ids": ["fax_layout_regular_soft_mixer_forbidden_v1"],
+                "confidence": 0.99,
+                "blocked": False,
+                "blocked_reasons": [],
+            },
+            "quantity_subgrid_passes": [{"page_index": 1, "normalized_rows": [["03/22", "朝", "Menu A", "8"]]}],
+            "table_box": [0.1, 0.2, 0.9, 0.8],
+            "grid_column_edges": [0.1, 0.3, 0.6, 0.9],
+            "grid_row_edges": [0.2, 0.4, 0.8],
         },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "describe_job_state",
-        lambda _job: {"status": "hard_failed", "job_id": f"OCR-{order['id']}"},
-    )
+    }
+    return specimens[case_id]
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
+@pytest.mark.parametrize("case_id", [
+    "awaiting-newer-nine", "awaiting-older-eight", "running-current-nine",
+])
+def test_unowned_completed_file_cannot_finish_owned_rerun(authored_sheet_case, tmp_path, case_id):
+    from tests.helpers.authored_sheet_case import prepare_rerun
+
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    active = case.evidence
+    calls = prepare_rerun(case, cell_values="9")
+    completed_payload = _unowned_completed_rerun_specimen(case_id, case.id)
+    completed = tmp_path / (
+        f"OCR-{case.id}_20260322_115959_999999.pdf.json"
+        if case_id == "awaiting-older-eight" else "ocr-rerun-completed.json")
+    completed.write_text(json.dumps(completed_payload), encoding="utf-8")
+    pending = tmp_path / (
+        f"OCR-{case.id}_20260322_120000_000001.pdf.json"
+        if case_id == "awaiting-older-eight" else "ocr_rerun_pending_current_ref.json")
+    pending_payload = {
+        "status": "running", "stage": "ocr", "input_reference": "file://dummy-workflow.pdf",
+        "output_reference": f"file://{pending}",
+    }
+    pending.write_text(json.dumps(pending_payload), encoding="utf-8")
+    case.protected += (completed, pending)
+    status = "running" if case_id == "running-current-nine" else "awaiting_output"
+    extra = {}
+    if case_id == "awaiting-older-eight":
+        extra = {"awaiting_output_since": "2026-03-22T12:00:00",
+                 "stage_updated_at": "2026-03-22T12:00:00"}
+    reference = completed if case_id == "running-current-nine" else pending
+    with case.execution():
+        progress = order_service._update_reparse_job_progress(case.job, status=status,
+            processing_stage="ocr_pipeline", result_state=status,
+            error_message=None if status == "running" else "ocr_output_pending",
+            metrics_patch={"request_mode": "ocr_rerun", "order_id": case.id, **extra})
+        assert progress is not None
+        updated, accepted = order_service.update_job_for_workflow_attempt(
+            case.job, case.queued["ocr_job"]["workflow_attempt_id"], order_id=case.id,
+            expected_workflow_revision=case.queued["workflow"]["revision"],
+            output_reference=f"file://{reference}")
+    assert accepted is True
+    assert updated["output_reference"] == f"file://{reference}"
+    before_job = get_ocr_job(case.job)
+    with case.readonly():
+        assert order_service._reconcile_finished_ocr_rerun(case.id) is False
+        current = order_service.get_current_sheet_context(case.id)
+        latest = order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False)
+        assert latest["id"] == active
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == active
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert json.loads(completed.read_text()) == completed_payload
+        assert json.loads(pending.read_text()) == pending_payload
+    state = case.get("workflow-v2")
+    assert state["state"] == "ocr_running"
+    assert state["selected_ocr_result_id"] == active
+    assert get_ocr_job(case.job) == before_job
+    assert before_job["status"] == status
+    assert before_job["metrics"].get("rerun_terminal_receipt") is None
+    assert calls == []
+
+
+def test_owned_native_nine_requires_real_completion_selection_and_save(authored_sheet_case):
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    first = case.evidence
+    source = case.produce(cell_values="9")
+    assert case.evidence != first
+    receipt = order_service.get_ocr_evidence_run(case.evidence)["terminal_receipt"]
+    assert receipt["status"] == "done"
+    assert receipt["evidence_run_id"] == case.evidence
+    assert source["sheet"]["rows"] == [["03/22", "朝", "Menu A", "9"]]
+    saved = save_draft(case, source["sheet"])
+    with case.readonly():
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == source["sheet"]["rows"]
+    assert case.get("workflow-v2")["selected_ocr_result_id"] == case.evidence
+    assert get_ocr_job(case.job)["status"] == "done"
+
+
+
+
+
+
+
+
+def test_owned_failed_rerun_retains_selected_saved_five(monkeypatch, authored_sheet_case):
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    from tests.helpers.authored_sheet_case import prepare_rerun
+
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    active = case.evidence
+    calls = prepare_rerun(case, cell_values="9")
+
+    def recognizer_failed(**_kwargs):
+        raise RuntimeError("authored_external_recognizer_failed")
+
+    monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognizer_failed)
+    with case.execution():
+        result, error = order_service.rerun_ocr_evidence_only(case.id, job_id=case.job,
+            project_sheet=False, refresh_workflow=False)
+    assert error == "hakodate_live_rerun_failed"
+    assert result["terminal_receipt"]["status"] == "failed"
+    assert result["terminal_receipt"]["error"] == error
+    assert result["terminal_receipt"]["evidence_run_id"] is None
+    assert calls == []
+    before_job = get_ocr_job(case.job)
+    assert before_job["status"] == "failed"
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(case.id)
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["draft_id"] == saved["id"]
+        assert current["base_evidence_run_id"] == active
+        assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
     assert isinstance(workflow, dict)
     assert workflow["state"] == "rerun_failed_keep_current"
     assert workflow["primary_action"] == "rerun_ocr_pipeline"
     assert "rerun_failed_keep_current" in (workflow["warnings_json"] or [])
+    assert case.get("workflow-v2")["state"] == "ocr_failed"
+    assert get_ocr_job(case.job) == before_job
 
 
-def test_refresh_workflow_state_does_not_treat_llm_reparse_as_rerun_state(monkeypatch):
+def test_refresh_workflow_state_does_not_treat_llm_reparse_as_rerun_state(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-llm-reparse-running", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-llm-reparse-running", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     _persist_evidence(order["id"])
     monkeypatch.setattr(
         workflow_state_service,
@@ -2715,232 +1921,213 @@ def test_refresh_workflow_state_does_not_treat_llm_reparse_as_rerun_state(monkey
     assert workflow["primary_action"] in {"apply_draft", "edit_draft"}
 
 
-def test_refresh_workflow_state_returns_layout_choice_required_for_column_mapping_candidates():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-003b", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "column_mapping_candidates": [
-                {"value": "cols-a", "label": "常食 / 軟菜 / ミキサー", "score": 0.62},
-                {"value": "cols-b", "label": "常食 / 常食(袋分け) / 軟菜", "score": 0.58},
-            ],
-        },
-    )
-    from unittest.mock import patch
+def test_legacy_column_choice_cannot_override_authored_canonical_columns(authored_sheet_case):
+    from src.services.candidate_resolution_service import build_column_mapping_resolution
+    from tests.contract.test_orders_ocr_sheet_history_api import LEGACY
 
-    with patch.object(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    ):
-        workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "layout_choice_required"
-    assert workflow["primary_action"] == "resolve_layout_choice"
-    assert "column_mapping_choice_required" in (workflow["apply_gate"]["blockers"] or [])
-    decisions = workflow.get("critical_decisions") or []
-    assert any(item.get("decision_type") == "column_mapping" for item in decisions)
-
-
-def test_refresh_workflow_state_unblocks_after_column_mapping_choice(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-003bb", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "column_mapping_candidates": [
-                {"value": "cols-a", "label": "常食 / 軟菜 / ミキサー", "score": 0.62},
-                {"value": "cols-b", "label": "常食 / 常食(袋分け) / 軟菜", "score": 0.58},
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: _semantic_initial_draft(order["id"]),
-    )
-
-    first = workflow_state_service.refresh_workflow_state(order["id"])
-    assert first["state"] == "layout_choice_required"
-
-    result, error = order_service.choose_critical_decision(
-        order["id"],
-        "column_mapping",
-        "cols-a",
-        selected_by="test",
-    )
-
-    assert error is None
-    assert isinstance(result, dict)
-    next_workflow = result.get("workflow_state") or {}
-    assert next_workflow.get("state") == "apply_ready"
-    blockers = next_workflow.get("apply_gate", {}).get("blockers") or []
-    assert "column_mapping_choice_required" not in blockers
-    assert "draft_rows_empty" not in blockers
-    assert next_workflow.get("can_apply") is True
-    assert next_workflow.get("can_confirm") is True
-    assert next_workflow.get("apply_gate", {}).get("can_apply") is True
-    assert next_workflow.get("apply_gate", {}).get("can_confirm") is True
-    assert "column_mapping" not in (
-        next_workflow.get("candidate_resolution", {}).get("gate_summary", {}).get("choice_required_types") or []
-    )
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    original = _legacy_unowned_evidence_payload(extra_payload={
+        "column_mapping_candidates": [
+            {"value": "cols-a", "label": "常食 / 軟菜 / ミキサー", "score": 0.62},
+            {"value": "cols-b", "label": "常食 / 常食(袋分け) / 軟菜", "score": 0.58},
+        ],
+    })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        resolution = build_column_mapping_resolution(original)
+        assert resolution["requires_user_choice"] is True
+        assert "column_mapping_choice_required" in resolution["blocked_reasons"]
+        assert resolution["decision_type"] == "column_mapping"
+        assert [candidate["value"] for candidate in resolution["candidates"]] == ["cols-a", "cols-b"]
+    requests = [
+        ("GET", "critical-decisions", None),
+        ("POST", "critical-decisions/column_mapping", {"value": "cols-a", "selected_by": "test"}),
+    ]
+    for method, endpoint, body in requests:
+        with case.readonly():
+            response = case.client.request(method, f"/orders/{case.id}/{endpoint}",
+                headers=case.actor.headers, json=body)
+            assert response.status_code == 410
+            assert response.json() == {"detail": {**LEGACY, "endpoint": "critical-decisions"}}
+            assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+            assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert state["can_apply"] is True and state["apply_gate"]["can_apply"] is True
+        assert type(state["can_confirm"]) is bool
+        assert state["can_confirm"] == state["apply_gate"]["can_confirm"]
+        blockers = state["apply_gate"]["blockers"]
+        assert "column_mapping_choice_required" not in blockers
+        assert "draft_rows_empty" not in blockers
+        assert "column_mapping" not in state["candidate_resolution"]["gate_summary"]["choice_required_types"]
+        assert state["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] != "position_fallback"
+        assert order_service.get_current_sheet_context(case.id)["fields"] == [
+            "date_mmdd", "daypart", "menu", "qty.regular_2f"]
 
 
-def test_refresh_workflow_state_returns_draft_blocked_when_template_is_unresolved():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-003c", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "template_resolution": {
-                "resolved_template_id": "",
-                "candidate_template_ids": [],
-                "confidence": 0.2,
-                "blocked": True,
-                "blocked_reasons": ["template_resolution_missing"],
-            },
-        },
-    )
+def test_unowned_template_resolution_failure_cannot_override_owned_saved_source(authored_sheet_case):
+    from src.models.order_ocr_cache import OrderOcrCache
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "draft_blocked"
-    assert workflow["primary_action"] == "resolve_blockers"
-    assert "semantic_shell_only" in (workflow["apply_gate"]["blockers"] or [])
-
-
-def test_refresh_workflow_state_returns_review_required_for_high_risk_quantity_signals():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-004", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "cell_issues": [
-                {"issue_code": "column_swap"},
-                {"issue_code": "merged_numeric_cell"},
-            ],
-            "failed_cells": [
-                {"row_index": 0, "column_index": 3},
-            ],
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "review_required"
-    assert workflow["primary_action"] == "review_critical_cells"
-    assert workflow["can_apply"] is False
-    assert workflow["can_confirm"] is False
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert workflow["apply_gate"]["can_confirm"] is False
-    warnings = workflow["apply_gate"]["warnings"] or []
-    assert "column_mapping_review_required" in warnings
-    assert "quantity_review_required" in warnings
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    original = _legacy_unowned_evidence_payload(extra_payload={
+        "template_resolution": {"resolved_template_id": "", "candidate_template_ids": [],
+            "confidence": 0.2, "blocked": True, "blocked_reasons": ["template_resolution_missing"]},
+    })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert isinstance(state, dict)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert "semantic_shell_only" not in state["apply_gate"]["blockers"]
+        assert "template_unresolved" not in state["apply_gate"]["blockers"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
 
 
-def test_refresh_workflow_state_returns_review_required_for_low_trust_populated_draft():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-low-trust-draft", facility_hint="FAC00001", week_hint="2026-03")
-    evidence = _persist_evidence(
-        order["id"],
-        extra_payload={
-            "cell_issues": [{"issue_code": "merged_numeric_cell"}],
-        },
-    )
-    saved = draft_sheet_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
-            "header": ["日付", "区分", "メニュー", "常食", "備考"],
-            "rows": [["03/22", "朝", "Menu A", "21", ""]],
-            "row_ids": ["draft-row-1"],
-        },
-        base_evidence_run_id=evidence["id"],
-        warnings=["sheet_payload_mapping_low_confidence"],
-    )
+@pytest.mark.parametrize("fault,code", [
+    ("missing", "authored_fax_template_missing"),
+    ("incomplete", "authored_fax_template_incomplete"),
+    ("ambiguous", "authored_fax_template_ambiguous"),
+])
+def test_actual_authored_template_defects_are_refused_without_guessing_or_state_writes(authored_sheet_case, fault, code):
+    case = authored_sheet_case(quantity=5, include_remarks=False, produce=False)
+    authored = json.loads(case.source.read_text())
+    envelope = authored["facilities"][0]
+    for config in (envelope, envelope["versions"][0]["facility"]):
+        if fault == "missing":
+            config.pop("fax_template")
+        elif fault == "incomplete":
+            config["fax_template"]["columns"] = []
+        else:
+            config["fax_template_ids"] = [config["fax_template_id"], "unselected-other-template"]
+    case.source.write_text(json.dumps(authored), encoding="utf-8")
+    with case.readonly():
+        with pytest.raises(ValueError, match="^" + code + "$"):
+            config_service.get_authored_facility_config(case.facility)
+        assert order_service.get_latest_sheet_draft(case.id) is None
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+
+
+def _store_unowned_workflow_payload(case, payload):
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    with session_scope() as session:
+        cached = session.get(OrderOcrCache, case.id)
+        assert cached is not None
+        cached.payload = payload
+
+
+def test_unowned_numeric_diagnostics_cannot_block_owned_saved_five(authored_sheet_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved = save_draft(case, _semantic_initial_draft(case.id))
+    original = _legacy_unowned_evidence_payload(extra_payload={
+        "cell_issues": [{"issue_code": "column_swap"}, {"issue_code": "merged_numeric_cell"}],
+        "failed_cells": [{"row_index": 0, "column_index": 3}],
+    })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert state["can_apply"] is True
+        assert state["apply_gate"]["can_apply"] is True
+        assert type(state["can_confirm"]) is bool
+        assert state["can_confirm"] == state["apply_gate"]["can_confirm"]
+        assert "column_mapping_review_required" not in state["apply_gate"]["warnings"]
+        assert "quantity_review_required" not in state["apply_gate"]["warnings"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
+
+
+def test_formal_operator_twenty_one_is_not_blocked_by_unowned_low_trust_flags(authored_sheet_case):
+    from src.models.order_ocr_cache import OrderOcrCache
+
+    case = authored_sheet_case(quantity=5, area="X",
+        cell_values=lambda region: "5" if region["role"] == "quantity" else "")
+    edited = {"order_id": case.id, "source": "weekly_menu+ocr_payload",
+        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "remarks"],
+        "header": ["日付", "区分", "メニュー", "常食", "備考"],
+        "rows": [["03/22", "朝", "Menu A", "21", ""]], "row_ids": ["draft-row-1"]}
+    saved = save_draft(case, edited)
     assert saved is not None
+    original = _legacy_unowned_evidence_payload(extra_payload={
+        "cell_issues": [{"issue_code": "merged_numeric_cell"}],
+        "warnings": ["sheet_payload_mapping_low_confidence"],
+    })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert state["apply_gate"]["can_apply"] is True
+        assert type(state["apply_gate"]["can_confirm"]) is bool
+        assert "numeric_trust_low" not in state["apply_gate"]["warnings"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "21", ""]]
+        with session_scope() as session:
+            assert session.get(OrderOcrCache, case.id).payload == original
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
 
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "review_required"
-    assert workflow["primary_action"] == "review_critical_cells"
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert workflow["apply_gate"]["can_confirm"] is False
-    assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
+def test_formal_regular_twenty_one_and_mixer_three_are_not_inferred_from_unowned_numeric_review(history_case):
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.mixer_x"]
+    header = ["日付", "区分", "メニュー", "常食", "ミキサー"]
+    columns = [{"index": i, "source_index": i, "name": field, "header": header[i],
+        "role": ["date", "daypart", "menu_name", "quantity", "quantity"][i]}
+        for i, field in enumerate(fields)]
+    columns[3].update(diet_type="regular", area_id="X")
+    columns[4].update(diet_type="mixer", area_id="X")
+    period = "2026-03@2026-03-22~2026-03-28"
+    case = history_case(facility="FAC00006", week=period, period=period,
+        received=datetime(2026, 3, 22, 9), columns=columns, lines=[],
+        menu_entries=[{"id": "fac6-manual-march22", "monthly_menu_id": "2026-03",
+            "menu_date": date(2026, 3, 22), "daypart": "朝", "name": "Menu A",
+            "slot_index": 0, "diet_type": "regular"}])
+    raw_values = {"qty.regular_x": "5", "qty.mixer_x": ""}
+
+    def recognize(region):
+        values = {raw_values[target["field"]] for target in region["logical_targets"]}
+        assert len(values) == 1
+        return values.pop()
+
+    source = case.produce(cell_values=recognize)
+    assert source["sheet"]["rows"] == [["03/22", "朝", "Menu A", "5", ""]]
+    edited = {"order_id": case.id, "source": "weekly_menu+ocr_payload",
+        "fields": fields, "header": header,
+        "rows": [["03/22", "朝", "Menu A", "21", "3"]], "row_ids": ["row-1"]}
+    saved = save_draft(case, edited)
+    original = _legacy_unowned_evidence_payload(extra_payload={
+        "cell_issues": [{"issue_code": "merged_numeric_cell"}],
+        "warnings": ["sheet_payload_mapping_low_confidence", "sheet_ocr_review_required"],
+    })
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert state["candidate_evidence_run_id"] is None
+        assert state["apply_gate"]["can_apply"] is True
+        assert "numeric_trust_low" not in state["apply_gate"]["warnings"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "21", "3"]]
+        assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/22", "朝", "Menu A", "5", ""]]
 
 
-def test_refresh_workflow_state_uses_semantic_initial_draft_for_low_trust_review(monkeypatch):
+def test_refresh_workflow_state_clears_stale_low_trust_review_when_current_sheet_is_semantic_ready(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-semantic-bootstrap-review", facility_hint="FAC00006", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "cell_issues": [{"issue_code": "merged_numeric_cell"}],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: {
-            "order_id": order["id"],
-            "source": "weekly_menu+ocr_payload",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.mixer_x"],
-            "header": ["日付", "区分", "メニュー", "常食", "ミキサー"],
-            "rows": [["03/22", "朝", "Menu A", "21", "3"]],
-            "row_ids": ["row-1"],
-            "warnings": ["sheet_payload_mapping_low_confidence", "sheet_ocr_review_required"],
-        },
-    )
-
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "review_required"
-    assert workflow["primary_action"] == "review_critical_cells"
-    assert workflow["candidate_evidence_run_id"] is None
-    assert workflow["apply_gate"]["can_apply"] is False
-    assert workflow["apply_gate"]["can_confirm"] is False
-    assert "numeric_trust_low" in (workflow["apply_gate"]["warnings"] or [])
-
-
-def test_refresh_workflow_state_clears_stale_low_trust_review_when_current_sheet_is_semantic_ready(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(
+    order = _seed_order(authored_layout_registration,
         message_id="msg-workflow-state-current-sheet-ready",
-        facility_hint="FAC00015",
-        week_hint="2026-04",
+        facility_id="FAC00015",
+        week="2026-04@2026-04-26~2026-04-30", effective_date="2026-04-26",
     )
     _persist_evidence(
         order["id"],
@@ -2996,12 +2183,12 @@ def test_refresh_workflow_state_clears_stale_low_trust_review_when_current_sheet
     assert "numeric_trust_low" not in warnings
 
 
-def test_refresh_workflow_state_keeps_low_trust_review_when_current_sheet_still_requests_ocr_review(monkeypatch):
+def test_refresh_workflow_state_keeps_low_trust_review_when_current_sheet_still_requests_ocr_review(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(
+    order = _seed_order(authored_layout_registration,
         message_id="msg-workflow-state-current-sheet-review",
-        facility_hint="FAC00015",
-        week_hint="2026-04",
+        facility_id="FAC00015",
+        week="2026-04@2026-04-26~2026-04-30", effective_date="2026-04-26",
     )
     _persist_evidence(
         order["id"],
@@ -3057,12 +2244,22 @@ def test_refresh_workflow_state_keeps_low_trust_review_when_current_sheet_still_
     assert "numeric_trust_low" in warnings
 
 
-def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-missing-menu", facility_hint="FAC00001", week_hint="2199-11")
-    _persist_evidence(order["id"])
+def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(authored_sheet_case):
+    from src.models.menu import MonthlyMenu
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    evidence = order_service.get_ocr_evidence_run(case.evidence)
+    assert case.selected_sheet["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenu).delete()
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(case.id)
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["menu_diagnostics"]["order_codes"] == ["monthly_menu_object_missing"]
+        assert current["rows"] == []
+        assert current["draft_payload"] is None
+        assert order_service.get_ocr_evidence_run(case.evidence) == evidence
 
     assert isinstance(workflow, dict)
     assert workflow["state"] == "draft_blocked"
@@ -3075,13 +2272,13 @@ def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing():
     assert workflow["apply_gate"]["can_confirm"] is False
 
 
-def test_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing():
-    _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing()
+def test_project_workflow_state_blocks_when_monthly_menu_object_is_missing(authored_sheet_case):
+    _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(authored_sheet_case)
 
 
-def test_refresh_workflow_state_uses_saved_draft_sheet_blockers():
+def test_refresh_workflow_state_uses_saved_draft_sheet_blockers(authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-draft-blockers", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-draft-blockers", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     _persist_evidence(order["id"])
     saved = order_service.persist_sheet_draft(
         order_id=order["id"],
@@ -3108,9 +2305,9 @@ def test_refresh_workflow_state_uses_saved_draft_sheet_blockers():
     assert apply_gate["can_confirm"] is False
 
 
-def test_refresh_workflow_state_keeps_semantic_initial_draft_when_weekly_menu_warning_remains(monkeypatch):
+def test_refresh_workflow_state_keeps_semantic_initial_draft_when_weekly_menu_warning_remains(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-semantic-initial", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-semantic-initial", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     _persist_evidence(order["id"])
 
     monkeypatch.setattr(
@@ -3142,29 +2339,29 @@ def test_refresh_workflow_state_keeps_semantic_initial_draft_when_weekly_menu_wa
     assert "monthly_menu_object_missing" in (workflow["apply_gate"]["warnings"] or [])
 
 
-def test_refresh_workflow_state_blocks_on_menu_entries_missing_without_monthly_menu_object_missing(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-menu-entries-missing", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(order["id"])
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": True,
-            "entries_count": 0,
-            "order_codes": ["menu_entries_missing"],
-        },
-    )
+def test_project_workflow_state_blocks_on_menu_entries_missing_without_monthly_menu_object_missing(authored_sheet_case):
+    from src.models.menu import MonthlyMenu
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    evidence = order_service.get_ocr_evidence_run(case.evidence)
+    with session_scope() as session:
+        session.query(MonthlyMenuEntry).delete()
+        assert session.get(MonthlyMenu, "2026-03") is not None
+    with case.readonly():
+        workflow = workflow_state_service.project_workflow_state(case.id)
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["menu_diagnostics"]["order_codes"] == ["menu_entries_missing"]
+        assert current["rows"] == []
+        assert current["draft_payload"] is None
+        assert order_service.get_ocr_evidence_run(case.evidence) == evidence
 
     assert isinstance(workflow, dict)
     assert workflow["state"] == "draft_blocked"
     blockers = workflow["apply_gate"]["blockers"] or []
     assert "menu_entries_missing" in blockers
     assert "monthly_menu_object_missing" not in blockers
+    assert workflow["apply_gate"]["can_apply"] is False
+    assert workflow["apply_gate"]["can_confirm"] is False
 
 
 def test_refresh_workflow_state_uses_current_sheet_context_menu_diagnostics_without_relookup(monkeypatch, authored_sheet_case):
@@ -3265,9 +2462,9 @@ def test_project_workflow_state_uses_canonical_order_week_over_stale_current_she
         f.client.close()
 
 
-def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_blockers(monkeypatch):
+def test_refresh_workflow_state_prefers_clean_saved_draft_over_stale_layout_blockers(monkeypatch, authored_layout_registration):
     order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-clean-draft-override", facility_hint="FAC00001", week_hint="2026-03")
+    order = _seed_order(authored_layout_registration, message_id="msg-workflow-state-clean-draft-override", facility_id="FAC00001", week="2026-03@2026-03-22~2026-03-28", effective_date="2026-03-22")
     _persist_evidence(
         order["id"],
         extra_payload={
@@ -3408,100 +2605,53 @@ def test_project_workflow_state_does_not_mutate_saved_sheet_blockers_on_read(
         f.client.close()
 
 
-def test_refresh_workflow_state_returns_layout_choice_required_for_critical_quantity_candidates():
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-005", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "critical_quantity_candidates": [
-                {
-                    "candidate_id": "qty-a",
-                    "candidate_type": "critical_quantity_candidate",
-                    "value": "qty-a",
-                    "label": "3を採用",
-                    "score": 0.81,
-                    "reason": "high_impact_total_cell",
-                    "evidence_ref": {"page": 1, "row_index": 7, "column_index": 4},
-                    "critical": True,
-                },
-                {
-                    "candidate_id": "qty-b",
-                    "candidate_type": "critical_quantity_candidate",
-                    "value": "qty-b",
-                    "label": "8を採用",
-                    "score": 0.76,
-                    "reason": "high_impact_total_cell",
-                    "evidence_ref": {"page": 1, "row_index": 7, "column_index": 4},
-                    "critical": True,
-                },
-            ],
-        },
-    )
+@pytest.mark.parametrize("candidate_kind", ["critical_quantity_candidates", "quantity_candidates"],
+    ids=["refuse_legacy_high_impact_quantity_adoption", "formal_manual_three_not_legacy_quantity_choice"])
+def test_legacy_quantity_choices_are_not_authority_for_current_operator_values(authored_sheet_case, candidate_kind):
+    from src.services.candidate_resolution_service import build_quantity_resolution
+    from tests.contract.test_orders_ocr_sheet_history_api import LEGACY
 
-    workflow = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert isinstance(workflow, dict)
-    assert workflow["state"] == "layout_choice_required"
-    assert workflow["primary_action"] == "resolve_layout_choice"
-    blockers = workflow["apply_gate"]["blockers"] or []
-    assert "quantity_choice_required" in blockers
-    decisions = workflow.get("critical_decisions") or []
-    quantity_decision = next(item for item in decisions if item.get("decision_type") == "quantity")
-    assert quantity_decision["candidate_set_json"]["ambiguity_scope"] == "high_impact_quantity"
-
-
-def _assert_refresh_workflow_state_clears_review_required_after_quantity_choice(monkeypatch):
-    order_service.clear_all()
-    order = _seed_order(message_id="msg-workflow-state-005b", facility_hint="FAC00001", week_hint="2026-03")
-    _persist_evidence(
-        order["id"],
-        extra_payload={
-            "cell_issues": [
-                {"issue_code": "merged_numeric_cell"},
-            ],
-            "quantity_candidates": [
-                {"value": "qty-a", "label": "3を採用", "score": 0.81},
-                {"value": "qty-b", "label": "8を採用", "score": 0.76},
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        workflow_state_service,
-        "_build_menu_context_from_current_sheet_context",
-        lambda **_kwargs: {
-            "month_id": "2026-03",
-            "weekly_menu_missing": False,
-            "menu_entries_missing": False,
-            "entries_count": 21,
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_initial_sheet_draft",
-        lambda _order_id: _semantic_initial_draft(order["id"]),
-    )
-
-    first = workflow_state_service.refresh_workflow_state(order["id"])
-
-    assert first["state"] == "layout_choice_required"
-    assert "quantity_choice_required" in (first["apply_gate"]["blockers"] or [])
-
-    result, error = order_service.choose_critical_decision(
-        order["id"],
-        "quantity",
-        "qty-a",
-        selected_by="test",
-    )
-
-    assert error is None
-    assert isinstance(result, dict)
-    next_workflow = result.get("workflow_state") or {}
-    assert next_workflow.get("state") == "apply_ready"
-    assert next_workflow.get("apply_gate", {}).get("can_apply") is True
-    warnings = next_workflow.get("apply_gate", {}).get("warnings") or []
-    assert "quantity_review_required" not in warnings
-
-
-def test_refresh_workflow_state_clears_review_required_after_quantity_choice(monkeypatch):
-    _assert_refresh_workflow_state_clears_review_required_after_quantity_choice(monkeypatch)
+    case = authored_sheet_case(quantity=5, include_remarks=False)
+    saved_five = save_draft(case, _semantic_initial_draft(case.id))
+    if candidate_kind == "critical_quantity_candidates":
+        candidates = [
+            {"candidate_id": "qty-a", "candidate_type": "critical_quantity_candidate",
+             "value": "qty-a", "label": "3を採用", "score": 0.81,
+             "reason": "high_impact_total_cell",
+             "evidence_ref": {"page": 1, "row_index": 7, "column_index": 4}, "critical": True},
+            {"candidate_id": "qty-b", "candidate_type": "critical_quantity_candidate",
+             "value": "qty-b", "label": "8を採用", "score": 0.76,
+             "reason": "high_impact_total_cell",
+             "evidence_ref": {"page": 1, "row_index": 7, "column_index": 4}, "critical": True},
+        ]
+        extra = {candidate_kind: candidates}
+    else:
+        candidates = [{"value": "qty-a", "label": "3を採用", "score": 0.81},
+                      {"value": "qty-b", "label": "8を採用", "score": 0.76}]
+        extra = {"cell_issues": [{"issue_code": "merged_numeric_cell"}], candidate_kind: candidates}
+    original = _legacy_unowned_evidence_payload(extra_payload=extra)
+    _store_unowned_workflow_payload(case, original)
+    with case.readonly():
+        resolution = build_quantity_resolution(original)
+        assert resolution["requires_user_choice"] is True
+        assert "quantity_choice_required" in resolution["blocked_reasons"]
+        assert resolution["ambiguity_scope"] == "high_impact_quantity"
+        assert [candidate["value"] for candidate in resolution["candidates"]] == ["qty-a", "qty-b"]
+        response = case.client.post(f"/orders/{case.id}/critical-decisions/quantity",
+            headers=case.actor.headers, json={"value": "qty-a", "selected_by": "test"})
+        assert response.status_code == 410
+        assert response.json() == {"detail": {**LEGACY, "endpoint": "critical-decisions"}}
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved_five
+        assert order_service.get_current_sheet_context(case.id)["rows"] == [["03/22", "朝", "Menu A", "5"]]
+    # The replacement is an explicit operator sheet value, never a guessed candidate adoption.
+    edited = _semantic_initial_draft(case.id, rows=[["03/22", "朝", "Menu A", "3"]])
+    saved_three = save_draft(case, edited)
+    with case.readonly():
+        state = workflow_state_service.project_workflow_state(case.id)
+        assert state["state"] == "apply_ready"
+        assert state["apply_gate"]["can_apply"] is True
+        assert "quantity_review_required" not in state["apply_gate"]["warnings"]
+        assert draft_sheet_service.get_selected_sheet_draft(case.id) == saved_three
+        current = order_service.get_current_sheet_context(case.id)
+        assert current["base_evidence_run_id"] == case.evidence
+        assert current["rows"] == [["03/22", "朝", "Menu A", "3"]]

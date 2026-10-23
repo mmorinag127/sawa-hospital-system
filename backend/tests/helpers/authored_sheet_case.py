@@ -21,8 +21,15 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
     with registered_hospital_operator(monkeypatch) as actor:
         cases = []
 
-        def create(*, quantity, area="2F", cell_values=None, include_remarks=True, produce=True):
+        def create(*, quantity, area="2F", cell_values=None, include_remarks=True, produce=True,
+                   menu_date=date(2026, 3, 22), period=PERIOD, facility="FAC00001"):
+            from src.services.sheet_week_service import parse_sheet_week_value
+
             assert not cases, "one owned source/order per case"
+            _, start, end = parse_sheet_week_value(period)
+            assert start is not None and end is not None, "explicit authored period required"
+            assert type(menu_date) is date and start <= menu_date <= end, "authored menu date outside explicit period"
+            assert isinstance(facility, str) and facility.strip() == facility and facility, "explicit authored facility required"
             fields = ["date_mmdd", "daypart", "menu", f"qty.regular_{area.lower()}", "remarks"]
             headers = ["日付", "区分", "メニュー", "常食2F" if area == "2F" else "常食", "備考"]
             roles = ["date", "daypart", "menu_name", "quantity", "note"]
@@ -32,11 +39,12 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
                        for i, (field, header, role) in enumerate(zip(fields, headers, roles, strict=True))]
             columns[3].update(diet_type="regular", area_id=area)
             case = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
-                week=PERIOD, period=PERIOD, received=datetime(2026, 3, 22, 9),
-                lines=[_line("2026-03-22", "Menu A", quantity, daypart="朝", area=area)],
+                facility=facility,
+                week=period, period=period, received=datetime.combine(menu_date, datetime.min.time()).replace(hour=9),
+                lines=[_line(menu_date.isoformat(), "Menu A", quantity, daypart="朝", area=area)],
                 columns=columns, menu_entries=[{
-                    "id": "march-22-breakfast-menu-a", "monthly_menu_id": "2026-03",
-                    "menu_date": date(2026, 3, 22), "daypart": "朝", "name": "Menu A",
+                    "id": f"{menu_date.isoformat()}-breakfast-menu-a", "monthly_menu_id": menu_date.strftime("%Y-%m"),
+                    "menu_date": menu_date, "daypart": "朝", "name": "Menu A",
                     "slot_index": 0, "diet_type": "regular",
                 }])
             cases.append(case)
@@ -52,8 +60,9 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
 
 def prepare_rerun(case, *, cell_values="9"):
     """Real queue/claim and capture; only rendering/recognition are component doubles."""
+    previous = order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False)
     calls = case.prepare_provider(cell_values=cell_values)
-    assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+    assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) == previous
     return calls
 
 

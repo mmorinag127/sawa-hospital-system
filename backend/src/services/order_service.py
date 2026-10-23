@@ -7643,7 +7643,8 @@ def _list_daily_output_override_editor_rows(
         facility_label = _resolve_facility_label_for_code(
             accepted_candidate["configured_input"]["facility"],
         )
-        lines = build_order_lines_for_outputs(order_payload, accepted_candidate=accepted_candidate)
+        lines = build_order_lines_for_outputs(order_payload, accepted_candidate=accepted_candidate,
+                                             include_daily_overrides=False)
         for line in lines:
             line_date = _normalize_entry_date(line.get("date"))
             if line_date != target_date:

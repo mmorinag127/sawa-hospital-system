@@ -15,12 +15,14 @@ from src.services import canonical_facility_lineage as lineage, config_service
 from src.services import menu_service, order_workflow_v2_service as workflow
 from tests.helpers.ingest_original import (
     configure_delivery, reserve_uploaded_original, register_authored_original,
-    authored_pipeline_provider, process_uploaded_original,
 )
 
 
 def accepted_materializer(monkeypatch, tmp_path, names, quantities, *, accessory_masters=None):
     # All values here are authored test inputs, not inferred customer settings.
+    for key in ("RAW_BUCKET", "OCR_OUTPUT_BUCKET", "K_SERVICE", "FACILITY_MASTER_URI"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "native-artifacts"))
     period = "2026-06@2026-06-21~2026-06-27"
     facility = {
         "facility_id": "FAC00003", "facility_name": "Synthetic June materializer fixture",
@@ -45,12 +47,8 @@ def accepted_materializer(monkeypatch, tmp_path, names, quantities, *, accessory
     policy = tmp_path / "materializer-policy.json"
     policy.write_text(json.dumps({"ocr_retry_limit": 1, "quantity_rules": {"zero_as_empty": False},
                                   "backlog_policy": {"skip_ocr_for_stale": False}}))
-    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
-    monkeypatch.delenv("K_SERVICE", raising=False)
     monkeypatch.setenv("FACILITY_MASTER_PATH", str(master))
     monkeypatch.setattr(config_service, "INGEST_POLICY_PATH", policy)
-    monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
-    monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "owned-artifacts"))
     with fitz.open() as pdf:
         page = pdf.new_page()
         page.insert_text((40, 40), "Synthetic FAC00003 / 2026-06-21 through 2026-06-27")
@@ -111,20 +109,20 @@ def accepted_materializer(monkeypatch, tmp_path, names, quantities, *, accessory
     context, error = workflow.confirm_context(order_id="ORD-WF2", facility_id="FAC00003",
         week_start="2026-06-21", week_end="2026-06-27", expected_revision=current["revision"])
     assert error is None, error
-    # Only the external recognizer component is doubled. Ownership, execution,
-    # first-pass evidence publication and adoption use the real services.
-    authored_pipeline_provider(monkeypatch, table_rows=[
-        ["06/21", "昼", name, str(quantity)] for name, quantity in zip(names, quantities, strict=True)])
-    delivered = process_uploaded_original("materializer-upload")
-    assert delivered["result"] == "business_done", delivered
-    results, error = workflow.list_ocr_results("ORD-WF2")
-    assert error is None, error
-    assert len(results["results"]) == 1
-    current, error = workflow.get_workflow_readonly("ORD-WF2")
-    assert error is None, error
-    selected, error = workflow.select_ocr_result("ORD-WF2", results["results"][0]["ocr_result_id"],
-                                                expected_revision=current["revision"])
-    assert error is None, error
+    from tests.helpers.native_selection import select_authored_native_result
+    from src.services.template_field_schema_service import canonical_field_name_from_template_column
+
+    columns = deepcopy(facility["fax_template"]["columns"])
+    for column in columns:
+        column["name"] = canonical_field_name_from_template_column(column)
+        assert column["name"] and type(column["source_index"]) is int
+        assert column["role"]
+    evidence = select_authored_native_result(monkeypatch, order_id="ORD-WF2",
+        table_rows=[["06/21", "昼", name, str(quantity)]
+                    for name, quantity in zip(names, quantities, strict=True)],
+        columns=columns, unlisted_cells="", artifact_root=tmp_path / "native-artifacts")
+    assert evidence["terminal_receipt"]["status"] == "done"
+    assert evidence["terminal_receipt"]["evidence_run_id"] == evidence["id"]
     current, error = workflow.get_workflow_readonly("ORD-WF2")
     assert error is None, error
     saved, error = workflow.save_sheet(order_id="ORD-WF2", sheet=sheet,
