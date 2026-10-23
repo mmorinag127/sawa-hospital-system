@@ -1,0 +1,20 @@
+{
+  "ORDbabf3c73": {
+    "status": "source_mismatch",
+    "resolved": false,
+    "reviewed_on": "2026-10-24",
+    "method": "Rendered the sole physical PDF page with pdftoppm and inspected facility and body dates; pdfinfo confirms one page. Fax header P.001/002 is not the physical PDF page count.",
+    "facility_id": "FAC00009",
+    "facility_name": "グループホームそよかぜ",
+    "pdf_page_count": 1,
+    "pdf_body_period": {"start": "2026-02-15", "end": "2026-02-21"},
+    "label_period": {"start": "2026-02-01", "end": "2026-02-08"},
+    "manual_label_path": "manual_labels/ORDbabf3c73.expected_sheet.json",
+    "files": [
+      {"path": "pdfs/ORDbabf3c73.pdf", "sha256": "b8c072e0748f1f63ad964895ae4d74d2c6d99000968b7598e448ddcfd35ffeca"},
+      {"path": "manual_labels/ORDbabf3c73.expected_sheet.json", "sha256": "6eeda382224f58630a9884832dc4e8cf63fb1e0503951255d150cb58643b3a1d"},
+      {"path": "llm/ORDbabf3c73.base_sheet.json", "sha256": "6eeda382224f58630a9884832dc4e8cf63fb1e0503951255d150cb58643b3a1d"}
+    ],
+    "restriction": "Do not execute or report this PDF/label pair as recognition accuracy or same-input production parity. Preserve original files; a verified matching label or original is still required."
+  }
+}

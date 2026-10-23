@@ -23,8 +23,8 @@
         "note": "Depends on provisional base sheet label"
       },
       "ORDbabf3c73": {
-        "status": "trusted",
-        "note": "Reviewed row-index copy label"
+        "status": "source_mismatch",
+        "note": "PDF body is February 15-21, label is February 1-8; see source_alignment_review.json. Unresolved, not recognition proof."
       }
     },
     "manual_labels": {
@@ -33,8 +33,8 @@
         "note": "Enable after exporting manual label and adding matching fixture PDF"
       },
       "ORDbabf3c73": {
-        "status": "trusted",
-        "note": "Optional manual-label override path for reviewed case"
+        "status": "source_mismatch",
+        "note": "PDF body is February 15-21, label is February 1-8; see source_alignment_review.json. Operator-data storage coverage is separate from recognition proof."
       }
     }
   }
