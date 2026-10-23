@@ -81,11 +81,62 @@ class ReceiptContractTest(unittest.TestCase):
                 output = Path(directory) / 'evidence'
                 with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
                      patch.object(RUNNER, 'MANIFEST', manifest), patch.object(RUNNER, 'clean_tree', return_value=True), \
-                     patch.object(RUNNER, 'git', side_effect=['a' * 40, ('c' if changed else 'a') * 40]), \
+                     patch.object(RUNNER, 'git', side_effect=['a' * 40, ('c' if changed else 'a') * 40, ('c' if changed else 'a') * 40]), \
                      patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], code)):
                     self.assertEqual(RUNNER.run(output), 1)
                 self.assertFalse((output / 'receipt.json').exists())
                 self.assertTrue((output / 'failed-run.json').exists())
+
+    def test_independent_failures_are_collected_in_one_serial_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            commands = [{'name': f'group-{index}', 'command': f'echo group-{index}'} for index in range(3)]
+            manifest.write_text(json.dumps({'version': 1, 'commands': commands}))
+            output = Path(directory) / 'evidence'
+            with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(RUNNER.subprocess, 'run', side_effect=[
+                     subprocess.CompletedProcess([], code) for code in (2, 0, 3)]) as execute:
+                self.assertEqual(RUNNER.run(output), 1)
+            self.assertEqual(execute.call_count, 3)
+            self.assertEqual([call.args[0][-1] for call in execute.call_args_list],
+                             [item['command'] for item in commands])
+            failed = json.loads((output / 'failed-run.json').read_text())
+            self.assertEqual([item['exit_code'] for item in failed['commands']], [2, 0, 3])
+            self.assertFalse((output / 'receipt.json').exists())
+
+    def test_source_change_stops_remaining_groups_and_never_signs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            manifest.write_text(json.dumps({'version': 1, 'commands': [
+                {'name': 'first', 'command': 'true'}, {'name': 'second', 'command': 'true'}]}))
+            output = Path(directory) / 'evidence'
+            with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'clean_tree', side_effect=[True, False, False]), \
+                 patch.object(RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
+                self.assertEqual(RUNNER.run(output), 1)
+            self.assertEqual(execute.call_count, 1)
+            failed = json.loads((output / 'failed-run.json').read_text())
+            self.assertFalse(failed['clean_after'])
+            self.assertFalse((output / 'receipt.json').exists())
+
+    def test_transient_head_change_is_not_erased_by_returning_to_original_head(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            manifest.write_text(json.dumps({'version': 1, 'commands': [{'name': 'only', 'command': 'true'}]}))
+            output = Path(directory) / 'evidence'
+            with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(RUNNER, 'git', side_effect=['a' * 40, 'c' * 40, 'a' * 40]), \
+                 patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+                self.assertEqual(RUNNER.run(output), 1)
+            self.assertTrue((output / 'failed-run.json').exists())
+            self.assertFalse((output / 'receipt.json').exists())
 
     def test_workflow_receipt_gate_executes_owner_sha_and_signature_rejections(self):
         shim = '''git() {

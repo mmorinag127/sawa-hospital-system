@@ -18,6 +18,12 @@ including packaged baseline migration. Missing PostgreSQL/native preparation is
 not a successful skipped verification. Commands run serially and do not rebuild
 or reinstall their environments for each test invocation.
 
+Ordinary command failures are collected across the independent command groups
+in the same serial batch, so one failure does not hide the other results.
+After each group, a changed HEAD, manifest or dirty source stops the batch.
+An observed source change remains a failure even if HEAD later returns to its
+starting value. Any failed group or source change prevents signing a receipt.
+
 ```sh
 python3 scripts/local_hospital_test_runner.py --output /tmp/sawa-hospital-receipt
 ```

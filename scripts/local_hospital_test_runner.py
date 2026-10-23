@@ -82,6 +82,7 @@ def run(output: Path) -> int:
     os.environ["SAWA_LOCAL_RUN_ID"] = str(time.time_ns())
     os.environ["SAWA_LOCAL_EVIDENCE_DIR"] = str(output.resolve())
     records = []
+    source_stable = True
     for index, item in enumerate(commands):
         name, command = item.get("name"), item.get("command")
         if not isinstance(name, str) or not isinstance(command, str):
@@ -91,14 +92,16 @@ def run(output: Path) -> int:
             result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
         records.append({"name": name, "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
                         "log_sha256": digest(log), "exit_code": result.returncode})
-        if result.returncode:
+        if (git("rev-parse", "HEAD") != source_sha_start
+                or digest(MANIFEST) != definition_start or not clean_tree()):
+            source_stable = False
             break
     source_sha_end = git("rev-parse", "HEAD")
     receipt = {"receipt_version": 1, "owner_attestation": "manual", "source_sha_start": source_sha_start,
                "source_sha_end": source_sha_end,
                "clean_before": True, "clean_after": clean_tree(), "definition_sha256": digest(MANIFEST),
                "commands": records}
-    if (source_sha_start != source_sha_end or definition_start != digest(MANIFEST)
+    if (not source_stable or source_sha_start != source_sha_end or definition_start != digest(MANIFEST)
             or not receipt["clean_after"] or len(records) != len(commands)
             or any(record["exit_code"] != 0 for record in records)):
         (output / "failed-run.json").write_text(json.dumps(receipt, indent=2) + "\n")
