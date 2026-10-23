@@ -205,6 +205,39 @@ def processing_configuration_matches(session, order_id, captured):
                 "facility": binding["facility"], "policy": binding["configuration"]["policy"]})
 
 
+
+def validate_candidate_template_source(session, order_id, captured, template_version_id):
+    """Validate the declared frozen source without converting its template lineage."""
+    from src.models.facility_template_version import FacilityTemplateVersion
+    from src.services.initial_saved_source_service import validate_saved_source
+    from src.services.workflow_attempt_guard_service import snapshots_equal
+
+    if not isinstance(captured.get("initial_saved_import"), dict):
+        raise ValueError("initial_saved_candidate_source_invalid")
+    binding = get_binding(session, order_id, template_version_id=template_version_id)
+    receipt = captured.get("initial_saved_source_receipt")
+    if (binding is None or not isinstance(receipt, dict)
+            or captured["initial_saved_import"] != binding["record"]
+            or not snapshots_equal(captured.get("configured_input"), {
+                "facility": binding["facility"], "policy": binding["configuration"]["policy"]})
+            or not snapshots_equal(captured.get("original_template_lineage"), receipt)
+            or not snapshots_equal(captured.get("original_template_source_proof"), receipt)):
+        raise ValueError("initial_saved_candidate_source_changed")
+    snapshot = validate_saved_source(session, receipt)
+    template = snapshot["template"]
+    if (snapshot["order"]["id"] != order_id or not isinstance(template, dict)
+            or template.get("id") != template_version_id
+            or snapshot["order"]["template_version_id"] != template_version_id
+            or not snapshots_equal(captured.get("order"), snapshot["order"])
+            or not snapshots_equal(captured.get("original_template_projection"), template)):
+        raise ValueError("initial_saved_candidate_template_changed")
+    physical = session.get(FacilityTemplateVersion, template_version_id,
+                           populate_existing=True, with_for_update=True)
+    if physical is None or not snapshots_equal(
+            {column.key: getattr(physical, column.key) for column in FacilityTemplateVersion.__table__.columns}, template):
+        raise ValueError("initial_saved_candidate_template_changed")
+
+
 def capture_queued_processing_input(session, order_id, captured):
     if captured.get("initial_saved_import") is None:
         return captured
