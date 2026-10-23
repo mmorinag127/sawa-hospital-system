@@ -35,6 +35,8 @@ from src.staging_data import DatasetMiddleware
 from src.maintenance.formal_migration_schema import require_formal_head
 
 app = FastAPI(title="Hospital Order System API")
+from src.api import staging_source_probe
+app.include_router(staging_source_probe.router)
 app.add_middleware(DatasetMiddleware)
 # Full OCR evidence can exceed Cloud Run's buffered response limit.
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=1)
