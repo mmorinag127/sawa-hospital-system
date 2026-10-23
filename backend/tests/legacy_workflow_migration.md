@@ -3,6 +3,29 @@
 These are local component contracts, not recognition accuracy or live FAX proof.
 No new test run has been performed during this implementation batch.
 
+## Current Consolidation Checkpoint (2026-10-24)
+
+The paragraphs below retain the chronological preparation audit, not a current
+claim that each earlier pending item remains open. Current integration HEAD
+`ee0352d8` includes the shared native helper, all frozen worker changes and the
+parent production corrections. The helper normalizes both menu identity sides
+with `_normalize_slot_text`, and both daypart sides with `_normalize_daypart_key`;
+its earlier identity dependencies below are implemented, still unverified.
+Bagging source indexes are bound by physical field identity, with upfront
+duplicate/unmapped-input rejection and separate typed-sheet rows.
+
+The parent's 25 remaining redesign projection preparations are now mapped in
+`docs/redesign_contract_migration_20261024.md`. Its six remaining API status
+preparations are mapped in `docs/status_contract_migration_20261024.md`.
+These are source/preparation updates, not executed pass results. Unowned data
+remains negative input, never selectable evidence or a terminal receipt.
+
+The workflow-state owner's final 11 preparation migrations and review remain
+separate pending work until its frozen diff is integrated. Full serial local
+validation, exact-develop integration proof and staging verification remain
+unperformed. The corpus source-period mismatch remains explicitly unresolved;
+an authored storage/export component does not establish recognition parity.
+
 `unit/test_daily_override_projection.py` now declares the saved facility in every
 pure candidate. Added two foreign-caller cases (foreign override only / owned
 and foreign overrides) require the accepted configured facility to win, retain

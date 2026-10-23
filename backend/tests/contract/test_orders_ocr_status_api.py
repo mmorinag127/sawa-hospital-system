@@ -110,21 +110,19 @@ def test_owned_running_job_is_not_completed_by_unowned_cache_success(history_cas
         assert session.get(OrderOcrCache, f.id).payload == cached_input
 
 
-def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeypatch, owned_registration):
-    order_service.clear_all()
-    _create_seed_order(owned_registration, "msg-status-api-read-workflow-no-refresh")
+def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeypatch, history_case):
+    case = _owned_status_case(history_case)
+    original = order_service.get_order_workflow_state
 
-    def _fake_workflow_state(_order_id: str, *, refresh: bool = False):
-        if refresh:
-            raise AssertionError("GET /orders must not refresh workflow state")
-        return None
+    def no_refresh(order_id, *, refresh=False):
+        assert refresh is False, "GET /orders must not refresh workflow state"
+        return original(order_id, refresh=False)
 
-    monkeypatch.setattr(orders_api.order_service, "get_order_workflow_state", _fake_workflow_state)
-
-    client = TestClient(app)
-    res = client.get("/orders?include_ocr=true")
-
-    assert res.status_code == 200
+    monkeypatch.setattr(order_service, "get_order_workflow_state", no_refresh)
+    with case.readonly():
+        response = case.client.get("/orders?include_ocr=true", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        assert any(row["id"] == case.id for row in response.json()["orders"])
 
 
 @pytest.mark.parametrize("failure", ["sheet_date_anchor_drift", "main_ocr_failed:gemini"],
@@ -399,51 +397,42 @@ def test_done_owned_rerun_keeps_stale_pending_diagnostics_readonly(history_case,
         assert session.get(OrderOcrCache, case.id).payload == cached_input
 
 
-def test_detail_reads_do_not_wait_for_missing_ocr_output_and_surface_rerun(monkeypatch, owned_registration):
-    order_service.clear_all()
-    order = _create_seed_order(owned_registration, "msg-status-api-loading-root-fix")
+def test_detail_reads_do_not_wait_for_missing_ocr_output_and_surface_rerun(monkeypatch, history_case):
+    from src.services import hakodate_cell_ocr_batch_service as batch
 
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="failed")
-    update_job(
-        job_id,
-        status="failed",
-        output_reference="file://missing-output.json",
-        error_message="ocr_output_missing",
-        metrics={"order_id": order["id"]},
-    )
+    case = _owned_status_case(history_case)
+    calls = case.prepare_provider(cell_values="5")
 
-    def _raise_missing(_uri: str):
-        raise FileNotFoundError("missing object")
+    def missing_external_output(**_kwargs):
+        raise FileNotFoundError("ocr_output_missing")
 
-    def _retry_called(*_args, **_kwargs):
-        raise AssertionError("detail read path must not retry OCR output recovery")
+    monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", missing_external_output)
+    with case.execution():
+        result, error = order_service.rerun_ocr_evidence_only(case.id, job_id=case.job,
+            project_sheet=False, refresh_workflow=False)
+    assert result["terminal_receipt"]["status"] == "failed"
+    assert result["terminal_receipt"]["evidence_run_id"] is None
+    assert error == "hakodate_live_rerun_failed" and calls == []
+    before = get_job(case.job)
+    assert before["status"] == "failed"
 
-    monkeypatch.setattr(orders_api, "load_bytes_from_uri", _raise_missing)
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", _raise_missing)
-    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", _retry_called)
+    def no_recovery(*_args, **_kwargs):
+        raise AssertionError("HTTP reads cannot wait for or discover missing OCR output")
 
-    client = TestClient(app)
-
-    detail_res = client.get(f"/orders/{order['id']}")
-    assert detail_res.status_code == 200
-    detail = detail_res.json()
-    assert detail.get("ocr_status") == "blocked"
-    assert detail.get("ocr_error") == "ocr_evidence_recovery_required"
-    assert detail.get("ocr_result_state") == "blocked"
-    assert detail.get("ocr_processing_stage") == "evidence_unavailable"
-    assert detail.get("ocr_updated_at") is None
-    workflow = detail.get("workflow_state") or {}
-    assert workflow.get("state") == "uploaded"
-    assert workflow.get("primary_action") == "run_ocr_pipeline"
-    assert "evidence_view_unavailable" in (workflow.get("blockers_json") or [])
-
-    output_res = client.get(f"/orders/{order['id']}/ocr-output")
-    assert output_res.status_code == 409
-    assert output_res.json() == {
-        "recovery_required": True,
-        "detail": "ocr evidence recovery required",
-    }
+    monkeypatch.setattr(order_service, "_load_pipeline_output_with_retry", no_recovery)
+    monkeypatch.setattr(order_service, "_load_pipeline_output_once", no_recovery)
+    with case.readonly():
+        detail_response = case.client.get(f"/orders/{case.id}", headers=case.actor.headers)
+        assert detail_response.status_code == 200, detail_response.text
+        detail = detail_response.json()
+        assert detail["ocr_status"] not in {"done", "running", "awaiting_output"}
+        assert detail.get("ocr_error")
+        output = case.client.get(f"/orders/{case.id}/ocr-output", headers=case.actor.headers)
+        assert output.status_code == 409, output.text
+        assert output.json() == {
+            "recovery_required": True, "detail": "ocr evidence recovery required"}
+        assert get_job(case.job) == before
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
 
 
 def test_get_ocr_output_returns_pending_when_active_ocr_rerun_output_is_pending(monkeypatch, history_case):
@@ -482,73 +471,76 @@ def test_get_ocr_output_returns_pending_when_active_ocr_rerun_output_is_pending(
             assert session.get(OrderOcrCache, case.id).payload == stale
 
 
-def test_get_order_does_not_reconcile_completed_first_pass_output(monkeypatch, tmp_path, owned_registration):
-    order_service.clear_all()
-    order = _create_seed_order(owned_registration, "msg-status-api-first-pass-reconcile")
-    output_path = tmp_path / "ocr_output_done_first_pass.json"
-    output_path.write_text(
-        json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
-        encoding="utf-8",
-    )
+def test_owned_running_detail_does_not_reconcile_unowned_first_pass_file(history_case, monkeypatch, tmp_path):
+    case = _owned_status_case(history_case)
+    case.queue()
+    with case.execution():
+        progress = order_service._update_reparse_job_progress(case.job,
+            status="running", processing_stage="ocr_pipeline")
+    assert progress is not None and progress["status"] == "running"
+    owned_before = get_job(case.job)
+    baseline = case.get()
+    output_path = tmp_path / "unowned-first-pass.json"
+    original = {"status": "done", "table_raw": "|02/15|朝|Menu A|",
+        "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}
+    output_path.write_text(json.dumps(original), encoding="utf-8")
+    case.protected += (output_path,)
+    job_id = f"OCR-{order_service.get_order_by_id(case.id)['message_id']}"
+    _, fresh = create_job(job_id, input_reference=str(case.pdf), status="running")
+    assert fresh is True
+    update_job(job_id, status="running", output_reference=f"file://{output_path}",
+        metrics={"request_mode": "ingest_first_pass"}, error_message=None)
+    diagnostic = get_job(job_id)
+    assert diagnostic["metrics"].get("workflow_attempt_id") is None
+    assert diagnostic["metrics"].get("rerun_terminal_receipt") is None
 
-    job_id = f"OCR-{order['message_id']}"
-    create_job(job_id, input_reference=order["document"], status="running")
-    update_job(
-        job_id,
-        status="running",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-    )
+    def unexpected_reconcile(*_args, **_kwargs):
+        raise AssertionError("detail GET cannot reconcile an unowned first-pass file")
 
-    seen: list[str] = []
-
-    def _fake_reconcile(target_job_id: str) -> bool:
-        seen.append(target_job_id)
-        update_job(target_job_id, status="done", error_message=None, metrics={"processing_stage": "evidence_ready"})
-        return True
-
-    monkeypatch.setattr(orders_api.order_service, "reconcile_completed_ocr_job", _fake_reconcile)
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    payload = res.json()
-    assert seen == []
-    assert payload.get("ocr_status") == "running"
-    assert get_job(job_id)["status"] == "running"
+    monkeypatch.setattr(order_service, "reconcile_completed_ocr_job", unexpected_reconcile)
+    with case.readonly():
+        response = case.client.get(f"/orders/{case.id}", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        for key in ("ocr_status", "ocr_error", "ocr_result_state", "ocr_processing_stage"):
+            assert payload.get(key) == baseline.get(key)
+        assert get_job(job_id) == diagnostic
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+        assert get_job(case.job) == owned_before
+        assert payload["ocr_status"] == "running"
+    assert json.loads(output_path.read_text()) == original
 
 
-def test_get_order_does_not_reconcile_done_first_pass_output_without_evidence(monkeypatch, tmp_path, owned_registration):
-    order_service.clear_all()
-    order = _create_seed_order(owned_registration, "msg-status-api-first-pass-done-missing-evidence")
-    output_path = tmp_path / "ocr_output_done_first_pass_missing_evidence.json"
-    output_path.write_text(
-        json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
-        encoding="utf-8",
-    )
+def test_unowned_done_message_job_does_not_publish_evidence_on_detail(history_case, monkeypatch, tmp_path):
+    case = _owned_status_case(history_case)
+    baseline = case.get()
+    output_path = tmp_path / "unowned-first-pass.json"
+    original = {"status": "done", "table_raw": "|02/15|朝|Menu A|",
+        "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}
+    output_path.write_text(json.dumps(original), encoding="utf-8")
+    case.protected += (output_path,)
+    job_id = f"OCR-{order_service.get_order_by_id(case.id)['message_id']}"
+    _, fresh = create_job(job_id, input_reference=str(case.pdf), status="done")
+    assert fresh is True
+    update_job(job_id, status="done", output_reference=f"file://{output_path}",
+        metrics={"request_mode": "ingest_first_pass"}, error_message=None)
+    diagnostic = get_job(job_id)
+    assert diagnostic["metrics"].get("workflow_attempt_id") is None
+    assert diagnostic["metrics"].get("rerun_terminal_receipt") is None
 
-    job_id = f"OCR-{order['message_id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-    )
+    def unexpected_reconcile(*_args, **_kwargs):
+        raise AssertionError("detail GET cannot reconcile an unowned first-pass file")
 
-    seen: list[str] = []
-
-    def _fake_reconcile(target_job_id: str) -> bool:
-        seen.append(target_job_id)
-        return True
-
-    monkeypatch.setattr(orders_api.order_service, "reconcile_completed_ocr_job", _fake_reconcile)
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    assert seen == []
-    assert get_job(job_id)["status"] == "done"
+    monkeypatch.setattr(order_service, "reconcile_completed_ocr_job", unexpected_reconcile)
+    with case.readonly():
+        response = case.client.get(f"/orders/{case.id}", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        for key in ("ocr_status", "ocr_error", "ocr_result_state", "ocr_processing_stage"):
+            assert payload.get(key) == baseline.get(key)
+        assert get_job(job_id) == diagnostic
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+    assert json.loads(output_path.read_text()) == original
 
 
 def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evidence_exists(monkeypatch, tmp_path, history_case):
@@ -588,51 +580,52 @@ def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evid
     assert json.loads(output_path.read_text()) == original
 
 
-def test_get_order_does_not_reconcile_done_order_bound_first_pass_output_without_evidence(monkeypatch, tmp_path, owned_registration):
-    order_service.clear_all()
-    order = _create_seed_order(owned_registration, "msg-status-api-order-bound-first-pass")
-    output_path = tmp_path / "ocr_output_done_order_bound_first_pass.json"
-    output_path.write_text(
-        json.dumps({"status": "done", "table_raw": "|02/15|朝|Menu A|", "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}),
-        encoding="utf-8",
-    )
+def test_unowned_done_order_job_does_not_publish_evidence_on_detail(history_case, monkeypatch, tmp_path):
+    case = _owned_status_case(history_case)
+    baseline = case.get()
+    output_path = tmp_path / "unowned-first-pass.json"
+    original = {"status": "done", "table_raw": "|02/15|朝|Menu A|",
+        "pages": [{"tables": [{"rows": [["02/15", "朝", "Menu A"]]}]}]}
+    output_path.write_text(json.dumps(original), encoding="utf-8")
+    case.protected += (output_path,)
+    job_id = f"OCR-{case.id}"
+    _, fresh = create_job(job_id, input_reference=str(case.pdf), status="done", order_id=case.id)
+    assert fresh is True
+    update_job(job_id, status="done", output_reference=f"file://{output_path}",
+        metrics={"request_mode": "ingest_first_pass"}, error_message=None)
+    diagnostic = get_job(job_id)
+    assert diagnostic["metrics"].get("workflow_attempt_id") is None
+    assert diagnostic["metrics"].get("rerun_terminal_receipt") is None
 
-    job_id = f"OCR-{order['id']}"
-    create_job(job_id, input_reference=order["document"], status="done")
-    update_job(
-        job_id,
-        status="done",
-        output_reference=f"file://{output_path}",
-        error_message=None,
-        metrics={"request_mode": "ingest_first_pass"},
-    )
+    def unexpected_reconcile(*_args, **_kwargs):
+        raise AssertionError("detail GET cannot reconcile an unowned first-pass file")
 
-    seen: list[str] = []
-
-    def _fake_reconcile(target_job_id: str) -> bool:
-        seen.append(target_job_id)
-        return True
-
-    monkeypatch.setattr(orders_api.order_service, "reconcile_completed_ocr_job", _fake_reconcile)
-
-    client = TestClient(app)
-    res = client.get(f"/orders/{order['id']}")
-    assert res.status_code == 200
-    assert seen == []
-    assert get_job(job_id)["status"] == "done"
+    monkeypatch.setattr(order_service, "reconcile_completed_ocr_job", unexpected_reconcile)
+    with case.readonly():
+        response = case.client.get(f"/orders/{case.id}", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        for key in ("ocr_status", "ocr_error", "ocr_result_state", "ocr_processing_stage"):
+            assert payload.get(key) == baseline.get(key)
+        assert get_job(job_id) == diagnostic
+        assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
+    assert json.loads(output_path.read_text()) == original
 
 
-def test_list_orders_include_ocr_keeps_running_status(owned_registration):
-    order_service.clear_all()
-    order = _create_seed_order(owned_registration, "msg-status-api-002")
-    create_job(f"OCR-{order['id']}", input_reference=order["document"], status="running")
-
-    client = TestClient(app)
-    res = client.get("/orders?include_ocr=true")
-    assert res.status_code == 200
-    rows = res.json().get("orders") or []
-    row = next(item for item in rows if item.get("id") == order["id"])
-    assert row.get("ocr_status") == "running"
+def test_list_orders_include_ocr_keeps_running_status(history_case):
+    case = _owned_status_case(history_case)
+    case.queue()
+    with case.execution():
+        progress = order_service._update_reparse_job_progress(case.job,
+            status="running", processing_stage="ocr_pipeline")
+    assert progress is not None and progress["status"] == "running"
+    before = get_job(case.job)
+    with case.readonly():
+        response = case.client.get("/orders?include_ocr=true", headers=case.actor.headers)
+        assert response.status_code == 200, response.text
+        (row,) = [item for item in response.json()["orders"] if item["id"] == case.id]
+        assert row["ocr_status"] == "running"
+        assert get_job(case.job) == before
 
 
 def test_list_orders_is_stably_sorted_by_received_at_and_id():
