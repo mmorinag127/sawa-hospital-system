@@ -51,6 +51,9 @@ if cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+from src.api import staging_source_settings
+from src.services import staging_source_boot_readonly
+app.include_router(staging_source_settings.router)
 app.include_router(health.router, prefix="")
 app.include_router(auth_config.router, prefix="")
 app.include_router(ingest.router, prefix="/ingest")
@@ -73,7 +76,5 @@ app.include_router(portal.router, prefix="")
 
 @app.on_event("startup")
 def _initialize_menu_schema() -> None:
-    menu_service.ensure_menu_schema()
-    facility_template_version_service.ensure_facility_template_version_schema()
-    facility_service.sync_facility_names_from_master()
+    staging_source_boot_readonly.require_initialized_runtime()
     start_uploaded_pdf_recovery_loop()

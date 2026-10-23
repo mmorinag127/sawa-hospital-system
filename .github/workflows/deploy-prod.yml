@@ -13,6 +13,11 @@ on:
       - ".github/workflows/deploy-prod.yml"
   workflow_dispatch:
     inputs:
+      settings_export_hotfix:
+        description: Approved current-prod-source read-only settings API hotfix
+        required: false
+        default: false
+        type: boolean
       order_id:
         description: "Production smoke order id"
         required: false
@@ -50,6 +55,7 @@ env:
 
 jobs:
   source-gate:
+    if: ${{ !inputs.settings_export_hotfix }}
     runs-on: ubuntu-latest
     outputs:
       order_id: ${{ steps.order.outputs.order_id }}
@@ -91,6 +97,7 @@ jobs:
           git merge-base --is-ancestor origin/develop HEAD
 
   build-backend:
+    if: ${{ !inputs.settings_export_hotfix }}
     needs: source-gate
     runs-on: ubuntu-latest
     permissions:
@@ -164,6 +171,7 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   build-frontend:
+    if: ${{ !inputs.settings_export_hotfix }}
     needs: source-gate
     runs-on: ubuntu-latest
     permissions:
@@ -209,6 +217,7 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
   production-approval:
+    if: ${{ !inputs.settings_export_hotfix }}
     needs:
       - source-gate
       - build-backend
@@ -220,6 +229,7 @@ jobs:
         run: echo "production deploy approved"
 
   prod-db-bootstrap-gate:
+    if: ${{ !inputs.settings_export_hotfix }}
     needs:
       - source-gate
       - build-backend
@@ -315,6 +325,7 @@ jobs:
           )
 
   deploy-backend:
+    if: ${{ !inputs.settings_export_hotfix }}
     needs:
       - source-gate
       - build-backend
@@ -386,6 +397,7 @@ jobs:
           retention-days: 7
 
   deploy-frontend:
+    if: ${{ !inputs.settings_export_hotfix }}
     needs:
       - source-gate
       - build-frontend
@@ -420,3 +432,13 @@ jobs:
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_web_with_checks.sh
+
+  settings-export-hotfix:
+    permissions:
+      contents: read
+      id-token: write
+    if: github.event_name == 'workflow_dispatch' && inputs.settings_export_hotfix == true
+    uses: ./.github/workflows/deploy-prod-source-export.yml
+    with:
+      production_confirmation: ${{ inputs.production_confirmation }}
+    secrets: inherit
