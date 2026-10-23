@@ -20,11 +20,11 @@ def main():
         "postgresql+psycopg2://sawa_output_test:isolated-test-only"
         "@127.0.0.1:5432/sawa_modernization_output_test"
     )
-    if os.environ.get("GITHUB_ACTIONS") != "true" or any(
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI") or any(
         os.environ.get(key) != expected for key in
         ("MODERNIZATION_PG_TEST_URI", "DB_URI", "DATABASE_URL", "ALEMBIC_DB_URI")
     ):
-        raise RuntimeError("migration probe requires the exact isolated CI test target")
+        raise RuntimeError("migration probe requires the exact isolated local test target")
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()

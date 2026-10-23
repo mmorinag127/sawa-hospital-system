@@ -2,6 +2,15 @@ name: Deploy Dev
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: "Full source SHA covered by the manually submitted local test receipt"
+        required: true
+        type: string
+      local_test_receipt:
+        description: "ECDSA-signed JSON envelope created by scripts/local_hospital_test_runner.py"
+        required: true
+        type: string
 
 env:
   NODE_OPTIONS: --use-openssl-ca
@@ -38,6 +47,29 @@ jobs:
             'SSL_CERT_DIR=/etc/ssl/certs' \
             'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require owner and exact successful local hospital test receipt
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          LOCAL_TEST_RECEIPT: ${{ inputs.local_test_receipt }}
+          SAWA_LOCAL_TEST_PUBLIC_KEY: ${{ vars.SAWA_LOCAL_TEST_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_ACTOR" = "$GITHUB_REPOSITORY_OWNER"
+          test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_REPOSITORY_OWNER"
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          git check-ref-format "refs/heads/$GITHUB_REF_NAME"
+          git fetch origin "+refs/heads/$GITHUB_REF_NAME:refs/remotes/origin/$GITHUB_REF_NAME"
+          test "$(git rev-parse "origin/$GITHUB_REF_NAME")" = "$EXPECTED_SOURCE_SHA"
+          printf '%s' "$LOCAL_TEST_RECEIPT" > "$RUNNER_TEMP/local-test-receipt.json"
+          python3 scripts/local_hospital_test_runner.py --validate "$RUNNER_TEMP/local-test-receipt.json" \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-definition-sha256 "$(sha256sum scripts/local_hospital_test_manifest.json | awk '{print $1}')"
       - uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.PROJECT_ID }}

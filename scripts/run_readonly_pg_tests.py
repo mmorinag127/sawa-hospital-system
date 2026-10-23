@@ -61,9 +61,11 @@ def require_postmaster(data, socket, port):
 
 def run(source, run_id, attempt, suite='readonly'):
     source = source.resolve(strict=True)
+    if os.environ.get('GITHUB_ACTIONS') or os.environ.get('CI'):
+        raise ValueError('readonly PG suites run only from the local hospital test entry')
     root = owned_root(run_id, attempt, suite)
-    if suite != 'readonly' and (sys.platform != 'linux' or os.environ.get('GITHUB_ACTIONS') != 'true'):
-        raise ValueError('C1 runner requires Linux GitHub Actions with PG16')
+    if suite != 'readonly' and sys.platform != 'linux':
+        raise ValueError('C1 runner requires local Linux with PG16')
     fixed_profile = suite in FIXED_PG
     root.mkdir(mode=0o700, exist_ok=False)
     evidence = root / 'evidence'

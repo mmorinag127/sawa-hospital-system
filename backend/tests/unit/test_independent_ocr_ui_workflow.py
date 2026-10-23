@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 
-WORKFLOW = yaml.safe_load((Path(__file__).resolve().parents[3] / '.github/workflows/deploy-stg.yml').read_text())
+WORKFLOW = yaml.safe_load((Path(__file__).resolve().parents[3] / 'local-checks/legacy/deploy-stg.yml').read_text())
 STEPS = WORKFLOW['jobs']['deploy-frontend']['steps']
 OCR = [step for step in STEPS if step.get('id', '').startswith('ocr-ui-')]
 

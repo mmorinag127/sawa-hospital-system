@@ -1,0 +1,1373 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - "backend/**"
+      - "agent_runtime/**"
+      - "experiments/agent_assistant/**"
+      - "frontend/**"
+      - "ocr_pipeline/**"
+      - "scripts/**"
+      - "Taskfile.yml"
+      - ".github/workflows/deploy-stg.yml"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Normal deployment or explicitly approved web image recovery"
+        required: true
+        type: choice
+        default: normal
+        options:
+          - normal
+          - recover-web-image
+      confirmation:
+        description: "Recovery only: RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES"
+        required: false
+        type: string
+      expected_revision:
+        description: "Recovery only: reviewed current web-stg revision"
+        required: false
+        type: string
+      expected_image:
+        description: "Recovery only: reviewed frontend repository@sha256 digest"
+        required: false
+        type: string
+      ocr_verification_manifest:
+        description: "Optional staging GCS manifest of identity-verified FAX uploads"
+        required: false
+        type: string
+      ocr_existing_artifact_run_id:
+        description: "Optional same-repository successful backend OCR artifact run ID; GET-only Step2 verification"
+        required: false
+        type: string
+        default: ""
+      verify_review_order_id:
+        description: "Existing artifact-bound order: inspect review dialog without submitting quantities or selecting OCR"
+        required: false
+        type: string
+        default: ""
+      menu_verification_manifest:
+        description: "Optional staging GCS manifest of verified production menu originals"
+        required: false
+        type: string
+      verify_menu_master_ui:
+        description: "Create, verify and strictly clean up this run's own staging menu master"
+        required: false
+        type: boolean
+        default: false
+      diagnose_saved_contact_replay:
+        description: "Read-only diagnosis of fixed failed staging OCR artifacts; never acceptance"
+        required: false
+        type: boolean
+        default: false
+      diagnose_reviewed_ocr:
+        description: "Read-only pinned reviewed OCR diagnosis; excludes deployment and all other verification"
+        required: false
+        type: boolean
+        default: false
+      diagnose_workflow_demand_parity:
+        description: "Read-only workflow demand comparison; excludes deployment and other verification"
+        required: false
+        type: boolean
+        default: false
+      verify_output_source_order_id:
+        description: "Optional existing staging order ID for read-only canonical output-source verification"
+        required: false
+        type: string
+        default: ""
+      verify_output_source_date:
+        description: "Required ISO date within the selected order's saved-sheet workflow week"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: deploy-stg
+  cancel-in-progress: false
+
+env:
+  NODE_OPTIONS: --use-openssl-ca
+  CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE: /etc/ssl/certs/ca-certificates.crt
+  PROJECT_ID: sawahospitalsystem
+  SAWA_STG_REPLAY_MANIFEST_URI: ${{ vars.STG_REPLAY_MANIFEST_URI }}
+  SAWA_STG_REPLAY_MANIFEST_SHA256: ${{ vars.STG_REPLAY_MANIFEST_SHA256 }}
+  REGION: asia-northeast2
+  WEB_SERVICE: web-stg
+  WORKER_SERVICE: worker-stg
+  FACILITY_MASTER_URI: ${{ vars.STG_FACILITY_MASTER_URI }}
+  WEB_URL: https://web-stg-avlnzjjrca-dt.a.run.app
+  PORTAL_PUBLIC_ORIGIN: https://web-stg-avlnzjjrca-dt.a.run.app
+  PORTAL_SESSION_ABSOLUTE_SECONDS: "604800"
+  PORTAL_SESSION_IDLE_SECONDS: "86400"
+  PORTAL_LOGIN_TTL_SECONDS: "300"
+  SHIFT_WEB_URL: https://shift-web-stg-avlnzjjrca-dt.a.run.app
+  SCHOOL_LUNCH_WEB_URL: https://price-web-stg-avlnzjjrca-dt.a.run.app
+  WORKER_URL: https://worker-stg-avlnzjjrca-dt.a.run.app
+  BACKEND_BASE_IMAGE: asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend:stg-backend-base-yomitoku-cpu-25dfbf2145a3-20260612-080320
+  BACKEND_BASE_FINGERPRINT: 25dfbf2145a30df3fc4e702be5b08e1f7126a52737e717af3d4f939f3d3637b4
+  ORDER_ID: ORD37344b72
+  STRICT_OCR_QUALITY: "0"
+  STRICT_OCR_SHEET_GATE: "0"
+  CHECK_WEB_PROXY: "1"
+  WORKFLOW_V2_DEPLOY_CHECK: "1"
+  GOOGLE_OAUTH_CLIENT_ID: ${{ vars.STG_GOOGLE_OAUTH_CLIENT_ID }}
+  PROD_GOOGLE_OAUTH_CLIENT_ID: "167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com"
+  AUTOMATION_AUTH_AUDIENCE: ${{ vars.STG_AUTOMATION_AUTH_AUDIENCE }}
+  AUTOMATION_AUTH_EMAIL: ${{ vars.STG_AUTOMATION_AUTH_EMAIL }}
+  AUTOMATION_AUTH_SUBJECT: ${{ vars.STG_AUTOMATION_AUTH_SUBJECT }}
+  SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE }}
+  SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL }}
+  SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
+
+jobs:
+  diagnose-workflow-demand-parity:
+    needs: source-gate
+    if: >-
+      needs.source-gate.result == 'success' && inputs.mode == 'normal' && inputs.diagnose_workflow_demand_parity == true &&
+      github.repository == 'mmorinag127/sawa-hospital-system' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch'
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DIAGNOSTIC_ENVIRONMENT: staging
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify named source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor 5e30eefee4f5daddc0f97b6c29cbd1ddc5172496 HEAD
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Update Python trust bundles
+        run: python -m pip install --upgrade --no-deps 'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70' 'certifi @ https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl#sha256=42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b'
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - name: Install locked diagnostic runtime
+        run: uv sync --project backend --extra dev --frozen --python 3.11
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: sawahospitalsystem
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Download pinned Cloud SQL proxy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/demand-cloud-sql-proxy" 'https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.24.1/cloud-sql-proxy.linux.amd64'
+          printf '%s  %s\n' 'fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb' "$RUNNER_TEMP/demand-cloud-sql-proxy" | sha256sum -c -
+          chmod 700 "$RUNNER_TEMP/demand-cloud-sql-proxy"
+      - name: Compare identical staging read snapshot
+        run: |
+          set -euo pipefail
+          backend/.venv/bin/python -B scripts/verify_workflow_demand_parity.py \
+            --product "$GITHUB_WORKSPACE" --proxy "$RUNNER_TEMP/demand-cloud-sql-proxy" \
+            --summary "$RUNNER_TEMP/demand-parity-summary"
+      - name: Remove private inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -x backend/.venv/bin/python ]; then
+            backend/.venv/bin/python -B scripts/verify_workflow_demand_parity.py \
+              --product "$GITHUB_WORKSPACE" --cleanup --summary "$RUNNER_TEMP/demand-parity-summary"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workflow-demand-parity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/demand-parity-summary/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  diagnose-reviewed-ocr:
+    needs: source-gate
+    if: >-
+      needs.source-gate.result == 'success' && inputs.mode == 'normal' && inputs.diagnose_reviewed_ocr == true &&
+      github.repository == 'mmorinag127/sawa-hospital-system' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch'
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      DIAGNOSTIC_ENVIRONMENT: staging
+      PRODUCT_SHA: e5282354017b43d17f0d4dbd58e73972f37a716f
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+        with:
+          path: diagnostic
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: e5282354017b43d17f0d4dbd58e73972f37a716f
+          path: product
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Update Python trust bundles
+        run: python -m pip install --upgrade --no-deps 'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70' 'certifi @ https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl#sha256=42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b'
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - name: Install unchanged product-locked runtime and isolated GUI comparison
+        run: |
+          set -euo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$GITHUB_SHA"
+          cmp product/backend/uv.lock candidate/backend/uv.lock
+          cmp product/backend/pyproject.toml candidate/backend/pyproject.toml
+          uv sync --project product/backend --extra dev --frozen --python 3.11
+          uv pip install --python product/backend/.venv/bin/python --no-deps --index-url https://pypi.org/simple --target "$RUNNER_TEMP/reviewed-opencv-gui" opencv-python==5.0.0.93
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: sawahospitalsystem
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Download existing pinned Cloud SQL proxy
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/reviewed-cloud-sql-proxy" 'https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.24.1/cloud-sql-proxy.linux.amd64'
+          printf '%s  %s\n' 'fae2766aac9d614a2bdef2f2a7778f3d054f3acd5ff07a81a9e300bd471512eb' "$RUNNER_TEMP/reviewed-cloud-sql-proxy" | sha256sum -c -
+          chmod 700 "$RUNNER_TEMP/reviewed-cloud-sql-proxy"
+      - name: Capture one read-only snapshot and run disconnected profiles
+        run: |
+          set -euo pipefail
+          # Original-input parity only; the script's default all-fault mode remains available.
+          product/backend/.venv/bin/python -B diagnostic/scripts/diagnose_reviewed_ocr.py \
+            --product "$GITHUB_WORKSPACE/product" --proxy "$RUNNER_TEMP/reviewed-cloud-sql-proxy" \
+            --candidate "$GITHUB_WORKSPACE/candidate" --original-only \
+            --summary "$RUNNER_TEMP/reviewed-ocr-summary"
+      - name: Remove private inputs even after failure
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -x product/backend/.venv/bin/python ]; then
+            product/backend/.venv/bin/python -B diagnostic/scripts/diagnose_reviewed_ocr.py \
+              --product "$GITHUB_WORKSPACE/product" --cleanup --summary "$RUNNER_TEMP/reviewed-ocr-summary"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reviewed-ocr-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reviewed-ocr-summary/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  diagnose-contact-replay:
+    needs: source-gate
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch' && inputs.mode == 'normal' && inputs.diagnose_saved_contact_replay && needs.source-gate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify failed source run identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/mmorinag127/sawa-hospital-system/actions/runs/39031990552 > "$RUNNER_TEMP/source-run.json"
+          jq -e '.head_sha == "b1a1197850b35e04aa7b88365d342e4f0acfd970" and .status == "completed" and .conclusion == "failure"' "$RUNNER_TEMP/source-run.json"
+      - uses: actions/download-artifact@v4
+        with:
+          name: live-ocr-stg
+          run-id: 39031990552
+          github-token: ${{ github.token }}
+          path: replay-source
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Read two immutable staging artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p replay-input
+          gcloud storage cp 'gs://sawahospitalsystem-stg-raw/artifacts/OCR-ORDc69f352e-e85a4b22abb54eafac860d68c099c42f/preprocess_observation.json#1792240687301835' replay-input/observation.json
+          gcloud storage cp 'gs://sawahospitalsystem-stg-raw/artifacts/OCR-CHECKPOINT-b45f67a4c585446186cba52ca9288e18/rectified.png#1792240410925117' replay-input/rectified.png
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - name: Diagnose both OpenCV builds without changing services or acceptance
+        run: |
+          set -euo pipefail
+          uv sync --project backend --extra dev --frozen
+          uv pip install --python backend/.venv/bin/python --no-deps --target "$RUNNER_TEMP/opencv-gui" opencv-python==5.0.0.93
+          for build in headless gui; do
+            export PYTHONPATH="$GITHUB_WORKSPACE/backend"
+            if [ "$build" = gui ]; then export PYTHONPATH="$RUNNER_TEMP/opencv-gui:$PYTHONPATH"; fi
+            backend/.venv/bin/python scripts/diagnose_saved_contact_replay.py \
+              --artifact-dir replay-source/FAC00004-20261018-real-one-d173c698 \
+              --observation replay-input/observation.json --checkpoint-image replay-input/rectified.png \
+              --output "replay-diagnostic/$build.json"
+          done
+          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
+          backend/.venv/bin/python scripts/diagnose_saved_contact_replay.py --canonical-packet-only \
+            --artifact-dir replay-source/FAC00004-20261018-real-one-d173c698 \
+            --observation replay-input/observation.json --checkpoint-image replay-input/rectified.png \
+            --output replay-diagnostic/full-canonical.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contact-replay-diagnostic-${{ github.run_id }}
+          path: replay-diagnostic/
+          if-no-files-found: warn
+          retention-days: 7
+
+  recover-web:
+    needs: source-gate
+    permissions:
+      contents: read
+      id-token: write
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-web-image'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require explicit staging source and recovery approval
+        env:
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          test "$GITHUB_REF" = refs/heads/develop
+          test "$RECOVERY_CONFIRMATION" = RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES
+          test -z "$(git status --porcelain)"
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git rev-parse origin/develop)"
+          test -n "$GOOGLE_OAUTH_CLIENT_ID"
+          test "$GOOGLE_OAUTH_CLIENT_ID" != 167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com
+          [[ "$GOOGLE_OAUTH_CLIENT_ID" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - id: build
+        name: Build immutable frontend from current develop
+        run: |
+          set -euo pipefail
+          deploy_dir="$(./scripts/prepare_web_deploy_source.sh ci-stg-web-recovery "$RUNNER_TEMP/web-source")"
+          ./scripts/validate_web_deploy_source.sh "$deploy_dir"
+          image="${REGION}-docker.pkg.dev/${PROJECT_ID}/backend/frontend:stg-recovery-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --build-arg NEXT_PUBLIC_API_BASE_URL=/api/hospital \
+            --build-arg API_PROXY_TARGET=https://worker-stg-avlnzjjrca-dt.a.run.app \
+            --build-arg SHIFT_WEB_PROXY_TARGET=https://shift-web-stg-avlnzjjrca-dt.a.run.app \
+            --build-arg SCHOOL_LUNCH_WEB_PROXY_TARGET=https://price-web-stg-avlnzjjrca-dt.a.run.app \
+            --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=$GOOGLE_OAUTH_CLIENT_ID" \
+            --build-arg NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=true \
+            --build-arg "NEXT_PUBLIC_GIT_SHA=$GITHUB_SHA" \
+            --build-arg "NEXT_PUBLIC_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "sawa.git_sha=$GITHUB_SHA" --label sawa.release_branch=develop \
+            -t "$image" "$deploy_dir"
+          docker run --rm --entrypoint node \
+            -v "$PWD/scripts/verify_tls_trust.mjs:/tmp/verify_tls_trust.mjs:ro" \
+            "$image" /tmp/verify_tls_trust.mjs
+          docker push "$image"
+          digest="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+          echo "image=$digest" >> "$GITHUB_OUTPUT"
+      - name: Recover image only and verify runtime database and cleanup protection
+        env:
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          uv run --project backend --extra dev --frozen python scripts/recover_stg_web_image.py \
+            --image "$IMAGE" --expected-revision "$EXPECTED_REVISION" --expected-image "$EXPECTED_IMAGE"
+
+  source-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      backend_changed: ${{ steps.changes.outputs.backend_changed }}
+      frontend_changed: ${{ steps.changes.outputs.frontend_changed }}
+    steps:
+      - name: Validate deployment mode and recovery inputs
+        env:
+          DEPLOY_MODE: ${{ inputs.mode }}
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          OCR_MANIFEST: ${{ inputs.ocr_verification_manifest }}
+          OCR_EXISTING_RUN: ${{ inputs.ocr_existing_artifact_run_id }}
+          MENU_MANIFEST: ${{ inputs.menu_verification_manifest }}
+          REVIEW_ORDER: ${{ inputs.verify_review_order_id }}
+          VERIFY_MENU: ${{ inputs.verify_menu_master_ui }}
+          OUTPUT_ORDER: ${{ inputs.verify_output_source_order_id }}
+          OUTPUT_DATE: ${{ inputs.verify_output_source_date }}
+          CONTACT_REPLAY: ${{ inputs.diagnose_saved_contact_replay }}
+          REVIEWED_DIAGNOSTIC: ${{ inputs.diagnose_reviewed_ocr }}
+          REVIEWED_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_reviewed_ocr) }}
+          DEMAND_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_workflow_demand_parity) }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          test "$GITHUB_REF" = refs/heads/develop
+          if [ -n "${OCR_EXISTING_RUN:-}" ]; then
+            [[ "$OCR_EXISTING_RUN" =~ ^[0-9]+$ ]] || exit 1
+            test -z "$OCR_MANIFEST"
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            test "${DEPLOY_MODE:-normal}" = normal
+          fi
+          if [ -n "${REVIEW_ORDER:-}" ]; then
+            [[ "$REVIEW_ORDER" =~ ^ORD[a-f0-9]{8}$ ]] || exit 1
+            test -n "$OCR_EXISTING_RUN"
+          fi
+          case "${REVIEWED_DIAGNOSTIC:-}:${REVIEWED_DIAGNOSTIC_JSON:-}" in
+            true:true)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              test "${DEPLOY_MODE:-normal}" = normal
+              test "$REPOSITORY_OWNER" = mmorinag127
+              test "$ACTOR" = "$REPOSITORY_OWNER"
+              test "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+              test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$OCR_MANIFEST$OCR_EXISTING_RUN$MENU_MANIFEST$REVIEW_ORDER$OUTPUT_ORDER$OUTPUT_DATE"
+              test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
+              test -z "$CONTACT_REPLAY" || test "$CONTACT_REPLAY" = false
+              test "${DEMAND_DIAGNOSTIC_JSON:-}" != true
+              ;;
+            false:false|:null|:) ;;
+            *) echo "invalid_diagnostic_flag" >&2; exit 1 ;;
+          esac
+          case "${DEMAND_DIAGNOSTIC_JSON:-}" in
+            true)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              test "${DEPLOY_MODE:-normal}" = normal
+              test "$ACTOR" = "$REPOSITORY_OWNER"
+              test "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+              test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$OCR_MANIFEST$OCR_EXISTING_RUN$MENU_MANIFEST$REVIEW_ORDER$OUTPUT_ORDER$OUTPUT_DATE"
+              test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
+              test -z "$CONTACT_REPLAY" || test "$CONTACT_REPLAY" = false
+              test "$REVIEWED_DIAGNOSTIC_JSON" != true
+              ;;
+            false|null|'') ;;
+            *) echo "invalid_demand_diagnostic_flag" >&2; exit 1 ;;
+          esac
+          case "$GITHUB_EVENT_NAME:${DEPLOY_MODE:-normal}" in
+            push:normal|workflow_dispatch:normal)
+              test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE"
+              ;;
+            workflow_dispatch:recover-web-image)
+              test "$RECOVERY_CONFIRMATION" = RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES
+              [[ "$EXPECTED_REVISION" =~ ^web-stg-[a-z0-9-]+$ ]] || exit 1
+              [[ "$EXPECTED_IMAGE" =~ ^asia-northeast2-docker\.pkg\.dev/sawahospitalsystem/backend/frontend@sha256:[a-f0-9]{64}$ ]] || exit 1
+              test -z "$OCR_MANIFEST$MENU_MANIFEST$OUTPUT_ORDER$OUTPUT_DATE"
+              test -z "$VERIFY_MENU" || test "$VERIFY_MENU" = false
+              ;;
+            *) echo "invalid_deployment_mode" >&2; exit 1 ;;
+          esac
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Assert staging source
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF_NAME}" = "develop"
+          test -z "$(git status --porcelain)"
+          git fetch origin "+refs/heads/develop:refs/remotes/origin/develop"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"
+          if [[ -z "${GOOGLE_OAUTH_CLIENT_ID}" ]]; then
+            echo "STG_GOOGLE_OAUTH_CLIENT_ID repository variable is required" >&2
+            exit 1
+          fi
+          if [[ "${GOOGLE_OAUTH_CLIENT_ID}" = "${PROD_GOOGLE_OAUTH_CLIENT_ID}" ]]; then
+            echo "staging must not reuse the production Google OAuth client ID" >&2
+            exit 1
+          fi
+          if [[ ! "${GOOGLE_OAUTH_CLIENT_ID}" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]; then
+            echo "STG_GOOGLE_OAUTH_CLIENT_ID is not a valid Google web client ID" >&2
+            exit 1
+          fi
+      - id: changes
+        name: Detect changed deploy surfaces
+        env:
+          DEPLOY_MODE: ${{ inputs.mode }}
+          REVIEWED_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_reviewed_ocr) }}
+          DEMAND_DIAGNOSTIC_JSON: ${{ toJSON(inputs.diagnose_workflow_demand_parity) }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = normal ] && [ "${DEMAND_DIAGNOSTIC_JSON:-}" = true ]; then
+            echo "backend_changed=false" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = normal ] && [ "${REVIEWED_DIAGNOSTIC_JSON:-}" = true ]; then
+            echo "backend_changed=false" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = "recover-web-image" ]; then
+            echo "backend_changed=false" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "backend_changed=true" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            before="$(git rev-list --max-parents=0 HEAD)"
+          fi
+          git cat-file -e "${before}^{commit}"
+          git diff --name-only "$before" "$after" > /tmp/changed-files.txt
+          if grep -Eq '^(backend|ocr_pipeline|agent_runtime|experiments/agent_assistant)/|^scripts/|^Taskfile.yml$|^\.github/workflows/deploy-stg\.yml$' /tmp/changed-files.txt; then
+            echo "backend_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -Eq '^(frontend|agent_runtime|experiments/agent_assistant)/|^scripts/|^Taskfile.yml$|^\.github/workflows/deploy-stg\.yml$' /tmp/changed-files.txt; then
+            echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate canonical facility runtime source
+        if: steps.changes.outputs.backend_changed == 'true'
+        run: PYTHONPATH=backend python3 scripts/check_canonical_facility_deploy.py
+
+  automation-bootstrap:
+    needs: source-gate
+    if: needs.source-gate.outputs.backend_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Register approved shift verification operator
+        run: bash scripts/bootstrap_automation_user.sh stg
+      - name: Register school lunch verification operator
+        run: bash scripts/bootstrap_automation_user.sh stg school-lunch
+
+  menu-master-migration:
+    needs: [source-gate, automation-bootstrap]
+    if: needs.source-gate.outputs.backend_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Explicitly adopt reviewed live schema and apply formal migrations
+        run: uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py
+      - name: Preflight runtime schema readiness
+        run: uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py
+
+  build-backend:
+    needs: [source-gate, automation-bootstrap, menu-master-migration]
+    if: needs.source-gate.outputs.backend_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      producer_image: ${{ steps.producer.outputs.image }}
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - id: fingerprint
+        name: Resolve backend base fingerprint
+        run: |
+          set -euo pipefail
+          current_base_fingerprint="$(python3 backend/scripts/backend_base_fingerprint.py backend)"
+          echo "current_base_fingerprint=$current_base_fingerprint" >> "$GITHUB_OUTPUT"
+      - id: base
+        name: Ensure backend base image
+        run: |
+          set -euo pipefail
+          current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
+          if [ "$current_base_fingerprint" = "$BACKEND_BASE_FINGERPRINT" ]; then
+            gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+            if docker manifest inspect "$BACKEND_BASE_IMAGE" >/dev/null 2>&1; then
+              echo "image=$BACKEND_BASE_IMAGE" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Configured backend base image is missing; rebuilding base image." >&2
+          fi
+          short_fingerprint="${current_base_fingerprint:0:12}"
+          tag="stg-backend-base-yomitoku-cpu-${short_fingerprint}-$(date -u +%Y%m%d-%H%M%S)"
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            -f backend/Dockerfile.base \
+            --label "sawa.backend_base_fingerprint=${current_base_fingerprint}" \
+            -t "$image" \
+            backend
+          docker run --rm --entrypoint python \
+            -v "$PWD/scripts/verify_tls_trust.py:/tmp/verify_tls_trust.py:ro" \
+            "$image" /tmp/verify_tls_trust.py --online
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - id: prepare
+        name: Prepare backend deploy source
+        run: |
+          set -euo pipefail
+          deploy_dir="$(./scripts/prepare_hakodate_backend_deploy_source.sh ci-stg-backend)"
+          echo "deploy_dir=$deploy_dir" >> "$GITHUB_OUTPUT"
+      - id: build
+        name: Build and push backend image
+        run: |
+          set -euo pipefail
+          deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
+          current_base_fingerprint="${{ steps.fingerprint.outputs.current_base_fingerprint }}"
+          base_image="${{ steps.base.outputs.image }}"
+          tag="stg-backend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/backend:${tag}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --build-arg "BASE_IMAGE=${base_image}" \
+            --label "sawa.backend_base_image=${base_image}" \
+            --label "sawa.backend_base_fingerprint=${current_base_fingerprint}" \
+            --label "sawa.git_sha=${GITHUB_SHA}" \
+            --label "sawa.release_branch=develop" \
+            -t "$image" \
+            "$deploy_dir"
+          docker run --rm --entrypoint python \
+            -v "$PWD/scripts/verify_tls_trust.py:/tmp/verify_tls_trust.py:ro" \
+            "$image" /tmp/verify_tls_trust.py --online
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - id: producer
+        name: Build and push same-source OCR producer
+        run: |
+          set -euo pipefail
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/ocr-pipeline:stg-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build --label "sawa.git_sha=${GITHUB_SHA}" --label "sawa.release_branch=develop" \
+            -t "$image" -f ocr_pipeline/Dockerfile ocr_pipeline
+          docker run --rm --entrypoint python \
+            -v "$PWD/scripts/verify_tls_trust.py:/tmp/verify_tls_trust.py:ro" \
+            "$image" /tmp/verify_tls_trust.py --online
+          docker push "$image"
+          digest_image="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+          echo "image=$digest_image" >> "$GITHUB_OUTPUT"
+
+  build-frontend:
+    needs: source-gate
+    if: needs.source-gate.outputs.frontend_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - id: prepare
+        name: Prepare frontend deploy source
+        run: |
+          set -euo pipefail
+          deploy_dir="$(WEB_DEPLOY_LABEL=ci-stg-web ./scripts/prepare_web_deploy_source.sh ci-stg-web)"
+          ./scripts/validate_web_deploy_source.sh "$deploy_dir"
+          echo "deploy_dir=$deploy_dir" >> "$GITHUB_OUTPUT"
+      - id: build
+        name: Build and push frontend image
+        run: |
+          set -euo pipefail
+          deploy_dir="${{ steps.prepare.outputs.deploy_dir }}"
+          tag="stg-frontend-${GITHUB_SHA::12}-$(date -u +%Y%m%d-%H%M%S)"
+          image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}"
+          deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --build-arg "NEXT_PUBLIC_API_BASE_URL=/api/hospital" \
+            --build-arg "API_PROXY_TARGET=${WORKER_URL}" \
+            --build-arg "SHIFT_WEB_PROXY_TARGET=${SHIFT_WEB_URL}" \
+            --build-arg "SCHOOL_LUNCH_WEB_PROXY_TARGET=${SCHOOL_LUNCH_WEB_URL}" \
+            --build-arg "NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID}" \
+            --build-arg NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=true \
+            --build-arg "NEXT_PUBLIC_GIT_SHA=${GITHUB_SHA}" \
+            --build-arg "NEXT_PUBLIC_DEPLOYED_AT=${deployed_at}" \
+            --label "sawa.git_sha=${GITHUB_SHA}" \
+            -t "$image" \
+            "$deploy_dir"
+          docker run --rm --entrypoint node \
+            -v "$PWD/scripts/verify_tls_trust.mjs:/tmp/verify_tls_trust.mjs:ro" \
+            "$image" /tmp/verify_tls_trust.mjs
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  deploy-backend:
+    needs:
+      - source-gate
+      - build-backend
+      - menu-master-migration
+    if: needs.source-gate.outputs.backend_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - id: auth-backend
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - name: Protect current and candidate staging producer images
+        env:
+          PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --current
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$PRODUCER_IMAGE" --component ocr-pipeline
+      - name: Deploy and verify same-source OCR producer before worker
+        env:
+          PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          uv run --project backend --extra dev --frozen python scripts/stg_ocr_producer_deploy.py --image "$PRODUCER_IMAGE" --source-sha "$GITHUB_SHA"
+      - name: Bootstrap and verify hospital delivery configuration
+        run: python3 scripts/hospital_delivery_config.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hospital-delivery-config-stg
+          path: hospital-delivery-artifacts/
+          if-no-files-found: error
+      - name: Deploy worker-stg
+        env:
+          IMAGE: ${{ needs.build-backend.outputs.image }}
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          DEPLOY_ID_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          test -n "${HOSPITAL_DELIVERY_ENV:-}"
+          test "$PORTAL_PUBLIC_ORIGIN" = "$WEB_URL"
+          test "$PORTAL_SESSION_ABSOLUTE_SECONDS" = 604800
+          test "$PORTAL_SESSION_IDLE_SECONDS" = 86400
+          test "$PORTAL_LOGIN_TTL_SECONDS" = 300
+          test "$(cat hospital-delivery-artifacts/verified-env.txt)" = "$HOSPITAL_DELIVERY_ENV"
+          dataset_env="$(python3 scripts/staging_dataset_config.py --mode env --environment stg)"
+          if [ -n "$dataset_env" ]; then HOSPITAL_DELIVERY_ENV="${HOSPITAL_DELIVERY_ENV},${dataset_env}"; fi
+          IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component backend
+          PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$WORKER_SERVICE" WEB_SERVICE="$WEB_SERVICE" WEB_URL="$WEB_URL" \
+          GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
+          DEPLOY_ID_TOKEN="$DEPLOY_ID_TOKEN" \
+          RUN_LOCAL_REGRESSION=0 STRICT_OCR_SHEET_GATE="$STRICT_OCR_SHEET_GATE" STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" \
+          CHECK_WEB_PROXY="$CHECK_WEB_PROXY" WORKFLOW_V2_DEPLOY_CHECK="$WORKFLOW_V2_DEPLOY_CHECK" \
+          WORKER_EXTRA_ENV_VARS="OCR_OUTPUT_BUCKET=${PROJECT_ID}-stg-raw,OCR_PIPELINE_STATE_URI=gs://${PROJECT_ID}-stg-raw/ocr/pipeline_state.json,AUTH_PROVIDER=local,PORTAL_PUBLIC_ORIGIN=${PORTAL_PUBLIC_ORIGIN},PORTAL_SESSION_ABSOLUTE_SECONDS=${PORTAL_SESSION_ABSOLUTE_SECONDS},PORTAL_SESSION_IDLE_SECONDS=${PORTAL_SESSION_IDLE_SECONDS},PORTAL_LOGIN_TTL_SECONDS=${PORTAL_LOGIN_TTL_SECONDS},GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},AUTOMATION_AUTH_AUDIENCE=${AUTOMATION_AUTH_AUDIENCE},AUTOMATION_AUTH_EMAIL=${AUTOMATION_AUTH_EMAIL},AUTOMATION_AUTH_SUBJECT=${AUTOMATION_AUTH_SUBJECT},SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE=${SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE},SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL=${SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL},SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT=${SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT},${HOSPITAL_DELIVERY_ENV}" \
+          ENSURE_GCLOUD_AUTH=true \
+          ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
+
+      - name: Verify live breakfast label display
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          gcloud run services describe "$WORKER_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
+            --format='json(status.latestReadyRevisionName,status.traffic,spec.template.spec.containers[0].image)' > verification/worker.json
+          python3 scripts/verify_live_breakfast_labels.py --target stg --order-id "$ORDER_ID" --output-dir verification
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-label-display-stg
+          path: verification/
+          retention-days: 7
+
+      - name: Verify explicitly requested staging monthly menus
+        if: github.event_name == 'workflow_dispatch' && inputs.menu_verification_manifest != ''
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+          MENU_MANIFEST: ${{ inputs.menu_verification_manifest }}
+        run: python3 scripts/verify_stg_monthly_menus.py --manifest "$MENU_MANIFEST" --output-dir menu-verification
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.menu_verification_manifest != ''
+        with:
+          name: live-menu-stg
+          path: menu-verification/
+          retention-days: 7
+
+      - name: Verify explicitly requested staging OCR uploads
+        if: github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
+          OCR_MANIFEST: ${{ inputs.ocr_verification_manifest }}
+        run: uv run --project backend --extra dev --frozen python scripts/verify_stg_ocr_upload.py --manifest "$OCR_MANIFEST" --output-dir ocr-verification
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.ocr_verification_manifest != ''
+        with:
+          name: live-ocr-stg
+          path: ocr-verification/
+          retention-days: 7
+
+  deploy-frontend:
+    needs:
+      - source-gate
+      - automation-bootstrap
+      - build-frontend
+      - build-agent
+      - deploy-backend
+      - menu-master-migration
+    if: |
+      always() &&
+      needs.source-gate.result == 'success' &&
+      needs.source-gate.outputs.frontend_changed == 'true' &&
+      needs.build-frontend.result == 'success' && needs.build-agent.result == 'success' &&
+      (needs.source-gate.outputs.backend_changed == 'false' ||
+       (needs.automation-bootstrap.result == 'success' &&
+        needs.menu-master-migration.result == 'success' && needs.deploy-backend.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - id: auth-frontend
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - name: Deploy web-stg
+        id: deploy-web
+        env:
+          IMAGE: ${{ needs.build-frontend.outputs.image }}
+          SAWA_AGENT_RUNTIME_IMAGE: ${{ needs.build-agent.outputs.image }}
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          DEPLOY_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/develop:refs/remotes/origin/develop'
+          IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$IMAGE")"
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --current
+          uv run --project backend --extra dev --frozen python scripts/stg_image_protection.py --image "$IMAGE" --component frontend
+          PROJECT_ID="$PROJECT_ID" REGION="$REGION" WEB_SERVICE="$WEB_SERVICE" WORKER_SERVICE="$WORKER_SERVICE" \
+          WEB_URL="$WEB_URL" WORKER_URL="$WORKER_URL" IMAGE="$IMAGE" ALLOW_WEB_IMAGE_PROMOTION=1 ALLOW_UNAUTHENTICATED_WEB=1 \
+          STRICT_OCR_QUALITY="$STRICT_OCR_QUALITY" WORKFLOW_V2_DEPLOY_CHECK="$WORKFLOW_V2_DEPLOY_CHECK" \
+          GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
+          GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
+          DEPLOY_ID_TOKEN="$DEPLOY_ID_TOKEN" \
+          ENSURE_GCLOUD_AUTH=true \
+          TAG_PREFIX=stg-frontend ./scripts/deploy_web_with_checks.sh
+
+      - name: Initialize opted-in menu master evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        run: |
+          mkdir -p tmp/menu-master-live
+          python3 -c 'import json,os,pathlib; pathlib.Path("tmp/menu-master-live/result.json").write_text(json.dumps({"status":"not-started","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in staging service-principal verification"}))'
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        with:
+          node-version: '20'
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+      - name: Prepare opted-in menu master verification
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+          cd ..
+          uv sync --project backend --extra dev --frozen
+      - id: auth-menu-master-live
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - name: Verify opted-in actual menu master UI and clean up own record
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        env:
+          C1_LIVE_VERIFY: 'true'
+          LIVE_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          LIVE_ID_TOKEN: ${{ steps.auth-menu-master-live.outputs.id_token }}
+        run: uv run --project backend --extra dev --frozen python scripts/verify_stg_menu_master_ui.py
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.verify_menu_master_ui == true
+        with:
+          name: live-menu-master-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/menu-master-live/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Validate output-source verification input pair
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OUTPUT_SOURCE_VERIFY_ORDER_ID: ${{ inputs.verify_output_source_order_id }}
+          OUTPUT_SOURCE_VERIFY_DATE: ${{ inputs.verify_output_source_date }}
+        run: python3 -c 'import os,sys; order=os.environ["OUTPUT_SOURCE_VERIFY_ORDER_ID"].strip(); date=os.environ["OUTPUT_SOURCE_VERIFY_DATE"].strip(); sys.exit("verify_output_source_order_id and verify_output_source_date must be specified together" if bool(order) != bool(date) else 0)'
+      - name: Initialize opted-in output-source evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        run: |
+          mkdir -p tmp/output-source-live
+          python3 -c 'import json,os,pathlib; pathlib.Path("tmp/output-source-live/result.json").write_text(json.dumps({"status":"not-verified","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in GET-only staging output-source verification"}))'
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        with:
+          node-version: '20'
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+      - name: Prepare opted-in output-source verification
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+          cd ..
+          uv sync --project backend --extra dev --frozen
+      - id: auth-output-source-live
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - name: Verify opted-in existing output source is read-only and canonical
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        env:
+          LIVE_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          LIVE_ID_TOKEN: ${{ steps.auth-output-source-live.outputs.id_token }}
+          OUTPUT_SOURCE_VERIFY_ORDER_ID: ${{ inputs.verify_output_source_order_id }}
+          OUTPUT_SOURCE_VERIFY_DATE: ${{ inputs.verify_output_source_date }}
+        run: uv run --project backend --extra dev --frozen python scripts/verify_stg_output_source.py
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.verify_output_source_order_id != '' && inputs.verify_output_source_date != ''
+        with:
+          name: live-output-source-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/output-source-live/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Initialize opted-in OCR UI evidence
+        id: ocr-ui-init
+        if: "!cancelled() && needs.source-gate.result == 'success' && steps.auth-frontend.outcome == 'success' && steps.deploy-web.outcome == 'success' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')"
+        run: |
+          mkdir -p tmp/ocr-live
+          python3 -c 'import json,os,pathlib; pathlib.Path("tmp/ocr-live/result.json").write_text(json.dumps({"status":"not-verified","sourceSHA":os.environ["GITHUB_SHA"],"scope":"opted-in staging GET-only workflow-v2 Step2 OCR verification"}))'
+      - uses: actions/download-artifact@v4
+        id: ocr-ui-new-artifact
+        if: "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_verification_manifest != '' && inputs.ocr_existing_artifact_run_id == '' && needs.deploy-backend.result == 'success'"
+        with:
+          name: live-ocr-stg
+          path: tmp/ocr-verification
+      - name: Validate existing staging OCR artifact provenance
+        id: ocr-ui-provenance
+        if: "!cancelled() && steps.ocr-ui-init.outcome == 'success' && inputs.ocr_existing_artifact_run_id != '' && inputs.ocr_verification_manifest == ''"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OCR_EXISTING_RUN: ${{ inputs.ocr_existing_artifact_run_id }}
+        run: python3 scripts/verify_existing_ocr_artifact.py "$OCR_EXISTING_RUN"
+      - uses: actions/download-artifact@v4
+        id: ocr-ui-existing-artifact
+        if: "!cancelled() && steps.ocr-ui-provenance.outcome == 'success'"
+        with:
+          name: live-ocr-stg
+          path: tmp/ocr-verification
+          run-id: ${{ inputs.ocr_existing_artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: mmorinag127/sawa-hospital-system
+      - uses: actions/setup-node@v4
+        id: ocr-ui-node
+        if: "!cancelled() && (steps.ocr-ui-new-artifact.outcome == 'success' || steps.ocr-ui-existing-artifact.outcome == 'success')"
+        with:
+          node-version: '20'
+      - name: Prepare opted-in OCR UI verification
+        id: ocr-ui-deps
+        if: "!cancelled() && steps.ocr-ui-node.outcome == 'success'"
+        run: |
+          npm ci --prefix frontend --ignore-scripts
+          cd frontend
+          npx --no-install playwright install --with-deps webkit
+      - name: Verify opted-in existing OCR workflow-v2 Step2 UI
+        id: ocr-ui-verify
+        if: "!cancelled() && steps.ocr-ui-deps.outcome == 'success'"
+        env:
+          LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
+        run: node frontend/scripts/verify-ocr-live.mjs tmp/ocr-verification tmp/ocr-live
+      - name: Inspect reviewed OCR confirmation dialog without submitting
+        if: "!cancelled() && steps.ocr-ui-deps.outcome == 'success' && inputs.verify_review_order_id != ''"
+        env:
+          LIVE_ID_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
+          REVIEW_ORDER_ID: ${{ inputs.verify_review_order_id }}
+        run: node frontend/scripts/verify-recognition-review-live.mjs tmp/ocr-verification tmp/ocr-live
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch' && (inputs.ocr_verification_manifest != '' || inputs.ocr_existing_artifact_run_id != '')
+        with:
+          name: live-ocr-ui-stg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/ocr-live/
+          retention-days: 7
+          if-no-files-found: error
+
+  build-agent:
+    needs: [source-gate, build-backend]
+    if: >-
+      always() && needs.source-gate.result == 'success' &&
+      needs.source-gate.outputs.frontend_changed == 'true' &&
+      (needs.source-gate.outputs.backend_changed == 'false' || needs.build-backend.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Update TLS trust stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) echo "Unsupported Ubuntu CA baseline" >&2; exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          actual="$(dpkg-query -W -f='${Version}' ca-certificates)"
+          dpkg --compare-versions "$actual" ge "$minimum"
+          printf 'ca-certificates=%s\n' "$actual"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' \
+            'SSL_CERT_DIR=/etc/ssl/certs' \
+            'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build immutable agent runtime
+        id: image
+        env:
+          BUILT_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
+          BACKEND_CHANGED: ${{ needs.source-gate.outputs.backend_changed }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/develop
+          test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
+          gcloud auth configure-docker asia-northeast2-docker.pkg.dev --quiet
+          image="asia-northeast2-docker.pkg.dev/$PROJECT_ID/backend/agent-runtime:stg-$GITHUB_SHA"
+          base_image="$BUILT_BACKEND_IMAGE"
+          case "$BACKEND_CHANGED" in
+            true) test -n "$base_image" ;;
+            false)
+              test -z "$base_image"
+              base_image="$(gcloud run services describe worker-stg --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containers[0].image)')"
+              ;;
+            *) echo "agent_backend_source_unresolved" >&2; exit 1 ;;
+          esac
+          base_image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$base_image")"
+          [[ "$base_image" == asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/backend@sha256:* ]] || {
+            echo "agent_backend_image_required" >&2; exit 1;
+          }
+          docker buildx build --platform linux/amd64 --push --metadata-file /tmp/agent-build.json \
+            --label "sawa.git_sha=$GITHUB_SHA" --label sawa.component=agent-runtime \
+            --build-arg "BASE_IMAGE=$base_image" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --file agent_runtime/Dockerfile --tag "$image" .
+          digest="$(python3 -c 'import json; print(json.load(open("/tmp/agent-build.json"))["containerimage.digest"])')"
+          echo "image=${image%:*}@$digest" >> "$GITHUB_OUTPUT"

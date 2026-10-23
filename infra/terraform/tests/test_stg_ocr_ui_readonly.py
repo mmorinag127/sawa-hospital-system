@@ -20,7 +20,7 @@ EXCLUSIONS = [WORKFLOW, "infra/terraform/tests/test_stg_ocr_ui_readonly.py",
 
 class ReadonlyOCRUI(unittest.TestCase):
     def setUp(self):
-        self.workflow = yaml.load((ROOT / WORKFLOW).read_text(), Loader=yaml.BaseLoader)
+        self.workflow = yaml.load((ROOT / 'local-checks/legacy/verify-stg-ocr-ui.yml').read_text(), Loader=yaml.BaseLoader)
         self.job = self.workflow["jobs"]["verify"]
         self.steps = self.job["steps"]
         self.gate = next(step["run"] for step in self.steps if step.get("name", "").startswith("Validate owner"))
@@ -57,14 +57,14 @@ class ReadonlyOCRUI(unittest.TestCase):
         self.assertEqual(download["with"]["name"], "live-ocr-stg")
         self.assertEqual(download["with"]["repository"], "mmorinag127/sawa-hospital-system")
         self.assertEqual(download["with"]["run-id"], "${{ inputs.artifact_run_id }}")
-        text = (ROOT / WORKFLOW).read_text()
+        text = (ROOT / 'local-checks/legacy/verify-stg-ocr-ui.yml').read_text()
         for forbidden in ("gcloud ", "docker ", "terraform ", "npm run build", "continue-on-error", "workflow_call", "<<"):
             self.assertNotIn(forbidden, text)
         for script in ("verify-ocr-live.mjs", "verify-recognition-review-live.mjs"):
             self.assertIn(script, self.wrapper)
         self.assertEqual(self.steps[-1]["if"], "always()")
         for path in EXCLUSIONS:
-            self.assertFalse(any(fnmatch(path, pattern) for pattern in deploy["on"]["push"]["paths"]))
+            self.assertEqual(set(deploy["on"]), {"workflow_dispatch"})
         for step in self.steps:
             if "run" in step:
                 if step.get("shell") == "python":

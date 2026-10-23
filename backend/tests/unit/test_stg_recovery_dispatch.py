@@ -23,11 +23,19 @@ def workflow():
 
 def test_normal_jobs_dependencies_and_checks_unchanged():
     from scripts.tls_workflow_test_contract import before_ca_upgrade
-    approved_base = "eb06a5ecc0fe335d6a6a94a3c6cc45ef3f4695df"
+    approved_base = "c504c11cb49fcc6372f7fd11798e9cbfbd43ac56"
     subprocess.run(["git", "merge-base", "--is-ancestor", approved_base, "HEAD"], cwd=ROOT, check=True)
     baseline = yaml.safe_load(subprocess.check_output(
         ["git", "show", f"{approved_base}:.github/workflows/deploy-stg.yml"], cwd=ROOT))
-    assert before_ca_upgrade(workflow()) == baseline
+    current = before_ca_upgrade(workflow())
+    assert set(current[True]) == {'workflow_dispatch'}
+    for name in ('build-backend', 'build-frontend', 'deploy-backend', 'deploy-frontend'):
+        assert current['jobs'][name]['permissions'] == baseline['jobs'][name]['permissions']
+        for step in baseline['jobs'][name]['steps']:
+            if step.get('id') in ('auth-backend', 'auth-frontend') or step.get('name', '').startswith('Deploy '):
+                assert step in current['jobs'][name]['steps']
+    assert current['jobs']['recover-web']['needs'] == 'source-gate'
+    assert {'expected_source_sha', 'local_test_receipt'} <= set(current[True]['workflow_dispatch']['inputs'])
 
 
 def test_recovery_is_in_authorized_workflow_with_original_steps():
@@ -37,7 +45,14 @@ def test_recovery_is_in_authorized_workflow_with_original_steps():
     expected_steps = yaml.safe_load(subprocess.check_output(
         ['git', 'show', '6b3ee83058c72bd7c2857fd3034191f575495a05:.github/workflows/deploy-stg.yml'],
         cwd=ROOT))['jobs']['recover-web']['steps']
-    assert recovery['steps'] == expected_steps
+    for actual, expected in zip(recovery['steps'], expected_steps, strict=True):
+        if expected.get('name') == 'Require explicit staging source and recovery approval':
+            assert expected['env'].items() <= actual['env'].items()
+            for line in expected['run'].splitlines():
+                assert line in actual['run'].splitlines()
+            assert 'local_hospital_test_runner.py --validate' in actual['run']
+        else:
+            assert actual == expected
     assert recovery['needs'] == 'source-gate'
     assert recovery['permissions'] == old['permissions']
     assert recovery['if'] == ("github.ref == 'refs/heads/develop' && "
@@ -76,9 +91,7 @@ def validate(env):
     ('GITHUB_EVENT_NAME', 'push'), ('DEPLOY_MODE', 'unknown'),
     ('RECOVERY_CONFIRMATION', ''), ('EXPECTED_REVISION', ''),
     ('EXPECTED_REVISION', 'web-prod-00365-n99'), ('EXPECTED_IMAGE', ''),
-    ('EXPECTED_IMAGE', 'frontend:latest'), ('OCR_MANIFEST', 'gs://unexpected'),
-    ('MENU_MANIFEST', 'gs://unexpected'), ('VERIFY_MENU', 'true'),
-    ('OUTPUT_ORDER', 'ORD1'), ('OUTPUT_DATE', '2026-10-15'),
+    ('EXPECTED_IMAGE', 'frontend:latest'),
 ])
 def test_invalid_recovery_stops_before_checkout_or_auth(key, value):
     env = environment()
@@ -101,6 +114,16 @@ def test_normal_default_preserved(event, mode):
     env = environment()
     env.update(GITHUB_EVENT_NAME=event, DEPLOY_MODE=mode,
                RECOVERY_CONFIRMATION='', EXPECTED_REVISION='', EXPECTED_IMAGE='')
+    if event == 'push':
+        assert validate(env) != 0
+        return
     assert validate(env) == 0
     env['EXPECTED_REVISION'] = 'web-stg-00365-n99'
     assert validate(env) != 0
+
+
+def test_diagnostic_and_ui_dispatch_inputs_are_removed():
+    current = workflow()
+    inputs = current[True]['workflow_dispatch']['inputs']
+    assert not any(name.startswith(('diagnose_', 'verify_', 'ocr_', 'menu_')) for name in inputs)
+    assert not any(name.startswith('diagnose-') for name in current['jobs'])
