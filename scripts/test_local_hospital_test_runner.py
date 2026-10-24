@@ -66,6 +66,7 @@ class ReceiptContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'DB_HOST': 'foreign',
                                     'DB_URI': 'foreign', 'DATABASE_URL': 'foreign', 'ALEMBIC_DB_URI': 'foreign',
+                                    'PYTEST_ADDOPTS': '-k foreign', 'PYTEST_PLUGINS': 'foreign_selector',
                                     'CI': '', 'GITHUB_ACTIONS': ''}), \
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
              patch.object(BACKEND_RUNNER, 'git', return_value='a' * 40), \
@@ -78,6 +79,9 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertNotIn('DB_HOST', execute.call_args.kwargs['env'])
             self.assertNotIn('DATABASE_URL', execute.call_args.kwargs['env'])
             self.assertNotIn('ALEMBIC_DB_URI', execute.call_args.kwargs['env'])
+            self.assertNotIn('PYTEST_ADDOPTS', execute.call_args.kwargs['env'])
+            self.assertNotIn('PYTEST_PLUGINS', execute.call_args.kwargs['env'])
+            self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], '1')
             self.assertEqual(execute.call_args.kwargs['env']['DB_URI'], 'sqlite:///' + directory + '/backend-tests/runtime.sqlite')
 
     def test_agent_cleanup_attempts_database_even_when_test_container_cannot_be_stopped(self):
@@ -263,6 +267,24 @@ class ReceiptContractTest(unittest.TestCase):
             failed = json.loads((output / 'failed-run.json').read_text())
             self.assertEqual([item['exit_code'] for item in failed['commands']], [2, 0, 3])
             self.assertFalse((output / 'receipt.json').exists())
+
+    def test_full_receipt_does_not_inherit_external_test_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            manifest.write_text(json.dumps({'version': 1, 'commands': [{'name': 'full', 'command': 'true'}]}))
+            with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_IMPACT_FULL': '0',
+                                        'PYTEST_ADDOPTS': '-k hidden --last-failed', 'PYTEST_PLUGINS': 'foreign_selector'}), \
+                 patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
+                self.assertEqual(RUNNER.run(Path(directory) / 'evidence'), 1)
+                environment = execute.call_args.kwargs['env']
+                self.assertNotIn('PYTEST_ADDOPTS', environment)
+                self.assertNotIn('PYTEST_PLUGINS', environment)
+                self.assertEqual(environment['SAWA_IMPACT_FULL'], '1')
+                self.assertEqual(os.environ['PYTEST_ADDOPTS'], '-k hidden --last-failed')
+                self.assertEqual(os.environ['SAWA_IMPACT_FULL'], '0')
 
     def test_source_change_stops_remaining_groups_and_never_signs(self):
         with tempfile.TemporaryDirectory() as directory:

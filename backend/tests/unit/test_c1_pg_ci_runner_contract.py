@@ -193,7 +193,7 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
     monkeypatch.setattr(sys, 'platform', platform)
     state.pytest_exit = exit_code
     if suite == 'c1':
-        for key in ('C1_POSTGRES_URI', 'C2_MENU_READONLY_PG_URI', 'PGHOST', 'PGOPTIONS', 'PYTEST_ADDOPTS'):
+        for key in ('C1_POSTGRES_URI', 'C2_MENU_READONLY_PG_URI', 'PGHOST', 'PGOPTIONS', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS'):
             monkeypatch.setenv(key, 'foreign-input')
     assert runner.run(state.source, '123', '1', suite) == exit_code
     root, source = state.root, state.source
@@ -228,7 +228,7 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
             '-w', 'start'] in commands
     if suite == 'c1':
         assert not any((name.startswith(('C2_', 'PG')) and name != 'C2_MENU_READONLY_OWNED_ROOT')
-                       or name == 'PYTEST_ADDOPTS' for name in env)
+                       or name in ('PYTEST_ADDOPTS', 'PYTEST_PLUGINS') for name in env)
         assert [str(runner.PG_BIN / 'createdb'), '-h', str(socket), '-p', port,
                 '-U', 'mmorinag', 'c1_menu_master'] in commands
         sql = next(args for args in commands if Path(args[0]).name == 'psql' and args[1] == '-X')

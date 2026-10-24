@@ -98,6 +98,13 @@ Local read-only OCR artifact verification now leaves gh on its existing local
 login instead of trying to resolve an unavailable Actions github.token. An
 already supplied GH_TOKEN is preserved; no Actions identity/token is generated.
 
+The full receipt entry removes inherited PYTEST_ADDOPTS/PYTEST_PLUGINS only from
+its child environment and forces the existing impact selector into full mode.
+The invoking user's environment is not changed. Direct general/owned-PG runners
+also discard inherited pytest selectors; explicit full manifest arguments remain
+unchanged. The regression contract checks both full child scope and parent
+environment retention. These new checks are not reported as executed yet.
+
 Native selected sheets remain viewable with sheet_unavailable and source blockers
 when the authored source is unavailable. This does not authorize adoption or
 borrow historical authority; negative tests must preserve both the blocked state

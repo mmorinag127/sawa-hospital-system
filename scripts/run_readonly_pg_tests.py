@@ -83,7 +83,7 @@ def run(source, run_id, attempt, suite='readonly'):
         owner.write_text(str(source))
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('PG', 'C1_', 'C2_', 'SAWA_OWNED_PG_'))
-           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'PYTEST_ADDOPTS')}
+           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS')}
     uri = 'sqlite:///' + str(root / 'bootstrap.sqlite3')
     env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     env.update({

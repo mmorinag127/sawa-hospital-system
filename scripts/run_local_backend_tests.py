@@ -34,7 +34,9 @@ def main():
     argv = [sys.executable, "-m", "pytest", "backend/tests",
             *["--ignore=" + name for name in excluded], *sys.argv[1:]]
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith("DB_") and key not in ("DATABASE_URL", "ALEMBIC_DB_URI")}
+           if not key.startswith("DB_")
+           and key not in ("DATABASE_URL", "ALEMBIC_DB_URI", "PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
+    env["SAWA_IMPACT_FULL"] = "1"
     env["DB_URI"] = "sqlite:///" + str(evidence / "runtime.sqlite")
     env["PYTHONPATH"] = str(ROOT / "backend") + os.pathsep + str(ROOT / "backend/tests/unit")
     (evidence / "partition.json").write_text(json.dumps({
