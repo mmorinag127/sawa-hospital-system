@@ -76,7 +76,7 @@ async function pendingCell(f, value = '19') {
   assert.ok(cell);
   await f.h.change(cell, value);
   assert.equal(f.probe.current.pendingSheetCellEditsRef.current.get('0:4').value, value);
-  assert.equal(f.probe.current.sheetDirtyRef.current, false, 'no blur/flush occurred');
+  assert.equal(f.probe.current.sheetDirtyRef.current, true, 'typing pins the dirty editor before blur/flush');
 }
 function confirmation(f, accepted) {
   let count = 0;
